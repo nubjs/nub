@@ -198,10 +198,13 @@ jobs:
             chmod +x "$PKG/bin/nub"
           fi
 
-          # Runtime files — glob every top-level .mjs so new runtime modules
-          # (e.g. cache-evict.mjs, lazily imported by preload.mjs) ship without
-          # editing this whitelist. node_modules/ + addons/ are handled below.
-          cp runtime/*.mjs "$PKG/runtime/"
+          # Runtime files — copy EVERY top-level runtime module: the .mjs ESM
+          # modules AND the .cjs preload chain (preload.cjs / preload-common.cjs /
+          # polyfills.cjs, used by the fast-tier `--require`). The old `*.mjs`-only
+          # glob silently dropped the .cjs files and shipped a package that can't
+          # load (0.0.13). `find -type f` ships new modules of any extension without
+          # editing a whitelist. node_modules/ + addons/ are handled below.
+          find runtime -maxdepth 1 -type f -exec cp {} "$PKG/runtime/" \;
 
           # Native addon
           if [[ "${{ matrix.platform }}" == win32-* ]]; then
