@@ -16,19 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
-      # Fast Windows-compile coverage: type-checks every cfg(windows) path in
-      # nub-cli/nub-core without waiting for the slower windows-latest runner
-      # (which does the real test execution). nub-native (N-API) is excluded —
-      # its build.rs needs a real Windows Node env, so it builds on the
-      # windows-latest leg instead. See wiki/research/windows-testing.md.
-      # ring (pulled in via reqwest/rustls for Node provisioning) compiles C in
-      # its build.rs, so the GNU cross target needs the mingw-w64 toolchain.
-      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
-      - run: cargo check --target x86_64-pc-windows-gnu -p nub-cli -p nub-core
+      # Real Windows compile + test coverage is the windows-latest leg of the
+      # `test` job. The previous fast `x86_64-pc-windows-gnu` cross-check needed
+      # mingw-w64 + ring's C build, which was fragile on the runner; the native
+      # Windows leg is the source of truth, so the cross-check is dropped.
 
   clippy:
     name: Clippy
