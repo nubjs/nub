@@ -9,6 +9,7 @@
 !.gitkeep
 !.gitattributes
 !.gitmodules
+!.vercelignore
 !.github/
 
 # === Global cruft ===

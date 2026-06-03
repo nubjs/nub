@@ -1,0 +1,9 @@
+# The Vercel project's Root Directory is `site/`; nothing outside it is needed
+# to build the marketing site. Keep CLI/git deploy uploads lean by excluding the
+# heavy + irrelevant top-level trees.
+.repos
+tests
+wiki
+epics
+.claude
+.scripts
