@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Decode a `.tar.xz` and unpack it under `dest_parent`, returning the single
 /// top-level directory it created (the `node-v<ver>-<plat>` dir). The `tar` crate
@@ -22,7 +22,10 @@ pub fn extract_tar_xz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(dest_parent)? {
         let path = entry?.path();
         if path.is_dir() && top.replace(path).is_some() {
-            bail!("expected a single top-level directory in {}", archive.display());
+            bail!(
+                "expected a single top-level directory in {}",
+                archive.display()
+            );
         }
     }
     top.with_context(|| format!("no directory extracted from {}", archive.display()))
@@ -43,8 +46,8 @@ pub fn extract_tar_xz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
 pub fn extract_zip(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     let file =
         std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .with_context(|| format!("reading zip {}", archive.display()))?;
+    let mut zip =
+        zip::ZipArchive::new(file).with_context(|| format!("reading zip {}", archive.display()))?;
     std::fs::create_dir_all(dest_parent)
         .with_context(|| format!("create {}", dest_parent.display()))?;
     zip.extract(dest_parent)
@@ -55,7 +58,10 @@ pub fn extract_zip(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(dest_parent)? {
         let path = entry?.path();
         if path.is_dir() && top.replace(path).is_some() {
-            bail!("expected a single top-level directory in {}", archive.display());
+            bail!(
+                "expected a single top-level directory in {}",
+                archive.display()
+            );
         }
     }
     top.with_context(|| format!("no directory extracted from {}", archive.display()))
@@ -66,7 +72,10 @@ pub fn extract_zip(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
 /// `provision_node`) and unpack in-process — no `tar`/`xz`/`Expand-Archive`
 /// shell-out — so the same verify-then-extract guarantee holds on every host.
 pub fn extract_archive(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
-    let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let name = archive
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
     if name.ends_with(".tar.xz") {
         extract_tar_xz(archive, dest_parent)
     } else if name.ends_with(".zip") {
@@ -131,8 +140,8 @@ mod tests {
         {
             let file = std::fs::File::create(&archive).unwrap();
             let mut writer = zip::ZipWriter::new(file);
-            let opts: zip::write::FileOptions<()> =
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
             writer.start_file("top/node.exe", opts).unwrap();
             writer.write_all(b"MZ\x90\x00").unwrap();
             writer.start_file("top/README", opts).unwrap();

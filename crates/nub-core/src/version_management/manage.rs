@@ -372,7 +372,11 @@ mod tests {
             .filter(|e| e.active)
             .map(|e| e.version.to_string())
             .collect();
-        assert_eq!(active, vec!["22.13.0"], "only the resolved cached row is active");
+        assert_eq!(
+            active,
+            vec!["22.13.0"],
+            "only the resolved cached row is active"
+        );
 
         // Resolves to a version that is NOT cached → nothing is marked (cache-only).
         let off_cache = ls_with(&store, Some(NodeVersion::new(18, 19, 0)));
@@ -433,7 +437,11 @@ mod tests {
             "the active-version guard fires with a clear message: {err}"
         );
         assert!(
-            store.join(active.to_string()).join("bin").join("node").is_file(),
+            store
+                .join(active.to_string())
+                .join("bin")
+                .join("node")
+                .is_file(),
             "the guarded version is NOT removed"
         );
     }
@@ -501,7 +509,10 @@ mod tests {
             ".nvmrc",
             "updates the existing .nvmrc rather than shadowing it"
         );
-        assert_eq!(std::fs::read_to_string(root.join(".nvmrc")).unwrap(), "22.13.0\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join(".nvmrc")).unwrap(),
+            "22.13.0\n"
+        );
         assert!(
             !root.join(".node-version").exists(),
             "no shadowing .node-version is created"
@@ -519,7 +530,10 @@ mod tests {
 
         let result = pin("22", &root).expect("pin writes");
         assert_eq!(result.path.file_name().unwrap(), ".node-version");
-        assert_eq!(std::fs::read_to_string(root.join(".node-version")).unwrap(), "22\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join(".node-version")).unwrap(),
+            "22\n"
+        );
         assert_eq!(
             std::fs::read_to_string(root.join(".nvmrc")).unwrap(),
             "16.0.0\n",
@@ -531,7 +545,10 @@ mod tests {
     fn pin_rejects_obvious_garbage_but_accepts_aliases() {
         let root = tmpdir("pin-garbage");
         std::fs::write(root.join("package.json"), r#"{"name":"app"}"#).unwrap();
-        assert!(pin("not a version!!", &root).is_err(), "garbage is rejected");
+        assert!(
+            pin("not a version!!", &root).is_err(),
+            "garbage is rejected"
+        );
         // Aliases + bare majors are valid pins (blind/offline — no network check).
         assert!(pin("lts", &root).is_ok());
         assert!(pin("22", &root).is_ok());

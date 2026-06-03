@@ -1174,8 +1174,8 @@ fn run_script(
             .workspace_root
             .clone()
             .unwrap_or_else(|| project.root.clone());
-        let root_project = nub_core::workspace::detect::detect_project(&ws_root)
-            .ok_or_else(|| {
+        let root_project =
+            nub_core::workspace::detect::detect_project(&ws_root).ok_or_else(|| {
                 anyhow::anyhow!("--workspace-root: no package.json at {}", ws_root.display())
             })?;
         let cmd = nub_core::workspace::scripts::resolve_script(&root_project.manifest, script)
@@ -2878,8 +2878,9 @@ fn run_help(command: Option<&str>) {
 /// Spec: `wiki/commands/node-versions.md`.
 fn run_node(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
-    let store = nub_core::node::discovery::node_store_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)"))?;
+    let store = nub_core::node::discovery::node_store_dir().ok_or_else(|| {
+        anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")
+    })?;
 
     // Bare `nub node`, or `nub node --help`/`-h`: short usage listing the verbs.
     let verb = args.first().map(String::as_str);
@@ -2906,9 +2907,12 @@ fn run_node(args: &[String]) -> Result<i32> {
                     eprintln!("Node {v} is already in nub's cache.");
                 }
                 InstallOutcome::AlreadyOnPath(v) => {
-                    eprintln!("Node {v} is already available on PATH — skipped (already installed).");
+                    eprintln!(
+                        "Node {v} is already available on PATH — skipped (already installed)."
+                    );
                 }
-                InstallOutcome::Installed(_) => { /* provision_node already printed the ✓ line */ }
+                InstallOutcome::Installed(_) => { /* provision_node already printed the ✓ line */
+                }
             };
             if specs.is_empty() {
                 let outcome = manage::install_from_pin(&store, &cwd)?;
@@ -2925,7 +2929,9 @@ fn run_node(args: &[String]) -> Result<i32> {
             use nub_core::version_management::manage;
             let entries = manage::ls(&store, &cwd);
             if entries.is_empty() {
-                eprintln!("No Node versions in nub's cache. Install one with `nub node install <version>`.");
+                eprintln!(
+                    "No Node versions in nub's cache. Install one with `nub node install <version>`."
+                );
                 return Ok(0);
             }
             for e in &entries {

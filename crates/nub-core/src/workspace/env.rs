@@ -147,15 +147,19 @@ pub fn parse_env(content: &str) -> Vec<(String, String)> {
         }
     };
 
-    let flush_dotenvy = |buf: &mut String, pairs: &mut Vec<(String, String)>, upsert: &mut dyn FnMut(&mut Vec<(String, String)>, String, String)| {
-        if buf.is_empty() {
-            return;
-        }
-        for (k, v) in dotenvy::from_read_iter(buf.as_bytes()).flatten() {
-            upsert(pairs, k, v);
-        }
-        buf.clear();
-    };
+    #[allow(clippy::type_complexity)]
+    let flush_dotenvy =
+        |buf: &mut String,
+         pairs: &mut Vec<(String, String)>,
+         upsert: &mut dyn FnMut(&mut Vec<(String, String)>, String, String)| {
+            if buf.is_empty() {
+                return;
+            }
+            for (k, v) in dotenvy::from_read_iter(buf.as_bytes()).flatten() {
+                upsert(pairs, k, v);
+            }
+            buf.clear();
+        };
 
     let bytes = content.as_bytes();
     let mut pos = 0;
@@ -214,7 +218,10 @@ fn backtick_value_start(line: &str) -> Option<(String, usize)> {
     let eq = line.find('=')?;
     let raw_key = &line[..eq];
     let key_trimmed = raw_key.trim();
-    let key_trimmed = key_trimmed.strip_prefix("export ").unwrap_or(key_trimmed).trim();
+    let key_trimmed = key_trimmed
+        .strip_prefix("export ")
+        .unwrap_or(key_trimmed)
+        .trim();
     if key_trimmed.is_empty() {
         return None;
     }
@@ -355,12 +362,24 @@ mod tests {
         ));
         let get = |k: &str| pairs.iter().find(|(p, _)| p == k).map(|(_, v)| v.as_str());
         assert_eq!(get("INNER"), Some("{\"foo\": \"bar's\"}"));
-        assert_eq!(get("NOEXPAND"), Some("he$X llo"), "no $-substitution in backticks");
-        assert_eq!(get("NOESCAPE"), Some("a\\nb"), "no escape processing in backticks");
+        assert_eq!(
+            get("NOEXPAND"),
+            Some("he$X llo"),
+            "no $-substitution in backticks"
+        );
+        assert_eq!(
+            get("NOESCAPE"),
+            Some("a\\nb"),
+            "no escape processing in backticks"
+        );
         assert_eq!(get("COMMENT"), Some("outside #hash"));
         assert_eq!(get("MULTI"), Some("THIS\nIS\n\"MULTI'S\"\nSTRING"));
         // A line following a multi-line backtick value must still parse.
-        assert_eq!(get("AFTER"), Some("plain"), "parsing resumes after the closing backtick line");
+        assert_eq!(
+            get("AFTER"),
+            Some("plain"),
+            "parsing resumes after the closing backtick line"
+        );
     }
 
     #[test]

@@ -95,16 +95,31 @@ fn provisions_uncached_pinned_node_and_runs() {
     // First run: installs + runs.
     let (stdout, stderr, code) = run();
     assert_eq!(code, 0, "first run must succeed: stderr={stderr}");
-    assert!(stdout.contains("pv:v22.12.0"), "script ran on the provisioned 22.12.0: stdout={stdout:?}");
-    assert!(stderr.contains("Installing Node 22.12.0"), "uv-style install on stderr: stderr={stderr:?}");
-    assert!(stderr.contains("✓ Installed Node 22.12.0"), "install-complete on stderr: stderr={stderr:?}");
-    assert!(!stdout.contains("Installing"), "progress must never touch stdout: stdout={stdout:?}");
+    assert!(
+        stdout.contains("pv:v22.12.0"),
+        "script ran on the provisioned 22.12.0: stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("Installing Node 22.12.0"),
+        "uv-style install on stderr: stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("✓ Installed Node 22.12.0"),
+        "install-complete on stderr: stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("Installing"),
+        "progress must never touch stdout: stdout={stdout:?}"
+    );
 
     // Second run: cache hit — silent (the load-bearing invariant).
     let (stdout2, stderr2, code2) = run();
     assert_eq!(code2, 0);
     assert!(stdout2.contains("pv:v22.12.0"));
-    assert!(stderr2.is_empty(), "a cached version must produce ZERO stderr: stderr={stderr2:?}");
+    assert!(
+        stderr2.is_empty(),
+        "a cached version must produce ZERO stderr: stderr={stderr2:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&work);
 }
@@ -520,10 +535,22 @@ fn regexp_escape_polyfill_matches_native() {
     // punctuators" (comma → \x2c, hyphen → \x2d).
     let (stdout, stderr, code) = run_nub("regexp-escape", "main.ts");
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains(r#""\\x61\\.b\\*c""#), "leading-letter + syntax chars: {stdout}");
-    assert!(stdout.contains(r#""\\x61\\x20b\\tc""#), "whitespace (space→\\x20, tab→\\t): {stdout}");
-    assert!(stdout.contains(r#""\\x61\\x2cb\\x2dc""#), "other punctuators (,→\\x2c, -→\\x2d): {stdout}");
-    assert!(stdout.contains(r#""😀x""#), "astral code points pass through: {stdout}");
+    assert!(
+        stdout.contains(r#""\\x61\\.b\\*c""#),
+        "leading-letter + syntax chars: {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""\\x61\\x20b\\tc""#),
+        "whitespace (space→\\x20, tab→\\t): {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""\\x61\\x2cb\\x2dc""#),
+        "other punctuators (,→\\x2c, -→\\x2d): {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""😀x""#),
+        "astral code points pass through: {stdout}"
+    );
 }
 
 #[test]

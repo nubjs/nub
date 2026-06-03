@@ -236,7 +236,10 @@ fn compat_tier_augments_commonjs_require() {
         return;
     };
 
-    assert_eq!(code, 0, "compat-tier require() of TS must succeed: stderr={stderr}");
+    assert_eq!(
+        code, 0,
+        "compat-tier require() of TS must succeed: stderr={stderr}"
+    );
     assert!(
         stdout.contains("alias:42 extless:42"),
         "require() of a tsconfig alias + extensionless TS must resolve, transpile, and run \
@@ -262,7 +265,10 @@ fn compat_tier_lowers_using_declarations() {
         return;
     };
 
-    assert_eq!(code, 0, "compat-tier `using` lowering must succeed: stderr={stderr}");
+    assert_eq!(
+        code, 0,
+        "compat-tier `using` lowering must succeed: stderr={stderr}"
+    );
     assert!(
         !stderr.contains("SyntaxError"),
         "`using` must be lowered, not left verbatim (a verbatim `using` SyntaxErrors on Node \
@@ -270,7 +276,9 @@ fn compat_tier_lowers_using_declarations() {
     );
     // Reverse-order disposal is the observable signature of correct lowering.
     assert!(
-        stdout.contains("close:b.txt") && stdout.contains("close:a.txt") && stdout.contains("using:done"),
+        stdout.contains("close:b.txt")
+            && stdout.contains("close:a.txt")
+            && stdout.contains("using:done"),
         "lowered `using` must dispose in reverse declaration order and run to completion: stdout={stdout:?}"
     );
 }
@@ -291,7 +299,10 @@ fn compat_tier_propagates_stage3_decorator_rejection() {
         return;
     };
 
-    assert_ne!(code, 0, "Stage 3 decorators must be rejected on the compat tier too");
+    assert_ne!(
+        code, 0,
+        "Stage 3 decorators must be rejected on the compat tier too"
+    );
     assert!(
         stderr.contains("Stage 3 decorators are not supported"),
         "the loader worker must propagate the Nub diagnostic across the worker boundary, \
@@ -318,7 +329,10 @@ fn compat_tier_rejects_require_of_esm_ts_with_clean_error() {
         return;
     };
 
-    assert_ne!(code, 0, "require() of an ESM-syntax TS module must be rejected here");
+    assert_ne!(
+        code, 0,
+        "require() of an ESM-syntax TS module must be rejected here"
+    );
     assert!(
         stderr.contains("ERR_REQUIRE_ESM") && stderr.contains("it is an ES module"),
         "must be nub's clean ERR_REQUIRE_ESM, not Node's opaque cjsCache crash: stderr={stderr:?}"

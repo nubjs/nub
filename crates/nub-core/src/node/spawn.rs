@@ -173,8 +173,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         .as_deref()
         .map(|p| preload_injection(p, &config.node.version));
     let reentrancy_key = injection.as_ref().map(|i| i.node_options_token());
-    let is_reentrant =
-        is_reentrant_in(env::var("NODE_OPTIONS").ok().as_deref(), reentrancy_key.as_deref());
+    let is_reentrant = is_reentrant_in(
+        env::var("NODE_OPTIONS").ok().as_deref(),
+        reentrancy_key.as_deref(),
+    );
 
     // Augment only when we can locate our own preload. If `find_preload` fails —
     // a broken install, or (Windows, A-WIN2) the PATH-shim `node.exe` running
@@ -249,8 +251,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // ABSOLUTE nub runtime dir (the directory holding the preload we just
         // injected) — never a broad `**/runtime/**`, which would also exclude a
         // user's own `runtime/` source.
-        if let Some(glob) = coverage_exclude_glob(config.user_args, node_options.as_deref(), preload.as_deref())
-        {
+        if let Some(glob) = coverage_exclude_glob(
+            config.user_args,
+            node_options.as_deref(),
+            preload.as_deref(),
+        ) {
             cmd.arg(glob);
         }
 
@@ -271,7 +276,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // only the preload chain is excluded. The sentinel path is keyed on nub's
         // PID; the child reads it from `process.ppid` (nub is its direct parent),
         // the same PID-keyed temp pattern as the PATH shim.
-        if let Some(dir) = env::var("NODE_COMPILE_CACHE").ok().filter(|s| !s.is_empty()) {
+        if let Some(dir) = env::var("NODE_COMPILE_CACHE")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
             cmd.env_remove("NODE_COMPILE_CACHE");
             if write_compile_cache_sentinel(&dir).is_ok() {
                 _ccache_guard = Some(CompileCacheSentinelGuard);
@@ -474,7 +482,10 @@ pub fn compute_augmentation_env(
         .as_deref()
         .map(|p| preload_injection(p, &node_version));
     let reentrancy_key = injection.as_ref().map(|i| i.node_options_token());
-    if is_reentrant_in(env::var("NODE_OPTIONS").ok().as_deref(), reentrancy_key.as_deref()) {
+    if is_reentrant_in(
+        env::var("NODE_OPTIONS").ok().as_deref(),
+        reentrancy_key.as_deref(),
+    ) {
         return None;
     }
     // Nothing to inject if we can't locate our preload (broken install, or a
@@ -490,8 +501,12 @@ pub fn compute_augmentation_env(
     // NODE_OPTIONS — injected experimental flags, the preload, and webstorage.
     // Dedupe injected flags against any existing NODE_OPTIONS so we don't emit a
     // flag the user already set.
-    let inject =
-        flags::compute_inject_flags(node_version.clone(), &[], existing_node_options.as_deref(), false);
+    let inject = flags::compute_inject_flags(
+        node_version.clone(),
+        &[],
+        existing_node_options.as_deref(),
+        false,
+    );
     let mut node_opts_parts: Vec<String> = inject.iter().map(|f| f.to_string()).collect();
     node_opts_parts.push(injection.node_options_token());
     // Webstorage, default-on with a project-keyed localstorage file — matches
@@ -599,9 +614,14 @@ fn is_permission_flag(arg: &str) -> bool {
 /// (`nub` has no separate coverage verb; coverage is engaged solely by that flag,
 /// so detecting it in either channel is the complete trigger.)
 fn coverage_active(user_args: &[String], node_options: Option<&str>) -> bool {
-    let in_argv = user_args.iter().any(|a| a == "--experimental-test-coverage");
+    let in_argv = user_args
+        .iter()
+        .any(|a| a == "--experimental-test-coverage");
     let in_opts = node_options
-        .map(|o| o.split_whitespace().any(|t| t == "--experimental-test-coverage"))
+        .map(|o| {
+            o.split_whitespace()
+                .any(|t| t == "--experimental-test-coverage")
+        })
         .unwrap_or(false);
     in_argv || in_opts
 }
@@ -738,9 +758,15 @@ fn preload_injection_for(
             .strip_suffix(".mjs")
             .map(|stem| format!("{stem}.cjs"))
             .unwrap_or_else(|| preload_mjs.to_string());
-        PreloadInjection { flag: "--require", value: cjs }
+        PreloadInjection {
+            flag: "--require",
+            value: cjs,
+        }
     } else {
-        PreloadInjection { flag: "--import", value: to_file_url(preload_mjs, windows) }
+        PreloadInjection {
+            flag: "--import",
+            value: to_file_url(preload_mjs, windows),
+        }
     }
 }
 
@@ -1113,7 +1139,10 @@ mod tests {
 
         // Coverage via argv → exclude keyed to the ABSOLUTE runtime dir (the
         // preload's parent), with a trailing `/**` — not a broad `**/runtime/**`.
-        let argv = vec!["--test".to_string(), "--experimental-test-coverage".to_string()];
+        let argv = vec![
+            "--test".to_string(),
+            "--experimental-test-coverage".to_string(),
+        ];
         assert_eq!(
             coverage_exclude_glob(&argv, None, Some(preload)).as_deref(),
             Some("--test-coverage-exclude=/opt/nub/runtime/**"),
@@ -1121,7 +1150,8 @@ mod tests {
 
         // Coverage via NODE_OPTIONS is detected the same way.
         assert_eq!(
-            coverage_exclude_glob(&[], Some("--experimental-test-coverage"), Some(preload)).as_deref(),
+            coverage_exclude_glob(&[], Some("--experimental-test-coverage"), Some(preload))
+                .as_deref(),
             Some("--test-coverage-exclude=/opt/nub/runtime/**"),
         );
 

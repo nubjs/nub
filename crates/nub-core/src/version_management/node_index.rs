@@ -126,7 +126,11 @@ pub fn resolve_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersion> {
     if let Some(codename) = lower.strip_prefix("lts/") {
         return index
             .iter()
-            .filter(|e| e.lts.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(codename)))
+            .filter(|e| {
+                e.lts
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(codename))
+            })
             .map(|e| e.version.clone())
             .max();
     }
@@ -139,7 +143,10 @@ pub fn resolve_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersion> {
             // Exact pin — match it in the index (so a typo'd nonexistent version
             // resolves to None rather than a doomed download).
             let want: NodeVersion = numeric.parse().ok()?;
-            index.iter().find(|e| e.version == want).map(|e| e.version.clone())
+            index
+                .iter()
+                .find(|e| e.version == want)
+                .map(|e| e.version.clone())
         }
         [maj, min] if all_digits(maj) && all_digits(min) => {
             let (maj, min): (u64, u64) = (maj.parse().ok()?, min.parse().ok()?);
@@ -196,19 +203,40 @@ mod tests {
     #[test]
     fn resolves_latest_and_lts_aliases() {
         let index = idx();
-        assert_eq!(resolve_spec("latest", &index), Some(NodeVersion::new(23, 5, 0)));
-        assert_eq!(resolve_spec("node", &index), Some(NodeVersion::new(23, 5, 0)));
+        assert_eq!(
+            resolve_spec("latest", &index),
+            Some(NodeVersion::new(23, 5, 0))
+        );
+        assert_eq!(
+            resolve_spec("node", &index),
+            Some(NodeVersion::new(23, 5, 0))
+        );
         // Newest LTS overall — 22.13.0 (Jod) beats 20.x (Iron).
-        assert_eq!(resolve_spec("lts", &index), Some(NodeVersion::new(22, 13, 0)));
-        assert_eq!(resolve_spec("lts/*", &index), Some(NodeVersion::new(22, 13, 0)));
+        assert_eq!(
+            resolve_spec("lts", &index),
+            Some(NodeVersion::new(22, 13, 0))
+        );
+        assert_eq!(
+            resolve_spec("lts/*", &index),
+            Some(NodeVersion::new(22, 13, 0))
+        );
     }
 
     #[test]
     fn resolves_lts_codename_case_insensitively() {
         let index = idx();
-        assert_eq!(resolve_spec("lts/iron", &index), Some(NodeVersion::new(20, 18, 1)));
-        assert_eq!(resolve_spec("lts/Iron", &index), Some(NodeVersion::new(20, 18, 1)));
-        assert_eq!(resolve_spec("lts/jod", &index), Some(NodeVersion::new(22, 13, 0)));
+        assert_eq!(
+            resolve_spec("lts/iron", &index),
+            Some(NodeVersion::new(20, 18, 1))
+        );
+        assert_eq!(
+            resolve_spec("lts/Iron", &index),
+            Some(NodeVersion::new(20, 18, 1))
+        );
+        assert_eq!(
+            resolve_spec("lts/jod", &index),
+            Some(NodeVersion::new(22, 13, 0))
+        );
         assert_eq!(resolve_spec("lts/nonexistent", &index), None);
     }
 
@@ -216,13 +244,28 @@ mod tests {
     fn resolves_numeric_major_minor_exact() {
         let index = idx();
         // Major → highest matching.
-        assert_eq!(resolve_spec("22", &index), Some(NodeVersion::new(22, 13, 0)));
-        assert_eq!(resolve_spec("20", &index), Some(NodeVersion::new(20, 18, 1)));
+        assert_eq!(
+            resolve_spec("22", &index),
+            Some(NodeVersion::new(22, 13, 0))
+        );
+        assert_eq!(
+            resolve_spec("20", &index),
+            Some(NodeVersion::new(20, 18, 1))
+        );
         // Major.minor → highest patch.
-        assert_eq!(resolve_spec("22.12", &index), Some(NodeVersion::new(22, 12, 0)));
+        assert_eq!(
+            resolve_spec("22.12", &index),
+            Some(NodeVersion::new(22, 12, 0))
+        );
         // Exact (must be present in the index; leading v tolerated).
-        assert_eq!(resolve_spec("v22.13.0", &index), Some(NodeVersion::new(22, 13, 0)));
-        assert_eq!(resolve_spec("22.13.0", &index), Some(NodeVersion::new(22, 13, 0)));
+        assert_eq!(
+            resolve_spec("v22.13.0", &index),
+            Some(NodeVersion::new(22, 13, 0))
+        );
+        assert_eq!(
+            resolve_spec("22.13.0", &index),
+            Some(NodeVersion::new(22, 13, 0))
+        );
         // Exact-but-not-published → None (don't attempt a doomed download).
         assert_eq!(resolve_spec("22.13.99", &index), None);
         // Nonexistent major → None.

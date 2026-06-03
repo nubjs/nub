@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 /// Blocking HTTP client: rustls (no OpenSSL), native roots so corporate MITM CAs
@@ -93,10 +93,12 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 
 fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// Find the expected SHA-256 for `filename` in a `SHASUMS256.txt` body. Each line
@@ -151,12 +153,14 @@ not-a-valid-hash  node-v22.13.0-win-x64.zip
     #[test]
     fn verify_checksum_is_fail_closed() {
         // Match (case-insensitive) → ok.
-        assert!(verify_checksum(
-            "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
-            SHASUMS,
-            "node-v22.13.0-darwin-arm64.tar.xz"
-        )
-        .is_ok());
+        assert!(
+            verify_checksum(
+                "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
+                SHASUMS,
+                "node-v22.13.0-darwin-arm64.tar.xz"
+            )
+            .is_ok()
+        );
         // Mismatch → error.
         assert!(verify_checksum("dead", SHASUMS, "node-v22.13.0-darwin-arm64.tar.xz").is_err());
         // Not listed → error (never silently pass).
@@ -199,7 +203,7 @@ not-a-valid-hash  node-v22.13.0-win-x64.zip
     #[test]
     #[ignore = "network: downloads a real Node tarball (~25MB)"]
     fn download_real_tarball_and_verify() {
-        use crate::version_management::{node_artifact, resolve_mirror_base, HostTarget};
+        use crate::version_management::{HostTarget, node_artifact, resolve_mirror_base};
         let host = HostTarget::detect().expect("a published host");
         let ver: crate::node::version::NodeVersion = "22.13.0".parse().unwrap();
         let art = node_artifact(&ver, &host, &resolve_mirror_base(&host));

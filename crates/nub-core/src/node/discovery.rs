@@ -190,8 +190,9 @@ pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryE
     };
     let host = crate::version_management::HostTarget::detect()
         .ok_or_else(|| fail("this host is not a platform nodejs.org publishes".to_string()))?;
-    let store_root = cache_dir()
-        .ok_or_else(|| fail("could not locate a cache directory (no $HOME / $XDG_CACHE_HOME)".to_string()))?;
+    let store_root = cache_dir().ok_or_else(|| {
+        fail("could not locate a cache directory (no $HOME / $XDG_CACHE_HOME)".to_string())
+    })?;
 
     // Resolve to a concrete version. Exact is already concrete; everything else
     // resolves against the (cached) dist index.
@@ -222,8 +223,9 @@ pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryE
     // Download + install it.
     let version_dir = crate::version_management::provision_node(&concrete, &host, &store_root)
         .map_err(|e| fail(format!("{e:#}")))?;
-    let bin = store_node_binary(&version_dir)
-        .ok_or_else(|| fail("installed, but no node binary was found in the extracted tree".to_string()))?;
+    let bin = store_node_binary(&version_dir).ok_or_else(|| {
+        fail("installed, but no node binary was found in the extracted tree".to_string())
+    })?;
     Ok(ResolvedNode {
         path: bin,
         version: concrete,
@@ -428,7 +430,9 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
 
 /// Resolve the `NODE_EXECUTABLE` override, if set. Split from the env read so the
 /// resolution is unit-testable without mutating the process environment.
-fn node_executable_from(raw: Option<std::ffi::OsString>) -> Result<Option<ResolvedNode>, DiscoveryError> {
+fn node_executable_from(
+    raw: Option<std::ffi::OsString>,
+) -> Result<Option<ResolvedNode>, DiscoveryError> {
     let Some(raw) = raw else { return Ok(None) };
     if raw.is_empty() {
         return Ok(None);
@@ -437,8 +441,8 @@ fn node_executable_from(raw: Option<std::ffi::OsString>) -> Result<Option<Resolv
     // Detect the version (spawns `<path> --version`, mtime-cached). A bad path /
     // non-Node binary surfaces a clear VersionDetection error.
     let version = detect_version(&path)?;
-    let utf8_path = Utf8PathBuf::try_from(path)
-        .map_err(|e| DiscoveryError::VersionDetection(e.to_string()))?;
+    let utf8_path =
+        Utf8PathBuf::try_from(path).map_err(|e| DiscoveryError::VersionDetection(e.to_string()))?;
     Ok(Some(ResolvedNode {
         path: utf8_path,
         version,
@@ -564,10 +568,13 @@ fn scan_nvm(pin: &VersionPin) -> Option<ResolvedNode> {
 /// `bin/node` on unix, `node.exe` at the dir root on Windows (the layout
 /// `nodejs.org/dist` tarballs extract to).
 fn store_node_binary(version_dir: &Path) -> Option<Utf8PathBuf> {
-    [version_dir.join("bin").join("node"), version_dir.join("node.exe")]
-        .into_iter()
-        .find(|p| p.is_file())
-        .and_then(|p| Utf8PathBuf::try_from(p).ok())
+    [
+        version_dir.join("bin").join("node"),
+        version_dir.join("node.exe"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+    .and_then(|p| Utf8PathBuf::try_from(p).ok())
 }
 
 /// Look up a Node satisfying `pin` in nub's own download store
@@ -679,7 +686,10 @@ mod tests {
         std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
         std::fs::write(dir.join(".nvmrc"), "18.19.0\n").unwrap();
         let (raw, _pin, source) = walk_up_for_pin(&dir).expect("a pin file");
-        assert_eq!(source, ".node-version", ".node-version must win over .nvmrc");
+        assert_eq!(
+            source, ".node-version",
+            ".node-version must win over .nvmrc"
+        );
         assert_eq!(raw, "20.11.0");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -690,7 +700,10 @@ mod tests {
         std::fs::write(dir.join("package.json"), r#"{"engines":{"node":">=20"}}"#).unwrap();
         let (range, source) = read_engines_node(&dir).expect("engines.node range");
         assert_eq!(range, ">=20");
-        assert!(source.contains("engines.node"), "source label names engines.node: {source}");
+        assert!(
+            source.contains("engines.node"),
+            "source label names engines.node: {source}"
+        );
         // A package.json without engines.node is the project boundary → None, not a
         // walk into ancestors.
         let dir2 = resolution_tmpdir("noeng");
@@ -732,7 +745,11 @@ mod tests {
         assert!(resolved.version.major() >= 18);
         // Unset / empty → no override (falls through to normal resolution).
         assert!(node_executable_from(None).unwrap().is_none());
-        assert!(node_executable_from(Some(std::ffi::OsString::new())).unwrap().is_none());
+        assert!(
+            node_executable_from(Some(std::ffi::OsString::new()))
+                .unwrap()
+                .is_none()
+        );
         // A bad path is a clear error, not a silent fall-through.
         assert!(node_executable_from(Some("/no/such/node".into())).is_err());
     }
@@ -752,9 +769,13 @@ mod tests {
         assert_eq!(exact.version, NodeVersion::new(22, 13, 0));
         assert!(exact.path.as_str().contains("22.13.0"));
         // Range pin (major 22) → highest matching cached version.
-        let major = nub_store_node_in(&store, &"22".parse::<VersionPin>().unwrap())
-            .expect("a cached 22.x");
-        assert_eq!(major.version, NodeVersion::new(22, 15, 0), "highest matching wins");
+        let major =
+            nub_store_node_in(&store, &"22".parse::<VersionPin>().unwrap()).expect("a cached 22.x");
+        assert_eq!(
+            major.version,
+            NodeVersion::new(22, 15, 0),
+            "highest matching wins"
+        );
         // Not cached → None (falls through to nvm / download).
         assert!(nub_store_node_in(&store, &"18.19.0".parse::<VersionPin>().unwrap()).is_none());
         let _ = std::fs::remove_dir_all(&store);

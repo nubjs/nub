@@ -219,7 +219,10 @@ mod tests {
                 "must NOT inject --disable-warning on {ver:?} (the flag aborts those versions)"
             );
             // --enable-source-maps is always safe, so the floor still augments.
-            assert!(flags.contains(&"--enable-source-maps"), "source-maps must still inject on {ver:?}");
+            assert!(
+                flags.contains(&"--enable-source-maps"),
+                "source-maps must still inject on {ver:?}"
+            );
         }
         for ver in [v(20, 11, 0), v(22, 13, 0)] {
             let flags = compute_inject_flags(ver.clone(), &[], None, false);

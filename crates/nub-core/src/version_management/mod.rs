@@ -151,7 +151,11 @@ pub struct NodeArtifact {
 /// [`resolve_mirror_base`]). Pure: no network, no env.
 pub fn node_artifact(version: &NodeVersion, host: &HostTarget, base: &str) -> NodeArtifact {
     let base = base.trim_end_matches('/');
-    let filename = format!("node-v{version}-{}.{}", host.platform_token(), host.archive_ext());
+    let filename = format!(
+        "node-v{version}-{}.{}",
+        host.platform_token(),
+        host.archive_ext()
+    );
     let dir = format!("{base}/v{version}");
     NodeArtifact {
         tarball_url: format!("{dir}/{filename}"),
@@ -199,7 +203,11 @@ impl Drop for WorkGuard {
 /// sibling temp dir, then `rename` into place, so a crash or a concurrent run
 /// never leaves a half-extracted dir masquerading as a cached version. An
 /// already-installed version short-circuits with no network + no output.
-pub fn provision_node(version: &NodeVersion, host: &HostTarget, store_root: &Path) -> Result<PathBuf> {
+pub fn provision_node(
+    version: &NodeVersion,
+    host: &HostTarget,
+    store_root: &Path,
+) -> Result<PathBuf> {
     let node_store = store_root.join("node");
     let final_dir = node_store.join(version.to_string());
     if version_dir_has_node(&final_dir) {
@@ -224,7 +232,10 @@ pub fn provision_node(version: &NodeVersion, host: &HostTarget, store_root: &Pat
         if !announced {
             announced = true;
             match total {
-                Some(t) => eprintln!("Installing Node {version} from nodejs.org ({} MB)...", t / 1_000_000),
+                Some(t) => eprintln!(
+                    "Installing Node {version} from nodejs.org ({} MB)...",
+                    t / 1_000_000
+                ),
                 None => eprintln!("Installing Node {version} from nodejs.org..."),
             }
         }
@@ -241,13 +252,17 @@ pub fn provision_node(version: &NodeVersion, host: &HostTarget, store_root: &Pat
         std::fs::create_dir_all(&node_store).ok();
         if let Err(e) = std::fs::rename(&extracted, &final_dir) {
             if !version_dir_has_node(&final_dir) {
-                return Err(e)
-                    .with_context(|| format!("installing Node {version} into {}", final_dir.display()));
+                return Err(e).with_context(|| {
+                    format!("installing Node {version} into {}", final_dir.display())
+                });
             }
         }
     }
 
-    eprintln!("✓ Installed Node {version} in {:.1}s", started.elapsed().as_secs_f64());
+    eprintln!(
+        "✓ Installed Node {version} in {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(final_dir)
 }
 
@@ -265,24 +280,63 @@ mod tests {
 
     #[test]
     fn platform_tokens_match_dist_filenames() {
-        assert_eq!(host(NodeOs::Darwin, NodeArch::Arm64, false).platform_token(), "darwin-arm64");
-        assert_eq!(host(NodeOs::Darwin, NodeArch::X64, false).platform_token(), "darwin-x64");
-        assert_eq!(host(NodeOs::Linux, NodeArch::X64, false).platform_token(), "linux-x64");
-        assert_eq!(host(NodeOs::Linux, NodeArch::Arm64, false).platform_token(), "linux-arm64");
-        assert_eq!(host(NodeOs::Linux, NodeArch::Armv7l, false).platform_token(), "linux-armv7l");
-        assert_eq!(host(NodeOs::Linux, NodeArch::Ppc64le, false).platform_token(), "linux-ppc64le");
-        assert_eq!(host(NodeOs::Linux, NodeArch::S390x, false).platform_token(), "linux-s390x");
-        assert_eq!(host(NodeOs::Windows, NodeArch::X64, false).platform_token(), "win-x64");
-        assert_eq!(host(NodeOs::Windows, NodeArch::Arm64, false).platform_token(), "win-arm64");
+        assert_eq!(
+            host(NodeOs::Darwin, NodeArch::Arm64, false).platform_token(),
+            "darwin-arm64"
+        );
+        assert_eq!(
+            host(NodeOs::Darwin, NodeArch::X64, false).platform_token(),
+            "darwin-x64"
+        );
+        assert_eq!(
+            host(NodeOs::Linux, NodeArch::X64, false).platform_token(),
+            "linux-x64"
+        );
+        assert_eq!(
+            host(NodeOs::Linux, NodeArch::Arm64, false).platform_token(),
+            "linux-arm64"
+        );
+        assert_eq!(
+            host(NodeOs::Linux, NodeArch::Armv7l, false).platform_token(),
+            "linux-armv7l"
+        );
+        assert_eq!(
+            host(NodeOs::Linux, NodeArch::Ppc64le, false).platform_token(),
+            "linux-ppc64le"
+        );
+        assert_eq!(
+            host(NodeOs::Linux, NodeArch::S390x, false).platform_token(),
+            "linux-s390x"
+        );
+        assert_eq!(
+            host(NodeOs::Windows, NodeArch::X64, false).platform_token(),
+            "win-x64"
+        );
+        assert_eq!(
+            host(NodeOs::Windows, NodeArch::Arm64, false).platform_token(),
+            "win-arm64"
+        );
         // musl appends the suffix (unofficial-builds naming).
-        assert_eq!(host(NodeOs::Linux, NodeArch::X64, true).platform_token(), "linux-x64-musl");
+        assert_eq!(
+            host(NodeOs::Linux, NodeArch::X64, true).platform_token(),
+            "linux-x64-musl"
+        );
     }
 
     #[test]
     fn archive_ext_is_zip_on_windows_else_tar_xz() {
-        assert_eq!(host(NodeOs::Windows, NodeArch::X64, false).archive_ext(), "zip");
-        assert_eq!(host(NodeOs::Darwin, NodeArch::Arm64, false).archive_ext(), "tar.xz");
-        assert_eq!(host(NodeOs::Linux, NodeArch::X64, false).archive_ext(), "tar.xz");
+        assert_eq!(
+            host(NodeOs::Windows, NodeArch::X64, false).archive_ext(),
+            "zip"
+        );
+        assert_eq!(
+            host(NodeOs::Darwin, NodeArch::Arm64, false).archive_ext(),
+            "tar.xz"
+        );
+        assert_eq!(
+            host(NodeOs::Linux, NodeArch::X64, false).archive_ext(),
+            "tar.xz"
+        );
     }
 
     #[test]
@@ -292,8 +346,14 @@ mod tests {
             &host(NodeOs::Darwin, NodeArch::Arm64, false),
             "https://nodejs.org/dist",
         );
-        assert_eq!(a.tarball_url, "https://nodejs.org/dist/v22.13.0/node-v22.13.0-darwin-arm64.tar.xz");
-        assert_eq!(a.shasums_url, "https://nodejs.org/dist/v22.13.0/SHASUMS256.txt");
+        assert_eq!(
+            a.tarball_url,
+            "https://nodejs.org/dist/v22.13.0/node-v22.13.0-darwin-arm64.tar.xz"
+        );
+        assert_eq!(
+            a.shasums_url,
+            "https://nodejs.org/dist/v22.13.0/SHASUMS256.txt"
+        );
         assert_eq!(a.tarball_filename, "node-v22.13.0-darwin-arm64.tar.xz");
     }
 
@@ -304,7 +364,10 @@ mod tests {
             &host(NodeOs::Windows, NodeArch::X64, false),
             "https://nodejs.org/dist/",
         );
-        assert_eq!(a.tarball_url, "https://nodejs.org/dist/v20.11.0/node-v20.11.0-win-x64.zip");
+        assert_eq!(
+            a.tarball_url,
+            "https://nodejs.org/dist/v20.11.0/node-v20.11.0-win-x64.zip"
+        );
         assert_eq!(a.tarball_filename, "node-v20.11.0-win-x64.zip");
     }
 
@@ -343,7 +406,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store);
 
         let dir = provision_node(&version, &host, &store).expect("provision");
-        assert!(version_dir_has_node(&dir), "installed node binary must be present");
+        assert!(
+            version_dir_has_node(&dir),
+            "installed node binary must be present"
+        );
         let out = std::process::Command::new(dir.join("bin").join("node"))
             .arg("--version")
             .output()
