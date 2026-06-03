@@ -1,0 +1,6 @@
+{
+  "name": "script-args",
+  "scripts": {
+    "echoargs": "node printargs.js"
+  }
+}

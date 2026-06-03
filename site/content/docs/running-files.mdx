@@ -1,0 +1,275 @@
+---
+title: File runner
+description: Run TypeScript and JSX files directly — a flag-for-flag drop-in for the node command, with module resolution, data-format loaders, automatic .env loading, and modern globals.
+---
+
+The top-level `nub <file>` command executes a file. It is a true drop-in replacement for `node <file>` — flag-for-flag compatible — plus on-the-fly TypeScript and JSX, `tsconfig.json` path aliases, data-format imports, automatic `.env` loading, and modern globals. Everything runs on the `node` you already have installed; Nub registers a `module.registerHooks()` load hook and gets out of the way. If `tsc --noEmit` accepts your code and your editor's Go-to-Definition works on its imports, Nub runs it.
+
+This page is a cookbook of concrete tasks. For the "what is it / how does it work" framing, start with the [Introduction](/docs) and the [FAQ](/docs/faq).
+
+## Running a file
+
+Point `nub` at a file. `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, and `.jsx` all run directly — no build step, no `ts-node`, no `tsx` wrapper.
+
+```sh
+nub index.ts
+nub server.tsx
+nub script.js
+```
+
+Nub transpiles the entry file (and any files it imports out of your project source) with its oxc-based transpiler, then hands the result to Node. It does **not** type-check — types are stripped for execution; keep `tsc --noEmit` in your editor and CI for type validation. Files inside `node_modules` are never transpiled; they load exactly as the package shipped them.
+
+## A drop-in for `node`
+
+Anything `node <args>` accepts, `nub <args>` accepts too — same argv shape, same flag set, same behavior. Pass-through is the default for the entire flag space: diagnostics (`--prof`, `--cpu-prof`, `--report-*`), module-resolution flags (`--conditions`, `--preserve-symlinks`), and warning flags (`--no-warnings`, `--trace-deprecation`) all reach Node verbatim.
+
+```sh
+nub --max-old-space-size=4096 build.ts
+nub --import ./instrument.js server.ts
+nub script.ts --port 3000 --verbose   # everything after the file is your script's argv
+```
+
+### Reading from stdin
+
+Read a program from stdin the same way `node -` does:
+
+```sh
+echo 'console.log(1 + 1)' | nub -
+nub - < script.js
+```
+
+### Debugging
+
+The inspector flags pass straight through to Node, and because Nub emits inline source maps your breakpoints land in the `.ts` source, not the transpiled output.
+
+```sh
+nub --inspect server.ts        # attach a debugger to the running process
+nub --inspect-brk server.ts    # break before the first line and wait for a debugger
+```
+
+Then attach Chrome DevTools or your editor's debugger as usual.
+
+## TypeScript
+
+Nub runs the whole TypeScript surface, not just the erasable subset Node's built-in type-stripping accepts.
+
+### Non-erasable syntax
+
+`enum`, `namespace`, and parameter properties require transformation, not just type removal — Node's type-stripping rejects them. Nub's oxc transpiler handles them as part of the normal pipeline.
+
+```ts
+enum Color { Red, Green, Blue }
+
+namespace Geometry {
+  export const PI = 3.14159;
+}
+
+class User {
+  constructor(public id: string, private name: string) {}
+}
+```
+
+These files don't run on vanilla `node` (with or without type-stripping), so supporting them doesn't break a Node-compatible code path — there isn't one. You opt into the syntax by writing it; Nub makes it run.
+
+### Legacy decorators
+
+Set `experimentalDecorators: true` in your `tsconfig.json` and decorated classes run with no build step. This is the legacy decorator form the DI / ORM ecosystem (NestJS, TypeORM, Angular) is written against.
+
+```json
+{
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  }
+}
+```
+
+```ts
+@Entity()
+class Account {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column()
+  balance: number;
+}
+```
+
+`emitDecoratorMetadata` emits calls to `Reflect.metadata`, so install and import `reflect-metadata` yourself, exactly as on plain TypeScript — Nub does not auto-inject it.
+
+> **Stage 3 decorators are not in v0.1.** TypeScript 5+ defaults to the spec-aligned Stage 3 form when neither decorator flag is set; that transform is an upstream gap in oxc, so Nub rejects it with a clear diagnostic pointing you at `experimentalDecorators: true`. NestJS / TypeORM / class-validator users already set that flag and are unaffected. Stage 3 support is on the roadmap, blocked on landing the transform upstream in oxc.
+
+### Extensionless imports
+
+In TypeScript-family files, extensionless imports resolve the way `tsc` resolves them — `import "./foo"` finds `./foo.ts`. This is the conventional pattern most TypeScript codebases use.
+
+```ts
+// from a .ts / .tsx / .mts / .cts file:
+import { config } from "./config";   // resolves ./config.ts (then .tsx, .js, .jsx, .json)
+import { add } from "./math";        // resolves ./math.ts
+import data from "./fixtures";       // resolves ./fixtures/index.ts (or its package.json "main")
+```
+
+This probing is scoped to TypeScript-family parent files only. A plain `.js` file stays strict about extensions, exactly like vanilla Node, so reversible `.js` code behaves identically under `nub` and `node`.
+
+### `.js` imports that resolve to `.ts`
+
+`moduleResolution: "nodenext"` makes `tsc` want `.js` on relative imports even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
+
+```ts
+import { handler } from "./handler.js";  // resolves ./handler.ts when no ./handler.js exists
+```
+
+A real on-disk `./handler.js` always wins; the swap only fires when the written extension doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`.
+
+### tsconfig path aliases
+
+Nub reads `compilerOptions.paths` and `compilerOptions.baseUrl` from your nearest `tsconfig.json` and applies them at runtime, so `@/...`-style imports work with no build step and no `tsconfig-paths` package.
+
+```json
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@db": ["src/db/index.ts"]
+    }
+  }
+}
+```
+
+```ts
+import { db } from "@db";
+import { Button } from "@/components/Button";
+```
+
+Nub walks up to the nearest `tsconfig.json`, follows `extends` chains, and honors `baseUrl` on its own — a bare `import "lib/config"` resolves to `baseUrl/lib/config.ts` even with no `paths` entry. Node builtins always win: `import "os"` is `node:os`, never `baseUrl/os.ts`. Edited your `tsconfig.json`? Restart the process (or let [`nub watch`](/docs/watch) restart it for you) — configs are read once per process.
+
+## Source maps
+
+Nub emits inline source maps and turns on `--enable-source-maps`, so uncaught errors and `console.trace()` print frames that point at your original TypeScript source and line numbers — not the transpiled JS. It's on by default; there's no flag to remember.
+
+```sh
+nub app.ts   # a throw inside app.ts reports app.ts:N, not the generated output
+```
+
+If you ever want it off, pass `--no-enable-source-maps`.
+
+## JSX
+
+`.jsx` and `.tsx` files execute directly through the same load hook. JSX is recognized in `.jsx` / `.tsx` only, never in plain `.js`. The defaults are the modern ones — automatic runtime, `react` as the import source — matching oxc-transformer, Vite's React plugins, Rolldown, and Bun, so a React project needs no setup.
+
+```sh
+nub render.tsx
+```
+
+### Choosing a JSX runtime
+
+Configure the JSX runtime the way the rest of your toolchain already does: through `tsconfig.json`, or with a per-file pragma that wins over tsconfig for that one file.
+
+```json
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact"
+  }
+}
+```
+
+```tsx
+/** @jsxImportSource hono/jsx */
+export default function Page() {
+  return <h1>Hello</h1>;
+}
+```
+
+`compilerOptions.jsx` (`preserve`, `react`, `react-jsx`, `react-jsxdev`, `react-native`) and `compilerOptions.jsxImportSource` are honored. Preact, Hono, and Vue JSX work via passthrough. Solid is the exception — its JSX needs `babel-preset-solid`'s reactive-graph compilation, which a per-file transpiler can't do, so run Solid through its bundler (e.g. `nub run vite`).
+
+## Data-format loaders
+
+Import a config or data file directly — no `npm install yaml` / `json5`, no `fs.readFile` + `parse` plumbing. The default export is the parsed value; the parsed object's top-level keys are also available as named exports. Same shape as `import data from "./data.json"`, which Node has supported since 2017.
+
+```ts
+import config from "./config.yaml";    // parsed object
+import flags from "./feature.jsonc";   // parsed object (comments stripped)
+import pkg from "./Cargo.toml";         // parsed object
+import schema from "./schema.json5";    // parsed object (JSON5 superset)
+import prompt from "./prompt.txt";       // string
+import { host, port } from "./config.yaml"; // named exports mirror top-level keys
+```
+
+Supported extensions out of the box: `.json` (Node-native), `.jsonc`, `.json5`, `.toml`, `.yaml` / `.yml`, and `.txt`. These are **extension-based loaders, not built-in modules** — Nub never claims the `yaml` / `toml` / `json5` import specifiers, so `import { parse } from "yaml"` keeps resolving to the published npm package on both Nub and Node.
+
+## Environment variables
+
+Nub reads your `.env*` files and injects them into the environment *before* Node starts — no `dotenv` import, no `--env-file` flag. It loads from the nearest directory that has a `package.json` (walking up from your cwd), matching Vite's single-directory model.
+
+The load order, highest priority first: the shell env (always wins), then `.env.[NODE_ENV].local`, `.env.local`, `.env.[NODE_ENV]`, and `.env`. So with `NODE_ENV=production` set, `.env.production` is read; `.env.local` is intentionally skipped under `NODE_ENV=test` so developer-machine secrets don't leak into the test suite.
+
+```sh
+NODE_ENV=production nub server.ts   # reads .env.production then .env
+```
+
+### Variable expansion
+
+Values support `${VAR}` and `$VAR` expansion, including nested references with cycle detection. Undefined variables expand to the empty string.
+
+```sh
+# .env
+HOST=localhost
+PORT=5432
+DATABASE_URL=postgres://${HOST}:${PORT}/app
+```
+
+Escape a literal dollar sign with `\$`. Watch the classic footgun: `PASSWORD=foo$bar` truncates to `foo` if `bar` is unset — quote and escape it as `PASSWORD="foo\$bar"`. If you pass Node's own `--env-file=path`, Nub steps aside for that specific file and lets Node load it (Node does no `${VAR}` expansion); your other `.env*` files still load through Nub.
+
+## Modern globals
+
+Modern web-platform and TC39 APIs work on every supported Node version — polyfilled where Node hasn't shipped them, unflagged where Node hides them behind `--experimental-*`. As your Node floor rises, the polyfills feature-detect and step aside; same code, no migration.
+
+```ts
+const now = Temporal.Now.plainDateTimeISO();          // native in Node 26+, polyfilled below
+const route = new URLPattern({ pathname: "/u/:id" }); // native in Node 24+, polyfilled below
+const ws = new WebSocket("wss://api.example.com");     // native in Node 22.5+, polyfilled on 20.x
+const stream = new EventSource("https://api/stream");  // auto-unflagged
+const worker = new Worker(new URL("./w.ts", import.meta.url), { type: "module" });
+```
+
+`localStorage` / `sessionStorage` also work without you setting `--localstorage-file` — Nub defaults the storage file under `~/.cache/nub` so persistence just works. `reportError`, `vm.Module` (used by Jest/Vitest), and `node:sqlite` are likewise available where Node still gates them.
+
+## The Node version
+
+Nub doesn't ship a Node runtime — it runs your code on stock Node. It resolves which Node to use from your project, and will fetch one for you if it's missing. To drive the cache by hand — pre-install a version, list what's cached, remove one, or write a pin — see [Managing Node versions](/docs/managing-node).
+
+### Pin a version, and Nub fetches it
+
+Pin a version in `.node-version` or `.nvmrc`. If that Node is already on your machine (on `PATH` or previously fetched), Nub uses it; if not, it downloads the matching stock build straight from nodejs.org — SHA-256 verified, cached under `~/.cache/nub/node`, and run in the same breath. No `nvm use`, no prompt.
+
+```sh
+$ cat .nvmrc
+22.15.0
+
+$ nub index.ts
+Installing Node 22.15.0 from nodejs.org (25 MB)...
+✓ Installed Node 22.15.0 in 2.7s
+# ...your script runs, on exactly the Node you pinned
+```
+
+The first run installs in a couple of seconds (progress on stderr; stdout is never touched); every run after is a single `stat`. Provisioning fires for `nub <file>` and for descendant `node` calls Nub's PATH shim catches.
+
+### Bring your own
+
+With no pin file, Nub adopts whatever `node` is on your `PATH`. Switch Node with `nvm`, `mise`, `fnm`, `brew`, or the official installer, and Nub picks up the active one. Upgrading Nub never changes your Node version, and upgrading Node never changes your Nub.
+
+```sh
+nvm use 24
+nub --which-node        # prints the resolved Node binary Nub will spawn
+```
+
+Augmented modes require **Node 22.15+** (the floor for synchronous `module.registerHooks()`). On older Node, augmented commands emit a tagged error telling you to upgrade.
+
+There's also no Nub verb for "plain Node" — just type `node`. The PATH shim Nub uses to augment child `node` calls is per-invocation, scoped to descendants of a `nub ...` call, so your shell's `node` is always your real, unaugmented Node.
+
+```sh
+node script.js          # your real Node, no augmentation
+```

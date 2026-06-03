@@ -1,0 +1,22 @@
+[package]
+name = "nub-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nub"
+path = "src/main.rs"
+
+[dependencies]
+nub-core = { path = "../nub-core" }
+anyhow.workspace = true
+clap.workspace = true
+dotenvy = "0.15"
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+tempfile = "3"
+tracing-subscriber.workspace = true

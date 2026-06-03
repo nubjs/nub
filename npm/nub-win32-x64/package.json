@@ -1,0 +1,17 @@
+{
+  "name": "@nubjs/nub-win32-x64",
+  "version": "0.0.12",
+  "description": "Nub binary for win32-x64",
+  "license": "MIT",
+  "repository": "https://github.com/colinhacks/nub",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "runtime"
+  ]
+}

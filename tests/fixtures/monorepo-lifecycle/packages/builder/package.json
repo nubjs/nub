@@ -1,0 +1,9 @@
+{
+  "name": "@mono/builder",
+  "version": "1.0.0",
+  "scripts": {
+    "prebuild": "echo builder-pre",
+    "build": "echo builder-main",
+    "postbuild": "echo builder-post"
+  }
+}

@@ -1,0 +1,52 @@
+# Please take extra care not to add rules that will make tracked files ignored.
+# To test that, run `git ls-files -i --exclude-standard`.
+# To check why a specific file is ignored, run `git check-ignore -v <filepath>`.
+
+# === Dotfiles ===
+# Ignore all dotfiles and dot-dirs by default; allow only what we explicitly track.
+.*
+!.gitignore
+!.gitkeep
+!.gitattributes
+!.gitmodules
+!.github/
+
+# === Global cruft ===
+*.pyc
+__pycache__/
+.DS_Store
+*~
+
+# === Build / IDE artifacts ===
+/target/
+/dist/
+/build/
+/coverage/
+node_modules/
+*.log
+*.swp
+compile_commands.json
+runtime/addons/*.node
+# tests/node-suite is a registered git submodule (see .gitmodules), not ignored content. Git manages its working tree across the submodule boundary and the gitlink is committed (mode 160000), so an ignore rule here only contradicts .gitmodules and risks confusing `git submodule update` / `actions/checkout` in CI. Test-run artifacts that land inside it surface as the submodule's own "untracked content" and never leak into this repo's index.
+
+# npm platform packages (built artifacts)
+npm/nub-*/bin/
+npm/nub-*/runtime/
+npm/nub/*.tgz
+npm/nub-*/*.tgz
+
+# nub's localStorage/cache leaking into cwd as `0/<node-version>-<arch>-…` when
+# XDG_CACHE_HOME is unset and the store path resolves relative (a real nub bug —
+# the cache should always live under ~/.cache/nub). Ignore the stray dirs until
+# the path resolution is fixed.
+0/
+
+# Test fixture — needed by the env-loading integration tests (the broad .* rule above hides it)
+!tests/fixtures/env-test/.env
+
+# === Internal design corpus & implementation ledgers ===
+# Kept on disk (and in the Desktop backup) but NOT published to the public repo:
+# roadmap, competitive research, design plans, per-version epics. Agents working
+# from a full local checkout still have them; the public repo does not.
+wiki/
+epics/

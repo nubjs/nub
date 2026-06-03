@@ -1,0 +1,40 @@
+---
+title: Introduction
+description: Nub is a Rust CLI that augments the Node you already have — TypeScript-first execution, a faster script runner, and a fast bin runner. Zero lock-in.
+---
+
+Nub is a unified runner CLI powered by Node.js that **modernizes** the developer experience in the Node.js ecosystem. Use it to run files, `package.json` scripts, and locally installed CLIs — instead of `node`, `npm run`, and `npx` (or the equivalents in your preferred package manager).
+
+```sh
+npm i -g @nubjs/nub
+nub index.ts             # run a TypeScript file
+nub run dev              # run a package.json script
+nub watch src/server.ts  # restart on file changes
+nubx prisma generate     # run a CLI from node_modules/.bin
+```
+
+It's written in Rust, powered by Node.js, and provides a Bun-like modern DX on top of the `node` you already have installed. There is no new runtime to adopt and no lock-in: every augmentation rides on Node's own public extension surfaces.
+
+## What it combines
+
+- **A file runner (`nub index.ts`)** — execute `.{js,cjs,mjs,jsx,ts,cts,mts,tsx}` files with complete TypeScript support and perfect Node compatibility.
+- **A script runner (`nub run`)** — run `package.json` scripts an order of magnitude faster than `pnpm run`, with the full workspace and lifecycle-hook surface preserved.
+- **A bin runner (`nubx`)** — run local CLIs installed in your project an order of magnitude faster than `npx`.
+- **A watcher (`nub watch`)** — restarts on changes to your source, your `.env*` files, and your `tsconfig.json`. The dependency graph drives the watch set; no glob hygiene required.
+
+## Install
+
+```sh
+npm install -g @nubjs/nub
+```
+
+`pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work equivalently. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`.
+
+## Requirements
+
+- **Node 22.15+** for augmented modes (the floor for synchronous `module.registerHooks()`).
+- macOS (arm64, x64), Linux (x64, arm64), Windows (x64).
+
+## Where to next
+
+- Quick answers: the [FAQ](/docs/faq).

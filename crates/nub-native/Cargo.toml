@@ -1,0 +1,22 @@
+[package]
+name = "nub-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi.workspace = true
+napi-derive.workspace = true
+serde_json.workspace = true
+json5.workspace = true
+jsonc-parser.workspace = true
+toml.workspace = true
+yaml-rust2.workspace = true
+
+[build-dependencies]
+napi-build = "2"

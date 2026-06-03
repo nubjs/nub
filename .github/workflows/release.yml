@@ -1,0 +1,447 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Also publish to npm + create the GitHub release. Default off = build + assemble only (for CI debugging)."
+        type: boolean
+        default: false
+      linux_only:
+        description: "Build only the Linux targets — cheap iteration that skips the 10×-billed macOS and 2× Windows runners. Tag pushes always build the full matrix."
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify version consistency
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # Internal consistency: all npm packages + Cargo.toml + preload.mjs agree.
+      - name: Check internal version consistency
+        run: make version-check
+      # The binary is built from the committed Cargo.toml and the committed
+      # preload.mjs is shipped as-is, so the tag MUST match what's committed —
+      # otherwise the published npm version (set from the tag) would disagree
+      # with the binary's reported version and the transpile-cache key.
+      # Only meaningful on a tag push — a workflow_dispatch has no tag
+      # (GITHUB_REF_NAME is the branch, e.g. "main"). The internal consistency
+      # check above (make version-check) already runs on dispatch.
+      - name: Check tag matches committed version
+        if: github.event_name == 'push'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          COMMITTED=$(node -e "console.log(require('./npm/nub/package.json').version)")
+          if [ "$TAG_VERSION" != "$COMMITTED" ]; then
+            echo "::error::Tag v$TAG_VERSION does not match committed version $COMMITTED. Run 'make version V=$TAG_VERSION', commit, then re-tag."
+            exit 1
+          fi
+          echo "✓ Tag v$TAG_VERSION matches committed version"
+      # Build matrix as data, so a debug `workflow_dispatch` with linux_only=true can
+      # drop the 10×-billed macOS + 2× Windows targets. Tag pushes (and dispatches
+      # without the flag) get the full 8-platform matrix.
+      - id: matrix
+        name: Compute build matrix
+        run: |
+          FULL='[
+            {"platform":"darwin-arm64","runner":"macos-14","target":"aarch64-apple-darwin","cross":false,"oxc_binding":"binding-darwin-arm64"},
+            {"platform":"darwin-x64","runner":"macos-14","target":"x86_64-apple-darwin","cross":false,"oxc_binding":"binding-darwin-x64"},
+            {"platform":"linux-x64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","cross":false,"oxc_binding":"binding-linux-x64-gnu"},
+            {"platform":"linux-x64-musl","runner":"ubuntu-latest","target":"x86_64-unknown-linux-musl","cross":true,"oxc_binding":"binding-linux-x64-musl"},
+            {"platform":"linux-arm64","runner":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","cross":true,"oxc_binding":"binding-linux-arm64-gnu"},
+            {"platform":"linux-arm64-musl","runner":"ubuntu-latest","target":"aarch64-unknown-linux-musl","cross":true,"oxc_binding":"binding-linux-arm64-musl"},
+            {"platform":"win32-x64","runner":"windows-latest","target":"x86_64-pc-windows-msvc","cross":false,"oxc_binding":"binding-win32-x64-msvc"},
+            {"platform":"win32-arm64","runner":"windows-latest","target":"aarch64-pc-windows-msvc","cross":false,"oxc_binding":"binding-win32-arm64-msvc"}
+          ]'
+          if [ "${{ inputs.linux_only }}" = "true" ]; then
+            SEL=$(echo "$FULL" | jq -c '[.[] | select(.platform | startswith("linux"))]')
+            echo "linux_only debug build — Linux targets only"
+          else
+            SEL=$(echo "$FULL" | jq -c '.')
+          fi
+          echo "matrix={\"include\":$SEL}" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test gate (cargo test + compat suite)
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      # No release without a green test run. This is the publish precondition,
+      # in two parts: `cargo test` runs the fast unit + integration suite, then
+      # `-- --ignored` runs the heavyweight Node-suite compat corpus
+      # (node_compat.rs / resolution_compat.rs — #[ignore]'d out of the fast path
+      # but mandatory before a publish). Both panic-loudly if the submodule is
+      # absent, so a missing checkout fails here instead of shipping a vacuous
+      # pass. `publish` needs this job, so a broken test blocks the release
+      # entirely (the binaries still build, but nothing is published).
+      - uses: actions/checkout@v4
+      - name: Init node-suite submodule (shallow)
+        run: git submodule update --init --depth 1 tests/node-suite
+        shell: bash
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      # The data-format loader tests (data_format_loaders, and the env-* tests whose
+      # fixture imports a .json5/.yaml file) need the nub-native addon — the npm
+      # parser fallback (yaml/@iarna/toml/json5) isn't a dev dependency, so without
+      # the addon those tests fail with "requires the yaml package". Build + place it
+      # so the test job exercises the real loaders. (linux-x64-glibc runner = native.)
+      - name: Build nub-native addon (for data-format loader tests)
+        run: |
+          cargo build --release -p nub-native
+          mkdir -p runtime/addons
+          cp target/release/libnub_native.so runtime/addons/nub-native.node
+      - run: cargo test
+      - name: Node compat corpus (publish gate)
+        run: cargo test --release -p nub-cli --test node_compat --test resolution_compat -- --ignored --nocapture
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      # Built as data by the `verify` job so a linux_only debug dispatch can drop the
+      # expensive macOS/Windows runners (see that job's "Compute build matrix" step).
+      matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release -p nub-cli --target ${{ matrix.target }}
+          else
+            cargo build --release -p nub-cli --target ${{ matrix.target }}
+          fi
+        shell: bash
+
+      - name: Build nub-native addon
+        run: |
+          CMD="cargo"; [ "${{ matrix.cross }}" = "true" ] && CMD="cross"
+          case "${{ matrix.target }}" in
+            *-musl)
+              # musl's default fully-static crt can't produce a cdylib (a .node is a
+              # dynamic lib). Disable crt-static for the ADDON only on musl so it
+              # builds as a dynamic lib; the static nub BINARY (built above) is
+              # untouched and stays portable. The resulting .node dyn-links
+              # libgcc_s.so.1 (Rust's musl unwinder) — present on node:*-alpine
+              # (pulled via libstdc++), so it loads. This is napi-rs's canonical
+              # musl recipe (what oxc/swc ship); `cross` forwards RUSTFLAGS by
+              # default (Cross.toml makes the passthrough explicit). Verified in
+              # Docker: builds + loads under node:alpine, exporting parseYaml/etc.
+              RUSTFLAGS="-C target-feature=-crt-static" $CMD build --release -p nub-native --target ${{ matrix.target }}
+              ;;
+            *)
+              $CMD build --release -p nub-native --target ${{ matrix.target }}
+              ;;
+          esac
+        shell: bash
+
+      - name: Assemble platform package
+        shell: bash
+        run: |
+          PKG="npm/nub-${{ matrix.platform }}"
+          mkdir -p "$PKG/bin" "$PKG/runtime/addons"
+
+          # Binary
+          if [[ "${{ matrix.platform }}" == win32-* ]]; then
+            cp "target/${{ matrix.target }}/release/nub.exe" "$PKG/bin/nub.exe"
+          else
+            cp "target/${{ matrix.target }}/release/nub" "$PKG/bin/nub"
+            chmod +x "$PKG/bin/nub"
+          fi
+
+          # Runtime files — glob every top-level .mjs so new runtime modules
+          # (e.g. cache-evict.mjs, lazily imported by preload.mjs) ship without
+          # editing this whitelist. node_modules/ + addons/ are handled below.
+          cp runtime/*.mjs "$PKG/runtime/"
+
+          # Native addon
+          if [[ "${{ matrix.platform }}" == win32-* ]]; then
+            cp "target/${{ matrix.target }}/release/nub_native.dll" "$PKG/runtime/addons/nub-native.node" 2>/dev/null || true
+          elif [[ "${{ matrix.platform }}" == darwin-* ]]; then
+            cp "target/${{ matrix.target }}/release/libnub_native.dylib" "$PKG/runtime/addons/nub-native.node" 2>/dev/null || true
+          else
+            cp "target/${{ matrix.target }}/release/libnub_native.so" "$PKG/runtime/addons/nub-native.node" 2>/dev/null || true
+          fi
+
+          # The addon is MANDATORY — the data-format loaders (YAML/TOML/JSON5/JSONC)
+          # are dead without it. Gate its presence (mirrors the oxc-binding gates
+          # below) so a failed/missing addon build can't silently ship a broken
+          # package (A36-adjacent). The post-publish smoke also imports a data file
+          # to validate this end-to-end on the installed package.
+          test -f "$PKG/runtime/addons/nub-native.node" \
+            || { echo "::error::missing nub-native.node for ${{ matrix.platform }} — the addon didn't build; data-format loaders would be dead. Fix the addon build before releasing."; exit 1; }
+
+          # Vendor node_modules into a self-contained runtime directory, pinned to
+          # the EXACT versions installed in the workspace so a shipped nub's transpile
+          # output is byte-identical to dev's. Read versions by package-NAME
+          # resolution (cwd is the workspace root here, which has node_modules) —
+          # never via an absolute path inside a `node -e` string, because on Windows
+          # $GITHUB_WORKSPACE is a backslash path (D:\a\nub\nub) that breaks require().
+          # Relative FILE path on purpose: a package-name require ('pkg/package.json')
+          # hits the package `exports` map, and modern packages (e.g. get-tsconfig)
+          # don't export ./package.json -> ERR_PACKAGE_PATH_NOT_EXPORTED. A relative
+          # path bypasses exports AND is Windows-safe (forward slashes in a relative
+          # specifier work on win32, unlike the backslash $GITHUB_WORKSPACE).
+          ver() { node -p "require('./node_modules/$1/package.json').version"; }
+          OXC_VERSION=$(ver oxc-transform)
+          GTS_VERSION=$(ver get-tsconfig)
+          OXCRT_VERSION=$(ver @oxc-project/runtime)
+          URLP_VERSION=$(ver urlpattern-polyfill)
+          TEMPORAL_VERSION=$(ver @js-temporal/polyfill)
+          FLOAT16_VERSION=$(ver @petamoriken/float16)
+          mkdir -p "$PKG/runtime/node_modules"
+          cd "$PKG/runtime"
+          npm init -y > /dev/null 2>&1
+          # SINGLE install — main JS deps AND the platform bindings together, in ONE
+          # `npm install` call. This is load-bearing, do not re-split it: a SECOND
+          # `npm install` in the same dir reconciles node_modules against the ideal
+          # tree and PRUNES every package not in that tree. With --no-save the first
+          # install's packages are never written to package.json, so a separate second
+          # install (e.g. just for the bindings) deletes them all as "extraneous" —
+          # which is exactly what silently shipped the broken 0.0.7: its
+          # runtime/node_modules held ONLY the two @oxc bindings, so transform-core.mjs
+          # could not resolve `oxc-transform` and every install threw ERR_MODULE_NOT_FOUND.
+          # (Reproduced locally before fixing — second --no-save install prunes the first.)
+          #
+          # --force bypasses npm's EBADPLATFORM os/cpu check for the bindings: most
+          # targets cross-compile on a different-arch runner (darwin-x64 on the arm64
+          # macos-14; linux-arm64 on the x64 ubuntu runner) and the binding is vendored
+          # for shipping, not executed here. --force does NOT mask 404 / missing-version
+          # errors, and pipefail (GitHub's default bash flags) still fails the step on a
+          # real npm error; the gate below catches a wrong binding or a pruned dep.
+          npm install --no-save --force \
+            "oxc-transform@$OXC_VERSION" \
+            "oxc-parser@$OXC_VERSION" \
+            "get-tsconfig@$GTS_VERSION" \
+            "@oxc-project/runtime@$OXCRT_VERSION" \
+            "urlpattern-polyfill@$URLP_VERSION" \
+            "@js-temporal/polyfill@$TEMPORAL_VERSION" \
+            "@petamoriken/float16@$FLOAT16_VERSION" \
+            "@oxc-transform/${{ matrix.oxc_binding }}@$OXC_VERSION" \
+            "@oxc-parser/${{ matrix.oxc_binding }}@$OXC_VERSION" \
+            2>&1 | tail -8
+          # Confirm the critical JS deps AND both platform bindings actually landed.
+          # An install that 404s a version, or a future re-split that reintroduces the
+          # prune bug, dies here instead of shipping a broken package.
+          for d in oxc-transform oxc-parser get-tsconfig \
+                   "@oxc-transform/${{ matrix.oxc_binding }}" \
+                   "@oxc-parser/${{ matrix.oxc_binding }}"; do
+            test -d "node_modules/$d" \
+              || { echo "::error::vendored dep missing from runtime/node_modules: $d"; exit 1; }
+          done
+          rm -f package.json package-lock.json
+          cd "$GITHUB_WORKSPACE"
+
+      - name: Upload platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nub-${{ matrix.platform }}
+          path: npm/nub-${{ matrix.platform }}
+
+  publish:
+    name: Publish to npm
+    # Only publish on a real tag push, or a manual dispatch that explicitly opts in.
+    # A plain `workflow_dispatch` (publish=false) runs verify+test+build (incl. the
+    # platform-package assemble) for CI debugging and stops there — nothing is
+    # published and no GitHub release is cut. Skipping publish also skips
+    # test-install (it `needs: publish`).
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    # Gate on the test job too: a broken test must block the release, not just
+    # a broken build. `build` and `test` both fan out from `verify` and run in
+    # parallel; publish waits on both.
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package release archives (binary + runtime)
+        run: |
+          # Per-platform archives containing bin/ + runtime/ (preload + vendored
+          # node_modules), so a curl|sh / irm install is self-contained and can
+          # transpile (A30). Distinct names per platform avoid the GitHub-Release
+          # asset collision of uploading bare `nub` for every target (A31).
+          # A `.sha256` sidecar is published next to each archive so the
+          # self-owned `~/.nub` upgrade channel (`nub upgrade`) can verify the
+          # download before swapping it into place. Format is `sha256sum`'s
+          # `<hex>  <name>`; `nub upgrade` reads the first field.
+          mkdir -p release-archives
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
+            PKG="artifacts/nub-$platform"
+            [ -d "$PKG" ] || { echo "skip $platform (not built)"; continue; }
+            if [[ "$platform" == win32-* ]]; then
+              archive="nub-$platform.zip"
+              (cd "$PKG" && zip -qr "$GITHUB_WORKSPACE/release-archives/$archive" bin runtime)
+            else
+              archive="nub-$platform.tar.gz"
+              tar -czf "release-archives/$archive" -C "$PKG" bin runtime
+            fi
+            (cd release-archives && sha256sum "$archive" > "$archive.sha256")
+          done
+          ls -la release-archives
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Publishing version: $VERSION"
+
+      - name: Prepare and publish platform packages
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
+            PKG="artifacts/nub-$platform"
+            if [ ! -d "$PKG" ]; then
+              echo "⚠️  Skipping $platform (not built)"
+              continue
+            fi
+            # Copy package.json from source and set version
+            cp "npm/nub-$platform/package.json" "$PKG/package.json"
+            node -e "
+              const fs = require('fs');
+              const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
+              p.version = '${{ env.VERSION }}';
+              fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
+            "
+            echo "→ @nubjs/nub-$platform@$VERSION"
+            (cd "$PKG" && npm publish --access public)
+          done
+
+      - name: Prepare and publish root package
+        run: |
+          # Update version in root package + optionalDependencies
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('npm/nub/package.json', 'utf8'));
+            p.version = '${{ env.VERSION }}';
+            for (const k of Object.keys(p.optionalDependencies || {})) {
+              p.optionalDependencies[k] = '${{ env.VERSION }}';
+            }
+            fs.writeFileSync('npm/nub/package.json', JSON.stringify(p, null, 2));
+          "
+          echo "→ @nubjs/nub@$VERSION"
+          (cd npm/nub && npm publish --access public)
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-archives/nub-darwin-arm64.tar.gz
+            release-archives/nub-darwin-arm64.tar.gz.sha256
+            release-archives/nub-darwin-x64.tar.gz
+            release-archives/nub-darwin-x64.tar.gz.sha256
+            release-archives/nub-linux-x64.tar.gz
+            release-archives/nub-linux-x64.tar.gz.sha256
+            release-archives/nub-linux-x64-musl.tar.gz
+            release-archives/nub-linux-x64-musl.tar.gz.sha256
+            release-archives/nub-linux-arm64.tar.gz
+            release-archives/nub-linux-arm64.tar.gz.sha256
+            release-archives/nub-linux-arm64-musl.tar.gz
+            release-archives/nub-linux-arm64-musl.tar.gz.sha256
+            release-archives/nub-win32-x64.zip
+            release-archives/nub-win32-x64.zip.sha256
+            release-archives/nub-win32-arm64.zip
+            release-archives/nub-win32-arm64.zip.sha256
+
+  test-install:
+    name: Test install (${{ matrix.os }})
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        # Smoke the PUBLISHED package on every runner OS — not just linux. darwin-arm64
+        # + win32-x64 catch binary-selection (bin/nub vs nub.exe) and addon-load
+        # regressions a linux-only smoke misses; windows-11-arm exercises the
+        # aarch64-pc-windows-msvc nub.exe that's built + published but otherwise never
+        # run (free for public repos). linux-musl is a separate job below (a container,
+        # not a runner OS).
+        os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install from npm
+        run: npm install -g @nubjs/nub
+      - name: Smoke the installed package
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/smoke.sh"
+
+  test-install-musl:
+    # The musl leg the 0.0.10 musl-detection bug slipped through — none of the
+    # runner OSes above are musl, so an Alpine container is the only way to catch a
+    # broken `-musl` platform-package selection / a glibc-only addon link in CI.
+    # node:22-alpine also exercises a floor-ish Node on musl in one shot.
+    name: Test install (linux-musl)
+    needs: publish
+    runs-on: ubuntu-latest
+    container: node:22-alpine
+    steps:
+      - name: Toolchain (bash + git for checkout/smoke)
+        run: apk add --no-cache bash git
+      - uses: actions/checkout@v4
+      - name: Install from npm
+        run: npm install -g @nubjs/nub
+      - name: Smoke the installed package (musl)
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/smoke.sh"

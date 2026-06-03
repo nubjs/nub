@@ -1,0 +1,9 @@
+{
+  // JSON5 supports comments
+  name: 'myapp', // unquoted keys, single-quoted strings
+  version: 2,
+  features: [
+    'auth',
+    'logging',
+  ], // trailing comma
+}

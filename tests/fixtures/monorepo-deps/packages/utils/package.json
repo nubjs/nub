@@ -1,0 +1,1 @@
+{"name":"@mono/utils","dependencies":{"@mono/core":"*"},"scripts":{"build":"echo utils-built","test":"echo utils-tested","slow":"node -e \"setTimeout(()=>console.log('utils-done'),1000)\""}}

@@ -1,0 +1,7 @@
+database:
+  host: db.example.com
+  port: 5432
+  name: myapp
+tags:
+  - production
+  - primary

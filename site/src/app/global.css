@@ -1,0 +1,142 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@source '../../node_modules/fumadocs-ui/dist/**/*.js';
+
+/* ----------------------------------------------------------------------------
+   Nub — dark, humanist, editorial. Serifs as the voice, mono for the machine,
+   restrained ink ground with deliberate pops of color.
+---------------------------------------------------------------------------- */
+
+@theme {
+  --font-display: var(--font-fraunces), ui-serif, Georgia, serif;
+  --font-serif: var(--font-newsreader), ui-serif, Georgia, serif;
+  --font-sans: var(--font-newsreader), ui-serif, Georgia, serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, monospace;
+
+  /* color pops — used sparingly against the ink ground */
+  --color-ember: #ff5d3b; /* primary: warm coral-ember */
+  --color-acid: #d6f24a; /* secondary: acid lime */
+  --color-sky: #7bb0ff; /* tertiary: cool sky */
+  --color-orchid: #c9a3ff; /* quaternary: soft orchid — version manager */
+}
+
+/* Dark-forward palette. Default to dark; light kept legible but secondary. */
+:root {
+  --color-fd-background: #faf7f0;
+  --color-fd-foreground: #1a1714;
+  --color-fd-muted: #efe9dd;
+  --color-fd-muted-foreground: #6b6358;
+  --color-fd-popover: #fffdf8;
+  --color-fd-popover-foreground: #1a1714;
+  --color-fd-card: #fffdf8;
+  --color-fd-card-foreground: #1a1714;
+  --color-fd-border: #e4dccb;
+  --color-fd-primary: #d6431f;
+  --color-fd-primary-foreground: #fffdf8;
+  --color-fd-secondary: #efe9dd;
+  --color-fd-secondary-foreground: #1a1714;
+  --color-fd-accent: #efe9dd;
+  --color-fd-accent-foreground: #1a1714;
+  --color-fd-ring: #d6431f;
+}
+
+.dark {
+  --color-fd-background: #100f0d;
+  --color-fd-foreground: #ece6d8;
+  --color-fd-muted: #1b1916;
+  /* Nudged from #9a9282 → #aba297 to clear WCAG AA (≈5.9:1) for the small
+     muted-foreground labels used across the marketing page. */
+  --color-fd-muted-foreground: #aba297;
+  --color-fd-popover: #161410;
+  --color-fd-popover-foreground: #ece6d8;
+  --color-fd-card: #16140f;
+  --color-fd-card-foreground: #ece6d8;
+  --color-fd-border: #2a2620;
+  --color-fd-primary: #ff5d3b;
+  --color-fd-primary-foreground: #160c08;
+  --color-fd-secondary: #1d1a15;
+  --color-fd-secondary-foreground: #ece6d8;
+  --color-fd-accent: #221e18;
+  --color-fd-accent-foreground: #f3eee2;
+  --color-fd-ring: #ff5d3b;
+}
+
+html {
+  font-feature-settings: 'kern', 'liga', 'calt';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: var(--font-serif);
+  text-wrap: pretty;
+}
+
+/* Headings carry the display serif with tight, editorial spacing. */
+h1, h2, h3, h4, .font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+}
+
+/* Small UI labels / eyebrows: mono, tracked, uppercase. */
+.eyebrow {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+/* Inline mono reads visually larger than the serif around it (mono x-height
+   runs high + wide). Pull it down and tighten it so it sits with the prose. */
+:not(pre) > code {
+  font-size: 0.86em;
+  letter-spacing: -0.01em;
+  font-variant-ligatures: none;
+}
+
+/* Constrain the home navbar's row to the content column so the search/theme/
+   GitHub controls sit at the content's right edge instead of floating against
+   the viewport edge. The header itself stays full-bleed (border + backdrop). */
+#nd-nav > nav {
+  max-width: 72rem;
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+}
+
+/* A little breathing room between the sidebar search box and the first link. */
+#nd-sidebar [data-radix-scroll-area-viewport] > div {
+  padding-top: 0.625rem;
+}
+
+/* Clickable elements always get the pointer cursor. */
+button:not(:disabled),
+[role='button'],
+[role='tab'],
+[role='menuitem'],
+summary,
+label[for],
+a[href] {
+  cursor: pointer;
+}
+
+::selection {
+  background: var(--color-ember);
+  color: #160c08;
+}
+
+/* Respect users who ask for less motion: collapse non-essential transitions
+   and animations to a single near-instant tick rather than removing them
+   outright (avoids breaking JS that waits on transitionend). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

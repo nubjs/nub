@@ -1,0 +1,1 @@
+{ "name": "@diamond/a", "scripts": { "build": "echo a-built" } }

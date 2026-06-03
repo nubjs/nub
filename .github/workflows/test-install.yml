@@ -1,0 +1,55 @@
+name: Test install (on-demand)
+
+# Smoke an ALREADY-PUBLISHED @nubjs/nub across every platform on demand — the same
+# comprehensive battery the release pipeline runs post-publish, but decoupled from a
+# release so you can re-validate any version (e.g. after an npm issue, or to vet a
+# tag before announcing). Runs .github/scripts/smoke.sh on linux-glibc, linux-musl,
+# macOS, and Windows.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "npm version or dist-tag to install (e.g. 0.0.11, latest)"
+        default: "latest"
+        type: string
+      node:
+        description: "Node major to test on the OS runners"
+        default: "24"
+        type: string
+
+jobs:
+  os:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-11-arm exercises the aarch64-pc-windows-msvc nub.exe that
+        # release.yml builds + publishes but no x64 Windows leg ever runs (free for
+        # public repos). darwin-arm64 + win32-x64 cover the other binary-selection
+        # paths.
+        os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node }}
+      - name: Install @nubjs/nub@${{ inputs.version }}
+        run: npm install -g "@nubjs/nub@${{ inputs.version }}"
+      - name: Smoke
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/smoke.sh"
+
+  musl:
+    name: linux-musl
+    runs-on: ubuntu-latest
+    container: node:22-alpine
+    steps:
+      - name: Toolchain (bash + git)
+        run: apk add --no-cache bash git
+      - uses: actions/checkout@v4
+      - name: Install @nubjs/nub@${{ inputs.version }}
+        run: npm install -g "@nubjs/nub@${{ inputs.version }}"
+      - name: Smoke (musl)
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/smoke.sh"

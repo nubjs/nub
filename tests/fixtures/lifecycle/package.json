@@ -1,0 +1,1 @@
+{"name":"lifecycle","scripts":{"greet":"echo main-greet","pregreet":"echo pre-greet","postgreet":"echo post-greet"}}

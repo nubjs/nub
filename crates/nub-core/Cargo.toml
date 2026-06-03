@@ -1,0 +1,30 @@
+[package]
+name = "nub-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+camino.workspace = true
+libc.workspace = true
+dirs-next.workspace = true
+dotenvy = "0.15"
+glob-match = "0.2"
+liblzma.workspace = true
+reqwest.workspace = true
+semver = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+zip.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Unix-only: terminating-signal forwarding to the child (SIGINT/SIGTERM/SIGHUP).
+# Gated so the Windows build (which uses a different ctrl_c path) doesn't pull it.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"

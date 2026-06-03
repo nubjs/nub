@@ -1,0 +1,24 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# typescript
+*.tsbuildinfo
+
+# fumadocs generated source
+/.source/
+
+# vercel
+.vercel
+
+# misc
+.DS_Store
+*.pem
+.env*.local

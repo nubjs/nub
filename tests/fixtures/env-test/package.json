@@ -1,0 +1,1 @@
+{"name":"env-test","scripts":{"check-env":"node -e \"console.log('FOO=' + process.env.FOO)\"","node-execpath":"node -e \"console.log('execpath=' + process.env.npm_node_execpath)\"","greet":"echo hello","pregreet":"echo pre-hello","postgreet":"echo post-hello"}}

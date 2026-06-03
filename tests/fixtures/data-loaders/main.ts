@@ -1,0 +1,20 @@
+import config from "./config.jsonc";
+import greeting from "./greeting.txt";
+import yaml, { database, tags } from "./config.yaml";
+console.log("jsonc:" + config.host);
+console.log("txt:" + greeting.trim());
+console.log("yaml-host:" + database.host);
+console.log("yaml-port:" + database.port);
+console.log("yaml-tags:" + tags.join(","));
+console.log("yaml-default:" + yaml.database.name);
+import toml, { title, server } from "./config.toml";
+console.log("toml-title:" + title);
+console.log("toml-port:" + server.port);
+console.log("toml-tls:" + server.tls.enabled);
+console.log("toml-debug:" + toml.debug);
+// `package` is a reserved word: no named export, reachable via default (A15).
+console.log("toml-pkg:" + toml.package.name);
+import json5, { name, features } from "./config.json5";
+console.log("json5-name:" + name);
+console.log("json5-ver:" + json5.version);
+console.log("json5-feat:" + features.join(","));

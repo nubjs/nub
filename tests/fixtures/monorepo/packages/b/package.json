@@ -1,0 +1,1 @@
+{"name": "@test/b", "dependencies": {"@test/c": "*"}, "scripts": {"build": "echo built-b"}}

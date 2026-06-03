@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "experimentalDecorators": false,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler"
+  }
+}

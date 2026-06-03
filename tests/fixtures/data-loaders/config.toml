@@ -1,0 +1,14 @@
+title = "App Config"
+debug = false
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[server.tls]
+enabled = true
+
+# `package` is a reserved word — must not become `export const package` (A15);
+# reachable via the default export instead.
+[package]
+name = "data-demo"

@@ -1,0 +1,8 @@
+{
+  // Database config
+  "host": "localhost",
+  "port": 5432,
+  /* Multi-line comment
+     explaining the database name */
+  "database": "test_db"
+}

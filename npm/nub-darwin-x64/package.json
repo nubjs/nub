@@ -1,0 +1,17 @@
+{
+  "name": "@nubjs/nub-darwin-x64",
+  "version": "0.0.12",
+  "description": "Nub binary for darwin-x64",
+  "license": "MIT",
+  "repository": "https://github.com/colinhacks/nub",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "runtime"
+  ]
+}

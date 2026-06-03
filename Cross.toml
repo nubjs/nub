@@ -1,0 +1,11 @@
+# cross-rs configuration.
+#
+# Forward RUSTFLAGS into the build container. The release workflow builds the
+# nub-native cdylib (.node) addon for the musl targets with
+# `RUSTFLAGS="-C target-feature=-crt-static"` (musl's default fully-static crt
+# can't produce a cdylib). cross does not pass arbitrary host env into the
+# container by default, so without this passthrough the flag would be silently
+# dropped and the musl addon build would fail with "cannot produce cdylib ... musl
+# does not support these crate types". See .github/workflows/release.yml.
+[build.env]
+passthrough = ["RUSTFLAGS"]

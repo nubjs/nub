@@ -1,0 +1,12 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "index",
+    "running-files",
+    "managing-node",
+    "running-scripts",
+    "watch",
+    "nubx",
+    "faq"
+  ]
+}

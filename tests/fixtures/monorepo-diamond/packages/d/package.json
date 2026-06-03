@@ -1,0 +1,1 @@
+{ "name": "@diamond/d", "dependencies": { "@diamond/b": "*", "@diamond/c": "*" }, "scripts": { "build": "echo d-built" } }

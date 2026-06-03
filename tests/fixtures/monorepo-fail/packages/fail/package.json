@@ -1,0 +1,1 @@
+{"name":"@fail/fail","scripts":{"build":"echo fail-start && exit 1"}}

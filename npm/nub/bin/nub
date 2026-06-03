@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+"use strict";
+// Entry point for the `nub` command. On POSIX this file is replaced by a symlink
+// to the native binary at install time (see postinstall.js); it only executes via
+// Node on Windows or as a fallback. No argv0 override → the child sees the binary's
+// own basename ("nub") and runs the default verb.
+require("./launch.js")();

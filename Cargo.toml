@@ -1,0 +1,45 @@
+[workspace]
+members = ["crates/nub-cli", "crates/nub-core", "crates/nub-native"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.12"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/colinhacks/nub"
+
+[workspace.dependencies]
+anyhow = "1"
+camino = "1"
+ctrlc = "3"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+dirs-next = "2"
+json5 = "0.4"
+jsonc-parser = { version = "0.24", features = ["serde"] }
+napi = { version = "2", features = ["serde-json"] }
+napi-derive = "2"
+toml = "0.8"
+yaml-rust2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# Node provisioning download (wiki/research/node-provisioning-implementation.md):
+# blocking + rustls (no OpenSSL/cross-compile pain), native roots so corporate
+# MITM CAs work, socks for SOCKS proxies. reqwest gives HTTP(S)_PROXY/NO_PROXY
+# for free. NOT async — provisioning is a short at-most-once-per-version step.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots", "socks"] }
+# xz extraction of the dist tarball. liblzma's "static" vendors its own C liblzma
+# (no system dependency, no shell-out to tar/xz); the maintained xz2 successor.
+liblzma = { version = "0.4", features = ["static"] }
+tar = "0.4"
+# Windows .zip Node-dist extraction (pure Rust, no shell-out to Expand-Archive /
+# tar.exe). default-features off + `deflate` only: Node's win-<arch>.zip uses
+# DEFLATE, so we skip bzip2/zstd/lzma/aes backends and their C deps. Keeps the
+# checksum-verify-then-extract flow in one process, deterministic across Windows
+# versions. Builds on every target; the .zip path just isn't exercised on unix.
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
