@@ -1,0 +1,119 @@
+name: Verify install scripts
+
+# Runs the REAL one-liner installers (install.ps1 / install.sh) exactly as users
+# do — fetch the script, pipe to the shell, then smoke the result — on every OS.
+# Decoupled from `release.yml`: dispatch it any time against an existing release,
+# no publish step required. Complements the release's `Test install` jobs, which
+# only exercise `npm install -g` and never touch the curl/irm script path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release to install ('latest' or e.g. 0.0.14)"
+        required: false
+        default: "latest"
+      source:
+        description: "Base URL the script is fetched from (use https://nubjs.com to also validate the served copies)"
+        required: false
+        default: "https://raw.githubusercontent.com/nub-js/nub/main"
+  push:
+    paths:
+      - install.sh
+      - install.ps1
+      - .github/workflows/verify-install.yml
+
+permissions:
+  contents: read
+
+jobs:
+  ps1:
+    name: install.ps1 · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install via install.ps1 (the real `irm | iex` path)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = "${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nub-js/nub/main' }}"
+          $ver = "${{ github.event.inputs.version || 'latest' }}"
+          $script = Invoke-RestMethod "$src/install.ps1"
+          if ($ver -eq "latest") { Invoke-Expression $script }
+          else { & ([scriptblock]::Create($script)) $ver }
+      - name: Binary runs (direct path)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "$env:USERPROFILE\.nub\bin\nub.exe"
+          if (-not (Test-Path $exe)) { throw "install.ps1 did not produce $exe" }
+          & $exe --version
+      - name: PATH persisted for a brand-new shell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $user = [Environment]::GetEnvironmentVariable("Path", "User")
+          if ($user -notlike "*\.nub\bin*") { throw "install.ps1 did not persist ~/.nub/bin to the User PATH" }
+          # Simulate a fresh terminal: resolve `nub` from the persisted registry PATH only.
+          $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + $user
+          nub --version
+
+  sh:
+    name: install.sh · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-13, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install via install.sh (the real `curl | bash` path)
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nub-js/nub/main' }}"
+          ver="${{ github.event.inputs.version || 'latest' }}"
+          if [ "$ver" = "latest" ]; then curl -fsSL "$src/install.sh" | bash
+          else curl -fsSL "$src/install.sh" | bash -s -- "$ver"; fi
+      - name: Binary runs (direct path)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$HOME/.nub/bin/nub" --version
+      - name: PATH line written to a shell rc
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -RqsE '\.nub/bin' "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" \
+            || { echo "install.sh did not add ~/.nub/bin to any shell rc"; exit 1; }
+
+  musl:
+    name: install.sh · linux-${{ matrix.arch }}-musl
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: alpine:3.20
+    steps:
+      # alpine is bare: install.sh needs bash/curl/tar, and `nub` (a Node augmenter)
+      # needs a `node` on PATH to report its version, same as a real musl user.
+      - name: Tooling (bash, curl, tar, node)
+        run: apk add --no-cache bash curl tar gzip nodejs
+      - name: Install via install.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nub-js/nub/main' }}"
+          ver="${{ github.event.inputs.version || 'latest' }}"
+          if [ "$ver" = "latest" ]; then curl -fsSL "$src/install.sh" | bash
+          else curl -fsSL "$src/install.sh" | bash -s -- "$ver"; fi
+      - name: Binary runs (direct path)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$HOME/.nub/bin/nub" --version
