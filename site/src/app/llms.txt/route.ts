@@ -4,7 +4,7 @@ import { source, blog } from '@/lib/source';
 export const dynamic = 'force-static';
 export const revalidate = false;
 
-const SITE = 'https://nub.sh';
+const SITE = 'https://nubjs.com';
 
 /**
  * `/llms.txt` — the llmstxt.org index.

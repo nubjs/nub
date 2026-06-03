@@ -5,8 +5,8 @@ import { useEffect, useState } from 'react';
 type TabId = 'unix' | 'windows' | 'npm';
 
 const TABS: { id: TabId; label: string; command: string }[] = [
-  { id: 'unix', label: 'macOS / Linux', command: 'curl -fsSL https://nub.sh/install.sh | bash' },
-  { id: 'windows', label: 'Windows', command: 'powershell -c "irm https://nub.sh/install.ps1 | iex"' },
+  { id: 'unix', label: 'macOS / Linux', command: 'curl -fsSL https://nubjs.com/install.sh | bash' },
+  { id: 'windows', label: 'Windows', command: 'powershell -c "irm https://nubjs.com/install.ps1 | iex"' },
   { id: 'npm', label: 'npm', command: 'npm install -g @nubjs/nub' },
 ];
 
