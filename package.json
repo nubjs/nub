@@ -5,11 +5,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/colinhacks/nub.git"
+    "url": "git+https://github.com/nub-js/nub.git"
   },
-  "homepage": "https://github.com/colinhacks/nub",
+  "homepage": "https://github.com/nub-js/nub",
   "bugs": {
-    "url": "https://github.com/colinhacks/nub/issues"
+    "url": "https://github.com/nub-js/nub/issues"
   },
   "engines": {
     "node": ">=22.15.0"

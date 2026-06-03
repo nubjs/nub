@@ -2441,7 +2441,7 @@ fn detect_package_manager(cwd: &Path) -> String {
 
 /// The GitHub repo that hosts Nub's release artifacts. The self-owned tarball
 /// channel downloads from here; mirror of install.sh.
-const RELEASE_REPO: &str = "colinhacks/nub";
+const RELEASE_REPO: &str = "nub-js/nub";
 
 /// The npm package users `npm install -g`. The bare `nub` name is an unrelated
 /// third-party package — emitting it would clobber a working install, so every
@@ -3258,7 +3258,7 @@ mod tests {
         let url = tarball_url("0.0.6", "darwin-arm64");
         assert_eq!(
             url,
-            "https://github.com/colinhacks/nub/releases/download/v0.0.6/nub-darwin-arm64.tar.gz"
+            "https://github.com/nub-js/nub/releases/download/v0.0.6/nub-darwin-arm64.tar.gz"
         );
         assert_eq!(
             checksum_url("0.0.6", "darwin-arm64"),

@@ -3,8 +3,8 @@
   "version": "0.0.12",
   "description": "TypeScript-first developer supertool — a fast script runner and TS runtime powered by Node.js",
   "license": "MIT",
-  "repository": "https://github.com/colinhacks/nub",
-  "homepage": "https://github.com/colinhacks/nub",
+  "repository": "https://github.com/nub-js/nub",
+  "homepage": "https://github.com/nub-js/nub",
   "bin": {
     "nub": "bin/nub",
     "nubx": "bin/nubx"

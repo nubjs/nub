@@ -7,7 +7,7 @@ version = "0.0.12"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/colinhacks/nub"
+repository = "https://github.com/nub-js/nub"
 
 [workspace.dependencies]
 anyhow = "1"

@@ -792,7 +792,7 @@ function Compatibility() {
           list), which shift when TypeScript and source maps are on.{' '}
           <span className="italic">Deliberate</span>, documented — nothing missing.{' '}
           <a
-            href="https://github.com/colinhacks/nub/tree/main/tests/cross-runtime"
+            href="https://github.com/nub-js/nub/tree/main/tests/cross-runtime"
             target="_blank"
             rel="noopener noreferrer"
             className="text-sky underline underline-offset-4"
@@ -887,8 +887,8 @@ function Footer() {
         <div className="flex items-center gap-6">
           <Link href="/docs" className="hover:text-fd-foreground">Docs</Link>
           <Link href="/blog" className="hover:text-fd-foreground">Blog</Link>
-          <a href="https://github.com/colinhacks/nub" className="hover:text-fd-foreground">GitHub</a>
-          <a href="https://github.com/colinhacks/nub/blob/main/LICENSE" className="hover:text-fd-foreground">License</a>
+          <a href="https://github.com/nub-js/nub" className="hover:text-fd-foreground">GitHub</a>
+          <a href="https://github.com/nub-js/nub/blob/main/LICENSE" className="hover:text-fd-foreground">License</a>
         </div>
       </Container>
     </footer>
