@@ -15,6 +15,7 @@
 //!   * `moduleRunnerTransform*` (Vite-only),
 //!   * `isolatedDeclaration*` and the `typescript.declaration` field (nub never
 //!     emits `.d.ts`).
+//!
 //! Everything on the path nub *does* exercise — `get_source_type`, the
 //! `TransformOptions` → `oxc::transformer::TransformOptions` mapping, the
 //! `Compiler`/`CompilerInterface` driver, codegen + sourcemap, and diagnostic
