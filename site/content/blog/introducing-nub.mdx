@@ -1,5 +1,5 @@
 ---
-title: Introducing Nub — a fast, Bun-like toolkit for Node.js
+title: Introducing Nub — a fast toolkit for Node.js
 description: A Rust CLI that augments the Node you already have — TypeScript that just runs, a faster script runner, and a fast bin runner. It augments Node.js instead of trying to replace it.
 author: Colin McDonnell
 date: 2026-05-30
@@ -17,13 +17,13 @@ $ nubx prisma generate     # run a CLI from node_modules/.bin
 
 ## Why?
 
-Node is the gold standard for server-side JavaScript. It defines the stdlib that undergirds the whole ecosystem and sets the bar in terms of stability and trust. It defines the stdlib the ecosystem is built around, and it sets the bar in terms of trust and stability. It remains the standard-bearer for server-side JavaScript. But with great power comes great responsibility:
+Node is the gold standard for server-side JavaScript. It defines the stdlib the whole ecosystem is built around, and it sets the bar for stability and trust. But with great power comes great responsibility:
 
 - strict compatibility constraints
 - contributor availability
 - slow governance and approval
 
-Even as these things earn Node.js it's reputation for stability, they also make it virtually impossible for it to keep up with the rapidly changing best practices, hot features, and developer expectations. Alternative unified toolkits like Bun and Deno have accumulated enthusiastic userbases. It's easy to see why. The toolchain for a typical Node.js developer is undeniably fragmented and confusing:
+Even as these things earn Node.js its reputation for stability, they also make it virtually impossible for it to keep up with the rapidly changing best practices, hot features, and developer expectations. Alternative unified toolkits like Bun and Deno have accumulated enthusiastic userbases. It's easy to see why. The toolchain for a typical Node.js developer is undeniably fragmented and confusing:
 
 - **`node`** — It runs files. It's good. Recently added limited support for TypeScript.
 - **`npm run`** — Or equivalent in `pnpm` or `yarn`. Commonly referred to as a "script runner". For invoking `"scripts"` from your `package.json`. As a historical accident, Node.js kicked the can on its own package management system, so third-party package manager CLIs ended up as the default "frontend" to almost every action you perform in a Node project. Weird. (Limited support in Node itself via `node --run` as of Node 22.0.)
@@ -42,7 +42,7 @@ A more cohesive/unified CLI that obviates this messy toolchain is a compelling p
 
 These "next-generation" toolkits all share a fundamental flaw: **they are trying to replace Node.js**. What if there was a similar unified toolchain that embraced Node.js instead of reinventing it?
 
-Introducing Hop—the unified runner CLI for Node.js. It's written in Rust, powered by Node.js, and provides a Bun-like modern DX on top of the `node` you already have installed.
+Introducing Nub—the unified runner CLI for Node.js. It's written in Rust, powered by Node.js, and provides a modern, unified DX on top of the `node` you already have installed.
 
 ```sh
 $ npm i -g @nubjs/nub
@@ -241,13 +241,13 @@ db.prepare("INSERT INTO users (name) VALUES (?)").run("Ada");
 
 #### Stage 4 standard-library bridges
 
-A cluster of finished (Stage 4) TC39 methods — native on Node 24+, polyfilled on the Node 22 LTS line (supported through April 2027). Each is a small pure-JS polyfill, feature-detected at preload time and deferred to native the moment your Node floor rises:
+A cluster of finished (Stage 4) TC39 methods — native on Node 24+, polyfilled on older lines. Each is a small pure-JS polyfill, feature-detected at preload time and deferred to native the moment your Node floor rises:
 
 - [`RegExp.escape`](https://github.com/tc39/proposal-regex-escaping) — escape arbitrary text for safe literal use inside a `RegExp`.
 - [`Error.isError`](https://github.com/tc39/proposal-is-error) — robust, cross-realm `Error` detection (where `instanceof` lies).
 - [`Promise.try`](https://github.com/tc39/proposal-promise-try) — start a promise chain from a sync-or-async function, with thrown errors funneled into the chain.
 - [`Float16Array`](https://github.com/tc39/proposal-float16array) — plus its companions `DataView.getFloat16` / `setFloat16` and `Math.f16round`. The one item with a real performance caveat: the userland polyfill is ~3× slower than V8's hardware-FP16 path, so pin to Node 24+ for ML-inference hot loops on Node 22.
-- [Iterator helpers](https://github.com/tc39/proposal-iterator-helpers) (`Iterator.from` / `map` / `filter` / …) — already native on Nub's Node 22.15 floor, so a no-op for Nub; listed here only because cross-runtime code targeting the Stage 4 set should treat them all as one bundle.
+- [Iterator helpers](https://github.com/tc39/proposal-iterator-helpers) (`Iterator.from` / `map` / `filter` / …) — native on Node 22+, polyfilled on older lines; listed here only because cross-runtime code targeting the Stage 4 set should treat them all as one bundle.
 
 ### Bring your own executable
 
@@ -257,11 +257,12 @@ And if the version your project pins isn't installed, Nub fetches it. Drop a `.n
 
 Supported versions:
 
-- **Node 22.15+** — current LTS, supported through April 2027
-- **Node 24** — active LTS
+- **Node 18.19+** — the floor (Node 18 LTS)
+- **Node 20 / 22 / 24** — maintenance and active LTS lines
 - **Node 25** — current release line
 - **Node 26+** — upcoming LTS
-- **Older Node (22.0–22.14, 20.x, 18.x)** — Nub's augmentation pipeline requires Node 22.15+ (the sync `module.registerHooks()` API backported there). On older Node, type `node` directly for plain Node behavior on whichever version you have.
+
+Nub's augmentation runs on all of them. Want plain Node on whichever version you have? Type `node` directly.
 
 ### Zero Nub-specific APIs, zero lock-in
 
@@ -431,11 +432,11 @@ Nub's own contribution is the orchestration: detecting the user's Node version, 
 
 What IS dramatically faster is the **CLI surface**. `nub run` and `nubx` outperform `pnpm run` and `npx` by an order of magnitude on cold start, because those tools are themselves Node.js programs and pay a full Node bootstrap to do what amounts to a script lookup. Nub is a native Rust binary; the wrapper overhead approximately disappears. See [§ `nub run` — a fast monorepo-friendly script runner](#nub-run--a-fast-monorepo-friendly-script-runner) for the breakdown.
 
-> **Transpiler cache.** Transpile output is stored in a content-addressed on-disk cache keyed on `(source content, Nub version, resolved tsconfig)`. First run transpiles; every run after hits the cache and pays roughly nothing, and entries dedupe across projects with identical files. The hook itself is installed via `module.registerHooks()` (Node 22.15+, sync API); the transpiler binding is N-API, not WASM, because the WASM oxc build crashes at ~10k files and runs ~6× slower on small projects. `--enable-source-maps` is on by default so stack traces resolve to your `.ts` source.
+> **Transpiler cache.** Transpile output is stored in a content-addressed on-disk cache keyed on `(source content, Nub version, resolved tsconfig)`. First run transpiles; every run after hits the cache and pays roughly nothing, and entries dedupe across projects with identical files. The hook itself is installed via `module.registerHooks()`; the transpiler binding is N-API, not WASM, because the WASM oxc build crashes at ~10k files and runs ~6× slower on small projects. `--enable-source-maps` is on by default so stack traces resolve to your `.ts` source.
 
 ### What npm packages can I stop using once I install Nub?
 
-Two buckets. **Nub replaces directly:** `dotenv` (multi-file `.env*` loading with `${VAR}` expansion is built in), `cross-env` (same), `tsx` / `ts-node` (native TS via oxc), `nodemon` (`nub --watch` in v0.x), `tsconfig-paths` / `tsconfig-paths/register` (native `paths` resolution), `npx` (`nubx` / `nub exec`). **Modern Node already obsoletes; Nub's Node 22.15+ floor lets you inherit:** `node-fetch` / `cross-fetch` / `isomorphic-fetch` / `whatwg-fetch` (native `fetch` since 18), `abort-controller` (native since 15), `uuid` for the v4 case (`crypto.randomUUID` since 14.17), `rimraf` (`fs.rmSync({ recursive: true, force: true })` since 14.14), `mkdirp` (`fs.mkdirSync({ recursive: true })` since 10.12), `glob` / `globby` (basic) (`fs.glob` since 22), `form-data` (native `FormData` since 18), `ws` client (native `WebSocket` since 22.5, Nub polyfills on older). The second bucket's credit is Node's; the relevance to Nub is that running on a modern Node floor is what makes the inheritance practical. Full catalog with weekly download counts and Node-version notes: `runtime/polyfill-obsoletion-catalog.md`.
+Two buckets. **Nub replaces directly:** `dotenv` (multi-file `.env*` loading with `${VAR}` expansion is built in), `cross-env` (same), `tsx` / `ts-node` (native TS via oxc), `nodemon` (`nub --watch` in v0.x), `tsconfig-paths` / `tsconfig-paths/register` (native `paths` resolution), `npx` (`nubx` / `nub exec`). **Modern Node already obsoletes; Nub lets you inherit:** `node-fetch` / `cross-fetch` / `isomorphic-fetch` / `whatwg-fetch` (native `fetch` since 18), `abort-controller` (native since 15), `uuid` for the v4 case (`crypto.randomUUID` since 14.17), `rimraf` (`fs.rmSync({ recursive: true, force: true })` since 14.14), `mkdirp` (`fs.mkdirSync({ recursive: true })` since 10.12), `glob` / `globby` (basic) (`fs.glob` since 22), `form-data` (native `FormData` since 18), `ws` client (native `WebSocket` since 22.5, Nub polyfills on older). The second bucket's credit is Node's; the relevance to Nub is that running on a modern Node floor is what makes the inheritance practical. Full catalog with weekly download counts and Node-version notes: `runtime/polyfill-obsoletion-catalog.md`.
 
 ### Why not just use Node's built-in TypeScript support?
 
