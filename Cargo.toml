@@ -18,8 +18,26 @@ clap = { version = "4", features = ["derive"] }
 dirs-next = "2"
 json5 = "0.4"
 jsonc-parser = { version = "0.24", features = ["serde"] }
-napi = { version = "2", features = ["serde-json"] }
-napi-derive = "2"
+# napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
+# napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
+# (the OxcError / SourceMap return types would fail to bridge). napi 3 is the
+# version oxc itself ships on. The `napi8` feature pins the NAPI-version FLOOR to
+# 8 (node_api_version 8 — available since Node 12.22/14.12/15.0, comfortably below
+# the 18.19 floor) so any accidental higher-API use fails at compile-time rather
+# than at load on 18.19. serde-json preserves the bridge the data parsers rely on.
+napi = { version = "3", features = ["serde-json", "napi8"] }
+napi-derive = "3"
+# oxc transpiler — pinned EXACT to the oxc-transform npm version nub ships today
+# (see package.json: oxc-transform/oxc-parser/@oxc-project/runtime are all 0.132.0).
+# The internal Rust crates carry the SAME version number as the napi release;
+# oxc_sourcemap is independently versioned (oxc_codegen 0.132.0 depends on
+# oxc_sourcemap ^6.0.1). Any oxc bump must move in lockstep with the npm pin AND a
+# NUB_VERSION bump (transpile-cache buster). DO NOT float without re-running the
+# transpile-parity gate. OXC_VERSION = 0.132.0
+oxc = { version = "=0.132.0", features = ["full"] }
+oxc_napi = "=0.132.0"
+oxc_sourcemap = { version = "=6.0.1", features = ["napi"] }
+rustc-hash = "2"
 toml = "0.8"
 yaml-rust2 = "0.9"
 serde = { version = "1", features = ["derive"] }

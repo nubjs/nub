@@ -1,9 +1,16 @@
-//! Nub N-API addon: data-format parsers exposed to the JS preload.
+//! Nub N-API addon: data-format parsers + the in-process TS/JSX transpiler,
+//! exposed to the JS preload.
 //!
-//! Each function takes a source string and returns a parsed value
-//! as a JS object (via napi's serde-json bridge).
+//! The parser functions take a source string and return a parsed value as a JS
+//! object (via napi's serde-json bridge). The [`transform`](transform::transform)
+//! function transpiles TS/JSX, mirroring `oxc-transform@0.132.0`'s `transformSync`
+//! for byte-for-byte emit parity.
+
+mod transform;
 
 use napi_derive::napi;
+
+pub use transform::transform;
 
 /// Parse YAML source into a JS value.
 #[napi]
