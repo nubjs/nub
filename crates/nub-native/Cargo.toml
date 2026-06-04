@@ -8,6 +8,15 @@ repository.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
+# nub-native is a Node N-API addon: its `napi_*` symbols are resolved by the Node
+# host at dlopen, never at link time. A cdylib links fine (undefined symbols are
+# allowed), but a `cargo test` harness is a normal executable and CANNOT link those
+# symbols (`undefined symbol: napi_create_object`). The crate has no unit/doc tests
+# anyway — it's exercised by loading the built addon into Node (the nub-cli
+# integration suite). So opt it out of `cargo test` to keep bare `cargo test`
+# (whole-workspace, as CI runs) green. Regressed when oxc_napi pulled napi 3 in.
+test = false
+doctest = false
 
 [dependencies]
 napi.workspace = true
