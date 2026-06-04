@@ -64,11 +64,11 @@ Yes. Every `node:` core module — `node:fs`, `node:http`, `node:test`, `node:wo
 
 ## What Node versions does it support?
 
-**Augmented modes require Node 22.15+.** That's the minimum version that ships synchronous `module.registerHooks()` — Nub's load-bearing primitive for the transpile-on-import path. Node 22.15 was released April 2025 and Node 22 LTS runs through April 2027, so the floor sits inside the current LTS window.
+**Augmented modes require Node 18.19+ (Node 18 LTS).** That's the floor for the loader-hook API Nub uses for the transpile-on-import path.
 
 **Compat mode (`nub run --node` / `nubx --node`) is best-effort on any Node version.** In compat mode Nub is a pure orchestrator (script resolution, workspace bin PATH, env var injection) and spawns plain Node without registering augmentation. Works on Node 20, 18, whatever. For ad-hoc plain-Node behavior on a file, type `node` directly.
 
-On Node older than 22.15, augmented commands emit a tagged error telling you to upgrade Node or use compat mode. Full details: `runtime/target-version.md`.
+On Node older than 18.19, augmented commands emit a tagged error telling you to upgrade Node or use compat mode. Full details: `runtime/target-version.md`.
 
 ## Does it work on Linux / macOS / Windows?
 
@@ -131,7 +131,7 @@ No patched Node, no vendored `libnode`, no separate runtime to discover.
 
 Every augmentation Nub applies is something a user with patience could wire up by hand on plain Node. The extension surface Node exposes for this work has grown substantially in the last three years, and the kit Nub composes is small and entirely public:
 
-- **`module.registerHooks()`** (Node 22.15, April 2025) — synchronous loader hooks. Async hooks add per-import latency that makes TypeScript-on-import unusable for cold start; the sync API is what makes the transpiler viable.
+- **`module.registerHooks()`** (Node 22.15, April 2025) — synchronous loader hooks for the transpile-on-import path.
 - **`module.register()`** (Node 20.6, August 2023) — programmatic loader registration, no `--loader` CLI dance.
 - **`--import` preload** (Node 19.0, October 2022, stable since 20.6) — run setup code before user `main`, ESM-aware. Used to install polyfills and set up the load hook.
 - **`--require` preload** (Node 1.6, 2012) — older CJS-style preload, still useful in pre-ESM corners.
@@ -162,7 +162,7 @@ These are not Nub-specific. They're the [Minimum Common Web API](https://min-com
 
 ## What npm packages can I stop using once I install Nub?
 
-Two buckets. **Nub replaces directly:** `dotenv`, `cross-env`, `tsx` / `ts-node`, `nodemon`, `tsconfig-paths`, `npx` (replaced by `nubx` / `nub exec`). **Modern Node already obsoletes; Nub's Node 22.15+ floor lets you inherit:** `node-fetch` / `cross-fetch` / `whatwg-fetch` (native `fetch` since 18), `abort-controller` (native since 15), `uuid` for the v4 case (`crypto.randomUUID` since 14.17), `rimraf` (`fs.rmSync({ recursive: true, force: true })` since 14.14), `mkdirp` (`fs.mkdirSync({ recursive: true })` since 10.12), `glob` / `globby` for basic cases (`fs.glob` since 22), `form-data` (native `FormData` since 18), `ws` client (native `WebSocket` since 22.5, Nub polyfills on older). The second bucket's credit is Node's — running on a modern-Node floor is what makes the inheritance practical without per-project Node-version verification. Full catalog with weekly download counts, Node-version notes, and the explicit "we don't replace this" list: `runtime/polyfill-obsoletion-catalog.md`.
+Two buckets. **Nub replaces directly:** `dotenv`, `cross-env`, `tsx` / `ts-node`, `nodemon`, `tsconfig-paths`, `npx` (replaced by `nubx` / `nub exec`). **Modern Node already obsoletes; Nub lets you inherit:** `node-fetch` / `cross-fetch` / `whatwg-fetch` (native `fetch` since 18), `abort-controller` (native since 15), `uuid` for the v4 case (`crypto.randomUUID` since 14.17), `rimraf` (`fs.rmSync({ recursive: true, force: true })` since 14.14), `mkdirp` (`fs.mkdirSync({ recursive: true })` since 10.12), `glob` / `globby` for basic cases (`fs.glob` since 22), `form-data` (native `FormData` since 18), `ws` client (native `WebSocket` since 22.5, Nub polyfills on older). The second bucket's credit is Node's — running on a modern-Node floor is what makes the inheritance practical without per-project Node-version verification. Full catalog with weekly download counts, Node-version notes, and the explicit "we don't replace this" list: `runtime/polyfill-obsoletion-catalog.md`.
 
 ## What's `nub-resolver`?
 

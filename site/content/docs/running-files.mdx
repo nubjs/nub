@@ -266,7 +266,7 @@ nvm use 24
 nub node which          # prints the resolved Node binary Nub will spawn
 ```
 
-Augmented modes require **Node 18.19+** (Node 18 LTS). On Node 22.15 and newer Nub registers its hooks synchronously with `module.registerHooks()`; on 18.19–22.14 it falls back to the async `module.register()` loader. Below 18.19, augmented commands emit a tagged error telling you to upgrade.
+Augmented modes require **Node 18.19+** (Node 18 LTS). Below that, augmented commands emit a tagged error telling you to upgrade.
 
 There's also no Nub verb for "plain Node" — just type `node`. The PATH shim Nub uses to augment child `node` calls is per-invocation, scoped to descendants of a `nub ...` call, so your shell's `node` is always your real, unaugmented Node.
 
