@@ -20,25 +20,30 @@
 // no top-level hook registration here — importing this module never augments the
 // realm; the tier files do that.
 
-// EVERY dependency of this module is pulled in via CJS `require()` (below), NOT
-// via static ESM `import`. This is load-bearing for loader compatibility (R11):
-// nub loads transform-core through `require(esm)`, and Node's `require(esm)`
-// instantiates the module by walking its STATIC IMPORT graph through whatever ESM
-// loader hooks are registered — including the USER's `--loader`/`register()`
-// chain. Static `import get-tsconfig`/`./version.mjs`/`node:*` here therefore
-// leaked nub's entire internal graph (transform-core, version.mjs, get-tsconfig,
-// their transitive node_modules deps, and the node: builtins) THROUGH the user's
-// resolve/load hooks, which observed and corrupted it (a user load hook returning
-// `source: 1` for version.mjs, a strict loader throwing on a bare specifier — see
-// test-esm-loader-chaining, -example-loader, -preserve-symlinks-not-found,
-// test-shadow-realm-custom-loaders). Verified: a CJS `require()` of a
-// package/builtin does NOT route through the ESM loader chain, so loading the graph
-// this way bypasses the user chain entirely. (The transpiler and TS/JSX detection
-// no longer go through any npm package at all: they are native calls into nub's own
-// N-API addon, so the worst historical leak — pulling oxc-transform's ESM entry
-// graph through the user chain — is gone by construction.) `process
+// EVERY node: builtin this module needs is pulled in via CJS `require()` / `process
+// .getBuiltinModule` (below), NOT via static ESM `import`. This is load-bearing for
+// loader compatibility (R11): nub loads transform-core through `require(esm)`, and
+// Node's `require(esm)` instantiates the module by walking its STATIC IMPORT graph
+// through whatever ESM loader hooks are registered — including the USER's
+// `--loader`/`register()` chain. Static `import get-tsconfig`/`./version.mjs`/`node:*`
+// here therefore once leaked nub's entire internal graph (transform-core,
+// version.mjs, get-tsconfig, their transitive node_modules deps, and the node:
+// builtins) THROUGH the user's resolve/load hooks, which observed and corrupted it
+// (a user load hook returning `source: 1` for version.mjs, a strict loader throwing
+// on a bare specifier — see test-esm-loader-chaining, -example-loader,
+// -preserve-symlinks-not-found, test-shadow-realm-custom-loaders). Verified: a CJS
+// `require()` of a builtin does NOT route through the ESM loader chain, so loading
+// off it bypasses the user chain entirely. As of this migration the point is
+// stronger: transform-core `require()`s ZERO npm packages — the transpiler, TS/JSX
+// detection, tsconfig discovery/parse, the additive TS-resolver, AND the transpile
+// cache are ALL native calls into nub's own N-API addon (loaded by absolute `.node`
+// path, off the loader chain), and the version.mjs text read is gone (the cache
+// version is baked into the addon). So the worst historical leaks — oxc-transform's
+// and then get-tsconfig's graphs pulled through the user chain — are gone by
+// construction; only node: builtins remain, fetched off the chain. `process
 // .getBuiltinModule` fetches node: builtins synchronously off the loader chain;
-// `createRequire(import.meta.url)` resolves the bare deps from nub's distribution.
+// `createRequire(import.meta.url)` resolves the (now CommonJS-only) vendored
+// polyfills + the `@oxc-project/runtime` helpers from nub's distribution.
 // This file keeps its `export`s (it stays an ES module), but has ZERO static
 // imports, so `require(esm)` finds no dependency graph to route through the user.
 // `process.getBuiltinModule` (Node 22.3 / backported to 20.16 / 18.20.4) fetches a
@@ -59,51 +64,31 @@ const { createRequire } = __getBuiltin("node:module");
 const __require = createRequire(import.meta.url);
 
 const module = __getBuiltin("node:module");
-const { readFileSync, writeFileSync, mkdirSync, statSync, renameSync, unlinkSync, readdirSync } = __getBuiltin("node:fs");
+const { readFileSync, writeFileSync, mkdirSync, statSync } = __getBuiltin("node:fs");
 const { fileURLToPath, pathToFileURL } = __getBuiltin("node:url");
-const { join, dirname, resolve: pathResolve, extname: pathExtname } = __getBuiltin("node:path");
+const { join, dirname } = __getBuiltin("node:path");
 // Nub's N-API addon — the in-process TS/JSX transpiler (`transform`,
-// `detectModuleInfo`) AND the data-format parsers (`parseYaml`/`parseToml`/
-// `parseJson5`/`parseJsonc`), all native. Loaded once per module instance (= once
-// per thread: the main thread and the loader worker each import this module
-// separately). It is a `.node` binary resolved by absolute path off this file's
-// dir, so it never touches the ESM loader chain — the historical
-// require(esm)-of-an-ESM-npm-package leak (oxc-transform) is gone: transpilation
-// is a synchronous native call, no JS package, no static-import graph to route.
+// `transformCached`, `detectModuleInfo`), the tsconfig reader + additive
+// TS-resolver (`loadTsconfig`, `resolveTs`), AND the data-format parsers
+// (`parseYaml`/`parseToml`/`parseJson5`/`parseJsonc`), all native. Loaded once
+// per module instance (= once per thread: the main thread and the loader worker
+// each import this module separately). It is a `.node` binary resolved by absolute
+// path off this file's dir, so it never touches the ESM loader chain — the
+// historical require(esm)-of-an-ESM-npm-package leak (oxc-transform, and before
+// this migration get-tsconfig) is gone: transpilation, tsconfig discovery, the
+// additive resolution, and the transpile cache are synchronous native calls, no JS
+// package, no static-import graph to route. nub now loads ZERO npm packages
+// internally, so the user ESM loader chain can never observe a nub dependency.
 let nubNative = null;
 for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
   try { nubNative = __require(fileURLToPath(new URL(rel, import.meta.url))); break; } catch {}
 }
-// get-tsconfig is `type: module` but ships a CJS `require` export
-// (./dist/index.cjs), so `require()` of it loads the CommonJS build — no
-// require(esm), no ESM-loader-chain routing.
-const { getTsconfig, createPathsMatcher } = __require("get-tsconfig");
 
-// NUB_VERSION is the single source of truth in runtime/version.mjs. We must NOT
-// `import` it (that would route version.mjs through the user loader chain — see
-// above; a user load hook returning bogus source corrupts it), and we cannot
-// `require()` it either (it is an ES module, so `require()` uses require(esm),
-// which re-routes version.mjs's own load through the chain). Instead read its
-// text directly and extract the literal — `make version` keeps the assignment on
-// one line (`export const NUB_VERSION = "x.y.z";`), so a tight regex is stable.
-const NUB_VERSION = (() => {
-  try {
-    const text = readFileSync(fileURLToPath(new URL("./version.mjs", import.meta.url)), "utf8");
-    const m = text.match(/NUB_VERSION\s*=\s*["']([^"']+)["']/);
-    if (m) return m[1];
-  } catch {}
-  return "0.0.0";
-})();
-
-// `node:crypto` is used ONLY to hash the transpile-cache key, so it loads lazily
-// on first transpile rather than at module top level. Importing it eagerly pulls
-// in the crypto/tls native tree (~dozens of builtins) on EVERY startup — including
-// a plain-JS run that never transpiles anything (R7). The first `.ts` transpile
-// pays the one-time require; a no-TS run never touches it. Memoized.
-let _createHash = null;
-function getCreateHash() {
-  return (_createHash ??= __require("node:crypto").createHash);
-}
+// NOTE: the transpile-cache version component is no longer read here. nub's
+// version is baked into the native addon at compile time (`env!("CARGO_PKG_VERSION")`
+// in nub-native's cache.rs), which `make version` keeps in lockstep with
+// runtime/version.mjs and Cargo.toml — so the cache key's version component lives
+// natively now, and this file no longer needs to read version.mjs.
 
 // ── Constants ───────────────────────────────────────────────────────
 export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
@@ -159,15 +144,24 @@ export function setWatchHooks({ reportDep, reportEnvDir } = {}) {
 }
 
 // ── tsconfig + package-type caches ──────────────────────────────────
+// tsconfig discovery / parse / `extends` resolution + the `paths` matcher all
+// happen natively (nub-native `loadTsconfig`, the get-tsconfig@4.14.0 port). This
+// JS wrapper exists only to (a) memoize per importer-dir — native ALSO memoizes,
+// but a JS-side Map skips the napi boundary on a hit and lets watch-mode report
+// the dep exactly once per dir — and (b) surface the resolved tsconfig path to the
+// watch FilesWatcher. The returned shape exposes the transform-relevant
+// `compilerOptions` slice and the `tsconfigHash` cache-key component; the `paths`
+// matcher lives entirely in native (`resolveTs` runs it), so there is no JS matcher.
 const tsconfigCache = new Map();
 export function getTsconfigForDir(dir) {
   if (tsconfigCache.has(dir)) return tsconfigCache.get(dir);
-  const result = getTsconfig(dir);
-  const matcher = result ? createPathsMatcher(result) : null;
-  const entry = { tsconfig: result, matcher };
-  tsconfigCache.set(dir, entry);
-  if (result?.path) _reportDep?.(result.path);
-  return entry;
+  // { path: string|null, compilerOptions: object|null, tsconfigHash: string }
+  const result = nubNative
+    ? nubNative.loadTsconfig(dir)
+    : { path: null, compilerOptions: null, tsconfigHash: "" };
+  tsconfigCache.set(dir, result);
+  if (result.path) _reportDep?.(result.path);
+  return result;
 }
 
 // The NEAREST package.json's `type` decides the format of ambiguous extensions
@@ -214,11 +208,6 @@ export function fileExists(filePath) {
   return s !== undefined && s.isFile();
 }
 
-export function dirExists(filePath) {
-  const s = statSync(filePath, { throwIfNoEntry: false });
-  return s !== undefined && s.isDirectory();
-}
-
 function safeRequireResolve(specifier) {
   try { return __require.resolve(specifier); } catch { return null; }
 }
@@ -230,101 +219,23 @@ export function barePkg(specifier) {
 }
 
 // ── Resolution ──────────────────────────────────────────────────────
-// Read a directory's package.json `main` (its legacy CJS entry point), or null.
-// `exports` is deliberately NOT consulted: Node honors `exports` only for
-// package-name/self-reference resolution, never for a relative/absolute import
-// of a directory path (verified against Node 24 — a relative dir import with
-// `exports` but no `main` falls through to index, not the export). So matching
-// Node here means `main` only.
-function readPackageMain(dir) {
-  const pkgPath = join(dir, "package.json");
-  if (!fileExists(pkgPath)) return null;
+// The ADDITIVE TS resolution — tsconfig `paths` aliases, `.ts/.tsx/.mts/.cts/.jsx`
+// extension probing, the `.js`→`.ts` (and `.jsx→.tsx`, `.mjs→.mts`, `.cjs→.cts`)
+// emit-convention swap, directory-index probing, and reading a directory's
+// `package.json#main` — all happens natively now (nub-native `resolveTs`). It
+// returns an absolute path for the additive cases nub owns, or `null` for
+// EVERYTHING Node owns (node_modules, `exports`/`imports`, conditions, scoped/bare
+// specifiers), which the resolve hooks below turn into a fall-through to Node. That
+// `null` is the byte-for-byte compat boundary; reimplementing Node's resolution in
+// nub is forbidden. The `node:`/`data:`/builtin guards, the nub-internal-graph
+// bypass, vendored packages, and the clobber map all stay in JS and run BEFORE the
+// native resolver (see resolveSpec / resolveCjsPath).
+function resolveTs(specifier, parentPath) {
+  if (!nubNative) return null;
   try {
-    const main = JSON.parse(readFileSync(pkgPath, "utf8")).main;
-    return typeof main === "string" && main.trim() ? main : null;
+    return nubNative.resolveTs(specifier, parentPath || "");
   } catch {
     return null;
-  }
-}
-
-// Try to resolve a file path with extensionless probing + .js→.ts swap.
-// `allowDirMain` honors a resolved directory's package.json `main` before its
-// index; it is cleared on the recursive main-target probe because Node's
-// LOAD_AS_DIRECTORY resolves `main` with file+index probing only and does not
-// recurse into the target's own nested `main` (verified against Node 24).
-export function tryResolveFile(target, parentExt, allowDirMain = true) {
-  // If the target already has an extension and exists, use it.
-  const existingExt = pathExtname(target);
-  if (existingExt && fileExists(target)) return target;
-
-  // .js → .ts swap (tsc emit convention reversal).
-  if (existingExt === ".js") {
-    const tsSwap = target.slice(0, -3) + ".ts";
-    if (fileExists(tsSwap)) return tsSwap;
-    const tsxSwap = target.slice(0, -3) + ".tsx";
-    if (fileExists(tsxSwap)) return tsxSwap;
-  }
-  if (existingExt === ".jsx") {
-    const tsxSwap = target.slice(0, -4) + ".tsx";
-    if (fileExists(tsxSwap)) return tsxSwap;
-  }
-  // .mjs → .mts swap (Bun does this).
-  if (existingExt === ".mjs") {
-    const mtsSwap = target.slice(0, -4) + ".mts";
-    if (fileExists(mtsSwap)) return mtsSwap;
-  }
-  // .cjs → .cts swap — the CommonJS analog of .mjs→.mts. tsc resolves
-  // `import "./foo.cjs"` to foo.cts (it strips the .cjs and finds the .cts
-  // source — verified via --traceResolution), so a TS file using the emitted
-  // extension to reference a .cts source must resolve at runtime. (Bun omits
-  // this swap even though it does .mjs→.mts; we match tsc, not that gap.)
-  if (existingExt === ".cjs") {
-    const ctsSwap = target.slice(0, -4) + ".cts";
-    if (fileExists(ctsSwap)) return ctsSwap;
-  }
-
-  // Extensionless: probe in parent-ext-aware order.
-  if (!existingExt) {
-    const probeOrder = getProbeOrder(parentExt);
-    for (const ext of probeOrder) {
-      if (fileExists(target + ext)) return target + ext;
-    }
-    // Directory: honor package.json `main` (Node's legacy LOAD_AS_DIRECTORY)
-    // before falling back to index probing. The main target is resolved with
-    // the same extensionless/TS-swap probing (so a TS package can point `main`
-    // at a `.ts`, or `.js`→`.ts` swaps apply), but without re-reading a nested
-    // `main` — matching Node. If `main` is absent or unresolvable, index wins
-    // (Node falls back to index too, with a DEP0128 warning we needn't emit).
-    if (dirExists(target)) {
-      if (allowDirMain) {
-        const main = readPackageMain(target);
-        if (main) {
-          const resolved = tryResolveFile(pathResolve(target, main), parentExt, false);
-          if (resolved) return resolved;
-        }
-      }
-      for (const ext of probeOrder) {
-        const idx = join(target, "index" + ext);
-        if (fileExists(idx)) return idx;
-      }
-    }
-  }
-
-  return null;
-}
-
-export function getProbeOrder(parentExt) {
-  switch (parentExt) {
-    case ".tsx": return [".tsx", ".ts", ".jsx", ".js", ".json"];
-    // .mts/.cts prefer their own module system first, but STILL fall through to
-    // the general TS (`.ts`) and JS extensions: tsc and Node resolve an
-    // extensionless `./foo` from a .mts/.cts parent to foo.ts / foo.js too, not
-    // only foo.mts / foo.cts. Omitting `.ts` here is what made `require('./config')`
-    // — and a tsconfig-paths alias — from a .cts (or .mts) parent miss a `.ts`
-    // target (works from .js/.cjs, which use the default order below).
-    case ".mts": return [".mts", ".ts", ".mjs", ".js", ".json"];
-    case ".cts": return [".cts", ".ts", ".cjs", ".js", ".json"];
-    default:     return [".ts", ".tsx", ".js", ".jsx", ".json"];
   }
 }
 
@@ -340,57 +251,20 @@ export function getProbeOrder(parentExt) {
 // resolution for these.
 const RUNTIME_DIR_URL = new URL(".", import.meta.url).href;
 
-// nub's internal-graph package roots — the file: URL prefixes of the npm packages
-// nub itself loads (get-tsconfig) and their transitive deps. Any resolution whose
-// IMPORTER lives under one of these is part of nub's internal graph, NOT user code,
-// and must FULLY short-circuit (resolve natively, return shortCircuit:true) — never
-// delegate to nextResolve — for EVERY specifier, including node: builtins and the
-// package's own relative imports, so the user ESM loader chain never observes nub's
-// internals (R11). get-tsconfig is loaded as CJS (its `require` export resolves to
-// ./dist/index.cjs), so its graph already bypasses the chain; this short-circuit is
-// the belt-and-suspenders for any ESM hop into a nub-internal package. The biggest
-// historical leak — oxc-transform's `type: module` entry pulled through require(esm)
-// and walked through the user loader — is gone: the transpiler is now a native
-// addon call, no npm package. Computed lazily (and pinned even on resolve failure)
-// so a missing dep can't wedge startup.
-let _nubGraphRoots = null;
-function nubGraphRoots() {
-  if (_nubGraphRoots) return _nubGraphRoots;
-  const roots = [];
-  for (const pkg of ["get-tsconfig"]) {
-    try {
-      const entry = __require.resolve(pkg);
-      // Package root = the directory two levels up does not work generically;
-      // instead key on the package-name segment: everything under
-      // `.../node_modules/<pkg>/` is that package. Use the entry's dir-with-pkg.
-      const idx = entry.lastIndexOf(`${sep()}node_modules${sep()}`);
-      if (idx !== -1) {
-        // Keep through the package-name segment (handles scoped names too).
-        const afterNM = entry.slice(idx + (`${sep()}node_modules${sep()}`).length);
-        const firstSeg = afterNM.startsWith("@")
-          ? afterNM.split(sep()).slice(0, 2).join(sep())
-          : afterNM.split(sep())[0];
-        const pkgRoot = entry.slice(0, idx) + `${sep()}node_modules${sep()}` + firstSeg + sep();
-        roots.push(pathToFileURL(pkgRoot).href);
-      }
-    } catch {}
-  }
-  return (_nubGraphRoots = roots);
-}
-function sep() {
-  return process.platform === "win32" ? "\\" : "/";
-}
-
-// Is this importer part of nub's own internal module graph (runtime dir or a nub
-// dependency package)? Such imports must bypass the user ESM loader chain entirely.
+// Is this importer part of nub's own internal module graph? Such imports must
+// bypass the user ESM loader chain entirely (R11). nub now loads ZERO npm packages
+// internally — tsconfig, the additive resolver, the transpile cache, the
+// transpiler, and module detection are ALL native nub-native calls, and the only
+// remaining JS deps (@oxc-project/runtime helpers, the polyfills) are CommonJS,
+// whose `require()` graph already bypasses the ESM loader chain by construction. So
+// the only nub-internal ESM importer left is nub's own runtime directory (this
+// file, the preload tiers, the Temporal lazy getter resolving @js-temporal/
+// polyfill). The historical "nub-dependency package roots" walk — which existed
+// solely to catch an ESM hop into get-tsconfig (and before that oxc-transform) — is
+// gone with those packages.
 function isNubInternalParent(parentURL) {
   if (!parentURL) return false;
-  const p = String(parentURL);
-  if (p.startsWith(RUNTIME_DIR_URL)) return true;
-  for (const root of nubGraphRoots()) {
-    if (p.startsWith(root)) return true;
-  }
-  return false;
+  return String(parentURL).startsWith(RUNTIME_DIR_URL);
 }
 
 // Resolve a specifier the way both hook tiers do. Returns `{ url, shortCircuit }`
@@ -403,7 +277,7 @@ export function resolveSpec(specifier, parentURL) {
   // node:/data:/builtin early-returns below, because those `return null` =
   // DELEGATE to the user loader — and a nub-internal `import "node:module"` (e.g.
   // from a nub-dependency ESM entry) delegated to a strict user loader is exactly
-  // the R11 leak. See isNubInternalParent / nubGraphRoots.
+  // the R11 leak. See isNubInternalParent.
   if (isNubInternalParent(parentURL)) {
     if (specifier.startsWith("node:") || module.builtinModules.includes(specifier)) {
       const url = specifier.startsWith("node:") ? specifier : `node:${specifier}`;
@@ -446,30 +320,16 @@ export function resolveSpec(specifier, parentURL) {
   }
 
   const parent = String(parentURL || "");
-  const parentExt = extname(parent);
 
-  // 4. tsconfig-paths (only for bare/aliased specifiers, not relative).
-  if (!specifier.startsWith(".") && !specifier.startsWith("/") && !specifier.startsWith("file:") && !isNodeModules(parent)) {
-    const parentDir = parent.startsWith("file:") ? dirname(fileURLToPath(parent)) : process.cwd();
-    const { matcher } = getTsconfigForDir(parentDir);
-    if (matcher) {
-      const mapped = matcher(specifier);
-      if (mapped && mapped.length > 0) {
-        for (const candidate of mapped) {
-          const resolved = tryResolveFile(candidate, parentExt);
-          if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
-        }
-      }
-    }
-  }
-
-  // 5. Extensionless probing (only when parent is a TS file).
-  if (TS_PARENT_EXTS.has(parentExt) && (specifier.startsWith("./") || specifier.startsWith("../"))) {
-    const parentDir = dirname(fileURLToPath(parent));
-    const target = pathResolve(parentDir, specifier);
-    const resolved = tryResolveFile(target, parentExt);
-    if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
-  }
+  // 4. The ADDITIVE TS resolution (tsconfig `paths`, extension probing, `.js`→`.ts`
+  // swap, directory index/`main`) — native. `resolveTs` is handed the parent's
+  // absolute FS path (or "" for a non-file: parent / the entry, where it falls back
+  // to cwd, matching the old `process.cwd()` parentDir). A non-null result is an
+  // additive hit nub owns; null falls through to Node's resolver (the compat
+  // boundary — node_modules, `exports`, bare/scoped specifiers stay Node's).
+  const parentPath = parent.startsWith("file:") ? fileURLToPath(parent) : "";
+  const resolved = resolveTs(specifier, parentPath);
+  if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
 
   return null;
 }
@@ -486,36 +346,11 @@ export function resolveCjsPath(request, parentPath) {
       module.builtinModules.includes(request)) {
     return null;
   }
-  const parentExt = parentPath ? pathExtname(parentPath) : "";
-
-  // tsconfig `paths` — bare/aliased specifiers from a file outside node_modules
-  // (not gated on a TS parent: a plain .js with a paths alias resolves too).
-  if (!request.startsWith(".") && !request.startsWith("/") && !request.startsWith("file:") &&
-      !isNodeModules(parentPath || "")) {
-    const parentDir = parentPath ? dirname(parentPath) : process.cwd();
-    const { matcher } = getTsconfigForDir(parentDir);
-    if (matcher) {
-      const mapped = matcher(request);
-      if (mapped && mapped.length > 0) {
-        for (const candidate of mapped) {
-          const resolved = tryResolveFile(candidate, parentExt);
-          if (resolved) return resolved;
-        }
-      }
-    }
-    return null; // a plain bare package → let Node resolve it from node_modules
-  }
-
-  // Extensionless probing + .js→.ts swap for a relative specifier — only when the
-  // requiring file is itself TS (same TS_PARENT_EXTS gate as resolveSpec step 5).
-  if (parentPath && TS_PARENT_EXTS.has(parentExt) &&
-      (request.startsWith("./") || request.startsWith("../"))) {
-    const target = pathResolve(dirname(parentPath), request);
-    const resolved = tryResolveFile(target, parentExt);
-    if (resolved) return resolved;
-  }
-
-  return null;
+  // The SAME native additive resolver as resolveSpec, returning an absolute path
+  // (not a URL). Vendored/clobber/builtin are import-only and never reach here. A
+  // null result (node_modules / `exports` / a plain bare package) falls through to
+  // Node's CJS resolver — the compat boundary.
+  return resolveTs(request, parentPath || "");
 }
 
 // Would `require()`-ing this resolved TS file need Node's require(esm)? An
@@ -602,23 +437,17 @@ function hasDecoratorSyntax(filePath, source, lang) {
   return detectModuleInfo(filePath, source, lang).hasDecorators;
 }
 
-// Drop a trailing bare `export {};` — oxc injects it to preserve module-ness
-// after stripping a file's only module syntax (e.g. a lone `import type`).
-const EMPTY_EXPORT_MARKER = /(?:^|\n)[ \t]*export[ \t]*\{[ \t]*\}[ \t]*;?\s*$/;
-function stripEmptyExportMarker(code) {
-  return code.replace(EMPTY_EXPORT_MARKER, "");
-}
-
 // ── Transpile cache ─────────────────────────────────────────────────
-// NUB_VERSION (from version.mjs) is the SOLE version component of the cache key:
-// the transpiler is nub's own native addon, compiled per release against a pinned
-// oxc, so any emit change ships only in a new nub version, which `make version`
-// bumps (and which rebuilds the addon). CACHE_SCHEMA busts the
-// cache when the on-disk ENTRY FORMAT changes (v3 = integrity prefix + leading
-// format byte). The fast and compat tiers share this cache: post-extraction they
-// emit byte-identical output for the same (source, ext, tsconfig, pkgType), so a
-// single cache under one key is correct and maximizes hits.
-const CACHE_SCHEMA = "3";
+// The transpile cache — `cacheGet` + transform-on-miss + post-processing
+// (CJS empty-export strip, inline sourceMap, `//# sourceURL=`) + `cacheSet` — is
+// ONE native call now (nub-native `transformCached`): the cache key (NUB_VERSION
+// is the sole version component — a new release ships any emit change + a rebuilt
+// addon), the 16-hex integrity prefix, the `c`/`m` format byte, and the atomic
+// `*.tmp`-then-rename write all live in Rust, byte-identical to the old JS cache so
+// warm caches survive. This JS file keeps only (a) the cache enable/disable signal
+// and (b) the cache directory it passes IN, so the policy stays in JS and native
+// just does the I/O against the dir nub hands it.
+//
 // Disable the transpile cache when (a) the permission model is active (writing a
 // cache file may not be granted), or (b) the user set `NODE_COMPILE_CACHE=0` —
 // Node's compile-cache disable signal, which nub honors as "no caching in this
@@ -632,50 +461,6 @@ if (!CACHE_DISABLED) {
   if (base) {
     cacheDir = join(base, "nub", "transpile");
     try { mkdirSync(cacheDir, { recursive: true }); } catch { cacheDir = null; }
-  }
-}
-
-function cacheKey(source) {
-  return getCreateHash()("sha256")
-    .update(NUB_VERSION).update("\0")
-    .update(CACHE_SCHEMA).update("\0")
-    .update(source)
-    .digest("hex");
-}
-// Each entry is stored as `<16-hex integrity prefix><body>`, where the prefix is
-// the first 8 bytes of sha256(body). cacheGet re-checks it and treats ANY
-// mismatch — truncation, on-disk corruption, bit-rot, external edits — as a miss,
-// so the entry is re-transpiled and overwritten (self-heals) instead of feeding
-// garbage to V8.
-const CACHE_INTEGRITY_LEN = 16;
-function cacheIntegrity(body) {
-  return getCreateHash()("sha256").update(body).digest("hex").slice(0, CACHE_INTEGRITY_LEN);
-}
-function cacheGet(key) {
-  if (!cacheDir) return null;
-  let raw;
-  try {
-    raw = readFileSync(join(cacheDir, key), "utf8");
-  } catch {
-    return null;
-  }
-  if (raw.length < CACHE_INTEGRITY_LEN) return null;
-  const body = raw.slice(CACHE_INTEGRITY_LEN);
-  if (raw.slice(0, CACHE_INTEGRITY_LEN) !== cacheIntegrity(body)) return null;
-  return body;
-}
-let cacheTmpCounter = 0;
-function cacheSet(key, value) {
-  if (!cacheDir) return;
-  const finalPath = join(cacheDir, key);
-  // Atomic write: temp file in the same dir, then rename (atomic on POSIX +
-  // Windows same-volume), so a concurrent reader sees old-or-complete, never torn.
-  const tmpPath = `${finalPath}.${process.pid}.${cacheTmpCounter++}.tmp`;
-  try {
-    writeFileSync(tmpPath, cacheIntegrity(value) + value);
-    renameSync(tmpPath, finalPath);
-  } catch {
-    try { unlinkSync(tmpPath); } catch {}
   }
 }
 
@@ -713,25 +498,14 @@ export function loadTranspile(url, ext) {
   const filePath = fileURLToPath(url);
   const source = readFileSync(filePath, "utf8");
   const dir = dirname(filePath);
-  const { tsconfig } = getTsconfigForDir(dir);
-  const co = tsconfig?.config?.compilerOptions;
+  // The transform-relevant compilerOptions slice + the byte-for-byte cache-key
+  // component (`tsconfigHash`) both come from the native tsconfig reader.
+  const { compilerOptions: co, tsconfigHash } = getTsconfigForDir(dir);
 
-  // Cache key folds in ext, the resolved tsconfig, and the nearest package.json
-  // type — the same source can transpile to a different format under a different
-  // type. The cached entry's leading byte ('c'/'m') records the chosen format,
-  // so a hit needs no re-detection.
+  // The nearest package.json `type` decides the format of an ambiguous extension
+  // (.ts/.tsx/.jsx); .mts/.cts are explicit so its lookup is skipped. The chosen
+  // format is folded into the cache key (and the entry's leading byte) by native.
   const pkgType = ext === ".mts" || ext === ".cts" ? undefined : getPackageType(dir);
-  const tsconfigHash = co ? JSON.stringify(co) : "";
-  const key = cacheKey(source + "\0" + ext + "\0" + tsconfigHash + "\0" + (pkgType || ""));
-  const cached = cacheGet(key);
-  if (cached) {
-    return {
-      format: cached[0] === "c" ? "commonjs" : "module",
-      source: cached.slice(1),
-      shortCircuit: true,
-    };
-  }
-
   const format = moduleFormatFor(ext, pkgType, filePath, source);
 
   const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
@@ -766,39 +540,28 @@ export function loadTranspile(url, ext) {
   // Stage-3 decorators: oxc returns errors:[] and emits the `@decorator` syntax
   // verbatim, so the result-error check below never fires and V8 throws a bare
   // SyntaxError. When legacy mode is off and decorator syntax is present, reject
-  // with the documented Option-A diagnostic instead.
+  // with the documented Option-A diagnostic instead. (Cheap `source.includes("@")`
+  // pre-filter keeps decorator-free files off the native parser; runs BEFORE the
+  // cache so the diagnostic surfaces even on what would be a warm hit.)
   if (co?.experimentalDecorators !== true && source.includes("@") &&
       hasDecoratorSyntax(filePath, source, lang)) {
     throw stage3DecoratorError(filePath);
   }
 
-  const result = nubNative.transform(filePath, source, opts);
+  // cacheGet + transform-on-miss + post-process (CJS empty-export strip, inline
+  // sourceMap, sourceURL append) + cacheSet — ALL native, byte-identical on-disk.
+  // The cache key folds in ext + tsconfigHash + pkgType (same source, different
+  // type → different format → distinct entry). `cacheDir: null/undefined` is the
+  // JS enable/disable signal: native then skips all cache I/O and just transforms.
+  const formatByte = format === "commonjs" ? "c" : "m";
+  const result = nubNative.transformCached(
+    filePath, source, opts, ext, tsconfigHash || "", pkgType || "", formatByte, cacheDir ?? undefined,
+  );
   if (result.errors.length > 0) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");
     throw new Error(`Transpile error in ${filePath}:\n${details}`);
   }
-
-  let code = result.code;
-  // A CommonJS file must not carry oxc's injected ESM `export {};` marker (CJS
-  // body + ESM marker won't run). Node's strip-types emits no such marker.
-  if (format === "commonjs") code = stripEmptyExportMarker(code);
-  if (result.map) {
-    const map = typeof result.map === "string" ? JSON.parse(result.map) : result.map;
-    map.sourcesContent = [source];
-    code += `\n//# sourceMappingURL=data:application/json;base64,${Buffer.from(JSON.stringify(map)).toString("base64")}\n`;
-  }
-  // Append a `//# sourceURL=` magic comment, matching Node's native strip-types
-  // (lib/internal/modules/typescript.js: `return ${code}\n\n//# sourceURL=${filename}`).
-  // This is the marker V8/the inspector reads to set `scriptParsed.hasSourceURL =
-  // true` — the signal that a script is generated/transpiled rather than read
-  // verbatim from disk (test-inspector-strip-types asserts it). It coexists with
-  // the inline sourceMappingURL above (maps still drive stack frames); sourceURL
-  // only names the origin. Use the absolute file path, exactly as Node does.
-  code += `\n//# sourceURL=${filePath}\n`;
-
-  // Store the chosen format as a leading byte so cache hits skip re-detection.
-  cacheSet(key, (format === "commonjs" ? "c" : "m") + code);
-  return { format, source: code, shortCircuit: true };
+  return { format: result.format, source: result.code, shortCircuit: true };
 }
 
 // ── Data-format imports ─────────────────────────────────────────────

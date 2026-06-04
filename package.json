@@ -19,7 +19,6 @@
     "@js-temporal/polyfill": "^0.5.1",
     "@oxc-project/runtime": "0.132.0",
     "@petamoriken/float16": "^3.9.3",
-    "get-tsconfig": "^4.14.0",
     "urlpattern-polyfill": "^10.1.0"
   }
 }

@@ -26,12 +26,12 @@ rm -rf "$PKG_DIR/runtime"
 cp -r "$REPO_ROOT/runtime" "$PKG_DIR/runtime"
 
 # 4. Vendor node_modules — pure-JS deps only. The TS/JSX transpiler + module
-# detection are now IN-PROCESS in nub-native (Rust addon, oxc compiled in), so
-# oxc-transform / oxc-parser and their native bindings are NO LONGER vendored.
+# detection, tsconfig discovery/parse + the additive TS-resolver, AND the transpile
+# cache are now IN-PROCESS in nub-native (Rust addon, oxc compiled in), so
+# oxc-transform / oxc-parser and get-tsconfig (+ its resolve-pkg-maps dep) are NO
+# LONGER vendored. nub loads zero npm packages internally now.
 rm -rf "$PKG_DIR/runtime/node_modules"
 mkdir -p "$PKG_DIR/runtime/node_modules"
-cp -r "$REPO_ROOT/node_modules/get-tsconfig" "$PKG_DIR/runtime/node_modules/"
-cp -r "$REPO_ROOT/node_modules/resolve-pkg-maps" "$PKG_DIR/runtime/node_modules/" 2>/dev/null || true
 # @oxc-project/runtime — oxc-transform emits helper imports from it (e.g.
 # `@oxc-project/runtime/helpers/decorate`) for decorators; oxc has zero deps, so
 # it never arrives transitively (A30). cp the package symlink (cp -r follows the

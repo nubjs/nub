@@ -230,12 +230,11 @@ jobs:
           # never via an absolute path inside a `node -e` string, because on Windows
           # $GITHUB_WORKSPACE is a backslash path (D:\a\nub\nub) that breaks require().
           # Relative FILE path on purpose: a package-name require ('pkg/package.json')
-          # hits the package `exports` map, and modern packages (e.g. get-tsconfig)
+          # hits the package `exports` map, and modern packages (e.g. @oxc-project/runtime)
           # don't export ./package.json -> ERR_PACKAGE_PATH_NOT_EXPORTED. A relative
           # path bypasses exports AND is Windows-safe (forward slashes in a relative
           # specifier work on win32, unlike the backslash $GITHUB_WORKSPACE).
           ver() { node -p "require('./node_modules/$1/package.json').version"; }
-          GTS_VERSION=$(ver get-tsconfig)
           OXCRT_VERSION=$(ver @oxc-project/runtime)
           URLP_VERSION=$(ver urlpattern-polyfill)
           TEMPORAL_VERSION=$(ver @js-temporal/polyfill)
@@ -243,29 +242,30 @@ jobs:
           mkdir -p "$PKG/runtime/node_modules"
           cd "$PKG/runtime"
           npm init -y > /dev/null 2>&1
-          # The TS/JSX transpiler + module detection are now IN-PROCESS in nub-native
+          # The TS/JSX transpiler + module detection, tsconfig discovery/parse + the
+          # additive TS-resolver, AND the transpile cache are now IN-PROCESS in nub-native
           # (the Rust addon, with oxc compiled in) — so oxc-transform / oxc-parser and
-          # their per-platform @oxc-transform/@oxc-parser bindings are NO LONGER vendored
-          # (that whole npm-binding-resolution surface, the source of the 0.0.7/0.0.13
-          # breakage, is gone). Only the pure-JS deps the EMITTED code or the JS runtime
-          # still need are vendored: @oxc-project/runtime (helper imports the transpile
-          # output references, e.g. usingCtx/decorate), get-tsconfig (tsconfig resolution),
-          # and the web-API polyfills. All are os/cpu-agnostic, so no --force is needed.
+          # their per-platform @oxc-transform/@oxc-parser bindings, AND get-tsconfig (+ its
+          # resolve-pkg-maps dep), are NO LONGER vendored (that whole npm-resolution
+          # surface, the source of the 0.0.7/0.0.13 breakage, is gone — nub loads zero npm
+          # packages internally now). Only the pure-JS deps the EMITTED code or the JS
+          # runtime still need are vendored: @oxc-project/runtime (helper imports the
+          # transpile output references, e.g. usingCtx/decorate) and the web-API polyfills.
+          # All are os/cpu-agnostic, so no --force is needed.
           #
           # SINGLE install — do NOT re-split into a second `npm install` in this dir:
           # with --no-save a second install reconciles node_modules to the ideal tree and
           # PRUNES the first install's packages as "extraneous" (this is what shipped the
           # broken 0.0.7). Keep it one call.
           npm install --no-save \
-            "get-tsconfig@$GTS_VERSION" \
             "@oxc-project/runtime@$OXCRT_VERSION" \
             "urlpattern-polyfill@$URLP_VERSION" \
             "@js-temporal/polyfill@$TEMPORAL_VERSION" \
             "@petamoriken/float16@$FLOAT16_VERSION" \
             2>&1 | tail -8
-          # Confirm the critical JS deps actually landed (a 404'd version or a future
+          # Confirm the critical JS dep actually landed (a 404'd version or a future
           # re-split that reintroduces the prune bug dies here, not in a shipped package).
-          for d in get-tsconfig "@oxc-project/runtime"; do
+          for d in "@oxc-project/runtime"; do
             test -d "node_modules/$d" \
               || { echo "::error::vendored dep missing from runtime/node_modules: $d"; exit 1; }
           done
