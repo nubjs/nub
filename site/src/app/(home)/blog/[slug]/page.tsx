@@ -14,7 +14,7 @@ export default async function BlogPost(props: {
   const MDXContent = page.data.body;
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-20">
+    <div className="mx-auto w-full min-w-0 max-w-3xl px-6 py-20">
       <Link
         href="/blog"
         className="font-mono text-xs uppercase tracking-[0.14em] text-fd-muted-foreground transition hover:text-ember"
