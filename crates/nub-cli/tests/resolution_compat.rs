@@ -1,7 +1,7 @@
 //! Resolution-correctness harness (A34-ROOT).
 //!
 //! Runs Node's module-resolution test subset under BOTH the exact Node binary
-//! nub resolves (`nub --which-node`, the passthrough baseline — equivalent to
+//! nub resolves (`nub node which`, the passthrough baseline — equivalent to
 //! `nub --node`) and under `nub` itself (augmented: TS hook, tsconfig paths,
 //! extensionless probing, package clobbering). It then asserts nub matches Node
 //! — any test Node passes that nub fails is an augmented-mode DIVERGENCE that
@@ -30,7 +30,7 @@ fn suite_dir() -> PathBuf {
 /// The exact Node binary nub resolves — the passthrough baseline, so the
 /// comparison is apples-to-apples (same Node, augmented vs not).
 fn baseline_node(nub: &Path) -> Option<PathBuf> {
-    let out = Command::new(nub).arg("--which-node").output().ok()?;
+    let out = Command::new(nub).args(["node", "which"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -173,7 +173,7 @@ fn resolution_parity() {
     // can't read as green.
     let node = baseline_node(&nub).unwrap_or_else(|| {
         panic!(
-            "resolution_compat: `{} --which-node` resolved no baseline Node, so the \
+            "resolution_compat: `{} node which` resolved no baseline Node, so the \
              augmented-vs-passthrough parity comparison cannot run. Ensure a Node is on PATH \
              and the nub binary built. (Refusing to skip silently.)",
             nub.display()

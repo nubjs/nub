@@ -14,7 +14,6 @@ use camino::Utf8PathBuf;
 
 use super::discovery::ResolvedNode;
 use super::flags;
-use super::version::NodeVersion;
 
 /// Terminating-signal forwarding to the current child, registered once per
 /// process. Nub catches SIGINT (Ctrl-C), SIGTERM (docker stop / systemd / CI
@@ -902,19 +901,10 @@ pub fn cleanup_shim() {
     }
 }
 
-/// Compute the version string for `nub --version` including the
-/// detected Node version.
-pub fn version_string(node_version: Option<NodeVersion>) -> String {
-    let nub_ver = env!("CARGO_PKG_VERSION");
-    match node_version {
-        Some(v) => format!("nub {nub_ver} (node {v})"),
-        None => format!("nub {nub_ver}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::version::NodeVersion;
 
     // `ctrl_c::CURRENT_CHILD` is a process-global AtomicU32. The two tests that
     // exercise it (`ctrl_c_forwards_*` and `diagnostic_signal_*`) therefore race
@@ -923,21 +913,6 @@ mod tests {
     // intermittent CI failure). Serialize them behind this guard. Poison-tolerant
     // so a panic in one doesn't cascade into a spurious failure in the other.
     static CTRL_C_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn version_string_with_node() {
-        let s = version_string(Some(NodeVersion::new(22, 15, 0)));
-        assert_eq!(
-            s,
-            format!("nub {} (node 22.15.0)", env!("CARGO_PKG_VERSION"))
-        );
-    }
-
-    #[test]
-    fn version_string_without_node() {
-        let s = version_string(None);
-        assert_eq!(s, format!("nub {}", env!("CARGO_PKG_VERSION")));
-    }
 
     #[cfg(unix)]
     #[test]

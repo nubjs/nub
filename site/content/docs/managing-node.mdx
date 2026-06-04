@@ -93,14 +93,14 @@ With no pin file, Nub adopts whatever `node` is on your `PATH`. Switch versions 
 
 ```sh
 nvm use 24
-nub --which-node     # prints the exact Node binary Nub will spawn here
+nub node which       # prints the exact Node binary Nub will spawn here
 ```
 
-`nub --which-node` is the quickest way to answer "which Node runs here, and where is it?" — it reports the resolved binary whether it came from a pin, the cache, or your `PATH`.
+`nub node which` is the quickest way to answer "which Node runs here, and where is it?" — it prints the resolved binary path to stdout (so `NODE=$(nub node which)` captures just the path), with a `» resolved from <source>` explainer on stderr, whether the version came from a pin, the cache, or your `PATH`. Bare `nub node` reports the same as a status block.
 
 ## The explicit surface is intentionally small
 
-`install`, `ls`, `uninstall`, and `pin` are the whole group. There's deliberately no `nub node current` / `which` (use `nub --which-node`), no `ls-remote`, and no `prune`, `--force`, custom aliases, or a global-default command — the automatic provisioning covers the common path, and the small surface keeps "you don't have to think about Node versions" true. If a workflow genuinely needs one of these, it's a candidate for a later release.
+`which`, `install`, `ls`, `uninstall`, and `pin` are the whole group (plus bare `nub node` for a status readout). There's deliberately no `ls-remote`, no `prune`, `--force`, custom aliases, or a global-default command — the automatic provisioning covers the common path, and the small surface keeps "you don't have to think about Node versions" true. If a workflow genuinely needs one of these, it's a candidate for a later release.
 
 ## Related
 

@@ -148,10 +148,12 @@ fn target_node_version() -> (u32, u32, u32) {
     use std::sync::OnceLock;
     static V: OnceLock<(u32, u32, u32)> = OnceLock::new();
     *V.get_or_init(|| {
-        // Prefer the exact binary nub would pick (`--which-node`); fall back to
+        // Prefer the exact binary nub would pick (`nub node which`); fall back to
         // PATH `node`. Either resolves the same version the spawned-nub tests use.
+        // (`nub node which` prints the path to stdout, the explainer to stderr —
+        // capturing stdout gives just the path.)
         let node = Command::new(nub_binary())
-            .arg("--which-node")
+            .args(["node", "which"])
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -492,15 +494,16 @@ fn version_flag_works() {
 }
 
 #[test]
-fn which_node_works() {
+fn node_which_prints_path_to_stdout() {
     let output = Command::new(nub_binary())
-        .arg("--which-node")
+        .args(["node", "which"])
         .output()
         .expect("failed to spawn nub");
+    // Path → stdout (capturable); resolution explainer → stderr.
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert!(
         stdout.contains("node"),
-        "expected a node path, got: {stdout}"
+        "expected a node path on stdout, got: {stdout}"
     );
     assert_eq!(output.status.code(), Some(0));
 }

@@ -263,7 +263,7 @@ With no pin file, Nub adopts whatever `node` is on your `PATH`. Switch Node with
 
 ```sh
 nvm use 24
-nub --which-node        # prints the resolved Node binary Nub will spawn
+nub node which          # prints the resolved Node binary Nub will spawn
 ```
 
 Augmented modes require **Node 22.15+** (the floor for synchronous `module.registerHooks()`). On older Node, augmented commands emit a tagged error telling you to upgrade.

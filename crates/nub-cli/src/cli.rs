@@ -230,10 +230,6 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "auto", default_missing_value = "always", num_args = 0..=1, require_equals = true)]
     pub color: ColorWhen,
 
-    /// Print the resolved Node binary path and exit.
-    #[arg(long)]
-    pub which_node: bool,
-
     /// Enable watch mode (alias for `nub watch`).
     #[arg(long)]
     pub watch: bool,
@@ -597,7 +593,6 @@ fn run_nub() -> Result<i32> {
     // Everything clap doesn't own passes through to Node verbatim.
     let mut cwd: Option<PathBuf> = None;
     let mut version = false;
-    let mut which_node = false;
     let mut watch = false;
     let mut show_help = false;
     let mut show_warnings = false;
@@ -629,7 +624,6 @@ fn run_nub() -> Result<i32> {
         match arg.as_str() {
             "--version" | "-v" | "-V" => version = true,
             "--help" | "-h" => show_help = true,
-            "--which-node" => which_node = true,
             "--watch" => watch = true,
             "--node" => compat = true,
             "--silent" | "-s" => silent = true,
@@ -741,18 +735,10 @@ fn run_nub() -> Result<i32> {
     }
 
     if version {
-        let cwd_path = env::current_dir()?;
-        let node_ver = nub_core::node::discovery::discover_node(&cwd_path)
-            .ok()
-            .map(|n| n.version);
-        println!("{}", nub_core::node::spawn::version_string(node_ver));
-        return Ok(0);
-    }
-
-    if which_node {
-        let cwd_path = env::current_dir()?;
-        let node = nub_core::node::discovery::discover_node(&cwd_path)?;
-        println!("{}", node.path);
+        // Pure, CI-greppable: just the Nub version. The resolved Node version and
+        // its path live under `nub node` / `nub node which` (which carry the
+        // project-relative resolution context that doesn't belong on --version).
+        println!("nub {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
     }
 
@@ -2882,13 +2868,14 @@ fn run_node(args: &[String]) -> Result<i32> {
         anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")
     })?;
 
-    // Bare `nub node`, or `nub node --help`/`-h`: short usage listing the verbs.
+    // `nub node --help`/`-h`/`help`: short usage listing the verbs.
     let verb = args.first().map(String::as_str);
-    if verb.is_none() || matches!(verb, Some("--help") | Some("-h") | Some("help")) {
+    if matches!(verb, Some("--help") | Some("-h") | Some("help")) {
         println!(
             "nub node — manage Node versions\n\n\
              Usage: nub node <command>\n\n\
              Commands:\n\
+             \x20 which                    print the resolved Node binary path (why → stderr)\n\
              \x20 install [<version>...]   provision version(s) into nub's cache (bare: the project pin)\n\
              \x20 ls                       list versions in nub's cache\n\
              \x20 uninstall <version>      remove a version from nub's cache\n\
@@ -2897,8 +2884,29 @@ fn run_node(args: &[String]) -> Result<i32> {
         return Ok(0);
     }
 
+    // Bare `nub node`: status — the resolved version, its path, and why.
+    if verb.is_none() {
+        let node = nub_core::node::discovery::discover_node(&cwd)?;
+        println!("node {}", node.version);
+        println!("  path      {}", node.path);
+        println!("  resolved  {}", resolution_source(&cwd));
+        return Ok(0);
+    }
+
     // Past the guard above, a verb is present.
     match verb.expect("verb present after the help/bare guard") {
+        "which" => {
+            // Path → stdout, so `NODE=$(nub node which)` captures just the path.
+            // Resolution explainer → stderr (diagnostics), suppressible with
+            // `2>/dev/null`. Path is written (and flushed) first so an interactive
+            // run shows it above the explainer.
+            let node = nub_core::node::discovery::discover_node(&cwd)?;
+            println!("{}", node.path);
+            use std::io::Write as _;
+            std::io::stdout().flush().ok();
+            eprintln!("» resolved from {}", resolution_source(&cwd));
+            Ok(0)
+        }
         "install" => {
             use nub_core::version_management::manage::{self, InstallOutcome};
             let specs = &args[1..];
@@ -2965,10 +2973,20 @@ fn run_node(args: &[String]) -> Result<i32> {
         // drop trailing args and diverge from the spec).
         _ => {
             bail!(
-                "nub node takes a subcommand (install, ls, uninstall, pin). \
+                "nub node takes a subcommand (which, install, ls, uninstall, pin). \
                  To run a file, use 'nub <file>'."
             );
         }
+    }
+}
+
+/// Human description of WHERE the resolved Node version requirement came from:
+/// the pin file plus its content (`.node-version (26)`), or `node on PATH` when
+/// no pin file applies. Used by `nub node` (status) and `nub node which`.
+fn resolution_source(cwd: &Path) -> String {
+    match nub_core::node::discovery::walk_up_for_pin(cwd) {
+        Some((raw, _pin, source)) => format!("{source} ({raw})"),
+        None => "node on PATH".to_string(),
     }
 }
 
@@ -3324,12 +3342,6 @@ mod tests {
         let cli = parse(&["nub", "server.ts", "--port", "3000"]).unwrap();
         assert!(cli.command.is_none());
         assert_eq!(cli.args, vec!["server.ts", "--port", "3000"]);
-    }
-
-    #[test]
-    fn which_node_flag() {
-        let cli = parse(&["nub", "--which-node"]).unwrap();
-        assert!(cli.which_node);
     }
 
     #[test]
