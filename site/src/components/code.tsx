@@ -2,15 +2,19 @@ import type { ReactNode } from 'react';
 import { highlight } from 'fumadocs-core/highlight';
 
 /* A window chrome with the three traffic-light dots and no title label. */
-function Window({ children, className = '' }: { children: ReactNode; className?: string }) {
+function Window({ children, className = '', size = 'sm' }: { children: ReactNode; className?: string; size?: 'sm' | 'lg' }) {
+  // Scale the chrome (dots + header) with the body so a larger terminal stays
+  // proportional, instead of bumping only the font and leaving tiny dots.
+  const dot = size === 'lg' ? 'h-3 w-3' : 'h-2.5 w-2.5';
+  const head = size === 'lg' ? 'gap-2.5 px-5 py-3.5' : 'gap-2 px-4 py-2.5';
   return (
     <div
       className={`overflow-hidden rounded-xl border border-fd-border bg-[#0b0a08] shadow-[0_30px_80px_-40px_rgba(0,0,0,0.9)] ${className}`}
     >
-      <div className="flex items-center gap-2 border-b border-fd-border/70 px-4 py-2.5">
-        <span className="h-2.5 w-2.5 rounded-full bg-ember/80" />
-        <span className="h-2.5 w-2.5 rounded-full bg-acid/70" />
-        <span className="h-2.5 w-2.5 rounded-full bg-sky/70" />
+      <div className={`flex items-center border-b border-fd-border/70 ${head}`}>
+        <span className={`${dot} rounded-full bg-ember/80`} />
+        <span className={`${dot} rounded-full bg-acid/70`} />
+        <span className={`${dot} rounded-full bg-sky/70`} />
       </div>
       {children}
     </div>
@@ -34,7 +38,7 @@ export function Terminal({
     size === 'lg' ? 'px-6 py-5 text-[0.98rem] leading-[2.1]' : 'px-5 py-4 text-[0.8rem] leading-7';
 
   return (
-    <Window className={className}>
+    <Window className={className} size={size}>
       <pre className={`overflow-x-auto font-mono ${body}`}>
         {lines.map((line, i) => (
           <div key={i} className="whitespace-pre">

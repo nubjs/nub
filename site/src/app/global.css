@@ -17,7 +17,7 @@
 
   /* color pops — used sparingly against the ink ground */
   --color-ember: #ff5d3b; /* primary: warm coral-ember */
-  --color-acid: #d6f24a; /* secondary: acid lime */
+  --color-acid: #4fe173; /* secondary: bright green (was acid lime #d6f24a) */
   --color-sky: #7bb0ff; /* tertiary: cool sky */
   --color-orchid: #c9a3ff; /* quaternary: soft orchid — version manager */
 }
@@ -138,5 +138,15 @@ a[href] {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* Toolkit carousel: the active tab's auto-advance progress bar fills L→R. */
+@keyframes toolkit-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
   }
 }
