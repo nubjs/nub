@@ -25,16 +25,11 @@ chmod +x "$PKG_DIR/bin/nub"
 rm -rf "$PKG_DIR/runtime"
 cp -r "$REPO_ROOT/runtime" "$PKG_DIR/runtime"
 
-# 4. Vendor node_modules (oxc-transform, oxc-parser, get-tsconfig + bindings)
+# 4. Vendor node_modules — pure-JS deps only. The TS/JSX transpiler + module
+# detection are now IN-PROCESS in nub-native (Rust addon, oxc compiled in), so
+# oxc-transform / oxc-parser and their native bindings are NO LONGER vendored.
 rm -rf "$PKG_DIR/runtime/node_modules"
 mkdir -p "$PKG_DIR/runtime/node_modules"
-cp -r "$REPO_ROOT/node_modules/oxc-transform" "$PKG_DIR/runtime/node_modules/"
-cp -r "$REPO_ROOT/node_modules/@oxc-transform" "$PKG_DIR/runtime/node_modules/"
-cp -r "$REPO_ROOT/node_modules/oxc-parser" "$PKG_DIR/runtime/node_modules/"
-# oxc-parser's native binding isn't hoisted to the top level by pnpm; copy it
-# flat (the resolver looks for @oxc-parser/binding-* next to oxc-parser).
-mkdir -p "$PKG_DIR/runtime/node_modules/@oxc-parser"
-cp -r "$REPO_ROOT"/node_modules/.pnpm/@oxc-parser+binding-*/node_modules/@oxc-parser/* "$PKG_DIR/runtime/node_modules/@oxc-parser/" 2>/dev/null || true
 cp -r "$REPO_ROOT/node_modules/get-tsconfig" "$PKG_DIR/runtime/node_modules/"
 cp -r "$REPO_ROOT/node_modules/resolve-pkg-maps" "$PKG_DIR/runtime/node_modules/" 2>/dev/null || true
 # @oxc-project/runtime — oxc-transform emits helper imports from it (e.g.

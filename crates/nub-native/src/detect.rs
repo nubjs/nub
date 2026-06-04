@@ -62,7 +62,10 @@ pub fn detect_module_info(
     // real error) and as "no decorators" for the guard (V8 surfaces the error).
     // Both fall out of an all-false return.
     if ret.panicked {
-        return ModuleInfo { has_value_esm_syntax: false, has_decorators: false };
+        return ModuleInfo {
+            has_value_esm_syntax: false,
+            has_decorators: false,
+        };
     }
 
     let has_value_esm_syntax = has_value_esm(
@@ -74,7 +77,10 @@ pub fn detect_module_info(
     let mut decorators = DecoratorFinder { found: false };
     decorators.visit_program(&ret.program);
 
-    ModuleInfo { has_value_esm_syntax, has_decorators: decorators.found }
+    ModuleInfo {
+        has_value_esm_syntax,
+        has_decorators: decorators.found,
+    }
 }
 
 /// Does the statement list carry value-level ESM syntax? Reproduces the JS

@@ -59,14 +59,14 @@ jobs:
         name: Compute build matrix
         run: |
           FULL='[
-            {"platform":"darwin-arm64","runner":"macos-14","target":"aarch64-apple-darwin","cross":false,"oxc_binding":"binding-darwin-arm64"},
-            {"platform":"darwin-x64","runner":"macos-14","target":"x86_64-apple-darwin","cross":false,"oxc_binding":"binding-darwin-x64"},
-            {"platform":"linux-x64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","cross":false,"oxc_binding":"binding-linux-x64-gnu"},
-            {"platform":"linux-x64-musl","runner":"ubuntu-latest","target":"x86_64-unknown-linux-musl","cross":true,"oxc_binding":"binding-linux-x64-musl"},
-            {"platform":"linux-arm64","runner":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","cross":true,"oxc_binding":"binding-linux-arm64-gnu"},
-            {"platform":"linux-arm64-musl","runner":"ubuntu-latest","target":"aarch64-unknown-linux-musl","cross":true,"oxc_binding":"binding-linux-arm64-musl"},
-            {"platform":"win32-x64","runner":"windows-latest","target":"x86_64-pc-windows-msvc","cross":false,"oxc_binding":"binding-win32-x64-msvc"},
-            {"platform":"win32-arm64","runner":"windows-latest","target":"aarch64-pc-windows-msvc","cross":false,"oxc_binding":"binding-win32-arm64-msvc"}
+            {"platform":"darwin-arm64","runner":"macos-14","target":"aarch64-apple-darwin","cross":false},
+            {"platform":"darwin-x64","runner":"macos-14","target":"x86_64-apple-darwin","cross":false},
+            {"platform":"linux-x64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","cross":false},
+            {"platform":"linux-x64-musl","runner":"ubuntu-latest","target":"x86_64-unknown-linux-musl","cross":true},
+            {"platform":"linux-arm64","runner":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","cross":true},
+            {"platform":"linux-arm64-musl","runner":"ubuntu-latest","target":"aarch64-unknown-linux-musl","cross":true},
+            {"platform":"win32-x64","runner":"windows-latest","target":"x86_64-pc-windows-msvc","cross":false},
+            {"platform":"win32-arm64","runner":"windows-latest","target":"aarch64-pc-windows-msvc","cross":false}
           ]'
           if [ "${{ inputs.linux_only }}" = "true" ]; then
             SEL=$(echo "$FULL" | jq -c '[.[] | select(.platform | startswith("linux"))]')
@@ -235,7 +235,6 @@ jobs:
           # path bypasses exports AND is Windows-safe (forward slashes in a relative
           # specifier work on win32, unlike the backslash $GITHUB_WORKSPACE).
           ver() { node -p "require('./node_modules/$1/package.json').version"; }
-          OXC_VERSION=$(ver oxc-transform)
           GTS_VERSION=$(ver get-tsconfig)
           OXCRT_VERSION=$(ver @oxc-project/runtime)
           URLP_VERSION=$(ver urlpattern-polyfill)
@@ -244,40 +243,29 @@ jobs:
           mkdir -p "$PKG/runtime/node_modules"
           cd "$PKG/runtime"
           npm init -y > /dev/null 2>&1
-          # SINGLE install — main JS deps AND the platform bindings together, in ONE
-          # `npm install` call. This is load-bearing, do not re-split it: a SECOND
-          # `npm install` in the same dir reconciles node_modules against the ideal
-          # tree and PRUNES every package not in that tree. With --no-save the first
-          # install's packages are never written to package.json, so a separate second
-          # install (e.g. just for the bindings) deletes them all as "extraneous" —
-          # which is exactly what silently shipped the broken 0.0.7: its
-          # runtime/node_modules held ONLY the two @oxc bindings, so transform-core.mjs
-          # could not resolve `oxc-transform` and every install threw ERR_MODULE_NOT_FOUND.
-          # (Reproduced locally before fixing — second --no-save install prunes the first.)
+          # The TS/JSX transpiler + module detection are now IN-PROCESS in nub-native
+          # (the Rust addon, with oxc compiled in) — so oxc-transform / oxc-parser and
+          # their per-platform @oxc-transform/@oxc-parser bindings are NO LONGER vendored
+          # (that whole npm-binding-resolution surface, the source of the 0.0.7/0.0.13
+          # breakage, is gone). Only the pure-JS deps the EMITTED code or the JS runtime
+          # still need are vendored: @oxc-project/runtime (helper imports the transpile
+          # output references, e.g. usingCtx/decorate), get-tsconfig (tsconfig resolution),
+          # and the web-API polyfills. All are os/cpu-agnostic, so no --force is needed.
           #
-          # --force bypasses npm's EBADPLATFORM os/cpu check for the bindings: most
-          # targets cross-compile on a different-arch runner (darwin-x64 on the arm64
-          # macos-14; linux-arm64 on the x64 ubuntu runner) and the binding is vendored
-          # for shipping, not executed here. --force does NOT mask 404 / missing-version
-          # errors, and pipefail (GitHub's default bash flags) still fails the step on a
-          # real npm error; the gate below catches a wrong binding or a pruned dep.
-          npm install --no-save --force \
-            "oxc-transform@$OXC_VERSION" \
-            "oxc-parser@$OXC_VERSION" \
+          # SINGLE install — do NOT re-split into a second `npm install` in this dir:
+          # with --no-save a second install reconciles node_modules to the ideal tree and
+          # PRUNES the first install's packages as "extraneous" (this is what shipped the
+          # broken 0.0.7). Keep it one call.
+          npm install --no-save \
             "get-tsconfig@$GTS_VERSION" \
             "@oxc-project/runtime@$OXCRT_VERSION" \
             "urlpattern-polyfill@$URLP_VERSION" \
             "@js-temporal/polyfill@$TEMPORAL_VERSION" \
             "@petamoriken/float16@$FLOAT16_VERSION" \
-            "@oxc-transform/${{ matrix.oxc_binding }}@$OXC_VERSION" \
-            "@oxc-parser/${{ matrix.oxc_binding }}@$OXC_VERSION" \
             2>&1 | tail -8
-          # Confirm the critical JS deps AND both platform bindings actually landed.
-          # An install that 404s a version, or a future re-split that reintroduces the
-          # prune bug, dies here instead of shipping a broken package.
-          for d in oxc-transform oxc-parser get-tsconfig \
-                   "@oxc-transform/${{ matrix.oxc_binding }}" \
-                   "@oxc-parser/${{ matrix.oxc_binding }}"; do
+          # Confirm the critical JS deps actually landed (a 404'd version or a future
+          # re-split that reintroduces the prune bug dies here, not in a shipped package).
+          for d in get-tsconfig "@oxc-project/runtime"; do
             test -d "node_modules/$d" \
               || { echo "::error::vendored dep missing from runtime/node_modules: $d"; exit 1; }
           done

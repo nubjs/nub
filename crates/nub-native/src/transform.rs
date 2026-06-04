@@ -34,9 +34,7 @@ use oxc::{
         EnvOptions, HelperLoaderMode, HelperLoaderOptions, JsxRuntime, ProposalOptions,
         RewriteExtensionsMode,
     },
-    transformer_plugins::{
-        InjectGlobalVariablesConfig, InjectImport, ReplaceGlobalDefinesConfig,
-    },
+    transformer_plugins::{InjectGlobalVariablesConfig, InjectImport, ReplaceGlobalDefinesConfig},
 };
 use oxc_napi::{OxcError, get_source_type};
 use oxc_sourcemap::napi::SourceMap;
@@ -456,7 +454,10 @@ impl Compiler {
     fn new(options: Option<TransformOptions>) -> Result<Self, Vec<OxcDiagnostic>> {
         let mut options = options;
 
-        let sourcemap = options.as_ref().and_then(|o| o.sourcemap).unwrap_or_default();
+        let sourcemap = options
+            .as_ref()
+            .and_then(|o| o.sourcemap)
+            .unwrap_or_default();
 
         let define = options
             .as_mut()
@@ -570,7 +571,9 @@ pub fn transform(
     let source_type = get_source_type(
         &filename,
         options.as_ref().and_then(|options| options.lang.as_deref()),
-        options.as_ref().and_then(|options| options.source_type.as_deref()),
+        options
+            .as_ref()
+            .and_then(|options| options.source_type.as_deref()),
     );
 
     let mut compiler = match Compiler::new(options) {
