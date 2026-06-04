@@ -19,7 +19,7 @@
 
 import {
   TRANSPILE_EXTS, DATA_EXTS,
-  extname, resolveSpec, loadTranspile, loadData, ensureParser,
+  extname, resolveSpec, loadTranspile, loadData,
 } from "./transform-core.mjs";
 
 // Node calls this once per worker when the main thread invokes
@@ -38,11 +38,10 @@ export async function resolve(specifier, context, nextResolve) {
 export async function load(url, context, nextLoad) {
   const ext = extname(url);
   if (TRANSPILE_EXTS.has(ext)) {
-    // Ensure oxc-parser is loaded (via dynamic import — `require` of this
-    // ESM-only package fails below require(esm) on Node 18.19 / 20.x). The async
-    // load hook can await; the synchronous module-format + decorator detection
-    // inside loadTranspile then has the parser.
-    await ensureParser();
+    // Module-format + decorator detection inside loadTranspile is a synchronous
+    // native call (nub's addon), available on every supported Node — no parser
+    // warm-up needed (the old `await ensureParser()` for the ESM-only oxc-parser
+    // is gone with the package).
     return loadTranspile(url, ext);
   }
   if (ext in DATA_EXTS) return loadData(url, ext);

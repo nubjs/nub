@@ -8,16 +8,16 @@
 // Temporal lazy global, watch-mode IPC, and the compat-tier CJS `require()`
 // shim. EVERYTHING about how a file is resolved and transpiled — extension
 // probing, the `.js`→`.ts` swap, tsconfig `paths`, module-format detection,
-// oxc-transform options (including `target: 'es2022'` `using`-lowering), the
+// transform options (including `target: 'es2022'` `using`-lowering), the
 // Stage-3 decorator guard, the on-disk cache, data-format imports, package
 // clobbering — lives here, so the two tiers can never drift. (They used to:
 // separate copies diverged on probe order, `target` lowering, the decorator
 // guard, module-format detection, the Temporal clobber's named exports, and the
 // reserved-export filter — every one a real compat bug. This module is the fix.)
 //
-// Side effects are confined to: loading the N-API data addon, lazily loading
-// oxc-parser/oxc-transform, and reading/writing the transpile cache. There is no
-// top-level hook registration here — importing this module never augments the
+// Side effects are confined to: loading the N-API addon (data parsers + the
+// in-process TS/JSX transpiler), and reading/writing the transpile cache. There is
+// no top-level hook registration here — importing this module never augments the
 // realm; the tier files do that.
 
 // EVERY dependency of this module is pulled in via CJS `require()` (below), NOT
@@ -25,16 +25,18 @@
 // nub loads transform-core through `require(esm)`, and Node's `require(esm)`
 // instantiates the module by walking its STATIC IMPORT graph through whatever ESM
 // loader hooks are registered — including the USER's `--loader`/`register()`
-// chain. Static `import oxc-transform`/`get-tsconfig`/`./version.mjs`/`node:*`
-// here therefore leaked nub's entire internal graph (transform-core, version.mjs,
-// oxc-transform, get-tsconfig, their transitive node_modules deps, and the node:
-// builtins) THROUGH the user's resolve/load hooks, which observed and corrupted
-// it (a user load hook returning `source: 1` for version.mjs, a resolve hook
-// appending `?foo` to `oxc-transform`, a strict loader throwing on the bare
-// `oxc-transform` specifier — see test-esm-loader-chaining, -example-loader,
-// -preserve-symlinks-not-found, test-shadow-realm-custom-loaders). Verified: a CJS
-// `require()` of a package/builtin does NOT route through the ESM loader chain, so
-// loading the graph this way bypasses the user chain entirely. `process
+// chain. Static `import get-tsconfig`/`./version.mjs`/`node:*` here therefore
+// leaked nub's entire internal graph (transform-core, version.mjs, get-tsconfig,
+// their transitive node_modules deps, and the node: builtins) THROUGH the user's
+// resolve/load hooks, which observed and corrupted it (a user load hook returning
+// `source: 1` for version.mjs, a strict loader throwing on a bare specifier — see
+// test-esm-loader-chaining, -example-loader, -preserve-symlinks-not-found,
+// test-shadow-realm-custom-loaders). Verified: a CJS `require()` of a
+// package/builtin does NOT route through the ESM loader chain, so loading the graph
+// this way bypasses the user chain entirely. (The transpiler and TS/JSX detection
+// no longer go through any npm package at all: they are native calls into nub's own
+// N-API addon, so the worst historical leak — pulling oxc-transform's ESM entry
+// graph through the user chain — is gone by construction.) `process
 // .getBuiltinModule` fetches node: builtins synchronously off the loader chain;
 // `createRequire(import.meta.url)` resolves the bare deps from nub's distribution.
 // This file keeps its `export`s (it stays an ES module), but has ZERO static
@@ -60,65 +62,21 @@ const module = __getBuiltin("node:module");
 const { readFileSync, writeFileSync, mkdirSync, statSync, renameSync, unlinkSync, readdirSync } = __getBuiltin("node:fs");
 const { fileURLToPath, pathToFileURL } = __getBuiltin("node:url");
 const { join, dirname, resolve: pathResolve, extname: pathExtname } = __getBuiltin("node:path");
-// oxc-transform is `type: module`, so a plain `require("oxc-transform")` uses
-// `require(esm)` and Node instantiates its ESM entry by walking ITS static
-// imports through the registered ESM loader chain — i.e. through the USER's
-// `--loader` worker (which nub's main-thread sync hooks do NOT chain into, so the
-// resolveSpec short-circuit can't catch it). oxc-transform's entry has exactly one
-// ESM-only construct that leaks: `import { createRequire } from 'node:module'`
-// (the rest is CJS `require`/`module.exports`-shaped). To keep it off the chain
-// entirely we load it AS CommonJS: read the entry source, neutralize its tiny ESM
-// header (the `import { createRequire }` line, the `const require =
-// createRequire(import.meta.url)` shadow, the `import.meta.url`-based `__dirname`)
-// and convert its `export { X }` footer to `module.exports`, then compile it with
-// `module._compile` at its real path so its internal `require('./binding.node')`
-// and `__dirname` resolve correctly. A CJS-compiled module has no static-import
-// graph for Node to route through any loader. Falls back to plain require(esm) if
-// the source shape ever changes (then the leak returns, but transpilation works).
-function requireOxcAsCjs() {
-  const Module = module;
-  let entry;
-  try {
-    entry = __require.resolve("oxc-transform");
-  } catch {
-    return __require("oxc-transform");
-  }
-  // Only the .js NAPI-RS wrapper has the mixed ESM-header/CJS-body shape we can
-  // safely transform; anything else, defer to the normal loader.
-  if (!entry.endsWith(".js")) return __require("oxc-transform");
-  try {
-    let src = readFileSync(entry, "utf8");
-    // Strip the ESM header: `import { createRequire } from 'node:module'`,
-    // `const require = createRequire(import.meta.url)`, and any
-    // `const __dirname = new URL('.', import.meta.url).pathname`. In a CJS module
-    // `require`, `__dirname`, `__filename` are already injected by _compile.
-    src = src
-      .replace(/^\s*import\s*\{[^}]*\}\s*from\s*['"]node:module['"];?\s*$/m, "")
-      .replace(/^\s*const\s+require\s*=\s*createRequire\([^)]*\);?\s*$/m, "")
-      .replace(/^\s*const\s+__dirname\s*=\s*new URL\([^)]*\)\.pathname;?\s*$/m, "");
-    // Convert the `export { Name }` footer lines to a single CJS exports block.
-    const names = [];
-    src = src.replace(/^\s*export\s*\{\s*([A-Za-z0-9_$]+)\s*\}\s*;?\s*$/gm, (_m, n) => {
-      names.push(n);
-      return "";
-    });
-    // Guard: if any `import`/`export`/`import.meta` survived, we don't understand
-    // this version's shape — bail to the safe loader rather than ship broken code.
-    if (/^\s*(import|export)\s/m.test(src) || /\bimport\.meta\b/.test(src)) {
-      return __require("oxc-transform");
-    }
-    if (names.length === 0) return __require("oxc-transform");
-    src += `\nmodule.exports = { ${names.join(", ")} };\n`;
-    const m = new Module(entry, null);
-    m.filename = entry;
-    m.paths = Module._nodeModulePaths(dirname(entry));
-    m._compile(src, entry);
-    return m.exports;
-  } catch {
-    return __require("oxc-transform");
-  }
+// Nub's N-API addon — the in-process TS/JSX transpiler (`transform`,
+// `detectModuleInfo`) AND the data-format parsers (`parseYaml`/`parseToml`/
+// `parseJson5`/`parseJsonc`), all native. Loaded once per module instance (= once
+// per thread: the main thread and the loader worker each import this module
+// separately). It is a `.node` binary resolved by absolute path off this file's
+// dir, so it never touches the ESM loader chain — the historical
+// require(esm)-of-an-ESM-npm-package leak (oxc-transform) is gone: transpilation
+// is a synchronous native call, no JS package, no static-import graph to route.
+let nubNative = null;
+for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
+  try { nubNative = __require(fileURLToPath(new URL(rel, import.meta.url))); break; } catch {}
 }
-const { transformSync } = requireOxcAsCjs();
+// get-tsconfig is `type: module` but ships a CJS `require` export
+// (./dist/index.cjs), so `require()` of it loads the CommonJS build — no
+// require(esm), no ESM-loader-chain routing.
 const { getTsconfig, createPathsMatcher } = __require("get-tsconfig");
 
 // NUB_VERSION is the single source of truth in runtime/version.mjs. We must NOT
@@ -187,14 +145,6 @@ export const CLOBBER_MAP = new Map([
   ["urlpattern-polyfill", () => `export const URLPattern = globalThis.URLPattern;`],
   ["abort-controller", () => `export const AbortController = globalThis.AbortController; export const AbortSignal = globalThis.AbortSignal; export default globalThis.AbortController;`],
 ]);
-
-// Nub's N-API addon for data-format parsing (Rust-native YAML/TOML/JSON5/JSONC).
-// Loaded once per module instance (= once per thread: the main thread and the
-// loader worker each import this module separately).
-let nubNative = null;
-for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
-  try { nubNative = __require(fileURLToPath(new URL(rel, import.meta.url))); break; } catch {}
-}
 
 // ── Watch-mode hooks (injected by the main-thread tier) ─────────────
 // `nub watch` needs config files (tsconfig.json, package.json) and `.env*` —
@@ -380,34 +330,34 @@ export function getProbeOrder(parentExt) {
 
 // nub's own runtime directory (this file's dir, as a file: URL prefix). Any
 // resolution whose IMPORTER lives here is one of nub's internal requires — the
-// preload loading transform-core, transform-core requiring oxc, the Temporal lazy
-// getter resolving @js-temporal/polyfill — and must NEVER be routed through nub's
-// own clobber/vendored/tsconfig logic: those are user-code conveniences, and
-// applying them to nub's internals both breaks them (e.g. the Temporal clobber
-// re-exports globalThis.Temporal, which IS the getter → a require of the polyfill
-// from the getter would recurse into the clobber) and amplifies the user loader
-// chain by re-walking nub's internal graph through user hooks (R11). Short-circuit
-// to native resolution for these.
+// preload loading transform-core, the Temporal lazy getter resolving
+// @js-temporal/polyfill — and must NEVER be routed through nub's own
+// clobber/vendored/tsconfig logic: those are user-code conveniences, and applying
+// them to nub's internals both breaks them (e.g. the Temporal clobber re-exports
+// globalThis.Temporal, which IS the getter → a require of the polyfill from the
+// getter would recurse into the clobber) and amplifies the user loader chain by
+// re-walking nub's internal graph through user hooks (R11). Short-circuit to native
+// resolution for these.
 const RUNTIME_DIR_URL = new URL(".", import.meta.url).href;
 
 // nub's internal-graph package roots — the file: URL prefixes of the npm packages
-// nub itself loads (oxc-transform, get-tsconfig) and their transitive deps. Any
-// resolution whose IMPORTER lives under one of these is part of nub's internal
-// graph, NOT user code. `oxc-transform` is `type: module`, so even when nub pulls
-// it in via CJS `require()`, Node loads its `index.js` through `require(esm)` and
-// walks ITS static `import "node:module"` graph through the registered ESM loader
-// chain — including the USER's loader. That re-leaks nub internals one hop down
-// (R11): test-esm-example-loader's strict loader throws on `node:module`,
-// loader-resolve-shortcircuit appends `?foo` to oxc's specifiers, etc. So a
-// nub-internal-graph resolution must FULLY short-circuit (resolve natively, return
-// shortCircuit:true) — never delegate to nextResolve — for EVERY specifier,
-// including node: builtins and the package's own relative imports. Computed lazily
-// (and pinned even on resolve failure) so a missing dep can't wedge startup.
+// nub itself loads (get-tsconfig) and their transitive deps. Any resolution whose
+// IMPORTER lives under one of these is part of nub's internal graph, NOT user code,
+// and must FULLY short-circuit (resolve natively, return shortCircuit:true) — never
+// delegate to nextResolve — for EVERY specifier, including node: builtins and the
+// package's own relative imports, so the user ESM loader chain never observes nub's
+// internals (R11). get-tsconfig is loaded as CJS (its `require` export resolves to
+// ./dist/index.cjs), so its graph already bypasses the chain; this short-circuit is
+// the belt-and-suspenders for any ESM hop into a nub-internal package. The biggest
+// historical leak — oxc-transform's `type: module` entry pulled through require(esm)
+// and walked through the user loader — is gone: the transpiler is now a native
+// addon call, no npm package. Computed lazily (and pinned even on resolve failure)
+// so a missing dep can't wedge startup.
 let _nubGraphRoots = null;
 function nubGraphRoots() {
   if (_nubGraphRoots) return _nubGraphRoots;
   const roots = [];
-  for (const pkg of ["oxc-transform", "get-tsconfig"]) {
+  for (const pkg of ["get-tsconfig"]) {
     try {
       const entry = __require.resolve(pkg);
       // Package root = the directory two levels up does not work generically;
@@ -452,7 +402,7 @@ export function resolveSpec(specifier, parentURL) {
   // user's loader chain) never observes nub's internals. This MUST run before the
   // node:/data:/builtin early-returns below, because those `return null` =
   // DELEGATE to the user loader — and a nub-internal `import "node:module"` (e.g.
-  // from oxc-transform's ESM entry) delegated to a strict user loader is exactly
+  // from a nub-dependency ESM entry) delegated to a strict user loader is exactly
   // the R11 leak. See isNubInternalParent / nubGraphRoots.
   if (isNubInternalParent(parentURL)) {
     if (specifier.startsWith("node:") || module.builtinModules.includes(specifier)) {
@@ -586,68 +536,29 @@ export function requireTargetIsEsm(filePath, ext) {
 }
 
 // ── Module-format detection ─────────────────────────────────────────
-// oxc-parser loads a native binding (~8 ms) and is needed ONLY for absent-`type`
-// module detection + the Stage-3 decorator guard, so it loads lazily — `nub
-// script.js` and explicit-`type` files never pay for it.
-//
-// oxc-parser is ESM-only, so `require()` of it needs require(esm), which only
-// exists on Node 20.19+ / 22.12+. The fast tier (>= 22.15) has it, so a lazy
-// `require` there keeps the load off plain-JS startups. The compat tier reaches
-// down to 18.19, where `require("oxc-parser")` throws ERR_REQUIRE_ESM — so the
-// compat-tier callers (the loader worker's async load hook, and preload.mjs's
-// main-thread compat branch) `await ensureParser()` first, which loads it via
-// dynamic `import()` (native ESM, works on every supported Node). Without this,
-// detection silently fell back to "ESM", so a CJS-content `.ts` mis-loaded as ESM
-// and decorator syntax slipped past the guard on Node 18.19 / 20.x.
-let _parseSync = null;
-let _requireTried = false;
-let _importTried = false;
-
-/// Async, idempotent: ensure oxc-parser is loaded via dynamic import (the only
-/// form that works below require(esm)). Compat-tier callers await this before the
-/// synchronous detection below runs.
-export async function ensureParser() {
-  if (_parseSync || _importTried) return;
-  _importTried = true;
-  try { _parseSync = (await import("oxc-parser")).parseSync; } catch { /* unavailable */ }
-}
-
-function getParseSync() {
-  if (!_parseSync && !_requireTried) {
-    _requireTried = true;
-    try { _parseSync = __require("oxc-parser").parseSync; } catch { /* try ensureParser instead */ }
-  }
-  return _parseSync;
-}
-
-// Does the source carry VALUE-level ESM syntax? Mirrors Node's
-// `--experimental-detect-module`: type-only imports/exports are erased by oxc
-// and must NOT count, but a value import/export, a bare `import "x"`, an
-// `export {}` marker, `import.meta`, or top-level `await` all force ESM.
-// Used only for the ambiguous extensions when package.json has no `type`.
-function hasEsmSyntax(filePath, source, lang) {
-  const parse = getParseSync();
-  if (!parse) return true; // detection unavailable → default ESM (the common case)
-  let mod;
+// Both signals nub needs to read off a file's syntax — the absent-`type` module
+// format and the Stage-3-decorator guard — come from ONE native call into nub's
+// N-API addon (`detectModuleInfo`, the oxc parser compiled in-process). There is
+// no JS parser package anymore: `oxc-parser` (ESM-only, which used to need
+// `require(esm)` on the fast tier and a dynamic-`import()` `ensureParser()` dance
+// on the 18.19 compat tier) is gone, and with it the whole "is require(esm)
+// available here?" fork. The native call is synchronous and works identically on
+// every supported Node, so there is nothing to preload and no async warm-up — the
+// former `ensureParser()` export is removed (its compat-tier callers just stop
+// calling it). Used only for ambiguous extensions / the decorator guard; explicit
+// `type` and `.mts`/`.cts` short-circuit before the parser runs.
+function detectModuleInfo(filePath, source, lang) {
+  // Addon missing (should never happen in a real install): default to ESM for
+  // format (the common case) and "no decorators" for the guard — the same fallback
+  // the old oxc-parser-unavailable branches used.
+  if (!nubNative) return { hasValueEsmSyntax: true, hasDecorators: false };
   try {
-    mod = parse(filePath, source, { lang }).module;
+    return nubNative.detectModuleInfo(filePath, source, lang);
   } catch {
-    return false; // unparseable → default CJS; the transpile surfaces the real error
+    // Unparseable → CJS for format + no decorators (the transpile/V8 surfaces the
+    // real error), matching the old per-call catch blocks.
+    return { hasValueEsmSyntax: false, hasDecorators: false };
   }
-  const valueImport = mod.staticImports.some(
-    (si) => si.entries.length === 0 || si.entries.some((e) => !e.isType),
-  );
-  const valueExport = mod.staticExports.some(
-    (se) => se.entries.length === 0 || se.entries.some((e) => !e.isType),
-  );
-  if (valueImport || valueExport || mod.importMetas.length > 0) return true;
-  // Top-level await: `hasModuleSyntax` is set with no static import/export/meta.
-  return (
-    mod.hasModuleSyntax &&
-    mod.staticImports.length === 0 &&
-    mod.staticExports.length === 0 &&
-    mod.importMetas.length === 0
-  );
 }
 
 // Map a transpiled file's extension + nearest package.json "type" to the module
@@ -661,7 +572,7 @@ export function moduleFormatFor(ext, pkgType, filePath, source) {
   if (pkgType === "module") return "module";
   if (pkgType === "commonjs") return "commonjs";
   const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
-  return hasEsmSyntax(filePath, source, lang) ? "module" : "commonjs";
+  return detectModuleInfo(filePath, source, lang).hasValueEsmSyntax ? "module" : "commonjs";
 }
 
 // The Stage-3-decorator rejection diagnostic. oxc does not lower TC39 Stage 3
@@ -686,36 +597,9 @@ function stage3DecoratorError(filePath) {
 // member)? Used ONLY when legacy decorators are off, to surface a clear
 // diagnostic instead of oxc's verbatim passthrough → V8 SyntaxError. The cheap
 // `source.includes("@")` pre-filter in the caller keeps decorator-free files off
-// the parser; decorators only attach to ClassDeclaration/ClassExpression and
-// their members (incl. accessors), and to `export`/`export default` wrappers.
+// the native parser. The walk now happens in Rust (detectModuleInfo's AST visit).
 function hasDecoratorSyntax(filePath, source, lang) {
-  const parse = getParseSync();
-  if (!parse) return false; // parser unavailable → let oxc/V8 surface the error
-  let program;
-  try {
-    program = parse(filePath, source, { lang }).program;
-  } catch {
-    return false; // unparseable → the transpile/V8 surfaces the real error
-  }
-  let found = false;
-  const visit = (node) => {
-    if (found || !node || typeof node !== "object") return;
-    if (Array.isArray(node)) {
-      for (const child of node) visit(child);
-      return;
-    }
-    if (Array.isArray(node.decorators) && node.decorators.length > 0) {
-      found = true;
-      return;
-    }
-    for (const k in node) {
-      if (k === "type" || k === "start" || k === "end") continue;
-      visit(node[k]);
-      if (found) return;
-    }
-  };
-  visit(program.body);
-  return found;
+  return detectModuleInfo(filePath, source, lang).hasDecorators;
 }
 
 // Drop a trailing bare `export {};` — oxc injects it to preserve module-ness
@@ -727,8 +611,9 @@ function stripEmptyExportMarker(code) {
 
 // ── Transpile cache ─────────────────────────────────────────────────
 // NUB_VERSION (from version.mjs) is the SOLE version component of the cache key:
-// oxc-transform is pinned exact + vendored per release, so any emit change ships
-// only in a new nub version, which `make version` bumps. CACHE_SCHEMA busts the
+// the transpiler is nub's own native addon, compiled per release against a pinned
+// oxc, so any emit change ships only in a new nub version, which `make version`
+// bumps (and which rebuilds the addon). CACHE_SCHEMA busts the
 // cache when the on-disk ENTRY FORMAT changes (v3 = integrity prefix + leading
 // format byte). The fast and compat tiers share this cache: post-extraction they
 // emit byte-identical output for the same (source, ext, tsconfig, pkgType), so a
@@ -887,7 +772,7 @@ export function loadTranspile(url, ext) {
     throw stage3DecoratorError(filePath);
   }
 
-  const result = transformSync(filePath, source, opts);
+  const result = nubNative.transform(filePath, source, opts);
   if (result.errors.length > 0) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");
     throw new Error(`Transpile error in ${filePath}:\n${details}`);

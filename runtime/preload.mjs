@@ -9,10 +9,11 @@
 //
 // THIS file stays the compat path: on 18.19–22.14, `module.registerHooks` does not
 // exist and `require(esm)` is unreliable, so hooks run async in a dedicated loader
-// worker via `module.register`, and the parser is preloaded via dynamic `import()`
-// while we can still `await`. That async machinery is exactly why the compat tier
-// keeps `--import` — its top-level `await` is accepted here (an `--import` ESM
-// module may be async), and the < 22.15 floor has no equivalent sync surface.
+// worker via `module.register`. That async machinery is why the compat tier keeps
+// `--import` — its top-level `await` is accepted here (an `--import` ESM module may
+// be async), and the < 22.15 floor has no equivalent sync surface. (Module-format
+// + decorator detection no longer needs a preloaded JS parser: it is a synchronous
+// native addon call, so there is nothing to `await`-warm-up before hooks run.)
 //
 // Resolution + transpile primitives come from runtime/transform-core.mjs; the
 // non-tier-specific wiring (watch IPC, the CJS require() shim, clobbered-polyfill
@@ -66,10 +67,9 @@ if (__isFastTier) {
 } else if (__isCompatTier) {
   // Compat path: ESM `import` hooks run in a dedicated loader worker thread.
   module.register("./preload-async-hooks.mjs", import.meta.url);
-  // The main-thread CommonJS require() shim's format detection is synchronous and
-  // reaches down to Node 18.19, where `require("oxc-parser")` (ESM-only) fails — so
-  // preload the parser via dynamic import now, while we can still await.
-  await core.ensureParser();
+  // (The main-thread require() shim's module-format + decorator detection is a
+  // synchronous native addon call now — no parser warm-up; the old
+  // `await core.ensureParser()` for the ESM-only oxc-parser is gone.)
   // module.register() is ESM-loader-only; augment CommonJS require() on the main
   // thread too. The compat tier has no sync registerHooks, so require()'d `.ts`
   // MUST be transpiled by the classic require.extensions shim — hence it always

@@ -6,10 +6,12 @@
 //! function transpiles TS/JSX, mirroring `oxc-transform@0.132.0`'s `transformSync`
 //! for byte-for-byte emit parity.
 
+mod detect;
 mod transform;
 
 use napi_derive::napi;
 
+pub use detect::detect_module_info;
 pub use transform::transform;
 
 /// Parse YAML source into a JS value.
