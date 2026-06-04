@@ -285,10 +285,9 @@ function RunFileBand() {
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub --version' },
-                  { out: 'nub 0.0.14' },
                   { cmd: 'nub app.ts' },
-                  { out: '# oxc transpiles, then stock node runs it' },
+                  { out: '# oxc transpiles in memory, then stock node runs it' },
+                  { out: 'running on node v26.2.0' },
                 ]}
               />
             }
@@ -311,8 +310,7 @@ function RunFileBand() {
             visual={
               <Source
                 lang="tsx"
-                code={`// invoice.ts
-import { Model } from "./base"   // extensionless → ./base.ts
+                code={`import { Model } from "./base"   // extensionless → ./base.ts
 
 enum Status { Draft, Sent, Paid }
 
