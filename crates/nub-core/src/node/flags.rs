@@ -29,6 +29,22 @@ pub fn webstorage_supported(node_version: &NodeVersion) -> bool {
     *node_version >= MIN_WEBSTORAGE
 }
 
+/// `--test-coverage-exclude=<glob>` landed in Node 22.5.0. Below it the flag does
+/// not exist: as argv it's a "bad option", and in NODE_OPTIONS it's "not allowed in
+/// NODE_OPTIONS" — either way a hard startup abort. nub injects it to keep its own
+/// preloaded runtime/*.mjs out of a user's `--experimental-test-coverage` report,
+/// but that exclude MUST be gated on this floor — otherwise every nub invocation on
+/// 18.19–22.4 dies before running a line (the NODE_OPTIONS form is unconditional).
+/// On the compat tier below 22.5 the exclude is simply skipped: nub's runtime shows
+/// up in the (rare) coverage report — a cosmetic aggregate quirk, vastly better than
+/// refusing to start. Verified against real Node 18.19 / 20.11 / 22.15.
+pub const MIN_TEST_COVERAGE_EXCLUDE: NodeVersion = NodeVersion::new(22, 5, 0);
+
+/// Whether the target Node supports `--test-coverage-exclude` (argv or NODE_OPTIONS).
+pub fn test_coverage_exclude_supported(node_version: &NodeVersion) -> bool {
+    *node_version >= MIN_TEST_COVERAGE_EXCLUDE
+}
+
 /// Experimental flags to unflag per the v0.1 set.
 /// Each entry: (flag, min Node version where the flag exists, max
 /// version where it's still behind the flag — None means "still
@@ -242,5 +258,20 @@ mod tests {
         assert!(webstorage_supported(&v(22, 4, 0)));
         assert!(webstorage_supported(&v(22, 13, 0)));
         assert!(webstorage_supported(&v(24, 0, 0)));
+    }
+
+    #[test]
+    fn test_coverage_exclude_gated_to_22_5() {
+        // `--test-coverage-exclude` was added in Node 22.5.0. Below it the flag is
+        // rejected in NODE_OPTIONS ("not allowed in NODE_OPTIONS") — and because nub
+        // injects it UNCONDITIONALLY whenever a preload is present, an ungated inject
+        // aborts EVERY nub invocation on the entire 18.19–22.4 range (the most common
+        // LTS lines). Callers must gate on this; this guards the regression.
+        assert!(!test_coverage_exclude_supported(&v(18, 19, 0)));
+        assert!(!test_coverage_exclude_supported(&v(20, 11, 0)));
+        assert!(!test_coverage_exclude_supported(&v(22, 4, 0)));
+        assert!(test_coverage_exclude_supported(&v(22, 5, 0)));
+        assert!(test_coverage_exclude_supported(&v(22, 15, 0)));
+        assert!(test_coverage_exclude_supported(&v(24, 0, 0)));
     }
 }

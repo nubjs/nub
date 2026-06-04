@@ -56,9 +56,13 @@ common.installWatchReporting(core);
 if (__isFastTier) {
   // Defensive only — the Rust path uses preload.cjs for 22.15+. If reached, the
   // sync registerHooks API is available; register synchronously to stay correct.
+  // Match preload.cjs: NO classic require.extensions shim on the fast tier — the
+  // sync registerHooks load hook + native require(esm) cover require()'d `.ts`
+  // (incl. ES modules); the classic shim would shadow require(esm) and throw a
+  // bogus ERR_REQUIRE_ESM on 22.15–22.17.
   const { resolve, load } = common.makeHooks(core, process.env.WATCH_REPORT_DEPENDENCIES === "1");
   module.registerHooks({ resolve, load });
-  common.installCjsRequireHooks(core, !__hasNativeTs);
+  common.installCjsRequireHooks(core, false);
 } else if (__isCompatTier) {
   // Compat path: ESM `import` hooks run in a dedicated loader worker thread.
   module.register("./preload-async-hooks.mjs", import.meta.url);
@@ -67,8 +71,15 @@ if (__isFastTier) {
   // preload the parser via dynamic import now, while we can still await.
   await core.ensureParser();
   // module.register() is ESM-loader-only; augment CommonJS require() on the main
-  // thread too. The compat tier never has native `.ts`, so it always installs the
-  // classic transpile shim (CJS transpile + clean error for ES-module require()).
+  // thread too. The compat tier has no sync registerHooks, so require()'d `.ts`
+  // MUST be transpiled by the classic require.extensions shim — hence it always
+  // installs (true). KNOWN LIMITATION: on the require(esm)-capable slice of the
+  // compat tier (22.12–22.14) an explicit `require('./esm-module.ts')` still
+  // surfaces ERR_REQUIRE_ESM, because the classic shim shadows native require(esm)
+  // and can't delegate to it from inside `_compile`. ESM `.ts` ENTRIES and `import`
+  // of ESM `.ts` both work (they ride the ESM loader); only require()-of-ESM-`.ts`
+  // is affected — an uncommon pattern. Below 22.12 the error is fully correct
+  // (no require(esm) at all). Fast tier (22.15+) has none of this — see preload.cjs.
   common.installCjsRequireHooks(core, !__hasNativeTs);
 } else {
   process.stderr.write(

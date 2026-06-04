@@ -102,14 +102,18 @@ if (!requireEsmDisabled) {
   // ── Hook registration (fast tier: sync, in-thread) ────────────────
   // Same realm as user code; covers `import` and (Node 24+) `require`.
   // registerHooks' require RESOLUTION is incomplete on 22.15–24, so also install
-  // the main-thread CJS resolve shim. Install the classic require.extensions
-  // transpile shim only on 22.15–22.17 (no native `.ts`); on 22.18+/24+ skip it so
-  // Node's native require() of `.ts` — incl. ES modules — isn't shadowed (see
-  // installCjsRequireHooks).
-  const __hasNativeTs = !!process.features?.typescript;
+  // the main-thread CJS resolve shim (its _resolveFilename half, always on). We do
+  // NOT install the classic require.extensions transpile shim on the fast tier: the
+  // sync registerHooks LOAD hook already transpiles require()'d `.ts` (CJS content,
+  // tsconfig paths, .tsx, extensionless — all verified), and native require(esm)
+  // (>= 22.12, always present at the 22.15+ fast floor) loads ES-module `.ts`. The
+  // classic require.extensions['.ts'] hook would SHADOW that native require(esm) and
+  // throw a bogus ERR_REQUIRE_ESM on every ESM `.ts` entry on 22.15–22.17 (where
+  // process.features.typescript is still false) — so it must stay off here. On
+  // 22.18+/24+ this was already the behavior (native-TS → false); now it's uniform.
   const { resolve, load } = common.makeHooks(core, watchReporting);
   module_.registerHooks({ resolve, load });
-  common.installCjsRequireHooks(core, !__hasNativeTs);
+  common.installCjsRequireHooks(core, false);
 
   // ── Sync polyfills + lazy ESM-side-effect polyfills ───────────────
   installSyncPolyfills(__preloadedPolyfills);

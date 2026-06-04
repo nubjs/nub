@@ -251,12 +251,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // ABSOLUTE nub runtime dir (the directory holding the preload we just
         // injected) — never a broad `**/runtime/**`, which would also exclude a
         // user's own `runtime/` source.
-        if let Some(glob) = coverage_exclude_glob(
-            config.user_args,
-            node_options.as_deref(),
-            preload.as_deref(),
-        ) {
-            cmd.arg(glob);
+        if flags::test_coverage_exclude_supported(&config.node.version) {
+            if let Some(glob) = coverage_exclude_glob(
+                config.user_args,
+                node_options.as_deref(),
+                preload.as_deref(),
+            ) {
+                cmd.arg(glob);
+            }
         }
 
         // Compile-cache pollution fix (R8). When the user sets NODE_COMPILE_CACHE
@@ -311,15 +313,20 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         //
         // It is NOT gated on `coverage_active`: the parent nub can't observe that the
         // grandchild will enable coverage (the flag lives in the fixture's own argv),
-        // so we must inject the exclude unconditionally whenever a preload is present.
-        // Node accepts `--test-coverage-exclude` in NODE_OPTIONS and treats it as a
-        // harmless no-op when coverage is off — verified.
-        if let Some(ref p) = preload {
-            if let Some(runtime_dir) = Path::new(p).parent() {
-                node_opts_parts.push(format!(
-                    "--test-coverage-exclude={}/**",
-                    runtime_dir.display()
-                ));
+        // so we inject the exclude whenever a preload is present AND the target Node
+        // actually has the flag. Node >= 22.5 accepts `--test-coverage-exclude` in
+        // NODE_OPTIONS and treats it as a harmless no-op when coverage is off; below
+        // 22.5 the flag does not exist and is REJECTED in NODE_OPTIONS ("not allowed
+        // in NODE_OPTIONS"), aborting every nub invocation before it runs a line — so
+        // it must be version-gated exactly like --disable-warning / webstorage.
+        if flags::test_coverage_exclude_supported(&config.node.version) {
+            if let Some(ref p) = preload {
+                if let Some(runtime_dir) = Path::new(p).parent() {
+                    node_opts_parts.push(format!(
+                        "--test-coverage-exclude={}/**",
+                        runtime_dir.display()
+                    ));
+                }
             }
         }
         if let Some(existing) = existing_opts {
