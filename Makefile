@@ -84,12 +84,14 @@ version:
 		"
 	@echo "✓ All packages, Cargo.toml, and runtime/version.mjs set to $(V)"
 
-# Verify version consistency across npm packages, Cargo.toml, and preload.mjs,
-# AND that oxc-transform / oxc-parser / @oxc-project/runtime are pinned to an
-# exact version and all share the same oxc version.
-# Canonical source is npm/nub/package.json. Non-zero exit on any mismatch — this
-# is the pre-release gate (release.yml runs it before building/publishing). The
-# oxc exact-pin check guards the transpile-cache invariant (A12): NUB_VERSION is
+# Verify version consistency across npm packages, Cargo.toml, and version.mjs,
+# AND that @oxc-project/runtime (the emit-helper runtime) is exact-pinned and
+# matches the oxc version compiled into nub-native (Cargo.toml `oxc = "=X.Y.Z"`).
+# The transpiler + parser are now native (crates/nub-native), so oxc-transform /
+# oxc-parser are no longer npm deps; only the helper runtime is, and it must move
+# in lockstep with the addon's oxc. Canonical source is npm/nub/package.json.
+# Non-zero exit on any mismatch — the pre-release gate (release.yml runs it before
+# building/publishing). Guards the transpile-cache invariant (A12): NUB_VERSION is
 # the sole cache key, valid only because oxc cannot float without a version bump.
 version-check:
 	@node -e " \
@@ -114,17 +116,15 @@ version-check:
 		if (!pm) errors.push('runtime/version.mjs: NUB_VERSION not found'); \
 		else if (pm[1] !== v) errors.push('runtime/version.mjs NUB_VERSION is ' + pm[1] + ', expected ' + v); \
 		const dev = JSON.parse(fs.readFileSync('package.json', 'utf8')); \
-		const oxc = dev.dependencies || {}; \
-		const oxcPkgs = ['oxc-transform', 'oxc-parser', '@oxc-project/runtime']; \
-		for (const d of oxcPkgs) { \
-		const spec = oxc[d]; \
-		if (!spec) errors.push('package.json: ' + d + ' missing from dependencies'); \
-		else if (!/^[0-9]/.test(spec) || /[~^<>*]/.test(spec) || spec.includes(' ') || spec.includes('||')) errors.push('package.json: ' + d + ' must be an EXACT version, not a range (got ' + spec + '): A12 transpile-cache-key proxy, must not float'); \
-		} \
-		const oxcVers = oxcPkgs.map((d) => oxc[d]).filter(Boolean); \
-		if (oxcVers.length && !oxcVers.every((v) => v === oxcVers[0])) errors.push('package.json: ' + oxcPkgs.join(' / ') + ' must all pin the SAME oxc version (got ' + oxcVers.join(', ') + ')'); \
+		const deps = dev.dependencies || {}; \
+		const rt = deps['@oxc-project/runtime']; \
+		if (!rt) errors.push('package.json: @oxc-project/runtime missing from dependencies'); \
+		else if (!/^[0-9]/.test(rt) || /[~^<>*]/.test(rt) || rt.includes(' ') || rt.includes('||')) errors.push('package.json: @oxc-project/runtime must be an EXACT version, not a range (got ' + rt + '): A12 transpile-cache-key proxy, must not float'); \
+		const om = cargo.match(/^oxc = \\{ version = \x22=([^\x22]*)\x22/m); \
+		if (!om) errors.push('Cargo.toml: oxc workspace dependency (=X.Y.Z pin) not found'); \
+		else if (rt && rt !== om[1]) errors.push('package.json @oxc-project/runtime (' + rt + ') must match the oxc crate compiled into nub-native (Cargo.toml oxc =' + om[1] + ') — the emit helpers and the transformer are one oxc release'); \
 		if (errors.length) { console.error('Version mismatch:\\n  ' + errors.join('\\n  ')); process.exit(1); } \
-		else { console.log('✓ All npm packages, Cargo.toml, runtime/version.mjs at v' + v + '; oxc-transform pinned exact'); }"
+		else { console.log('✓ All npm packages, Cargo.toml, runtime/version.mjs at v' + v + '; @oxc-project/runtime matches nub-native oxc pin (' + (om ? om[1] : '?') + ')'); }"
 
 npm-build: build
 	./npm/build-local.sh
