@@ -916,6 +916,14 @@ pub fn version_string(node_version: Option<NodeVersion>) -> String {
 mod tests {
     use super::*;
 
+    // `ctrl_c::CURRENT_CHILD` is a process-global AtomicU32. The two tests that
+    // exercise it (`ctrl_c_forwards_*` and `diagnostic_signal_*`) therefore race
+    // when cargo runs them on parallel threads — one test's `track(<real pid>)`
+    // flips the global out from under the other's `current()` assertion (an
+    // intermittent CI failure). Serialize them behind this guard. Poison-tolerant
+    // so a panic in one doesn't cascade into a spurious failure in the other.
+    static CTRL_C_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn version_string_with_node() {
         let s = version_string(Some(NodeVersion::new(22, 15, 0)));
@@ -951,10 +959,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ctrl_c_forwards_to_the_latest_child_not_the_first() {
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // The bug A20 fixes: a second spawn's set_handler no-op'd, so the single
         // handler kept the first (dead) pid. Now the global pid updates per spawn,
         // so the handler always targets the current child; untrack clears it so a
         // stray SIGINT after exit is a no-op rather than a kill of a reused pid.
+        ctrl_c::untrack(); // reset the shared global before asserting on it
         ctrl_c::track(111);
         assert_eq!(ctrl_c::current(), 111);
         ctrl_c::track(222);
@@ -974,6 +984,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn diagnostic_signal_reaches_child_and_parent_survives() {
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // SIGUSR2 is the diagnostic-signal exemplar (Node's --report-signal default,
         // and what nodemon sends). Default disposition is TERMINATE the receiver, so
         // without nub installing a handler this signal would kill the resident parent
