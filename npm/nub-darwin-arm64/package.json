@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/nub-darwin-arm64",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "description": "Nub binary for macOS ARM64 (Apple Silicon)",
   "license": "MIT",
   "repository": "https://github.com/nub-js/nub",
