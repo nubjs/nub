@@ -13,8 +13,21 @@
 // the child crashes (observed against test-esm-loader-chaining). `process
 // .getBuiltinModule` fetches the real builtin synchronously off the loader
 // graph, bypassing the user chain entirely — same fix transform-core.mjs uses.
-const { Worker: NodeWorker, parentPort, isMainThread } = process.getBuiltinModule("node:worker_threads");
-const { fileURLToPath } = process.getBuiltinModule("node:url");
+// `process.getBuiltinModule` doesn't exist below Node 22.3 / 20.16 / 18.20.4 (it
+// threw `TypeError: ... is not a function` there). Fall back to a createRequire
+// bootstrapped from a single static `node:module` import. The actual builtins below
+// are still fetched through `__getBuiltin` — getBuiltinModule on new Node, CJS
+// `__require` on old — and BOTH bypass the user ESM loader chain (the whole reason
+// this file avoids a static `import` of node:worker_threads). Only the bootstrap
+// touches node:module, which user loader hooks don't intercept (unlike the mockable
+// node:worker_threads the chaining test targets), so the bypass guarantee holds.
+import { createRequire as __bootstrapCreateRequire } from "node:module";
+const __getBuiltin =
+  typeof process.getBuiltinModule === "function"
+    ? (id) => process.getBuiltinModule(id)
+    : ((__r) => (id) => __r(id))(__bootstrapCreateRequire(import.meta.url));
+const { Worker: NodeWorker, parentPort, isMainThread } = __getBuiltin("node:worker_threads");
+const { fileURLToPath } = __getBuiltin("node:url");
 
 // `ErrorEvent` only became a global in Node 26. On the 22/24 floor it is
 // undefined, so `new ErrorEvent(...)` below would throw a ReferenceError inside
