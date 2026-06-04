@@ -34,6 +34,21 @@ function Mono({ children }: { children: ReactNode }) {
   return <span className="font-mono text-[0.84em] text-fd-foreground">{children}</span>;
 }
 
+/* An external link to upstream docs (Node, oxc). Neutral underline that brightens
+   on hover; opens in a new tab. Wrap a <Mono> inside for a linked code term. */
+function DocLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="underline decoration-fd-border underline-offset-4 hover:decoration-fd-muted-foreground"
+    >
+      {children}
+    </a>
+  );
+}
+
 /* Inline code sized for a display heading: monospace, a touch smaller than the
    serif around it, with a faint tinted pill so a command reads as a command. */
 function HeadingCode({ children }: { children: ReactNode }) {
@@ -136,13 +151,13 @@ function HeroPill() {
   return (
     <Link
       href="/blog/introducing-nub"
-      className="group inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/50 py-1 pl-1 pr-3 text-sm leading-none text-fd-muted-foreground transition hover:border-ember/50"
+      className="group inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/50 py-1 pl-1 pr-3 text-sm leading-none text-fd-muted-foreground hover:border-ember/50"
     >
       <span className="rounded-full bg-ember px-2.5 py-0.5 font-mono text-[0.7rem] font-medium uppercase tracking-wider text-[#160c08]">
         New
       </span>
       <span className="translate-y-px text-fd-foreground">Introducing Nub</span>
-      <span aria-hidden className="translate-y-px text-fd-muted-foreground transition group-hover:translate-x-0.5">
+      <span aria-hidden className="translate-y-px text-fd-muted-foreground group-hover:translate-x-0.5">
         →
       </span>
     </Link>
@@ -156,7 +171,7 @@ function HeroH1({ className = '' }: { className?: string }) {
     >
       The unified JavaScript toolkit that{' '}
       <span className="italic text-ember">augments</span> Node.js instead of trying
-      to replace it.
+      to replace it
     </h1>
   );
 }
@@ -187,16 +202,18 @@ function Hero() {
       />
       {/* Wider than the rest of the page (smaller gutters) so the H1 has room
           and never breaks past 3 lines. Stacks to one column below xl. */}
-      <div className="relative mx-auto grid w-full max-w-[88rem] items-center gap-12 px-6 pt-24 pb-32 sm:px-8 md:pb-80 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="min-w-0">
-          <HeroPill />
-          <HeroH1 className="mt-6 text-4xl md:text-5xl" />
-          <HeroSub className="mt-6" />
-          <div className="mt-9">
-            <InstallTabs />
+      <div className="relative mx-auto flex min-h-[calc(100svh-3.5rem)] w-full max-w-[88rem] items-center px-6 py-16 sm:px-8">
+        <div className="grid w-full items-center gap-12 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:gap-20">
+          <div className="min-w-0">
+            <HeroPill />
+            <HeroH1 className="mt-6 text-4xl md:text-5xl" />
+            <HeroSub className="mt-6" />
+            <div className="mt-9">
+              <InstallTabs />
+            </div>
           </div>
+          <Terminal size="lg" className="w-full min-w-0 max-w-xl xl:max-w-none" lines={HERO_LINES_LONG} />
         </div>
-        <Terminal size="lg" className="w-full min-w-0 max-w-xl xl:max-w-none" lines={HERO_LINES_LONG} />
       </div>
     </section>
   );
@@ -210,7 +227,7 @@ function Hero() {
 function Toolkit() {
   return (
     <section className="border-b border-fd-border">
-      <Container className="py-28 md:py-80">
+      <Container className="py-28 md:py-[180px]">
         <div className="mx-auto max-w-2xl text-center">
           <p className="eyebrow text-fd-muted-foreground">The toolchain</p>
           <h2 className="mt-3 text-balance font-display text-3xl font-medium leading-tight md:text-4xl">
@@ -234,15 +251,15 @@ function Toolkit() {
 function RunFileBand() {
   return (
     <section className="border-b border-fd-border">
-      <Container className="py-32 md:py-80">
+      <Container className="py-32 md:py-[180px]">
         <BandHeader
           command={'nub <file>'}
           title="A TypeScript-first Node.js"
           subhead={
             <>
               Nub adds support for TypeScript, JSX, decorators, <Mono>.env</Mono>{' '}files,
-              YAML/TOML imports, and modern APIs syntax on top of stock Node. Powered by
-              Rust and oxc.
+              YAML/TOML imports, and modern APIs syntax on top of stock Node. Flag-for-flag
+              compatible with <Mono>node</Mono>. Powered by Rust and oxc.
             </>
           }
           accent="ember"
@@ -251,21 +268,27 @@ function RunFileBand() {
         <div className="mt-10 divide-y divide-fd-border/60">
           <Feature
             accent="ember"
-            eyebrow="Drop-in"
-            title={<>Flag-for-flag compatible with <HeadingCode>node</HeadingCode></>}
+            eyebrow="Architecture"
+            title="Transpiled by Rust, run on real Node"
             body={
               <>
-                Nub is a true drop-in replacement for <Mono>node</Mono>. Same flags, same
-                argv, same runtime behavior.
+                Nub transpiles your code in memory with{' '}
+                <DocLink href="https://oxc.rs">oxc</DocLink>{' '}
+                (compiled into a{' '}
+                <DocLink href="https://nodejs.org/api/n-api.html">native Node addon</DocLink>) and
+                runs the output on the stock{' '}
+                <Mono>node</Mono>{' '}binary — there&rsquo;s no Nub runtime, just real Node.
+                Your code is run by the version of Node your project expects. If unavailable,
+                it&rsquo;s installed on the fly. Runs on Node.js 18 LTS and newer.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub --inspect server.ts', comment: 'attach a debugger' },
-                  { cmd: 'nub --import ./instrument.js app.ts' },
-                  { cmd: 'nub app.ts --port 3000', comment: 'argv passes through' },
-                  { cmd: 'echo "1+1" | nub -', comment: 'read from stdin' },
+                  { cmd: 'nub --version' },
+                  { out: 'nub 0.0.14' },
+                  { cmd: 'nub app.ts' },
+                  { out: '# oxc transpiles, then stock node runs it' },
                 ]}
               />
             }
@@ -278,25 +301,24 @@ function RunFileBand() {
             title="Full TypeScript support, not just type stripping"
             body={
               <>
-                Recent versions of Node support type stripping. Nub has 100% TypeScript
-                compatibility, supporting non-erasable syntax (e.g. enums) that Node
-                doesn&rsquo;t.
+                Recent versions of Node support{' '}
+                <DocLink href="https://nodejs.org/api/typescript.html">type stripping</DocLink>,
+                which erases annotations but rejects non-erasable syntax. Nub&rsquo;s load hook
+                transpiles each file through its native addon instead, so enums, parameter
+                properties, and extensionless imports that Node doesn&rsquo;t allow all just work.
               </>
             }
             visual={
               <Source
                 lang="tsx"
-                code={`// app.ts
-import { logger } from "@/logger"   // tsconfig path alias
-import { render } from "./invoice"  // extensionless → .ts
+                code={`// invoice.ts
+import { Model } from "./base"   // extensionless → ./base.ts
 
-enum Status { Draft, Sent, Paid }   // node's stripper errors here
+enum Status { Draft, Sent, Paid }
 
-class Invoice {
-  constructor(public id: string) {} // parameter property
-}
-
-logger.info(render(new Invoice("INV-1")))`}
+class Invoice extends Model {
+  constructor(public status = Status.Draft) {} // parameter property
+}`}
               />
             }
           />
@@ -308,9 +330,12 @@ logger.info(render(new Invoice("INV-1")))`}
             body={
               <>
                 Nub resolves your <Mono>tsconfig.json</Mono>{' '}(including{' '}
-                <Mono>{'"extends"'}</Mono>) and incorporates it into module resolution.
-                No more <Mono>tsconfig-paths</Mono>{' '}or disagreement between Node.js and
-                your editor.
+                <Mono>{'"extends"'}</Mono>) and feeds its <Mono>paths</Mono>{' '}into Node&rsquo;s own
+                resolver through a{' '}
+                <DocLink href="https://nodejs.org/api/module.html#moduleregisterhooksoptions">
+                  <Mono>module.registerHooks()</Mono>
+                </DocLink>{' '}resolve hook. No more <Mono>tsconfig-paths</Mono>{' '}or disagreement
+                between Node.js and your editor.
               </>
             }
             visual={
@@ -389,9 +414,11 @@ const view = <Hello name="world" /> // JSX in .tsx`}
             body={
               <>
                 Import <Mono>.yml</Mono>, <Mono>.yaml</Mono>, <Mono>.toml</Mono>,{' '}
-                <Mono>.json5</Mono>, and <Mono>.jsonc</Mono>{' '}files directly. Nub uses
-                fast Rust-based loaders to parse the contents and resolve the import to a
-                plain JavaScript object. (Oh, <Mono>.txt</Mono>{' '}works too)
+                <Mono>.json5</Mono>, and <Mono>.jsonc</Mono>{' '}files directly. A{' '}
+                <DocLink href="https://nodejs.org/api/module.html#moduleregisterhooksoptions">
+                  <Mono>module.registerHooks()</Mono>
+                </DocLink>{' '}load hook routes them through fast Rust parsers in Nub&rsquo;s native
+                addon, resolving each import to a plain JavaScript object. (Oh, <Mono>.txt</Mono>{' '}works too)
               </>
             }
             visual={
@@ -413,7 +440,10 @@ import { host, port } from "./config.yaml" // named exports`}
             title="A dependency-aware watch mode"
             body={
               <>
-                Powered by <Mono>node --watch</Mono>, Nub&rsquo;s <Mono>watch</Mono>{' '}command
+                Powered by{' '}
+                <DocLink href="https://nodejs.org/api/cli.html#--watch">
+                  <Mono>node --watch</Mono>
+                </DocLink>, Nub&rsquo;s <Mono>watch</Mono>{' '}command
                 watches for changes to your entrypoint or any file transitively imported.
                 It also adds TypeScript/JSX sourcemap support and watches your <Mono>package.json</Mono>, tsconfigs, and{' '}
                 <Mono>.env</Mono>{' '}files.
@@ -432,11 +462,38 @@ import { host, port } from "./config.yaml" // named exports`}
             }
           />
 
+          <Compatibility />
+
+          <Feature
+            accent="ember"
+            eyebrow="Drop-in"
+            title={<>Flag-for-flag compatible with <HeadingCode>node</HeadingCode></>}
+            body={
+              <>
+                Nub is a true drop-in replacement for <Mono>node</Mono>. Same flags, same
+                argv, same runtime behavior.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  {
+                    cmd: `nub \\
+  --max-old-space-size=4096 \\
+  --inspect \\
+  --import ./instrument.js \\
+  app.ts --port 3000`,
+                  },
+                ]}
+              />
+            }
+          />
+
           <Feature
             accent="ember"
             reverse
             eyebrow="The brand stops at the binary"
-            title="Zero lock-in."
+            title="Zero lock-in"
             body={
               <>
                 Nub is <span className="text-fd-foreground">not a runtime</span>. Your code
@@ -462,7 +519,6 @@ import { host, port } from "./config.yaml" // named exports`}
             }
           />
 
-          <Compatibility />
           <ModernApis />
         </div>
       </Container>
@@ -472,10 +528,10 @@ import { host, port } from "./config.yaml" // named exports`}
 
 /* Modern web-platform + TC39 globals — "browser APIs on the server". */
 const APIS: { name: string; label: string }[] = [
+  { name: 'Web Workers', label: 'Auto-polyfilled' },
   { name: 'Temporal', label: 'Polyfilled < 26' },
   { name: 'URLPattern', label: 'Polyfilled < 24' },
   { name: 'WebSocket', label: 'Polyfilled < 22.5' },
-  { name: 'Worker', label: 'Auto-polyfilled' },
   { name: 'navigator.locks', label: 'Auto-polyfilled' },
   { name: 'localStorage', label: 'Unflagged < 25' },
   { name: 'EventSource', label: 'Auto-unflagged' },
@@ -504,7 +560,7 @@ function ModernApis() {
         {APIS.map((api) => (
           <div
             key={api.name}
-            className="rounded-lg border border-fd-border bg-fd-card/40 px-4 py-3.5 transition hover:border-ember/50"
+            className="rounded-lg border border-fd-border bg-fd-card/40 px-4 py-3.5 hover:border-ember/50"
           >
             <div className="font-mono text-sm text-fd-foreground">{api.name}</div>
             <div className="mt-1 font-mono text-[0.7rem] uppercase tracking-wider text-fd-muted-foreground">
@@ -522,7 +578,7 @@ function ModernApis() {
 function NodeVersionBand() {
   return (
     <section className="border-b border-fd-border">
-      <Container className="py-32 md:py-80">
+      <Container className="py-32 md:py-[180px]">
         <BandHeader
           command="nub node"
           title="A built-in Node version manager"
@@ -550,10 +606,9 @@ function NodeVersionBand() {
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub --which-node' },
-                  { out: 'v26.2.0' },
-                  { out: '  resolved from package.json#engines (>=26)' },
-                  { out: '  ~/.nub/node/26.2.0/bin/node' },
+                  { cmd: 'nub node which' },
+                  { out: '~/.nub/node/26.2.0/bin/node' },
+                  { out: '» resolved from package.json#engines (>=26)' },
                 ]}
               />
             }
@@ -598,7 +653,7 @@ function NodeVersionBand() {
                 lines={[
                   { cmd: 'nub node install 26', comment: 'install a version' },
                   { cmd: 'nub node ls', comment: "what's installed" },
-                  { cmd: 'nub node pin 24', comment: 'write .node-version' },
+                  { cmd: 'nub node pin 26', comment: 'write .node-version' },
                   { cmd: 'nub node uninstall 22', comment: 'remove a version' },
                 ]}
               />
@@ -615,16 +670,15 @@ function NodeVersionBand() {
 function RunScriptBand() {
   return (
     <section className="border-b border-fd-border">
-      <Container className="py-32 md:py-80">
+      <Container className="py-32 md:py-[180px]">
         <BandHeader
           command="nub run"
           title={<>An 18× faster <HeadingCode>pnpm run</HeadingCode></>}
           subhead={
             <>
-              <Mono>npm</Mono>{' '}and <Mono>pnpm</Mono>{' '}boot a full Node process just to
-              look up a script — ~150ms of overhead on every call. Nub is a Rust binary
-              that skips the bootstrap entirely. Removes the perf tax that makes your
-              commands feel sluggish.
+              A drop-in for <Mono>npm run</Mono>{' '}and <Mono>pnpm run</Mono>{' '}with lifecycle
+              hooks, <Mono>npm_*</Mono>{' '}env vars, and arg forwarding all working, minus the
+              per-call Node bootstrap.
             </>
           }
           accent="acid"
@@ -637,9 +691,10 @@ function RunScriptBand() {
             title="Run package.json scripts at the speed of Rust"
             body={
               <>
-                A drop-in for <Mono>npm run</Mono>{' '}and <Mono>pnpm run</Mono>{' '}— lifecycle
-                hooks, <Mono>npm_*</Mono>{' '}env vars, and arg forwarding all work, minus the
-                per-call Node bootstrap.
+                Scripts run with <Mono>npm run</Mono>{' '}or <Mono>pnpm run</Mono>{' '}feel
+                perceptibly laggy due to the 100+ms of overhead introduced by these tools.
+                They&rsquo;re written in Node.js themselves, so they pay the Node.js
+                bootstrap tax.
               </>
             }
             visual={
@@ -656,6 +711,14 @@ function RunScriptBand() {
                     { cmd: 'pnpm run echo-hi', ms: 161, ratio: 18 },
                   ]}
                 />
+                <a
+                  href="https://github.com/nub-js/nub/tree/main/benchmarks"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-5 inline-block font-mono text-[0.7rem] uppercase tracking-[0.14em] text-sky underline underline-offset-4"
+                >
+                  Reproduce →
+                </a>
               </div>
             }
           />
@@ -663,8 +726,8 @@ function RunScriptBand() {
           <Feature
             accent="acid"
             reverse
-            eyebrow="Monorepo"
-            title="Every package, in dependency order"
+            eyebrow="Workspaces"
+            title="Monorepo-friendly"
             body={
               <>
                 Nub implements pnpm&rsquo;s <Mono>--filter</Mono>{' '}grammar and{' '}
@@ -695,7 +758,7 @@ function RunScriptBand() {
 function NubxBand() {
   return (
     <section className="border-b border-fd-border">
-      <Container className="py-32 md:py-80">
+      <Container className="py-32 md:py-[180px]">
         <BandHeader
           command="nubx"
           title={<>A 20× faster <HeadingCode>npx</HeadingCode></>}
@@ -736,6 +799,14 @@ function NubxBand() {
                     { cmd: 'npx esbuild --version', ms: 226, ratio: 20 },
                   ]}
                 />
+                <a
+                  href="https://github.com/nub-js/nub/tree/main/benchmarks"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-5 inline-block font-mono text-[0.7rem] uppercase tracking-[0.14em] text-sky underline underline-offset-4"
+                >
+                  Reproduce →
+                </a>
               </div>
             }
           />
@@ -827,10 +898,8 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Running against Deno&rsquo;s Node-compat suite, node-relative. The 1% that differs — a
-          handful of tests pinning Node&rsquo;s exact internals (error wording, the built-in module
-          list), which shift when TypeScript and source maps are on.{' '}
-          <span className="italic">Deliberate</span>, documented — nothing missing.{' '}
+          Deno&rsquo;s Node-compat suite, node-relative. The 1% gap is unavoidable divergence due
+          to Nub&rsquo;s module-hook preload, unflagging of experimental features, and use of native addons.{' '}
           <a
             href="https://github.com/nub-js/nub/tree/main/tests/cross-runtime"
             target="_blank"
@@ -867,9 +936,9 @@ function FinalCta() {
             'radial-gradient(50% 60% at 50% 120%, rgba(255,93,59,0.14), transparent 70%)',
         }}
       />
-      <Container className="relative py-32 text-center md:py-80">
+      <Container className="relative py-32 text-center md:py-[180px]">
         <h2 className="text-balance font-display text-4xl font-medium leading-[1.05] md:text-6xl">
-          The toolkit that <span className="italic text-ember">augments</span> Node.js.
+          The toolkit that <span className="italic text-ember">augments</span> Node.js
         </h2>
         <div className="mt-10 flex flex-col items-center">
           <InstallTabs className="mx-auto" />

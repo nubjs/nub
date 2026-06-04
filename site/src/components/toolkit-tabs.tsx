@@ -38,14 +38,17 @@ const PIECES: {
     title: 'A TypeScript-first Node.js',
     blurb: (
       <>
-        Run <Mono>.ts</Mono>, <Mono>.tsx</Mono>, and <Mono>.js</Mono> on stock Node — with
-        TypeScript, JSX, decorators, <Mono>.env</Mono> files, and modern APIs, no build step.
+        Run <Mono>.ts</Mono>, <Mono>.tsx</Mono>, and <Mono>.jsx</Mono> on stock Node with full{' '}
+        <Mono>tsconfig.json</Mono> support, <Mono>.env</Mono> loading, and unflagged support
+        for modern syntax and APIs.
       </>
     ),
     replaces: ['tsx', 'ts-node', 'tsconfig-paths', 'dotenv'],
     lines: [
-      { cmd: 'nub index.ts', comment: 'run a TypeScript file' },
-      { cmd: 'nub watch src/server.ts', comment: 'restart on changes' },
+      { out: '# run a TypeScript file' },
+      { cmd: 'nub index.ts' },
+      { out: '# restart on changes' },
+      { cmd: 'nub watch src/server.ts' },
     ],
   },
   {
@@ -55,14 +58,16 @@ const PIECES: {
     title: 'An 18× faster pnpm run',
     blurb: (
       <>
-        A drop-in for <Mono>npm run</Mono> and <Mono>pnpm run</Mono> — lifecycle hooks, env
+        A drop-in for <Mono>npm run</Mono> and <Mono>pnpm run</Mono> with lifecycle hooks, env
         vars, and workspaces, minus the per-call Node bootstrap.
       </>
     ),
     replaces: ['npm run', 'pnpm run'],
     lines: [
-      { cmd: 'nub run dev', comment: 'run a package.json script' },
-      { cmd: 'nub -r run build', comment: 'every workspace, in order' },
+      { out: '# run a package.json script' },
+      { cmd: 'nub run dev' },
+      { out: '# every workspace, in dependency order' },
+      { cmd: 'nub -r run build' },
     ],
   },
   {
@@ -78,15 +83,17 @@ const PIECES: {
     ),
     replaces: ['npx', 'pnpm exec'],
     lines: [
-      { cmd: 'nubx prisma generate', comment: 'run a local CLI, fast' },
-      { cmd: 'nubx eslint .', comment: "your install's exact binary" },
+      { out: '# run a local CLI, fast' },
+      { cmd: 'nubx prisma generate' },
+      { out: "# your install's exact binary" },
+      { cmd: 'nubx eslint .' },
     ],
   },
   {
     accent: 'orchid',
     command: 'nub node',
-    label: 'Version manager',
-    title: 'A built-in version manager',
+    label: 'Node version manager',
+    title: 'A built-in Node version manager',
     blurb: (
       <>
         Reads <Mono>.node-version</Mono> / <Mono>.nvmrc</Mono> and installs the right Node
@@ -95,9 +102,9 @@ const PIECES: {
     ),
     replaces: ['nvm', 'fnm'],
     lines: [
-      { cmd: 'echo 24 > .node-version' },
+      { cmd: 'echo 26 > .node-version' },
       { cmd: 'nub hello.ts' },
-      { out: 'Installing Node 24 from nodejs.org…' },
+      { out: 'Installing Node 26 from nodejs.org…' },
       { out: 'Hello world!' },
     ],
   },
@@ -134,7 +141,7 @@ export function ToolkitTabs() {
                 role="tab"
                 aria-selected={on}
                 onClick={() => setActive(i)}
-                className={`rounded-lg border px-4 py-1.5 text-sm font-medium ${t.text} ${
+                className={`rounded-lg border px-4 py-1.5 text-sm font-normal ${t.text} ${
                   on ? t.active : `border-transparent ${t.hover}`
                 }`}
               >
@@ -146,7 +153,7 @@ export function ToolkitTabs() {
       </div>
 
       {/* Horizontal panel — same shape as the band subsections below. */}
-      <div className="mt-12 grid items-center gap-10 lg:grid-cols-2">
+      <div className="mt-12 grid items-center gap-10 lg:min-h-[244px] lg:grid-cols-2">
         <div className="min-w-0">
           <span
             className={`inline-flex items-center gap-2 rounded-full border bg-fd-card/50 px-3.5 py-1 font-mono text-sm ${tab.pill}`}

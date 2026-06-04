@@ -30,7 +30,7 @@ const plexMono = IBM_Plex_Mono({
   weight: ['400', '500', '600'],
 });
 
-const TITLE = 'Nub — a fast, Bun-like toolkit for Node.js';
+const TITLE = 'Nub — a fast toolkit for Node.js';
 const DESCRIPTION =
   'Nub is a Rust CLI that augments the Node you already have: TypeScript-first execution, a faster script runner, and a fast bin runner. Zero lock-in.';
 const SITE_URL = 'https://nubjs.com';

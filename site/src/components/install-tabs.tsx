@@ -46,7 +46,7 @@ export function InstallTabs({ className = '' }: { className?: string }) {
             role="tab"
             aria-selected={active === t.id}
             onClick={() => setActive(t.id)}
-            className={`rounded-md px-3.5 py-1.5 font-mono text-xs leading-none transition ${
+            className={`rounded-md px-3.5 py-1.5 font-mono text-xs leading-none ${
               active === t.id
                 ? 'bg-fd-muted text-fd-foreground'
                 : 'text-fd-muted-foreground hover:text-fd-foreground'
@@ -61,11 +61,11 @@ export function InstallTabs({ className = '' }: { className?: string }) {
         type="button"
         onClick={copy}
         aria-label={`Copy: ${command}`}
-        className="group flex w-full items-center gap-3 rounded-b-lg border border-fd-border bg-fd-card/60 px-5 py-4 text-left font-mono text-[0.95rem] text-fd-foreground backdrop-blur transition hover:border-ember/50 hover:bg-ember/[0.06]"
+        className="group flex w-full items-center gap-3 rounded-b-lg border border-fd-border bg-fd-card/60 px-5 py-4 text-left font-mono text-[0.95rem] text-fd-foreground backdrop-blur hover:border-ember/50 hover:bg-ember/[0.06]"
       >
         <span className="select-none text-ember">$</span>
         <span className="min-w-0 flex-1 truncate">{command}</span>
-        <span className="inline-flex w-4 shrink-0 justify-center text-fd-muted-foreground transition group-hover:text-ember">
+        <span className="inline-flex w-4 shrink-0 justify-center text-fd-muted-foreground group-hover:text-ember">
           {copied ? (
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path d="M20 6 9 17l-5-5" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
