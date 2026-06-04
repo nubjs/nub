@@ -21,7 +21,13 @@ doctest = false
 [dependencies]
 napi.workspace = true
 napi-derive.workspace = true
-serde_json.workspace = true
+# `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed)
+# rather than sorting keys. This is load-bearing for `tsconfig_hash` byte-parity:
+# the old JS computed the cache-key component as `JSON.stringify(compilerOptions)`
+# over the get-tsconfig-normalized object, whose key order is the JSONC-parse +
+# extends-merge + normalize INSERTION order. Re-serializing here must reproduce
+# that order exactly, or every transpile-cache key shifts.
+serde_json = { workspace = true, features = ["preserve_order"] }
 json5.workspace = true
 jsonc-parser.workspace = true
 toml.workspace = true
@@ -32,6 +38,11 @@ oxc.workspace = true
 oxc_napi.workspace = true
 oxc_sourcemap.workspace = true
 rustc-hash.workspace = true
+# tsconfig discovery/parse/extends + the transpile cache (moved in-process from
+# the get-tsconfig npm package and the JS cache). serde drives the RawTsconfig /
+# CompilerOptions deserialization; sha2 computes the cache key + integrity prefix.
+serde.workspace = true
+sha2.workspace = true
 
 [build-dependencies]
 napi-build = "2"
