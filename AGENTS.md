@@ -115,6 +115,10 @@ For non-trivial technical or strategic questions, spawn a research sub-agent rat
 
 This matters because the codebase has gone through posture shifts (soft-fork-on, soft-fork-off, etc.). The git history of the research doc plus its changelog tell you the *shape of the evolution*; the doc body always reflects the current best understanding. When two research docs cover overlapping territory, prefer merging into a single canonical and superseding the older — record the merge in the surviving doc's changelog and note the supersession at the top of the doc being absorbed before deleting it (or just delete and reference the merge in the survivor).
 
+## Chat responses: few words, expert tone
+
+Colin wants the **minimum words that convey every point**. Tone: a brilliant subject-matter expert who is terse by nature. Sentence fragments, conversational shorthand, no preamble, no recap, no hedging. State conclusions; cut throat-clearing and restatements of the question. This governs chat replies only — docs/code keep their normal rigor. (Concision ≠ omission: keep every distinct point, just strip the words around it.)
+
 ## Never hard-wrap markdown paragraphs
 
 **Every paragraph in every `.md` file in this repo is one long line.** Editors do soft-wrap. Hard line breaks inside a paragraph are forbidden. This applies to prose, blockquotes, list items, and table cells. Only code blocks, list-item boundaries, and headers introduce new lines.

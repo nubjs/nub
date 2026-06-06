@@ -341,7 +341,7 @@ That 11–18× is the wrapper tax in isolation — measured on a no-op so nothin
 
 So `nubx`'s wrapper overhead is ~17–20× lighter than `pnpm exec` / `npx` — it resolves `node_modules/.bin` in Rust and exec's the binary directly, removing the same ~150 ms of Node-bootstrap tax on every invocation.
 
-The work didn't get faster; the wrapper got out of the way. Nub's Rust CLI avoids the ~100–200 ms Node startup tax that `pnpm` and `npm` pay on every invocation — it resolves `.bin` paths in Rust and exec's the binary directly, while npm/pnpm spawn a full Node.js process first. Methodology: `hyperfine --warmup 3 --runs 20` on macOS ARM64 (M1 Max), Node v24.14.0; reproduce with [`benchmarks/`](https://github.com/nub-js/nub/tree/main/benchmarks).
+The work didn't get faster; the wrapper got out of the way. Nub's Rust CLI avoids the ~100–200 ms Node startup tax that `pnpm` and `npm` pay on every invocation — it resolves `.bin` paths in Rust and exec's the binary directly, while npm/pnpm spawn a full Node.js process first. Methodology: `hyperfine --warmup 3 --runs 20` on macOS ARM64 (M1 Max), Node v24.14.0; reproduce with [`benchmarks/`](https://github.com/nubjs/nub/tree/main/benchmarks).
 
 ### Workspace-aware
 
@@ -507,5 +507,5 @@ Nothing here is a criticism of Node.js. Node is an exceptionally well-managed pr
 
 ---
 
-*Nub is open source. Install: `npm install -g @nubjs/nub`. Source: [github.com/nub-js/nub](https://github.com/nub-js/nub).*
+*Nub is open source. Install: `npm install -g @nubjs/nub`. Source: [github.com/nubjs/nub](https://github.com/nubjs/nub).*
 

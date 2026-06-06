@@ -16,7 +16,7 @@ on:
       source:
         description: "Base URL the script is fetched from (use https://nubjs.com to also validate the served copies)"
         required: false
-        default: "https://raw.githubusercontent.com/nub-js/nub/main"
+        default: "https://raw.githubusercontent.com/nubjs/nub/main"
   push:
     paths:
       - install.sh
@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $src = "${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nub-js/nub/main' }}"
+          $src = "${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}"
           $ver = "${{ github.event.inputs.version || 'latest' }}"
           $script = Invoke-RestMethod "$src/install.ps1"
           if ($ver -eq "latest") { Invoke-Expression $script }
@@ -73,7 +73,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          src="${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nub-js/nub/main' }}"
+          src="${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}"
           ver="${{ github.event.inputs.version || 'latest' }}"
           if [ "$ver" = "latest" ]; then curl -fsSL "$src/install.sh" | bash
           else curl -fsSL "$src/install.sh" | bash -s -- "$ver"; fi
@@ -108,7 +108,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          src="${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nub-js/nub/main' }}"
+          src="${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}"
           ver="${{ github.event.inputs.version || 'latest' }}"
           if [ "$ver" = "latest" ]; then curl -fsSL "$src/install.sh" | bash
           else curl -fsSL "$src/install.sh" | bash -s -- "$ver"; fi

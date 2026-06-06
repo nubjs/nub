@@ -1,6 +1,6 @@
 #!/usr/bin/env pwsh
 # Nub installer for Windows (PowerShell)
-# Usage: irm https://raw.githubusercontent.com/nub-js/nub/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/nubjs/nub/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
@@ -15,7 +15,7 @@ switch ($Arch) {
 # --- Version ---
 $Version = if ($args.Count -gt 0) { $args[0] } else { "latest" }
 if ($Version -eq "latest") {
-    $Release = Invoke-RestMethod "https://api.github.com/repos/nub-js/nub/releases/latest"
+    $Release = Invoke-RestMethod "https://api.github.com/repos/nubjs/nub/releases/latest"
     $Version = $Release.tag_name -replace "^v", ""
 }
 
@@ -31,7 +31,7 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 # Download the per-platform archive (binary + runtime) and extract it into the
 # install dir. The archive ships bin\nub.exe alongside runtime\ (preload.mjs +
 # vendored node_modules); without runtime\, nub cannot transpile at all (A30).
-$Url = "https://github.com/nub-js/nub/releases/download/v$Version/nub-$Target.zip"
+$Url = "https://github.com/nubjs/nub/releases/download/v$Version/nub-$Target.zip"
 Write-Host "Downloading from $Url..."
 
 $TmpZip = Join-Path $env:TEMP "nub-$Target-$PID.zip"
@@ -53,7 +53,15 @@ if (-not (Test-Path $Exe)) {
     exit 1
 }
 
-Write-Host "Installed nub to $Exe" -ForegroundColor Green
+# `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
+# args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
+# bin\nub.exe, so create the nubx alias. On Windows we COPY rather than symlink:
+# symlinks require admin/Developer Mode, and a copy reliably yields argv[0]
+# "nubx.exe". Re-extract on upgrade wipes bin\, so this is recreated each run.
+$Exex = "$BinDir\nubx.exe"
+Copy-Item -Path $Exe -Destination $Exex -Force
+
+Write-Host "Installed nub (with nubx) to $Exe" -ForegroundColor Green
 
 # --- PATH setup ---
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")

@@ -200,7 +200,7 @@ impl Argv0 {
 #[derive(Parser, Debug)]
 #[command(
     name = "nub",
-    about = "TypeScript-first developer supertool",
+    about = "The unified JavaScript toolkit that augments Node.js instead of replacing it",
     long_about = None,
     disable_help_subcommand = true,
     disable_version_flag = true,
@@ -2427,7 +2427,7 @@ fn detect_package_manager(cwd: &Path) -> String {
 
 /// The GitHub repo that hosts Nub's release artifacts. The self-owned tarball
 /// channel downloads from here; mirror of install.sh.
-const RELEASE_REPO: &str = "nub-js/nub";
+const RELEASE_REPO: &str = "nubjs/nub";
 
 /// The npm package users `npm install -g`. The bare `nub` name is an unrelated
 /// third-party package — emitting it would clobber a working install, so every
@@ -2764,6 +2764,20 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         // worse. In practice both renames are same-filesystem and don't fail
         // independently; this branch is the documented tail risk.
         bail!("nub upgrade: swapped bin/ but failed to swap runtime/: {e}");
+    }
+
+    // The release tarball ships only `bin/nub`; recreate the `nubx` alias that
+    // install.sh creates (relative symlink → nub; the CLI dispatches on argv[0],
+    // so the alias name is what matters — see Argv0::detect). Without this, every
+    // self-owned upgrade would silently drop nubx. POSIX-only: Windows self-owned
+    // upgrades already bailed at the top of this fn.
+    #[cfg(unix)]
+    {
+        let nubx = install_dir.join("bin").join("nubx");
+        let _ = std::fs::remove_file(&nubx);
+        std::os::unix::fs::symlink("nub", &nubx).with_context(|| {
+            format!("nub upgrade: failed to create nubx symlink at {}", nubx.display())
+        })?;
     }
 
     println!(
@@ -3282,7 +3296,7 @@ mod tests {
         let url = tarball_url("0.0.6", "darwin-arm64");
         assert_eq!(
             url,
-            "https://github.com/nub-js/nub/releases/download/v0.0.6/nub-darwin-arm64.tar.gz"
+            "https://github.com/nubjs/nub/releases/download/v0.0.6/nub-darwin-arm64.tar.gz"
         );
         assert_eq!(
             checksum_url("0.0.6", "darwin-arm64"),

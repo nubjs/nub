@@ -18,6 +18,6 @@ export function baseOptions(): BaseLayoutProps {
       { text: 'Docs', url: '/docs', active: 'nested-url' },
       { text: 'Blog', url: '/blog', active: 'nested-url' },
     ],
-    githubUrl: 'https://github.com/nub-js/nub',
+    githubUrl: 'https://github.com/nubjs/nub',
   };
 }

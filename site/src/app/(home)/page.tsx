@@ -710,7 +710,7 @@ function RunScriptBand() {
                   ]}
                 />
                 <a
-                  href="https://github.com/nub-js/nub/tree/main/benchmarks"
+                  href="https://github.com/nubjs/nub/tree/main/benchmarks"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mt-5 inline-block font-mono text-[0.7rem] uppercase tracking-[0.14em] text-sky underline underline-offset-4"
@@ -798,7 +798,7 @@ function NubxBand() {
                   ]}
                 />
                 <a
-                  href="https://github.com/nub-js/nub/tree/main/benchmarks"
+                  href="https://github.com/nubjs/nub/tree/main/benchmarks"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mt-5 inline-block font-mono text-[0.7rem] uppercase tracking-[0.14em] text-sky underline underline-offset-4"
@@ -899,7 +899,7 @@ function Compatibility() {
           Deno&rsquo;s Node-compat suite, node-relative. The 1% gap is unavoidable divergence due
           to Nub&rsquo;s module-hook preload, unflagging of experimental features, and use of native addons.{' '}
           <a
-            href="https://github.com/nub-js/nub/tree/main/tests/cross-runtime"
+            href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"
             rel="noopener noreferrer"
             className="text-sky underline underline-offset-4"
@@ -956,8 +956,8 @@ function Footer() {
         <div className="flex items-center gap-6">
           <Link href="/docs" className="hover:text-fd-foreground">Docs</Link>
           <Link href="/blog" className="hover:text-fd-foreground">Blog</Link>
-          <a href="https://github.com/nub-js/nub" className="hover:text-fd-foreground">GitHub</a>
-          <a href="https://github.com/nub-js/nub/blob/main/LICENSE" className="hover:text-fd-foreground">License</a>
+          <a href="https://github.com/nubjs/nub" className="hover:text-fd-foreground">GitHub</a>
+          <a href="https://github.com/nubjs/nub/blob/main/LICENSE" className="hover:text-fd-foreground">License</a>
         </div>
       </Container>
     </footer>
