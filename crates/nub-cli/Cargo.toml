@@ -16,7 +16,9 @@ anyhow.workspace = true
 clap.workspace = true
 dotenvy = "0.15"
 serde_json.workspace = true
+semver = "1"
 sha2.workspace = true
 tracing.workspace = true
 tempfile = "3"
 tracing-subscriber.workspace = true
+which = { workspace = true }

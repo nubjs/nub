@@ -512,7 +512,7 @@ struct ScriptExecOpts<'a> {
 }
 
 /// Known subcommand names that clap should handle.
-const SUBCOMMANDS: &[&str] = &["run", "watch", "exec", "upgrade", "help", "node"];
+const SUBCOMMANDS: &[&str] = &["run", "watch", "exec", "upgrade", "help", "node", "pm"];
 
 /// Accept pnpm's flag-before-subcommand order. pnpm takes `pnpm -r run build` AND
 /// `pnpm run -r build`; nub's pre-parse otherwise only recognizes a subcommand in
@@ -606,6 +606,12 @@ fn run_nub() -> Result<i32> {
     let mut eval_tempfile: Option<tempfile::NamedTempFile> = None;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
 
+    // GAP (out of scope): a leading flag before a PM-management verb — e.g.
+    // `nub -D add foo` — falls into the `_` arm below as a Node flag and routes to
+    // Node passthrough, not to the configured PM. PM passthrough only kicks in when
+    // the first token is the bareword verb (`nub add -D foo`). Closing this would
+    // require teaching the pre-parse to distinguish a Node flag from a PM flag
+    // before any verb is seen — deferred.
     let mut i = 0;
     while i < raw_args.len() {
         let arg = &raw_args[i];
@@ -797,11 +803,12 @@ fn run_nub() -> Result<i32> {
                      \x20\x20(to run a file instead: nub ./{first})"
                 );
             }
-            bail!(
-                "nub: unknown command \"{first}\"\n\
-                 \x20\x20To run a script: nub run {first}\n\
-                 \x20\x20To run a file: nub ./{first}"
-            );
+            // Not a reserved verb, not a file, not a likely script name: this is a
+            // PM-management verb (`add`, `remove`, `publish`, `frobnicate`, …).
+            // Pass it through to the project's configured package manager verbatim
+            // — denylist (nub's reserved verbs), not allowlist (A2: pure
+            // passthrough, no flag-mapping / no normalization).
+            run_pm_passthrough(&rest)
         }
     }
 }
@@ -912,6 +919,14 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // `nub node` prints the verb list instead of a clap usage error.
     if subcommand == "node" {
         return run_node(&rest[1..]);
+    }
+
+    // `pm` is the package-manager management group (`which`/`switch`/`update`/
+    // `cache`). Like `node`, it's a non-forwarding manual sub-verb match rather
+    // than a clap `Command` variant, so its bare-usage / invalid-verb messages
+    // read like `nub node`'s and it never reaches clap dispatch.
+    if subcommand == "pm" {
+        return run_pm(&rest[1..]);
     }
 
     let forwards = matches!(subcommand.as_str(), "run" | "exec" | "watch");
@@ -3052,6 +3067,253 @@ fn run_node(args: &[String]) -> Result<i32> {
     }
 }
 
+/// nub's PM store root — `<cache_dir>/pm/…`, a sibling of the Node store
+/// (`<cache_dir>/node/…`). `provision_pm` takes the cache *root* (it appends
+/// `pm/<pm>/<version>` itself), so this returns the root, not the `pm` subdir.
+fn pm_store_root() -> Result<PathBuf> {
+    nub_core::node::discovery::cache_dir().ok_or_else(|| {
+        anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")
+    })
+}
+
+/// `nub pm <verb>` — the package-manager management group. Manual sub-verb match
+/// (mirroring [`run_node`]'s shape): bare / `help` list the verbs, an unknown
+/// token errors naming the set. The verbs operate on the project's PM *pin*
+/// (`which`/`switch`/`update`) and nub's PM cache (`cache`); none mutate
+/// `package.json` implicitly — only the explicit `switch` writes a pin.
+fn run_pm(args: &[String]) -> Result<i32> {
+    use nub_core::pm::resolve::{self, PmTarget};
+
+    let cwd = env::current_dir()?;
+
+    let verb = args.first().map(String::as_str);
+    if matches!(verb, None | Some("help") | Some("--help") | Some("-h")) {
+        println!(
+            "nub pm — manage the project's package manager\n\n\
+             Usage: nub pm <command>\n\n\
+             Commands:\n\
+             \x20 which              print the resolved package-manager path (why → stderr)\n\
+             \x20 switch <pm>@<ver>  pin a package manager into package.json#packageManager\n\
+             \x20 update             update the pinned package manager to the latest\n\
+             \x20 cache [clear]      list cached package managers (or clear the cache)"
+        );
+        return Ok(0);
+    }
+
+    match verb.expect("verb present after the help/bare guard") {
+        // Path → stdout (so `PM=$(nub pm which)` captures just the path); the
+        // provenance explainer → stderr. Byte-for-byte the `nub node which` shape.
+        "which" => {
+            let target = resolve::resolve_target(&cwd)
+                .context("no package manager is pinned (no .yarnrc.yml yarnPath, packageManager, or devEngines.packageManager) — pin one with `nub pm switch <pm>@<version>`")?;
+            let (path, provenance) = match target {
+                PmTarget::YarnPath(release) => {
+                    (release, "resolved from .yarnrc.yml yarnPath".to_string())
+                }
+                PmTarget::Provision(pin) => {
+                    let pm = pin.pm;
+                    let store = pm_store_root()?;
+                    let prov = nub_core::pm::provision::provision_pm(&pin, &store)?;
+                    let provenance =
+                        format!("resolved from packageManager ({pm}@{})", prov.version);
+                    (prov.bin, provenance)
+                }
+                PmTarget::BerryNoYarnPath => bail!(berry_no_yarn_path_msg()),
+            };
+            println!("{}", path.display());
+            use std::io::Write as _;
+            std::io::stdout().flush().ok();
+            eprintln!("» {provenance}");
+            Ok(0)
+        }
+        // The only verb that writes a pin — explicit, never implicit. Parses
+        // through the SAME spec parser the `packageManager` reader uses.
+        "switch" => {
+            let Some(spec) = args.get(1) else {
+                bail!("nub pm switch requires a <pm>@<version> (e.g. nub pm switch pnpm@9.1.0)");
+            };
+            let pin = resolve::parse_spec(spec)?;
+            let version = pin
+                .version
+                .as_deref()
+                .context("nub pm switch needs an explicit version (e.g. pnpm@9.1.0)")?;
+            let path = resolve::write_pin(pin.pm, version, &cwd)?;
+            println!("pinned {}@{version} → {}", pin.pm, path.display());
+            Ok(0)
+        }
+        // Resolve the pinned PM's latest published version and rewrite the pin if
+        // it's newer. No baked version table — the registry is the source of truth.
+        "update" => {
+            let pin = resolve::resolve_pin(&cwd)
+                .context("no package manager is pinned to update — pin one with `nub pm switch <pm>@<version>`")?;
+            let pkg = pin.pm.to_string();
+            let base = nub_core::pm::registry::registry_base(&cwd);
+            let latest = nub_core::pm::registry::resolve_version(&base, &pkg, "latest")?;
+            let current = pin.version.as_deref();
+            if current_is_at_least(current, &latest.version) {
+                eprintln!(
+                    "{pkg} is already on the latest version ({}).",
+                    current.unwrap_or(&latest.version)
+                );
+                return Ok(0);
+            }
+            resolve::write_pin(pin.pm, &latest.version, &cwd)?;
+            eprintln!(
+                "updated {pkg} {} → {}",
+                current.unwrap_or("(unpinned)"),
+                latest.version
+            );
+            Ok(0)
+        }
+        // List the cached package managers (`<pm>@<version>` per line), or clear
+        // the cache. `clear` is positional (no flag struct) — `nub pm cache clear`.
+        "cache" => {
+            let pm_cache = pm_store_root()?.join("pm");
+            if args.get(1).map(String::as_str) == Some("clear") {
+                if pm_cache.is_dir() {
+                    std::fs::remove_dir_all(&pm_cache)
+                        .with_context(|| format!("clearing {}", pm_cache.display()))?;
+                }
+                eprintln!(
+                    "cleared nub's package-manager cache ({}).",
+                    pm_cache.display()
+                );
+                return Ok(0);
+            }
+            let entries = list_pm_cache(&pm_cache);
+            if entries.is_empty() {
+                eprintln!("No package managers in nub's cache.");
+            } else {
+                for entry in entries {
+                    println!("{entry}");
+                }
+            }
+            Ok(0)
+        }
+        _ => bail!("nub pm takes a subcommand (which, switch, update, cache)."),
+    }
+}
+
+/// The shared "a bare Berry pin can't be provisioned" error: nub can't synthesize
+/// a Yarn Berry release, so the project must commit one (`.yarn/releases/*.cjs` +
+/// a `yarnPath:` in `.yarnrc.yml`) or pin classic `yarn@1`.
+fn berry_no_yarn_path_msg() -> String {
+    "yarn 2+ (Berry) requires a committed release — nub can't provision it. \
+     Commit a release (\".yarn/releases/yarn-<v>.cjs\" + \"yarnPath:\" in .yarnrc.yml), \
+     or pin classic yarn@1."
+        .to_string()
+}
+
+/// Is `current` already at least `latest`? An absent / unparseable current
+/// version is treated as out-of-date (so `update` proceeds). The Corepack hash
+/// suffix is stripped before the semver compare.
+fn current_is_at_least(current: Option<&str>, latest: &str) -> bool {
+    let strip = |v: &str| v.split_once('+').map_or(v, |(b, _)| b).to_string();
+    match (
+        current.map(|c| semver::Version::parse(&strip(c))),
+        semver::Version::parse(latest),
+    ) {
+        (Some(Ok(cur)), Ok(want)) => cur >= want,
+        _ => false,
+    }
+}
+
+/// List nub's cached package managers as sorted `<pm>@<version>` strings, reading
+/// the `<cache>/pm/<pm>/<version>/` layout `provision_pm` writes. The in-progress
+/// `.tmp-*` work dirs are skipped. Deliberately the listing only — no richer entry
+/// struct (the `nub node ls` active-marker model doesn't apply: a PM has no
+/// "currently active" version independent of the project pin).
+fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(pms) = std::fs::read_dir(pm_cache) else {
+        return out;
+    };
+    for pm_entry in pms.flatten() {
+        if !pm_entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let pm_name = pm_entry.file_name().to_string_lossy().into_owned();
+        let Ok(versions) = std::fs::read_dir(pm_entry.path()) else {
+            continue;
+        };
+        for v in versions.flatten() {
+            if !v.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let version = v.file_name().to_string_lossy().into_owned();
+            if version.starts_with(".tmp-") {
+                continue;
+            }
+            out.push(format!("{pm_name}@{version}"));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Pure passthrough (A2): run a PM-management verb (`add`, `remove`, `publish`, …
+/// anything that isn't a reserved nub verb) on the project's configured package
+/// manager, verbatim. The PM is resolved exactly as it is for a real run — the
+/// committed Berry release, the provisioned pinned PM, or (unpinned) the
+/// lockfile-detected PM on PATH. `argv` is forwarded byte-for-byte: no
+/// flag-mapping, no normalization, no `--` handling. The PM process gets NO nub
+/// augmentation env (only `--env-file` vars, the same explicit-flag overlay every
+/// spawn path honors) — passthrough is the configured PM, unmodified.
+fn run_pm_passthrough(argv: &[String]) -> Result<i32> {
+    let cwd = env::current_dir()?;
+    let (program, full_args) = build_passthrough_command(&cwd, argv)?;
+
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(&full_args).current_dir(&cwd);
+    apply_env_file_vars(&mut cmd);
+    let status = cmd
+        .status()
+        .with_context(|| format!("running {}", program.display()))?;
+    Ok(nub_core::node::spawn::exit_code_from_status(&status))
+}
+
+/// Resolve the `(program, full_args)` to spawn for a PM-management passthrough,
+/// without spawning — the spawn-free seam the passthrough test asserts against.
+/// `argv` is never rewritten — byte-for-byte forwarding is the contract (A2).
+///
+///   - committed Berry release / provisioned pinned PM → run the `.cjs` under the
+///     project's resolved Node, with the user's `argv` appended verbatim;
+///   - unpinned → the lockfile-detected PM, resolved on PATH, run directly.
+fn build_passthrough_command(cwd: &Path, argv: &[String]) -> Result<(PathBuf, Vec<String>)> {
+    use nub_core::pm::resolve::{PmTarget, resolve_target};
+
+    // Run a PM launcher script (.cjs) under the project's resolved Node, with the
+    // user's argv appended unchanged.
+    let under_node = |script: String| -> Result<(PathBuf, Vec<String>)> {
+        let node = nub_core::node::discovery::discover_node(cwd)?;
+        let mut args = vec![script];
+        args.extend(argv.iter().cloned());
+        Ok((PathBuf::from(node.path.as_str()), args))
+    };
+
+    match resolve_target(cwd) {
+        Some(PmTarget::YarnPath(release)) => under_node(release.to_string_lossy().into_owned()),
+        Some(PmTarget::Provision(pin)) => {
+            let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?)?;
+            under_node(prov.bin.to_string_lossy().into_owned())
+        }
+        Some(PmTarget::BerryNoYarnPath) => bail!(berry_no_yarn_path_msg()),
+        None => {
+            // Unpinned: fall back to the lockfile-detected PM on PATH. The detector
+            // preserves the bun inference — a bun-locked project execs a PATH bun
+            // (nub never provisions bun, but won't get in the way of a real one).
+            let pm = detect_package_manager(cwd);
+            let program = which::which(&pm).map_err(|_| {
+                anyhow::anyhow!(
+                    "nub: no package manager is pinned and `{pm}` (inferred from the lockfile) \
+                     is not on PATH. Pin one with `nub pm switch <pm>@<version>`, or install {pm}."
+                )
+            })?;
+            Ok((program, argv.to_vec()))
+        }
+    }
+}
+
 /// Human description of WHERE the resolved Node version requirement came from:
 /// the pin file plus its content (`.node-version (26)`), or `node on PATH` when
 /// no pin file applies. Used by `nub node` (status) and `nub node which`.
@@ -3450,6 +3712,302 @@ mod tests {
     #[test]
     fn argv0_detection() {
         assert_eq!(Argv0::detect(), Argv0::Nub);
+    }
+
+    // ── nub pm verbs + PM-management passthrough ────────────────────────
+
+    /// A unique temp project dir under the system temp root (never under $HOME, so
+    /// the manifest walk-up can't escape into a stray ancestor `package.json`).
+    fn pm_tmpdir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "nub-cli-pm-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A committed yarn-classic release fixture: `packageManager: yarn@1.x` plus a
+    /// `.yarn/releases/*.cjs` + a `yarnPath:` so [`resolve_target`] short-circuits
+    /// to `YarnPath` — the hermetic pinned-PM path (no network, no provisioning).
+    /// Returns the project dir and the absolute committed-release path.
+    fn yarn_path_fixture(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = pm_tmpdir(tag);
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"packageManager":"yarn@1.22.19"}"#,
+        )
+        .unwrap();
+        let releases = dir.join(".yarn/releases");
+        std::fs::create_dir_all(&releases).unwrap();
+        let release = releases.join("yarn-1.22.19.cjs");
+        std::fs::write(&release, "// yarn classic\n").unwrap();
+        std::fs::write(
+            dir.join(".yarnrc.yml"),
+            "yarnPath: .yarn/releases/yarn-1.22.19.cjs\n",
+        )
+        .unwrap();
+        (dir, release)
+    }
+
+    /// Serializes the handful of tests that mutate the process cwd (cwd is
+    /// process-global, so they can't run concurrently with each other).
+    fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        use std::sync::Mutex;
+        static CWD_LOCK: Mutex<()> = Mutex::new(());
+        let _g = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = env::current_dir().unwrap();
+        env::set_current_dir(dir).unwrap();
+        let out = f();
+        env::set_current_dir(prev).unwrap();
+        out
+    }
+
+    #[test]
+    fn passthrough_forwards_argv_byte_for_byte() {
+        // `nub add -D foo --x` in a pinned project resolves to running the committed
+        // PM under the project's Node, with the user's argv appended UNCHANGED — no
+        // flag-mapping, no normalization, no `--` handling (A2: pure passthrough).
+        let (dir, release) = yarn_path_fixture("forward");
+        let argv = vec![
+            "add".to_string(),
+            "-D".to_string(),
+            "foo".to_string(),
+            "--x".to_string(),
+        ];
+        let (program, full_args) = build_passthrough_command(&dir, &argv).unwrap();
+
+        // program is the project's Node (the committed .cjs runs under it).
+        assert!(
+            program.file_stem().is_some_and(|s| s == "node"),
+            "a committed Berry release runs under Node, got program {}",
+            program.display()
+        );
+        // argv = [release.cjs, ...user argv] — the user tail is identical.
+        assert_eq!(full_args[0], release.to_string_lossy());
+        assert_eq!(
+            &full_args[1..],
+            &argv[..],
+            "user argv must forward verbatim"
+        );
+    }
+
+    #[test]
+    fn passthrough_is_verb_agnostic_denylist_not_allowlist() {
+        // An unknown verb (`frobnicate`) is forwarded exactly like a known one —
+        // the passthrough builder never inspects argv[0]. (The denylist that keeps
+        // nub's own verbs native lives in dispatch, asserted separately.)
+        let (dir, _release) = yarn_path_fixture("frob");
+        let (_p, args) =
+            build_passthrough_command(&dir, &["frobnicate".to_string(), "--wat".to_string()])
+                .unwrap();
+        assert_eq!(&args[1..], &["frobnicate".to_string(), "--wat".to_string()]);
+    }
+
+    #[test]
+    fn reserved_verbs_are_native_not_passed_through() {
+        // The denylist is the SUBCOMMANDS set: a reserved verb is recognized by the
+        // pre-parse and dispatched natively; only non-reserved barewords reach
+        // passthrough. `nubx` is argv0 dispatch, not a SUBCOMMANDS entry.
+        for verb in ["run", "exec", "node", "pm", "watch", "upgrade", "help"] {
+            assert!(
+                SUBCOMMANDS.contains(&verb),
+                "{verb} must be a reserved native verb, not passthrough"
+            );
+        }
+        for verb in ["add", "remove", "install", "publish", "frobnicate"] {
+            assert!(
+                !SUBCOMMANDS.contains(&verb),
+                "{verb} is a PM-management verb and must pass through"
+            );
+        }
+    }
+
+    #[test]
+    fn passthrough_propagates_the_childs_exit_code() {
+        // The configured PM's exit code is nub's exit code. Drive a tiny script as
+        // the "PM" via an unpinned project + a fake `npm` on PATH that exits 42.
+        let dir = pm_tmpdir("exit");
+        std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        std::fs::write(dir.join("package-lock.json"), "{}").unwrap(); // → npm
+        let code = with_fake_pm_on_path(&dir, "npm", "exit 42", || {
+            run_pm_passthrough_in(&dir, &["add".to_string(), "foo".to_string()])
+        });
+        assert_eq!(code.unwrap(), 42, "the PM's exit code must propagate");
+    }
+
+    /// Run the passthrough against an explicit `cwd` (the production entry reads the
+    /// process cwd; this is the test seam that doesn't fight the global).
+    fn run_pm_passthrough_in(cwd: &Path, argv: &[String]) -> Result<i32> {
+        let (program, full_args) = build_passthrough_command(cwd, argv)?;
+        let status = std::process::Command::new(&program)
+            .args(&full_args)
+            .current_dir(cwd)
+            .status()?;
+        Ok(nub_core::node::spawn::exit_code_from_status(&status))
+    }
+
+    /// Put a one-line shell-script `name` on PATH (with the given body) for the
+    /// duration of `f`. Unix only — the exit-code test is gated to Unix.
+    #[cfg(unix)]
+    fn with_fake_pm_on_path<T>(dir: &Path, name: &str, body: &str, f: impl FnOnce() -> T) -> T {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("fakebin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join(name);
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        use std::sync::Mutex;
+        static PATH_LOCK: Mutex<()> = Mutex::new(());
+        let _g = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = env::var_os("PATH");
+        let new = match &prev {
+            Some(p) => format!("{}:{}", bin.display(), p.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        // SAFETY: PATH mutation is serialized by PATH_LOCK; restored before unlock.
+        unsafe { env::set_var("PATH", &new) };
+        let out = f();
+        match prev {
+            Some(p) => unsafe { env::set_var("PATH", p) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+        out
+    }
+    #[cfg(not(unix))]
+    fn with_fake_pm_on_path<T>(_dir: &Path, _name: &str, _body: &str, f: impl FnOnce() -> T) -> T {
+        f()
+    }
+
+    #[test]
+    fn switch_writes_the_pin_and_bare_switch_errors() {
+        let dir = pm_tmpdir("switch");
+        std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+
+        // `nub pm switch pnpm@9.1.0` writes the pin into package.json.
+        let code = with_cwd(&dir, || run_pm(&["switch".into(), "pnpm@9.1.0".into()])).unwrap();
+        assert_eq!(code, 0);
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["packageManager"].as_str(), Some("pnpm@9.1.0"));
+
+        // Bare `nub pm switch` (no spec) errors naming the form.
+        let err = with_cwd(&dir, || run_pm(&["switch".into()]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("<pm>@<version>"),
+            "bare switch must name the required form, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cache_lists_versions_and_clear_removes_only_the_pm_dir() {
+        // Seed a fake cache: <root>/pm/pnpm/{9.1.0,10.0.0} + <root>/node/22.0.0.
+        let root = pm_tmpdir("cache");
+        let pm = root.join("pm");
+        for v in ["10.0.0", "9.1.0"] {
+            std::fs::create_dir_all(pm.join("pnpm").join(v).join("package")).unwrap();
+        }
+        std::fs::create_dir_all(pm.join("pnpm").join(".tmp-9.9.9-123")).unwrap(); // work dir
+        let node = root.join("node/22.0.0");
+        std::fs::create_dir_all(&node).unwrap();
+
+        // Listing is sorted `<pm>@<version>`, work dirs excluded.
+        assert_eq!(list_pm_cache(&pm), vec!["pnpm@10.0.0", "pnpm@9.1.0"]);
+
+        // Clear removes the pm dir; the sibling node/ dir survives untouched.
+        std::fs::remove_dir_all(&pm).unwrap();
+        assert!(!pm.exists(), "the pm cache dir is gone after clear");
+        assert!(node.exists(), "the sibling node/ store must be untouched");
+    }
+
+    #[test]
+    fn which_with_no_pin_errors_naming_the_remedy() {
+        let dir = pm_tmpdir("which-none");
+        std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        let err = with_cwd(&dir, || run_pm(&["which".into()]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no package manager is pinned") && err.contains("nub pm switch"),
+            "which-no-pin must name the unpinned state and the remedy, got: {err}"
+        );
+    }
+
+    #[test]
+    fn which_yarn_path_prints_abs_path_and_yarnrc_provenance() {
+        // A committed Berry release short-circuits provisioning: `which` prints the
+        // absolute release path (stdout) and ".yarnrc.yml yarnPath" provenance
+        // (stderr). Asserted at the resolution seam (the stdout/stderr split is the
+        // same as `nub node which`, exercised there).
+        let (dir, release) = yarn_path_fixture("which-yarn");
+        let target = nub_core::pm::resolve::resolve_target(&dir).unwrap();
+        match target {
+            nub_core::pm::resolve::PmTarget::YarnPath(p) => {
+                assert_eq!(p, release, "which resolves to the committed release path");
+                assert!(p.is_absolute(), "the printed path must be absolute");
+            }
+            other => panic!("expected YarnPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_version_comparison_handles_newer_older_and_hash_suffix() {
+        // The easy-to-get-wrong boundary: when is the pin "already latest"? An
+        // absent / unparseable current is out-of-date (update proceeds); equal or
+        // newer is up-to-date; the Corepack hash suffix is stripped before compare.
+        assert!(
+            current_is_at_least(Some("9.1.0"), "9.1.0"),
+            "equal is up-to-date"
+        );
+        assert!(
+            current_is_at_least(Some("9.2.0"), "9.1.0"),
+            "newer is up-to-date"
+        );
+        assert!(
+            !current_is_at_least(Some("9.0.0"), "9.1.0"),
+            "older is out-of-date"
+        );
+        assert!(
+            current_is_at_least(Some("9.1.0+sha512.abc"), "9.1.0"),
+            "the hash suffix is stripped before the semver compare"
+        );
+        assert!(
+            !current_is_at_least(None, "9.1.0"),
+            "an absent pin is out-of-date"
+        );
+        assert!(
+            !current_is_at_least(Some("garbage"), "9.1.0"),
+            "an unparseable pin updates"
+        );
+    }
+
+    /// Real-network e2e for `nub pm update`: pin an old pnpm, update to latest, and
+    /// confirm the pin advanced. `#[ignore]` — hits the registry.
+    ///   cargo test -p nub-cli --lib -- --ignored update_pin_advances
+    #[test]
+    #[ignore = "network: resolves pnpm@latest from the registry"]
+    fn update_pin_advances_to_latest() {
+        let dir = pm_tmpdir("update-net");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0"}"#,
+        )
+        .unwrap();
+        let code = with_cwd(&dir, || run_pm(&["update".into()])).unwrap();
+        assert_eq!(code, 0);
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        let pinned = manifest["packageManager"].as_str().unwrap();
+        assert!(pinned.starts_with("pnpm@"), "pin stays pnpm, got {pinned}");
+        assert_ne!(pinned, "pnpm@9.0.0", "the pin must advance past the seed");
     }
 
     // ── nubx argv0 dispatch ─────────────────────────────────────────

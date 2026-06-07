@@ -38,6 +38,9 @@ oxc = { version = "=0.132.0", features = ["full"] }
 oxc_napi = "=0.132.0"
 oxc_sourcemap = { version = "=6.0.1", features = ["napi"] }
 rustc-hash = "2"
+# PATH lookup for the unpinned-PM passthrough fallback (`nub add foo` with no
+# `packageManager` pin): resolve the project's lockfile-detected PM on PATH.
+which = "8"
 toml = "0.8"
 yaml-rust2 = "0.9"
 serde = { version = "1", features = ["derive"] }

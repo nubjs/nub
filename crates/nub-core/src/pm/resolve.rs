@@ -128,7 +128,10 @@ fn pin_target_dir(cwd: &Path) -> PathBuf {
 /// errors naming the required `name@version` shape. The Corepack hash suffix
 /// (`yarn@4.2.2+sha512.xxxx`) is kept verbatim in `version` — resolution never
 /// lies about what was written; the engine strips it before download.
-fn parse_spec(spec: &str) -> Result<PmPin> {
+///
+/// Public so `nub pm switch <pm>@<v>` parses through the SAME pin parser the
+/// `packageManager` reader uses — there is no second spec parser.
+pub fn parse_spec(spec: &str) -> Result<PmPin> {
     let spec = spec.trim();
     let (name, version) = spec.split_once('@').with_context(|| {
         format!("packageManager \"{spec}\" must be in name@version form (e.g. pnpm@9.1.0)")

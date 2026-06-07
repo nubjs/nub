@@ -1873,13 +1873,15 @@ fn exec_forwards_flags_to_bin_not_nub() {
 }
 
 #[test]
-fn bareword_errors_with_targeted_run_hint() {
-    // D3: `nub <bareword>` never auto-runs (a deliberate divergence from
-    // pnpm/bun) — it errors. When the name is an actual script or a conventional
-    // script name, the error leads with `nub run <name>`; otherwise both options.
+fn bareword_local_or_common_script_leads_with_the_run_hint() {
+    // D3: `nub <bareword>` never auto-runs a script (a deliberate divergence from
+    // pnpm/bun). When the name is an actual script or a conventional script name,
+    // the bareword leads with the targeted `nub run <name>` hint instead of passing
+    // through to the PM. (A bareword that is NOT a known/common script falls through
+    // to PM-management passthrough — see `bareword_unknown_verb_passes_through`.)
     let fixture = fixtures_dir().join("env-test"); // defines a `greet` script
 
-    // (a) an actual script in package.json → targeted hint
+    // (a) an actual script in package.json → targeted hint, never auto-run.
     let out = Command::new(nub_binary())
         .arg("greet")
         .current_dir(&fixture)
@@ -1889,14 +1891,14 @@ fn bareword_errors_with_targeted_run_hint() {
     assert_ne!(
         out.status.code(),
         Some(0),
-        "bareword must error, never auto-run: {err}"
+        "a known-script bareword must error, never auto-run: {err}"
     );
     assert!(
         err.contains("did you mean `nub run greet`"),
         "known script → run hint: {err:?}"
     );
 
-    // (b) a conventional script name not defined here → still the targeted hint
+    // (b) a conventional script name not defined here → still the targeted hint.
     let out_dev = Command::new(nub_binary())
         .arg("dev")
         .current_dir(&fixture)
@@ -1906,21 +1908,24 @@ fn bareword_errors_with_targeted_run_hint() {
         String::from_utf8_lossy(&out_dev.stderr).contains("did you mean `nub run dev`"),
         "common script name → run hint"
     );
+}
 
-    // (c) an unrecognized bareword → the neutral two-option message
-    let out_x = Command::new(nub_binary())
+#[test]
+fn bareword_unknown_verb_passes_through_to_the_pm() {
+    // An unrecognized bareword (not a reserved verb, not a known/common script,
+    // not a file) is a PM-management verb: it passes through to the configured PM,
+    // NOT nub's old "unknown command" error. `env-test` is unpinned, so the
+    // lockfile-detected PM (npm by default) handles it — nub stays out of the way.
+    let fixture = fixtures_dir().join("env-test");
+    let out = Command::new(nub_binary())
         .arg("frobnicate")
         .current_dir(&fixture)
         .output()
         .expect("failed to spawn nub");
-    let err_x = String::from_utf8_lossy(&out_x.stderr);
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err_x.contains("unknown command"),
-        "uncommon non-script → generic error: {err_x:?}"
-    );
-    assert!(
-        err_x.contains("nub run frobnicate") && err_x.contains("nub ./frobnicate"),
-        "generic error lists both options: {err_x:?}"
+        !err.contains("unknown command"),
+        "an unknown bareword must pass through, not hit nub's old error: {err:?}"
     );
 }
 
@@ -2715,5 +2720,138 @@ fn run_npm_aliases_map_to_canonical_flags() {
             && stdout2.contains("utils-built")
             && stdout2.contains("app-built"),
         "`--workspaces` must run every member like `-r`: {stdout2}"
+    );
+}
+
+// ── PM-management passthrough (hypermanager) ─────────────────────────────────
+
+/// A self-contained temp project with a committed yarn-classic "release" that is
+/// really a `.cjs` echoing its forwarded argv. A `packageManager: yarn@1.x` pin +
+/// a `.yarnrc.yml yarnPath` make nub resolve to this release (hermetic — no
+/// network, no provisioning), so the test can assert byte-for-byte forwarding
+/// through the whole binary. Returns the project dir.
+fn pm_passthrough_project() -> PathBuf {
+    let dir = unique_test_cache(); // a fresh temp dir under the system temp root
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"packageManager":"yarn@1.22.19"}"#,
+    )
+    .unwrap();
+    let releases = dir.join(".yarn/releases");
+    std::fs::create_dir_all(&releases).unwrap();
+    // The "PM": print each forwarded arg on its own line, then exit with the arg
+    // count so the test can assert both argv-forwarding AND exit-code propagation.
+    std::fs::write(
+        releases.join("yarn-1.22.19.cjs"),
+        "const a = process.argv.slice(2);\nfor (const x of a) console.log(x);\nprocess.exit(a.length);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".yarnrc.yml"),
+        "yarnPath: .yarn/releases/yarn-1.22.19.cjs\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// `nub add -D foo --x` in a pinned project runs the configured PM with the user's
+/// argv forwarded VERBATIM (no flag-mapping, no `--` handling), and the PM's exit
+/// code becomes nub's. The committed release echoes its argv and exits with the
+/// arg count, so both contracts are asserted at once.
+#[test]
+fn pm_passthrough_forwards_argv_and_exit_code_through_the_binary() {
+    let dir = pm_passthrough_project();
+    let out = Command::new(nub_binary())
+        .args(["add", "-D", "foo", "--x"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub add");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["add", "-D", "foo", "--x"],
+        "argv must forward byte-for-byte: {stdout}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "the PM's exit code (here: the 4 forwarded args) must propagate"
+    );
+}
+
+/// A verb nub has never heard of (`frobnicate`) still passes through — the
+/// denylist is nub's own reserved verbs, not an allowlist of known PM verbs.
+#[test]
+fn pm_passthrough_handles_an_unknown_verb() {
+    let dir = pm_passthrough_project();
+    let out = Command::new(nub_binary())
+        .args(["frobnicate", "--wat"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub frobnicate");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["frobnicate", "--wat"],
+        "an unknown verb forwards verbatim too: {stdout}"
+    );
+}
+
+/// A bareword that names a local script (`build`) must NOT pass through — the
+/// script-hint guard wins, leading with `nub run build`. (Passthrough is only
+/// reached *after* this guard, so a known script can never be sent to a PM.)
+#[test]
+fn bareword_local_script_keeps_the_run_hint_over_passthrough() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","scripts":{"build":"echo built"}}"#,
+    )
+    .unwrap();
+    let out = Command::new(nub_binary())
+        .arg("build")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub build");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nub run build"),
+        "a local script bareword must lead with the run hint, not pass through: {stderr}"
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "the hint path is a non-zero bail"
+    );
+}
+
+/// `nub pm which` with no pin errors clearly (names the unpinned state + the
+/// `nub pm switch` remedy) and exits non-zero — exercised through the binary so
+/// the dispatch routing (`pm` → `run_pm` → `which`) is covered end-to-end.
+#[test]
+fn pm_which_without_a_pin_errors_through_the_binary() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    let out = Command::new(nub_binary())
+        .args(["pm", "which"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub pm which");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "no-pin which must exit non-zero"
+    );
+    assert!(
+        stderr.contains("no package manager is pinned") && stderr.contains("nub pm switch"),
+        "the error must name the unpinned state and the remedy: {stderr}"
     );
 }
