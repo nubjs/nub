@@ -3,7 +3,11 @@
 //!
 //! There is exactly ONE [`Pm`] enum, ONE pin reader ([`resolve`]), ONE yarn
 //! classifier, and ONE `.npmrc` reader (`workspace::scripts::npmrc_value`).
-//! Later phases (P1) fill in [`registry`], [`extract`], and [`provision`].
+//!
+//! [`registry`] resolves a spec (exact / dist-tag / range) to a tarball + dist
+//! integrity; [`extract`] unpacks the `.tgz`; [`provision`] ties them together
+//! with nub's download/verify/cache machinery into a runnable, version-addressed
+//! install — reusing the same provisioning skeleton as Node.
 
 pub mod extract;
 pub mod provision;

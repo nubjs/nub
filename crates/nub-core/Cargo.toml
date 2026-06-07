@@ -12,12 +12,17 @@ camino.workspace = true
 libc.workspace = true
 dirs-next.workspace = true
 dotenvy = "0.15"
+flate2.workspace = true
 glob-match = "0.2"
 liblzma.workspace = true
 reqwest.workspace = true
 semver = "1"
 serde.workspace = true
 serde_json.workspace = true
+# sha1 (ancient PM publishes carry only a sha1 dist.shasum) sits alongside sha2.
+# Pinned 0.10 to share `digest` 0.10 with sha2 — a single Digest trait, no second
+# major. sha512 is preferred; sha1 is the fail-closed fallback only.
+sha1 = "0.10"
 sha2.workspace = true
 tar.workspace = true
 zip.workspace = true

@@ -51,6 +51,10 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # xz extraction of the dist tarball. liblzma's "static" vendors its own C liblzma
 # (no system dependency, no shell-out to tar/xz); the maintained xz2 successor.
 liblzma = { version = "0.4", features = ["static"] }
+# gzip decode of PM registry tarballs (npm publishes .tgz = gzip+tar). Pure Rust
+# (miniz_oxide backend), no system zlib / shell-out — mirrors the in-process,
+# verify-then-extract posture of the Node xz path.
+flate2 = "1"
 tar = "0.4"
 # Windows .zip Node-dist extraction (pure Rust, no shell-out to Expand-Archive /
 # tar.exe). default-features off + `deflate` only: Node's win-<arch>.zip uses

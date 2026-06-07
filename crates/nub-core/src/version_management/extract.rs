@@ -4,6 +4,26 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+/// The single top-level directory `dest_parent` now holds after an archive was
+/// unpacked into it — the `node-v<ver>-<plat>` dir for Node tarballs/zips, the
+/// `package` dir for an npm `.tgz`. Errors if zero or more than one dir is present
+/// (a stock archive always has exactly one). Shared by every extractor so the
+/// "one top dir, or it's malformed" rule lives in one place; `archive` is only
+/// used to name the file in error messages.
+pub(crate) fn single_top_dir(dest_parent: &Path, archive: &Path) -> Result<PathBuf> {
+    let mut top: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(dest_parent)? {
+        let path = entry?.path();
+        if path.is_dir() && top.replace(path).is_some() {
+            bail!(
+                "expected a single top-level directory in {}",
+                archive.display()
+            );
+        }
+    }
+    top.with_context(|| format!("no directory extracted from {}", archive.display()))
+}
+
 /// Decode a `.tar.xz` and unpack it under `dest_parent`, returning the single
 /// top-level directory it created (the `node-v<ver>-<plat>` dir). The `tar` crate
 /// guards against path-traversal (`..` / absolute entries) during `unpack`.
@@ -16,19 +36,7 @@ pub fn extract_tar_xz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
         .with_context(|| format!("create {}", dest_parent.display()))?;
     tar.unpack(dest_parent)
         .with_context(|| format!("extracting {}", archive.display()))?;
-
-    // A stock dist tarball contains exactly one top-level dir: node-v<ver>-<plat>.
-    let mut top: Option<PathBuf> = None;
-    for entry in std::fs::read_dir(dest_parent)? {
-        let path = entry?.path();
-        if path.is_dir() && top.replace(path).is_some() {
-            bail!(
-                "expected a single top-level directory in {}",
-                archive.display()
-            );
-        }
-    }
-    top.with_context(|| format!("no directory extracted from {}", archive.display()))
+    single_top_dir(dest_parent, archive)
 }
 
 /// Unpack a Node Windows dist `.zip` under `dest_parent`, returning the single
@@ -52,19 +60,7 @@ pub fn extract_zip(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
         .with_context(|| format!("create {}", dest_parent.display()))?;
     zip.extract(dest_parent)
         .with_context(|| format!("extracting {}", archive.display()))?;
-
-    // A stock dist zip contains exactly one top-level dir: node-v<ver>-win-<arch>.
-    let mut top: Option<PathBuf> = None;
-    for entry in std::fs::read_dir(dest_parent)? {
-        let path = entry?.path();
-        if path.is_dir() && top.replace(path).is_some() {
-            bail!(
-                "expected a single top-level directory in {}",
-                archive.display()
-            );
-        }
-    }
-    top.with_context(|| format!("no directory extracted from {}", archive.display()))
+    single_top_dir(dest_parent, archive)
 }
 
 /// Extract `archive` by type: `.tar.xz` (macOS/Linux) or `.zip` (Windows). Both
