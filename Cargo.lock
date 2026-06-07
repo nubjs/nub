@@ -1198,11 +1198,13 @@ dependencies = [
  "clap",
  "dotenvy",
  "nub-core",
+ "semver",
  "serde_json",
  "sha2",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "which",
 ]
 
 [[package]]
@@ -1213,6 +1215,7 @@ dependencies = [
  "camino",
  "dirs-next",
  "dotenvy",
+ "flate2",
  "glob-match",
  "libc",
  "liblzma",
@@ -1220,6 +1223,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha1 0.10.6",
  "sha2",
  "signal-hook",
  "tar",
@@ -1748,7 +1752,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
- "sha1",
+ "sha1 0.11.0",
 ]
 
 [[package]]
@@ -2335,6 +2339,17 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -3032,6 +3047,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "which"
+version = "8.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81995fafaaaf6ae47a7d0cc83c67caf92aeb7e5331650ae6ff856f7c0c60c459"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -66,6 +66,12 @@ pub fn registry_base(root: &std::path::Path) -> String {
 ///     than attempting a doomed download),
 ///   - a dist-tag (`latest`, `next`, …) via the `dist-tags` map,
 ///   - a semver range (`^9`, `10`, `>=9 <11`) via the highest satisfying key.
+///
+/// Range parsing goes through Cargo's `semver` crate, which requires comparators
+/// be comma-separated; npm/node-semver (what `packageManager` / `devEngines` users
+/// write) separates them by space. [`normalize_range`] bridges the two so a
+/// `>=9 <11` pin resolves rather than erroring. The `||` OR operator is NOT
+/// supported (Cargo's `semver` has no OR) — vanishingly rare in a PM pin.
 pub fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
     let spec = spec.trim();
     let versions = packument
@@ -91,7 +97,7 @@ pub fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
     }
 
     // 3. Otherwise treat the spec as a semver range and pick the highest match.
-    let req = semver::VersionReq::parse(spec).with_context(|| {
+    let req = semver::VersionReq::parse(&normalize_range(spec)).with_context(|| {
         format!("\"{spec}\" is not an exact version, dist-tag, or semver range")
     })?;
     let best = versions
@@ -102,6 +108,20 @@ pub fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
         .map(|(_, key)| key)
         .with_context(|| format!("no published version satisfies \"{spec}\""))?;
     dist_from_meta(best, &versions[best])
+}
+
+/// Translate a node-semver range into the form Cargo's `semver` crate parses:
+/// space-separated comparators (`>=9 <11`) become comma-separated (`>=9, <11`).
+/// A spec that already uses commas, or that is a single comparator (`^9`, `10`,
+/// `>=9`), is returned unchanged. This is a syntactic bridge only — it does not
+/// translate the `||` OR operator (unsupported by Cargo's `semver`).
+fn normalize_range(spec: &str) -> String {
+    let spec = spec.trim();
+    // Single token, or the user already comma-separated → nothing to do.
+    if spec.contains(',') || !spec.contains(char::is_whitespace) {
+        return spec.to_string();
+    }
+    spec.split_whitespace().collect::<Vec<_>>().join(", ")
 }
 
 /// Build a [`VersionDist`] from one `versions[X.Y.Z]` entry. `version` is the
@@ -333,6 +353,21 @@ mod tests {
         assert_eq!(resolve_dist(&p, "^9").unwrap().version, "9.5.0");
         // Bare-major range picks the newest 10.x, not the 11 rc.
         assert_eq!(resolve_dist(&p, "10").unwrap().version, "10.0.0");
+        // node-semver space-separated comparators (`>=9 <10`) — npm/devEngines
+        // write these; Cargo's semver needs commas, so the normalizer bridges it.
+        assert_eq!(resolve_dist(&p, ">=9 <10").unwrap().version, "9.5.0");
+    }
+
+    #[test]
+    fn normalize_range_bridges_space_separated_comparators_only() {
+        // Space-separated comparators → comma form (the only translation).
+        assert_eq!(normalize_range(">=9 <11"), ">=9, <11");
+        assert_eq!(normalize_range(">=9   <11"), ">=9, <11"); // runs of space collapse
+        // Single comparators and bare versions pass through untouched.
+        assert_eq!(normalize_range("^9"), "^9");
+        assert_eq!(normalize_range("10"), "10");
+        // An already-comma'd spec is left alone (no double-comma).
+        assert_eq!(normalize_range(">=9, <11"), ">=9, <11");
     }
 
     #[test]
