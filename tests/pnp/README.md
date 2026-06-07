@@ -25,6 +25,9 @@ nub discovers its Node from `PATH`, so `PATH="<nvm-version>/bin:$PATH" nub …` 
 | `nubx` | `nubx <bin>` for a zip-stored bin — the `pnpapi` bin-resolver plus running a zip-internal entry |
 | `node-off` | `nub --node` must **not** resolve the dep — proves augmentation (and PnP) is fully disabled |
 
-## Known gap, asserted not failed
+## No remaining gaps
 
-`nubx <bin>` where the bin's script is still inside a `.yarn/cache/*.zip` works only on the **fast tier** (Node 22.15+). On the compat tier the `--import` preload routes the entry through the ESM loader, whose existence check bypasses PnP's `fs` patch, so a zip-internal entry path can't be read. The matrix marks this `~(known-compat-gap)` rather than failing — if a future change makes it pass on compat Node it flips to a visible `✓(gap-now-fixed!)`. Workarounds today: run `nubx` on Node 22.15+, or `yarn unplug <pkg>`. Everything else passes across the whole supported range (18.19+).
+Every scenario, including `nubx` of a zip-stored bin, passes across the whole supported range (Node 18.19+). The two corners that initially failed and how they were closed:
+
+- **Pure-ESM zip dep on Node <20.19** (`ERR_REQUIRE_ESM`) — the resolve hook now emits an explicit module `format` (via `runtime/pnp-util.cjs`), so older Node doesn't mis-tag a zip-stored ESM `.js` as CommonJS.
+- **`nubx` of a zip-stored bin on the compat tier** (`ERR_MODULE_NOT_FOUND`) — `runtime/pnp-bin-run.cjs` loads the resolved bin via `require()` (the zip-safe CJS path where PnP's `fs` patch is live) instead of running it as a node entry (which the compat tier's `--import` would route through the ESM loader, whose existence check bypasses the patch). This mirrors `yarn exec`.

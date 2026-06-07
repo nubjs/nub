@@ -7,13 +7,12 @@
 #   esm-cjsdep   import a CJS PnP dep from ESM            (CJS-from-ESM sub-loader)
 #   esm-puredep  import a pure-ESM zip-stored PnP dep     (resolve hook must emit `format`)
 #   run          `nub run` a script using a PnP dep       (compute_augmentation_env path)
-#   nubx         `nubx <bin>` for a zip-stored bin        (pnpapi bin-resolver + entry load)
+#   nubx         `nubx <bin>` for a zip-stored bin        (pnpapi resolve + require() load)
 #   node-off     `nub --node` must NOT resolve the dep    (augmentation disabled)
 #
-# KNOWN GAP (asserted, not failed): nubx of a *zip-stored* bin only works on the
-# fast tier (Node 22.15+); on the compat tier the --import preload routes the entry
-# through the ESM loader whose existence check bypasses PnP's fs patch. Workaround:
-# Node 22.15+ or `yarn unplug`. Tracked in wiki/research/pnp-preload-feasibility.md.
+# All scenarios pass across the full supported range (18.19+). nubx of a zip-stored
+# bin works on every tier because the runner loads the bin via require() (zip-safe),
+# mirroring `yarn exec`, not as a node entry. See wiki/research/pnp-preload-feasibility.md.
 #
 # Usage:
 #   tests/pnp/run-pnp-matrix.sh [nub-binary] [node-bin-dir ...]
@@ -50,7 +49,6 @@ fi
 # probe <node-bin-dir> <invocation...> -> grep token; prints OK/X
 run() { ( cd "$FIXTURE" && PATH="$1:$PATH" "${@:2}" ) 2>&1; }
 fails=0
-ver_ge_2215() { [ "$1" -gt 22 ] || { [ "$1" -eq 22 ] && [ "$2" -ge 15 ]; }; }
 
 printf "nub: %s\n\n" "$NUB"
 for bin in "${NODE_DIRS[@]}"; do
@@ -68,14 +66,9 @@ for bin in "${NODE_DIRS[@]}"; do
   # --node must DISABLE PnP: the dep must NOT resolve.
   check node-off    "$(run "$bin" "$NUB" --node cjs-test.cjs)" "Cannot find module"
 
-  # nubx zip-bin: a hard PASS only on the fast tier; on compat it's the known gap
-  # (asserted as expected-fail so a future fix flips it to a visible pass).
-  nubx_out="$(run "$bin" "$NUBX" cowsay hi)"
-  if ver_ge_2215 "$maj" "$min"; then
-    check nubx "$nubx_out" "< hi >"
-  else
-    if echo "$nubx_out" | grep -q "< hi >"; then line+=" nubx:✓(gap-now-fixed!)"; else line+=" nubx:~(known-compat-gap)"; fi
-  fi
+  # nubx of a zip-stored bin — a hard PASS on every tier: the runner loads the bin
+  # via require() (zip-safe) instead of as a node entry, mirroring `yarn exec`.
+  check nubx "$(run "$bin" "$NUBX" cowsay hi)" "< hi >"
 
   printf "%-12s %d/%d %s\n" "v$nv" "$ok" "$tot" "$line"
 done

@@ -2498,17 +2498,19 @@ fn run_exec(bin: &str, compat_mode: bool, args: &[String]) -> Result<i32> {
         return launch_bin(&bin_path, args, compat_mode, &cwd);
     }
 
-    // Yarn PnP has no node_modules/.bin, so find_bin misses. Resolve the bin via
-    // pnpapi (running Yarn's own .pnp.cjs) and, on success, run the resolved script
-    // through the normal augmented path — which re-injects --require .pnp.cjs
-    // because cwd is still a PnP tree. Skipped in compat mode (--node).
-    if !compat_mode {
-        if let Some(pnp) = nub_core::pnp::detect(&cwd) {
-            if let Some(script) = resolve_pnp_bin(&pnp.pnp_cjs, bin, &cwd) {
-                let mut cmd_args = vec![script];
-                cmd_args.extend(args.iter().cloned());
-                return run_file_with_compat(&cmd_args, compat_mode);
-            }
+    // Yarn PnP has no node_modules/.bin, so find_bin misses. Hand off to the
+    // pnp-bin-run.cjs runner through nub's normal augmented path: that re-injects
+    // --require .pnp.cjs (cwd is still a PnP tree), so the runner can resolve the
+    // bin via pnpapi and load it with require() — the way `yarn exec` does, which
+    // reads zip-stored bins on every tier (running the bin as a node *entry* breaks
+    // on the compat tier, where --import forces it through the ESM loader). The
+    // runner prints its own not-found message + exit 127 on a miss. Skipped in
+    // compat mode (--node).
+    if !compat_mode && nub_core::pnp::detect(&cwd).is_some() {
+        if let Some(runner) = pnp_bin_runner_path() {
+            let mut cmd_args = vec![runner, bin.to_string()];
+            cmd_args.extend(args.iter().cloned());
+            return run_file_with_compat(&cmd_args, compat_mode);
         }
     }
 
@@ -2529,36 +2531,13 @@ fn run_exec(bin: &str, compat_mode: bool, args: &[String]) -> Result<i32> {
     Ok(127)
 }
 
-/// Resolve a bin name to its script path under Yarn PnP. Runs the pure resolver
-/// `runtime/pnp-bin-resolver.cjs` under `node --require <.pnp.cjs>` (so `pnpapi` is
-/// available + zipfs reads work), capturing the printed absolute path. `None` if no
-/// dep provides the bin (exit 127), the resolver exits non-zero, or we can't locate
-/// node / the runtime dir. The .pnp.cjs path is passed as argv[3] so the resolver
-/// can require() it directly — `require("pnpapi")` fails for out-of-tree scripts.
-fn resolve_pnp_bin(pnp_cjs: &Path, bin: &str, cwd: &Path) -> Option<String> {
+/// Absolute path to `runtime/pnp-bin-run.cjs` (sibling of nub's preload). `None`
+/// only on a broken install where the runtime dir can't be located.
+fn pnp_bin_runner_path() -> Option<String> {
     let nub_binary = nub_core::node::spawn::current_nub_binary().ok()?;
     let preload = nub_core::node::spawn::find_public_preload(&nub_binary)?;
     let runtime_dir = Path::new(&preload).parent()?;
-    let resolver = runtime_dir.join("pnp-bin-resolver.cjs");
-    let node = nub_core::node::discovery::discover_node(cwd)
-        .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
-
-    let output = std::process::Command::new(node.path.as_str())
-        .arg("--require")
-        .arg(pnp_cjs)
-        .arg(&resolver)
-        .arg(bin)
-        .arg(pnp_cjs)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if path.is_empty() { None } else { Some(path) }
+    Some(runtime_dir.join("pnp-bin-run.cjs").to_string_lossy().into_owned())
 }
 
 /// Launch a resolved `node_modules/.bin` entry, shebang/extension-aware (A40).
