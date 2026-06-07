@@ -375,6 +375,42 @@ pub enum Command {
         #[arg(long)]
         node: bool,
 
+        /// Run the bin in every workspace package. `--workspaces` is the npm-style alias.
+        #[arg(short = 'r', long = "recursive", visible_alias = "workspaces")]
+        recursive: bool,
+
+        /// Filter workspace packages by name or glob. Repeatable: multiple
+        /// `--filter`s union; `!`-prefixed filters subtract. `-F` is the alias.
+        #[arg(short = 'F', long)]
+        filter: Vec<String>,
+
+        /// npm-style member selection: alias for `--filter <name>`. Long-only
+        /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
+        #[arg(long = "workspace", value_name = "NAME")]
+        workspace: Vec<String>,
+
+        /// Run from the workspace root regardless of cwd.
+        #[arg(short = 'w', long)]
+        workspace_root: bool,
+
+        /// Add the workspace root package to the recursive set (npm-style;
+        /// distinct from `--workspace-root`, which targets *only* the root).
+        #[arg(long)]
+        include_workspace_root: bool,
+
+        /// Error if the filter selects zero packages. (Nub also errors on a
+        /// zero-match filter by default; this is the explicit form.)
+        #[arg(long)]
+        fail_if_no_match: bool,
+
+        /// Max concurrent packages per topological chunk.
+        #[arg(long, value_name = "N")]
+        workspace_concurrency: Option<i32>,
+
+        /// Run the bin in all packages concurrently with no topological ordering.
+        #[arg(long)]
+        parallel: bool,
+
         /// Remaining arguments forwarded to the binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -839,7 +875,17 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "--cwd",
             "--workspace-concurrency",
         ],
-        "exec" => &["--cwd"],
+        // Exec's workspace value-flags must be listed so `nubx --filter @org/api
+        // tsc` binds `@org/api` to the filter, not the bin positional. (Exec's
+        // workspace scope is exactly -r/--filter/--parallel; --workspace and
+        // --workspace-concurrency take a following token like their `run` twins.)
+        "exec" => &[
+            "--filter",
+            "-F",
+            "--workspace",
+            "--workspace-concurrency",
+            "--cwd",
+        ],
         "watch" => &["--cwd"],
         _ => &[],
     }
@@ -1044,10 +1090,62 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         Some(Command::Exec {
             bin,
             node,
+            recursive,
+            mut filter,
+            workspace,
+            workspace_root,
+            include_workspace_root,
+            fail_if_no_match,
+            workspace_concurrency,
+            parallel,
             mut args,
         }) => {
             args.extend(suffix);
-            run_exec(&bin, node, &args)
+            // `--workspace <name>` desugars to a name filter, exactly as on `run`.
+            filter.extend(workspace);
+            // `--include-workspace-root`/`--parallel` imply a workspace run even
+            // without `-r`/`--filter` (they only mean anything across the member
+            // set); promote to recursive so run_exec_target routes correctly.
+            let recursive = recursive || parallel || include_workspace_root;
+            // Exec scope is exactly `-r`/`--filter`/`--parallel`; the script-only
+            // WorkspaceOpts fields ride at inert defaults. `bail: false` is the one
+            // load-bearing choice: `nub exec -r tsc` runs the bin in EVERY selected
+            // member and aggregates failures (a non-zero overall exit), rather than
+            // stopping at the first — so a member missing the bin, or a tool that
+            // exits non-zero, never masks the others. (Exec has no `--no-bail` flag
+            // to flip this; the aggregate-all behavior is the only mode.)
+            let ws_opts = WorkspaceOpts {
+                recursive,
+                filter,
+                workspace_root,
+                include_workspace_root,
+                fail_if_no_match,
+                workspace_concurrency,
+                parallel,
+                bail: false,
+                reverse: false,
+                sort: !parallel,
+                stream: false,
+                if_present: false,
+                ignore_scripts: false,
+                script_shell: None,
+                aggregate_output: false,
+                resume_from: None,
+            };
+            // The workspace branch engages only on -r/--filter/--parallel;
+            // a plain `nub exec tsc` stays the single-package path unchanged.
+            if ws_opts.recursive || !ws_opts.filter.is_empty() || ws_opts.parallel {
+                run_workspace_target(
+                    WorkspaceTarget::Bin {
+                        name: &bin,
+                        args: &args,
+                    },
+                    node,
+                    &ws_opts,
+                )
+            } else {
+                run_exec(&bin, node, &args)
+            }
         }
         Some(Command::Upgrade {
             version,
@@ -1097,21 +1195,33 @@ fn run_file(args: &[String]) -> Result<i32> {
 
 fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
     let cwd = env::current_dir()?;
+    run_file_in_dir(args, compat_mode, &cwd)
+}
+
+/// Run a file with the project context (Node pin, `.env`, PnP, webstorage) and
+/// the spawned child's working directory all keyed to `cwd` — an EXPLICIT cwd
+/// that overrides the process's `env::current_dir()`. The plain `nub <file>` path
+/// passes the process cwd (a no-op override); the workspace-bin path threads each
+/// member's dir so a node bin (`eslint`/`tsc`/`vitest`) run via `nub exec -r` sees
+/// the member's `.env`, Node pin, and `.bin` chain — not the workspace root's. The
+/// child's cwd is set on `SpawnConfig` so the override reaches Node itself, not
+/// just nub's discovery (spawn_node otherwise inherits the parent's cwd).
+fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path) -> Result<i32> {
     // Fire point: `nub <file>` (and the hijack-descendant `node`, which routes
     // through run_as_node → run_file). A pinned-but-uncached version is downloaded
     // + installed from nodejs.org here, uv-style. (`nub run`/`nub exec` keep plain
     // discover_node — they don't version-check.)
-    let node = nub_core::node::discovery::discover_or_provision_node(&cwd)?;
+    let node = nub_core::node::discovery::discover_or_provision_node(cwd)?;
 
     if !compat_mode {
-        if let Some(w) = nub_core::node::discovery::engines_disagreement_warning(&cwd, &node) {
+        if let Some(w) = nub_core::node::discovery::engines_disagreement_warning(cwd, &node) {
             eprintln!("{w}");
         }
         nub_core::node::discovery::check_min_version(&node)?;
     }
 
     // .env loading: eager for all non-compat invocations per wiki/runtime/env-loading.md.
-    let project = nub_core::workspace::detect::detect_project(&cwd);
+    let project = nub_core::workspace::detect::detect_project(cwd);
     let mut env_vars = if !compat_mode {
         project
             .as_ref()
@@ -1129,7 +1239,7 @@ fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     // Yarn PnP: inject the user's own `.pnp.cjs` (spawn.rs gates this on
     // `!compat_mode`, so `--node` skips it regardless).
-    let pnp_ctx = nub_core::pnp::detect(&cwd);
+    let pnp_ctx = nub_core::pnp::detect(cwd);
     let config = nub_core::node::spawn::SpawnConfig {
         node: &node,
         user_args: args,
@@ -1139,6 +1249,7 @@ fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
         env_vars: &env_vars,
         project_root,
         pnp: pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
+        cwd,
     };
 
     let result = nub_core::node::spawn::spawn_node(&config)?;
@@ -1167,7 +1278,7 @@ fn run_script(
 
     // Workspace-wide execution: -r, --filter, or --parallel.
     if ws.recursive || !ws.filter.is_empty() || ws.parallel {
-        return run_workspace_script(script, compat_mode, ws, args, &project);
+        return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
     }
 
     // `-w` / `--workspace-root` alone: run the script in the workspace ROOT
@@ -1214,13 +1325,39 @@ fn run_script(
     run_single_script(script, &cmd, &project, compat_mode, args, &exec)
 }
 
-fn run_workspace_script(
-    script: &str,
+/// What a workspace run executes in each selected member: either a package.json
+/// script (`nub run -r build`) or a `node_modules/.bin` binary (`nub exec -r tsc`,
+/// `nubx -r eslint`). Both share the entire scheduling machinery in
+/// [`run_workspace_target`] — discovery, filtering, the dependency graph, chunking,
+/// concurrency — and diverge only at the per-member leaf ([`run_one_member`]).
+#[derive(Clone, Copy)]
+enum WorkspaceTarget<'a> {
+    /// A package.json script name + the user args forwarded to it.
+    Script(&'a str, &'a [String]),
+    /// A `.bin` binary name + the user args forwarded to it.
+    Bin { name: &'a str, args: &'a [String] },
+}
+
+impl WorkspaceTarget<'_> {
+    /// The label used in stream prefixes / recursion-reentry keying. For a script
+    /// it's the script name; for a bin it's the bin name.
+    fn label(&self) -> &str {
+        match self {
+            WorkspaceTarget::Script(name, _) => name,
+            WorkspaceTarget::Bin { name, .. } => name,
+        }
+    }
+}
+
+fn run_workspace_target(
+    target: WorkspaceTarget,
     compat_mode: bool,
     ws: &WorkspaceOpts,
-    args: &[String],
-    project: &nub_core::workspace::detect::Project,
 ) -> Result<i32> {
+    let cwd = env::current_dir()?;
+    let project = nub_core::workspace::detect::detect_project(&cwd)
+        .ok_or_else(|| anyhow::anyhow!("no package.json found"))?;
+    let project = &project;
     let ws_root = project
         .workspace_root
         .as_deref()
@@ -1400,22 +1537,19 @@ fn run_workspace_script(
                 if bail && total_failed > 0 {
                     break;
                 }
-                let code = run_one_workspace_pkg(
-                    &members[idx],
-                    script,
-                    ws_root,
+                let leaf = MemberLeaf {
                     compat_mode,
-                    ws.if_present,
-                    ws.stream
+                    if_present: ws.if_present,
+                    stream: ws.stream
                         || ws.parallel
                         || concurrency > 1
                         || aggregate
                         || reporter_is_ndjson(),
-                    args,
-                    idx,
-                    &exec,
+                    color_idx: idx,
+                    exec: &exec,
                     aggregate,
-                )?;
+                };
+                let code = run_one_member(target, &members[idx], ws_root, &leaf);
                 if code != 0 {
                     total_failed += 1;
                 }
@@ -1437,24 +1571,24 @@ fn run_workspace_script(
                 .map(|_| {
                     let rx = Arc::clone(&rx);
                     let failed = Arc::clone(&failed);
-                    let members_snapshot: Vec<_> = chunk
+                    // Clone the selected members so they cross the thread boundary
+                    // (the borrowed `&members` slice can't be `move`d); paired with
+                    // their original index for the prefix color. `WorkspacePackage`
+                    // derives Clone, so this replaces the prior 4-field tuple
+                    // snapshot with one structured clone.
+                    let members_snapshot: Vec<(
+                        usize,
+                        nub_core::workspace::filter::WorkspacePackage,
+                    )> = chunk
                         .iter()
-                        .map(|&idx| {
-                            (
-                                idx,
-                                members[idx].name.clone(),
-                                members[idx].dir.clone(),
-                                members[idx].manifest.clone(),
-                            )
-                        })
+                        .map(|&idx| (idx, members[idx].clone()))
                         .collect();
                     let ws_root_buf = ws_root.to_path_buf();
-                    let script = script.to_string();
-                    let args: Vec<String> = args.to_vec();
+                    // Owned target + per-script knobs so they cross the thread
+                    // boundary; reconstituted into the borrowed forms inside the
+                    // worker (the borrowed forms can't be `move`d).
+                    let target = OwnedTarget::from(target);
                     let if_present = ws.if_present;
-                    // Owned copies so the per-script knobs cross the thread
-                    // boundary; reconstituted into a borrowed `ScriptExecOpts`
-                    // inside the worker (the borrowed form can't be `move`d).
                     let ignore_scripts = exec.ignore_scripts;
                     let script_shell = ws.script_shell.clone();
 
@@ -1463,6 +1597,7 @@ fn run_workspace_script(
                             ignore_scripts,
                             script_shell: script_shell.as_deref(),
                         };
+                        let target = target.borrow();
                         loop {
                             let work_idx = match rx.lock() {
                                 Ok(guard) => match guard.recv() {
@@ -1474,60 +1609,23 @@ fn run_workspace_script(
                             if bail && failed.load(AtomicOrdering::Relaxed) > 0 {
                                 continue;
                             }
-                            let Some((_, pkg_name, pkg_dir, pkg_manifest)) =
-                                members_snapshot.iter().find(|(i, _, _, _)| *i == work_idx)
+                            let Some((_, member)) =
+                                members_snapshot.iter().find(|(i, _)| *i == work_idx)
                             else {
                                 continue;
                             };
-                            // Recursion guard (same as the sequential path): a
-                            // package re-entering its own running script self-skips.
-                            if is_workspace_recursion_reentry(&script, pkg_name) {
-                                continue;
-                            }
-                            let fake_project = nub_core::workspace::detect::Project {
-                                root: pkg_dir.clone(),
-                                workspace_root: Some(ws_root_buf.clone()),
-                                manifest: pkg_manifest.clone(),
+                            let leaf = MemberLeaf {
+                                compat_mode,
+                                if_present,
+                                // The concurrent path always streams (prefixed) —
+                                // its whole reason for existing is interleaved output.
+                                stream: true,
+                                color_idx: work_idx,
+                                exec: &exec,
+                                aggregate,
                             };
-                            let cmd = nub_core::workspace::scripts::resolve_script(
-                                &fake_project.manifest,
-                                &script,
-                            );
-                            let prefix = member_prefix(pkg_dir, &ws_root_buf, pkg_name);
-                            match cmd {
-                                Some(cmd) => {
-                                    match run_single_script_prefixed(
-                                        &script,
-                                        &cmd,
-                                        &fake_project,
-                                        compat_mode,
-                                        &args,
-                                        &prefix,
-                                        work_idx,
-                                        &exec,
-                                        aggregate,
-                                    ) {
-                                        Ok(code) if code != 0 => {
-                                            let err_prefix =
-                                                format_stream_prefix(&prefix, &script, work_idx);
-                                            eprintln!("{err_prefix}exit {code}");
-                                            failed.fetch_add(1, AtomicOrdering::Relaxed);
-                                        }
-                                        Err(e) => {
-                                            let err_prefix =
-                                                format_stream_prefix(&prefix, &script, work_idx);
-                                            eprintln!("{err_prefix}error: {e}");
-                                            failed.fetch_add(1, AtomicOrdering::Relaxed);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None => {
-                                    if !if_present {
-                                        eprintln!("{pkg_name} | missing script \"{script}\"");
-                                        failed.fetch_add(1, AtomicOrdering::Relaxed);
-                                    }
-                                }
+                            if run_one_member(target, member, &ws_root_buf, &leaf) != 0 {
+                                failed.fetch_add(1, AtomicOrdering::Relaxed);
                             }
                         }
                     })
@@ -1570,68 +1668,191 @@ fn is_workspace_recursion_reentry(script: &str, pkg_name: &str) -> bool {
         && std::env::var("npm_package_name").as_deref() == Ok(pkg_name)
 }
 
-// Many genuinely-distinct inputs (package, script, workspace root, the
-// run/output flags, the per-script exec knobs, args, and the prefix-color
-// index); bundling them into a struct would be ceremony for one internal call
-// site.
-#[allow(clippy::too_many_arguments)]
-fn run_one_workspace_pkg(
-    pkg: &nub_core::workspace::filter::WorkspacePackage,
-    script: &str,
-    ws_root: &Path,
-    compat_mode: bool,
-    if_present: bool,
-    stream: bool,
-    args: &[String],
-    color_idx: usize,
-    exec: &ScriptExecOpts,
-    aggregate: bool,
-) -> Result<i32> {
-    // Recursion guard: skip a package whose own script is already running in an
-    // ancestor `nub run` (see `is_workspace_recursion_reentry`).
-    if is_workspace_recursion_reentry(script, &pkg.name) {
-        return Ok(0);
-    }
-    let cmd = nub_core::workspace::scripts::resolve_script(&pkg.manifest, script);
-    match cmd {
-        Some(cmd) => {
-            let fake_project = nub_core::workspace::detect::Project {
-                root: pkg.dir.clone(),
-                workspace_root: Some(ws_root.to_path_buf()),
-                manifest: pkg.manifest.clone(),
-            };
-            let prefix = member_prefix(&pkg.dir, ws_root, &pkg.name);
-            if stream {
-                let code = run_single_script_prefixed(
-                    script,
-                    &cmd,
-                    &fake_project,
-                    compat_mode,
-                    args,
-                    &prefix,
-                    color_idx,
-                    exec,
-                    aggregate,
-                )?;
-                if code != 0 {
-                    let err_prefix = format_stream_prefix(&prefix, script, color_idx);
-                    eprintln!("{err_prefix}exit {code}");
-                }
-                Ok(code)
-            } else {
-                eprintln!("  {} {script}", pkg.name);
-                let code = run_single_script(script, &cmd, &fake_project, compat_mode, args, exec)?;
-                if code != 0 {
-                    eprintln!("  {} {script} — exit {code}", pkg.name);
-                }
-                Ok(code)
+/// Owned mirror of [`WorkspaceTarget`] so the target can cross the `thread::spawn`
+/// boundary in the concurrent path (the borrowed form holds non-`'static`
+/// references). Reconstituted into a borrowed `WorkspaceTarget` via [`borrow`]
+/// inside each worker.
+enum OwnedTarget {
+    Script(String, Vec<String>),
+    Bin(String, Vec<String>),
+}
+
+impl OwnedTarget {
+    fn from(target: WorkspaceTarget) -> Self {
+        match target {
+            WorkspaceTarget::Script(name, args) => {
+                OwnedTarget::Script(name.to_string(), args.to_vec())
+            }
+            WorkspaceTarget::Bin { name, args } => {
+                OwnedTarget::Bin(name.to_string(), args.to_vec())
             }
         }
-        None => {
-            if !if_present {
-                bail!("missing script: \"{script}\" in {}", pkg.name);
+    }
+
+    fn borrow(&self) -> WorkspaceTarget<'_> {
+        match self {
+            OwnedTarget::Script(name, args) => WorkspaceTarget::Script(name, args),
+            OwnedTarget::Bin(name, args) => WorkspaceTarget::Bin { name, args },
+        }
+    }
+}
+
+/// Per-member execution knobs shared by both the sequential and concurrent
+/// chunk loops. Bundles the genuinely-distinct inputs (compat, the streaming /
+/// aggregate output discipline, the prefix-color index, the per-script exec
+/// knobs) so [`run_one_member`] has one stable signature both loops call.
+#[derive(Clone, Copy)]
+struct MemberLeaf<'a> {
+    compat_mode: bool,
+    /// Scripts only: skip a member that lacks the named script (`--if-present`).
+    /// Inert for bins (exec has no `--if-present`; a missing bin is an error).
+    if_present: bool,
+    /// Scripts only: pipe + prefix each output line vs. inherit stdio with a
+    /// single header. Bins always inherit stdio (see [`run_one_workspace_bin`]).
+    stream: bool,
+    /// Prefix color slot (pnpm-style per-member cycling).
+    color_idx: usize,
+    exec: &'a ScriptExecOpts<'a>,
+    /// Scripts only: buffer + flush each member's output as one block.
+    aggregate: bool,
+}
+
+/// Run a workspace [`WorkspaceTarget`] in one member, returning its exit code (0
+/// = success). The single per-member leaf both chunk loops call: it owns the
+/// recursion-reentry skip, the per-target dispatch, and the failure-print, so a
+/// caller need only do `if run_one_member(...) != 0 { failed += 1 }`. The two
+/// targets diverge only in their resolution + launch:
+///   - `Script`: resolve from package.json#scripts, run the pre/main/post
+///     lifecycle (streamed-prefixed or inherited-with-header per `leaf.stream`).
+///   - `Bin`: resolve `<member>/node_modules/.bin/<name>` (walking up), launch
+///     with inherited stdio.
+fn run_one_member(
+    target: WorkspaceTarget,
+    member: &nub_core::workspace::filter::WorkspacePackage,
+    ws_root: &Path,
+    leaf: &MemberLeaf,
+) -> i32 {
+    // Recursion guard: skip a member whose own script is already running in an
+    // ancestor `nub run` (see `is_workspace_recursion_reentry`). Scripts only —
+    // `nub exec` sets no `npm_lifecycle_event`, so a bin re-entry can't false-match.
+    if is_workspace_recursion_reentry(target.label(), &member.name) {
+        return 0;
+    }
+    match target {
+        WorkspaceTarget::Script(script, args) => {
+            run_one_workspace_script(script, args, member, ws_root, leaf)
+        }
+        WorkspaceTarget::Bin { name, args } => run_one_workspace_bin(name, args, member, leaf),
+    }
+}
+
+/// Per-member leaf for a `Script` target. Resolves the named script in the
+/// member, runs its pre/main/post lifecycle, and prints a failure line. A
+/// missing script is a counted failure unless `--if-present` (returns 0). The
+/// streamed vs. inherited disposition follows `leaf.stream`.
+fn run_one_workspace_script(
+    script: &str,
+    args: &[String],
+    member: &nub_core::workspace::filter::WorkspacePackage,
+    ws_root: &Path,
+    leaf: &MemberLeaf,
+) -> i32 {
+    let Some(cmd) = nub_core::workspace::scripts::resolve_script(&member.manifest, script) else {
+        if !leaf.if_present {
+            eprintln!("{} | missing script \"{script}\"", member.name);
+            return 1;
+        }
+        return 0;
+    };
+    let fake_project = nub_core::workspace::detect::Project {
+        root: member.dir.clone(),
+        workspace_root: Some(ws_root.to_path_buf()),
+        manifest: member.manifest.clone(),
+    };
+    let prefix = member_prefix(&member.dir, ws_root, &member.name);
+    if leaf.stream {
+        match run_single_script_prefixed(
+            script,
+            &cmd,
+            &fake_project,
+            leaf.compat_mode,
+            args,
+            &prefix,
+            leaf.color_idx,
+            leaf.exec,
+            leaf.aggregate,
+        ) {
+            Ok(0) => 0,
+            Ok(code) => {
+                let err_prefix = format_stream_prefix(&prefix, script, leaf.color_idx);
+                eprintln!("{err_prefix}exit {code}");
+                code
             }
-            Ok(0)
+            Err(e) => {
+                let err_prefix = format_stream_prefix(&prefix, script, leaf.color_idx);
+                eprintln!("{err_prefix}error: {e}");
+                1
+            }
+        }
+    } else {
+        eprintln!("  {} {script}", member.name);
+        match run_single_script(
+            script,
+            &cmd,
+            &fake_project,
+            leaf.compat_mode,
+            args,
+            leaf.exec,
+        ) {
+            Ok(0) => 0,
+            Ok(code) => {
+                eprintln!("  {} {script} — exit {code}", member.name);
+                code
+            }
+            Err(e) => {
+                eprintln!("  {} {script} — error: {e}", member.name);
+                1
+            }
+        }
+    }
+}
+
+/// Per-member leaf for a `Bin` target. Resolves `<member>/node_modules/.bin/<name>`
+/// via `find_bin` (which walks up, so a hoisted root `.bin` entry counts — pnpm
+/// PATH-chain semantics) and launches it with the member's own cwd so it sees the
+/// member's `.env`, Node pin, and `.bin` chain — not the workspace root's. A member
+/// missing the bin is a per-member error counted into the total, NOT a silent skip
+/// (exec has no `--if-present`).
+///
+/// OUTPUT GAP (deliberate): bins inherit stdio — `launch_bin` and its augmented
+/// node re-entry write straight to the parent's fd, so there is no pipe to
+/// per-line-prefix the way the script path's `spawn_script_prefixed` does. We emit
+/// one header line before launch (mirroring the non-stream script path's
+/// `  <member> <script>` header, with the bin name in place of the script) and let
+/// the bin's output flow through raw. Under `-r`/`--parallel` concurrency this
+/// output can interleave across members; that is the accepted cost of not owning a
+/// pipe, and matches how pnpm streams native tool output. The streaming params on
+/// [`MemberLeaf`] are therefore unused here — they are script-only.
+fn run_one_workspace_bin(
+    bin: &str,
+    args: &[String],
+    member: &nub_core::workspace::filter::WorkspacePackage,
+    leaf: &MemberLeaf,
+) -> i32 {
+    let Some(bin_path) = nub_core::workspace::scripts::find_bin(bin, &member.dir) else {
+        eprintln!("{} | missing bin \"{bin}\"", member.name);
+        return 1;
+    };
+    eprintln!("  {} {bin}", member.name);
+    match launch_bin(&bin_path, args, leaf.compat_mode, &member.dir) {
+        Ok(0) => 0,
+        Ok(code) => {
+            eprintln!("  {} {bin} — exit {code}", member.name);
+            code
+        }
+        Err(e) => {
+            eprintln!("  {} {bin} — error: {e}", member.name);
+            1
         }
     }
 }
@@ -2337,11 +2558,7 @@ fn resolve_pnp_bin(pnp_cjs: &Path, bin: &str, cwd: &Path) -> Option<String> {
         return None;
     }
     let path = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
+    if path.is_empty() { None } else { Some(path) }
 }
 
 /// Launch a resolved `node_modules/.bin` entry, shebang/extension-aware (A40).
@@ -2354,7 +2571,12 @@ fn launch_bin(bin_path: &Path, args: &[String], compat_mode: bool, cwd: &Path) -
     if is_node_bin(bin_path) {
         let mut cmd_args = vec![bin_path.to_string_lossy().to_string()];
         cmd_args.extend(args.iter().cloned());
-        return run_file_with_compat(&cmd_args, compat_mode);
+        // Run IN `cwd`, not the process cwd: a workspace-bin run (`nub exec -r`)
+        // passes each member's dir so the node bin sees the member's `.env` / Node
+        // pin / `.bin` chain. The single-package path passes the process cwd (a
+        // no-op override). run_file_in_dir threads cwd onto SpawnConfig so the
+        // child's working directory is set, not just nub's discovery.
+        return run_file_in_dir(&cmd_args, compat_mode, cwd);
     }
 
     let mut cmd = bin_launcher(bin_path, args);
@@ -2849,7 +3071,10 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         let nubx = install_dir.join("bin").join("nubx");
         let _ = std::fs::remove_file(&nubx);
         std::os::unix::fs::symlink("nub", &nubx).with_context(|| {
-            format!("nub upgrade: failed to create nubx symlink at {}", nubx.display())
+            format!(
+                "nub upgrade: failed to create nubx symlink at {}",
+                nubx.display()
+            )
         })?;
     }
 

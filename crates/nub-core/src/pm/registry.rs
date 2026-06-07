@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha512};
@@ -91,8 +91,9 @@ pub fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
     }
 
     // 3. Otherwise treat the spec as a semver range and pick the highest match.
-    let req = semver::VersionReq::parse(spec)
-        .with_context(|| format!("\"{spec}\" is not an exact version, dist-tag, or semver range"))?;
+    let req = semver::VersionReq::parse(spec).with_context(|| {
+        format!("\"{spec}\" is not an exact version, dist-tag, or semver range")
+    })?;
     let best = versions
         .keys()
         .filter_map(|v| semver::Version::parse(v).ok().map(|parsed| (parsed, v)))
@@ -116,9 +117,8 @@ fn dist_from_meta(version: &str, meta: &Value) -> Result<VersionDist> {
         .to_string();
     let integrity = parse_integrity(dist)
         .with_context(|| format!("version {version} has no usable dist integrity"))?;
-    let bin_subpath = bin_subpath(meta).with_context(|| {
-        format!("version {version} has no resolvable bin entry to run")
-    })?;
+    let bin_subpath = bin_subpath(meta)
+        .with_context(|| format!("version {version} has no resolvable bin entry to run"))?;
     Ok(VersionDist {
         version: version.to_string(),
         tarball,
@@ -343,7 +343,10 @@ mod tests {
         assert!(resolve_dist(&p, "9.9.9").is_err());
         // A range with no matching key errors naming the spec.
         let err = resolve_dist(&p, ">=20").unwrap_err().to_string();
-        assert!(err.contains(">=20"), "error names the unsatisfiable spec: {err}");
+        assert!(
+            err.contains(">=20"),
+            "error names the unsatisfiable spec: {err}"
+        );
     }
 
     #[test]
@@ -369,8 +372,7 @@ mod tests {
         // under the parallel harness) — covered by the documented single-override
         // shape, not asserted here. When it's set in the ambient env, skip the
         // lower-precedence assertions it would shadow.
-        let env_set = std::env::var("npm_config_registry")
-            .is_ok_and(|v| !v.trim().is_empty());
+        let env_set = std::env::var("npm_config_registry").is_ok_and(|v| !v.trim().is_empty());
 
         let dir = std::env::temp_dir().join(format!("nub-pm-reg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -384,9 +386,7 @@ mod tests {
         // No project key and no env → the public registry, slash trimmed.
         let empty = dir.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        if !env_set
-            && npmrc_value(&empty, "registry").is_none()
-        {
+        if !env_set && npmrc_value(&empty, "registry").is_none() {
             assert_eq!(registry_base(&empty), "https://registry.npmjs.org");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -419,7 +419,10 @@ mod tests {
         let err = verify_integrity(&f, &Integrity::Sha512("WRONG".into()))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("expected sha512-WRONG"), "names the expected: {err}");
+        assert!(
+            err.contains("expected sha512-WRONG"),
+            "names the expected: {err}"
+        );
         assert!(err.contains(sha512_abc), "names the actual digest: {err}");
 
         assert!(

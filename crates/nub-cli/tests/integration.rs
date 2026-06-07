@@ -2855,3 +2855,251 @@ fn pm_which_without_a_pin_errors_through_the_binary() {
         "the error must name the unpinned state and the remedy: {stderr}"
     );
 }
+
+// ── Section 8: exec/nubx workspace flags (-r / --filter / --parallel) ───
+//
+// Unix-only: the `.bin` entries are POSIX-shebang node scripts created at
+// runtime (node_modules is gitignored), same constraint the `exec_runs_*` tests
+// note. The Windows `.cmd`/`.exe` resolution is covered by `find_bin`'s unit
+// tests + the windows-latest CI leg.
+
+/// Build a two-member workspace under a fresh temp dir. Each member gets a local
+/// `node_modules/.bin/<bin>` node shebang script whose body is `make_body(member)`,
+/// so a test can give each member a distinguishable bin. Returns the root dir.
+#[cfg(unix)]
+fn make_exec_workspace(tag: &str, bin: &str, make_body: impl Fn(&str) -> String) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("nub-execws-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    for member in ["a", "b"] {
+        let dir = root.join("packages").join(member);
+        let bin_dir = dir.join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name":"@org/{member}"}}"#),
+        )
+        .unwrap();
+        let bin_file = bin_dir.join(bin);
+        std::fs::write(&bin_file, make_body(member)).unwrap();
+        std::fs::set_permissions(&bin_file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    root
+}
+
+/// `nub exec -r <bin>` runs the bin once in every member — the golden recursive
+/// path. Each member's local `.bin` greeter prints its own member name, proving
+/// the bin ran per-member (not once at the root).
+#[cfg(unix)]
+#[test]
+fn exec_recursive_runs_the_bin_in_each_member() {
+    let root = make_exec_workspace("rec", "greet", |member| {
+        format!("#!/usr/bin/env node\nconsole.log('ran-in:{member}');\n")
+    });
+    let out = Command::new(nub_binary())
+        .args(["exec", "-r", "greet"])
+        .current_dir(&root)
+        .output()
+        .expect("spawn nub exec -r");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("ran-in:a"),
+        "member a must run the bin: {stdout}"
+    );
+    assert!(
+        stdout.contains("ran-in:b"),
+        "member b must run the bin: {stdout}"
+    );
+}
+
+/// `--filter <name>` narrows a recursive exec to the one matching member; the
+/// other member's bin must NOT run.
+#[cfg(unix)]
+#[test]
+fn exec_filter_narrows_to_one_member() {
+    let root = make_exec_workspace("filt", "greet", |member| {
+        format!("#!/usr/bin/env node\nconsole.log('ran-in:{member}');\n")
+    });
+    let out = Command::new(nub_binary())
+        .args(["exec", "--filter", "@org/a", "greet"])
+        .current_dir(&root)
+        .output()
+        .expect("spawn nub exec --filter");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("ran-in:a"),
+        "the filtered member must run: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ran-in:b"),
+        "the unfiltered member must NOT run: {stdout}"
+    );
+}
+
+/// A member missing the bin is a per-member error (exec has no `--if-present`),
+/// not a silent skip: the overall run exits non-zero, the error names the missing
+/// bin, and the member that DOES have the bin still runs.
+#[cfg(unix)]
+#[test]
+fn exec_recursive_member_missing_bin_is_an_error_not_a_skip() {
+    // Build with the bin in both members, then delete it from `b`.
+    let root = make_exec_workspace("miss", "greet", |member| {
+        format!("#!/usr/bin/env node\nconsole.log('ran-in:{member}');\n")
+    });
+    std::fs::remove_file(root.join("packages/b/node_modules/.bin/greet")).unwrap();
+    let out = Command::new(nub_binary())
+        .args(["exec", "-r", "greet"])
+        .current_dir(&root)
+        .output()
+        .expect("spawn nub exec -r");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a missing bin must fail the run: {stderr}"
+    );
+    assert!(
+        stderr.contains("missing bin \"greet\""),
+        "the failure must name the missing bin (not skip silently): {stderr}"
+    );
+    assert!(
+        stdout.contains("ran-in:a"),
+        "the member that HAS the bin must still run: {stdout}"
+    );
+}
+
+/// A plain `nub exec <bin>` (no -r/--filter/--parallel) stays the single-package
+/// path: the workspace branch must NOT engage. Run from a member with a local
+/// bin; only that member's bin runs, and exactly once.
+#[cfg(unix)]
+#[test]
+fn exec_without_workspace_flags_is_unchanged() {
+    let root = make_exec_workspace("plain", "greet", |member| {
+        format!("#!/usr/bin/env node\nconsole.log('ran-in:{member}');\n")
+    });
+    let out = Command::new(nub_binary())
+        .args(["exec", "greet"])
+        .current_dir(root.join("packages/a"))
+        .output()
+        .expect("spawn nub exec");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert_eq!(
+        stdout.matches("ran-in:").count(),
+        1,
+        "plain exec runs the bin once in the cwd member only: {stdout}"
+    );
+    assert!(
+        stdout.contains("ran-in:a"),
+        "must run member a's own bin: {stdout}"
+    );
+}
+
+/// argv split: `nubx --filter @org/a greet --flag` binds `@org/a` to the filter
+/// (a value-consuming flag, not the bin positional) and forwards `--flag` to the
+/// bin. Routed through `nub exec` (the identical split path nubx uses).
+#[cfg(unix)]
+#[test]
+fn exec_filter_value_does_not_steal_the_bin_and_forwards_trailing_flags() {
+    let root = make_exec_workspace("argv", "greet", |_member| {
+        "#!/usr/bin/env node\nconsole.log('args:' + process.argv.slice(2).join('|'));\n".to_string()
+    });
+    let out = Command::new(nub_binary())
+        .args(["exec", "--filter", "@org/a", "greet", "--fix", "x"])
+        .current_dir(&root)
+        .output()
+        .expect("spawn nub exec --filter ... greet --fix");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("args:--fix|x"),
+        "trailing flags after the bin must reach the bin: {stdout}"
+    );
+}
+
+/// Per-member cwd (the correctness core of this phase): a node bin runs IN its
+/// member's directory, so it sees that member's auto-loaded `.env` — not the
+/// workspace root's. The bin is HOISTED to the root `.bin` (one file, resolved by
+/// `find_bin`'s walk-up for both members), and each member's `.env` sets `WHO` to
+/// a distinct value the bin echoes. Before the cwd fix, both members ran with the
+/// root cwd and would have echoed the same (root/none) value.
+#[cfg(unix)]
+#[test]
+fn exec_recursive_node_bin_uses_each_members_cwd_and_env() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("nub-execws-cwd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    // Hoisted bin in the ROOT .bin only — both members resolve it via walk-up.
+    let root_bin = root.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&root_bin).unwrap();
+    let bin_file = root_bin.join("whoami-env");
+    std::fs::write(
+        &bin_file,
+        "#!/usr/bin/env node\nconsole.log('who:' + (process.env.WHO ?? 'unset'));\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin_file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for member in ["a", "b"] {
+        let dir = root.join("packages").join(member);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name":"@org/{member}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(dir.join(".env"), format!("WHO={member}\n")).unwrap();
+    }
+
+    let out = Command::new(nub_binary())
+        .args(["exec", "-r", "whoami-env"])
+        .current_dir(&root)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub exec -r whoami-env");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("who:a"),
+        "member a's bin must see a's cwd/.env (WHO=a): {stdout}"
+    );
+    assert!(
+        stdout.contains("who:b"),
+        "member b's bin must see b's cwd/.env (WHO=b): {stdout}"
+    );
+}

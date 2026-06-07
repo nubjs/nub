@@ -115,6 +115,11 @@ pub struct SpawnConfig<'a> {
     /// `--require` ahead of nub's own preload so PnP's resolver patches install
     /// first. `None` when not in a PnP tree.
     pub pnp: Option<&'a std::path::Path>,
+    /// Working directory for the spawned Node child. For `nub <file>` this is the
+    /// process cwd (a no-op); the workspace-bin path threads each member's dir so
+    /// a node bin run via `nub exec -r` executes IN the member, seeing its own
+    /// `.env` / Node pin / `.bin` chain rather than the workspace root's.
+    pub cwd: &'a Path,
 }
 
 /// The result of spawning a Node process.
@@ -128,6 +133,10 @@ pub struct SpawnResult {
 /// injection, no preloads, no PATH shim.
 pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     let mut cmd = Command::new(config.node.path.as_str());
+    // Run the child in the configured cwd. For `nub <file>` this equals the
+    // process cwd (a no-op); the workspace-bin path threads a member dir so a
+    // node bin executes IN that member rather than inheriting the parent's cwd.
+    cmd.current_dir(config.cwd);
 
     // Permission model detection and auto-grant.
     let has_permission = config.user_args.iter().any(|a| is_permission_flag(a));

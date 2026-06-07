@@ -77,12 +77,7 @@ pub fn provision_pm(pin: &PmPin, store_root: &Path) -> Result<ProvisionedPm> {
 /// (deliberately re-stated rather than abstracted: two artifact kinds — Node
 /// tarballs and PM `.tgz`s — would make a generic `Provisioner` trait pure
 /// indirection).
-fn install(
-    pm: super::Pm,
-    dist: &VersionDist,
-    pm_store: &Path,
-    final_dir: &Path,
-) -> Result<()> {
+fn install(pm: super::Pm, dist: &VersionDist, pm_store: &Path, final_dir: &Path) -> Result<()> {
     // Sibling temp dir on the same filesystem → final placement is an atomic
     // rename. The guard cleans it up on every exit path.
     let work = pm_store.join(format!(".tmp-{}-{}", dist.version, std::process::id()));
@@ -120,7 +115,11 @@ fn install(
         if let Err(e) = std::fs::rename(&staging, final_dir) {
             if !final_dir.join("package").is_dir() {
                 return Err(e).with_context(|| {
-                    format!("installing {pm} {} into {}", dist.version, final_dir.display())
+                    format!(
+                        "installing {pm} {} into {}",
+                        dist.version,
+                        final_dir.display()
+                    )
                 });
             }
         }
@@ -160,7 +159,11 @@ mod tests {
     #[test]
     fn strips_the_corepack_hash_suffix_only() {
         assert_eq!(strip_hash_suffix("10.0.0+sha512.abc123"), "10.0.0");
-        assert_eq!(strip_hash_suffix("10.0.0"), "10.0.0", "no suffix is untouched");
+        assert_eq!(
+            strip_hash_suffix("10.0.0"),
+            "10.0.0",
+            "no suffix is untouched"
+        );
         assert_eq!(strip_hash_suffix("^9"), "^9", "a range is untouched");
     }
 
@@ -186,8 +189,7 @@ mod tests {
         // Exec under the project's resolved Node (the contract: never the bare
         // shell `node`). Discovery from the temp store's cwd has no pin, so it uses
         // PATH node here — sufficient to prove the provisioned bin runs.
-        let node = crate::node::discovery::discover_node(&store)
-            .expect("a node to run pnpm under");
+        let node = crate::node::discovery::discover_node(&store).expect("a node to run pnpm under");
         let out = std::process::Command::new(&node.path)
             .arg(&prov.bin)
             .arg("--version")

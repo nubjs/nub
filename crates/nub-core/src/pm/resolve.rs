@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::Pm;
 use crate::workspace::detect::detect_project;
@@ -147,9 +147,7 @@ fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
         "pnpm" => Pm::Pnpm,
         // A pinned yarn has a version, so the yarnrc signal is irrelevant here.
         "yarn" => classify_yarn(version, false),
-        other => bail!(
-            "unsupported package manager \"{other}\" — nub manages npm, pnpm, and yarn"
-        ),
+        other => bail!("unsupported package manager \"{other}\" — nub manages npm, pnpm, and yarn"),
     };
     Ok(PmPin {
         pm,
@@ -317,10 +315,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            resolve_target(&dir),
-            Some(PmTarget::YarnPath(release_file))
-        );
+        assert_eq!(resolve_target(&dir), Some(PmTarget::YarnPath(release_file)));
     }
 
     #[test]
@@ -382,7 +377,9 @@ mod tests {
 
         // No package.json at the target dir → error, never create one.
         let empty = tmpdir("write-pin-empty");
-        let err = write_pin(Pm::Npm, "10.0.0", &empty).unwrap_err().to_string();
+        let err = write_pin(Pm::Npm, "10.0.0", &empty)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("no package.json"),
             "missing-manifest error must say so, got: {err}"
