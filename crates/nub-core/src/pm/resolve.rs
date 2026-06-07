@@ -61,8 +61,14 @@ pub fn resolve_target(cwd: &Path) -> Option<PmTarget> {
 
 /// Resolve just the pin (for `nub pm which` / `nub pm update`). `None` means no
 /// `packageManager` and no `devEngines.packageManager` field.
+///
+/// The pin is read from the workspace root, not just the nearest `package.json`:
+/// a monorepo pins `packageManager` once at the root, and a member's `package.json`
+/// rarely carries it. Reading at the workspace root keeps the *read* symmetric with
+/// [`write_pin`]'s *write* (both target [`pin_target_dir`]) — a `nub pm switch` in a
+/// member writes the pin where the next `resolve_pin` will find it.
 pub fn resolve_pin(cwd: &Path) -> Option<PmPin> {
-    let manifest = detect_project(cwd)?.manifest;
+    let manifest = root_manifest(cwd)?;
 
     // `packageManager` wins; `devEngines.packageManager` (object form) is the
     // fallback. Both are parsed by the same spec parser.
@@ -76,6 +82,20 @@ pub fn resolve_pin(cwd: &Path) -> Option<PmPin> {
     let name = dev.get("name")?.as_str()?;
     let version = dev.get("version").and_then(|v| v.as_str());
     classify(name, version).ok()
+}
+
+/// The `package.json` value at [`pin_target_dir`] — the workspace root if one is
+/// above `cwd`, else the nearest project root. The detected project already parsed
+/// the nearest manifest; only a distinct workspace root needs a second read.
+fn root_manifest(cwd: &Path) -> Option<serde_json::Value> {
+    let project = detect_project(cwd)?;
+    match &project.workspace_root {
+        Some(ws) if *ws != project.root => {
+            let content = std::fs::read_to_string(ws.join("package.json")).ok()?;
+            serde_json::from_str(&content).ok()
+        }
+        _ => Some(project.manifest),
+    }
 }
 
 /// Write `packageManager` into the workspace-root `package.json` (the same
@@ -108,7 +128,17 @@ pub fn write_pin(pm: Pm, version: &str, cwd: &Path) -> Result<PathBuf> {
     let mut serialized = serde_json::to_string_pretty(&manifest)
         .with_context(|| format!("serializing {}", path.display()))?;
     serialized.push('\n');
-    std::fs::write(&path, serialized).with_context(|| format!("writing {}", path.display()))?;
+
+    // Atomic, crash-safe rewrite: write a sibling temp file then `rename` over the
+    // target. A `package.json` carries the user's whole manifest, so a torn write
+    // (crash / full disk mid-`write`) must never leave it truncated — the original
+    // survives until the rename, and the rename is atomic on the same filesystem.
+    let tmp = dir.join(format!(".package.json.nub-{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &serialized).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("replacing {}", path.display()));
+    }
 
     Ok(path)
 }
@@ -155,14 +185,17 @@ fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
     })
 }
 
-/// The single yarn classic-vs-Berry classifier, shared by both routes:
+/// The single yarn classic-vs-Berry classifier:
 ///   - pinned: a `version` is present → major `>= 2` is Berry.
-///   - lockfile-inferred (no pin): `version` is `None` → a sibling `.yarnrc.yml`
-///     (`yarnrc_present`) means Berry; otherwise classic.
+///   - no usable version → fall back to the `.yarnrc.yml` presence signal
+///     (`yarnrc_present`): a sibling means Berry, otherwise classic.
 ///
-/// P1's lockfile-inference route calls this with `version = None` and the
-/// `.yarnrc.yml` presence flag; the pinned route calls it with the version.
-pub fn classify_yarn(version: Option<&str>, yarnrc_present: bool) -> Pm {
+/// The pinned route ([`classify`]) calls this with the version. The unpinned route
+/// does NOT reach here — it defers to whatever `yarn` is on PATH (see the
+/// `build_passthrough_command` fallback) and so needs no classic/Berry split. The
+/// `None`-version arm is the seam a future provisioning-from-lockfile path would
+/// use; it is exercised by tests but has no production caller today.
+fn classify_yarn(version: Option<&str>, yarnrc_present: bool) -> Pm {
     match version.and_then(yarn_major) {
         Some(major) if major >= 2 => Pm::YarnBerry,
         Some(_) => Pm::Yarn,
@@ -190,7 +223,11 @@ fn yarn_major(version: &str) -> Option<u32> {
 /// entry is recognized; a nested or multi-document form is not (no real-world
 /// `.yarnrc.yml` nests `yarnPath`).
 fn read_yarn_path(cwd: &Path) -> Option<PathBuf> {
-    let root = detect_project(cwd)?.root;
+    // A Berry monorepo commits `.yarnrc.yml` (and the release it points at) at the
+    // workspace root, not in each member, so resolve at the workspace root — the
+    // same dir [`resolve_pin`] reads the pin from. `yarnPath` is relative to the
+    // file that declares it, so the join base must be that same root.
+    let root = pin_target_dir(cwd);
     let path = root.join(".yarnrc.yml");
     let content = std::fs::read_to_string(&path).ok()?;
     for line in content.lines() {
@@ -285,8 +322,8 @@ mod tests {
 
     #[test]
     fn yarn_disambiguated_by_yarnrc_when_only_lockfile_present() {
-        // The lockfile-inference route has no version, so `.yarnrc.yml` presence
-        // (the same helper, second route) decides classic vs Berry.
+        // With no usable version, `.yarnrc.yml` presence decides classic vs Berry —
+        // the no-pin seam (see `classify_yarn`'s doc); no production caller yet.
         assert_eq!(
             classify_yarn(None, false),
             Pm::Yarn,
@@ -388,5 +425,72 @@ mod tests {
             !empty.join("package.json").exists(),
             "write_pin must not scaffold a package.json"
         );
+    }
+
+    #[test]
+    fn pin_is_read_and_written_at_the_workspace_root_from_a_member() {
+        // A monorepo pins `packageManager` once at the root; a member's package.json
+        // carries none. Resolving from the member must still find the root pin (read
+        // symmetric with write), and a committed Berry release lives at the root too.
+        let root = tmpdir("ws-root");
+        write_pkg(
+            &root,
+            r#"{"packageManager":"yarn@4.2.2","workspaces":["packages/*"]}"#,
+        );
+        let release = root.join(".yarn/releases");
+        std::fs::create_dir_all(&release).unwrap();
+        let release_file = release.join("yarn-4.2.2.cjs");
+        std::fs::write(&release_file, "// yarn\n").unwrap();
+        std::fs::write(
+            root.join(".yarnrc.yml"),
+            "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
+        )
+        .unwrap();
+
+        let member = root.join("packages").join("app");
+        std::fs::create_dir_all(&member).unwrap();
+        write_pkg(&member, r#"{"name":"@mono/app"}"#);
+
+        // Pin reads the root field even though the member has none.
+        assert_eq!(
+            resolve_pin(&member).unwrap().pm,
+            Pm::YarnBerry,
+            "resolve_pin must walk to the workspace root for the pin"
+        );
+        // yarnPath resolves at the root, with its relative path joined onto the root.
+        assert_eq!(
+            resolve_target(&member),
+            Some(PmTarget::YarnPath(release_file)),
+            "the committed Berry release at the workspace root must resolve from a member"
+        );
+        // A `nub pm switch` in the member writes to the SAME root file resolve reads.
+        assert_eq!(
+            write_pin(Pm::Pnpm, "9.1.0", &member).unwrap(),
+            root.join("package.json")
+        );
+    }
+
+    #[test]
+    fn write_pin_replaces_atomically_and_leaves_no_temp_file() {
+        // The rewrite goes through a sibling temp + rename; on success no `.tmp`
+        // litter remains, and the target holds exactly the new pin.
+        let dir = tmpdir("write-atomic");
+        write_pkg(&dir, "{\n  \"name\": \"app\"\n}\n");
+        write_pin(Pm::Npm, "10.9.0", &dir).unwrap();
+
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp") || n.starts_with(".package.json"))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "the atomic rename must leave no temp file behind, found: {leftover:?}"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["packageManager"].as_str(), Some("npm@10.9.0"));
     }
 }
