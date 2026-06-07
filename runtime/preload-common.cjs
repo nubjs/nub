@@ -34,12 +34,24 @@ const { join, dirname, extname: pathExtname } = require("node:path");
 // (brand boundary); `null` when this is not a PnP run.
 let __pnpApi;
 function pnpApi() {
-  if (__pnpApi !== undefined) return __pnpApi;
-  __pnpApi = null;
-  if (process.versions.pnp) {
-    try { __pnpApi = module_.findPnpApi(cwdIssuer()) || null; } catch {}
+  if (__pnpApi) return __pnpApi; // cache only a SUCCESSFUL lookup (see below)
+  if (!process.versions.pnp) return null;
+  // `findPnpApi` matches by the queried path. A single synthesized `cwd + sep` anchor
+  // can miss on Windows (drive-letter casing, 8.3 short paths, trailing separator),
+  // and a transient early miss must NOT be cached sticky — otherwise every later
+  // resolution falls through to PnP's `_resolveFilename`, which rejects the
+  // `conditions` option Node injects under a registered hook (the intermittent
+  // Windows `conditions` crash). So try several real in-tree anchors and cache only
+  // on success: `argv[1]` is the user's entry file (in-tree for `nub <file>`); cwd
+  // covers `nub run` / `nub exec`.
+  for (const anchor of [process.argv[1], cwdIssuer(), process.cwd()]) {
+    if (!anchor) continue;
+    try {
+      const api = module_.findPnpApi(anchor);
+      if (api) return (__pnpApi = api);
+    } catch {}
   }
-  return __pnpApi;
+  return null;
 }
 
 // Shared PnP ESM resolution (resolveRequest + format) + the directory-issuer
@@ -300,21 +312,28 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     // CJS deps fine (no conditions option) and interposing here instead recurses to
     // OOM on the Node 18 line — so the PnP branch is gated to where registerHooks
     // exists. `pnpApi()` is null off-PnP, making this doubly safe.
-    const pnp = typeof module_.registerHooks === "function" ? pnpApi() : null;
-    if (pnp) {
+    // On a PnP tree + fast tier (sync `registerHooks` registered), resolve through
+    // PnP's conditions-free `resolveRequest` and NEVER fall through to
+    // `origResolveFilename` — that is PnP's patched `_resolveFilename`, which rejects
+    // the `conditions` option Node injects under a registered hook. The gate is
+    // `process.versions.pnp` (set the moment `.pnp.cjs` runs), NOT a non-null api:
+    // if `findPnpApi` momentarily misses we still avoid PnP's resolver and use Node's
+    // native `_findPath`, so a transient lookup miss can't leak a `conditions` crash.
+    const inPnp = typeof module_.registerHooks === "function" && !!process.versions.pnp;
+    if (inPnp) {
       if (module_.isBuiltin(request)) return request; // PnP defers builtins to Node
-      try {
-        const issuer = (parent && typeof parent.filename === "string" ? parent.filename : cwdIssuer());
-        const r = pnp.resolveRequest(request, issuer);
-        if (r) return r;
-      } catch { /* fall through to Node's PnP-free path resolver */ }
-      // PnP couldn't resolve it (e.g. nub's OWN vendored deps, whose issuer is nub's
-      // out-of-tree install dir). We CANNOT call `origResolveFilename` here: it is
-      // PnP's patched `_resolveFilename`, and once a customization hook is registered
-      // Node's `wrapResolveFilename` re-injects the `conditions` option PnP rejects —
-      // there is no way to suppress it from JS. Use Node's native path primitives
-      // (`_resolveLookupPaths` + `_findPath`), which PnP does NOT patch, so nub's
-      // runtime requires (resolved via NODE_PATH globalPaths) still work.
+      const pnp = pnpApi();
+      if (pnp) {
+        try {
+          const issuer = parent && typeof parent.filename === "string" ? parent.filename : cwdIssuer();
+          const r = pnp.resolveRequest(request, issuer);
+          if (r) return r;
+        } catch { /* fall through to native path resolution below */ }
+      }
+      // PnP couldn't resolve it (nub's OWN vendored deps, whose issuer is nub's
+      // out-of-tree install dir) or the api was momentarily unavailable. Use Node's
+      // native path primitives (`_resolveLookupPaths` + `_findPath`), which PnP does
+      // NOT patch — never `origResolveFilename` (PnP's, + `conditions`).
       const lookupPaths = module_._resolveLookupPaths(request, parent) || [];
       const found = module_._findPath(request, lookupPaths, isMain);
       if (found) return found;
