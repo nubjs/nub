@@ -147,9 +147,11 @@ pub fn find_bin(name: &str, cwd: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Read `script-shell` from `.npmrc` (project-level, then user-level).
-/// Returns the shell path if set, or None to use the platform default.
-pub fn script_shell(project_root: &Path) -> Option<String> {
+/// Read a single `key = value` setting from `.npmrc` (project-level, then
+/// user-level `~/.npmrc`), returning the first match's value with surrounding
+/// quotes stripped. The one `.npmrc` reader in the crate — `script_shell` and
+/// (P1) the PM registry lookup both go through it.
+pub fn npmrc_value(project_root: &Path, key: &str) -> Option<String> {
     // Check project .npmrc first, then ~/.npmrc
     let candidates = [
         project_root.join(".npmrc"),
@@ -162,7 +164,7 @@ pub fn script_shell(project_root: &Path) -> Option<String> {
         if let Ok(content) = fs::read_to_string(path) {
             for line in content.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("script-shell") {
+                if trimmed.starts_with(key) {
                     if let Some((_, value)) = trimmed.split_once('=') {
                         let value = value.trim().trim_matches('"').trim_matches('\'');
                         if !value.is_empty() {
@@ -177,10 +179,40 @@ pub fn script_shell(project_root: &Path) -> Option<String> {
     None
 }
 
+/// Read `script-shell` from `.npmrc` (project-level, then user-level).
+/// Returns the shell path if set, or None to use the platform default.
+pub fn script_shell(project_root: &Path) -> Option<String> {
+    npmrc_value(project_root, "script-shell")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::find_bin;
+    use super::{find_bin, npmrc_value, script_shell};
     use std::fs;
+
+    #[test]
+    fn npmrc_value_reads_keys_and_script_shell_delegates() {
+        let tmp = std::env::temp_dir().join(format!("nub-npmrc-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join(".npmrc"),
+            "registry=https://example.test/\nscript-shell = \"/bin/dash\"\n",
+        )
+        .unwrap();
+
+        // Arbitrary keys round-trip, with surrounding quotes/whitespace stripped.
+        assert_eq!(
+            npmrc_value(&tmp, "registry").as_deref(),
+            Some("https://example.test/")
+        );
+        // script_shell is now a thin delegate over npmrc_value (quote-stripped).
+        assert_eq!(script_shell(&tmp).as_deref(), Some("/bin/dash"));
+        // A key absent from the project .npmrc falls through to None (no ~/.npmrc
+        // key named this in CI).
+        assert!(npmrc_value(&tmp, "nub-no-such-key").is_none());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn find_bin_resolves_platform_entry() {
