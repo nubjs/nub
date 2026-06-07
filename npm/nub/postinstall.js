@@ -1,7 +1,7 @@
 const { platform } = process;
-const { mkdirSync, unlinkSync, symlinkSync, copyFileSync, chmodSync } = require("fs");
 const { join } = require("path");
 const { platformPackage } = require("./platform.js");
+const { installShims } = require("./shims.js");
 
 const { key, pkg } = platformPackage();
 
@@ -26,30 +26,18 @@ try {
   process.exit(0);
 }
 
-// POSIX fast path: replace each JS launcher with a direct symlink to the platform
-// binary, so `nub` and `nubx` exec the native Rust binary with no Node bootstrap.
-// Both names point at the SAME binary; the Rust CLI selects its verb from argv[0]'s
-// basename (nub vs nubx — see crates/nub-cli/src/cli.rs Argv0::detect), and
-// process.execPath still resolves to the platform binary so the sibling runtime/
+// POSIX fast path: atomically replace each JS launcher with a direct SYMLINK to the
+// platform binary, so `nub` and `nubx` exec the native Rust binary with no Node
+// bootstrap. Both names point at the SAME binary; the Rust CLI selects its verb from
+// argv[0]'s basename (nub vs nubx — see crates/nub-cli/src/cli.rs Argv0::detect), and
+// the symlink resolves to the platform binary's real location so the sibling runtime/
 // directory is found by walking up.
+//
+// SYMLINK ONLY — no copy fallback. runtime/ ships only inside the platform package
+// (next to its binary), so a copy at bin/nub would have no sibling runtime/ and break
+// preload resolution. If the symlink can't be made (read-only FS, EXDEV, …),
+// installShims leaves the JS launcher in place — correct, just slower. (See shims.js
+// for the full rationale; the same logic self-heals at runtime in bin/launch.js when
+// a package manager skips this postinstall.)
 const binDir = join(__dirname, "bin");
-mkdirSync(binDir, { recursive: true });
-for (const name of ["nub", "nubx"]) {
-  const dest = join(binDir, name);
-  try { unlinkSync(dest); } catch {}
-  try {
-    symlinkSync(binSrc, dest);
-    chmodSync(dest, 0o755);
-  } catch {
-    // Fallback: copy if symlink fails (e.g. cross-device). Slower path resolution
-    // but correct — argv[0] still resolves to a binary named nub/nubx.
-    try {
-      copyFileSync(binSrc, dest);
-      chmodSync(dest, 0o755);
-    } catch (err) {
-      console.error(`@nubjs/nub: failed to install ${name} binary: ${err.message}`);
-      process.exit(0);
-    }
-  }
-}
-chmodSync(binSrc, 0o755);
+installShims(binSrc, binDir);

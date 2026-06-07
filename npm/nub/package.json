@@ -12,7 +12,8 @@
   "files": [
     "bin",
     "platform.js",
-    "postinstall.js"
+    "postinstall.js",
+    "shims.js"
   ],
   "scripts": {
     "postinstall": "node postinstall.js"
