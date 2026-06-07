@@ -130,6 +130,59 @@ jobs:
           fi
       - run: cargo test
 
+  pnp:
+    name: Yarn PnP (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cross-OS coverage on the current Node line — PnP's zipfs fs patch, path
+        # handling, and `findPnpApi` differ by OS (Windows backslashes especially),
+        # which the host (macOS) + Docker (Linux) legs can't fully cover. Plus two
+        # Linux tier representatives: 22.15 = fast-tier floor (sync registerHooks),
+        # 18.19 = compat-tier floor (async loader worker). Tiers are runtime-version
+        # specific, not OS-specific, so they run on Linux only.
+        os: [ubuntu-latest, windows-latest, macos-14]
+        node: ['24']
+        include:
+          - os: ubuntu-latest
+            node: '22.15'
+          - os: ubuntu-latest
+            node: '18.19'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # nub itself + the nub-native addon (the TS-under-PnP scenario transpiles, so
+      # the addon must be present, same as the `test` job's data-format gate).
+      - name: Build nub + native addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p nub-cli -p nub-native
+          mkdir -p runtime/addons
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cp target/debug/nub_native.dll runtime/addons/nub-native.node
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            cp target/debug/libnub_native.dylib runtime/addons/nub-native.node
+          else
+            cp target/debug/libnub_native.so runtime/addons/nub-native.node
+          fi
+      # Builds a real Yarn 4 PnP fixture (corepack ships with Node) and runs every
+      # PnP scenario against the in-runner Node. The matrix script is bash; Windows
+      # runners provide Git Bash via `shell: bash`.
+      - name: Run Yarn PnP matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          NUB=target/debug/nub
+          [[ "$RUNNER_OS" == "Windows" ]] && NUB=target/debug/nub.exe
+          tests/pnp/run-pnp-matrix.sh "$NUB" "$(dirname "$(command -v node)")"
+
   # The heavyweight Node-suite compat corpus job was removed from CI (2026-06-03):
   # it regressed during the repo move and reproducibly kills the runner at parallel
   # fan-out, and isn't needed as a CI gate for now. nub still runs on byte-for-byte

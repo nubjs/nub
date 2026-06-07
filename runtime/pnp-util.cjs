@@ -12,8 +12,13 @@
 // 18.19 floor. (CJS resolution stays in preload-common.cjs's `_resolveFilename`
 // branch — it returns a path, not a hook result, and is main-thread-only.)
 const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
+const { join, sep } = require("node:path");
 const { fileURLToPath, pathToFileURL } = require("node:url");
+
+// A directory issuer for pnpapi.resolveRequest: cwd with a trailing separator so
+// PnP treats it as a directory. `path.sep` (not a literal "/") keeps it correct on
+// Windows, where cwd uses backslashes and a mixed "C:\x/" can confuse resolution.
+const cwdIssuer = () => process.cwd() + sep;
 
 // Module format of a PnP-resolved file. `.mjs`/`.cjs` are unambiguous; a `.js` file
 // inherits its package's `type` (read via PnP — `fs` is zip-patched in both realms).
@@ -36,11 +41,11 @@ function pnpFormat(pnp, resolvedPath) {
 // resolve it (then the caller delegates to Node's default resolver). Throwing is
 // the caller's signal to fall through too — callers wrap in try/catch.
 function pnpResolveEsm(pnp, specifier, parentURL) {
-  const issuer = parentURL ? fileURLToPath(parentURL) : process.cwd() + "/";
+  const issuer = parentURL ? fileURLToPath(parentURL) : cwdIssuer();
   const resolved = pnp.resolveRequest(specifier, issuer);
   if (!resolved) return null;
   const format = pnpFormat(pnp, resolved);
   return { url: pathToFileURL(resolved).href, shortCircuit: true, ...(format && { format }) };
 }
 
-module.exports = { pnpResolveEsm };
+module.exports = { pnpResolveEsm, cwdIssuer };

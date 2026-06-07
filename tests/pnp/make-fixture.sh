@@ -58,6 +58,11 @@ cat > esm-pure.mjs <<'JS'
 import chalk from "chalk"; // pure-ESM dep, zip-stored
 console.log("PURE-ESM-OK", typeof chalk.green);
 JS
+cat > ts-test.ts <<'TS'
+import _ from "lodash"; // TS entry (nub transpiles) importing a PnP dep
+const msg: string = _.capitalize("ts pnp works");
+console.log("TS-OK", msg);
+TS
 cat > script-runner.cjs <<'JS'
 const _ = require("lodash");
 console.log("SCRIPT-OK", _.kebabCase("Pnp Script Runner"));

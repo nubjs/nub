@@ -2537,7 +2537,12 @@ fn pnp_bin_runner_path() -> Option<String> {
     let nub_binary = nub_core::node::spawn::current_nub_binary().ok()?;
     let preload = nub_core::node::spawn::find_public_preload(&nub_binary)?;
     let runtime_dir = Path::new(&preload).parent()?;
-    Some(runtime_dir.join("pnp-bin-run.cjs").to_string_lossy().into_owned())
+    Some(
+        runtime_dir
+            .join("pnp-bin-run.cjs")
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Launch a resolved `node_modules/.bin` entry, shebang/extension-aware (A40).

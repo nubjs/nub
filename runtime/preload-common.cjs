@@ -37,14 +37,14 @@ function pnpApi() {
   if (__pnpApi !== undefined) return __pnpApi;
   __pnpApi = null;
   if (process.versions.pnp) {
-    try { __pnpApi = module_.findPnpApi(process.cwd() + "/") || null; } catch {}
+    try { __pnpApi = module_.findPnpApi(cwdIssuer()) || null; } catch {}
   }
   return __pnpApi;
 }
 
-// Shared PnP ESM resolution (resolveRequest + format), identical to the compat
-// worker's — see runtime/pnp-util.cjs.
-const { pnpResolveEsm } = require("./pnp-util.cjs");
+// Shared PnP ESM resolution (resolveRequest + format) + the directory-issuer
+// helper, identical to the compat worker's — see runtime/pnp-util.cjs.
+const { pnpResolveEsm, cwdIssuer } = require("./pnp-util.cjs");
 
 // ── Watch-mode dependency reporting (main thread only) ──────────────
 // Under `nub watch`, Node's FilesWatcher only watches files in the import graph;
@@ -304,7 +304,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     if (pnp) {
       if (module_.isBuiltin(request)) return request; // PnP defers builtins to Node
       try {
-        const issuer = (parent && typeof parent.filename === "string" ? parent.filename : process.cwd() + "/");
+        const issuer = (parent && typeof parent.filename === "string" ? parent.filename : cwdIssuer());
         const r = pnp.resolveRequest(request, issuer);
         if (r) return r;
       } catch { /* fall through to Node's PnP-free path resolver */ }

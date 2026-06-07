@@ -21,13 +21,14 @@ nub discovers its Node from `PATH`, so `PATH="<nvm-version>/bin:$PATH" nub …` 
 | `cjs` | `require()` of a CJS PnP dep — `--require .pnp.cjs` + the fast-tier `_resolveFilename` PnP branch |
 | `esm-cjsdep` | `import` of a CJS dep from ESM — the CJS-from-ESM sub-loader (where PnP's fs patch is live) |
 | `esm-puredep` | `import` of a pure-ESM **zip-stored** dep — the resolve hook must emit an explicit `format`, or Node ≤20.11 mis-tags it CJS → `ERR_REQUIRE_ESM` |
+| `ts` | a `.ts` entry that imports a PnP dep — nub's transpile hook **and** PnP resolution composing (nub's core value × PnP) |
 | `run` | `nub run` of a script using a PnP dep — the `compute_augmentation_env` NODE_OPTIONS path |
-| `nubx` | `nubx <bin>` for a zip-stored bin — the `pnpapi` bin-resolver plus running a zip-internal entry |
+| `exec` | `nub exec <bin>` for a zip-stored bin — `pnpapi` resolution + `require()` load (`runtime/pnp-bin-run.cjs`). The `nubx` argv0 alias shares this path |
 | `node-off` | `nub --node` must **not** resolve the dep — proves augmentation (and PnP) is fully disabled |
 
 ## No remaining gaps
 
-Every scenario, including `nubx` of a zip-stored bin, passes across the whole supported range (Node 18.19+). The two corners that initially failed and how they were closed:
+Every scenario, including `nub exec` of a zip-stored bin, passes across the whole supported range (Node 18.19+) on Linux, macOS, and Windows (the CI `pnp` job in `.github/workflows/ci.yml`). The two corners that initially failed and how they were closed:
 
 - **Pure-ESM zip dep on Node <20.19** (`ERR_REQUIRE_ESM`) — the resolve hook now emits an explicit module `format` (via `runtime/pnp-util.cjs`), so older Node doesn't mis-tag a zip-stored ESM `.js` as CommonJS.
 - **`nubx` of a zip-stored bin on the compat tier** (`ERR_MODULE_NOT_FOUND`) — `runtime/pnp-bin-run.cjs` loads the resolved bin via `require()` (the zip-safe CJS path where PnP's `fs` patch is live) instead of running it as a node entry (which the compat tier's `--import` would route through the ESM loader, whose existence check bypasses the patch). This mirrors `yarn exec`.

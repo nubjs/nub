@@ -34,8 +34,8 @@ if [ ! -x "$NUB" ]; then echo "error: nub binary not found/executable at $NUB" >
 # Absolutize — the probes `cd` into the fixture, so a relative nub path would break.
 NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 
-# nubx dispatch is by argv0 — symlink a `nubx` next to the binary under test.
-NUBX="$(dirname "$NUB")/nubx"; ln -sf "$NUB" "$NUBX"
+# The bin scenario uses `nub exec <bin>`, which routes through the SAME run_exec PnP
+# path as the `nubx` argv0 alias but needs no argv0 symlink — portable to Windows CI.
 
 [ -f "$FIXTURE/.pnp.cjs" ] || "$SCRIPT_DIR/make-fixture.sh" "$FIXTURE"
 
@@ -62,13 +62,15 @@ for bin in "${NODE_DIRS[@]}"; do
   check cjs         "$(run "$bin" "$NUB" cjs-test.cjs)"  "CJS-OK"
   check esm-cjsdep  "$(run "$bin" "$NUB" esm-test.mjs)"  "ESM-OK"
   check esm-puredep "$(run "$bin" "$NUB" esm-pure.mjs)"  "PURE-ESM-OK"
+  check ts          "$(run "$bin" "$NUB" ts-test.ts)"    "TS-OK"
   check run         "$(run "$bin" "$NUB" run start)"     "SCRIPT-OK"
   # --node must DISABLE PnP: the dep must NOT resolve.
   check node-off    "$(run "$bin" "$NUB" --node cjs-test.cjs)" "Cannot find module"
 
-  # nubx of a zip-stored bin — a hard PASS on every tier: the runner loads the bin
-  # via require() (zip-safe) instead of as a node entry, mirroring `yarn exec`.
-  check nubx "$(run "$bin" "$NUBX" cowsay hi)" "< hi >"
+  # bin of a zip-stored package — a hard PASS on every tier: pnp-bin-run.cjs loads
+  # the bin via require() (zip-safe) instead of as a node entry, mirroring `yarn
+  # exec`. `nub exec` and the `nubx` argv0 alias share this run_exec path.
+  check exec "$(run "$bin" "$NUB" exec cowsay hi)" "< hi >"
 
   printf "%-12s %d/%d %s\n" "v$nv" "$ok" "$tot" "$line"
 done

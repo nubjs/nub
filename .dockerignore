@@ -1,0 +1,10 @@
+# Keep the Docker build context small: the in-container build compiles from source
+# and installs deps fresh, so host build artifacts and checkouts must not be copied.
+target/
+node_modules/
+.repos/
+.git/
+.vercel/
+site/node_modules/
+site/.next/
+**/*.log

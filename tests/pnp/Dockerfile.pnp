@@ -13,24 +13,35 @@
 #   docker build -f tests/pnp/Dockerfile.pnp --build-arg NODE_VERSION=20.19 -t nub-pnp:20 .
 #   docker run --rm nub-pnp:20
 
-# ── builder: compile a Linux nub (release) ──────────────────────────────────────
+# NODE_VERSION must be a global ARG (declared before the first FROM) to be usable in
+# the runner stage's FROM line. Override with --build-arg NODE_VERSION=<ver>.
+ARG NODE_VERSION=22
+
+# ── builder: compile a Linux nub + native addon, assemble the runtime dir ────────
 FROM rust:1-bookworm AS builder
 WORKDIR /src
 COPY . .
-# The runtime/addons/*.node N-API addon is produced by the build; cargo build emits
-# the nub binary. Cache registry + target across rebuilds.
+# Build the nub binary AND the nub-native addon (the TS-under-PnP scenario
+# transpiles, which needs the addon), then place the freshly-built *Linux* addon
+# into runtime/addons — overwriting whatever the host build context carried (e.g. a
+# macOS .dylib), so the runner stage copies a runtime dir with the correct-arch
+# addon. The cp must share this RUN with the build (target/ is a cache mount).
+# Cache the addon out to a non-mounted path so the runner COPY can reach it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p nub-cli && \
-    cp target/release/nub /usr/local/bin/nub
+    cargo build --release -p nub-cli -p nub-native && \
+    mkdir -p /out/runtime && cp -r runtime/. /out/runtime/ && \
+    mkdir -p /out/runtime/addons && \
+    cp target/release/libnub_native.so /out/runtime/addons/nub-native.node && \
+    cp target/release/nub /out/nub
 
 # ── runner: layer nub onto a specific Node, run the PnP matrix ───────────────────
-ARG NODE_VERSION=22
 FROM node:${NODE_VERSION}-bookworm
 WORKDIR /work
-# nub needs its sibling runtime/ dir (find_preload walks up to it) + the test harness.
-COPY --from=builder /usr/local/bin/nub /opt/nub/bin/nub
-COPY runtime /opt/nub/runtime
+# nub needs its sibling runtime/ dir (find_preload walks up to it) + the test
+# harness. Take runtime/ from the builder so the Linux addon is the one present.
+COPY --from=builder /out/nub /opt/nub/bin/nub
+COPY --from=builder /out/runtime /opt/nub/runtime
 COPY tests/pnp /opt/nub/tests/pnp
 RUN corepack enable
 # Sweep just the in-container Node (its bin dir), not nvm.

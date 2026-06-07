@@ -19,13 +19,14 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
+const { cwdIssuer } = require("./pnp-util.cjs");
 
 const want = process.argv[2];
 const rest = process.argv.slice(3);
 
 // `require("pnpapi")` throws for an out-of-tree issuer (this file lives in nub's
 // install dir); `findPnpApi` resolves by the queried path, so it works here.
-const api = require("node:module").findPnpApi(process.cwd() + "/");
+const api = require("node:module").findPnpApi(cwdIssuer());
 if (!api) {
   process.stderr.write("nubx: not a Yarn PnP project\n");
   process.exit(127);
