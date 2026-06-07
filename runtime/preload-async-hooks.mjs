@@ -22,7 +22,7 @@ import {
   extname, resolveSpec, loadTranspile, loadData,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -56,6 +56,25 @@ const __pnp = (() => {
 // lets the main thread `await register(...)`.
 export async function initialize(_data) {}
 
+// Module format of a PnP-resolved file, so the resolve hook can hand Node an
+// explicit `format`. WITHOUT this, Node ≤ 20.11 mis-detects a zip-stored `.js`
+// file from a `"type":"module"` package as CommonJS, routes it through the CJS
+// translator, and `require()`s the ESM source → ERR_REQUIRE_ESM. Node 20.19+ gets
+// it right on its own, but emitting the format fixes the whole supported range
+// (down to the 18.19 floor). `.mjs`/`.cjs` are unambiguous; a `.js` file inherits
+// its package's `type` (read via PnP — fs is zip-patched in this worker). `null`
+// lets Node decide (non-JS, or detection failed).
+function pnpFormat(resolvedPath) {
+  if (resolvedPath.endsWith(".mjs")) return "module";
+  if (resolvedPath.endsWith(".cjs")) return "commonjs";
+  if (!resolvedPath.endsWith(".js")) return null;
+  try {
+    const info = __pnp.getPackageInformation(__pnp.findPackageLocator(resolvedPath));
+    const pj = JSON.parse(readFileSync(join(info.packageLocation, "package.json"), "utf8"));
+    return pj.type === "module" ? "module" : "commonjs";
+  } catch { return null; }
+}
+
 // ── Resolve hook ────────────────────────────────────────────────────
 export async function resolve(specifier, context, nextResolve) {
   const r = resolveSpec(specifier, context.parentURL);
@@ -65,7 +84,10 @@ export async function resolve(specifier, context, nextResolve) {
     try {
       const issuer = context.parentURL ? fileURLToPath(context.parentURL) : process.cwd() + "/";
       const resolved = __pnp.resolveRequest(specifier, issuer);
-      if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
+      if (resolved) {
+        const format = pnpFormat(resolved);
+        return { url: pathToFileURL(resolved).href, shortCircuit: true, ...(format && { format }) };
+      }
     } catch { /* fall through to Node's resolver */ }
   }
   return nextResolve(specifier, context);

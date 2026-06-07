@@ -42,6 +42,24 @@ function pnpApi() {
   return __pnpApi;
 }
 
+// Module format of a PnP-resolved file, so the resolve hook can return an explicit
+// `format`. WITHOUT it, Node ≤ 20.11 mis-detects a zip-stored `.js` file from a
+// `"type":"module"` package as CommonJS, routes it through the CJS translator, and
+// `require()`s the ESM source → ERR_REQUIRE_ESM. Newer Node detects it on its own,
+// but emitting the format makes PnP ESM deps work across the whole supported range
+// (down to the 18.19 floor). `.mjs`/`.cjs` are unambiguous; a `.js` file inherits
+// its package's `type` (read via PnP — fs is zip-patched). `null` lets Node decide.
+function pnpFormat(pnp, resolvedPath) {
+  if (resolvedPath.endsWith(".mjs")) return "module";
+  if (resolvedPath.endsWith(".cjs")) return "commonjs";
+  if (!resolvedPath.endsWith(".js")) return null;
+  try {
+    const info = pnp.getPackageInformation(pnp.findPackageLocator(resolvedPath));
+    const pj = JSON.parse(require("node:fs").readFileSync(join(info.packageLocation, "package.json"), "utf8"));
+    return pj.type === "module" ? "module" : "commonjs";
+  } catch { return null; }
+}
+
 // ── Watch-mode dependency reporting (main thread only) ──────────────
 // Under `nub watch`, Node's FilesWatcher only watches files in the import graph;
 // config files (tsconfig.json, package.json) and `.env*` are NOT in any graph, so
@@ -143,7 +161,8 @@ function makeHooks(core, watchReporting) {
           : process.cwd() + "/";
         const resolved = pnp.resolveRequest(specifier, issuer);
         if (resolved) {
-          return { url: pathToFileURL(resolved).href, shortCircuit: true };
+          const format = pnpFormat(pnp, resolved);
+          return { url: pathToFileURL(resolved).href, shortCircuit: true, ...(format && { format }) };
         }
       } catch { /* fall through to Node's resolver */ }
     }
