@@ -464,6 +464,17 @@ mod tests {
             verify_integrity(&f, &Integrity::Sha1("dead".into())).is_err(),
             "a wrong sha1 fails closed"
         );
+
+        // An expected sha512 SRI payload with a non-base64 character can't decode;
+        // that must fail closed at decode time, not pass verification. The message
+        // names the decode context so a CI failure points at the malformed SRI.
+        let err = verify_integrity(&f, &Integrity::Sha512("!!not-base64!!".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("decoding sha512 SRI"),
+            "an undecodable SRI must fail closed at decode, got: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

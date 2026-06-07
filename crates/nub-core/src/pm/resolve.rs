@@ -175,8 +175,26 @@ fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
     let pm = match name {
         "npm" => Pm::Npm,
         "pnpm" => Pm::Pnpm,
-        // A pinned yarn has a version, so the yarnrc signal is irrelevant here.
-        "yarn" => classify_yarn(version, false),
+        "yarn" => {
+            // A *pinned* yarn (version present) must classify by major to pick the
+            // classic-tarball vs Berry provisioning path. A dist-tag/range whose
+            // version has no leading numeric major (`yarn@stable`, `yarn@berry`)
+            // can't be split, and Corepack requires an exact version anyway — reject
+            // it here naming the requirement, rather than silently provisioning the
+            // wrong (classic-tarball) artifact for a Berry tag. A genuinely absent
+            // version (the lockfile-inference seam) still flows through the yarnrc
+            // signal in `classify_yarn`.
+            if let Some(v) = version {
+                if yarn_major(v).is_none() {
+                    bail!(
+                        "yarn \"{v}\" must be an exact version (e.g. yarn@4.2.2) — \
+                         dist-tags and ranges (yarn@stable, yarn@berry) are unsupported \
+                         in a yarn pin"
+                    );
+                }
+            }
+            classify_yarn(version, false)
+        }
         other => bail!("unsupported package manager \"{other}\" — nub manages npm, pnpm, and yarn"),
     };
     Ok(PmPin {
@@ -237,13 +255,35 @@ fn read_yarn_path(cwd: &Path) -> Option<PathBuf> {
         }
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("yarnPath:") {
-            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            let value = strip_yaml_value(rest);
             if !value.is_empty() {
                 return Some(root.join(value));
             }
         }
     }
     None
+}
+
+/// Extract a scalar YAML value from the text after a `key:`. A quoted value is
+/// taken verbatim (quotes stripped); an unquoted value has a trailing inline
+/// `# comment` removed — `yarnPath: .yarn/releases/x.cjs # pinned` is the path,
+/// not `… # pinned`. Comments are only recognized on unquoted values (a `#`
+/// inside quotes is part of the path).
+fn strip_yaml_value(rest: &str) -> &str {
+    let rest = rest.trim();
+    for quote in ['"', '\''] {
+        if let Some(inner) = rest.strip_prefix(quote) {
+            if let Some(end) = inner.find(quote) {
+                return &inner[..end];
+            }
+        }
+    }
+    // Unquoted: an inline comment starts at the first ` #` (space then hash);
+    // a bare `#` mid-token is not a comment in flow scalars.
+    match rest.split_once(" #") {
+        Some((value, _comment)) => value.trim_end(),
+        None => rest,
+    }
 }
 
 #[cfg(test)]
@@ -468,6 +508,58 @@ mod tests {
             write_pin(Pm::Pnpm, "9.1.0", &member).unwrap(),
             root.join("package.json")
         );
+    }
+
+    #[test]
+    fn yarn_dist_tag_or_range_pin_is_rejected_naming_the_exact_version_rule() {
+        // A non-numeric yarn version (`yarn@stable`, `yarn@berry`) can't be split
+        // into classic-vs-Berry and Corepack requires an exact version — so the
+        // parser errors here rather than silently misclassifying it as classic and
+        // attempting a doomed classic-tarball provision.
+        for spec in ["yarn@stable", "yarn@berry"] {
+            let err = parse_spec(spec).unwrap_err().to_string();
+            assert!(
+                err.contains("exact version"),
+                "{spec} must be rejected naming the exact-version rule, got: {err}"
+            );
+        }
+        // An exact version (even partial) still classifies fine.
+        assert_eq!(parse_spec("yarn@4").unwrap().pm, Pm::YarnBerry);
+        assert_eq!(parse_spec("yarn@1.22.19").unwrap().pm, Pm::Yarn);
+    }
+
+    #[test]
+    fn yarn_path_value_drops_inline_comments_and_honors_quotes() {
+        // The single yarnPath reader must not fold a trailing ` # comment` into the
+        // path, and must take a quoted value (with spaces) verbatim.
+        assert_eq!(
+            strip_yaml_value(" .yarn/releases/y.cjs"),
+            ".yarn/releases/y.cjs"
+        );
+        assert_eq!(
+            strip_yaml_value(" .yarn/releases/y.cjs # pinned"),
+            ".yarn/releases/y.cjs",
+            "an inline comment must not become part of the path"
+        );
+        assert_eq!(
+            strip_yaml_value(r#" ".yarn/releases/with space.cjs""#),
+            ".yarn/releases/with space.cjs",
+            "a quoted value keeps its spaces and is taken verbatim"
+        );
+
+        // End to end: a commented yarnPath still resolves to the real release path.
+        let dir = tmpdir("yarnpath-comment");
+        write_pkg(&dir, r#"{"packageManager":"yarn@4.2.2"}"#);
+        let release = dir.join(".yarn/releases");
+        std::fs::create_dir_all(&release).unwrap();
+        let release_file = release.join("yarn-4.2.2.cjs");
+        std::fs::write(&release_file, "// yarn\n").unwrap();
+        std::fs::write(
+            dir.join(".yarnrc.yml"),
+            "yarnPath: .yarn/releases/yarn-4.2.2.cjs # committed Berry\n",
+        )
+        .unwrap();
+        assert_eq!(resolve_target(&dir), Some(PmTarget::YarnPath(release_file)));
     }
 
     #[test]

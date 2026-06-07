@@ -1711,7 +1711,13 @@ fn exec_runs_node_and_non_node_bins() {
         "greet",
         "#!/usr/bin/env node\nconsole.log('exec-greet:' + process.argv.slice(2).join('|'));\n",
     );
-    write_exec("shtool", "#!/bin/sh\necho \"exec-sh:$*\"\n");
+    // A non-node tool still gets nub's augmentation env so any `node` IT spawns
+    // stays transpile-enabled (this is what keeps TS configs working under `nubx
+    // vite` etc.). It echoes NODE_OPTIONS to prove apply_exec_augmentation fired.
+    write_exec(
+        "shtool",
+        "#!/bin/sh\necho \"exec-sh:$*\"\necho \"opts:$NODE_OPTIONS\"\n",
+    );
 
     let out = Command::new(nub_binary())
         .args(["exec", "greet", "a", "b"])
@@ -1745,6 +1751,13 @@ fn exec_runs_node_and_non_node_bins() {
     assert!(
         stdout2.contains("exec-sh:x y"),
         "non-node .bin execs directly (not via node): {stdout2}"
+    );
+    // The augmentation env reaches the non-node launcher: NODE_OPTIONS carries
+    // nub's preload (`--require`/`--import …preload.…`), so a `node` the tool spawns
+    // re-enters nub and stays TS-aware.
+    assert!(
+        stdout2.contains("opts:") && stdout2.contains("preload"),
+        "a non-node .bin must inherit nub's NODE_OPTIONS preload (TS in subprocesses): {stdout2}"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1914,20 +1927,82 @@ fn bareword_local_or_common_script_leads_with_the_run_hint() {
 #[test]
 fn bareword_unknown_verb_passes_through_to_the_pm() {
     // An unrecognized bareword (not a reserved verb, not a known/common script,
-    // not a file) is a PM-management verb: it passes through to the configured PM,
-    // NOT nub's old "unknown command" error. `env-test` is unpinned, so the
-    // lockfile-detected PM (npm by default) handles it — nub stays out of the way.
-    let fixture = fixtures_dir().join("env-test");
+    // not a file) is a PM-management verb that passes through to the configured PM
+    // byte-for-byte. This drives the UNPINNED `which`-based resolution path — the one
+    // that resolves `npm` → `npm.cmd` on Windows and spawns it via std::Command (the
+    // CVE-2024-24576 surface). A fake `npm` on PATH echoes its argv and exits 7, so
+    // we prove the child saw the verb + flags UNCHANGED and that its exit code
+    // propagated — across all three CI OSes, including a real `.cmd` spawn on Windows.
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    // No lockfile → the detector picks npm.
+    std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    let bin_dir = fake_pm_on_path(&dir, "npm");
+
+    let path = prepend_path(&bin_dir);
     let out = Command::new(nub_binary())
-        .arg("frobnicate")
-        .current_dir(&fixture)
+        .args(["frobnicate", "-D", "left-pad", "--x"])
+        .current_dir(&dir)
+        .env("PATH", path)
         .output()
         .expect("failed to spawn nub");
-    let err = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !err.contains("unknown command"),
-        "an unknown bareword must pass through, not hit nub's old error: {err:?}"
+        !stderr.contains("unknown command"),
+        "an unknown bareword must pass through, not hit nub's old error: {stderr:?}"
     );
+    assert!(
+        stdout.contains("ARGV: frobnicate -D left-pad --x"),
+        "the PM must receive the verb + flags byte-for-byte (no normalization): {stdout:?}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "the PM's exit code must propagate: stderr={stderr:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Drop a fake package manager named `name` into a `fakebin/` dir under `parent`
+/// that echoes `ARGV: <args…>` and exits 7. Cross-OS: a `#!/bin/sh` script on Unix,
+/// a `.cmd` batch file on Windows (so the test exercises a real `.cmd` spawn — the
+/// quoting-hazard surface). Returns the dir to prepend to PATH.
+fn fake_pm_on_path(parent: &Path, name: &str) -> PathBuf {
+    let bin = parent.join("fakebin");
+    std::fs::create_dir_all(&bin).unwrap();
+    #[cfg(windows)]
+    {
+        // `%*` is the whole argument tail, quoting preserved by cmd.exe; `exit /b 7`
+        // sets the batch exit code that std propagates.
+        std::fs::write(
+            bin.join(format!("{name}.cmd")),
+            "@echo off\r\necho ARGV: %*\r\nexit /b 7\r\n",
+        )
+        .unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = bin.join(name);
+        std::fs::write(&script, "#!/bin/sh\necho \"ARGV: $*\"\nexit 7\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// Prepend `dir` to the inherited PATH (OS-correct separator).
+fn prepend_path(dir: &Path) -> std::ffi::OsString {
+    let prev = std::env::var_os("PATH").unwrap_or_default();
+    let mut joined = std::ffi::OsString::from(dir);
+    if !prev.is_empty() {
+        #[cfg(windows)]
+        joined.push(";");
+        #[cfg(not(windows))]
+        joined.push(":");
+        joined.push(&prev);
+    }
+    joined
 }
 
 /// Appended script args are escaped the way npm does (A42), so a multi-word arg

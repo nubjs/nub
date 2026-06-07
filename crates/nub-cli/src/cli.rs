@@ -813,6 +813,12 @@ fn run_nub() -> Result<i32> {
         Ok(0)
     } else {
         let first = &rest[0];
+        // A leading `-` is treated as Node passthrough (`nub --inspect file.js`),
+        // NOT a PM verb. KNOWN LIMITATION (deliberate): a PM invocation whose first
+        // token is a flag — `nub --frozen-lockfile install` — therefore does not
+        // route to the configured PM; spell it `nub install --frozen-lockfile`
+        // (verb first) instead. Leading-flag-first PM verbs are vanishingly rare,
+        // and disambiguating them from Node flags here would cost more than it buys.
         let is_node_passthrough = first.starts_with('.')
             || first.starts_with('/')
             || first.starts_with('-')
@@ -3492,9 +3498,17 @@ fn build_passthrough_command(cwd: &Path, argv: &[String]) -> Result<(PathBuf, Ve
     use nub_core::pm::resolve::{PmTarget, resolve_target};
 
     // Run a PM launcher script (.cjs) under the project's resolved Node, with the
-    // user's argv appended unchanged.
+    // user's argv appended unchanged. A `.cjs` launcher ALWAYS spawns Node, so this
+    // is a genuine "we're about to spawn node" fire point (per
+    // node-version-management.md §"Where the version logic fires") — hence
+    // `discover_or_provision_node`, not bare `discover_node`. Without it, a pinned-
+    // but-uncached Node would make `nub add` fail to find a Node to run the
+    // provisioned PM under, while `nub run` (via the hijack) would have provisioned
+    // it — the asymmetry of "provision the PM but refuse the Node to run it." The
+    // unpinned arm (a system PM straight on PATH, possibly bun) does NOT go through
+    // here, so it keeps the run/exec posture of not provisioning Node.
     let under_node = |script: String| -> Result<(PathBuf, Vec<String>)> {
-        let node = nub_core::node::discovery::discover_node(cwd)?;
+        let node = nub_core::node::discovery::discover_or_provision_node(cwd)?;
         let mut args = vec![script];
         args.extend(argv.iter().cloned());
         Ok((PathBuf::from(node.path.as_str()), args))
@@ -3511,6 +3525,14 @@ fn build_passthrough_command(cwd: &Path, argv: &[String]) -> Result<(PathBuf, Ve
             // Unpinned: fall back to the lockfile-detected PM on PATH. The detector
             // preserves the bun inference — a bun-locked project execs a PATH bun
             // (nub never provisions bun, but won't get in the way of a real one).
+            //
+            // `which` returns the resolved path WITH its extension (e.g. `pnpm.cmd`
+            // on Windows). That extension is load-bearing for safety: spawning a
+            // `.cmd`/`.bat` via `std::process::Command` is only argument-safe because
+            // Rust >= 1.77.2 (CVE-2024-24576) applies cmd.exe escaping when the
+            // program path keeps a batch-file extension. The workspace MSRV (1.85)
+            // and CI's @stable both carry that fix; an extensionless resolve would
+            // reintroduce the quoting hazard (see the Windows unit test).
             let pm = detect_package_manager(cwd);
             let program = which::which(&pm).map_err(|_| {
                 anyhow::anyhow!(
@@ -3996,7 +4018,11 @@ mod tests {
             program.display()
         );
         // argv = [release.cjs, ...user argv] — the user tail is identical.
-        assert_eq!(full_args[0], release.to_string_lossy());
+        // Compare the release path component-wise, not byte-wise: production joins
+        // the POSIX `yarnPath` value onto the root via `Path::join`, so on Windows
+        // `full_args[0]` carries mixed `/`+`\` separators while the fixture's
+        // `release` is all-`\`. `Path` equality is separator-agnostic on Windows.
+        assert_eq!(Path::new(&full_args[0]), release.as_path());
         assert_eq!(
             &full_args[1..],
             &argv[..],
@@ -4035,6 +4061,11 @@ mod tests {
         }
     }
 
+    // Unix-only: `with_fake_pm_on_path` authors a `#!/bin/sh` script, which is a
+    // no-op stub on Windows (it would run the real `npm` on PATH and never exit 42).
+    // Cross-OS exit-code propagation through a real `.cmd` shim is covered by the
+    // integration test `bareword_unknown_verb_passes_through_to_the_pm`.
+    #[cfg(unix)]
     #[test]
     fn passthrough_propagates_the_childs_exit_code() {
         // The configured PM's exit code is nub's exit code. Drive a tiny script as
@@ -4049,7 +4080,9 @@ mod tests {
     }
 
     /// Run the passthrough against an explicit `cwd` (the production entry reads the
-    /// process cwd; this is the test seam that doesn't fight the global).
+    /// process cwd; this is the test seam that doesn't fight the global). Used only
+    /// by the Unix-gated exit-code test.
+    #[cfg(unix)]
     fn run_pm_passthrough_in(cwd: &Path, argv: &[String]) -> Result<i32> {
         let (program, full_args) = build_passthrough_command(cwd, argv)?;
         let status = std::process::Command::new(&program)
@@ -4086,10 +4119,6 @@ mod tests {
             None => unsafe { env::remove_var("PATH") },
         }
         out
-    }
-    #[cfg(not(unix))]
-    fn with_fake_pm_on_path<T>(_dir: &Path, _name: &str, _body: &str, f: impl FnOnce() -> T) -> T {
-        f()
     }
 
     #[test]
@@ -4222,19 +4251,120 @@ mod tests {
     // ── nubx argv0 dispatch ─────────────────────────────────────────
 
     #[test]
-    fn nubx_node_flag_detection() {
-        // Verify the --node flag stripping logic in run_nubx
-        let args = vec![
-            "--node".to_string(),
-            "vitest".to_string(),
-            "--run".to_string(),
-        ];
-        let has_node = args.iter().any(|a| a == "--node");
-        assert!(has_node);
+    fn nubx_delegates_to_exec_preserving_the_node_flag_and_bin_args() {
+        // `run_nubx` does no flag handling of its own: it prepends `exec` and lets
+        // clap parse via the exact `nub exec` grammar. So `nubx --node vitest --run`
+        // must parse identically to `nub exec --node vitest --run` — `--node` before
+        // the bin is nubx's (→ Exec.node), and `--run` after it reaches the bin
+        // verbatim. (The real binary path is exercised by the integration suite; this
+        // pins the argv-construction contract `run_nubx` relies on.)
+        let nubx_args = ["--node", "vitest", "--run"];
+        let mut rest = vec!["nub".to_string(), "exec".to_string()];
+        rest.extend(nubx_args.iter().map(|s| s.to_string()));
+        let cli = Cli::try_parse_from(&rest).unwrap();
+        match cli.command {
+            Some(Command::Exec {
+                node,
+                ref bin,
+                ref args,
+                ..
+            }) => {
+                assert!(node, "a leading --node must set Exec.node");
+                assert_eq!(bin, "vitest", "the first non-flag token is the bin");
+                assert_eq!(args, &vec!["--run".to_string()], "post-bin args forward");
+            }
+            other => panic!("expected Exec, got {other:?}"),
+        }
+    }
 
-        let mut filtered: Vec<String> = args.into_iter().filter(|a| a != "--node").collect();
-        let bin = filtered.remove(0);
-        assert_eq!(bin, "vitest");
-        assert_eq!(filtered, vec!["--run"]);
+    // ── .bin launcher resolution (the node-vs-shim decision) ─────────────
+
+    #[test]
+    fn is_node_bin_classifies_by_extension_and_shebang() {
+        // JS extensions run under node; native/Windows-shim extensions never do.
+        // (The decision is pure extension/shebang inspection — platform-shared, so a
+        // regression in either branch is caught on every CI OS.)
+        let dir = pm_tmpdir("is-node-bin");
+        let by_ext = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            is_node_bin(&p)
+        };
+        assert!(by_ext("a.js"), ".js runs under node");
+        assert!(by_ext("a.cjs"), ".cjs runs under node");
+        assert!(by_ext("a.mjs"), ".mjs runs under node");
+        assert!(!by_ext("a.cmd"), ".cmd is a Windows shim, never node");
+        assert!(!by_ext("a.exe"), ".exe is native, never node");
+        assert!(!by_ext("a.ps1"), ".ps1 is a PowerShell shim, never node");
+
+        // Extensionless: the shebang decides (the typical Unix .bin symlink).
+        let node_shim = dir.join("node-shim");
+        std::fs::write(&node_shim, b"#!/usr/bin/env node\nconsole.log(1)\n").unwrap();
+        assert!(
+            is_node_bin(&node_shim),
+            "a `#!…node` shebang runs under node"
+        );
+        let sh_shim = dir.join("sh-shim");
+        std::fs::write(&sh_shim, b"#!/bin/sh\necho hi\n").unwrap();
+        assert!(!is_node_bin(&sh_shim), "a non-node shebang does not");
+    }
+
+    /// The Windows launcher must route `.cmd`/`.bat` through `cmd /C` and `.ps1`
+    /// through PowerShell (neither is launchable by a bare `CreateProcess`), with the
+    /// user args appended after the script — a regression here (wrong flag, dropped
+    /// args) would silently break every `nubx`-launched Windows shim. Asserted by
+    /// inspecting the constructed `Command` (no spawn), so it's fast and hermetic.
+    #[cfg(windows)]
+    #[test]
+    fn bin_launcher_routes_windows_shims_through_their_interpreter() {
+        use std::ffi::OsStr;
+        let argv = vec!["--flag".to_string(), "x".to_string()];
+
+        let cmd = bin_launcher(Path::new(r"C:\tools\tool.cmd"), &argv);
+        assert_eq!(cmd.get_program(), OsStr::new("cmd"));
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                OsStr::new("/C"),
+                OsStr::new(r"C:\tools\tool.cmd"),
+                OsStr::new("--flag"),
+                OsStr::new("x"),
+            ],
+            "a .cmd runs as `cmd /C <path> <args...>`"
+        );
+
+        let ps = bin_launcher(Path::new(r"C:\tools\tool.ps1"), &argv);
+        assert_eq!(ps.get_program(), OsStr::new("powershell"));
+        let ps_args: Vec<&OsStr> = ps.get_args().collect();
+        assert!(
+            ps_args.contains(&OsStr::new("-File"))
+                && ps_args.last() == Some(&OsStr::new("x"))
+                && ps_args.contains(&OsStr::new("Bypass")),
+            "a .ps1 runs via powershell -NoProfile -ExecutionPolicy Bypass -File <path> <args>, got {ps_args:?}"
+        );
+    }
+
+    /// The unpinned passthrough resolves a system PM via `which` and spawns it
+    /// directly. On Windows `which` returns the `.cmd` shim (e.g. `npm.cmd`), and
+    /// spawning a `.cmd` via `std::process::Command` is only argument-safe because
+    /// Rust >= 1.77.2 (CVE-2024-24576) applies cmd.exe escaping when the program path
+    /// keeps a batch-file extension. This pins that the resolved path DOES carry an
+    /// executable extension (so the std escaping engages); an extensionless resolve
+    /// would silently reintroduce the quoting hazard.
+    #[cfg(windows)]
+    #[test]
+    fn windows_unpinned_pm_resolves_to_an_executable_extension() {
+        // npm ships with Node, so it is always on the windows-latest runner's PATH.
+        let npm = which::which("npm").expect("npm must be on PATH (ships with node)");
+        let ext = npm
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        assert!(
+            matches!(ext.as_deref(), Some("cmd" | "bat" | "exe")),
+            "which(npm) must keep a batch/exe extension so std applies CVE-2024-24576 \
+             arg escaping when spawned; got {npm:?}"
+        );
     }
 }
