@@ -14,7 +14,6 @@
 // resolves its sibling runtime/ directory by walking up from its real location.
 const { spawnSync } = require("child_process");
 const { platformPackage } = require("../platform.js");
-const { installShims } = require("../shims.js");
 
 function resolveBinary() {
   const { key, pkg } = platformPackage();
@@ -34,27 +33,6 @@ function resolveBinary() {
 // omitted the child sees the binary path, whose basename is "nub" — the default verb.
 module.exports = function launch(argv0Name) {
   const binPath = resolveBinary();
-
-  // Self-heal (POSIX only). If we're running at all on POSIX, the install-time
-  // symlink is absent — i.e. the package manager skipped this package's postinstall
-  // (pnpm v10+ and bun block dependency lifecycle scripts by default). Atomically
-  // replace bin/nub and bin/nubx with symlinks to the native binary so EVERY FUTURE
-  // invocation execs the Rust CLI directly and skips this ~35ms Node bootstrap. This
-  // first call still pays it; later calls don't.
-  //
-  // Best-effort and silent: installShims never throws and the heal is wrapped here
-  // too, so a failure never delays or breaks the user's actual command — we fall
-  // straight through to the spawn below. We heal BOTH names so a single `nub` run
-  // also fixes `nubx`. Overwriting our own bin/nub + launch.js mid-execution is safe
-  // on POSIX: Node already read+compiled both into memory before launch() runs, and
-  // renameSync just swaps the directory entry (the in-use inode lives on); the binary
-  // we spawn (binPath, in the platform package) is a different file the heal never
-  // touches. Windows is excluded: no symlink fast path, symlinks need privilege, and
-  // a running .exe cannot be replaced.
-  if (process.platform !== "win32") {
-    try { installShims(binPath, __dirname); } catch {}
-  }
-
   const opts = { stdio: "inherit", windowsHide: true };
   if (argv0Name) opts.argv0 = argv0Name;
   const result = spawnSync(binPath, process.argv.slice(2), opts);
