@@ -515,7 +515,7 @@ fn help_flag_works() {
         .output()
         .expect("failed to spawn nub");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("TypeScript-first"));
+    assert!(stdout.contains("augments Node.js"));
     assert_eq!(output.status.code(), Some(0));
 }
 
