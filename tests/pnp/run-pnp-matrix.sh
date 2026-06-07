@@ -56,8 +56,17 @@ for bin in "${NODE_DIRS[@]}"; do
   maj="${nv%%.*}"; rest="${nv#*.}"; min="${rest%%.*}"
   [ "$maj" -gt 18 ] 2>/dev/null || { [ "$maj" -eq 18 ] && [ "$min" -ge 19 ]; } || { printf "%-12s SKIP (below 18.19 floor)\n" "v$nv"; continue; }
 
-  ok=0; tot=0; line=""
-  check() { tot=$((tot+1)); if echo "$2" | grep -q "$3"; then ok=$((ok+1)); line+=" $1:✓"; else line+=" $1:✗"; fails=$((fails+1)); fi; }
+  ok=0; tot=0; line=""; diags=""
+  # On a miss, stash the scenario's actual output so the run is self-debugging in CI
+  # (where the failing command isn't rerunnable). Printed under the version row.
+  check() {
+    tot=$((tot+1))
+    if echo "$2" | grep -q "$3"; then ok=$((ok+1)); line+=" $1:✓"
+    else line+=" $1:✗"; fails=$((fails+1)); diags+="
+  ── $1 (expected /$3/) ──
+$(echo "$2" | sed 's/^/    /')"
+    fi
+  }
 
   check cjs         "$(run "$bin" "$NUB" cjs-test.cjs)"  "CJS-OK"
   check esm-cjsdep  "$(run "$bin" "$NUB" esm-test.mjs)"  "ESM-OK"
@@ -73,6 +82,7 @@ for bin in "${NODE_DIRS[@]}"; do
   check exec "$(run "$bin" "$NUB" exec cowsay hi)" "< hi >"
 
   printf "%-12s %d/%d %s\n" "v$nv" "$ok" "$tot" "$line"
+  [ -n "$diags" ] && printf "%s\n" "$diags"
 done
 
 echo
