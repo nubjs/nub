@@ -164,8 +164,8 @@ pub fn npmrc_value(project_root: &Path, key: &str) -> Option<String> {
         if let Ok(content) = fs::read_to_string(path) {
             for line in content.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with(key) {
-                    if let Some((_, value)) = trimmed.split_once('=') {
+                if let Some((k, value)) = trimmed.split_once('=') {
+                    if k.trim() == key {
                         let value = value.trim().trim_matches('"').trim_matches('\'');
                         if !value.is_empty() {
                             return Some(value.to_string());

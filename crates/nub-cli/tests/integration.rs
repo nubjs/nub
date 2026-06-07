@@ -963,6 +963,7 @@ fn workspace_stream_prefix_format() {
     let output = Command::new(nub_binary())
         .args(["run", "-r", "--stream", "build"])
         .current_dir(&fixture)
+        .env_remove("FORCE_COLOR")
         .output()
         .expect("failed to spawn nub");
     let stdout = String::from_utf8_lossy(&output.stdout);
