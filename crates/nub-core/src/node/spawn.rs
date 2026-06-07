@@ -111,6 +111,10 @@ pub struct SpawnConfig<'a> {
     pub env_vars: &'a std::collections::HashMap<String, String>,
     /// Project root directory (for webstorage path computation).
     pub project_root: Option<&'a Path>,
+    /// Yarn PnP `.pnp.cjs` path (from `nub_core::pnp::detect`), injected via
+    /// `--require` ahead of nub's own preload so PnP's resolver patches install
+    /// first. `None` when not in a PnP tree.
+    pub pnp: Option<&'a std::path::Path>,
 }
 
 /// The result of spawning a Node process.
@@ -234,6 +238,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             });
         }
 
+        // Yarn PnP: `--require <.pnp.cjs>` BEFORE nub's own preload so PnP's
+        // `_resolveFilename` + zipfs patches install first; nub's resolve hooks
+        // then layer on top. Inside the `!compat_mode && !is_reentrant` gate, so
+        // `--node` and re-entrant child shells both skip PnP for free.
+        if let Some(pnp) = config.pnp {
+            cmd.arg("--require").arg(pnp);
+        }
+
         // Preload injection: `--require <cjs-path>` (fast tier) or `--import <url>`
         // (compat tier). See PreloadInjection for why the channel is tier-specific.
         if let Some(ref inj) = injection {
@@ -297,6 +309,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         let mut node_opts_parts: Vec<String> = Vec::new();
         for flag in &inject {
             node_opts_parts.push(flag.to_string());
+        }
+        // Yarn PnP token BEFORE nub's preload token, mirroring the argv order
+        // above so hardcoded-path `node` invocations inherit PnP-first ordering.
+        if let Some(pnp) = config.pnp {
+            node_opts_parts.push(format!("--require={}", pnp.display()));
         }
         if let Some(ref inj) = injection {
             node_opts_parts.push(inj.node_options_token());
@@ -472,6 +489,7 @@ pub fn compute_augmentation_env(
     node_version: super::version::NodeVersion,
     compat_mode: bool,
     project_root: Option<&Path>,
+    pnp: Option<&Path>,
 ) -> Option<AugmentationEnv> {
     if compat_mode {
         return None;
@@ -514,6 +532,11 @@ pub fn compute_augmentation_env(
         false,
     );
     let mut node_opts_parts: Vec<String> = inject.iter().map(|f| f.to_string()).collect();
+    // Yarn PnP `--require <.pnp.cjs>` BEFORE nub's preload token so PnP's
+    // resolver installs first in script-runner child shells too.
+    if let Some(pnp) = pnp {
+        node_opts_parts.push(format!("--require={}", pnp.display()));
+    }
     node_opts_parts.push(injection.node_options_token());
     // Webstorage, default-on with a project-keyed localstorage file — matches
     // the whitepaper promise and `spawn_node`. A script that wants it off runs

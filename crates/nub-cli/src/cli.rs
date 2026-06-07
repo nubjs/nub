@@ -1112,6 +1112,9 @@ fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
     let project_root = project.as_ref().map(|p| p.root.as_path());
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
+    // Yarn PnP: inject the user's own `.pnp.cjs` (spawn.rs gates this on
+    // `!compat_mode`, so `--node` skips it regardless).
+    let pnp_ctx = nub_core::pnp::detect(&cwd);
     let config = nub_core::node::spawn::SpawnConfig {
         node: &node,
         user_args: args,
@@ -1120,6 +1123,7 @@ fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
         nub_binary: &nub_binary,
         env_vars: &env_vars,
         project_root,
+        pnp: pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
     };
 
     let result = nub_core::node::spawn::spawn_node(&config)?;
@@ -1766,11 +1770,13 @@ fn build_script_command(
     // webstorage. Computed once; `None` in compat or re-entrant invocations.
     // `node` was resolved above (its path fed npm_node_execpath).
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
+    let pnp_ctx = nub_core::pnp::detect(&project.root);
     let aug = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
         node.version,
         compat_mode,
         Some(&project.root),
+        pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
     );
 
     let mut command = StdCommand::new(shell);
@@ -2256,6 +2262,20 @@ fn run_exec(bin: &str, compat_mode: bool, args: &[String]) -> Result<i32> {
         return launch_bin(&bin_path, args, compat_mode, &cwd);
     }
 
+    // Yarn PnP has no node_modules/.bin, so find_bin misses. Resolve the bin via
+    // pnpapi (running Yarn's own .pnp.cjs) and, on success, run the resolved script
+    // through the normal augmented path — which re-injects --require .pnp.cjs
+    // because cwd is still a PnP tree. Skipped in compat mode (--node).
+    if !compat_mode {
+        if let Some(pnp) = nub_core::pnp::detect(&cwd) {
+            if let Some(script) = resolve_pnp_bin(&pnp.pnp_cjs, bin, &cwd) {
+                let mut cmd_args = vec![script];
+                cmd_args.extend(args.iter().cloned());
+                return run_file_with_compat(&cmd_args, compat_mode);
+            }
+        }
+    }
+
     // Not in node_modules/.bin. Per exec.md (decision 2026-05-26): nub does NOT
     // run a `dlx`/`npx` network fetch itself — that hits the registry and can
     // block on an interactive install prompt in CI, the exact failure that
@@ -2271,6 +2291,42 @@ fn run_exec(bin: &str, compat_mode: bool, args: &[String]) -> Result<i32> {
     eprintln!("nub: `{bin}` is not installed in node_modules/.bin.");
     eprintln!("     install it ({add_cmd}), or run it ad-hoc with: {dlx_cmd}");
     Ok(127)
+}
+
+/// Resolve a bin name to its script path under Yarn PnP. Runs the pure resolver
+/// `runtime/pnp-bin-resolver.cjs` under `node --require <.pnp.cjs>` (so `pnpapi` is
+/// available + zipfs reads work), capturing the printed absolute path. `None` if no
+/// dep provides the bin (exit 127), the resolver exits non-zero, or we can't locate
+/// node / the runtime dir. The .pnp.cjs path is passed as argv[3] so the resolver
+/// can require() it directly — `require("pnpapi")` fails for out-of-tree scripts.
+fn resolve_pnp_bin(pnp_cjs: &Path, bin: &str, cwd: &Path) -> Option<String> {
+    let nub_binary = nub_core::node::spawn::current_nub_binary().ok()?;
+    let preload = nub_core::node::spawn::find_public_preload(&nub_binary)?;
+    let runtime_dir = Path::new(&preload).parent()?;
+    let resolver = runtime_dir.join("pnp-bin-resolver.cjs");
+    let node = nub_core::node::discovery::discover_node(cwd)
+        .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+
+    let output = std::process::Command::new(node.path.as_str())
+        .arg("--require")
+        .arg(pnp_cjs)
+        .arg(&resolver)
+        .arg(bin)
+        .arg(pnp_cjs)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
 }
 
 /// Launch a resolved `node_modules/.bin` entry, shebang/extension-aware (A40).
@@ -2361,11 +2417,13 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
     };
     let node = nub_core::node::discovery::discover_node(cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
         node.version,
         false,
         Some(cwd),
+        pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
     ) else {
         return;
     };

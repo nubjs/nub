@@ -20,6 +20,28 @@ const { readdirSync } = require("node:fs");
 const { fileURLToPath, pathToFileURL } = require("node:url");
 const { join, dirname, extname: pathExtname } = require("node:path");
 
+// Yarn PnP API handle, fetched lazily via Node's `module.findPnpApi`. `.pnp.cjs`
+// (injected by the Rust spawn layer via --require, ahead of nub's preload) sets
+// `process.versions.pnp` and installs `findPnpApi`, which returns the pnpapi object
+// governing a given path. Unlike a bare `require("pnpapi")` — which throws here,
+// since this preload lives in nub's install dir, OUTSIDE the user's PnP tree —
+// `findPnpApi` resolves by the queried path, so an out-of-tree issuer works. Being
+// a plain query it never re-enters nub's resolve hooks, so there is no ordering
+// constraint with `module.registerHooks` (the reason the previous abs-path require
+// was load-bearing-fragile). nub resolves PnP specifiers through
+// `pnpapi.resolveRequest` (its public, conditions-free resolver) in both the
+// registerHooks resolve hook and the `_resolveFilename` override below. No env var
+// (brand boundary); `null` when this is not a PnP run.
+let __pnpApi;
+function pnpApi() {
+  if (__pnpApi !== undefined) return __pnpApi;
+  __pnpApi = null;
+  if (process.versions.pnp) {
+    try { __pnpApi = module_.findPnpApi(process.cwd() + "/") || null; } catch {}
+  }
+  return __pnpApi;
+}
+
 // ── Watch-mode dependency reporting (main thread only) ──────────────
 // Under `nub watch`, Node's FilesWatcher only watches files in the import graph;
 // config files (tsconfig.json, package.json) and `.env*` are NOT in any graph, so
@@ -103,7 +125,29 @@ function makeHooks(core, watchReporting) {
 
   function resolve(specifier, context, nextResolve) {
     const r = core.resolveSpec(specifier, context.parentURL);
-    return r ?? nextResolve(specifier, context);
+    if (r) return r;
+    // Under Yarn PnP, delegating to `nextResolve` flows into Node's default
+    // resolution, which calls PnP's patched `_resolveFilename` WITH a `conditions`
+    // option PnP rejects once a customization hook is registered ("aren't supported
+    // by PnP yet (conditions)"). PnP exposes its own conditions-free resolver —
+    // `pnpapi.resolveRequest` — so resolve through THAT and hand Node the file URL.
+    // Still "PnP does the resolution" (its public API); nub adds none of its own.
+    // Returns a virtual `.zip` path for zip-stored deps, which Node reads via the
+    // zipfs patch `.pnp.cjs` installed. Falls back to `nextResolve` if PnP can't
+    // resolve (e.g. a builtin or a relative path PnP defers to Node).
+    const pnp = pnpApi();
+    if (pnp && !module_.isBuiltin(specifier) && !specifier.startsWith("node:")) {
+      try {
+        const issuer = context && context.parentURL
+          ? fileURLToPath(context.parentURL)
+          : process.cwd() + "/";
+        const resolved = pnp.resolveRequest(specifier, issuer);
+        if (resolved) {
+          return { url: pathToFileURL(resolved).href, shortCircuit: true };
+        }
+      } catch { /* fall through to Node's resolver */ }
+    }
+    return nextResolve(specifier, context);
   }
 
   function load(url, context, nextLoad) {
@@ -246,6 +290,38 @@ function installCjsRequireHooks(core, withClassicTranspile) {
         throw requireEsmError(resolved);
       }
       return resolved;
+    }
+    // Yarn PnP, FAST TIER ONLY. On the fast tier nub registers a sync
+    // `module.registerHooks` resolve hook, which makes Node thread a `conditions`
+    // option into PnP's patched `_resolveFilename` ("aren't supported by PnP yet
+    // (conditions)") AND re-inject it even if we pass none — so we must resolve
+    // everything ourselves via PnP's conditions-free `pnpapi.resolveRequest` and the
+    // native path primitives, never falling through to PnP's `_resolveFilename`. On
+    // the COMPAT tier there is no sync hook, so PnP's own `_resolveFilename` resolves
+    // CJS deps fine (no conditions option) and interposing here instead recurses to
+    // OOM on the Node 18 line — so the PnP branch is gated to where registerHooks
+    // exists. `pnpApi()` is null off-PnP, making this doubly safe.
+    const pnp = typeof module_.registerHooks === "function" ? pnpApi() : null;
+    if (pnp) {
+      if (module_.isBuiltin(request)) return request; // PnP defers builtins to Node
+      try {
+        const issuer = (parent && typeof parent.filename === "string" ? parent.filename : process.cwd() + "/");
+        const r = pnp.resolveRequest(request, issuer);
+        if (r) return r;
+      } catch { /* fall through to Node's PnP-free path resolver */ }
+      // PnP couldn't resolve it (e.g. nub's OWN vendored deps, whose issuer is nub's
+      // out-of-tree install dir). We CANNOT call `origResolveFilename` here: it is
+      // PnP's patched `_resolveFilename`, and once a customization hook is registered
+      // Node's `wrapResolveFilename` re-injects the `conditions` option PnP rejects —
+      // there is no way to suppress it from JS. Use Node's native path primitives
+      // (`_resolveLookupPaths` + `_findPath`), which PnP does NOT patch, so nub's
+      // runtime requires (resolved via NODE_PATH globalPaths) still work.
+      const lookupPaths = module_._resolveLookupPaths(request, parent) || [];
+      const found = module_._findPath(request, lookupPaths, isMain);
+      if (found) return found;
+      const err = new Error(`Cannot find module '${request}'`);
+      err.code = "MODULE_NOT_FOUND";
+      throw err;
     }
     return origResolveFilename.call(this, request, parent, isMain, options);
   };

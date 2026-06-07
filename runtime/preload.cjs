@@ -114,6 +114,12 @@ if (!requireEsmDisabled) {
   const { resolve, load } = common.makeHooks(core, watchReporting);
   module_.registerHooks({ resolve, load });
   common.installCjsRequireHooks(core, false);
+  // NOTE: no Yarn `.pnp.loader.mjs` registration. nub's own `resolve` hook already
+  // routes PnP specifiers through `pnpapi.resolveRequest` (see makeHooks /
+  // installCjsRequireHooks), covering both `import` and `require` of PnP deps.
+  // Registering Yarn's ESM loader ON TOP of the sync `module.registerHooks` hooks
+  // deadlocks ESM entry loading (silent exit) — both hook systems intercept ESM
+  // resolution. The compat tier (preload-async-hooks.mjs) resolves PnP the same way.
 
   // ── Sync polyfills + lazy ESM-side-effect polyfills ───────────────
   installSyncPolyfills(__preloadedPolyfills);

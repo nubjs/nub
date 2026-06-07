@@ -65,7 +65,9 @@ if (__isFastTier) {
   module.registerHooks({ resolve, load });
   common.installCjsRequireHooks(core, false);
 } else if (__isCompatTier) {
-  // Compat path: ESM `import` hooks run in a dedicated loader worker thread.
+  // Compat path: ESM `import` hooks run in a dedicated loader worker thread. That
+  // worker resolves PnP deps via pnpapi.resolveRequest itself (preload-async-
+  // hooks.mjs), so no Yarn `.pnp.loader.mjs` registration is needed here either.
   module.register("./preload-async-hooks.mjs", import.meta.url);
   // (The main-thread require() shim's module-format + decorator detection is a
   // synchronous native addon call now — no parser warm-up; the old

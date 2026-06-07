@@ -1,6 +1,7 @@
 //! Core logic shared across Nub's CLI crates.
 
 pub mod node;
+pub mod pnp;
 pub mod version_management;
 pub mod workspace;
 
