@@ -9,4 +9,4 @@
 // previously lived as a literal inside preload.mjs, which `make version` patched,
 // while the worker carried a hand-maintained "…-compat" copy that `make version`
 // never touched — a latent staleness bug this module closes.)
-export const NUB_VERSION = "0.0.18";
+export const NUB_VERSION = "0.0.19";

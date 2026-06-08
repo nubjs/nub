@@ -3,7 +3,7 @@ members = ["crates/nub-cli", "crates/nub-core", "crates/nub-native"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.18"
+version = "0.0.19"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
