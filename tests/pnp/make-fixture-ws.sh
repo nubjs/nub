@@ -51,5 +51,8 @@ const _ = require("lodash");
 console.log("WS-CJS-OK", hello(), _.capitalize("ok"));
 JS
 
-corepack yarn install >/dev/null 2>&1
+# `--no-immutable`: Yarn Berry auto-enables immutable installs when `CI` is set, which
+# fails on a fresh fixture with no lockfile. (The single-package fixture uses `yarn
+# add`, which isn't subject to it.)
+corepack yarn install --no-immutable >/dev/null 2>&1
 echo "WS PnP fixture ready at $DEST (member dir: $DEST/packages/a, .pnp.cjs $( [ -f .pnp.cjs ] && echo present || echo MISSING ))"

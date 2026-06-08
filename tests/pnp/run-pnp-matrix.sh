@@ -44,6 +44,11 @@ WS_FIXTURE="${NUB_PNP_WS_FIXTURE:-/tmp/nub-pnp-ws}"
 WS_MEMBER="$WS_FIXTURE/packages/a"
 [ -f "$WS_FIXTURE/.pnp.cjs" ] || "$SCRIPT_DIR/make-fixture-ws.sh" "$WS_FIXTURE"
 
+# Fail loudly if either fixture didn't build (e.g. a Yarn install error) — otherwise a
+# build failure masquerades as every scenario failing, which is a confusing signal.
+[ -f "$FIXTURE/.pnp.cjs" ]    || { echo "error: single-package fixture failed to build at $FIXTURE" >&2; exit 2; }
+[ -f "$WS_FIXTURE/.pnp.cjs" ] || { echo "error: workspace fixture failed to build at $WS_FIXTURE" >&2; exit 2; }
+
 # Node bin dirs to sweep.
 NODE_DIRS=("$@")
 if [ ${#NODE_DIRS[@]} -eq 0 ]; then
