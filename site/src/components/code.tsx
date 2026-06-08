@@ -28,7 +28,7 @@ export function Terminal({
   className = '',
   size = 'sm',
 }: {
-  lines: { cmd?: string; comment?: string; out?: string }[];
+  lines: { cmd?: string; comment?: string; out?: string; bright?: boolean }[];
   className?: string;
   size?: 'sm' | 'lg';
 }) {
@@ -43,7 +43,9 @@ export function Terminal({
         {lines.map((line, i) => (
           <div key={i} className="whitespace-pre">
             {line.out !== undefined ? (
-              <span className="text-fd-muted-foreground">{line.out}</span>
+              <span className={line.bright ? 'text-fd-foreground' : 'text-fd-muted-foreground'}>
+                {line.out}
+              </span>
             ) : (
               <>
                 <span className="select-none text-ember">$ </span>

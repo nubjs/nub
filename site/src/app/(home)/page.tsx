@@ -18,6 +18,7 @@ export default function HomePage() {
       <RunScriptBand />
       <NubxBand />
       <NodeVersionBand />
+      <HypermanagerBand />
       <FinalCta />
       <Footer />
     </div>
@@ -59,18 +60,20 @@ function HeadingCode({ children }: { children: ReactNode }) {
   );
 }
 
-type Accent = 'ember' | 'acid' | 'sky' | 'orchid';
+type Accent = 'ember' | 'acid' | 'sky' | 'orchid' | 'pink';
 const ACCENT_TEXT: Record<Accent, string> = {
   ember: 'text-ember',
   acid: 'text-acid',
   sky: 'text-sky',
   orchid: 'text-orchid',
+  pink: 'text-pink',
 };
 const ACCENT_PILL: Record<Accent, string> = {
   ember: 'border-ember/40 text-ember',
   acid: 'border-acid/40 text-acid',
   sky: 'border-sky/40 text-sky',
   orchid: 'border-orchid/40 text-orchid',
+  pink: 'border-pink/40 text-pink',
 };
 
 /* The centered top-of-band header: a command pill + serif title + subhead. */
@@ -922,6 +925,99 @@ const RULES = [
 ];
 
 /* -------------------------------------------------------------- Final CTA */
+
+/* ----------------------------------------------------------- Package hypermanager */
+
+function HypermanagerBand() {
+  return (
+    <section className="border-b border-fd-border">
+      <Container className="py-32 md:py-[180px]">
+        <BandHeader
+          command="nub install"
+          title="A package hypermanager"
+          subhead={
+            <>
+              Type <Mono>nub</Mono> for any package manager. Nub reads your project&rsquo;s{' '}
+              <Mono>packageManager</Mono> field, provisions the exact npm, pnpm, or yarn version on
+              demand, and passes your command straight through — no global installs, no Corepack, no
+              lock-in.
+            </>
+          }
+          accent="pink"
+        />
+
+        <div className="mt-10 divide-y divide-fd-border/60">
+          <Feature
+            accent="pink"
+            eyebrow="Passthrough"
+            title="Your package manager, not ours"
+            body={
+              <>
+                <Mono>nub install</Mono>, <Mono>nub add</Mono>, and <Mono>nub up</Mono>{' '}each run your
+                project&rsquo;s configured package manager, verbatim. Nub adds one entrypoint and gets
+                out of the way — no flags to relearn, no behavior to emulate.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub install', comment: '→ pnpm install' },
+                  { cmd: 'nub add -D vitest', comment: '→ pnpm add -D vitest' },
+                  { cmd: 'nub up --latest', comment: '→ pnpm up --latest' },
+                ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            reverse
+            eyebrow="Provisioning"
+            title="Never install a package manager again"
+            body={
+              <>
+                Pin a version once and Nub fetches it on demand, verifies its integrity, and caches it
+                across every machine and CI run. It&rsquo;s Corepack&rsquo;s job, reimplemented in
+                Rust, without the version treadmill.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub pm switch pnpm@11', comment: 'writes packageManager' },
+                  { cmd: 'nub install', comment: 'fetch pnpm@11 · verify · cache' },
+                  { cmd: 'nub pm which', comment: 'pnpm@11.2.0 → ~/.cache/nub' },
+                ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            eyebrow="No lock-in"
+            title="Portable, with or without Nub"
+            body={
+              <>
+                Nub drives the standard <Mono>packageManager</Mono> field — no <Mono>nub</Mono>-specific
+                config, environment variable, or registry. Clone the repo without Nub and every
+                command still works. npm, pnpm, and yarn today; Bun next.
+              </>
+            }
+            visual={
+              <Source
+                lang="json"
+                code={`{
+  "name": "acme-web",
+  "packageManager": "pnpm@9.12.0"
+}`}
+              />
+            }
+          />
+        </div>
+      </Container>
+    </section>
+  );
+}
 
 function FinalCta() {
   return (

@@ -20,7 +20,7 @@ function Chevron({ dir }: { dir: 'left' | 'right' }) {
   );
 }
 
-type Accent = 'ember' | 'acid' | 'sky' | 'orchid';
+type Accent = 'ember' | 'acid' | 'sky' | 'orchid' | 'pink';
 
 const PIECES: {
   accent: Accent;
@@ -108,6 +108,30 @@ const PIECES: {
       { out: 'Hello world!' },
     ],
   },
+  {
+    accent: 'pink',
+    command: 'nub install',
+    label: 'Package hypermanager',
+    title: 'A package hypermanager',
+    blurb: (
+      <>
+        All package-management commands (<Mono>install</Mono>, <Mono>add</Mono>, <Mono>remove</Mono> …)
+        delegate to your project&rsquo;s configured package manager. It <em>auto-detects</em>{' '}
+        <Mono>package.json#packageManager</Mono> (or infers from an existing lockfile), installs it if
+        needed, and delegates to it. No Corepack required.
+      </>
+    ),
+    replaces: ['corepack'],
+    lines: [
+      { cmd: 'nub install' },
+      { out: '» resolved package manager is pnpm @11' },
+      { out: '» resolved from package.json#packageManager' },
+      { out: '» found pnpm@11 in $PATH' },
+      { out: '» pnpm install' },
+      { out: 'Already up to date', bright: true },
+      { out: 'Done in 0.4s', bright: true },
+    ],
+  },
 ];
 
 const TAB: Record<Accent, { text: string; active: string; hover: string; pill: string; dot: string }> = {
@@ -115,6 +139,7 @@ const TAB: Record<Accent, { text: string; active: string; hover: string; pill: s
   acid: { text: 'text-acid', active: 'border-acid/50 bg-acid/10', hover: 'hover:bg-acid/10', pill: 'border-acid/40 text-acid', dot: 'bg-acid' },
   sky: { text: 'text-sky', active: 'border-sky/50 bg-sky/10', hover: 'hover:bg-sky/10', pill: 'border-sky/40 text-sky', dot: 'bg-sky' },
   orchid: { text: 'text-orchid', active: 'border-orchid/50 bg-orchid/10', hover: 'hover:bg-orchid/10', pill: 'border-orchid/40 text-orchid', dot: 'bg-orchid' },
+  pink: { text: 'text-pink', active: 'border-pink/50 bg-pink/10', hover: 'hover:bg-pink/10', pill: 'border-pink/40 text-pink', dot: 'bg-pink' },
 };
 
 export function ToolkitTabs() {
