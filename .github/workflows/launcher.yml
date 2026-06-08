@@ -1,0 +1,41 @@
+name: Launcher heal
+
+# Validates the POSIX self-heal launcher (npm/nub/bin/launch.js): first call runs
+# and rewrites the on-PATH bin entry (pnpm cmd-shim or npm/bun symlink) into a
+# minimal #!/bin/sh trampoline -> native, later calls spawn ZERO node, nubx keeps
+# its verb, and a foreign `nub` is never clobbered. Runs on ubuntu (dash) and macos
+# (bash) — the same launcher JS, exercised against both PM shim shapes with a fake
+# native (the heal is binary-agnostic). Windows is intentionally excluded: the heal
+# is a no-op there (no shebang/symlink fast path), so Windows keeps the JS launcher
+# and is covered by release.yml's `npm install -g` smoke.
+
+on:
+  push:
+    paths:
+      - npm/nub/**
+      - .github/scripts/heal-test.sh
+      - .github/workflows/launcher.yml
+  pull_request:
+    paths:
+      - npm/nub/**
+      - .github/scripts/heal-test.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  heal:
+    name: heal · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate self-heal launcher
+        run: bash .github/scripts/heal-test.sh
