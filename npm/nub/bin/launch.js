@@ -115,6 +115,14 @@ function healPathEntry(verb, nativePath) {
 module.exports = function launch(argv0Name) {
   const verb = argv0Name || "nub";
   const binPath = resolveBinary(verb);
+  // Ensure the platform binary is executable. npm strips the +x bit on install from
+  // files that aren't `bin`-field entries, and the platform package declares no bin
+  // field — so the staged-executable binary lands 0o644 and both spawnSync (below)
+  // and the healed sh trampoline's `exec` would EACCES / "Permission denied". The old
+  // postinstall did this chmod; doing it in the launcher covers EVERY package manager
+  // (npm strips, others may not) and runs before the heal writes a trampoline that
+  // exec's this binary. Best-effort; harmless if already executable.
+  try { fs.chmodSync(binPath, 0o755); } catch {}
   // Self-heal the PATH entry on first POSIX call so later calls skip Node entirely.
   healPathEntry(verb, binPath);
   // This call still runs through Node; spawn the native binary. argv0 basename of

@@ -31,7 +31,7 @@ build(){ # $1 = pnpm | symlink
   chmod +x "$W/p/node_modules/@nubjs/nub/bin/nub" "$W/p/node_modules/@nubjs/nub/bin/nubx"
   cp "$FAKE" "$W/p/node_modules/@nubjs/nub-host/bin/nub"
   cp "$FAKE" "$W/p/node_modules/@nubjs/nub-host/bin/nubx"
-  chmod +x "$W/p/node_modules/@nubjs/nub-host/bin/"*
+  chmod 0644 "$W/p/node_modules/@nubjs/nub-host/bin/"*
   printf '{"name":"@nubjs/nub-host","version":"9.9.9","files":["bin"]}\n' > "$W/p/node_modules/@nubjs/nub-host/package.json"
   # platform.js maps the host -> @nubjs/nub-host so resolveBinary finds the fake.
   printf 'module.exports={platformPackage(){return{key:"host",pkg:"@nubjs/nub-host"};}};\n' > "$W/p/node_modules/@nubjs/nub/platform.js"
