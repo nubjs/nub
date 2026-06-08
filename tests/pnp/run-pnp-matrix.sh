@@ -106,6 +106,10 @@ $(echo "$2" | sed 's/^/    /')"
   check ws-cjs     "$(runws "$bin" "$NUB" ws-cjs.cjs)"            "WS-CJS-OK"
   check ws-sib-bin "$(runws "$bin" "$NUB" exec pkg-b-bin)"        "WS-SIBLING-BIN-OK"
   check ws-mem-bin "$(runws "$bin" "$NUB" exec cowsay wsmember)"  "< wsmember >"
+  # ws-run: `nub run <script>` from a member (PnP augmentation injected from a subdir).
+  # ws-scoped-bin: nubx a SCOPED package's string bin (named after its unscoped tail).
+  check ws-run        "$(runws "$bin" "$NUB" run start)"          "WS-RUN-OK"
+  check ws-scoped-bin "$(runws "$bin" "$NUB" exec tool)"          "SCOPED-STRING-BIN-OK"
 
   printf "%-12s %d/%d %s\n" "v$nv" "$ok" "$tot" "$line"
   [ -n "$diags" ] && printf "%s\n" "$diags"

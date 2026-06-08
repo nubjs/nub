@@ -34,12 +34,23 @@ JSON
 echo 'exports.hello = () => "from-pkg-b";' > packages/b/index.js
 printf '#!/usr/bin/env node\nconsole.log("WS-SIBLING-BIN-OK");\n' > packages/b/cli.js
 
-# pkg-a: depends on the sibling + an external lib, with its own devDep bin (cowsay).
+# A SCOPED local package shipping a STRING bin — guards scoped-bin naming (the bin is
+# named after the package's unscoped tail, here `tool`).
+mkdir -p scoped-tool
+cat > scoped-tool/package.json <<'JSON'
+{ "name": "@ws/tool", "version": "1.0.0", "bin": "./cli.js" }
+JSON
+printf '#!/usr/bin/env node\nconsole.log("SCOPED-STRING-BIN-OK");\n' > scoped-tool/cli.js
+
+# pkg-a: depends on the sibling + an external lib, with its own devDep bins (cowsay,
+# the scoped tool) and a script — exercises `nub run` from a member subdir too.
 cat > packages/a/package.json <<'JSON'
 { "name": "pkg-a", "version": "1.0.0",
+  "scripts": { "start": "node run-dep.cjs" },
   "dependencies": { "pkg-b": "workspace:*", "lodash": "*" },
-  "devDependencies": { "cowsay": "*" } }
+  "devDependencies": { "cowsay": "*", "@ws/tool": "portal:../../scoped-tool" } }
 JSON
+echo 'const _ = require("lodash"); console.log("WS-RUN-OK", _.kebabCase("From Member Script"));' > packages/a/run-dep.cjs
 cat > packages/a/ws-esm.mjs <<'JS'
 import { hello } from "pkg-b"; // workspace sibling (lexer-detectable named export)
 import _ from "lodash";        // external dep of this member
