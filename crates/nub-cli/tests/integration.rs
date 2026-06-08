@@ -1410,10 +1410,13 @@ fn recursive_run_self_reference_terminates_via_guard() {
         r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#,
     )
     .unwrap();
-    // pkg-a recurses; the nested nub is located via $TEST_NUB_BIN (set below).
+    // pkg-a recurses; the nested nub is located via $TEST_NUB_BIN (set below). The
+    // re-entry runs through `node -e` (not a shell `&&` + `$VAR`) so the body is
+    // identical under POSIX `sh` and Windows `cmd` — the recursion-guard contract is
+    // OS-independent, so the test must exercise it on every CI leg.
     std::fs::write(
         dir.join("packages/a/package.json"),
-        r#"{"name":"@w/a","scripts":{"build":"echo a-built && \"$TEST_NUB_BIN\" run -r build"}}"#,
+        r#"{"name":"@w/a","scripts":{"build":"node -e \"console.log('a-built');require('child_process').execFileSync(process.env.TEST_NUB_BIN,['run','-r','build'],{stdio:'inherit'})\""}}"#,
     )
     .unwrap();
     std::fs::write(
@@ -1791,17 +1794,20 @@ fn pre_post_lifecycle_scripts() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
-    let pre_pos = stdout.find("pre-hello").expect("missing pregreet output");
-    let main_pos = stdout.find("hello\n").expect("missing greet output");
-    let post_pos = stdout.find("post-hello").expect("missing postgreet output");
-    assert!(
-        pre_pos < main_pos,
-        "pregreet must run before greet: {stdout}"
-    );
-    assert!(
-        main_pos < post_pos,
-        "greet must run before postgreet: {stdout}"
-    );
+    // Order by line index, matching each lifecycle line after a `.trim()` so the
+    // standalone `hello` is found under both LF (POSIX) and CRLF (Windows `cmd
+    // echo`, which emits `hello\r\n`). `== "hello"` excludes `pre-hello`/`post-hello`.
+    let line_of = |want: &str| {
+        stdout
+            .lines()
+            .position(|l| l.trim() == want)
+            .unwrap_or_else(|| panic!("missing {want} output: {stdout}"))
+    };
+    let pre = line_of("pre-hello");
+    let main = line_of("hello");
+    let post = line_of("post-hello");
+    assert!(pre < main, "pregreet must run before greet: {stdout}");
+    assert!(main < post, "greet must run before postgreet: {stdout}");
 }
 
 #[test]

@@ -1,1 +1,1 @@
-{ "name": "@agg/a", "scripts": { "build": "for i in 1 2 3 4 5 6 7 8 9 10; do echo AGG-a-$i; sleep 0.01; done" } }
+{ "name": "@agg/a", "scripts": { "build": "node -e \"let i=0;(function t(){if(i++<10){console.log('AGG-a-'+i);setTimeout(t,10)}})()\"" } }

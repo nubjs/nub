@@ -1959,7 +1959,7 @@ fn build_script_command(
 
     // Shell precedence: the explicit `--script-shell <path>` flag wins, then a
     // `.npmrc` `script-shell=` setting, then the platform default. A custom
-    // POSIX shell uses `-c`; only the implicit Windows `cmd` default uses `/C`.
+    // POSIX shell uses `-c`; only the implicit Windows `cmd` default uses `/d /s /c`.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
@@ -1978,10 +1978,18 @@ fn build_script_command(
     let (shell, shell_flag) = if let Some(ref s) = custom_shell {
         (s.as_str(), "-c")
     } else if cfg!(windows) {
-        ("cmd", "/C")
+        // npm's exact flags: `/d` (skip AutoRun), `/s` (strip outer quotes), `/c`.
+        ("cmd", "/d /s /c")
     } else {
         ("sh", "-c")
     };
+    // The implicit Windows `cmd` default must spawn with verbatim arguments — the
+    // script body is passed to cmd.exe exactly as written (npm's
+    // `windowsVerbatimArguments: true`), so Rust's MSVCRT re-quoting never mangles
+    // a `node -e "…"` body or undoes the per-arg cmd escaping below. A custom POSIX
+    // shell (e.g. Git-Bash `sh.exe` via `--shell-emulator`) does its own parsing,
+    // so it takes the normal escaped-`arg` path.
+    let cmd_verbatim = custom_shell.is_none() && cfg!(windows);
 
     // Append the user's extra args the way npm does (@npmcli/promise-spawn):
     // each arg is escaped for the target shell and spliced onto the UNescaped
@@ -2022,7 +2030,30 @@ fn build_script_command(
     );
 
     let mut command = StdCommand::new(shell);
-    command.arg(shell_flag).arg(&full_cmd);
+    // Windows cmd: split the multi-token flag (`/d /s /c`) and pass the body
+    // verbatim via `raw_arg`, the Rust equivalent of Node's
+    // `windowsVerbatimArguments: true`, so MSVCRT re-quoting never mangles a
+    // `node -e "…"` body or undoes the per-arg cmd escaping. A custom POSIX shell
+    // (e.g. Git-Bash `sh.exe`) does its own parsing → the escaped-`arg` path.
+    #[cfg(windows)]
+    let spawned = if cmd_verbatim {
+        use std::os::windows::process::CommandExt;
+        for flag in shell_flag.split(' ') {
+            command.arg(flag);
+        }
+        command.raw_arg(&full_cmd);
+        true
+    } else {
+        false
+    };
+    #[cfg(not(windows))]
+    let spawned = {
+        let _ = cmd_verbatim;
+        false
+    };
+    if !spawned {
+        command.arg(shell_flag).arg(&full_cmd);
+    }
     command.current_dir(&project.root);
 
     // PATH: shim dir (when augmenting) → `.bin` walk-up chain → system PATH.
@@ -2375,7 +2406,10 @@ fn member_prefix(dir: &std::path::Path, ws_root: &Path, name: &str) -> String {
     if rel.is_empty() {
         name.to_string()
     } else {
-        rel
+        // Forward slashes in the label on every OS (pnpm parity): the relative
+        // path is `packages\core` on Windows, but the displayed prefix contract
+        // is `packages/core` regardless of the host separator.
+        rel.replace('\\', "/")
     }
 }
 
