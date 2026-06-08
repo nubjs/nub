@@ -190,12 +190,16 @@ jobs:
           PKG="npm/nub-${{ matrix.platform }}"
           mkdir -p "$PKG/bin" "$PKG/runtime/addons"
 
-          # Binary
+          # Binary — staged under BOTH names (nub, nubx). The POSIX launcher heals
+          # the on-PATH entry into a minimal sh trampoline that exec's bin/<verb>,
+          # whose argv[0] basename is the verb, so nubx must be a real second copy.
           if [[ "${{ matrix.platform }}" == win32-* ]]; then
             cp "target/${{ matrix.target }}/release/nub.exe" "$PKG/bin/nub.exe"
+            cp "target/${{ matrix.target }}/release/nub.exe" "$PKG/bin/nubx.exe"
           else
             cp "target/${{ matrix.target }}/release/nub" "$PKG/bin/nub"
-            chmod +x "$PKG/bin/nub"
+            cp "target/${{ matrix.target }}/release/nub" "$PKG/bin/nubx"
+            chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
           fi
 
           # Runtime files — copy EVERY top-level runtime module: the .mjs ESM

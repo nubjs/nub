@@ -16,10 +16,13 @@ echo "Building for ${PLATFORM}-${ARCH} → $PKG_DIR"
 # 1. Build release binary
 cargo build --release -p nub-cli
 
-# 2. Copy binary
+# 2. Copy binary — under BOTH names (nub, nubx). The launcher heals the on-PATH
+# entry into a minimal sh trampoline that exec's bin/<verb> directly; the verb is
+# the binary's own argv[0] basename, so nubx must be a real second copy here.
 mkdir -p "$PKG_DIR/bin"
 cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nub"
-chmod +x "$PKG_DIR/bin/nub"
+cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nubx"
+chmod +x "$PKG_DIR/bin/nub" "$PKG_DIR/bin/nubx"
 
 # 3. Copy runtime
 rm -rf "$PKG_DIR/runtime"

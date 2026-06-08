@@ -11,12 +11,8 @@
   },
   "files": [
     "bin",
-    "platform.js",
-    "postinstall.js"
+    "platform.js"
   ],
-  "scripts": {
-    "postinstall": "node postinstall.js"
-  },
   "optionalDependencies": {
     "@nubjs/nub-darwin-arm64": "0.0.18",
     "@nubjs/nub-darwin-x64": "0.0.18",
