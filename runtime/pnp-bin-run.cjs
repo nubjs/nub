@@ -42,7 +42,13 @@ function binsOf(pkg) {
 }
 
 let script = null;
-const top = api.getPackageInformation(api.topLevel);
+// Anchor on the package that OWNS cwd — a workspace member, or the project root for a
+// single-package install. Its dependencies are the bins runnable here, matching
+// `yarn bin`. Using `api.topLevel` (the workspace ROOT) would, in a monorepo, list
+// only the member packages and miss a member's own dep/devDep bins. `findPackageLocator`
+// falls back to topLevel for the single-package case (cwd === root).
+const locator = api.findPackageLocator(cwdIssuer()) || api.topLevel;
+const top = api.getPackageInformation(locator);
 for (const [name, reference] of top.packageDependencies) {
   if (reference == null) continue;
   const info = api.getPackageInformation(api.getLocator(name, reference));

@@ -39,6 +39,11 @@ NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 
 [ -f "$FIXTURE/.pnp.cjs" ] || "$SCRIPT_DIR/make-fixture.sh" "$FIXTURE"
 
+# Workspace (monorepo) fixture — scenarios run from a member subdir.
+WS_FIXTURE="${NUB_PNP_WS_FIXTURE:-/tmp/nub-pnp-ws}"
+WS_MEMBER="$WS_FIXTURE/packages/a"
+[ -f "$WS_FIXTURE/.pnp.cjs" ] || "$SCRIPT_DIR/make-fixture-ws.sh" "$WS_FIXTURE"
+
 # Node bin dirs to sweep.
 NODE_DIRS=("$@")
 if [ ${#NODE_DIRS[@]} -eq 0 ]; then
@@ -48,6 +53,8 @@ fi
 
 # probe <node-bin-dir> <invocation...> -> grep token; prints OK/X
 run() { ( cd "$FIXTURE" && PATH="$1:$PATH" "${@:2}" ) 2>&1; }
+# Same, but from the workspace MEMBER dir (cwd is a subdir; .pnp.cjs is at an ancestor).
+runws() { ( cd "$WS_MEMBER" && PATH="$1:$PATH" "${@:2}" ) 2>&1; }
 fails=0
 
 printf "nub: %s\n\n" "$NUB"
@@ -84,6 +91,16 @@ $(echo "$2" | sed 's/^/    /')"
   # the bin via require() (zip-safe) instead of as a node entry, mirroring `yarn
   # exec`. `nub exec` and the `nubx` argv0 alias share this run_exec path.
   check exec "$(run "$bin" "$NUB" exec cowsay hi)" "< hi >"
+
+  # ── Workspace (monorepo), run from a member subdir ──────────────────────────────
+  # ws-esm/ws-cjs: resolve a workspace sibling + an external dep from the member.
+  # ws-sib-bin: nubx the sibling package's bin. ws-mem-bin: nubx the member's OWN
+  # devDep bin — both must enumerate the MEMBER's deps (not the workspace root), the
+  # bug this guards.
+  check ws-esm     "$(runws "$bin" "$NUB" ws-esm.mjs)"            "WS-ESM-OK"
+  check ws-cjs     "$(runws "$bin" "$NUB" ws-cjs.cjs)"            "WS-CJS-OK"
+  check ws-sib-bin "$(runws "$bin" "$NUB" exec pkg-b-bin)"        "WS-SIBLING-BIN-OK"
+  check ws-mem-bin "$(runws "$bin" "$NUB" exec cowsay wsmember)"  "< wsmember >"
 
   printf "%-12s %d/%d %s\n" "v$nv" "$ok" "$tot" "$line"
   [ -n "$diags" ] && printf "%s\n" "$diags"
