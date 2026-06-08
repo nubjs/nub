@@ -57,6 +57,10 @@ for STYLE in pnpm symlink; do
   case "$(cat "$BIN/nub")" in "#!/bin/sh"*nub-host/bin/nub\'*) ok "nub healed -> sh trampoline";; *) no "nub not healed: $(tail -1 "$BIN/nub")";; esac
   : > "$W/p/node.log"; o2=$(R "$BIN/nub" --version); case "$o2" in *9.9.9-ci*) ok "nub second-call runs";; *) no "nub second: $o2";; esac
   [ -s "$W/p/node.log" ] && no "node spawned post-heal" || ok "zero node post-heal"
+  # The healed entry is an sh/node POLYGLOT: a concurrent Node that re-reads it mid-heal
+  # must run the JS fallback (exec native), not choke parsing sh as JS. Prove it runs
+  # correctly when invoked as a Node script too.
+  pn=$(node "$BIN/nub" --version 2>&1); case "$pn" in *9.9.9-ci*) ok "healed entry also runs via node (polyglot fallback)";; *) no "polyglot-as-node: $pn";; esac
   : > "$W/p/node.log"; ox=$(R "$BIN/nubx" foo); case "$ox" in *nubx-mode*) ok "nubx verb dispatch";; *) no "nubx verb: $ox";; esac
   case "$(cat "$BIN/nubx")" in *nub-host/bin/nubx\'*) ok "nubx healed -> bin/nubx";; *) no "nubx not healed";; esac
 done

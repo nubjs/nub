@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 "use strict";
-// Entry point for the `nubx` command (npx-equivalent bin runner). On POSIX this
-// file is replaced by a symlink to the native binary at install time; it only
-// executes via Node on Windows or as a fallback. argv0 "nubx" makes the Rust CLI
-// enter exec mode directly (Argv0::Nubx), identical to the POSIX symlink whose
-// basename is "nubx".
+// Entry point for the `nubx` command (npx-equivalent bin runner). The package manager
+// links its on-PATH `nubx` to this Node launcher; on its first POSIX call launch.js
+// self-heals that entry into a tiny sh trampoline that exec's the platform package's
+// bin/nubx — whose argv[0] basename "nubx" makes the Rust CLI enter exec mode
+// (Argv0::Nubx). On Windows this Node launcher runs every call (no fast path).
 require("./launch.js")("nubx");

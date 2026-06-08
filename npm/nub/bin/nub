@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 "use strict";
-// Entry point for the `nub` command. On POSIX this file is replaced by a symlink
-// to the native binary at install time (see postinstall.js); it only executes via
-// Node on Windows or as a fallback. No argv0 override → the child sees the binary's
-// own basename ("nub") and runs the default verb.
+// Entry point for the `nub` command. The package manager links its on-PATH `nub` to
+// this Node launcher (a symlink on npm/bun/yarn, an sh cmd-shim on pnpm). On its first
+// POSIX call, launch.js self-heals that on-PATH entry into a tiny sh trampoline → the
+// native binary, so later calls skip Node entirely (see launch.js). On Windows there
+// is no such fast path and this Node launcher runs on every call.
 require("./launch.js")();

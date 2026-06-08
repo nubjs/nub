@@ -9,18 +9,20 @@
 //
 // On its FIRST POSIX invocation this launcher SELF-HEALS: it rewrites the on-PATH
 // entry that dispatched it — the package manager's bin shim (pnpm cmd-shim) or
-// symlink (npm/bun) — into a MINIMAL `#!/bin/sh` trampoline that exec's the native
-// binary directly. Every later call then resolves PATH -> that tiny sh trampoline
+// symlink (npm/bun/yarn) — into a tiny `#!/bin/sh` sh/node POLYGLOT trampoline that
+// exec's the native binary. Every later call then resolves PATH -> that trampoline
 // -> native, skipping Node entirely (~native cold-start; the sh hop is ~1-2ms on
 // Linux dash/busybox, ~4ms on macOS bash — vs ~50ms for this Node launcher).
 //
-// CRITICAL: the heal target is a minimal sh SCRIPT, never a native binary. A
-// script->binary swap has an irreducible TOCTOU race (the kernel reads `#!/bin/sh`
-// then `/bin/sh` reopens the path and finds a Mach-O -> "cannot execute binary
-// file"; ~24% under a concurrent burst). A script->script swap (both `#!/bin/sh`,
-// always valid scripts) is race-free by construction — a concurrent `/bin/sh`
-// reopening the entry mid-swap always reads a valid trampoline (measured 0/600 vs
-// 146/600). So the heal needs no lock: it is best-effort, atomic (write temp +
+// CRITICAL: the heal target is a SCRIPT, never a native binary (a script->binary swap
+// has an irreducible exec-format TOCTOU race), AND it is an sh/node polyglot so the
+// swap is safe under concurrency on every PM. Two race classes are closed: (1) pnpm's
+// entry is an sh cmd-shim, so sh->sh is race-free by construction; (2) npm/bun/yarn's
+// entry is a symlink to this #!node launcher, so a concurrent Node that already passed
+// the shebang and re-reads the swapped file would parse sh-as-JS and die — UNLESS the
+// new file is also valid JS, which the polyglot is (it runs a JS fallback that spawns
+// native). Measured: pure-sh heal ~6%/200 concurrent first-call failures on npm/bun;
+// polyglot 0/600. So the heal needs no lock: it is best-effort, atomic (write temp +
 // rename), verify-before-clobber, and a no-op on Windows.
 //
 // The native binary selects its verb from argv[0]'s basename (nub vs nubx); the
@@ -88,7 +90,18 @@ function healPathEntry(verb, nativePath) {
     const ourBin = path.join(__dirname, verb); // .../@nubjs/nub/bin/<verb>
     let ourReal; try { ourReal = fs.realpathSync(ourBin); } catch { ourReal = ourBin; }
     let nativeReal; try { nativeReal = fs.realpathSync(nativePath); } catch { nativeReal = nativePath; }
-    const content = `#!/bin/sh\nexec ${shq(nativeReal)} "$@"\n`;
+    // The healed entry is an sh/node POLYGLOT. A fresh exec reads `#!/bin/sh` and sh
+    // runs line 2 (`exec native`, the fast path). But a concurrent Node that already
+    // spawned through the pre-heal node shim — passing the `#!node` shebang BEFORE the
+    // heal renamed this file in — then re-opens this path as its "script" and reads
+    // line 2 as a `":"` string statement + a `//` comment (no-op), running line 3's JS
+    // fallback (spawn native) instead of choking on sh-as-JS. So the heal is race-free
+    // on symlink-to-node-shim PMs (npm/bun/yarn) too, the guarantee pnpm gets for free.
+    // Measured: pure-sh heal ~6%/200 concurrent first-call failures; polyglot 0/600.
+    const content =
+      `#!/bin/sh\n` +
+      `":" //# nub launcher; exec ${shq(nativeReal)} "$@"\n` +
+      `var r=require("child_process").spawnSync(${JSON.stringify(nativeReal)},process.argv.slice(2),{stdio:"inherit"});process.exit(r.status==null?1:r.status)\n`;
 
     for (const dir of (process.env.PATH || "").split(path.delimiter)) {
       if (!dir) continue;
