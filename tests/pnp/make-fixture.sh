@@ -43,7 +43,19 @@ nodeLinker: pnp
 enableGlobalCache: true
 YML
 
+# A local DUAL package (distinct `import` vs `require` builds) — guards the
+# condition-correctness bug where `import` of a dual package wrongly resolved to its
+# CJS build. Added as a PnP `portal:` dependency.
+mkdir -p dual-pkg
+cat > dual-pkg/package.json <<'JSON'
+{ "name": "dual-pkg", "version": "1.0.0", "type": "commonjs",
+  "exports": { ".": { "import": "./esm.mjs", "require": "./cjs.cjs" } } }
+JSON
+echo 'export const flavor = "ESM-build";' > dual-pkg/esm.mjs
+echo 'module.exports = { flavor: "CJS-build" };' > dual-pkg/cjs.cjs
+
 corepack yarn add lodash chalk@5 cowsay >/dev/null 2>&1
+corepack yarn add dual-pkg@portal:./dual-pkg >/dev/null 2>&1
 
 # Test entries, one per resolution shape.
 cat > cjs-test.cjs <<'JS'
@@ -63,6 +75,13 @@ import _ from "lodash"; // TS entry (nub transpiles) importing a PnP dep
 const msg: string = _.capitalize("ts pnp works");
 console.log("TS-OK", msg);
 TS
+cat > dual-esm.mjs <<'JS'
+import { flavor } from "dual-pkg"; // dual package: `import` must pick the ESM build
+console.log("DUAL-IMPORT", flavor);
+JS
+cat > dual-cjs.cjs <<'JS'
+console.log("DUAL-REQUIRE", require("dual-pkg").flavor); // must pick the CJS build
+JS
 cat > script-runner.cjs <<'JS'
 const _ = require("lodash");
 console.log("SCRIPT-OK", _.kebabCase("Pnp Script Runner"));

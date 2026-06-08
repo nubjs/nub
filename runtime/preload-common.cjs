@@ -142,19 +142,17 @@ function makeHooks(core, watchReporting) {
   function resolve(specifier, context, nextResolve) {
     const r = core.resolveSpec(specifier, context.parentURL);
     if (r) return r;
-    // Under Yarn PnP, delegating to `nextResolve` flows into Node's default
-    // resolution, which calls PnP's patched `_resolveFilename` WITH a `conditions`
-    // option PnP rejects once a customization hook is registered ("aren't supported
-    // by PnP yet (conditions)"). PnP exposes its own conditions-free resolver —
-    // `pnpapi.resolveRequest` — so resolve through THAT and hand Node the file URL.
-    // Still "PnP does the resolution" (its public API); nub adds none of its own.
-    // Returns a virtual `.zip` path for zip-stored deps, which Node reads via the
-    // zipfs patch `.pnp.cjs` installed. Falls back to `nextResolve` if PnP can't
-    // resolve (e.g. a builtin or a relative path PnP defers to Node).
+    // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
+    // be resolved explicitly — through `pnpapi.resolveRequest`, passing Node's
+    // `context.conditions` (the import-side set) so a DUAL package resolves to its
+    // `import` build, not its `require` build. Returns a virtual `.zip` path Node
+    // reads via the zipfs patch. If the api is momentarily unavailable we fall through
+    // to `nextResolve`, which reaches nub's `_resolveFilename` override (delegating to
+    // PnP) — so a plain dep still resolves; only a dual package's condition is lost.
     const pnp = pnpApi();
     if (pnp && !module_.isBuiltin(specifier) && !specifier.startsWith("node:")) {
       try {
-        const res = pnpResolveEsm(pnp, specifier, context && context.parentURL);
+        const res = pnpResolveEsm(pnp, specifier, context);
         if (res) return res;
       } catch { /* fall through to Node's resolver */ }
     }
@@ -302,46 +300,35 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       }
       return resolved;
     }
-    // Yarn PnP, FAST TIER ONLY. On the fast tier nub registers a sync
-    // `module.registerHooks` resolve hook, which makes Node thread a `conditions`
-    // option into PnP's patched `_resolveFilename` ("aren't supported by PnP yet
-    // (conditions)") AND re-inject it even if we pass none — so we must resolve
-    // everything ourselves via PnP's conditions-free `pnpapi.resolveRequest` and the
-    // native path primitives, never falling through to PnP's `_resolveFilename`. On
-    // the COMPAT tier there is no sync hook, so PnP's own `_resolveFilename` resolves
-    // CJS deps fine (no conditions option) and interposing here instead recurses to
-    // OOM on the Node 18 line — so the PnP branch is gated to where registerHooks
-    // exists. `pnpApi()` is null off-PnP, making this doubly safe.
-    // On a PnP tree + fast tier (sync `registerHooks` registered), resolve through
-    // PnP's conditions-free `resolveRequest` and NEVER fall through to
-    // `origResolveFilename` — that is PnP's patched `_resolveFilename`, which rejects
-    // the `conditions` option Node injects under a registered hook. The gate is
-    // `process.versions.pnp` (set the moment `.pnp.cjs` runs), NOT a non-null api:
-    // if `findPnpApi` momentarily misses we still avoid PnP's resolver and use Node's
-    // native `_findPath`, so a transient lookup miss can't leak a `conditions` crash.
-    const inPnp = typeof module_.registerHooks === "function" && !!process.versions.pnp;
-    if (inPnp) {
-      if (module_.isBuiltin(request)) return request; // PnP defers builtins to Node
-      const pnp = pnpApi();
-      if (pnp) {
-        try {
-          const issuer = parent && typeof parent.filename === "string" ? parent.filename : cwdIssuer();
-          const r = pnp.resolveRequest(request, issuer);
-          if (r) return r;
-        } catch { /* fall through to native path resolution below */ }
-      }
-      // PnP couldn't resolve it (nub's OWN vendored deps, whose issuer is nub's
-      // out-of-tree install dir) or the api was momentarily unavailable. Use Node's
-      // native path primitives (`_resolveLookupPaths` + `_findPath`), which PnP does
-      // NOT patch — never `origResolveFilename` (PnP's, + `conditions`).
-      const lookupPaths = module_._resolveLookupPaths(request, parent) || [];
-      const found = module_._findPath(request, lookupPaths, isMain);
-      if (found) return found;
-      const err = new Error(`Cannot find module '${request}'`);
-      err.code = "MODULE_NOT_FOUND";
-      throw err;
+    // Yarn PnP (CJS): `.pnp.cjs` already patched THIS function (origResolveFilename)
+    // to resolve from PnP's manifest, including zip-stored deps — so we just delegate
+    // to it. The one snag is that a registered customization hook makes Node thread a
+    // `conditions` option that PnP rejects ("aren't supported by PnP yet
+    // (conditions)"), so strip it first. The require/default condition PnP then
+    // applies is exactly right for `require()`. (Stripping is a harmless no-op when
+    // origResolveFilename is plain Node — i.e. not a PnP project.) This replaces the
+    // former `pnpapi.resolveRequest` reimplementation: simpler, and with no
+    // `findPnpApi` in the hot path there is no lookup-miss to leak a `conditions`
+    // crash on Windows.
+    if (options && "conditions" in options) {
+      options = { ...options };
+      delete options.conditions;
     }
-    return origResolveFilename.call(this, request, parent, isMain, options);
+    try {
+      return origResolveFilename.call(this, request, parent, isMain, options);
+    } catch (e) {
+      // Under PnP, an in-tree issuer requiring a dep NOT in its manifest makes PnP
+      // throw. That is nub's OWN transpile helpers (e.g. `@oxc-project/runtime`),
+      // injected into transpiled user code and resolved via NODE_PATH globalPaths
+      // (A30). Fall back to Node's native path resolver, which PnP does NOT patch.
+      // Gated to PnP so off-PnP a genuine miss surfaces Node's own error unchanged.
+      if (process.versions.pnp && e && e.code === "MODULE_NOT_FOUND") {
+        const lookupPaths = module_._resolveLookupPaths(request, parent) || [];
+        const found = module_._findPath(request, lookupPaths, isMain);
+        if (found) return found;
+      }
+      throw e;
+    }
   };
 
   if (!withClassicTranspile) return;

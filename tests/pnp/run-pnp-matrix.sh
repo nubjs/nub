@@ -72,6 +72,10 @@ $(echo "$2" | sed 's/^/    /')"
   check esm-cjsdep  "$(run "$bin" "$NUB" esm-test.mjs)"  "ESM-OK"
   check esm-puredep "$(run "$bin" "$NUB" esm-pure.mjs)"  "PURE-ESM-OK"
   check ts          "$(run "$bin" "$NUB" ts-test.ts)"    "TS-OK"
+  # Dual package: `import` must pick the ESM build, `require` the CJS build (condition
+  # correctness — `import` resolving to the require build is the bug this guards).
+  check dual-import "$(run "$bin" "$NUB" dual-esm.mjs)"  "DUAL-IMPORT ESM-build"
+  check dual-req    "$(run "$bin" "$NUB" dual-cjs.cjs)"  "DUAL-REQUIRE CJS-build"
   check run         "$(run "$bin" "$NUB" run start)"     "SCRIPT-OK"
   # --node must DISABLE PnP: the dep must NOT resolve.
   check node-off    "$(run "$bin" "$NUB" --node cjs-test.cjs)" "Cannot find module"
