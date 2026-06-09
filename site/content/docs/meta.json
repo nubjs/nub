@@ -3,8 +3,8 @@
   "pages": [
     "index",
     "running-files",
-    "running-scripts",
     "watch",
+    "running-scripts",
     "nubx",
     "managing-node",
     "pm",
