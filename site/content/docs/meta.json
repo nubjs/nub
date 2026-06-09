@@ -6,8 +6,8 @@
     "running-scripts",
     "watch",
     "nubx",
-    "faq",
     "managing-node",
-    "pm"
+    "pm",
+    "faq"
   ]
 }
