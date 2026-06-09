@@ -8,10 +8,14 @@ export const source = loader({
   source: docs.toFumadocsSource(),
   pageTree: {
     // Backtick spans in frontmatter titles render as <code> in the sidebar.
-    attachFile(node) {
-      if (typeof node.name === 'string') node.name = renderTitle(node.name);
-      return node;
-    },
+    transformers: [
+      {
+        file(node) {
+          if (typeof node.name === 'string') node.name = renderTitle(node.name);
+          return node;
+        },
+      },
+    ],
   },
 });
 
