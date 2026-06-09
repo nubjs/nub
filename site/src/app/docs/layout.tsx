@@ -9,6 +9,7 @@ import { source } from '@/lib/source';
 const COMMAND_BY_URL: Record<string, string> = {
   '/docs/running-files': 'nub <file>',
   '/docs/managing-node': 'nub node',
+  '/docs/pm': 'nub pm',
   '/docs/running-scripts': 'nub run',
   '/docs/watch': 'nub watch',
   '/docs/nubx': 'nubx',
