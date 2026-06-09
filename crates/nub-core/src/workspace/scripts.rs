@@ -21,6 +21,7 @@ pub fn npm_env(
     lifecycle_event: &str,
     lifecycle_script: Option<&str>,
     node_execpath: &str,
+    node_version: &str,
 ) -> HashMap<String, String> {
     let mut env_vars = HashMap::new();
 
@@ -61,14 +62,18 @@ pub fn npm_env(
 
     env_vars.insert("npm_command".to_string(), "run-script".to_string());
 
+    // pnpm's UA shape (`<name>/<ver> npm/? node/v<ver> <platform> <arch>`) so
+    // postinstall sniffers (which-pm-runs, only-allow, create-* scaffolders)
+    // parse it; first token stays honestly `nub` (decision 2026-06-09). Platform
+    // tokens use Node's process.platform/process.arch vocabulary (darwin/win32,
+    // x64/arm64), not Rust's, so parsers see the same words npm/pnpm send.
     let nub_version = env!("CARGO_PKG_VERSION");
-    let node_version = env::var("NODE_VERSION").unwrap_or_default();
     env_vars.insert(
         "npm_config_user_agent".to_string(),
         format!(
-            "nub/{nub_version} npm/? node/{node_version} {} {}",
-            env::consts::OS,
-            env::consts::ARCH
+            "nub/{nub_version} npm/? node/v{node_version} {} {}",
+            node_platform(),
+            node_arch()
         ),
     );
 
@@ -88,6 +93,27 @@ pub fn npm_env(
     );
 
     env_vars
+}
+
+/// Node's `process.platform` vocabulary for the UA string (`darwin`, `win32`,
+/// `linux`), mapped from Rust's `std::env::consts::OS`.
+fn node_platform() -> &'static str {
+    match env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+/// Node's `process.arch` vocabulary (`x64`, `arm64`, `ia32`), mapped from
+/// Rust's `std::env::consts::ARCH`.
+fn node_arch() -> &'static str {
+    match env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        other => other,
+    }
 }
 
 /// Build the PATH with node_modules/.bin directories prepended.
