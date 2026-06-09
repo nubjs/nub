@@ -937,10 +937,9 @@ function HypermanagerBand() {
           title="A package hypermanager"
           subhead={
             <>
-              Type <Mono>nub</Mono> for any package manager. Nub reads your project&rsquo;s{' '}
-              <Mono>packageManager</Mono> field, provisions the exact npm, pnpm, or yarn version on
-              demand, and passes your command straight through — no global installs, no Corepack, no
-              lock-in.
+              Not a new package manager — Nub runs the one your project already uses. Type{' '}
+              <Mono>nub install</Mono>{' '}and it detects npm, pnpm, or yarn, fetches the right version if
+              it&rsquo;s missing, and runs it.
             </>
           }
           accent="pink"
@@ -949,21 +948,22 @@ function HypermanagerBand() {
         <div className="mt-10 divide-y divide-fd-border/60">
           <Feature
             accent="pink"
-            eyebrow="Passthrough"
-            title="Your package manager, not ours"
+            eyebrow="Detect + install"
+            title="Detects and installs your package manager"
             body={
               <>
-                <Mono>nub install</Mono>, <Mono>nub add</Mono>, and <Mono>nub up</Mono>{' '}each run your
-                project&rsquo;s configured package manager, verbatim. Nub adds one entrypoint and gets
-                out of the way — no flags to relearn, no behavior to emulate.
+                Nub reads <Mono>package.json</Mono>{' '}(or infers from your lockfile) to see which
+                manager the project uses, then fetches and caches that exact version on demand — on
+                every machine and in CI. You never install or pin a package manager by hand.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub install', comment: '→ pnpm install' },
-                  { cmd: 'nub add -D vitest', comment: '→ pnpm add -D vitest' },
-                  { cmd: 'nub up --latest', comment: '→ pnpm up --latest' },
+                  { cmd: 'nub install' },
+                  { out: '» detected pnpm@11 (package.json)' },
+                  { out: '» fetched + cached → ~/.cache/nub' },
+                  { out: '» pnpm install' },
                 ]}
               />
             }
@@ -972,21 +972,22 @@ function HypermanagerBand() {
           <Feature
             accent="pink"
             reverse
-            eyebrow="Provisioning"
-            title="Never install a package manager again"
+            eyebrow="Normalized"
+            title="One spelling, every manager"
             body={
               <>
-                Pin a version once and Nub fetches it on demand, verifies its integrity, and caches it
-                across every machine and CI run. It&rsquo;s Corepack&rsquo;s job, reimplemented in
-                Rust, without the version treadmill.
+                The everyday verbs — <Mono>install</Mono>, <Mono>add</Mono>, <Mono>remove</Mono>,{' '}
+                <Mono>update</Mono>{' '}— are spelled once and mapped to your package manager&rsquo;s
+                own flags. Nub never emulates a missing feature: anything it can&rsquo;t map fails
+                fast and tells you to run your manager directly.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub pm switch pnpm@11', comment: 'writes packageManager' },
-                  { cmd: 'nub install', comment: 'fetch pnpm@11 · verify · cache' },
-                  { cmd: 'nub pm which', comment: 'pnpm@11.2.0 → ~/.cache/nub' },
+                  { cmd: 'nub add -D vitest', comment: '→ pnpm add -D vitest' },
+                  { cmd: 'nub install --frozen', comment: '→ pnpm install --frozen-lockfile' },
+                  { cmd: 'nub install --frozen', comment: '→ yarn install --immutable' },
                 ]}
               />
             }
@@ -994,22 +995,45 @@ function HypermanagerBand() {
 
           <Feature
             accent="pink"
-            eyebrow="No lock-in"
-            title="Portable, with or without Nub"
+            eyebrow="vs Corepack"
+            title="Replaces Corepack, without the shims"
             body={
               <>
-                Nub drives the standard <Mono>packageManager</Mono> field — no <Mono>nub</Mono>-specific
-                config, environment variable, or registry. Clone the repo without Nub and every
-                command still works. npm, pnpm, and yarn today; Bun next.
+                Corepack does the same version provisioning — but by installing shims that hijack npm,
+                pnpm, and yarn on your <Mono>PATH</Mono>. Nub installs nothing global and intercepts
+                nothing: it&rsquo;s one binary you call explicitly. Same manager-agnostic result, no
+                PATH surgery, and your manager&rsquo;s exact output and lockfile.
               </>
             }
             visual={
-              <Source
-                lang="json"
-                code={`{
-  "name": "acme-web",
-  "packageManager": "pnpm@9.12.0"
-}`}
+              <Terminal
+                lines={[
+                  { cmd: 'corepack enable', comment: 'hijacks npm/pnpm/yarn on PATH' },
+                  { cmd: 'nub install', comment: 'no shims, nothing global' },
+                ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            reverse
+            eyebrow="nub pm"
+            title="Take control when you want it"
+            body={
+              <>
+                The <Mono>nub pm</Mono>{' '}commands surface it all explicitly: see what resolves,
+                switch or pin a version, bump to the latest, or inspect the binary cache.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub pm which' },
+                  { out: 'pnpm 11.2.0  ·  ~/.cache/nub/pm/pnpm' },
+                  { cmd: 'nub pm switch yarn@4' },
+                  { out: 'pinned yarn@4 in package.json' },
+                ]}
               />
             }
           />
