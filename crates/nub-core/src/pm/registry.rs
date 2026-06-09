@@ -115,7 +115,7 @@ pub fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
 /// A spec that already uses commas, or that is a single comparator (`^9`, `10`,
 /// `>=9`), is returned unchanged. This is a syntactic bridge only — it does not
 /// translate the `||` OR operator (unsupported by Cargo's `semver`).
-fn normalize_range(spec: &str) -> String {
+pub(crate) fn normalize_range(spec: &str) -> String {
     let spec = spec.trim();
     // Single token, or the user already comma-separated → nothing to do.
     if spec.contains(',') || !spec.contains(char::is_whitespace) {
@@ -167,8 +167,11 @@ fn parse_integrity(dist: &Value) -> Option<Integrity> {
 /// The bin path to run, relative to the package root. npm's `bin` is either a
 /// string (single bin == the package name) or a map of `name -> path`; for a PM
 /// the entry whose key matches the package `name` is the launcher, with the
-/// sole-entry and single-string forms as fallbacks.
-fn bin_subpath(meta: &Value) -> Option<PathBuf> {
+/// sole-entry and single-string forms as fallbacks. Works on a packument
+/// `versions[X.Y.Z]` entry and on an installed `package/package.json` alike —
+/// both carry the same `name` + `bin` shape (the cache-first path reads the
+/// latter to avoid the network).
+pub(crate) fn bin_subpath(meta: &Value) -> Option<PathBuf> {
     let bin = meta.get("bin")?;
     if let Some(path) = bin.as_str() {
         return Some(PathBuf::from(path));
