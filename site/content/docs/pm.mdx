@@ -1,0 +1,94 @@
+---
+title: Package managers
+description: nub pm provisions and runs the package manager your project pins — corepack's job, in native Rust. Pin a version and the exact pnpm/npm/yarn is fetched, verified, cached, and run on the project's Node.
+---
+
+Nub reads your project's package-manager pin, downloads that exact version from the npm registry — integrity-verified before extraction, cached under `~/.cache/nub/pm` — and runs it under the project's Node. No corepack, no `enable` step, no baked version table: a nub binary from six months ago provisions today's pnpm.
+
+```sh
+$ nub pm which
+/Users/you/.cache/nub/pm/pnpm/9.15.4/package/bin/pnpm.cjs
+» resolved from packageManager (pnpm@9.15.4)
+```
+
+## The pin
+
+The package manager resolves from, in order:
+
+1. **`.yarnrc.yml` `yarnPath`** — a committed Yarn Berry release. Run directly; nothing to provision.
+2. **`package.json#packageManager`** — `name@x.y.z`, optionally `+sha512.<hash>`. The corepack field; nub is contract-compatible with it.
+3. **`package.json#devEngines.packageManager`** — `{ name, version }`, where `version` may be a range.
+
+Pins are read at the workspace root. `packageManager` must be exact — the entire ecosystem enforces this (corepack, pnpm, yarn all reject ranges there); ranges belong in `devEngines`. With no pin, there's nothing to manage — `nub pm which` says so and the commands below tell you how to pin.
+
+## `nub pm which`
+
+Print the resolved package manager — path on stdout, provenance on stderr, so `PM=$(nub pm which)` captures just the path. Provisions the pinned version if it isn't cached yet.
+
+```sh
+$ nub pm which
+/Users/you/.cache/nub/pm/pnpm/9.15.4/package/bin/pnpm.cjs
+» resolved from packageManager (pnpm@9.15.4)
+```
+
+## `nub pm pin`
+
+Pin the version of the project's package manager. Takes an exact version, a range, or a dist-tag — always resolved to an exact version before writing:
+
+```sh
+nub pm pin pnpm@9.15.4
+nub pm pin pnpm@^9        # resolves to the newest 9.x
+nub pm pin pnpm@latest
+```
+
+`pin` fetches and verifies the version it's about to pin, then writes both fields — preserving your file's indentation:
+
+```json
+{
+  "packageManager": "pnpm@9.15.4+sha512.f8e3…",
+  "devEngines": {
+    "packageManager": { "name": "pnpm", "version": "^9.15.4", "onFail": "download" }
+  }
+}
+```
+
+The exact `packageManager` (hash computed from the verified tarball) is what corepack, pnpm, and turbo execute. The `devEngines` range records intent — it's what [`nub pm update`](#nub-pm-update) respects, and modern npm/pnpm validate against it.
+
+Pinning a package manager the project doesn't currently use is an error — that's [`switch`](#nub-pm-switch).
+
+## `nub pm switch`
+
+Change *which* package manager the project uses. Same resolution as `pin`; the version defaults to `latest`.
+
+```sh
+nub pm switch pnpm        # move the project to pnpm (newest version)
+nub pm switch npm@10
+```
+
+`switch` rewrites the pin. It does not yet migrate your lockfile — that's planned.
+
+## `nub pm update`
+
+Bump the pin: resolve the newest version satisfying the `devEngines` range (or the registry `latest` if there's no range), provision it, and rewrite both fields. Alias: `nub pm up`.
+
+```sh
+$ nub pm update
+pinned pnpm@9.15.9 → /Users/you/.cache/nub/pm/pnpm/9.15.9/package/bin/pnpm.cjs
+```
+
+## `nub pm cache`
+
+Inspect or clear the package-manager cache.
+
+```sh
+$ nub pm cache
+pnpm@9.15.4
+yarn@1.22.22
+$ nub pm cache clear
+```
+
+Versions live at `~/.cache/nub/pm/<pm>/<version>`. An exact pin that's already cached runs fully offline — the registry is only contacted to resolve ranges and fetch missing versions.
+
+## Yarn Berry
+
+Yarn 2+ ships as a release committed to your repo (`.yarnrc.yml` `yarnPath`) — nub runs that file directly. Nub doesn't provision Berry: a `yarn@2+` pin without a committed release is an error. Yarn classic (1.x) provisions like any other package manager.

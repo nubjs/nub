@@ -21,7 +21,7 @@ Installing Node 22.15.0 from nodejs.org (25 MB)...
 
 This is the headline. Everything below is for when you want to do one of these steps deliberately instead of letting it happen on the next run. For the full provisioning story — precedence, the `~/.cache/nub` layout, the per-invocation shim — see [Running files → The Node version](/docs/running-files#the-node-version).
 
-## Pre-install a version — `nub node install`
+## `nub node install`
 
 Provision a version into the cache *now*, instead of on the next `nub <file>`. The use cases are warming a CI cache in a setup step, or fetching a Node before you go offline.
 
@@ -45,7 +45,7 @@ $ nub node install 22.15.0
 Node 22.15.0 is already available on PATH — skipped
 ```
 
-## See what's installed — `nub node ls`
+## `nub node ls`
 
 List the versions in Nub's cache, newest first. The version your current directory resolves to is marked.
 
@@ -58,7 +58,7 @@ $ nub node ls
 
 `ls` shows Nub's own download cache only — it doesn't enumerate your `nvm` / `fnm` / system installs, because Nub doesn't manage those stores. The `→` marker appears only when the resolved version is one Nub has cached.
 
-## Remove a version — `nub node uninstall`
+## `nub node uninstall`
 
 Reclaim disk by deleting a cached version. Nub guards against removing the version your current directory resolves to.
 
@@ -69,7 +69,7 @@ Removed Node 20.11.0 from the cache
 
 Like `ls`, this operates on Nub's cache only — it will never touch a version `nvm` or your system package manager installed.
 
-## Record a pin — `nub node pin`
+## `nub node pin`
 
 Write a `.node-version` for the project so every later `nub` in that tree uses it. This is the explicit form of creating the pin file by hand.
 
