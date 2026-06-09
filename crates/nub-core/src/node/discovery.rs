@@ -59,6 +59,18 @@ pub enum DiscoveryError {
         pin_source: Option<String>,
     },
 
+    /// `package.json#devEngines.runtime` declares only non-Node runtimes
+    /// (bun/deno/workerd/…) and the governing entry's effective `onFail` is the
+    /// default `error` (or `download` — nub can't download a non-Node runtime).
+    /// nub's environment IS Node, so it refuses rather than silently running a
+    /// project on a runtime it asked not to be run on. An explicit
+    /// `onFail: "warn"`/`"ignore"` falls through to the next pin source instead.
+    #[error(
+        "this project declares \"{runtime}\" as its runtime (devEngines.runtime) — nub runs Node\n\
+         \x20\x20Add a node entry to devEngines.runtime, or set onFail: \"warn\" or \"ignore\" on the entry to let nub continue."
+    )]
+    RuntimeNotNode { runtime: String },
+
     #[error("failed to detect Node version: {0}")]
     VersionDetection(String),
 
@@ -94,15 +106,19 @@ fn format_unsupported(version: &NodeVersion, pin_source: Option<&str>) -> String
     }
 }
 
-/// Discover the Node binary to use, following the algorithm in
-/// `wiki/runtime/node-version-discovery.md`.
+/// Discover the Node binary to use, following the resolution order in
+/// `wiki/runtime/node-version-management.md`.
 ///
-/// 1. Walk up from `cwd` looking for `.node-version` / `.nvmrc`.
+/// 1. Resolve the pin chain: `package.json#devEngines.runtime` (#1, may refuse
+///    when the declared runtime isn't Node) → `.node-version` (#2) → `.nvmrc`
+///    (#3) → `package.json#engines.node` (#4, a resolution range).
+///    `devEngines.runtime` `onFail: "warn"` notices print here (once per
+///    invocation), then resolution falls through.
 /// 2. If no pin: use `node` on PATH.
 /// 3. If pinned: PATH node satisfies → nub's own download store
 ///    (`~/.cache/nub/node/<version>/`) → nvm scan → error. (The download +
-///    install step that populates the store, replacing the error, is the next
-///    provisioning sub-item — see `wiki/runtime/node-version-management.md`.)
+///    install step that populates the store, replacing the error, is
+///    [`discover_or_provision_node`].)
 ///
 /// The hard floor (Node 18.19) is **not** enforced here — call
 /// [`check_min_version`] afterwards. Discovery deliberately stays
@@ -119,9 +135,12 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
         return Ok(node);
     }
 
-    let pin = walk_up_for_pin(cwd);
+    let chain = resolve_pin_chain(cwd)?;
+    for warning in &chain.warnings {
+        eprintln!("{warning}");
+    }
 
-    match pin {
+    match chain.pin {
         None => {
             // No pin file — use whatever node is on PATH.
             shell_path_node(None)
@@ -179,7 +198,10 @@ pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryE
         Err(e @ (DiscoveryError::PinnedNotFound { .. } | DiscoveryError::NoNodeOnPath)) => e,
         Err(other) => return Err(other),
     };
-    let Some((raw, pin, pin_source)) = walk_up_for_pin(cwd) else {
+    // Re-resolve the chain for the pin to provision. Warnings are deliberately
+    // not re-printed — the discover_node call above already emitted them; a
+    // refusal can't reach here (discover_node returned it as `other`).
+    let Some((raw, pin, pin_source)) = resolve_pin_chain(cwd)?.pin else {
         return Err(discover_err); // no pin → nothing to provision
     };
 
@@ -202,8 +224,16 @@ pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryE
             let mirror = crate::version_management::resolve_mirror_base(&host);
             let index = crate::version_management::node_index::load_index(&store_root, &mirror)
                 .map_err(|e| fail(format!("could not fetch the Node release index: {e:#}")))?;
-            crate::version_management::node_index::resolve_spec(&raw, &index)
-                .ok_or_else(|| fail("no published Node version matches this pin".to_string()))?
+            match &pin {
+                // A devEngines.runtime / engines.node semver range resolves to
+                // the newest published version satisfying it
+                // (node-version-management.md §Resolution order).
+                VersionPin::Range(alternatives) => {
+                    crate::version_management::node_index::resolve_range(alternatives, &index)
+                }
+                _ => crate::version_management::node_index::resolve_spec(&raw, &index),
+            }
+            .ok_or_else(|| fail("no published Node version matches this pin".to_string()))?
         }
     };
 
@@ -260,11 +290,12 @@ pub fn check_min_version(node: &ResolvedNode) -> Result<(), DiscoveryError> {
 /// user-facing messages. Bounded by $HOME, filesystem root, and 16 ancestors.
 ///
 /// Precedence within a directory is `.node-version` BEFORE `.nvmrc`, per
-/// `wiki/runtime/node-version-management.md` §"Resolution order" (1. `.node-version`,
-/// 2. `.nvmrc`). `.node-version` is the tool-agnostic standard, so it wins when a
-/// project carries both. (`package.json#engines.node` is precedence #3 — handled
-/// separately via [`engines_disagreement_warning`]; an `engines.node`-only
-/// resolution still routes through the download path, not yet wired.)
+/// `wiki/runtime/node-version-management.md` §"Resolution order" (#2 `.node-version`,
+/// #3 `.nvmrc`). `.node-version` is the tool-agnostic standard, so it wins when a
+/// project carries both. Precedence #1, `package.json#devEngines.runtime`, sits
+/// ABOVE both and #4, `package.json#engines.node`, BELOW both —
+/// [`resolve_pin_chain`] orders all four; this helper is only the pin-file
+/// middle of the chain.
 pub fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
     let home = dirs_next::home_dir();
     let mut dir = cwd.to_path_buf();
@@ -298,63 +329,294 @@ pub fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
     None
 }
 
-/// Read `package.json#engines.node` (precedence #3, a semver *range*) from the
-/// nearest `package.json` walking up from `cwd`. Returns `(range, source_label)`,
-/// or `None` when the nearest `package.json` has no `engines.node`. The walk stops
-/// at the first `package.json` found — that is the project boundary; an
-/// `engines.node` in a grandparent belongs to a different project.
-fn read_engines_node(cwd: &Path) -> Option<(String, String)> {
-    let home = dirs_next::home_dir();
-    let mut dir = cwd.to_path_buf();
+/// Source label for the `devEngines.runtime` pin channel (precedence #1),
+/// shaped like the `package.json#engines.node` label.
+const DEV_ENGINES_RUNTIME_SOURCE: &str = "package.json#devEngines.runtime";
 
-    for _ in 0..16 {
-        let pkg_path = dir.join("package.json");
-        if let Ok(content) = fs::read_to_string(&pkg_path) {
-            // Nearest package.json = project boundary; whether or not it carries
-            // engines.node, we don't look past it.
-            let range = serde_json::from_str::<serde_json::Value>(&content)
-                .ok()
-                .as_ref()
-                .and_then(|json| json.get("engines"))
-                .and_then(|engines| engines.get("node"))
-                .and_then(|node| node.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            return range.map(|r| (r, "package.json#engines.node".to_string()));
+/// Source label for the `engines.node` pin channel (precedence #4).
+const ENGINES_NODE_SOURCE: &str = "package.json#engines.node";
+
+/// The governing `package.json` for `cwd`, parsed: the WORKSPACE ROOT's manifest
+/// when one exists above `cwd`, else the nearest one. This is the one manifest
+/// both `devEngines.runtime` (#1) and `engines.node` (#4) read from.
+///
+/// Workspace-root, not nearest, deliberately: a monorepo pins its Node once at
+/// the root (pnpm — the field's model implementation — reads `devEngines.runtime`
+/// at the workspace root), and the pin-file walk (`walk_up_for_pin`) already
+/// climbs past a member to a root `.node-version`. A nearest-only read here
+/// would invert the spec's precedence from a member dir — a root
+/// `devEngines.runtime` (#1) invisible while a root `.node-version` (#2) wins.
+/// Same scope rule as the PM side (`pm::resolve::root_manifest`); a member's own
+/// manifest governs only when no workspace root exists above it.
+fn project_manifest(cwd: &Path) -> Option<serde_json::Value> {
+    let project = crate::workspace::detect::detect_project(cwd)?;
+    match &project.workspace_root {
+        Some(ws) if *ws != project.root => {
+            let content = fs::read_to_string(ws.join("package.json")).ok()?;
+            serde_json::from_str(&content).ok()
         }
-        if home.as_deref() == Some(&dir) || !dir.pop() {
-            break;
-        }
+        _ => Some(project.manifest),
     }
-
-    None
 }
 
-/// When a project carries BOTH a pin file (`.node-version`/`.nvmrc`) and a
-/// `package.json#engines.node` range, and the pinned version does NOT satisfy
-/// that range, return a warning naming both sources — a project misconfiguration
-/// the user should see (`wiki/runtime/node-version-management.md`: "If a pin file
-/// and `engines.node` disagree, warn"). Returns `None` when there is no pin file,
-/// no `engines.node`, the range is unparseable (be conservative — don't cry wolf
-/// on node-semver syntax the `semver` crate can't model), or they agree.
+/// Read `package.json#engines.node` (precedence #4, a semver *range*) from the
+/// governing manifest ([`project_manifest`]). Returns `(range, source_label)`,
+/// or `None` when the manifest has no `engines.node`.
+fn read_engines_node(cwd: &Path) -> Option<(String, String)> {
+    let range = project_manifest(cwd)?
+        .get("engines")?
+        .get("node")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)?;
+    Some((range, ENGINES_NODE_SOURCE.to_string()))
+}
+
+/// One entry of `devEngines.runtime` (the object form is a single entry).
+/// Malformed entries (non-object, missing/empty `name`) parse to `None` and are
+/// skipped — same conservative posture as an unparseable pin file.
+struct RuntimeEntry {
+    name: String,
+    version: Option<String>,
+    on_fail: Option<String>,
+}
+
+fn runtime_entry(value: &serde_json::Value) -> Option<RuntimeEntry> {
+    let name = value.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let str_field = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Some(RuntimeEntry {
+        name: name.to_string(),
+        version: str_field("version"),
+        on_fail: str_field("onFail"),
+    })
+}
+
+/// What `devEngines.runtime` says about this project's runtime.
+#[derive(Debug)]
+enum RuntimeOutcome {
+    /// A node-named entry with a parseable constraint — the top-precedence pin.
+    Pin { raw: String, pin: VersionPin },
+    /// No applicable constraint — continue down the chain. `warnings` carries
+    /// `onFail: "warn"` notices for non-node runtimes (printed once by
+    /// [`discover_node`]).
+    FallThrough { warnings: Vec<String> },
+    /// A non-node runtime whose effective `onFail` is `error`/`download` (or
+    /// the default) — refuse to run.
+    Refuse { runtime: String },
+}
+
+/// Evaluate a `devEngines.runtime` value (object or array) per
+/// `wiki/runtime/node-version-management.md` §"Resolution order":
+///
+/// - The entry whose `name` is `node` is the pin, regardless of array position;
+///   non-node entries are then skipped entirely. Its `onFail` is not consulted
+///   (`download` is simply nub's native provisioning behavior). A node entry
+///   with no `version` (or an unparseable one) is "field present, no
+///   constraint" — fall through to the next pin source.
+/// - With no node entry, the declared runtimes govern: per entry, effective
+///   `onFail` = the explicit value, else the spec's array default (`ignore` for
+///   earlier elements, `error` for the last / the object form). `ignore` skips
+///   silently, `warn` collects a notice and continues, anything else
+///   (`error`, `download`, unrecognized) refuses naming that runtime.
+fn evaluate_dev_engines_runtime(field: &serde_json::Value) -> RuntimeOutcome {
+    let entries: Vec<RuntimeEntry> = match field {
+        serde_json::Value::Array(items) => items.iter().filter_map(runtime_entry).collect(),
+        obj @ serde_json::Value::Object(_) => runtime_entry(obj).into_iter().collect(),
+        _ => Vec::new(),
+    };
+
+    if let Some(node) = entries.iter().find(|e| e.name == "node") {
+        return match &node.version {
+            Some(raw) => match VersionPin::parse_allowing_ranges(raw) {
+                Ok(pin) => RuntimeOutcome::Pin {
+                    raw: raw.clone(),
+                    pin,
+                },
+                // Present but unusable — same loud posture as an unusable
+                // `packageManager` spec: one stderr warning naming the field and
+                // the raw spec, never a silent fall-through (the project stated a
+                // pin; ignoring it without a word would be the worst option).
+                Err(_) => RuntimeOutcome::FallThrough {
+                    warnings: vec![format!(
+                        "Warning: ignoring devEngines.runtime version \"{raw}\" — not a version \
+                         or range nub can model; continuing with the next version source."
+                    )],
+                },
+            },
+            None => RuntimeOutcome::FallThrough {
+                warnings: Vec::new(),
+            },
+        };
+    }
+
+    let mut warnings = Vec::new();
+    let last = entries.len().saturating_sub(1);
+    for (i, entry) in entries.iter().enumerate() {
+        let effective =
+            entry
+                .on_fail
+                .as_deref()
+                .unwrap_or(if i == last { "error" } else { "ignore" });
+        match effective {
+            "ignore" => {}
+            "warn" => warnings.push(format!(
+                "Warning: this project declares \"{}\" as its runtime (devEngines.runtime, \
+                 onFail: \"warn\") — nub runs Node; continuing with the next version source.",
+                entry.name
+            )),
+            // "error", "download", or anything unrecognized: the field's default.
+            _ => {
+                return RuntimeOutcome::Refuse {
+                    runtime: entry.name.clone(),
+                };
+            }
+        }
+    }
+    RuntimeOutcome::FallThrough { warnings }
+}
+
+/// Result of the full pin-source chain. Public so the user-facing verbs that
+/// must report or act on the SAME resolution the run path uses — `nub node`
+/// status / `nub node which` (`resolution_source`) and bare `nub node install`
+/// (`manage::install_from_pin`) — go through this chain rather than a private
+/// re-derivation that could drift from it.
+#[derive(Debug)]
+pub struct PinChain {
+    /// `(raw, parsed, source_label)` from the winning source, or `None` when no
+    /// source pins a version (PATH node applies).
+    pub pin: Option<(String, VersionPin, String)>,
+    /// Notices collected during resolution (`devEngines.runtime`
+    /// `onFail: "warn"`, present-but-unusable version specs) — printed once per
+    /// invocation by the entry point ([`discover_node`], or the `nub node`
+    /// verbs when they resolve the chain themselves).
+    pub warnings: Vec<String>,
+}
+
+/// The pin-source chain in spec precedence order
+/// (`wiki/runtime/node-version-management.md` §"Resolution order"):
+/// `package.json#devEngines.runtime` (#1) → `.node-version` (#2) → `.nvmrc`
+/// (#3) → `package.json#engines.node` (#4, a resolution range). Errs with
+/// [`DiscoveryError::RuntimeNotNode`] when `devEngines.runtime` declares a
+/// non-Node runtime that refuses (its default).
+pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
+    let mut warnings = Vec::new();
+    let manifest = project_manifest(cwd);
+    if let Some(field) = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.get("devEngines"))
+        .and_then(|dev| dev.get("runtime"))
+    {
+        match evaluate_dev_engines_runtime(field) {
+            RuntimeOutcome::Pin { raw, pin } => {
+                return Ok(PinChain {
+                    pin: Some((raw, pin, DEV_ENGINES_RUNTIME_SOURCE.to_string())),
+                    warnings,
+                });
+            }
+            RuntimeOutcome::Refuse { runtime } => {
+                return Err(DiscoveryError::RuntimeNotNode { runtime });
+            }
+            RuntimeOutcome::FallThrough { warnings: w } => warnings = w,
+        }
+    }
+    if let Some(pin) = walk_up_for_pin(cwd) {
+        return Ok(PinChain {
+            pin: Some(pin),
+            warnings,
+        });
+    }
+    // #4: engines.node — a resolution *range* ("resolve to the newest available
+    // version satisfying the range"). A PATH node inside the range satisfies it
+    // like any range pin; provisioning resolves newest-satisfying.
+    if let Some((range, source)) = read_engines_node(cwd) {
+        match VersionPin::parse_allowing_ranges(&range) {
+            Ok(pin) => {
+                return Ok(PinChain {
+                    pin: Some((range, pin, source)),
+                    warnings,
+                });
+            }
+            Err(_) => warnings.push(format!(
+                "Warning: ignoring {source} \"{range}\" — not a version or range nub can model; \
+                 using node on PATH."
+            )),
+        }
+    }
+    Ok(PinChain {
+        pin: None,
+        warnings,
+    })
+}
+
+/// Warn when pin sources disagree — a project misconfiguration the user should
+/// see (`wiki/runtime/node-version-management.md`: "If sources disagree
+/// (`devEngines.runtime` vs pin file, pin file vs `engines.node`), warn"). Two
+/// checks, joined with a newline when both fire:
+///
+/// - when `devEngines.runtime` won, the resolved version vs the pin file
+///   (`.node-version`/`.nvmrc`) it overrode;
+/// - the resolved version (whatever source won) vs `package.json#engines.node`.
+///
+/// Returns `None` when nothing was pinned, there's nothing to compare against,
+/// the losing spec can't be modeled concretely (alias pin, unparseable range —
+/// be conservative, don't cry wolf), or the sources agree.
 ///
 /// `node` is the already-resolved result of [`discover_node`]; its `version` IS
 /// the pinned version when `pin_source` is set, so no re-resolution is needed.
 pub fn engines_disagreement_warning(cwd: &Path, node: &ResolvedNode) -> Option<String> {
-    // Only a pin-file resolution can "disagree" with engines — an engines-only
-    // project has nothing to contradict.
+    // Only a pinned resolution can "disagree" — an engines-only project has
+    // nothing to contradict.
     let pin_source = node.pin_source.as_deref()?;
-    let (range, engines_source) = read_engines_node(cwd)?;
-    let req = semver::VersionReq::parse(&range).ok()?;
-    if req.matches(&node.version.0) {
-        return None;
+    let mut warnings = Vec::new();
+
+    // devEngines.runtime (winner, #1) vs the pin file (#2/#3) it overrode.
+    if pin_source == DEV_ENGINES_RUNTIME_SOURCE {
+        if let Some((raw, file_pin, file_source)) = walk_up_for_pin(cwd) {
+            // An alias pin can't be compared without resolving it first.
+            if !matches!(file_pin, VersionPin::Alias(_)) && !node.version.satisfies(&file_pin) {
+                warnings.push(format!(
+                    "Warning: Node {} is pinned via {pin_source}, but {file_source} pins \
+                     \"{raw}\". devEngines.runtime wins; update one so they agree.",
+                    node.version
+                ));
+            }
+        }
     }
-    Some(format!(
-        "Warning: Node {} is pinned via {pin_source}, but {engines_source} requires \"{range}\". \
-         The pin wins; update the pin or the engines range so they agree.",
-        node.version
-    ))
+
+    // The winning pin vs package.json#engines.node (#4) — unless engines.node
+    // IS the winning source (it can't disagree with itself).
+    if pin_source != ENGINES_NODE_SOURCE {
+        if let Some((range, engines_source)) = read_engines_node(cwd) {
+            // Same grammar as the chain (operator-space, `||`, hyphen) — a range
+            // the chain could honor must not be silently un-comparable here.
+            if let Ok(pin) = VersionPin::parse_allowing_ranges(&range) {
+                if !matches!(pin, VersionPin::Alias(_)) && !node.version.satisfies(&pin) {
+                    warnings.push(format!(
+                        "Warning: Node {} is pinned via {pin_source}, but {engines_source} requires \
+                         \"{range}\". The pin wins; update the pin or the engines range so they agree.",
+                        node.version
+                    ));
+                }
+            }
+        }
+    }
+
+    if warnings.is_empty() {
+        None
+    } else {
+        Some(warnings.join("\n"))
+    }
 }
 
 /// Resolve `node` from the shell PATH and detect its version.
@@ -695,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_engines_node_from_nearest_package_json() {
+    fn reads_engines_node_from_the_governing_manifest() {
         let dir = resolution_tmpdir("eng");
         std::fs::write(dir.join("package.json"), r#"{"engines":{"node":">=20"}}"#).unwrap();
         let (range, source) = read_engines_node(&dir).expect("engines.node range");
@@ -704,8 +966,8 @@ mod tests {
             source.contains("engines.node"),
             "source label names engines.node: {source}"
         );
-        // A package.json without engines.node is the project boundary → None, not a
-        // walk into ancestors.
+        // A non-workspace package.json without engines.node is the project
+        // boundary → None, not a walk into ancestors.
         let dir2 = resolution_tmpdir("noeng");
         std::fs::write(dir2.join("package.json"), r#"{"name":"x"}"#).unwrap();
         assert!(read_engines_node(&dir2).is_none());
@@ -727,6 +989,252 @@ mod tests {
             warning.contains("18.19.0") && warning.contains(".nvmrc") && warning.contains(">=20"),
             "warning must name the pinned version, the pin source, and the engines range: {warning}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_engines_exact_pin_wins_over_node_version_file() {
+        // Spec precedence (node-version-management.md §"Resolution order"):
+        // package.json#devEngines.runtime (#1) beats .node-version (#2).
+        let dir = resolution_tmpdir("dev-exact");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"node","version":"22.13.0"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
+        let chain = resolve_pin_chain(&dir).expect("a node entry never refuses");
+        let (raw, pin, source) = chain.pin.expect("a pin");
+        assert_eq!(
+            source, DEV_ENGINES_RUNTIME_SOURCE,
+            "devEngines.runtime must win over .node-version"
+        );
+        assert_eq!(raw, "22.13.0");
+        assert_eq!(pin, VersionPin::Exact(NodeVersion::new(22, 13, 0)));
+        assert!(chain.warnings.is_empty(), "no warn entries → no warnings");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_engines_range_becomes_a_constraining_range_pin() {
+        // A semver range resolves like engines.node ranges: constrain here
+        // (PATH-satisfies check), newest-satisfying at provision time (the
+        // resolve_range test in node_index.rs covers that half). onFail:
+        // "download" on a node entry is nub's native behavior — ignored.
+        let dir = resolution_tmpdir("dev-range");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"node","version":">=20 <23","onFail":"download"}}}"#,
+        )
+        .unwrap();
+        let chain = resolve_pin_chain(&dir).unwrap();
+        let (raw, pin, source) = chain.pin.expect("a pin");
+        assert_eq!(source, DEV_ENGINES_RUNTIME_SOURCE);
+        assert_eq!(raw, ">=20 <23");
+        assert!(
+            NodeVersion::new(22, 14, 0).satisfies(&pin),
+            "22.14 is inside >=20 <23"
+        );
+        assert!(
+            !NodeVersion::new(23, 0, 0).satisfies(&pin),
+            "23.0 is outside >=20 <23"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_dev_engines_runtime_governs_from_a_workspace_member() {
+        // The monorepo precedence regression: from a member dir with its own
+        // package.json, a root-level devEngines.runtime (#1) must beat a
+        // root-level .node-version (#2) — the field reads at the workspace root
+        // (matching the PM side's rule), not nearest-manifest-only.
+        let root = resolution_tmpdir("ws-dev");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":["packages/*"],"devEngines":{"runtime":{"name":"node","version":"22.13.0"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join(".node-version"), "20.11.0\n").unwrap();
+        let member = root.join("packages").join("app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"@mono/app"}"#).unwrap();
+
+        let chain = resolve_pin_chain(&member).unwrap();
+        let (raw, _pin, source) = chain.pin.expect("a pin");
+        assert_eq!(
+            source, DEV_ENGINES_RUNTIME_SOURCE,
+            "the root devEngines.runtime must govern a member, beating the root .node-version"
+        );
+        assert_eq!(raw, "22.13.0");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn engines_node_is_the_fourth_chain_source_below_pin_files() {
+        // engines.node alone is a resolution range (#4) — including the legal
+        // operator-space form (">= 20"), which must not silently degrade to
+        // no-constraint.
+        let dir = resolution_tmpdir("eng-chain");
+        std::fs::write(dir.join("package.json"), r#"{"engines":{"node":">= 20"}}"#).unwrap();
+        let chain = resolve_pin_chain(&dir).unwrap();
+        let (raw, pin, source) = chain.pin.expect("engines.node pins as a range");
+        assert_eq!(source, ENGINES_NODE_SOURCE);
+        assert_eq!(raw, ">= 20");
+        assert!(NodeVersion::new(22, 13, 0).satisfies(&pin));
+        assert!(!NodeVersion::new(18, 19, 0).satisfies(&pin));
+
+        // A pin file outranks it (#2 beats #4).
+        std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
+        let chain = resolve_pin_chain(&dir).unwrap();
+        let (_, _, source) = chain.pin.expect("a pin");
+        assert_eq!(source, ".node-version", "a pin file must beat engines.node");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unusable_dev_engines_runtime_version_warns_and_falls_through() {
+        // A present-but-unmodelable devEngines.runtime version (e.g. a dist-tag)
+        // must warn on the chain — same posture as an unusable packageManager —
+        // and fall through to the next source, never silently un-constrain.
+        let dir = resolution_tmpdir("dev-bad-ver");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"node","version":"current"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
+        let chain = resolve_pin_chain(&dir).unwrap();
+        let (_, _, source) = chain.pin.expect("falls through to the pin file");
+        assert_eq!(source, ".node-version");
+        assert_eq!(chain.warnings.len(), 1, "exactly one unusable-spec warning");
+        assert!(
+            chain.warnings[0].contains("devEngines.runtime")
+                && chain.warnings[0].contains("\"current\""),
+            "the warning names the field and the raw spec: {}",
+            chain.warnings[0]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_engines_bun_only_refuses_naming_the_runtime() {
+        // A devEngines.runtime naming only non-node runtimes fails by default
+        // (the field's onFail default is error) — even when a pin file exists
+        // below it in the chain.
+        let dir = resolution_tmpdir("dev-bun");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"bun","version":"^1.2.0"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
+        match resolve_pin_chain(&dir) {
+            Err(e @ DiscoveryError::RuntimeNotNode { .. }) => {
+                let msg = e.to_string();
+                assert!(msg.contains("\"bun\""), "names the declared runtime: {msg}");
+                assert!(msg.contains("nub runs Node"), "states nub's runtime: {msg}");
+            }
+            other => panic!("expected RuntimeNotNode, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_engines_bun_with_on_fail_warn_falls_through_to_pin_file() {
+        let dir = resolution_tmpdir("dev-warn");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"bun","onFail":"warn"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
+        let chain = resolve_pin_chain(&dir).expect("warn must not refuse");
+        let (raw, _pin, source) = chain.pin.expect("falls through to the pin file");
+        assert_eq!(source, ".node-version", "next source in the chain wins");
+        assert_eq!(raw, "20.11.0");
+        assert_eq!(chain.warnings.len(), 1, "exactly one onFail:warn notice");
+        assert!(
+            chain.warnings[0].contains("\"bun\""),
+            "warning names the runtime: {}",
+            chain.warnings[0]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_engines_array_node_entry_wins_regardless_of_position() {
+        // Spec array semantics: the node-named entry is the pin; earlier
+        // non-node entries are skipped silently (default ignore).
+        let dir = resolution_tmpdir("dev-array");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":[{"name":"bun","version":"^1.0.0"},{"name":"node","version":">=20"}]}}"#,
+        )
+        .unwrap();
+        let chain = resolve_pin_chain(&dir).expect("the node entry must preempt bun's refusal");
+        let (raw, pin, source) = chain.pin.expect("a pin");
+        assert_eq!(source, DEV_ENGINES_RUNTIME_SOURCE);
+        assert_eq!(raw, ">=20");
+        assert!(NodeVersion::new(22, 13, 0).satisfies(&pin));
+        assert!(
+            chain.warnings.is_empty(),
+            "skipped non-node entries are silent: {:?}",
+            chain.warnings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_engines_evaluator_edge_semantics() {
+        let eval = |s: &str| evaluate_dev_engines_runtime(&serde_json::from_str(s).unwrap());
+        // A node entry with no version: field present, no constraint → fall
+        // through to the next pin source (not a pin, not a refusal).
+        assert!(matches!(
+            eval(r#"{"name":"node"}"#),
+            RuntimeOutcome::FallThrough { .. }
+        ));
+        // onFail:"ignore" on a non-node entry → silent fall-through.
+        match eval(r#"{"name":"deno","onFail":"ignore"}"#) {
+            RuntimeOutcome::FallThrough { warnings } => {
+                assert!(warnings.is_empty(), "ignore must be silent: {warnings:?}")
+            }
+            other => panic!("expected FallThrough, got {other:?}"),
+        }
+        // Array with no node entry: earlier entries default to ignore, the
+        // LAST defaults to error — [bun, deno] refuses naming deno.
+        match eval(r#"[{"name":"bun"},{"name":"deno"}]"#) {
+            RuntimeOutcome::Refuse { runtime } => assert_eq!(runtime, "deno"),
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dev_engines_disagreement_with_pin_file_warns() {
+        // devEngines.runtime (winner) and .node-version disagree → one warning
+        // naming both sources and both versions.
+        let dir = resolution_tmpdir("dev-disagree");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"node","version":"22.13.0"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
+        let node = ResolvedNode {
+            path: Utf8PathBuf::from("/x/node"),
+            version: NodeVersion::new(22, 13, 0),
+            pin_source: Some(DEV_ENGINES_RUNTIME_SOURCE.to_string()),
+        };
+        let warning = engines_disagreement_warning(&dir, &node).expect("a disagreement warning");
+        assert!(
+            warning.contains("22.13.0")
+                && warning.contains(".node-version")
+                && warning.contains("20.11.0")
+                && warning.contains("devEngines.runtime"),
+            "warning must name both sources and both versions: {warning}"
+        );
+        // Sources agreeing → silent.
+        std::fs::write(dir.join(".node-version"), "22.13.0\n").unwrap();
+        assert!(engines_disagreement_warning(&dir, &node).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

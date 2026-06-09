@@ -18,7 +18,13 @@ liblzma.workspace = true
 reqwest.workspace = true
 semver = "1"
 serde.workspace = true
-serde_json.workspace = true
+# `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed).
+# Load-bearing for the pin writers in `pm::resolve`: a `package.json` round-trip
+# must not alphabetize the user's keys (a pin write that reorders the manifest
+# reads as vandalism in the diff). nub-native enables the same feature for its
+# tsconfig hashing; declaring it here keeps nub-core's behavior identical with
+# and without feature unification against nub-native.
+serde_json = { workspace = true, features = ["preserve_order"] }
 # sha1 (ancient PM publishes carry only a sha1 dist.shasum) sits alongside sha2.
 # Pinned 0.10 to share `digest` 0.10 with sha2 — a single Digest trait, no second
 # major. sha512 is preferred; sha1 is the fail-closed fallback only.

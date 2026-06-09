@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::registry::{self, VersionDist};
 use super::resolve::PmPin;
@@ -33,7 +33,8 @@ pub struct ProvisionedPm {
 
 /// Download + verify + extract the pinned package manager into nub's store,
 /// returning its runnable bin. Flow mirrors [`provision_node`]:
-///   1. strip any Corepack `+sha512.…` hash suffix from the pinned version,
+///   1. split any Corepack `+<algo>.<hex>` pin hash off the pinned version (the
+///      suffix gates step 6 on the download path — see [`split_hash_suffix`]),
 ///   2. an EXACT pin cache-checks `<store_root>/pm/<pm>/<version>/` before any
 ///      network — the registry only exists to *resolve* a spec or fetch missing
 ///      bytes, and an exact, already-installed version needs neither (corepack
@@ -45,7 +46,9 @@ pub struct ProvisionedPm {
 ///      answer and surfaces the fetch error),
 ///   4. cache-check the resolved version (silent hit),
 ///   5. download into a sibling temp dir (cleaned up by the [`WorkGuard`]),
-///   6. verify integrity BEFORE extraction (executables landing on disk),
+///   6. verify integrity BEFORE extraction (executables landing on disk): the
+///      pin's embedded hash when present (the registry-independent trust
+///      anchor), then the registry's dist integrity,
 ///   7. extract the `.tgz` and atomically `rename` into place,
 ///   8. uv-style `Installing…` / `✓ Installed…` on STDERR.
 ///
@@ -54,11 +57,11 @@ pub struct ProvisionedPm {
 /// before reaching here). The returned bin is `<version>/package/<bin_subpath>`.
 pub fn provision_pm(pin: &PmPin, store_root: &Path) -> Result<ProvisionedPm> {
     let pm = pin.pm;
-    let spec = pin
+    let raw = pin
         .version
         .as_deref()
-        .map(strip_hash_suffix)
         .with_context(|| format!("no version to provision for {pm}"))?;
+    let (spec, pin_hash) = split_hash_suffix(raw);
 
     let pm_store = store_root.join("pm").join(pm.to_string());
 
@@ -104,7 +107,7 @@ pub fn provision_pm(pin: &PmPin, store_root: &Path) -> Result<ProvisionedPm> {
         }); // cache hit — silent
     }
 
-    install(pm, &dist, &pm_store, &final_dir)?;
+    install(pm, &dist, &pm_store, &final_dir, pin_hash)?;
     Ok(ProvisionedPm {
         bin,
         version: dist.version,
@@ -145,8 +148,15 @@ fn best_cached_match(pm_store: &Path, spec: &str) -> Option<(String, PathBuf)> {
 /// happy path reads as a flat sequence. Modeled on [`provision_node`]'s skeleton
 /// (deliberately re-stated rather than abstracted: two artifact kinds — Node
 /// tarballs and PM `.tgz`s — would make a generic `Provisioner` trait pure
-/// indirection).
-fn install(pm: super::Pm, dist: &VersionDist, pm_store: &Path, final_dir: &Path) -> Result<()> {
+/// indirection). `pin_hash` is the pin's `<algo>.<hex>` suffix, when the pin
+/// carried one — verified against the downloaded tarball before extraction.
+fn install(
+    pm: super::Pm,
+    dist: &VersionDist,
+    pm_store: &Path,
+    final_dir: &Path,
+    pin_hash: Option<&str>,
+) -> Result<()> {
     // Sibling temp dir on the same filesystem → final placement is an atomic
     // rename. The guard cleans it up on every exit path.
     let work = pm_store.join(format!(".tmp-{}-{}", dist.version, std::process::id()));
@@ -168,15 +178,31 @@ fn install(pm: super::Pm, dist: &VersionDist, pm_store: &Path, final_dir: &Path)
     })
     .with_context(|| format!("downloading {pm} {}", dist.version))?;
 
-    // Verify BEFORE extracting.
+    // Verify BEFORE extracting. The pin's embedded hash comes first: it is the
+    // registry-INDEPENDENT trust anchor (`nub pm pin` computed it from a tarball
+    // it verified), so a tampered artifact fails against the committed digest
+    // even if the registry's own metadata is complicit. Note this gates the
+    // DOWNLOAD path only — an exact pin already in the store returned from the
+    // cache scan before any download (a hit is trusted; the version-addressed
+    // store posture in the module doc).
+    if let Some(suffix) = pin_hash {
+        verify_pin_hash(&tarball, suffix).with_context(|| {
+            format!(
+                "verifying {pm} {} against the packageManager pin hash",
+                dist.version
+            )
+        })?;
+    }
     registry::verify_integrity(&tarball, &dist.integrity)
         .with_context(|| format!("verifying {pm} {}", dist.version))?;
 
-    // Extract into a clean sibling so `staging`'s only child is the tarball's
-    // `package/` top dir; renaming `staging` into place makes the install root
-    // `<final_dir>/package/…` (the bin path callers expect).
+    // Extract into a clean sibling, then normalize its single top dir to
+    // `package/`; renaming `staging` into place makes the install root
+    // `<final_dir>/package/…` (the bin path callers expect) regardless of the
+    // publisher's tarball root.
     let staging = work.join("staging");
-    extract_tgz(&tarball, &staging)?;
+    let top = extract_tgz(&tarball, &staging)?;
+    normalize_top_dir(&staging, &top)?;
 
     // Atomic place. If a concurrent run already installed it, keep theirs.
     if !final_dir.join("package").is_dir() {
@@ -202,12 +228,77 @@ fn install(pm: super::Pm, dist: &VersionDist, pm_store: &Path, final_dir: &Path)
     Ok(())
 }
 
-/// Strip the Corepack hash suffix (`10.0.0+sha512.abc…`) from a `packageManager`
-/// version so the bare `X.Y.Z` (or range / dist-tag) reaches the registry. The
-/// integrity gate is the registry's `dist.integrity`, not this suffix — nub does
-/// not honor `COREPACK_INTEGRITY_KEYS` (out of scope).
-fn strip_hash_suffix(version: &str) -> &str {
-    version.split_once('+').map_or(version, |(v, _)| v)
+/// Rename an extracted tarball's single top-level dir to `package/` when the
+/// publisher used another name: npm/pnpm publish under `package/`, but **yarn
+/// classic's tarball root is `yarn-v<version>/`**. The store's uniform
+/// `<version>/package/<bin>` layout — what [`cached_bin`], the cache-hit checks,
+/// and the returned bin path all assume — depends on this normalization; without
+/// it a yarn install lands unrunnable and poisons its store dir.
+fn normalize_top_dir(staging: &Path, top: &Path) -> Result<()> {
+    let pkg = staging.join("package");
+    if top != pkg {
+        std::fs::rename(top, &pkg)
+            .with_context(|| format!("normalizing {} to package/", top.display()))?;
+    }
+    Ok(())
+}
+
+/// Split a `packageManager`-style version into the bare spec and the optional
+/// Corepack `+<algo>.<hex>` hash suffix: `10.0.0+sha512.abc…` →
+/// `("10.0.0", Some("sha512.abc…"))`. The bare spec is what reaches the cache
+/// scan and the registry; the suffix is the PIN HASH — the registry-independent
+/// trust anchor `nub pm pin` writes from the artifact it verified — and it gates
+/// the download path in [`install`] (see [`verify_pin_hash`]). nub does not
+/// honor `COREPACK_INTEGRITY_KEYS` (signature keys are out of scope; the pin
+/// hash plus the registry's `dist` integrity are the whole integrity story).
+fn split_hash_suffix(version: &str) -> (&str, Option<&str>) {
+    match version.split_once('+') {
+        Some((v, suffix)) => (v, Some(suffix)),
+        None => (version, None),
+    }
+}
+
+/// Verify a downloaded tarball against the pin's `<algo>.<hex>` suffix. The
+/// digest is HEX-encoded (corepack's format — `createHash(algo).digest("hex")`),
+/// NOT the registry's base64 SRI. `sha512` (what corepack and `nub pm pin` write
+/// today) and `sha224` (corepack's older default) are supported; anything else
+/// is a fail-closed unsupported-algorithm error — a pin that *claims* a hash nub
+/// can't check must never install silently unverified.
+fn verify_pin_hash(file: &Path, suffix: &str) -> Result<()> {
+    use sha2::{Digest, Sha224, Sha512};
+
+    let (algo, want) = suffix.split_once('.').with_context(|| {
+        format!("malformed pin hash suffix \"+{suffix}\" — expected +<algo>.<hex>")
+    })?;
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let got = match algo {
+        "sha512" => hex_lower(&Sha512::digest(&bytes)),
+        "sha224" => hex_lower(&Sha224::digest(&bytes)),
+        other => bail!(
+            "unsupported pin hash algorithm \"{other}\" in \"+{suffix}\" — nub verifies \
+             sha512 and sha224 (hex digests, corepack's format); refusing to install unverified"
+        ),
+    };
+    if !got.eq_ignore_ascii_case(want) {
+        bail!(
+            "pin hash mismatch for {}: the packageManager pin expects {algo}.{want}, \
+             the downloaded tarball is {algo}.{got}",
+            file.display()
+        );
+    }
+    Ok(())
+}
+
+/// Lowercase-hex render of a digest. Mirrors `registry::hex_lower` (private
+/// there; four lines — duplicating beats widening that module's surface).
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// Best-effort cleanup of the temp work dir on any return path (the same guard
@@ -226,14 +317,92 @@ mod tests {
     use crate::pm::Pm;
 
     #[test]
-    fn strips_the_corepack_hash_suffix_only() {
-        assert_eq!(strip_hash_suffix("10.0.0+sha512.abc123"), "10.0.0");
+    fn splits_the_corepack_hash_suffix_into_spec_and_pin_hash() {
         assert_eq!(
-            strip_hash_suffix("10.0.0"),
-            "10.0.0",
-            "no suffix is untouched"
+            split_hash_suffix("10.0.0+sha512.abc123"),
+            ("10.0.0", Some("sha512.abc123"))
         );
-        assert_eq!(strip_hash_suffix("^9"), "^9", "a range is untouched");
+        assert_eq!(
+            split_hash_suffix("10.0.0"),
+            ("10.0.0", None),
+            "a hashless pin carries no claim to verify — provisioning is unaffected"
+        );
+        assert_eq!(
+            split_hash_suffix("^9"),
+            ("^9", None),
+            "a range is untouched"
+        );
+    }
+
+    #[test]
+    fn pin_hash_verification_is_fail_closed_over_hex_digests() {
+        let dir = std::env::temp_dir().join(format!("nub-pm-pinhash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("blob.tgz");
+        std::fs::write(&f, b"abc").unwrap();
+
+        // Known digests of "abc" — HEX (corepack's format), not base64 SRI.
+        const SHA512_ABC: &str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
+        const SHA224_ABC: &str = "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7";
+
+        verify_pin_hash(&f, &format!("sha512.{SHA512_ABC}")).expect("matching sha512 verifies");
+        verify_pin_hash(&f, &format!("sha224.{}", SHA224_ABC.to_uppercase()))
+            .expect("sha224 is accepted, case-insensitively");
+
+        // A mismatch must fail naming BOTH digests, so a CI failure is
+        // self-debugging without a rerun.
+        let err = verify_pin_hash(&f, "sha512.deadbeef")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("sha512.deadbeef"),
+            "mismatch names the pinned digest: {err}"
+        );
+        assert!(
+            err.contains(SHA512_ABC),
+            "mismatch names the actual digest: {err}"
+        );
+
+        // An algorithm nub can't check is an error, never a silent skip.
+        let err = verify_pin_hash(&f, &format!("sha1.{SHA224_ABC}"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unsupported") && err.contains("sha1"),
+            "unknown algorithm fails closed naming it: {err}"
+        );
+
+        // A suffix with no `<algo>.` separator is malformed — also fail closed.
+        assert!(verify_pin_hash(&f, "sha512").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_package_top_dir_is_normalized_to_the_store_layout() {
+        // yarn classic's tarball root is `yarn-v<version>/`, not npm's `package/`
+        // — the normalizer renames it so `<version>/package/<bin>` holds for
+        // every PM (found live: an unnormalized yarn install left a store dir
+        // with no `package/`, unrunnable and blocking every later install).
+        let staging = std::env::temp_dir().join(format!("nub-pm-topdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        let top = staging.join("yarn-v1.22.19");
+        std::fs::create_dir_all(top.join("bin")).unwrap();
+        std::fs::write(top.join("bin/yarn.js"), "// yarn\n").unwrap();
+
+        normalize_top_dir(&staging, &top).unwrap();
+        assert!(
+            staging.join("package/bin/yarn.js").is_file(),
+            "a foreign top dir must be renamed to package/ with its contents intact"
+        );
+        assert!(
+            !top.exists(),
+            "the original top dir is renamed away, not copied"
+        );
+
+        // An already-`package/` top dir (npm/pnpm tarballs) is a no-op.
+        normalize_top_dir(&staging, &staging.join("package")).unwrap();
+        assert!(staging.join("package/bin/yarn.js").is_file());
+        let _ = std::fs::remove_dir_all(&staging);
     }
 
     /// A fake installed PM at `<store>/pm/<pm>/<version>/package/` with a real
@@ -242,8 +411,7 @@ mod tests {
     /// the real registry. `tag` keeps each test's store distinct: tests share a
     /// process (same pid) and run in parallel, so a version-only name would race.
     fn offline_store_with(tag: &str, version: &str) -> PathBuf {
-        let store =
-            std::env::temp_dir().join(format!("nub-pm-cache-{tag}-{}", std::process::id()));
+        let store = std::env::temp_dir().join(format!("nub-pm-cache-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&store);
         let pkg = store.join("pm").join("pnpm").join(version).join("package");
         std::fs::create_dir_all(pkg.join("bin")).unwrap();
@@ -269,10 +437,12 @@ mod tests {
     fn exact_cached_pin_provisions_offline() {
         // An exact pin with a cached install never consults the registry — the
         // dead-registry `.npmrc` proves it: any fetch would error, not succeed.
+        // The pin hash rides along but is NOT re-checked on a cache hit (a hit is
+        // trusted — the hash gates the download path only).
         let store = offline_store_with("exact", "9.5.0");
         let pin = PmPin {
             pm: Pm::Pnpm,
-            version: Some("9.5.0+sha512.abc".to_string()), // hash suffix stripped first
+            version: Some("9.5.0+sha512.abc".to_string()),
         };
         let prov = provision_pm(&pin, &store).expect("offline cache hit");
         assert_eq!(prov.version, "9.5.0");
@@ -360,6 +530,29 @@ mod tests {
         // Second call: silent cache hit, identical path.
         let again = provision_pm(&pin, &store).expect("cache hit");
         assert_eq!(again, prov);
+
+        // Wiring check for the pin hash on the real download path: a FRESH store
+        // (no cache to satisfy the pin) + a wrong claimed digest must fail closed
+        // before anything lands in the store. The match path is the same code
+        // minus the bail (unit-covered above), so only the mismatch is exercised
+        // against the network.
+        let fresh = std::env::temp_dir().join(format!("nub-pm-prov-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fresh);
+        let bad = PmPin {
+            pm: Pm::Pnpm,
+            version: Some(format!("10.0.0+sha512.{}", "0".repeat(128))),
+        };
+        let err = format!("{:#}", provision_pm(&bad, &fresh).unwrap_err());
+        assert!(
+            err.contains("pin hash mismatch"),
+            "a wrong pin hash must fail the download path closed, got: {err}"
+        );
+        assert!(
+            !fresh.join("pm").join("pnpm").join("10.0.0").exists(),
+            "a failed verification must not leave an install behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&fresh);
         let _ = std::fs::remove_dir_all(&store);
     }
 }

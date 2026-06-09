@@ -1,0 +1,5 @@
+{
+  "name": "version-verify-fixture",
+  "private": true,
+  "description": "Deliberately pin-free: no engines.node, no devEngines.runtime. This file exists so the fixture is its own project boundary — without it, Node-version discovery walks up to the repo-root package.json, whose engines.node (>=22.15.0) is resolution source #4 and would override the PATH-injected Node the version_tiers tests pin."
+}

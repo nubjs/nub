@@ -2,9 +2,9 @@
 //! `uninstall` / `pin`. Spec: `wiki/commands/node-versions.md`.
 //!
 //! Every operation is a thin wrapper over machinery that already ships: the
-//! resolver (`node_index::resolve_spec`), the cache layout
+//! resolver (`node_index::resolve_spec` / `resolve_range`), the cache layout
 //! (`discovery::node_store_dir`), the downloader (`provision_node`), and the
-//! pin-file walk-up (`discovery::walk_up_for_pin`). No new runtime capability —
+//! pin-source chain (`discovery::resolve_pin_chain`). No new runtime capability —
 //! this is the *explicit* surface over the implicit auto-provision path.
 //!
 //! Each op takes the store dir / cwd as a parameter (mirroring
@@ -113,7 +113,18 @@ pub fn install_one(spec: &str, store: &Path, cwd: &Path) -> Result<InstallOutcom
         .ok_or_else(|| anyhow::anyhow!("this host is not a platform nodejs.org publishes"))?;
 
     let concrete = resolve_to_concrete(spec, store, &host)?;
+    install_concrete(concrete, &host, store, cwd)
+}
 
+/// The install body once a CONCRETE version is known: cache no-op → PATH skip →
+/// download. Shared by [`install_one`] (spec → concrete via `resolve_spec`) and
+/// [`install_from_pin`]'s range leg (range → concrete via `resolve_range`).
+fn install_concrete(
+    concrete: NodeVersion,
+    host: &HostTarget,
+    store: &Path,
+    cwd: &Path,
+) -> Result<InstallOutcome> {
     // Already in nub's cache → no-op.
     if version_dir_has_node(&store.join(concrete.to_string())) {
         return Ok(InstallOutcome::AlreadyCached(concrete));
@@ -133,7 +144,7 @@ pub fn install_one(spec: &str, store: &Path, cwd: &Path) -> Result<InstallOutcom
         }
     }
 
-    provision_node(&concrete, &host, store_root_of(store))
+    provision_node(&concrete, host, store_root_of(store))
         .with_context(|| format!("installing Node {concrete}"))?;
     Ok(InstallOutcome::Installed(concrete))
 }
@@ -158,15 +169,41 @@ fn path_node_version() -> Option<NodeVersion> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
-/// Bare `nub node install`: resolve the project pin (walk-up) and install that.
-/// Errors clearly when there's no pin to install.
+/// Bare `nub node install`: resolve the project pin through the FULL chain —
+/// `devEngines.runtime` (#1) → `.node-version` (#2) → `.nvmrc` (#3) →
+/// `engines.node` (#4), the same `resolve_pin_chain` the run path uses, so the
+/// version installed is the version a run would resolve (never the pin-file
+/// version when `devEngines.runtime` outranks it). Errors clearly when there's
+/// no pin to install; chain warnings (onFail:warn, unusable specs) land on
+/// stderr here since this entry point resolves the chain itself.
 pub fn install_from_pin(store: &Path, cwd: &Path) -> Result<InstallOutcome> {
-    let (raw, _pin, _source) = discovery::walk_up_for_pin(cwd).ok_or_else(|| {
-        anyhow::anyhow!(
-            "nub node install: no version given and no .node-version/.nvmrc found in this project"
-        )
-    })?;
-    install_one(&raw, store, cwd)
+    let chain = discovery::resolve_pin_chain(cwd)?;
+    for warning in &chain.warnings {
+        eprintln!("{warning}");
+    }
+    let Some((raw, pin, source)) = chain.pin else {
+        bail!(
+            "nub node install: no version given and no Node pin (devEngines.runtime, \
+             .node-version, .nvmrc, or engines.node) found in this project"
+        );
+    };
+    match &pin {
+        // A range pin (devEngines.runtime / engines.node) resolves to the newest
+        // published version satisfying it — resolve_spec only knows the nvm grammar.
+        VersionPin::Range(alternatives) => {
+            let host = HostTarget::detect().ok_or_else(|| {
+                anyhow::anyhow!("this host is not a platform nodejs.org publishes")
+            })?;
+            let mirror = resolve_mirror_base(&host);
+            let index = node_index::load_index(store, &mirror)
+                .with_context(|| "fetching the Node release index")?;
+            let concrete = node_index::resolve_range(alternatives, &index).ok_or_else(|| {
+                anyhow::anyhow!("no published Node version satisfies \"{raw}\" (from {source})")
+            })?;
+            install_concrete(concrete, &host, store, cwd)
+        }
+        _ => install_one(&raw, store, cwd),
+    }
 }
 
 // ── ls ───────────────────────────────────────────────────────────────────
@@ -578,16 +615,42 @@ mod tests {
 
     #[test]
     fn install_from_pin_errors_when_no_pin_present() {
-        // Bare `nub node install` with no .node-version/.nvmrc up-tree errors before
-        // any network — a pure walk-up. tmpdir() lives under the system temp root,
+        // Bare `nub node install` with no pin source up-tree errors before any
+        // network — a pure walk-up. tmpdir() lives under the system temp root,
         // not $HOME, so the walk-up can't escape into a stray ancestor pin.
         let store = tmpdir("pinless-store");
         let cwd = tmpdir("pinless-cwd");
 
         let err = install_from_pin(&store, &cwd).unwrap_err().to_string();
         assert!(
-            err.contains("no .node-version/.nvmrc"),
-            "names the missing-pin reason for bare `nub node install`: {err}"
+            err.contains("devEngines.runtime") && err.contains(".node-version"),
+            "names the pin sources it looked for, for bare `nub node install`: {err}"
+        );
+    }
+
+    #[test]
+    fn install_from_pin_honors_dev_engines_runtime_over_the_pin_file() {
+        // Bare `nub node install` must install what a RUN would resolve: the
+        // devEngines.runtime pin (#1), not the .node-version (#2) it outranks.
+        // Hermetic: the devEngines version is already cached, so the exact-spec
+        // fast path answers offline — were the pin file consulted instead, the
+        // outcome would name 20.11.0 (also planted, to make the failure loud).
+        let store = tmpdir("dev-pin-store");
+        plant(&store, "22.13.0");
+        plant(&store, "20.11.0");
+        let cwd = tmpdir("dev-pin-cwd");
+        std::fs::write(
+            cwd.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"node","version":"22.13.0"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(cwd.join(".node-version"), "20.11.0\n").unwrap();
+
+        let outcome = install_from_pin(&store, &cwd).expect("an offline cache hit");
+        assert_eq!(
+            outcome,
+            InstallOutcome::AlreadyCached(NodeVersion::new(22, 13, 0)),
+            "bare install must provision the devEngines.runtime version, not the pin file's"
         );
     }
 

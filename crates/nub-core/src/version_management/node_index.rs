@@ -172,6 +172,23 @@ fn all_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Resolve an already-parsed semver range (`devEngines.runtime` /
+/// `engines.node` style) to the newest version in `index` satisfying it —
+/// the resolution rule for range pins per
+/// `wiki/runtime/node-version-management.md` §"Resolution order".
+/// `alternatives` carries node-semver `||` branches (OR semantics — the shape
+/// `VersionPin::Range` holds); a plain range is a one-element slice.
+pub fn resolve_range(
+    alternatives: &[semver::VersionReq],
+    index: &[IndexEntry],
+) -> Option<NodeVersion> {
+    index
+        .iter()
+        .filter(|e| alternatives.iter().any(|req| req.matches(&e.version.0)))
+        .map(|e| e.version.clone())
+        .max()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +287,31 @@ mod tests {
         assert_eq!(resolve_spec("22.13.99", &index), None);
         // Nonexistent major → None.
         assert_eq!(resolve_spec("99", &index), None);
+    }
+
+    #[test]
+    fn resolve_range_picks_newest_satisfying() {
+        let index = idx();
+        let req = semver::VersionReq::parse(">=20, <23").unwrap();
+        assert_eq!(
+            resolve_range(std::slice::from_ref(&req), &index),
+            Some(NodeVersion::new(22, 13, 0)),
+            "newest in-range release wins, not merely any match"
+        );
+        // `||` alternatives: newest across ALL branches — 22.13.0 (from >=22)
+        // beats 18.20.5 (from ^18) even though both branches match something.
+        let or = vec![
+            semver::VersionReq::parse("^18").unwrap(),
+            semver::VersionReq::parse(">=22, <23").unwrap(),
+        ];
+        assert_eq!(
+            resolve_range(&or, &index),
+            Some(NodeVersion::new(22, 13, 0)),
+            "the newest match across || branches wins"
+        );
+        // Unsatisfiable range → None (surfaces as ProvisionFailed upstream).
+        let none = semver::VersionReq::parse(">=99").unwrap();
+        assert_eq!(resolve_range(std::slice::from_ref(&none), &index), None);
     }
 
     /// Real-network: resolve common aliases against the live index.

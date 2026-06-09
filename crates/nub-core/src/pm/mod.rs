@@ -10,6 +10,7 @@
 //! install — reusing the same provisioning skeleton as Node.
 
 pub mod extract;
+pub mod lockfile_version;
 pub mod provision;
 pub mod registry;
 pub mod resolve;

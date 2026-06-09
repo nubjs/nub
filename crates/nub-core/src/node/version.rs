@@ -78,6 +78,9 @@ impl NodeVersion {
                 self.0.major == *major as u64 && self.0.minor == *minor as u64
             }
             VersionPin::Major(major) => self.0.major == *major as u64,
+            // node-semver `||` semantics: the version satisfies the range when it
+            // matches ANY alternative.
+            VersionPin::Range(alternatives) => alternatives.iter().any(|req| req.matches(&self.0)),
             // An alias (`latest`/`lts`/`lts/<codename>`/`rc/<major>`) can't be
             // satisfied by inspecting a concrete version — it must first resolve
             // to a concrete version against the dist index. Callers that handle
@@ -121,7 +124,7 @@ impl FromStr for NodeVersion {
     }
 }
 
-/// A version pin from `.nvmrc` / `.node-version`.
+/// A version pin from `.nvmrc` / `.node-version` / `devEngines.runtime`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionPin {
     Exact(NodeVersion),
@@ -131,6 +134,75 @@ pub enum VersionPin {
     /// `node`, `lts` / `lts/*`, `lts/<codename>`, or `rc/<major>`. Stored
     /// lowercased; resolution lives in `version_management::node_index`.
     Alias(String),
+    /// A semver range (`>=20 <23`, `^20.11`, `~22.1.0`, `20.x`,
+    /// `^18 || >=20`) from `package.json#devEngines.runtime` /
+    /// `package.json#engines.node` — the `engines.node` grammar. Never produced
+    /// by `FromStr` (pin files keep the nvm grammar); constructed via
+    /// [`VersionPin::parse_allowing_ranges`]. node-semver `||` alternatives are
+    /// modeled as a non-empty list of `VersionReq`s with OR semantics (a version
+    /// satisfies the pin when it matches ANY of them). Resolves to the newest
+    /// published version satisfying it
+    /// (`version_management::node_index::resolve_range`).
+    Range(Vec<semver::VersionReq>),
+}
+
+impl VersionPin {
+    /// Parse a `devEngines.runtime.version` / `engines.node` value: everything
+    /// `FromStr` accepts (exact / major / major.minor / alias) plus semver
+    /// ranges per the field's spec ("follows the `engines.node` format").
+    /// Handled grammar beyond `FromStr`: space-separated AND-comparators
+    /// (`>=20 <23`), operator-space form (`>= 20`), hyphen ranges (`20 - 22`),
+    /// and `||` alternatives (`^18 || >=20`) — each alternative bridged to the
+    /// comma form Cargo's `semver` crate wants. Every alternative must parse, or
+    /// the whole spec errors (the caller warns and falls through to the next pin
+    /// source — never silently half-honors a range).
+    pub fn parse_allowing_ranges(s: &str) -> Result<Self, VersionParseError> {
+        if let Ok(pin) = s.parse::<VersionPin>() {
+            return Ok(pin);
+        }
+        let raw = s.trim();
+        let alternatives: Result<Vec<semver::VersionReq>, _> = raw
+            .split("||")
+            .map(|alt| semver::VersionReq::parse(&normalize_node_range(alt.trim())))
+            .collect();
+        match alternatives {
+            Ok(alts) if !alts.is_empty() => Ok(Self::Range(alts)),
+            _ => Err(VersionParseError(raw.to_string())),
+        }
+    }
+}
+
+/// Bridge one node-semver alternative (no `||` — the caller splits those) to the
+/// grammar Cargo's `semver` crate parses:
+///   - hyphen ranges: `20.0.0 - 22.1.0` → `>=20.0.0, <=22.1.0`;
+///   - space-separated AND-comparators: `>=20 <23` → `>=20, <23`;
+///   - operator-space form (legal node-semver): `>= 20` → `>=20`.
+///
+/// Single comparators, bare versions, and already-comma'd specs pass through
+/// untouched. A dangling trailing operator is kept verbatim so the parse fails
+/// (better an honest error than a silently dropped comparator).
+fn normalize_node_range(spec: &str) -> String {
+    if spec.contains(',') {
+        return spec.to_string();
+    }
+    if let Some((lo, hi)) = spec.split_once(" - ") {
+        return format!(">={}, <={}", lo.trim(), hi.trim());
+    }
+    let mut comparators: Vec<String> = Vec::new();
+    let mut pending_op: Option<&str> = None;
+    for token in spec.split_whitespace() {
+        if matches!(token, ">" | "<" | ">=" | "<=" | "=" | "^" | "~") {
+            pending_op = Some(token);
+        } else if let Some(op) = pending_op.take() {
+            comparators.push(format!("{op}{token}"));
+        } else {
+            comparators.push(token.to_string());
+        }
+    }
+    if let Some(op) = pending_op {
+        comparators.push(op.to_string());
+    }
+    comparators.join(", ")
 }
 
 impl FromStr for VersionPin {
@@ -277,6 +349,54 @@ mod tests {
         assert_eq!(parse("22"), VersionPin::Major(22));
         assert_eq!(parse("22.13"), VersionPin::MajorMinor(22, 13));
         assert!(matches!(parse("22.13.0"), VersionPin::Exact(_)));
+    }
+
+    #[test]
+    fn parse_allowing_ranges_covers_the_engines_grammar() {
+        let p = |s: &str| VersionPin::parse_allowing_ranges(s).unwrap();
+        // Exact / major shorthand still route to the concrete variants.
+        assert_eq!(p("22.13.0"), VersionPin::Exact(NodeVersion::new(22, 13, 0)));
+        assert_eq!(p("22"), VersionPin::Major(22));
+        // node-semver space-separated comparators bridge to a working Range.
+        let range = p(">=20 <23");
+        assert!(matches!(range, VersionPin::Range(_)), "got {range:?}");
+        assert!(NodeVersion::new(22, 14, 0).satisfies(&range));
+        assert!(!NodeVersion::new(23, 0, 0).satisfies(&range));
+        assert!(!NodeVersion::new(18, 19, 0).satisfies(&range));
+        // Caret and x-wildcard forms (common devEngines spellings).
+        let caret = p("^20.11");
+        assert!(NodeVersion::new(20, 18, 1).satisfies(&caret));
+        assert!(!NodeVersion::new(21, 0, 0).satisfies(&caret));
+        let wild = p("20.x");
+        assert!(NodeVersion::new(20, 18, 1).satisfies(&wild));
+        assert!(!NodeVersion::new(22, 0, 0).satisfies(&wild));
+        // Garbage errors — the caller falls through to the next pin source.
+        assert!(VersionPin::parse_allowing_ranges("not-a-version").is_err());
+    }
+
+    #[test]
+    fn parse_allowing_ranges_handles_operator_space_or_alternatives_and_hyphen() {
+        let p = |s: &str| VersionPin::parse_allowing_ranges(s).unwrap();
+        // Operator-space form is legal node-semver (`>= 20`), not a parse failure.
+        let spaced = p(">= 20");
+        assert!(NodeVersion::new(22, 0, 0).satisfies(&spaced));
+        assert!(!NodeVersion::new(18, 19, 0).satisfies(&spaced));
+        // `||` alternatives: satisfied by ANY side, by neither gap version.
+        let or = p("^18.19 || >=22");
+        assert!(NodeVersion::new(18, 20, 0).satisfies(&or));
+        assert!(NodeVersion::new(23, 1, 0).satisfies(&or));
+        assert!(
+            !NodeVersion::new(20, 11, 0).satisfies(&or),
+            "20.x falls in the gap between ^18.19 and >=22"
+        );
+        // Hyphen ranges are inclusive on both ends.
+        let hyphen = p("20.0.0 - 22.13.0");
+        assert!(NodeVersion::new(20, 0, 0).satisfies(&hyphen));
+        assert!(NodeVersion::new(22, 13, 0).satisfies(&hyphen));
+        assert!(!NodeVersion::new(22, 14, 0).satisfies(&hyphen));
+        // One bad alternative poisons the whole spec — never half-honor a range.
+        assert!(VersionPin::parse_allowing_ranges(">=20 || nonsense").is_err());
+        assert!(VersionPin::parse_allowing_ranges(">=").is_err());
     }
 
     #[test]

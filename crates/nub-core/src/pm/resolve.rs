@@ -46,7 +46,7 @@ pub enum PmTarget {
 /// `.yarnrc.yml yarnPath`, no `packageManager`, no `devEngines.packageManager`).
 pub fn resolve_target(cwd: &Path) -> Option<PmTarget> {
     // 1. A committed Berry release short-circuits everything.
-    if let Some(path) = read_yarn_path(cwd) {
+    if let Some(path) = committed_yarn_path(cwd) {
         return Some(PmTarget::YarnPath(path));
     }
 
@@ -65,23 +65,137 @@ pub fn resolve_target(cwd: &Path) -> Option<PmTarget> {
 /// The pin is read from the workspace root, not just the nearest `package.json`:
 /// a monorepo pins `packageManager` once at the root, and a member's `package.json`
 /// rarely carries it. Reading at the workspace root keeps the *read* symmetric with
-/// [`write_pin`]'s *write* (both target [`pin_target_dir`]) — a `nub pm switch` in a
-/// member writes the pin where the next `resolve_pin` will find it.
+/// [`write_pin_pair`]'s *write* (both target [`pin_target_dir`]) — a `nub pm pin` in
+/// a member writes the pin where the next `resolve_pin` will find it.
+///
+/// A pin field that is PRESENT but unusable (`yarn@^4`, `bun@1.1.0`) resolves as
+/// unpinned, but never silently: one warning lands on stderr naming the field, the
+/// raw spec, and why it was ignored. pnpm warns here and corepack hard-errors;
+/// saying nothing and falling through to a PATH PM would be the worst of the three.
 pub fn resolve_pin(cwd: &Path) -> Option<PmPin> {
     let manifest = root_manifest(cwd)?;
+    let (pin, warning) = pin_from_manifest(&manifest);
+    if let Some(msg) = warning {
+        eprintln!("{msg}");
+    }
+    pin
+}
 
+/// The pure core of [`resolve_pin`]: the pin from an already-parsed manifest, plus
+/// at most one warning (an `Option` — structurally never two) for a spec that is
+/// present but unusable. Absent fields are silent: `(None, None)`.
+fn pin_from_manifest(manifest: &serde_json::Value) -> (Option<PmPin>, Option<String>) {
     // `packageManager` wins; `devEngines.packageManager` (object form) is the
-    // fallback. Both are parsed by the same spec parser.
+    // fallback. Both are parsed by the same spec parser. An unusable
+    // `packageManager` does NOT fall through to devEngines — the project stated a
+    // pin nub can't honor, so it runs unpinned (with the warning), never on a
+    // half-matching secondary field.
     if let Some(spec) = manifest.get("packageManager").and_then(|v| v.as_str()) {
-        return parse_spec(spec).ok();
+        return match parse_spec(spec) {
+            Ok(pin) => (Some(pin), None),
+            Err(err) => (
+                None,
+                Some(format!("nub: ignoring packageManager \"{spec}\": {err}")),
+            ),
+        };
     }
     // devEngines carries name + version as separate keys; feed them straight to
     // the shared classifier. A name with no version is valid here (version stays
     // `None`), so unlike `packageManager` there's no required-version check.
-    let dev = manifest.get("devEngines")?.get("packageManager")?;
-    let name = dev.get("name")?.as_str()?;
+    let Some(dev) = manifest
+        .get("devEngines")
+        .and_then(|d| d.get("packageManager"))
+    else {
+        return (None, None);
+    };
+    let Some(name) = dev.get("name").and_then(|v| v.as_str()) else {
+        return (None, None);
+    };
     let version = dev.get("version").and_then(|v| v.as_str());
-    classify(name, version).ok()
+    match classify(name, version) {
+        Ok(pin) => (Some(pin), None),
+        Err(err) => {
+            let spec = match version {
+                Some(v) => format!("{name}@{v}"),
+                None => name.to_string(),
+            };
+            (
+                None,
+                Some(format!(
+                    "nub: ignoring devEngines.packageManager \"{spec}\": {err}"
+                )),
+            )
+        }
+    }
+}
+
+/// The project's PM identity at the NAME level — what the same-PM guard on
+/// `nub pm pin` keys off (pin must never change WHICH PM a project uses; that's
+/// `switch`'s job). Unlike [`resolve_pin`] it never reads a project as unpinned
+/// just because the pin's *version* is unusable, and it sees identity channels
+/// that carry no provisionable version:
+///
+///   - a committed `yarnPath` with no `packageManager` field at all → yarn Berry;
+///   - a present-but-unusable spec (`yarn@^4`) → still names yarn;
+///   - an out-of-scope manager (`bun@1.1.0`) → still names bun (the guard
+///     refuses a cross-PM pin even toward a PM nub doesn't provision).
+///
+/// `berry` is true when the yarn identity is Berry (committed yarnPath, pinned
+/// major >= 2, or a versionless yarn beside a `.yarnrc.yml`). Read-only and
+/// silent — the guard is a probe, not a resolution, so no warnings print here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmIdentity {
+    pub name: String,
+    pub berry: bool,
+}
+
+pub fn project_pm_identity(cwd: &Path) -> Option<PmIdentity> {
+    if committed_yarn_path(cwd).is_some() {
+        return Some(PmIdentity {
+            name: "yarn".to_string(),
+            berry: true,
+        });
+    }
+    let manifest = root_manifest(cwd)?;
+    let (name, version) = raw_pin_name_version(&manifest)?;
+    let berry = name == "yarn" && {
+        let yarnrc_present = pin_target_dir(cwd).join(".yarnrc.yml").is_file();
+        classify_yarn(version.as_deref(), yarnrc_present) == Pm::YarnBerry
+    };
+    Some(PmIdentity { name, berry })
+}
+
+/// The raw `(name, version)` a manifest's pin fields state, with NO usability
+/// check — `packageManager` first, then `devEngines.packageManager` (object or
+/// array; an array yields its LAST named entry, the one the spec's
+/// ignore-earlier/error-last semantics make govern). The identity probe's
+/// reader; [`pin_from_manifest`] stays the strict, warning-emitting one.
+fn raw_pin_name_version(manifest: &serde_json::Value) -> Option<(String, Option<String>)> {
+    if let Some(spec) = manifest.get("packageManager").and_then(|v| v.as_str()) {
+        let spec = spec.trim();
+        let (name, version) = match spec.split_once('@') {
+            Some((n, v)) => (n, Some(v.to_string())),
+            None => (spec, None),
+        };
+        return (!name.is_empty()).then(|| (name.to_string(), version));
+    }
+    let dev = manifest.get("devEngines")?.get("packageManager")?;
+    let entry = match dev {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .rev()
+            .find(|e| e.get("name").and_then(|n| n.as_str()).is_some())?,
+        other => other,
+    };
+    let name = entry.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let version = entry
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Some((name.to_string(), version))
 }
 
 /// The `package.json` value at [`pin_target_dir`] — the workspace root if one is
@@ -98,11 +212,124 @@ fn root_manifest(cwd: &Path) -> Option<serde_json::Value> {
     }
 }
 
-/// Write `packageManager` into the workspace-root `package.json` (the same
-/// workspace-root rule [`crate::version_management`]'s pin uses). Preserves
-/// sibling keys via a serde round-trip. Errors if no `package.json` exists at the
-/// target dir — Nub never creates one (no silent scaffolding).
-pub fn write_pin(pm: Pm, version: &str, cwd: &Path) -> Result<PathBuf> {
+/// Write THE PAIR — the ratified pin shape (2026-06-09, see
+/// `wiki/research/pm-version-pinning-and-inference.md` §Decision state) — into the
+/// workspace-root `package.json`:
+///
+///   - `packageManager: "<name>@<exact>+sha512.<hex>"` — the resolved record
+///     corepack / yarn-classic-1.22.21+ / turbo execute. The legacy field is
+///     exact-only across the ecosystem, so `version` must be the already-resolved
+///     exact version, and `sha512_hex` the hex digest of the verified tarball
+///     (computed by the caller — pin-implies-fetch: you can't write an honest hash
+///     without the bytes).
+///   - `devEngines.packageManager: {name, version: "^<exact>", onFail: "download"}`
+///     — the loose intent, in the only field whose spec sanctions a range (the
+///     shape `pnpm init --init-package-manager` writes).
+///
+/// The two land consistent (exact ∈ range — corepack itself validates that when
+/// both are present). Existing `devEngines` siblings (`os`/`cpu`/`libc`/`runtime`)
+/// and all other manifest content survive; an ARRAY-form
+/// `devEngines.packageManager` is spliced (the entry naming this PM replaced in
+/// place, else appended), never clobbered wholesale — the spec allows the array
+/// and the user's other declared managers are their data, not ours. The file's
+/// indentation and trailing newline are reproduced (see [`edit_manifest`]).
+/// Errors if no `package.json` exists at the target dir — Nub never creates one
+/// (no silent scaffolding).
+pub fn write_pin_pair(pm: Pm, version: &str, sha512_hex: &str, cwd: &Path) -> Result<PathBuf> {
+    // Fail closed on a non-exact version: writing `packageManager: "pnpm@^9"`
+    // breaks corepack (hard error), pnpm (warn + drop), and yarn classic 1.22.21+
+    // (startup exit 1) — the caller resolves ranges/tags BEFORE writing. A '+' is
+    // rejected too: the hash suffix is appended here, never passed in.
+    if version.contains('+') || semver::Version::parse(version).is_err() {
+        bail!(
+            "write_pin_pair needs an exact resolved version (e.g. 9.1.0), got \"{version}\" — \
+             ranges/tags are resolved before the pin is written"
+        );
+    }
+
+    edit_manifest(cwd, |obj| {
+        obj.insert(
+            "packageManager".to_string(),
+            serde_json::Value::String(format!("{pm}@{version}+sha512.{sha512_hex}")),
+        );
+        let entry = serde_json::json!({
+            "name": pm.to_string(),
+            "version": format!("^{version}"),
+            "onFail": "download",
+        });
+        let dev = obj
+            .entry("devEngines".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !dev.is_object() {
+            // A malformed (non-object) devEngines can't carry the pin; replace it.
+            *dev = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let dev = dev
+            .as_object_mut()
+            .expect("devEngines is an object per the guard above");
+        match dev.get_mut("packageManager") {
+            // The spec's ARRAY form: splice the entry naming this PM in place
+            // (its array position and the other declared managers survive), else
+            // append — never clobber a user's multi-manager declaration with the
+            // object form.
+            Some(serde_json::Value::Array(items)) => {
+                let name = pm.to_string();
+                match items
+                    .iter_mut()
+                    .find(|e| e.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+                {
+                    Some(slot) => *slot = entry,
+                    None => items.push(entry),
+                }
+            }
+            _ => {
+                dev.insert("packageManager".to_string(), entry);
+            }
+        }
+    })
+}
+
+/// Detected surface formatting of a manifest: the per-level indent unit (taken
+/// from the first indented line — tabs vs N spaces) and whether the file ends
+/// with a newline. A single-line / unindented file gets the 2-space default.
+struct ManifestFormat {
+    indent: String,
+    trailing_newline: bool,
+}
+
+fn detect_format(content: &str) -> ManifestFormat {
+    let indent = content
+        .lines()
+        .find_map(|line| {
+            let ws_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+            (ws_len > 0 && !line.trim().is_empty()).then(|| line[..ws_len].to_string())
+        })
+        .unwrap_or_else(|| "  ".to_string());
+    ManifestFormat {
+        indent,
+        trailing_newline: content.ends_with('\n'),
+    }
+}
+
+/// Read → edit → atomically rewrite the `package.json` at [`pin_target_dir`] (the
+/// same workspace-root rule [`crate::version_management`]'s pin uses). The shared
+/// body of every pin writer:
+///
+///   - **Formatting-preserving** (the Volta steal): the file's detected indent
+///     unit and trailing-newline presence are reproduced, and `serde_json`'s
+///     `preserve_order` keeps the user's key order — a pin write must not
+///     reformat the manifest. (Caveat: a `\r\n` file is rewritten with `\n`.)
+///   - **Atomic, crash-safe rewrite**: write a sibling temp file then `rename`
+///     over the target. A `package.json` carries the user's whole manifest, so a
+///     torn write (crash / full disk mid-`write`) must never leave it truncated —
+///     the original survives until the rename, and the rename is atomic on the
+///     same filesystem.
+///   - Errors if no `package.json` exists at the target dir — Nub never creates
+///     one (no silent scaffolding).
+fn edit_manifest(
+    cwd: &Path,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<PathBuf> {
     let dir = pin_target_dir(cwd);
     let path = dir.join("package.json");
     if !path.is_file() {
@@ -114,25 +341,18 @@ pub fn write_pin(pm: Pm, version: &str, cwd: &Path) -> Result<PathBuf> {
 
     let content =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let format = detect_format(&content);
     let mut manifest: serde_json::Value =
         serde_json::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
 
     let obj = manifest
         .as_object_mut()
         .with_context(|| format!("{} is not a JSON object", path.display()))?;
-    obj.insert(
-        "packageManager".to_string(),
-        serde_json::Value::String(format!("{pm}@{version}")),
-    );
+    edit(obj);
 
-    let mut serialized = serde_json::to_string_pretty(&manifest)
+    let serialized = serialize_manifest(&manifest, &format)
         .with_context(|| format!("serializing {}", path.display()))?;
-    serialized.push('\n');
 
-    // Atomic, crash-safe rewrite: write a sibling temp file then `rename` over the
-    // target. A `package.json` carries the user's whole manifest, so a torn write
-    // (crash / full disk mid-`write`) must never leave it truncated — the original
-    // survives until the rename, and the rename is atomic on the same filesystem.
     let tmp = dir.join(format!(".package.json.nub-{}.tmp", std::process::id()));
     std::fs::write(&tmp, &serialized).with_context(|| format!("writing {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, &path) {
@@ -141,6 +361,20 @@ pub fn write_pin(pm: Pm, version: &str, cwd: &Path) -> Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+/// Pretty-print with the detected indent unit (vs `to_string_pretty`'s hardwired
+/// two spaces) and reproduce the trailing-newline state.
+fn serialize_manifest(manifest: &serde_json::Value, format: &ManifestFormat) -> Result<String> {
+    use serde::Serialize;
+    let mut buf = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(format.indent.as_bytes());
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    manifest.serialize(&mut ser).context("serializing JSON")?;
+    if format.trailing_newline {
+        buf.push(b'\n');
+    }
+    String::from_utf8(buf).context("serialized JSON is not UTF-8")
 }
 
 /// Resolve where a pin is written: the workspace root if one is above `cwd`,
@@ -235,12 +469,16 @@ fn yarn_major(version: &str) -> Option<u32> {
 /// resolved relative to that root. A committed Berry release lives there
 /// (`.yarn/releases/yarn-4.2.2.cjs`).
 ///
+/// Public so the CLI's Berry-pin refusal can tell "commit a release" apart from
+/// "you already committed one" (the message must not instruct the user to do
+/// what they already did).
+///
 /// This is a hand line-scan for one flat top-level `yarnPath:` key, mirroring
 /// `workspace::filter::read_pnpm_workspace`'s idiom — nub-core takes no YAML
 /// dependency. LIMITATION: only a single, top-level, unindented `yarnPath:`
 /// entry is recognized; a nested or multi-document form is not (no real-world
 /// `.yarnrc.yml` nests `yarnPath`).
-fn read_yarn_path(cwd: &Path) -> Option<PathBuf> {
+pub fn committed_yarn_path(cwd: &Path) -> Option<PathBuf> {
     // A Berry monorepo commits `.yarnrc.yml` (and the release it points at) at the
     // workspace root, not in each member, so resolve at the workspace root — the
     // same dir [`resolve_pin`] reads the pin from. `yarnPath` is relative to the
@@ -407,8 +645,9 @@ mod tests {
         // bun is out of scope → error names the supported set.
         let dir = tmpdir("err-bun");
         write_pkg(&dir, r#"{"packageManager":"bun@1.1.0"}"#);
-        // resolve_pin swallows the parse error into None (it's a "no usable pin"
-        // query); the underlying parser carries the message.
+        // resolve_pin resolves the unusable pin as None (after warning on stderr —
+        // see `present_but_unusable_pin_warns_once_and_resolves_unpinned`); the
+        // underlying parser carries the message.
         let err = parse_spec("bun@1.1.0").unwrap_err().to_string();
         assert!(
             err.contains("npm, pnpm, and yarn"),
@@ -425,20 +664,20 @@ mod tests {
     }
 
     #[test]
-    fn write_pin_preserves_siblings_and_errors_without_package_json() {
+    fn write_pin_pair_preserves_siblings_and_errors_without_package_json() {
         let dir = tmpdir("write-pin");
         write_pkg(
             &dir,
             "{\n  \"name\": \"app\",\n  \"scripts\": {\n    \"build\": \"tsc\"\n  }\n}\n",
         );
-        let written = write_pin(Pm::Pnpm, "9.1.0", &dir).unwrap();
+        let written = write_pin_pair(Pm::Pnpm, "9.1.0", "abc", &dir).unwrap();
         assert_eq!(written, dir.join("package.json"));
 
         let manifest: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
         assert_eq!(
             manifest["packageManager"].as_str(),
-            Some("pnpm@9.1.0"),
+            Some("pnpm@9.1.0+sha512.abc"),
             "the pin is written"
         );
         assert_eq!(
@@ -454,7 +693,7 @@ mod tests {
 
         // No package.json at the target dir → error, never create one.
         let empty = tmpdir("write-pin-empty");
-        let err = write_pin(Pm::Npm, "10.0.0", &empty)
+        let err = write_pin_pair(Pm::Npm, "10.0.0", "abc", &empty)
             .unwrap_err()
             .to_string();
         assert!(
@@ -463,7 +702,7 @@ mod tests {
         );
         assert!(
             !empty.join("package.json").exists(),
-            "write_pin must not scaffold a package.json"
+            "write_pin_pair must not scaffold a package.json"
         );
     }
 
@@ -505,7 +744,7 @@ mod tests {
         );
         // A `nub pm switch` in the member writes to the SAME root file resolve reads.
         assert_eq!(
-            write_pin(Pm::Pnpm, "9.1.0", &member).unwrap(),
+            write_pin_pair(Pm::Pnpm, "9.1.0", "abc", &member).unwrap(),
             root.join("package.json")
         );
     }
@@ -563,12 +802,170 @@ mod tests {
     }
 
     #[test]
-    fn write_pin_replaces_atomically_and_leaves_no_temp_file() {
+    fn present_but_unusable_pin_warns_once_and_resolves_unpinned() {
+        // A yarn range in `packageManager` is unusable (classify needs an exact
+        // version for the classic/Berry split) — it must resolve as unpinned WITH
+        // exactly one warning naming the raw spec and the reason. The warning is
+        // an Option, so "exactly once" is structural.
+        let manifest: serde_json::Value =
+            serde_json::from_str(r#"{"packageManager":"yarn@^4"}"#).unwrap();
+        let (pin, warning) = pin_from_manifest(&manifest);
+        assert_eq!(pin, None, "an unusable pin resolves as unpinned");
+        let msg = warning.expect("a present-but-unusable pin must warn");
+        assert!(
+            msg.contains("yarn@^4") && msg.contains("exact version"),
+            "the warning names the raw spec and the exact-version rule, got: {msg}"
+        );
+
+        // The same rule covers the devEngines fallback, naming its field.
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"devEngines":{"packageManager":{"name":"yarn","version":"^4"}}}"#,
+        )
+        .unwrap();
+        let (pin, warning) = pin_from_manifest(&manifest);
+        assert_eq!(pin, None);
+        let msg = warning.expect("an unusable devEngines pin must warn");
+        assert!(
+            msg.contains("devEngines.packageManager"),
+            "the warning names the field it ignored, got: {msg}"
+        );
+
+        // Absent fields are NOT a warning — unpinned is a valid, silent state.
+        let manifest: serde_json::Value = serde_json::from_str(r#"{"name":"app"}"#).unwrap();
+        assert_eq!(pin_from_manifest(&manifest), (None, None));
+    }
+
+    #[test]
+    fn write_pin_pair_lands_both_fields_and_keeps_dev_engines_siblings() {
+        // The ratified pair: exact+hash in `packageManager`, the caret range in
+        // `devEngines.packageManager` (onFail: download) — consistent, with the
+        // existing devEngines siblings untouched.
+        let dir = tmpdir("pair");
+        write_pkg(
+            &dir,
+            concat!(
+                "{\n",
+                "  \"name\": \"app\",\n",
+                "  \"devEngines\": {\n",
+                "    \"runtime\": { \"name\": \"node\", \"version\": \"^22\" },\n",
+                "    \"cpu\": { \"name\": \"arm64\" },\n",
+                "    \"packageManager\": { \"name\": \"npm\", \"version\": \"10.0.0\" }\n",
+                "  }\n",
+                "}\n"
+            ),
+        );
+        let path = write_pin_pair(Pm::Pnpm, "9.1.0", "abc123", &dir).unwrap();
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            m["packageManager"].as_str(),
+            Some("pnpm@9.1.0+sha512.abc123"),
+            "packageManager carries the exact version + artifact hash"
+        );
+        assert_eq!(
+            m["devEngines"]["packageManager"],
+            serde_json::json!({"name": "pnpm", "version": "^9.1.0", "onFail": "download"}),
+            "devEngines carries the loose intent, replacing the old entry"
+        );
+        assert_eq!(
+            m["devEngines"]["runtime"]["version"].as_str(),
+            Some("^22"),
+            "devEngines.runtime sibling survives"
+        );
+        assert_eq!(
+            m["devEngines"]["cpu"]["name"].as_str(),
+            Some("arm64"),
+            "devEngines.cpu sibling survives"
+        );
+
+        // A manifest with no devEngines gets one created (yarn prints as `yarn`).
+        let dir = tmpdir("pair-fresh");
+        write_pkg(&dir, "{\n  \"name\": \"app\"\n}\n");
+        let path = write_pin_pair(Pm::YarnBerry, "4.2.2", "fff", &dir).unwrap();
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(m["packageManager"].as_str(), Some("yarn@4.2.2+sha512.fff"));
+        assert_eq!(
+            m["devEngines"]["packageManager"]["name"].as_str(),
+            Some("yarn")
+        );
+
+        // A range/tag must be resolved BEFORE the write — the writer fails closed
+        // rather than committing a `packageManager` value corepack chokes on.
+        for bad in ["^9", "latest", "9.1.0+sha512.abc"] {
+            let err = write_pin_pair(Pm::Pnpm, bad, "aa", &dir)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("exact resolved version"),
+                "\"{bad}\" must be rejected naming the exact-version rule, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn pair_write_preserves_indent_style_and_trailing_newline_byte_for_byte() {
+        // A pin write must not reformat the manifest: the detected indent unit
+        // (2-space / 4-space / tab) and the trailing-newline state are reproduced
+        // exactly — the only diff is the two pin keys. Byte-equality, so any
+        // reformat shows up verbatim in the failure output.
+        fn render(lines: &[(usize, &str)], indent: &str, trailing_newline: bool) -> String {
+            let mut s = lines
+                .iter()
+                .map(|(depth, line)| format!("{}{line}", indent.repeat(*depth)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if trailing_newline {
+                s.push('\n');
+            }
+            s
+        }
+        let input: &[(usize, &str)] = &[
+            (0, "{"),
+            (1, r#""name": "app","#),
+            (1, r#""devEngines": {"#),
+            (2, r#""os": {"#),
+            (3, r#""name": "darwin""#),
+            (2, "}"),
+            (1, "}"),
+            (0, "}"),
+        ];
+        let expected: &[(usize, &str)] = &[
+            (0, "{"),
+            (1, r#""name": "app","#),
+            (1, r#""devEngines": {"#),
+            (2, r#""os": {"#),
+            (3, r#""name": "darwin""#),
+            (2, "},"),
+            (2, r#""packageManager": {"#),
+            (3, r#""name": "pnpm","#),
+            (3, r#""version": "^9.1.0","#),
+            (3, r#""onFail": "download""#),
+            (2, "}"),
+            (1, "},"),
+            (1, r#""packageManager": "pnpm@9.1.0+sha512.cafe01""#),
+            (0, "}"),
+        ];
+        // Tab + no trailing newline in one case: both detections are independent.
+        for (indent, trailing) in [("  ", true), ("    ", true), ("\t", false)] {
+            let dir = tmpdir("pair-fmt");
+            write_pkg(&dir, &render(input, indent, trailing));
+            let path = write_pin_pair(Pm::Pnpm, "9.1.0", "cafe01", &dir).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                render(expected, indent, trailing),
+                "indent {indent:?} / trailing newline {trailing} must be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn write_pin_pair_replaces_atomically_and_leaves_no_temp_file() {
         // The rewrite goes through a sibling temp + rename; on success no `.tmp`
         // litter remains, and the target holds exactly the new pin.
         let dir = tmpdir("write-atomic");
         write_pkg(&dir, "{\n  \"name\": \"app\"\n}\n");
-        write_pin(Pm::Npm, "10.9.0", &dir).unwrap();
+        write_pin_pair(Pm::Npm, "10.9.0", "abc", &dir).unwrap();
 
         let leftover: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -583,6 +980,127 @@ mod tests {
         let manifest: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
                 .unwrap();
-        assert_eq!(manifest["packageManager"].as_str(), Some("npm@10.9.0"));
+        assert_eq!(
+            manifest["packageManager"].as_str(),
+            Some("npm@10.9.0+sha512.abc")
+        );
+    }
+
+    #[test]
+    fn write_pin_pair_splices_an_array_form_dev_engines_entry() {
+        // The devEngines spec allows the array form. A pin must replace ONLY the
+        // entry naming this PM (position preserved) — the other declared
+        // managers must survive — and append when no entry names it.
+        let dir = tmpdir("pair-array");
+        write_pkg(
+            &dir,
+            r#"{"devEngines":{"packageManager":[{"name":"bun","onFail":"ignore"},{"name":"pnpm","version":"9.0.0"}]}}"#,
+        );
+        let path = write_pin_pair(Pm::Pnpm, "9.1.0", "abc", &dir).unwrap();
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            m["devEngines"]["packageManager"],
+            serde_json::json!([
+                {"name": "bun", "onFail": "ignore"},
+                {"name": "pnpm", "version": "^9.1.0", "onFail": "download"}
+            ]),
+            "the pnpm entry is replaced in place; the bun entry survives"
+        );
+
+        // No entry names the pinned PM → append (the last slot is the one the
+        // spec's array semantics make govern).
+        let dir = tmpdir("pair-array-append");
+        write_pkg(
+            &dir,
+            r#"{"devEngines":{"packageManager":[{"name":"bun","onFail":"ignore"}]}}"#,
+        );
+        let path = write_pin_pair(Pm::Npm, "10.9.0", "ff", &dir).unwrap();
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            m["devEngines"]["packageManager"],
+            serde_json::json!([
+                {"name": "bun", "onFail": "ignore"},
+                {"name": "npm", "version": "^10.9.0", "onFail": "download"}
+            ]),
+            "an array with no matching entry gets the new pin appended"
+        );
+    }
+
+    #[test]
+    fn project_pm_identity_sees_channels_resolve_pin_reads_as_unpinned() {
+        // (a) A Berry project pinned solely via a committed yarnPath (no
+        // packageManager field) — resolve_pin says unpinned, but the identity is
+        // yarn Berry, so the same-PM guard can refuse `nub pm pin pnpm@9`.
+        let dir = tmpdir("ident-yarnpath");
+        write_pkg(&dir, r#"{"name":"app"}"#);
+        let release = dir.join(".yarn/releases");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(release.join("yarn-4.2.2.cjs"), "// yarn\n").unwrap();
+        std::fs::write(
+            dir.join(".yarnrc.yml"),
+            "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_pin(&dir),
+            None,
+            "no pin field — resolve_pin is None"
+        );
+        assert_eq!(
+            project_pm_identity(&dir),
+            Some(PmIdentity {
+                name: "yarn".to_string(),
+                berry: true
+            }),
+            "a committed yarnPath IS a yarn-Berry identity"
+        );
+
+        // (b) A present-but-unusable spec still names its PM (and classifies
+        // yarn@^4 + no yarnrc via the version-less seam — classic here).
+        let dir = tmpdir("ident-range");
+        write_pkg(&dir, r#"{"packageManager":"yarn@^4"}"#);
+        assert_eq!(
+            project_pm_identity(&dir).map(|i| i.name),
+            Some("yarn".to_string()),
+            "an unusable version must not erase the PM identity"
+        );
+
+        // (c) An out-of-scope manager still names itself; a Berry pin reads as
+        // berry; no channel at all is None.
+        let dir = tmpdir("ident-bun");
+        write_pkg(&dir, r#"{"packageManager":"bun@1.1.0"}"#);
+        assert_eq!(
+            project_pm_identity(&dir),
+            Some(PmIdentity {
+                name: "bun".to_string(),
+                berry: false
+            })
+        );
+        let dir = tmpdir("ident-berry");
+        write_pkg(&dir, r#"{"packageManager":"yarn@4.2.2"}"#);
+        assert_eq!(
+            project_pm_identity(&dir),
+            Some(PmIdentity {
+                name: "yarn".to_string(),
+                berry: true
+            })
+        );
+        let dir = tmpdir("ident-none");
+        write_pkg(&dir, r#"{"name":"app"}"#);
+        assert_eq!(project_pm_identity(&dir), None);
+
+        // (d) devEngines array form: the LAST named entry governs the identity.
+        let dir = tmpdir("ident-array");
+        write_pkg(
+            &dir,
+            r#"{"devEngines":{"packageManager":[{"name":"bun"},{"name":"pnpm","version":"^9"}]}}"#,
+        );
+        assert_eq!(
+            project_pm_identity(&dir).map(|i| i.name),
+            Some("pnpm".to_string()),
+            "the array's last named entry (spec: error-last) is the identity"
+        );
     }
 }
