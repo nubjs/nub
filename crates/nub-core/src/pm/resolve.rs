@@ -209,10 +209,10 @@ fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
 ///     (`yarnrc_present`): a sibling means Berry, otherwise classic.
 ///
 /// The pinned route ([`classify`]) calls this with the version. The unpinned route
-/// does NOT reach here — it defers to whatever `yarn` is on PATH (see the
-/// `build_passthrough_command` fallback) and so needs no classic/Berry split. The
-/// `None`-version arm is the seam a future provisioning-from-lockfile path would
-/// use; it is exercised by tests but has no production caller today.
+/// does NOT reach here — it defers to whatever `yarn` is on PATH and so needs no
+/// classic/Berry split. The `None`-version arm is the seam a future
+/// provisioning-from-lockfile path would use; it is exercised by tests but has no
+/// production caller today.
 fn classify_yarn(version: Option<&str>, yarnrc_present: bool) -> Pm {
     match version.and_then(yarn_major) {
         Some(major) if major >= 2 => Pm::YarnBerry,

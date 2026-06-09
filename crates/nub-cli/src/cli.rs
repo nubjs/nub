@@ -550,6 +550,54 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle.
 const SUBCOMMANDS: &[&str] = &["run", "watch", "exec", "upgrade", "help", "node", "pm"];
 
+/// PM-management verbs nub recognizes only to redirect. The pure-passthrough
+/// frontend (A2) was disabled 2026-06-09 in favor of the normalized standard
+/// surface (wiki/research/package-manager-normalized-surface.md — not yet
+/// implemented), so these verbs error with the project's real PM command instead
+/// of dispatching anything. Union of the npm/pnpm/yarn/bun staples plus their
+/// short aliases; must stay disjoint from SUBCOMMANDS (asserted in tests). `dlx`
+/// is deliberately absent — its spelling diverges per PM (`npx`/`bunx`), so a
+/// uniform `<pm> dlx` suggestion would be wrong for npm/bun.
+const PM_VERBS: &[&str] = &[
+    "install",
+    "i",
+    "ci",
+    "add",
+    "remove",
+    "rm",
+    "uninstall",
+    "update",
+    "up",
+    "outdated",
+    "audit",
+    "publish",
+    "pack",
+    "version",
+    "link",
+    "unlink",
+    "dedupe",
+    "rebuild",
+    "why",
+    "list",
+    "ls",
+    "info",
+    "view",
+    "init",
+    "create",
+    "login",
+    "logout",
+    "whoami",
+    "config",
+    "store",
+    "cache",
+    "import",
+    "migrate",
+    "prune",
+    "deprecate",
+    "dist-tag",
+    "patch",
+];
+
 /// Accept pnpm's flag-before-subcommand order. pnpm takes `pnpm -r run build` AND
 /// `pnpm run -r build`; nub's pre-parse otherwise only recognizes a subcommand in
 /// first position, so a leading run-flag (`-r`, `--filter`, …) falls through to
@@ -642,12 +690,6 @@ fn run_nub() -> Result<i32> {
     let mut eval_tempfile: Option<tempfile::NamedTempFile> = None;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
 
-    // GAP (out of scope): a leading flag before a PM-management verb — e.g.
-    // `nub -D add foo` — falls into the `_` arm below as a Node flag and routes to
-    // Node passthrough, not to the configured PM. PM passthrough only kicks in when
-    // the first token is the bareword verb (`nub add -D foo`). Closing this would
-    // require teaching the pre-parse to distinguish a Node flag from a PM flag
-    // before any verb is seen — deferred.
     let mut i = 0;
     while i < raw_args.len() {
         let arg = &raw_args[i];
@@ -813,12 +855,7 @@ fn run_nub() -> Result<i32> {
         Ok(0)
     } else {
         let first = &rest[0];
-        // A leading `-` is treated as Node passthrough (`nub --inspect file.js`),
-        // NOT a PM verb. KNOWN LIMITATION (deliberate): a PM invocation whose first
-        // token is a flag — `nub --frozen-lockfile install` — therefore does not
-        // route to the configured PM; spell it `nub install --frozen-lockfile`
-        // (verb first) instead. Leading-flag-first PM verbs are vanishingly rare,
-        // and disambiguating them from Node flags here would cost more than it buys.
+        // A leading `-` is treated as Node passthrough (`nub --inspect file.js`).
         let is_node_passthrough = first.starts_with('.')
             || first.starts_with('/')
             || first.starts_with('-')
@@ -845,12 +882,22 @@ fn run_nub() -> Result<i32> {
                      \x20\x20(to run a file instead: nub ./{first})"
                 );
             }
-            // Not a reserved verb, not a file, not a likely script name: this is a
-            // PM-management verb (`add`, `remove`, `publish`, `frobnicate`, …).
-            // Pass it through to the project's configured package manager verbatim
-            // — denylist (nub's reserved verbs), not allowlist (A2: pure
-            // passthrough, no flag-mapping / no normalization).
-            run_pm_passthrough(&rest)
+            // PM-management verbs are not nub commands: the A2 pure-passthrough
+            // frontend is disabled pending the normalized standard surface (see
+            // PM_VERBS). Redirect with the exact command to paste — the lockfile
+            // names the project's real PM.
+            if PM_VERBS.contains(&first.as_str()) {
+                let pm = detect_package_manager(&env::current_dir()?);
+                bail!(
+                    "nub: \"{first}\" is not a nub command — run it with your package manager:\n\
+                     \x20\x20{pm} {}",
+                    rest.join(" ")
+                );
+            }
+            bail!(
+                "nub: \"{first}\" is not a nub command — see `nub --help`\n\
+                 \x20\x20(to run a script: nub run {first} · to run a file: nub ./{first})"
+            );
         }
     }
 }
@@ -3500,85 +3547,6 @@ fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
     out
 }
 
-/// Pure passthrough (A2): run a PM-management verb (`add`, `remove`, `publish`, …
-/// anything that isn't a reserved nub verb) on the project's configured package
-/// manager, verbatim. The PM is resolved exactly as it is for a real run — the
-/// committed Berry release, the provisioned pinned PM, or (unpinned) the
-/// lockfile-detected PM on PATH. `argv` is forwarded byte-for-byte: no
-/// flag-mapping, no normalization, no `--` handling. The PM process gets NO nub
-/// augmentation env (only `--env-file` vars, the same explicit-flag overlay every
-/// spawn path honors) — passthrough is the configured PM, unmodified.
-fn run_pm_passthrough(argv: &[String]) -> Result<i32> {
-    let cwd = env::current_dir()?;
-    let (program, full_args) = build_passthrough_command(&cwd, argv)?;
-
-    let mut cmd = std::process::Command::new(&program);
-    cmd.args(&full_args).current_dir(&cwd);
-    apply_env_file_vars(&mut cmd);
-    let status = cmd
-        .status()
-        .with_context(|| format!("running {}", program.display()))?;
-    Ok(nub_core::node::spawn::exit_code_from_status(&status))
-}
-
-/// Resolve the `(program, full_args)` to spawn for a PM-management passthrough,
-/// without spawning — the spawn-free seam the passthrough test asserts against.
-/// `argv` is never rewritten — byte-for-byte forwarding is the contract (A2).
-///
-///   - committed Berry release / provisioned pinned PM → run the `.cjs` under the
-///     project's resolved Node, with the user's `argv` appended verbatim;
-///   - unpinned → the lockfile-detected PM, resolved on PATH, run directly.
-fn build_passthrough_command(cwd: &Path, argv: &[String]) -> Result<(PathBuf, Vec<String>)> {
-    use nub_core::pm::resolve::{PmTarget, resolve_target};
-
-    // Run a PM launcher script (.cjs) under the project's resolved Node, with the
-    // user's argv appended unchanged. A `.cjs` launcher ALWAYS spawns Node, so this
-    // is a genuine "we're about to spawn node" fire point (per
-    // node-version-management.md §"Where the version logic fires") — hence
-    // `discover_or_provision_node`, not bare `discover_node`. Without it, a pinned-
-    // but-uncached Node would make `nub add` fail to find a Node to run the
-    // provisioned PM under, while `nub run` (via the hijack) would have provisioned
-    // it — the asymmetry of "provision the PM but refuse the Node to run it." The
-    // unpinned arm (a system PM straight on PATH, possibly bun) does NOT go through
-    // here, so it keeps the run/exec posture of not provisioning Node.
-    let under_node = |script: String| -> Result<(PathBuf, Vec<String>)> {
-        let node = nub_core::node::discovery::discover_or_provision_node(cwd)?;
-        let mut args = vec![script];
-        args.extend(argv.iter().cloned());
-        Ok((PathBuf::from(node.path.as_str()), args))
-    };
-
-    match resolve_target(cwd) {
-        Some(PmTarget::YarnPath(release)) => under_node(release.to_string_lossy().into_owned()),
-        Some(PmTarget::Provision(pin)) => {
-            let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?)?;
-            under_node(prov.bin.to_string_lossy().into_owned())
-        }
-        Some(PmTarget::BerryNoYarnPath) => bail!(berry_no_yarn_path_msg()),
-        None => {
-            // Unpinned: fall back to the lockfile-detected PM on PATH. The detector
-            // preserves the bun inference — a bun-locked project execs a PATH bun
-            // (nub never provisions bun, but won't get in the way of a real one).
-            //
-            // `which` returns the resolved path WITH its extension (e.g. `pnpm.cmd`
-            // on Windows). That extension is load-bearing for safety: spawning a
-            // `.cmd`/`.bat` via `std::process::Command` is only argument-safe because
-            // Rust >= 1.77.2 (CVE-2024-24576) applies cmd.exe escaping when the
-            // program path keeps a batch-file extension. The workspace MSRV (1.85)
-            // and CI's @stable both carry that fix; an extensionless resolve would
-            // reintroduce the quoting hazard (see the Windows unit test).
-            let pm = detect_package_manager(cwd);
-            let program = which::which(&pm).map_err(|_| {
-                anyhow::anyhow!(
-                    "nub: no package manager is pinned and `{pm}` (inferred from the lockfile) \
-                     is not on PATH. Pin one with `nub pm switch <pm>@<version>`, or install {pm}."
-                )
-            })?;
-            Ok((program, argv.to_vec()))
-        }
-    }
-}
-
 /// Human description of WHERE the resolved Node version requirement came from:
 /// the pin file plus its content (`.node-version (26)`), or `node on PATH` when
 /// no pin file applies. Used by `nub node` (status) and `nub node which`.
@@ -3979,7 +3947,7 @@ mod tests {
         assert_eq!(Argv0::detect(), Argv0::Nub);
     }
 
-    // ── nub pm verbs + PM-management passthrough ────────────────────────
+    // ── nub pm verbs + PM-verb redirect ─────────────────────────────────
 
     /// A unique temp project dir under the system temp root (never under $HOME, so
     /// the manifest walk-up can't escape into a stray ancestor `package.json`).
@@ -4032,127 +4000,22 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_forwards_argv_byte_for_byte() {
-        // `nub add -D foo --x` in a pinned project resolves to running the committed
-        // PM under the project's Node, with the user's argv appended UNCHANGED — no
-        // flag-mapping, no normalization, no `--` handling (A2: pure passthrough).
-        let (dir, release) = yarn_path_fixture("forward");
-        let argv = vec![
-            "add".to_string(),
-            "-D".to_string(),
-            "foo".to_string(),
-            "--x".to_string(),
-        ];
-        let (program, full_args) = build_passthrough_command(&dir, &argv).unwrap();
-
-        // program is the project's Node (the committed .cjs runs under it).
-        assert!(
-            program.file_stem().is_some_and(|s| s == "node"),
-            "a committed Berry release runs under Node, got program {}",
-            program.display()
-        );
-        // argv = [release.cjs, ...user argv] — the user tail is identical.
-        // Compare the release path component-wise, not byte-wise: production joins
-        // the POSIX `yarnPath` value onto the root via `Path::join`, so on Windows
-        // `full_args[0]` carries mixed `/`+`\` separators while the fixture's
-        // `release` is all-`\`. `Path` equality is separator-agnostic on Windows.
-        assert_eq!(Path::new(&full_args[0]), release.as_path());
-        assert_eq!(
-            &full_args[1..],
-            &argv[..],
-            "user argv must forward verbatim"
-        );
-    }
-
-    #[test]
-    fn passthrough_is_verb_agnostic_denylist_not_allowlist() {
-        // An unknown verb (`frobnicate`) is forwarded exactly like a known one —
-        // the passthrough builder never inspects argv[0]. (The denylist that keeps
-        // nub's own verbs native lives in dispatch, asserted separately.)
-        let (dir, _release) = yarn_path_fixture("frob");
-        let (_p, args) =
-            build_passthrough_command(&dir, &["frobnicate".to_string(), "--wat".to_string()])
-                .unwrap();
-        assert_eq!(&args[1..], &["frobnicate".to_string(), "--wat".to_string()]);
-    }
-
-    #[test]
-    fn reserved_verbs_are_native_not_passed_through() {
-        // The denylist is the SUBCOMMANDS set: a reserved verb is recognized by the
-        // pre-parse and dispatched natively; only non-reserved barewords reach
-        // passthrough. `nubx` is argv0 dispatch, not a SUBCOMMANDS entry.
+    fn pm_verbs_and_reserved_verbs_stay_disjoint() {
+        // Reserved verbs are recognized by the pre-parse and dispatch natively;
+        // PM_VERBS exists only to redirect (the A2 passthrough is disabled). A
+        // verb in both sets would make the redirect arm unreachable.
         for verb in ["run", "exec", "node", "pm", "watch", "upgrade", "help"] {
             assert!(
                 SUBCOMMANDS.contains(&verb),
-                "{verb} must be a reserved native verb, not passthrough"
+                "{verb} must be a reserved native verb"
             );
         }
-        for verb in ["add", "remove", "install", "publish", "frobnicate"] {
+        for verb in PM_VERBS {
             assert!(
-                !SUBCOMMANDS.contains(&verb),
-                "{verb} is a PM-management verb and must pass through"
+                !SUBCOMMANDS.contains(verb),
+                "{verb} is in both PM_VERBS and SUBCOMMANDS — the redirect arm would be unreachable"
             );
         }
-    }
-
-    // Unix-only: `with_fake_pm_on_path` authors a `#!/bin/sh` script, which is a
-    // no-op stub on Windows (it would run the real `npm` on PATH and never exit 42).
-    // Cross-OS exit-code propagation through a real `.cmd` shim is covered by the
-    // integration test `bareword_unknown_verb_passes_through_to_the_pm`.
-    #[cfg(unix)]
-    #[test]
-    fn passthrough_propagates_the_childs_exit_code() {
-        // The configured PM's exit code is nub's exit code. Drive a tiny script as
-        // the "PM" via an unpinned project + a fake `npm` on PATH that exits 42.
-        let dir = pm_tmpdir("exit");
-        std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
-        std::fs::write(dir.join("package-lock.json"), "{}").unwrap(); // → npm
-        let code = with_fake_pm_on_path(&dir, "npm", "exit 42", || {
-            run_pm_passthrough_in(&dir, &["add".to_string(), "foo".to_string()])
-        });
-        assert_eq!(code.unwrap(), 42, "the PM's exit code must propagate");
-    }
-
-    /// Run the passthrough against an explicit `cwd` (the production entry reads the
-    /// process cwd; this is the test seam that doesn't fight the global). Used only
-    /// by the Unix-gated exit-code test.
-    #[cfg(unix)]
-    fn run_pm_passthrough_in(cwd: &Path, argv: &[String]) -> Result<i32> {
-        let (program, full_args) = build_passthrough_command(cwd, argv)?;
-        let status = std::process::Command::new(&program)
-            .args(&full_args)
-            .current_dir(cwd)
-            .status()?;
-        Ok(nub_core::node::spawn::exit_code_from_status(&status))
-    }
-
-    /// Put a one-line shell-script `name` on PATH (with the given body) for the
-    /// duration of `f`. Unix only — the exit-code test is gated to Unix.
-    #[cfg(unix)]
-    fn with_fake_pm_on_path<T>(dir: &Path, name: &str, body: &str, f: impl FnOnce() -> T) -> T {
-        use std::os::unix::fs::PermissionsExt;
-        let bin = dir.join("fakebin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let script = bin.join(name);
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        use std::sync::Mutex;
-        static PATH_LOCK: Mutex<()> = Mutex::new(());
-        let _g = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = env::var_os("PATH");
-        let new = match &prev {
-            Some(p) => format!("{}:{}", bin.display(), p.to_string_lossy()),
-            None => bin.display().to_string(),
-        };
-        // SAFETY: PATH mutation is serialized by PATH_LOCK; restored before unlock.
-        unsafe { env::set_var("PATH", &new) };
-        let out = f();
-        match prev {
-            Some(p) => unsafe { env::set_var("PATH", p) },
-            None => unsafe { env::remove_var("PATH") },
-        }
-        out
     }
 
     #[test]
@@ -4379,26 +4242,4 @@ mod tests {
         );
     }
 
-    /// The unpinned passthrough resolves a system PM via `which` and spawns it
-    /// directly. On Windows `which` returns the `.cmd` shim (e.g. `npm.cmd`), and
-    /// spawning a `.cmd` via `std::process::Command` is only argument-safe because
-    /// Rust >= 1.77.2 (CVE-2024-24576) applies cmd.exe escaping when the program path
-    /// keeps a batch-file extension. This pins that the resolved path DOES carry an
-    /// executable extension (so the std escaping engages); an extensionless resolve
-    /// would silently reintroduce the quoting hazard.
-    #[cfg(windows)]
-    #[test]
-    fn windows_unpinned_pm_resolves_to_an_executable_extension() {
-        // npm ships with Node, so it is always on the windows-latest runner's PATH.
-        let npm = which::which("npm").expect("npm must be on PATH (ships with node)");
-        let ext = npm
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase);
-        assert!(
-            matches!(ext.as_deref(), Some("cmd" | "bat" | "exe")),
-            "which(npm) must keep a batch/exe extension so std applies CVE-2024-24576 \
-             arg escaping when spawned; got {npm:?}"
-        );
-    }
 }

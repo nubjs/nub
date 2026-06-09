@@ -1,5 +1,5 @@
 //! Nub's package-manager hypermanager: the unified PM model shared by every
-//! consumer (resolution, provisioning, the CLI passthrough layer).
+//! consumer (resolution, provisioning, the `nub pm` CLI surface).
 //!
 //! There is exactly ONE [`Pm`] enum, ONE pin reader ([`resolve`]), ONE yarn
 //! classifier, and ONE `.npmrc` reader (`workspace::scripts::npmrc_value`).

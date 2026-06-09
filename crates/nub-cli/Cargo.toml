@@ -21,4 +21,3 @@ sha2.workspace = true
 tracing.workspace = true
 tempfile = "3"
 tracing-subscriber.workspace = true
-which = { workspace = true }
