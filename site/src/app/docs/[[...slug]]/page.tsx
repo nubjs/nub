@@ -8,6 +8,7 @@ import {
 import { notFound } from 'next/navigation';
 import { AIActions } from '@/components/ai-actions';
 import { getMDXComponents } from '../../../../mdx-components';
+import { renderTitle, plainTitle } from '@/lib/title';
 
 export default async function Page(props: {
   params: Promise<{ slug?: string[] }>;
@@ -20,7 +21,7 @@ export default async function Page(props: {
 
   return (
     <DocsPage toc={page.data.toc} full={page.data.full}>
-      <DocsTitle>{page.data.title}</DocsTitle>
+      <DocsTitle>{renderTitle(page.data.title)}</DocsTitle>
       <DocsDescription>{page.data.description}</DocsDescription>
       <AIActions markdownUrl={`/llms${page.url}.mdx`} pageUrl={page.url} />
       <DocsBody>
@@ -42,7 +43,7 @@ export async function generateMetadata(props: {
   if (!page) notFound();
 
   return {
-    title: page.data.title,
+    title: plainTitle(page.data.title),
     description: page.data.description,
   };
 }
