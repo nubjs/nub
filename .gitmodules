@@ -1,3 +1,6 @@
 [submodule "tests/node-suite"]
 	path = tests/node-suite
 	url = https://github.com/nodejs/node.git
+[submodule "vendor/aube"]
+	path = vendor/aube
+	url = https://github.com/jdx/aube
