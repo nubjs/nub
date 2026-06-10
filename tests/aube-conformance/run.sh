@@ -35,6 +35,8 @@ if [ $# -lt 1 ]; then
   exit 2
 fi
 NUB="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+# Windows (Git Bash): tolerate a path given without the .exe suffix.
+{ [ -x "$NUB" ] || ! [ -x "$NUB.exe" ]; } || NUB="$NUB.exe"
 [ -x "$NUB" ] || { echo "error: nub binary not executable: $NUB" >&2; exit 2; }
 shift
 
@@ -68,6 +70,20 @@ export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_STATE_HOME="$HOME/.local/state"
 mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
+# Windows (Git Bash): Node tools resolve os.homedir() from USERPROFILE, and
+# npm roots its cache/userconfig in LOCALAPPDATA/APPDATA — HOME alone doesn't
+# sandbox them on this OS, so point all three into the sandbox home too.
+# (nub itself follows the XDG_* overrides above on every OS: those are plain
+# env reads, checked before any platform known-folder fallback.)
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    mkdir -p "$HOME/AppData/Roaming" "$HOME/AppData/Local"
+    USERPROFILE="$(cygpath -w "$HOME")"
+    APPDATA="$(cygpath -w "$HOME/AppData/Roaming")"
+    LOCALAPPDATA="$(cygpath -w "$HOME/AppData/Local")"
+    export USERPROFILE APPDATA LOCALAPPDATA
+    ;;
+esac
 # Format steering must come only from the per-leg env below.
 unset npm_config_default_lockfile_format NPM_CONFIG_DEFAULT_LOCKFILE_FORMAT 2>/dev/null || true
 

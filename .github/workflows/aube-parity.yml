@@ -128,3 +128,37 @@ jobs:
         run: cargo build -p nub-cli
       - name: Run lockfile conformance matrix
         run: tests/aube-conformance/run.sh target/debug/nub
+
+  aube-conformance-windows:
+    name: lockfile conformance, real PMs (windows)
+    # Windows leg of the conformance matrix (Colin 2026-06-10). Budgeted
+    # subset: the pnpm + npm judge legs over the simple, peer-heavy, and
+    # workspace fixtures — the signal is lockfile semantics crossed with
+    # Windows realities (path separators, junction/symlink linking, .exe
+    # resolution, CRLF), not full OS × format coverage. bun, yarn, and the
+    # nub round-trip legs stay ubuntu-only; the harness itself runs under
+    # the runner's Git Bash (shell: bash) and sandboxes USERPROFILE/APPDATA
+    # alongside HOME/XDG (see run.sh).
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      # The runner image ships core.autocrlf=true; that would CRLF-ify the
+      # bash harness and the committed fixtures at checkout. Must precede
+      # actions/checkout.
+      - name: Force LF checkout
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Build nub
+        run: cargo build -p nub-cli
+      - name: Run lockfile conformance matrix (pnpm + npm judges)
+        shell: bash
+        env:
+          FORMATS: pnpm npm
+        run: tests/aube-conformance/run.sh target/debug/nub.exe simple peer-heavy workspace
