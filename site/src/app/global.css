@@ -20,7 +20,7 @@
   --color-acid: #4fe173; /* secondary: bright green (was acid lime #d6f24a) */
   --color-sky: #7bb0ff; /* tertiary: cool sky */
   --color-orchid: #c9a3ff; /* quaternary: soft orchid — version manager */
-  --color-pink: #ff6fb5; /* quinary: rose-pink — package hypermanager */
+  --color-pink: #ff6fb5; /* quinary: rose-pink — package manager manager */
 }
 
 /* Dark-forward palette. Default to dark; light kept legible but secondary. */

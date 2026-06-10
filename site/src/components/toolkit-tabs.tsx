@@ -110,25 +110,26 @@ const PIECES: {
   },
   {
     accent: 'pink',
-    command: 'nub install',
-    label: 'Package hypermanager',
-    title: 'A package hypermanager',
+    command: 'nub pm',
+    label: 'Package manager manager',
+    title: 'A package manager manager',
     blurb: (
       <>
-        Not a new package manager — Nub runs the one your project already uses.{' '}
-        <Mono>nub install</Mono> detects npm, pnpm, or yarn from <Mono>package.json</Mono>, fetches the
-        right version if it&rsquo;s missing, and runs it. Same commands, no setup.
+        Not a new package manager — Nub provisions and runs the one your project pins.{' '}
+        Corepack&rsquo;s job, in native Rust: <Mono>nub pm pin</Mono> records the exact version,{' '}
+        and it&rsquo;s fetched, verified, and cached on every machine that needs it. Opt-in shims
+        make even bare <Mono>pnpm</Mono> run the pinned version.
       </>
     ),
     replaces: ['corepack'],
     lines: [
-      { cmd: 'nub install' },
-      { out: '» resolved package manager is pnpm @11' },
-      { out: '» resolved from package.json#packageManager' },
-      { out: '» found pnpm@11 in $PATH' },
-      { out: '» pnpm install' },
-      { out: 'Already up to date', bright: true },
-      { out: 'Done in 0.4s', bright: true },
+      { cmd: 'nub pm pin pnpm@^9' },
+      { out: 'Fetching pnpm 9.15.4 (4 MB)...' },
+      { out: '✓ Installed pnpm 9.15.4 in 0.7s' },
+      { out: 'pinned pnpm@9.15.4 → package.json', bright: true },
+      { cmd: 'nub pm which' },
+      { out: '~/.cache/nub/pm/pnpm/9.15.4/package/bin/pnpm.cjs', bright: true },
+      { out: '» resolved from packageManager (pnpm@9.15.4)' },
     ],
   },
 ];

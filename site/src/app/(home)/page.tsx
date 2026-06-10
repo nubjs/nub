@@ -272,7 +272,7 @@ function RunFileBand() {
           <Feature
             accent="ember"
             eyebrow="Architecture"
-            title="Transpiled by Rust, run on real Node"
+            title="Transpiles in Rust, runs on real Node"
             body={
               <>
                 Nub transpiles your code in memory with{' '}
@@ -933,13 +933,13 @@ function HypermanagerBand() {
     <section className="border-b border-fd-border">
       <Container className="py-32 md:py-[180px]">
         <BandHeader
-          command="nub install"
-          title="A package hypermanager"
+          command="nub pm"
+          title="A package manager manager"
           subhead={
             <>
-              Not a new package manager — Nub runs the one your project already uses. Type{' '}
-              <Mono>nub install</Mono>{' '}and it detects npm, pnpm, or yarn, fetches the right version if
-              it&rsquo;s missing, and runs it.
+              Not a new package manager — Nub provisions and runs the one your project pins.
+              Corepack&rsquo;s job, in native Rust: the exact npm, pnpm, or yarn is fetched, verified,
+              cached, and run on the project&rsquo;s Node.
             </>
           }
           accent="pink"
@@ -948,22 +948,26 @@ function HypermanagerBand() {
         <div className="mt-10 divide-y divide-fd-border/60">
           <Feature
             accent="pink"
-            eyebrow="Detect + install"
-            title="Detects and installs your package manager"
+            eyebrow="Pin + provision"
+            title="Pin a version, get it everywhere"
             body={
               <>
-                Nub reads <Mono>package.json</Mono>{' '}(or infers from your lockfile) to see which
-                manager the project uses, then fetches and caches that exact version on demand — on
-                every machine and in CI. You never install or pin a package manager by hand.
+                <Mono>nub pm pin</Mono>{' '}takes an exact version, a range, or a tag — resolves it,
+                fetches and integrity-verifies the tarball, and writes the pin to{' '}
+                <Mono>package.json</Mono>. Every machine and CI runner provisions the same manager on
+                demand; a cached pin runs fully offline.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub install' },
-                  { out: '» detected pnpm@11 (package.json)' },
-                  { out: '» fetched + cached → ~/.cache/nub' },
-                  { out: '» pnpm install' },
+                  { cmd: 'nub pm pin pnpm@^9' },
+                  { out: 'Fetching pnpm 9.15.4 (4 MB)...' },
+                  { out: '✓ Installed pnpm 9.15.4 in 0.7s' },
+                  { out: 'pinned pnpm@9.15.4 → package.json' },
+                  { cmd: 'nub pm which' },
+                  { out: '~/.cache/nub/pm/pnpm/9.15.4/package/bin/pnpm.cjs' },
+                  { out: '» resolved from packageManager (pnpm@9.15.4)' },
                 ]}
               />
             }
@@ -972,22 +976,24 @@ function HypermanagerBand() {
           <Feature
             accent="pink"
             reverse
-            eyebrow="Normalized"
-            title="One spelling, every manager"
+            eyebrow="nub pm shim"
+            title="Bare commands, pinned versions"
             body={
               <>
-                The everyday verbs — <Mono>install</Mono>, <Mono>add</Mono>, <Mono>remove</Mono>,{' '}
-                <Mono>update</Mono>{' '}— are spelled once and mapped to your package manager&rsquo;s
-                own flags. Nub never emulates a missing feature: anything it can&rsquo;t map fails
-                fast and tells you to run your manager directly.
+                Opt-in shims make <em>bare</em>{' '}<Mono>npm</Mono>, <Mono>pnpm</Mono>, and{' '}
+                <Mono>yarn</Mono>{' '}— typed from muscle memory, or spawned by tools you don&rsquo;t
+                control — run the pinned version. The wrong manager is refused before it can write a
+                competing lockfile.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub add -D vitest', comment: '→ pnpm add -D vitest' },
-                  { cmd: 'nub install --frozen', comment: '→ pnpm install --frozen-lockfile' },
-                  { cmd: 'nub install --frozen', comment: '→ yarn install --immutable' },
+                  { cmd: 'nub pm shim', comment: 'opt-in, one-time' },
+                  { cmd: 'pnpm --version' },
+                  { out: '9.15.4' },
+                  { cmd: 'npm install' },
+                  { out: 'nub: this project pins pnpm — refusing to run npm.', bright: true },
                 ]}
               />
             }
@@ -996,20 +1002,21 @@ function HypermanagerBand() {
           <Feature
             accent="pink"
             eyebrow="vs Corepack"
-            title="Replaces Corepack, without the shims"
+            title="Corepack, without the Node tax"
             body={
               <>
-                Corepack does the same version provisioning — but by installing shims that hijack npm,
-                pnpm, and yarn on your <Mono>PATH</Mono>. Nub installs nothing global and intercepts
-                nothing: it&rsquo;s one binary you call explicitly. Same manager-agnostic result, no
-                PATH surgery, and your manager&rsquo;s exact output and lockfile.
+                Every Corepack shim boots a whole Node process just to decide which pnpm to run. A Nub
+                shim <em>is</em>{' '}the native binary — resolution costs zero Node boots, then it
+                execs the real manager. Unpinned projects fall through to the manager already on your{' '}
+                <Mono>PATH</Mono>{' '}(Corepack never does), and there&rsquo;s no baked version table to
+                go stale.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'corepack enable', comment: 'hijacks npm/pnpm/yarn on PATH' },
-                  { cmd: 'nub install', comment: 'no shims, nothing global' },
+                  { cmd: 'corepack enable', comment: 'every call boots Node to resolve' },
+                  { cmd: 'nub pm shim', comment: 'native resolution, then exec' },
                 ]}
               />
             }
@@ -1022,17 +1029,18 @@ function HypermanagerBand() {
             title="Take control when you want it"
             body={
               <>
-                The <Mono>nub pm</Mono>{' '}commands surface it all explicitly: see what resolves,
-                switch or pin a version, bump to the latest, or inspect the binary cache.
+                The <Mono>nub pm</Mono>{' '}commands surface it all explicitly: see what resolves and
+                why, pin or switch managers, bump within your range, or inspect the binary cache.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub pm which' },
-                  { out: 'pnpm 11.2.0  ·  ~/.cache/nub/pm/pnpm' },
-                  { cmd: 'nub pm switch yarn@4' },
-                  { out: 'pinned yarn@4 in package.json' },
+                  { cmd: 'nub pm update' },
+                  { out: 'pinned pnpm@9.15.9 → package.json' },
+                  { cmd: 'nub pm cache' },
+                  { out: 'pnpm@9.15.9' },
+                  { out: 'yarn@1.22.22' },
                 ]}
               />
             }
