@@ -31,18 +31,24 @@
 //! # Write-tier policy (yarn gate)
 //!
 //! aube's yarn.lock *write* fidelity is unproven, so anything that would
-//! mutate a detected `yarn.lock` (classic or berry) is refused:
-//! `install`/`ci` gate on drift or explicit-rewrite flags (frozen-satisfiable
-//! installs proceed — reads never rewrite); `add`/`remove`/`update` re-resolve
-//! by definition and are refused outright (their `--global` forms never touch
-//! the project lockfile and proceed); `dedupe` is refused except `--check`
-//! (which writes nothing); `patch-commit`/`patch-remove` chain into a
-//! prefer-frozen install that only rewrites on drift, so they gate exactly
-//! like `install` does (drifted yarn.lock ⇒ refuse; satisfiable ⇒ proceed,
-//! no write). The non-lockfile-writing verbs (`prune`, `rebuild`, `fetch`,
-//! `link`, `unlink`, `approve-builds`, `ignored-builds`, `dlx`, `import`,
-//! `patch`) are not gated — `import` *reads* yarn.lock and writes nub's own
-//! pnpm-lock.yaml.
+//! mutate `yarn.lock` (classic or berry) is refused. The gate keys on the
+//! session's RESOLVED identity (declared-first, see
+//! `super::resolve_identity_walk_up`), so it also covers the declared-yarn
+//! project with no yarn.lock yet — there a first install would *create*
+//! the gated file, refused in `run_install` / the patch chained-install
+//! pre-flight: `install`/`ci` gate on drift or explicit-rewrite flags
+//! (frozen-satisfiable installs proceed — reads never rewrite);
+//! `add`/`remove`/`update` re-resolve by definition and are refused
+//! outright (their `--global` forms never touch the project lockfile and
+//! proceed); `dedupe` is refused except `--check` (which writes nothing);
+//! `patch-commit`/`patch-remove` chain into a prefer-frozen install that
+//! only rewrites on drift, so they gate exactly like `install` does
+//! (drifted yarn.lock ⇒ refuse; satisfiable ⇒ proceed, no write). The
+//! non-lockfile-writing verbs (`prune`, `rebuild`, `fetch`, `link`,
+//! `unlink`, `approve-builds`, `ignored-builds`, `dlx`, `import`, `patch`)
+//! are not gated — `import` *reads* yarn.lock and writes nub's own
+//! pnpm-lock.yaml (and deliberately skips the session's identity errors:
+//! it must keep working in the contradicted states it cleans up).
 //!
 //! # nub-side divergences from aube's dispatch (each deliberate)
 //!
@@ -556,12 +562,18 @@ fn run_patch_remove(typed: &str, args: &[String]) -> Result<i32> {
 /// state `nub install` gates on, refused with the same message shape.
 fn patch_chained_install_yarn_gate(typed: &str, session: &EngineSession) -> Result<()> {
     if yarn_detected(session) {
-        let dir = &session
-            .detected
-            .as_ref()
-            .expect("yarn implies detection")
-            .dir;
-        if let Some(reason) = yarn_drift_reason(dir) {
+        let detected = session.detected.as_ref().expect("yarn implies detection");
+        // Declared yarn, no yarn.lock yet: the chained install would create
+        // one — the gated write (same guard as run_install's fresh arm).
+        if detected.fresh {
+            return Err(yarn_gate_error(
+                typed,
+                "this project declares yarn but has no yarn.lock yet — the chained \
+                 install would create it",
+                "yarn install",
+            ));
+        }
+        if let Some(reason) = yarn_drift_reason(&detected.dir) {
             return Err(yarn_gate_error(
                 typed,
                 &format!("the chained install would re-resolve a stale yarn.lock ({reason})"),
@@ -584,7 +596,12 @@ fn run_import(typed: &str, args: &[String]) -> Result<i32> {
     // import never chains into install (`--ignore-scripts`) and already
     // only writes the lockfile (`--lockfile-only`).
     let _ = (verb.ignore_scripts, verb.lockfile_only);
-    let _session = super::engine_session(globals.dir.as_deref())?;
+    // Deliberately NOT engine_session: its identity resolution errors on the
+    // contradicted / multi-lockfile states import exists to clean up, and
+    // import needs neither the runtime nor the layout policy — just the
+    // chdir and the brand seams (registered before any engine read).
+    super::apply_dir(globals.dir.as_deref())?;
+    super::engine_brand_preflight();
     match import_to_pnpm_lock(verb.force) {
         Ok(summary) => {
             present::info(&summary);
@@ -844,11 +861,19 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
 
     let yarn = yarn_detected(&session);
     if yarn {
-        let dir = &session
-            .detected
-            .as_ref()
-            .expect("yarn implies detection")
-            .dir;
+        let detected = session.detected.as_ref().expect("yarn implies detection");
+        // A declared-yarn project with NO yarn.lock yet (identity resolution's
+        // DeclaredFresh): the first install would *create* yarn.lock, which is
+        // exactly the write the gate exists to block.
+        if detected.fresh {
+            return Err(yarn_gate_error(
+                "install",
+                "this project declares yarn but has no yarn.lock yet — a fresh install \
+                 would create it",
+                "yarn install",
+            ));
+        }
+        let dir = &detected.dir;
         // Refuse upfront when the flags *ask* for a lockfile write…
         if flags.no_frozen_lockfile || flags.force || flags.lockfile_only {
             return Err(yarn_gate_error(
@@ -869,7 +894,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
         // Belt-and-braces: force strict-frozen so anything the pre-flight
         // missed errors instead of rewriting yarn.lock. (`strict_no_lockfile`
         // stays as `into_options` resolved it — a missing yarn.lock can't
-        // happen here; detection just saw one.)
+        // happen past the fresh guard above; detection just saw one.)
         opts.mode = FrozenMode::Frozen;
     }
 

@@ -361,6 +361,60 @@ mod tests {
     }
 
     #[test]
+    fn convert_lockfile_carries_resolution_state_into_the_target_format() {
+        // No network: a real (in-sync) npm v3 lockfile parses into the graph
+        // and writes back as pnpm format — version + integrity preserved,
+        // never delete-and-regenerate. (End-to-end, real pnpm accepts these
+        // conversions with --frozen-lockfile — the conformance harness and
+        // the ignored network e2e cover that; this pins the library seam.)
+        let dir = root(
+            "convert",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
+                ),
+                (
+                    "package-lock.json",
+                    r#"{
+  "name": "app",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": { "name": "app", "version": "1.0.0", "dependencies": { "is-positive": "3.1.0" } },
+    "node_modules/is-positive": {
+      "version": "3.1.0",
+      "resolved": "https://registry.npmjs.org/is-positive/-/is-positive-3.1.0.tgz",
+      "integrity": "sha512-8ND1j3y9/HP94TOvGzr69/FgbkX2ruOldhLEsTWwcJVfo4oRjwemJmJxt7RJkKYH8tz7vYBP9JcKQY8CLuJ90Q==",
+      "engines": { "node": ">=0.10.0" }
+    }
+  }
+}
+"#,
+                ),
+            ],
+        );
+        let written = convert_lockfile(
+            &dir,
+            &dir.join("package-lock.json"),
+            LockfileKind::Npm,
+            "pnpm",
+        )
+        .unwrap();
+        assert_eq!(written, dir.join("pnpm-lock.yaml"));
+        let body = std::fs::read_to_string(&written).unwrap();
+        assert!(
+            body.contains("is-positive@3.1.0") || body.contains("is-positive: 3.1.0"),
+            "the resolved version must survive the conversion:\n{body}"
+        );
+        assert!(
+            body.contains("sha512-8ND1j3y9"),
+            "the integrity must survive the conversion:\n{body}"
+        );
+    }
+
+    #[test]
     fn shrinkwrap_outranks_package_lock_as_the_npm_conversion_source() {
         // Both npm artifacts present: shrinkwrap is the source npm itself
         // honors first; both are removed after the migration.

@@ -544,34 +544,42 @@ pub(crate) fn stub_error(typed: &str, args: &[String], pm_hint: &str) -> anyhow:
     )
 }
 
-/// One prepared engine invocation: the detected lockfile (layout policy
-/// input) plus the tokio runtime the command runs on. Every family verb
-/// starts by calling [`engine_session`] instead of re-deriving the
-/// preflight/runtime recipe.
+/// One prepared engine invocation: the project's resolved PM identity
+/// (layout-policy input) plus the tokio runtime the command runs on. Every
+/// family verb starts by calling [`engine_session`] instead of re-deriving
+/// the preflight/runtime recipe.
 pub(crate) struct EngineSession {
     pub(crate) detected: Option<DetectedLockfile>,
     pub(crate) runtime: tokio::runtime::Runtime,
 }
 
 /// Build the shared engine context for one verb invocation: apply `--dir`,
-/// register the brand/seam toggles, detect the project lockfile (walking
-/// up), push the embedder setting defaults, and construct the runtime.
-/// Idempotent at the seam level (every seam is a `OnceLock`), which fits
-/// nub's one-command-per-process CLI shape.
+/// register the brand/seam toggles, resolve the project's PM identity
+/// (declared-first, walking up), push the embedder setting defaults, and
+/// construct the runtime. Idempotent at the seam level (every seam is a
+/// `OnceLock`), which fits nub's one-command-per-process CLI shape.
+///
+/// Identity resolution is the engine's declaration-aware policy
+/// (`aube_lockfile::resolve_project_lockfile_kind` — pin-over-inference per
+/// wiki/commands/pm/identity-policy.md, Axiom 1), so a declared PM outranks
+/// stray lockfiles, a declared-but-contradicted project errors loudly here
+/// (rendered through [`present`], with the `nub pm use` remedy), and an
+/// undeclared multi-lockfile project errors as ambiguous instead of
+/// silently picking by filename precedence.
 ///
 /// Ordering is load-bearing: the brand preflight must run before *any*
-/// engine code touches project config — even lockfile detection reads the
-/// workspace yaml transitively (`detect_existing_lockfile_kind` →
+/// engine code touches project config — even identity resolution reads the
+/// workspace yaml transitively (`resolve_project_lockfile_kind` →
 /// `aube_lock_filename` → `git_branch_lockfile_enabled` → workspace-config
 /// load), and the toggled getters freeze on first read. The embedder
-/// defaults are the one seam that *needs* the detection result, so they
+/// defaults are the one seam that *needs* the resolution result, so they
 /// land after it (they feed settings resolution, which no detection-path
 /// code consults).
 pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
     apply_dir(dir)?;
     engine_brand_preflight();
     let cwd = std::env::current_dir()?;
-    let detected = detect_lockfile_walk_up(&cwd);
+    let detected = resolve_identity_walk_up(&cwd)?;
     // Set-unless-user-set: ranks below CLI flags, env vars, and every
     // config file in the engine's settings precedence.
     aube::set_embedder_defaults(nub_setting_defaults(detected.as_ref()));
@@ -583,7 +591,9 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
 
 /// `--dir` / `-C` (and the global `--cwd`, which dispatch applies earlier):
 /// chdir before anything reads the project. Mirrors aube's global `-C`.
-fn apply_dir(dir: Option<&Path>) -> Result<()> {
+/// `pub(crate)` for the verbs that deliberately skip [`engine_session`]'s
+/// identity resolution (`import` — see its module note).
+pub(crate) fn apply_dir(dir: Option<&Path>) -> Result<()> {
     if let Some(dir) = dir {
         std::env::set_current_dir(dir)
             .with_context(|| format!("failed to change directory to {}", dir.display()))?;
@@ -593,24 +603,84 @@ fn apply_dir(dir: Option<&Path>) -> Result<()> {
 
 pub(crate) struct DetectedLockfile {
     pub(crate) kind: LockfileKind,
-    /// Directory the lockfile was found in (project / workspace root).
+    /// Directory the identity resolved in (project / workspace root).
     pub(crate) dir: PathBuf,
+    /// True when the kind comes from the manifest declaration alone
+    /// (`ResolvedLockfileKind::DeclaredFresh`) — no lockfile exists on disk
+    /// yet. The yarn write gate branches on this: a fresh declared-yarn
+    /// install would *create* yarn.lock, which is gated.
+    pub(crate) fresh: bool,
 }
 
-/// Find the project's existing lockfile, walking up like the PM-redirect
-/// detector does (a member dir inside a workspace has no lockfile of its own;
-/// the root's lockfile governs the layout).
-fn detect_lockfile_walk_up(cwd: &Path) -> Option<DetectedLockfile> {
+/// Resolve the project's PM identity, walking up like the PM-redirect
+/// detector does (a member dir inside a workspace has no lockfile or
+/// declaration of its own; the root's governs the layout). Per level the
+/// engine's declaration-aware policy applies — declaration first, lockfile
+/// inference second; contradiction/ambiguity are loud errors carrying the
+/// `nub pm use` remedy.
+fn resolve_identity_walk_up(cwd: &Path) -> Result<Option<DetectedLockfile>> {
+    use aube_lockfile::ResolvedLockfileKind;
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
-        if let Some(kind) = aube_lockfile::detect_existing_lockfile_kind(&dir) {
-            return Some(DetectedLockfile { kind, dir });
+        match aube_lockfile::resolve_project_lockfile_kind(&dir) {
+            Ok(ResolvedLockfileKind::Existing(kind)) => {
+                return Ok(Some(DetectedLockfile {
+                    kind,
+                    dir,
+                    fresh: false,
+                }));
+            }
+            Ok(ResolvedLockfileKind::DeclaredFresh(kind)) => {
+                return Ok(Some(DetectedLockfile {
+                    kind,
+                    dir,
+                    fresh: true,
+                }));
+            }
+            // Nothing at this level decides the identity — keep walking.
+            Ok(ResolvedLockfileKind::Fresh) => {}
+            Err(err) => return Err(identity_error(err)),
         }
         if !dir.pop() {
             break;
         }
     }
-    None
+    Ok(None)
+}
+
+/// Render the engine's structured identity errors (contradiction /
+/// ambiguity) for nub's surface: same message and stable code (rewritten
+/// `ERR_AUBE_*` → `ERR_NUB_*` by [`present`]), with nub's remedy in place
+/// of the engine's (`aube import` is not the verb nub users reach for —
+/// `nub pm use` is the one-command fix for both states). Exit code is the
+/// generic 1 (the session-build path has no per-code exit channel); the
+/// stable code string in the output is the contract scripts can branch on.
+fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
+    use aube_lockfile::Error as E;
+    const REMEDY: &str = "set the declaration: nub pm use <pm> — or remove the stale lockfile";
+    let report = match &err {
+        E::DeclarationMismatch {
+            declared,
+            field,
+            expected,
+            found,
+        } => miette::miette!(
+            code = aube_codes::errors::ERR_AUBE_LOCKFILE_DECLARATION_MISMATCH,
+            help = REMEDY,
+            "package.json declares `{declared}` (via `{field}`), but {expected} is missing — \
+             found {found} instead"
+        ),
+        E::AmbiguousLockfiles { found } => miette::miette!(
+            code = aube_codes::errors::ERR_AUBE_LOCKFILE_AMBIGUOUS,
+            help = REMEDY,
+            "multiple lockfiles found: {found} — cannot tell which package manager owns this \
+             project"
+        ),
+        // Any other detection failure (unreadable lockfile, parse error)
+        // renders as-is through the same brand rewrite.
+        other => miette::miette!("{other}"),
+    };
+    anyhow::anyhow!("{}", present::render_report(&report))
 }
 
 /// Register nub's brand/seam toggles on the engine's process-wide embedder
@@ -774,6 +844,7 @@ mod tests {
         let detected = |kind| DetectedLockfile {
             kind,
             dir: dir.path().to_path_buf(),
+            fresh: false,
         };
 
         // Flat-layout kinds ⇒ nodeLinker defaults to hoisted.
@@ -818,6 +889,7 @@ mod tests {
             let detected = detected.map(|kind| DetectedLockfile {
                 kind,
                 dir: dir.path().to_path_buf(),
+                fresh: false,
             });
             let defaults = nub_setting_defaults(detected.as_ref());
             assert_eq!(get(&defaults, "defaultLockfileFormat"), Some("pnpm"));
