@@ -182,13 +182,24 @@ fn install(
 
     let started = Instant::now();
     let tarball = work.join("package.tgz");
+    // uv/cargo-style progress: the announce line appears BEFORE the download (so
+    // a slow fetch isn't silence), and on a TTY the ✓ line OVERWRITES it — a
+    // finished session shows one line, not a redundant Installing/Installed
+    // pair. Non-TTY (CI logs, pipes) keeps both lines: there's no cursor to
+    // rewrite, and the announce timestamp is useful in a log.
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let mut announced = false;
     download::download_to_file_auth(&dist.tarball, &tarball, auth, |_done, total| {
         if !announced {
             announced = true;
-            match total {
-                Some(t) => eprintln!("Installing {pm} {} ({} MB)...", dist.version, t / 1_000_000),
-                None => eprintln!("Installing {pm} {}...", dist.version),
+            let size = match total {
+                Some(t) => format!(" ({} MB)", t / 1_000_000),
+                None => String::new(),
+            };
+            if tty {
+                eprint!("Installing {pm} {}{size}...", dist.version);
+            } else {
+                eprintln!("Installing {pm} {}{size}...", dist.version);
             }
         }
     })
@@ -236,8 +247,11 @@ fn install(
         }
     }
 
+    // \r + clear-to-EOL rewrites the announce line on a TTY (it was printed
+    // without a newline there); non-TTY just gets the second line.
+    let rewrite = if tty { "\r\x1b[K" } else { "" };
     eprintln!(
-        "✓ Installed {pm} {} in {:.1}s",
+        "{rewrite}✓ Installed {pm} {} in {:.1}s",
         dist.version,
         started.elapsed().as_secs_f64()
     );
