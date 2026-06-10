@@ -12,6 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 nub-core = { path = "../nub-core" }
+# Vendored aube (vendor/aube git submodule, nubjs/aube fork). Linkage spike:
+# first real path dep across the nub<->aube workspace boundary; aube-lockfile
+# is a pure library crate (no CLI/tokio surface). See vendor/aube/AGENTS.md.
+aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
 anyhow.workspace = true
 clap.workspace = true
 dotenvy = "0.15"

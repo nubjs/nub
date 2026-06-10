@@ -3808,6 +3808,28 @@ mod tests {
         Cli::try_parse_from(args)
     }
 
+    #[test]
+    fn aube_lockfile_detects_pnpm_lock_in_project_dir() {
+        // Linkage spike for the vendored aube workspace (vendor/aube submodule):
+        // proves the cross-workspace path dep on aube-lockfile compiles and links
+        // by exercising its lockfile-kind detection against a real temp dir.
+        use aube_lockfile::{LockfileKind, detect_existing_lockfile_kind};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            detect_existing_lockfile_kind(dir.path()),
+            None,
+            "empty project dir must detect no lockfile"
+        );
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
+            .expect("write pnpm-lock.yaml");
+        assert_eq!(
+            detect_existing_lockfile_kind(dir.path()),
+            Some(LockfileKind::Pnpm),
+            "pnpm-lock.yaml on disk must detect as LockfileKind::Pnpm"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn find_posix_sh_locates_sh() {

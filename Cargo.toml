@@ -1,5 +1,14 @@
 [workspace]
 members = ["crates/nub-cli", "crates/nub-core", "crates/nub-native"]
+# vendor/aube is its own Cargo workspace (the vendored aube package manager,
+# git submodule -> nubjs/aube fork). The exclude is load-bearing: nub crates
+# take `path` dependencies into vendor/aube/crates/*, and cargo auto-adopts
+# path deps living under the workspace directory as members unless excluded —
+# which would collide with aube's own [workspace] root. Excluded, the aube
+# crates still build as path deps (resolved into THIS workspace's Cargo.lock)
+# while their `workspace = true` field inheritance resolves against
+# vendor/aube/Cargo.toml.
+exclude = ["vendor/aube"]
 resolver = "3"
 
 [workspace.package]
