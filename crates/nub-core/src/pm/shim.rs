@@ -100,6 +100,45 @@ impl ShimName {
 /// (`npm --yes create x`) is not recognized — strictness errs toward refusing.
 pub const TRANSPARENT_VERBS: [&str; 4] = ["init", "create", "dlx", "exec"];
 
+/// Whether this shim invocation was spawned by an already-running package
+/// manager (a nested call), versus typed by the user at a shell (a top-level
+/// call). Decides whether a NAME-MISMATCH is a hard refusal (top-level — the
+/// user can fix their command) or a silent fall-through (nested — a lifecycle
+/// script three layers down invoked a different PM, and refusing would break an
+/// install the user never directly issued).
+///
+/// The signal is `npm_config_user_agent` / `npm_execpath` in the environment:
+/// every package manager sets `npm_config_user_agent` for the children it
+/// spawns (it is THE ecosystem-standard "a PM is running above me" marker — what
+/// `ni` / `package-manager-detector` read), so its presence means we were spawned
+/// by a running PM, not invoked from a bare shell. This is brand-safe: it is an
+/// `npm_*` variable the npm ecosystem owns, never a `NUB_*` sentinel of our own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nesting {
+    /// No `npm_config_user_agent`/`npm_execpath` in the environment — the user
+    /// typed `pnpm`/`npm`/`yarn` at a shell. Full strict refusal applies.
+    TopLevel,
+    /// A running PM set `npm_config_user_agent`/`npm_execpath` — we are a child
+    /// of an install in progress. A name mismatch falls through instead of
+    /// refusing, so a `pnpm` postinstall that shells out to `npm` is not broken.
+    Nested,
+}
+
+impl Nesting {
+    /// Read the nesting context from an env-var lookup. `getenv("npm_config_user_agent")`
+    /// or `getenv("npm_execpath")` being present (and non-empty) ⇒ [`Nesting::Nested`].
+    /// Pure over the lookup so the decision core stays testable without touching
+    /// the process environment.
+    pub fn from_env(mut getenv: impl FnMut(&str) -> Option<String>) -> Self {
+        let mut present = |k: &str| getenv(k).is_some_and(|v| !v.is_empty());
+        if present("npm_config_user_agent") || present("npm_execpath") {
+            Self::Nested
+        } else {
+            Self::TopLevel
+        }
+    }
+}
+
 /// Where a project's PM pin came from — named in the refusal message so the
 /// user knows which file to look at. The caller derives this when it resolves
 /// the pin (`resolve::committed_yarn_path` → [`PinProvenance::YarnPath`]; else
@@ -165,11 +204,21 @@ pub enum ShimDecision {
 ///   - unpinned → fall through, always (transparency is irrelevant);
 ///   - pinned + name match → run pinned, always (a transparent verb in a
 ///     MATCHED project still runs the pin — `pnpm dlx` in a pnpm repo uses the
-///     pinned pnpm);
+///     pinned pnpm). Nesting is irrelevant here: a same-PM nested call still
+///     runs the pin, exactly as a top-level one does;
 ///   - pinned + name mismatch → refuse, UNLESS transparent (`npx`/`pnpx`
 ///     binaries, or a first-token verb in [`TRANSPARENT_VERBS`]) → fall
-///     through to the system PM on PATH, NOT the pinned PM.
-pub fn decide(invoked: ShimName, pin: &PinState, first_arg: Option<&str>) -> ShimDecision {
+///     through to the system PM on PATH, NOT the pinned PM;
+///   - pinned + name mismatch + [`Nesting::Nested`] → fall through, NOT refuse:
+///     a running PM spawned this (a lifecycle script invoking a different PM),
+///     so refusing would break an install the user never directly typed. Only a
+///     TOP-LEVEL mismatch — one the user can actually fix — stays strict.
+pub fn decide(
+    invoked: ShimName,
+    pin: &PinState,
+    first_arg: Option<&str>,
+    nesting: Nesting,
+) -> ShimDecision {
     let PinState::Pinned {
         pm: pinned,
         provenance,
@@ -183,9 +232,14 @@ pub fn decide(invoked: ShimName, pin: &PinState, first_arg: Option<&str>) -> Shi
             bin_entry: invoked.bin_entry(),
         };
     }
+    // A name mismatch: transparent verbs always escape; a NESTED invocation
+    // (spawned by a running PM, e.g. a pnpm postinstall calling `npm`) escapes
+    // too — refusing there breaks an install the user issued at one layer up,
+    // never typed `npm` for, and can't fix from the failing command. Only a
+    // top-level, non-transparent mismatch the user can correct stays strict.
     let transparent = invoked.always_transparent()
         || first_arg.is_some_and(|verb| TRANSPARENT_VERBS.contains(&verb));
-    if transparent {
+    if transparent || nesting == Nesting::Nested {
         ShimDecision::FallThrough { invoked }
     } else {
         ShimDecision::Refuse {
@@ -200,6 +254,45 @@ pub fn decide(invoked: ShimName, pin: &PinState, first_arg: Option<&str>) -> Shi
 fn same_pm_name(a: Pm, b: Pm) -> bool {
     let yarn = |pm| matches!(pm, Pm::Yarn | Pm::YarnBerry);
     a == b || (yarn(a) && yarn(b))
+}
+
+/// Verbs that exist on `npm` but have NO equivalent of the same name on the
+/// target PM — suggesting `<pm> <verb>` for these would propose a command that
+/// errors. The canonical case is `ci`: npm-only (pnpm uses `install
+/// --frozen-lockfile`, yarn `install --immutable`), so `pnpm ci` / `yarn ci`
+/// are not real commands. We deliberately keep this list to the verbs we are
+/// CERTAIN diverge rather than trying to enumerate every PM's full surface — a
+/// false "unsupported" only costs a slightly less specific suggestion, while a
+/// false "supported" reintroduces the bug (a redirect to a command that fails).
+fn verb_absent_on(pinned: Pm, verb: &str) -> bool {
+    match pinned {
+        // pnpm and yarn have no `ci`; npm and (defensively) anything else do.
+        Pm::Pnpm | Pm::Yarn | Pm::YarnBerry => verb == "ci",
+        Pm::Npm => false,
+    }
+}
+
+/// What the refusal should tell the user to run instead. The redirect must never
+/// invent a verb the pinned PM lacks (the bug: a blind `<pm> <args…>` swap that
+/// suggested `pnpm ci`). The rule:
+///   - empty argv → just the bare PM name (`pnpm`);
+///   - a first verb the pinned PM also implements → the project PM with the SAME
+///     verb and its remaining args (`pnpm install react`);
+///   - a first verb the pinned PM does NOT implement → just `use <pinned-pm>`,
+///     with no synthesized verb mapping (`pnpm ci` → "use pnpm").
+///
+/// Returns the redirect TEXT (without the surrounding message framing) so the
+/// CLI owns the prose and this stays a pure, unit-testable decision.
+pub fn safe_redirect(pinned: Pm, args: &[String]) -> String {
+    let Some(verb) = args.first() else {
+        return pinned.to_string();
+    };
+    if verb_absent_on(pinned, verb) {
+        // No honest same-verb suggestion exists — don't fabricate one.
+        format!("use {pinned}")
+    } else {
+        format!("{pinned} {}", args.join(" "))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +339,92 @@ pub struct InstalledShim {
     pub copied: bool,
 }
 
+/// How long a shim-dir lockfile may sit before it's deemed stale and stolen —
+/// the holder crashed or was killed between create and cleanup. Install/remove
+/// is a handful of `link`/`unlink` syscalls (sub-millisecond); 30s is orders of
+/// magnitude past the longest honest hold, so stealing it can only happen after
+/// a real abandonment, never mid-operation.
+const LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A best-effort advisory lock on the shim dir, held for the duration of an
+/// install/remove. Created `O_EXCL` so exactly one creator wins the race; a
+/// lockfile older than [`LOCK_STALE`] is stolen (the previous holder died). The
+/// guard removes the file on drop. Lives at `<dir>.lock` in the parent
+/// (`~/.nub`, created first) so it also covers the shim dir's own
+/// `create_dir_all` / `remove_dir_all`.
+///
+/// What it closes: `nub pm shim`'s remove-then-link is NOT atomic per entry
+/// ([`install_shims_into`]'s documented ENOENT window). A re-link (e.g. the
+/// `nub upgrade` post-swap re-link) racing a parallel `pnpm -r` shim storm —
+/// many children exec'ing the same shim names while one process rewrites them —
+/// could otherwise catch an entry mid-swap. Serializing every install/remove on
+/// this lock means at most one process is rewriting the dir at a time, so a
+/// concurrent re-link can't interleave with another's remove-then-link. It does
+/// NOT make a single entry's swap atomic against a *reader* exec'ing that exact
+/// name — that window (microseconds, documented on [`install_shims_into`])
+/// stands; the lock only serializes WRITERS against each other.
+struct ShimLock {
+    path: PathBuf,
+}
+
+impl ShimLock {
+    /// Acquire the lock for `dir`. Best-effort: if every attempt fails for a
+    /// reason other than "already held" (e.g. a read-only parent), proceed
+    /// UNLOCKED rather than blocking a legitimate install — the lock is a
+    /// race-narrowing convenience, not a correctness gate. `None` = proceeding
+    /// without a held lock; `Some(guard)` = held, released on drop.
+    fn acquire(dir: &Path) -> Option<Self> {
+        let parent = dir.parent()?;
+        // The parent (`~/.nub`) must exist to hold the lockfile; this also
+        // pre-creates it for the install path's own create_dir_all.
+        std::fs::create_dir_all(parent).ok()?;
+        let path = parent.join(format!(
+            "{}.lock",
+            dir.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        // Spin for up to LOCK_STALE: a live holder finishes in sub-ms, so a
+        // wait this long means the holder is gone — steal and retry once.
+        let deadline = std::time::Instant::now() + LOCK_STALE;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true) // O_EXCL: exactly one creator wins
+                .open(&path)
+            {
+                Ok(_) => return Some(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Steal a stale lock (holder died mid-operation). Re-read
+                    // the mtime each iteration so a freshly-touched lock isn't
+                    // stolen out from under a live holder.
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .map(|t| t.elapsed().unwrap_or_default() > LOCK_STALE)
+                        .unwrap_or(true);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        // Waited a full stale-window for a lock that keeps
+                        // looking fresh — proceed unlocked rather than hang.
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                // Any other error (read-only parent, etc.): give up on locking
+                // and let the caller proceed — the lock is best-effort.
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
+impl Drop for ShimLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Populate [`shim_dir`] with hardlinks to `nub_binary` under every
 /// [`SHIM_NAMES`] entry. Idempotent — re-running re-links, which is also how
 /// shims are refreshed after `nub upgrade` (the upgrade writes a new inode, so
@@ -264,6 +443,9 @@ pub fn install_shims(nub_binary: &Path) -> Result<Vec<InstalledShim>> {
 /// is already current. On Windows, replacing a RUNNING shim `.exe` fails (the
 /// OS locks executing images) — unverified here, for the future CI leg.
 pub fn install_shims_into(dir: &Path, nub_binary: &Path) -> Result<Vec<InstalledShim>> {
+    // Serialize concurrent writers (a re-link racing a `pnpm -r` shim storm) on
+    // a best-effort advisory lock — see [`ShimLock`]. Held until this returns.
+    let _lock = ShimLock::acquire(dir);
     std::fs::create_dir_all(dir).with_context(|| format!("creating shim dir {}", dir.display()))?;
     let mut report = Vec::with_capacity(SHIM_NAMES.len());
     for name in SHIM_NAMES {
@@ -326,6 +508,9 @@ pub fn remove_shims() -> Result<bool> {
 
 /// [`remove_shims`] with an explicit dir (the testable body).
 pub fn remove_shims_from(dir: &Path) -> Result<bool> {
+    // Same writer-serializing lock as [`install_shims_into`]: an `unshim`
+    // racing a re-link must not remove the dir mid-link. Held until return.
+    let _lock = ShimLock::acquire(dir);
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -1006,13 +1191,99 @@ mod tests {
                 "unpinned + transparent is still a plain fall-through",
             ),
         ];
+        // Every row in this matrix is a TOP-LEVEL invocation (no PM running
+        // above us). The nested-call relaxation is exercised separately in
+        // `nested_mismatch_falls_through_top_level_still_refuses`.
         for (invoked, pin, arg, want, why) in cases {
             assert_eq!(
-                decide(*invoked, pin, *arg),
+                decide(*invoked, pin, *arg, Nesting::TopLevel),
                 *want,
                 "{why} (invoked {invoked:?}, first arg {arg:?})"
             );
         }
+    }
+
+    #[test]
+    fn nested_mismatch_falls_through_top_level_still_refuses() {
+        use ShimDecision::*;
+        use ShimName::*;
+        let pnpm = PinState::Pinned {
+            pm: Pm::Pnpm,
+            provenance: PinProvenance::PackageManagerField,
+        };
+
+        // The bug: a pnpm postinstall shells out to `npm install` (a name
+        // mismatch). TOP-LEVEL that refuses — the user typed it and can fix it.
+        assert_eq!(
+            decide(Npm, &pnpm, Some("install"), Nesting::TopLevel),
+            Refuse {
+                pinned_pm: Pm::Pnpm,
+                provenance: PinProvenance::PackageManagerField,
+            },
+            "a top-level npm-in-a-pnpm-project mismatch stays strict"
+        );
+        // NESTED (a running PM set npm_config_user_agent) it must fall through,
+        // not refuse — otherwise the pnpm-driven install breaks on its own hook.
+        assert_eq!(
+            decide(Npm, &pnpm, Some("install"), Nesting::Nested),
+            FallThrough { invoked: Npm },
+            "a nested mismatch falls through to the system PM instead of refusing"
+        );
+        // A nested SAME-PM call is unchanged: it still runs the pin. Nesting only
+        // relaxes the mismatch refusal, never the run-the-pin path.
+        assert_eq!(
+            decide(Pnpm, &pnpm, Some("install"), Nesting::Nested),
+            RunPinned {
+                pm: Pm::Pnpm,
+                bin_entry: "pnpm",
+            },
+            "a nested same-PM call still runs the pinned PM"
+        );
+
+        // The env reader: any non-empty PM marker means nested; absence/empty is
+        // top-level. (Either npm_config_user_agent or npm_execpath suffices.)
+        assert_eq!(
+            Nesting::from_env(|k| (k == "npm_config_user_agent").then(|| "pnpm/9.0.0".into())),
+            Nesting::Nested
+        );
+        assert_eq!(
+            Nesting::from_env(|k| (k == "npm_execpath").then(|| "/x/npm-cli.js".into())),
+            Nesting::Nested
+        );
+        assert_eq!(
+            Nesting::from_env(|k| (k == "npm_config_user_agent").then(String::new)),
+            Nesting::TopLevel,
+            "an empty marker is not a running PM"
+        );
+        assert_eq!(Nesting::from_env(|_| None), Nesting::TopLevel);
+    }
+
+    #[test]
+    fn safe_redirect_keeps_real_verbs_and_never_invents_a_missing_one() {
+        let v = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+        // A verb the pinned PM implements is suggested verbatim with its args.
+        assert_eq!(
+            safe_redirect(Pm::Pnpm, &v(&["install", "react"])),
+            "pnpm install react"
+        );
+        // `ci` is npm-only: the OLD code blindly suggested `pnpm ci`, which is
+        // not a real command. The redirect now drops to a verbless `use pnpm`
+        // rather than fabricating a verb pnpm/yarn lack.
+        assert_eq!(
+            safe_redirect(Pm::Pnpm, &v(&["ci"])),
+            "use pnpm",
+            "pnpm has no `ci` — suggest the PM, not a nonexistent verb"
+        );
+        assert_eq!(
+            safe_redirect(Pm::YarnBerry, &v(&["ci"])),
+            "use yarn",
+            "yarn has no `ci` either; Berry still prints `yarn`"
+        );
+        // npm DOES have `ci` — there the same-verb suggestion is honest.
+        assert_eq!(safe_redirect(Pm::Npm, &v(&["ci"])), "npm ci");
+        // No argv → bare PM name (nothing to swap).
+        assert_eq!(safe_redirect(Pm::Pnpm, &[]), "pnpm");
     }
 
     #[cfg(unix)]
@@ -1100,6 +1371,33 @@ mod tests {
             !remove_shims_from(&shims).unwrap(),
             "a second removal reports nothing-to-do, not an error"
         );
+    }
+
+    #[test]
+    fn shim_lock_is_exclusive_then_released_and_steals_a_stale_holder() {
+        let root = tmpdir("lock");
+        let shims = root.join("shims");
+        let lockfile = root.join("shims.lock"); // sibling: <parent>/<name>.lock
+
+        // First acquirer holds it; a second concurrent acquire of the SAME dir
+        // sees a fresh lock and — rather than block the suite — returns None
+        // (best-effort: proceed unlocked after the wait). We assert the held
+        // lockfile exists while the guard is alive, and is gone after drop.
+        let held = ShimLock::acquire(&shims).expect("first acquire wins");
+        assert!(lockfile.is_file(), "the lockfile exists while held");
+        drop(held);
+        assert!(!lockfile.exists(), "drop releases (removes) the lockfile");
+
+        // A STALE lock (mtime older than the window) is stolen: backdate the
+        // file's mtime past LOCK_STALE and confirm acquire reclaims it.
+        let f = std::fs::File::create(&lockfile).unwrap();
+        let old = std::time::SystemTime::now() - (LOCK_STALE + std::time::Duration::from_secs(5));
+        f.set_modified(old).unwrap();
+        drop(f);
+        let reclaimed = ShimLock::acquire(&shims).expect("a stale lock is stolen, not waited on");
+        assert!(lockfile.is_file(), "the reclaimed lock is freshly created");
+        drop(reclaimed);
+        assert!(!lockfile.exists());
     }
 
     #[test]

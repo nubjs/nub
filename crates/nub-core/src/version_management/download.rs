@@ -6,6 +6,13 @@
 //! SHA-256 inside it authenticates the tarball. No GPG gate in v0.1. Verification
 //! is mandatory and fail-closed — a missing entry or a mismatch is an error, and
 //! callers must verify BEFORE extracting (executables landing on disk).
+//!
+//! PM provisioning reuses this transport for the npm registry, which (unlike
+//! nodejs.org) may be a private mirror requiring an `Authorization` header — the
+//! `_auth`-bearing [`fetch_text_auth`] / [`download_to_file_auth`] variants carry
+//! it (the credential-free `fetch_text` / `download_to_file` delegate with no
+//! auth, so the Node path is untouched). Attempt failures retry a bounded
+//! number of times ([`MAX_ATTEMPTS`]); 4xx and integrity failures fail fast.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -13,6 +20,35 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
+
+/// An HTTP `Authorization` credential for a private registry. `Bearer` carries a
+/// token (`.npmrc` `_authToken` / `COREPACK_NPM_TOKEN`); `Basic` carries the
+/// already-base64-encoded `user:pass` (or the verbatim `.npmrc` `_auth`, which is
+/// itself that base64). The value is rendered straight into the header, so the
+/// caller owns the encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Auth {
+    Bearer(String),
+    Basic(String),
+}
+
+impl Auth {
+    /// The full `Authorization` header value (`Bearer <tok>` / `Basic <b64>`).
+    fn header_value(&self) -> String {
+        match self {
+            Auth::Bearer(tok) => format!("Bearer {tok}"),
+            Auth::Basic(b64) => format!("Basic {b64}"),
+        }
+    }
+}
+
+/// Bounded retry for transient transport failures (connection reset mid-stream,
+/// 5xx, timeout). 4xx and integrity mismatches are NOT transient and fail on the
+/// first attempt. Three total attempts with brief linear backoff is enough to
+/// ride out a flaky proxy / a registry hiccup without turning a hard failure into
+/// a multi-minute hang.
+const MAX_ATTEMPTS: u32 = 3;
+const RETRY_BACKOFF: Duration = Duration::from_millis(400);
 
 /// Blocking HTTP client: rustls (no OpenSSL), native roots so corporate MITM CAs
 /// keep working, and `HTTP(S)_PROXY` / `NO_PROXY` honored for free by reqwest.
@@ -25,15 +61,117 @@ fn client() -> Result<reqwest::blocking::Client> {
         .context("building HTTP client")
 }
 
+/// Attach the optional `Authorization` header to a request builder.
+fn with_auth(
+    req: reqwest::blocking::RequestBuilder,
+    auth: Option<&Auth>,
+) -> reqwest::blocking::RequestBuilder {
+    match auth {
+        Some(a) => req.header(reqwest::header::AUTHORIZATION, a.header_value()),
+        None => req,
+    }
+}
+
+/// Whether a transport error is worth retrying: a timeout or a
+/// connection-level fault (reset / refused / DNS blip) is transient; a TLS or
+/// redirect-policy error is not. `error_for_status` produces a `status()`-bearing
+/// error for non-2xx — those are classified by [`status_is_transient`], not here.
+fn err_is_transient(err: &reqwest::Error) -> bool {
+    if err.is_timeout() || err.is_connect() {
+        return true;
+    }
+    // A body-read fault mid-stream (peer closed the connection) surfaces as a
+    // generic request error with no status — treat it as transient so a dropped
+    // tarball stream retries rather than aborting the install.
+    err.status().is_none() && !err.is_builder() && !err.is_redirect()
+}
+
+/// 5xx (and 429) are transient; every other status (notably 4xx auth/not-found)
+/// is a hard failure that must not retry.
+fn status_is_transient(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Brief linear backoff between attempts (no jitter — this is a single-process
+/// one-shot provision, not a thundering-herd client).
+fn backoff(attempt: u32) {
+    std::thread::sleep(RETRY_BACKOFF * attempt);
+}
+
 /// GET a small text resource (e.g. `SHASUMS256.txt`), fail-closed on non-2xx.
 pub fn fetch_text(url: &str) -> Result<String> {
-    let resp = client()?
-        .get(url)
+    fetch_text_auth(url, None)
+}
+
+/// [`fetch_text`] with an optional private-registry `Authorization` header and the
+/// bounded transient-failure retry.
+pub fn fetch_text_auth(url: &str, auth: Option<&Auth>) -> Result<String> {
+    let client = client()?;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let last = attempt >= MAX_ATTEMPTS;
+        match try_fetch_text(&client, url, auth) {
+            Ok(body) => return Ok(body),
+            Err(e) if !last && e.transient => {
+                backoff(attempt);
+                continue;
+            }
+            Err(e) => return Err(e.error).with_context(|| format!("GET {url}")),
+        }
+    }
+}
+
+/// One `fetch_text` attempt; the [`Attempt`] wrapper tells the retry loop
+/// whether the failure is worth another try.
+fn try_fetch_text(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    auth: Option<&Auth>,
+) -> std::result::Result<String, Attempt> {
+    let resp = with_auth(client.get(url), auth)
         .send()
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("GET {url}"))?;
-    resp.text().with_context(|| format!("reading {url}"))
+        .map_err(Attempt::from_send)?;
+    let resp = resp.error_for_status().map_err(Attempt::from_status)?;
+    resp.text()
+        .map_err(|e| Attempt::transient(anyhow::Error::new(e)))
+}
+
+/// A failed attempt plus whether the retry loop should try again.
+struct Attempt {
+    error: anyhow::Error,
+    transient: bool,
+}
+
+impl Attempt {
+    fn transient(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            transient: true,
+        }
+    }
+    fn fatal(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            transient: false,
+        }
+    }
+    /// A send/connect/timeout failure (no HTTP status yet).
+    fn from_send(err: reqwest::Error) -> Self {
+        let transient = err_is_transient(&err);
+        Self {
+            error: anyhow::Error::new(err),
+            transient,
+        }
+    }
+    /// A non-2xx status from `error_for_status`: only 5xx/429 retry.
+    fn from_status(err: reqwest::Error) -> Self {
+        let transient = err.status().map(status_is_transient).unwrap_or(false);
+        Self {
+            error: anyhow::Error::new(err),
+            transient,
+        }
+    }
 }
 
 /// Stream `url` into `dest` (not buffered in memory — tarballs are tens of MB),
@@ -43,32 +181,78 @@ pub fn fetch_text(url: &str) -> Result<String> {
 pub fn download_to_file(
     url: &str,
     dest: &Path,
+    progress: impl FnMut(u64, Option<u64>),
+) -> Result<String> {
+    download_to_file_auth(url, dest, None, progress)
+}
+
+/// [`download_to_file`] with an optional private-registry `Authorization` header
+/// and bounded transient-failure retry. A mid-stream connection drop, a 5xx, or a
+/// timeout retries from scratch (the dest file is truncated on each attempt, so a
+/// partial body never corrupts the result); a 4xx fails fast. The `progress`
+/// callback may fire on a doomed attempt — callers gate their announce line on a
+/// latch (see `provision`), so a retried download announces at most once.
+pub fn download_to_file_auth(
+    url: &str,
+    dest: &Path,
+    auth: Option<&Auth>,
     mut progress: impl FnMut(u64, Option<u64>),
 ) -> Result<String> {
-    let mut resp = client()?
-        .get(url)
+    let client = client()?;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let last = attempt >= MAX_ATTEMPTS;
+        match try_download(&client, url, dest, auth, &mut progress) {
+            Ok(sha) => return Ok(sha),
+            Err(e) if !last && e.transient => {
+                backoff(attempt);
+                continue;
+            }
+            Err(e) => return Err(e.error).with_context(|| format!("downloading {url}")),
+        }
+    }
+}
+
+/// One streamed-download attempt. A non-2xx status or a connect failure before
+/// the first byte classifies via [`Attempt`]; a fault *during* the body stream
+/// is treated as transient (peer reset mid-tarball is the canonical retryable
+/// case). The dest file is (re)created at the top, so a retry starts clean.
+fn try_download(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    auth: Option<&Auth>,
+    progress: &mut impl FnMut(u64, Option<u64>),
+) -> std::result::Result<String, Attempt> {
+    let resp = with_auth(client.get(url), auth)
         .send()
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("GET {url}"))?;
+        .map_err(Attempt::from_send)?;
+    let mut resp = resp.error_for_status().map_err(Attempt::from_status)?;
     let total = resp.content_length();
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let mut file =
-        std::fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
+    let mut file = std::fs::File::create(dest)
+        .with_context(|| format!("create {}", dest.display()))
+        .map_err(Attempt::fatal)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut written = 0u64;
     loop {
-        let n = resp.read(&mut buf).context("reading response body")?;
+        // A read fault here is a mid-stream transport drop → retry.
+        let n = resp.read(&mut buf).map_err(|e| {
+            Attempt::transient(anyhow::Error::new(e).context("reading response body"))
+        })?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
+        // A local write failure is NOT transient (disk full / read-only) — fail fast.
         file.write_all(&buf[..n])
-            .with_context(|| format!("writing {}", dest.display()))?;
+            .with_context(|| format!("writing {}", dest.display()))
+            .map_err(Attempt::fatal)?;
         written += n as u64;
         progress(written, total);
     }
@@ -128,6 +312,35 @@ pub fn verify_checksum(actual_sha256_hex: &str, shasums: &str, filename: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_renders_the_authorization_header_value() {
+        assert_eq!(
+            Auth::Bearer("abc123".into()).header_value(),
+            "Bearer abc123"
+        );
+        // Basic carries the already-encoded credential verbatim.
+        assert_eq!(
+            Auth::Basic("dXNlcjpwYXNz".into()).header_value(),
+            "Basic dXNlcjpwYXNz"
+        );
+    }
+
+    #[test]
+    fn only_5xx_and_429_status_codes_retry() {
+        use reqwest::StatusCode;
+        // Server faults and rate-limit are transient.
+        assert!(status_is_transient(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(status_is_transient(StatusCode::BAD_GATEWAY));
+        assert!(status_is_transient(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(status_is_transient(StatusCode::TOO_MANY_REQUESTS));
+        // Auth/not-found/client errors must fail fast — retrying a 401 just
+        // wastes three round-trips against an auth-required mirror.
+        assert!(!status_is_transient(StatusCode::UNAUTHORIZED));
+        assert!(!status_is_transient(StatusCode::FORBIDDEN));
+        assert!(!status_is_transient(StatusCode::NOT_FOUND));
+        assert!(!status_is_transient(StatusCode::OK));
+    }
 
     // A realistic SHASUMS256.txt slice (two-space separator, real format).
     const SHASUMS: &str = "\

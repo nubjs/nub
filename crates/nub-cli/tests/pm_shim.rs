@@ -68,6 +68,12 @@ fn run(program: &Path, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (Stri
         let mut cmd = Command::new(program);
         cmd.args(args).current_dir(cwd);
         cmd.env_remove("npm_config_registry");
+        // Strip the PM-nesting markers from the inherited env so a top-level
+        // refusal/fall-through assertion is deterministic even when the suite
+        // itself was launched by a package manager (which would set these). The
+        // nested-re-entry tests set them back EXPLICITLY via `env`.
+        cmd.env_remove("npm_config_user_agent");
+        cmd.env_remove("npm_execpath");
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -233,6 +239,98 @@ fn transparent_verb_falls_through_to_the_system_pm_not_the_pin() {
         stdout,
         format!("FAKE:{}:create vite my-app\n", fake.display()),
         "the transparent fall-through targets the system npm, not the pinned pnpm"
+    );
+}
+
+#[test]
+fn nested_mismatched_pm_falls_through_instead_of_refusing() {
+    // The highest-value bug: the pinned pnpm runs a lifecycle script (a
+    // postinstall) that shells out to `npm`. That `npm` re-enters the shim as a
+    // name mismatch — and a strict refusal there would break an install the
+    // user issued as `pnpm install`, never typed `npm` for. The nesting marker
+    // `npm_config_user_agent` (set by every PM for its children) tells the shim
+    // we're nested, so the mismatch falls through to the system npm.
+    let work = tmp("nested");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{"packageManager":"pnpm@9.0.0"}"#,
+    )
+    .unwrap();
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    let fake = fake_pm(&sys, "npm");
+    let link = shim_link(&work, "npm");
+
+    let (stdout, stderr, code) = run(
+        &link,
+        &["install"],
+        &proj,
+        &[
+            ("PATH", sys.to_str().unwrap()),
+            ("HOME", work.to_str().unwrap()),
+            // The "a PM is running above me" marker a real pnpm sets for its
+            // spawned children — brand-safe (npm-owned), not a NUB_* sentinel.
+            ("npm_config_user_agent", "pnpm/9.0.0 npm/? node/v22.0.0"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a nested mismatch must NOT refuse — it falls through; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        format!("FAKE:{}:install\n", fake.display()),
+        "the nested npm runs the system npm rather than breaking the install"
+    );
+
+    // Control: the SAME invocation WITHOUT the marker (the user typed `npm
+    // install` at a shell) keeps the strict refusal.
+    let (stdout, _stderr, code) = run(
+        &link,
+        &["install"],
+        &proj,
+        &[
+            ("PATH", sys.to_str().unwrap()),
+            ("HOME", work.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 1, "a top-level mismatch still refuses");
+    assert!(
+        !stdout.contains("FAKE"),
+        "the strict refusal must not run the system npm, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn refusal_suggests_use_pnpm_for_an_npm_only_verb() {
+    // The verb-swap fix: a strict refusal must not synthesize a verb the pinned
+    // PM lacks. `npm ci` in a pnpm-pinned project must NOT suggest `pnpm ci`
+    // (pnpm has no `ci`) — it suggests the verbless `use pnpm`.
+    let work = tmp("ci-redirect");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{"packageManager":"pnpm@9.0.0"}"#,
+    )
+    .unwrap();
+    let link = shim_link(&work, "npm");
+
+    let (_stdout, stderr, code) = run(
+        &link,
+        &["ci"],
+        &proj,
+        &[
+            ("PATH", work.to_str().unwrap()),
+            ("HOME", work.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 1, "a top-level mismatch refuses; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("use pnpm") && !stderr.contains("pnpm ci"),
+        "the redirect must suggest `use pnpm`, never the nonexistent `pnpm ci`, got:\n{stderr}"
     );
 }
 

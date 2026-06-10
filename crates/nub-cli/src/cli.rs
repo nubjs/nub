@@ -4015,12 +4015,26 @@ fn shim_plan(
 ) -> Result<ShimPlan> {
     use nub_core::pm::Pm;
     use nub_core::pm::resolve::{self, PmTarget};
-    use nub_core::pm::shim::{self, ShimDecision};
+    use nub_core::pm::shim::{self, Nesting, ShimDecision};
 
     let target = resolve::resolve_target(cwd);
     let pin_state = shim_pin_state(cwd, target.as_ref());
 
-    match shim::decide(invoked, &pin_state, args.first().map(String::as_str)) {
+    // Nested re-entry: when a running PM (e.g. a pnpm postinstall) spawns this
+    // shim as a DIFFERENT PM, `npm_config_user_agent`/`npm_execpath` are set in
+    // our environment — the ecosystem-standard "a PM is running above me" marker
+    // (brand-safe: npm-owned vars, not a NUB_* sentinel). A name mismatch then
+    // falls through to the system PM instead of refusing, so the install the
+    // user issued one layer up isn't broken by its own lifecycle script. A
+    // top-level invocation (no marker) keeps full strict behavior.
+    let nesting = Nesting::from_env(|k| env::var(k).ok());
+
+    match shim::decide(
+        invoked,
+        &pin_state,
+        args.first().map(String::as_str),
+        nesting,
+    ) {
         ShimDecision::Refuse {
             pinned_pm,
             provenance,
@@ -4162,11 +4176,11 @@ fn shim_refusal_message(
     args: &[String],
 ) -> String {
     let invoked = invoked.as_str();
-    let paste = if args.is_empty() {
-        pinned.to_string()
-    } else {
-        format!("{pinned} {}", args.join(" "))
-    };
+    // The redirect must never synthesize a verb the pinned PM lacks: a blind
+    // `<pm> <args…>` swap suggested `pnpm ci`, but pnpm has no `ci`.
+    // `safe_redirect` returns `<pm> <same-verb> <args…>` only when the verb
+    // exists, else a verbless `use <pm>` — see shim::safe_redirect.
+    let paste = nub_core::pm::shim::safe_redirect(pinned, args);
     format!(
         "nub: the nub package-manager shims on your PATH (installed via `nub pm shim`) intercepted this.\n\
          This project pins {pinned} (via {provenance}) — refusing to run {invoked}.\n\
