@@ -140,10 +140,12 @@ fn store_path_prints_the_nub_namespaced_store() {
     let ctx = Ctx::new("store-path", MANIFEST);
     let (stdout, stderr, code) = ctx.run(&["store", "path"]);
     assert_eq!(code, 0, "stderr: {stderr}");
+    // Separator-normalize before comparing: on Windows the engine prints
+    // native `\` components while the expectation is joined with `/`.
     let expected = ctx.home.join("xdg-data/nub/store/v1");
     assert_eq!(
-        stdout.trim(),
-        expected.to_string_lossy(),
+        stdout.trim().replace('\\', "/"),
+        expected.to_string_lossy().replace('\\', "/"),
         "store path must resolve through nub's storeDir default"
     );
 }
@@ -212,6 +214,10 @@ fn config_set_routes_npmrc_first_and_get_reads_it_back() {
 /// `undefined` (pnpm parity; reviewer #7). A restricted location still
 /// reports `undefined` (that file genuinely doesn't set it), as do other
 /// unset keys (engine behavior, documented in the family module doc).
+/// Unix-only: the substitution rides the stdout fd capture, which is a
+/// documented no-op on Windows — there the engine's `undefined` passes
+/// through (same bucket as the other fd-capture Windows residuals).
+#[cfg(unix)]
 #[test]
 fn config_get_registry_resolves_the_default_when_unset() {
     let ctx = Ctx::new("get-reg", MANIFEST);

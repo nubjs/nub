@@ -178,10 +178,18 @@ if ! "$NUB" install >"$out3" 2>&1; then
   cat "$out3"
   fail "nub install (warning fixture) exited non-zero"
 fi
-grep -q 'WARN ignored build scripts' "$out3" || fail "ignored-build-scripts warning was swallowed (tracing bridge dead)"
-grep -q 'WARN_NUB_IGNORED_BUILD_SCRIPTS' "$out3" || fail "warning code not rewritten to WARN_NUB_*"
-grep -q 'Run \`nub approve-builds\`' "$out3" || fail "approve-builds hint not rebranded"
-grep -q 'deprecation warnings. Run \`nub deprecations' "$out3" || fail "transitive-deprecation hint not rebranded"
+# On failure, dump the captured install output — a CI log without it
+# leaves the miss undiagnosable (which line fired, which spelling leaked).
+fail_with_output() { echo "---- install output ($out3):"; cat "$out3"; fail "$@"; }
+grep -q 'WARN ignored build scripts' "$out3" || fail_with_output "ignored-build-scripts warning was swallowed (tracing bridge dead)"
+grep -q 'WARN_NUB_IGNORED_BUILD_SCRIPTS' "$out3" || fail_with_output "warning code not rewritten to WARN_NUB_*"
+# NB: plain backticks inside single quotes — '\`' would be a literal
+# backslash-backtick, which GNU grep parses as the buffer-start anchor
+# (never matches mid-line) while BSD grep treats it as an escaped
+# backtick. The mismatch made these two greps pass on macOS and fail on
+# every Linux runner.
+grep -q 'Run `nub approve-builds`' "$out3" || fail_with_output "approve-builds hint not rebranded"
+grep -q 'deprecation warnings. Run `nub deprecations' "$out3" || fail_with_output "transitive-deprecation hint not rebranded"
 if grep -inE 'aube|jdx\.dev' "$out3"; then
   fail "engine-branded identity reached the warning channel (above)"
 fi
