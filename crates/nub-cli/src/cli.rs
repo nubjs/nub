@@ -4451,14 +4451,15 @@ mod tests {
     fn engine_verbs_dispatch_to_the_family_stub() {
         // The registered-but-unwired surface must fail loud (stub error
         // naming the verb + the real-PM fallback), not fall through to the
-        // bareword/redirect arms. Exercise one alias through the real
-        // dispatch path.
-        let spec = crate::pm_engine::lookup_verb("rm").expect("rm must be registered");
-        let err = crate::pm_engine::dispatch_verb(spec, "rm", &["lodash".to_string()], "pnpm")
+        // bareword/redirect arms. `patch` is still a stub (the install
+        // family's daily drivers — add/rm/up/dlx/… — are wired and no
+        // longer hit this path).
+        let spec = crate::pm_engine::lookup_verb("patch").expect("patch must be registered");
+        let err = crate::pm_engine::dispatch_verb(spec, "patch", &["lodash".to_string()], "pnpm")
             .expect_err("stub verbs must error until wired");
         let msg = err.to_string();
         assert!(msg.contains("wired in phase Surface"), "{msg}");
-        assert!(msg.contains("pnpm rm lodash"), "{msg}");
+        assert!(msg.contains("pnpm patch lodash"), "{msg}");
     }
 
     /// A project dir whose `.npmrc` points the registry at an unroutable port, so

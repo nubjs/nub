@@ -67,6 +67,58 @@ pub(crate) fn info(msg: &str) {
     eprintln!("{}", rewrite(msg));
 }
 
+/// Help-grade rewrite: the config-vocabulary map below, then [`rewrite`].
+///
+/// Help text describes nub's *configured contract* — not runtime facts — so
+/// engine spellings of configuration locations are mapped to what nub's
+/// embedder seams actually configure: `defaultLockfileFormat=pnpm` (fresh
+/// lockfiles are `pnpm-lock.yaml`), the workspace-yaml list restricted to
+/// `pnpm-workspace.yaml`, the manifest config namespace restricted to
+/// `pnpm`, and `virtualStoreDir=node_modules/.nub`. Runtime messages must
+/// keep using [`rewrite`]: they may truthfully name on-disk files (a real
+/// `aube-lock.yaml` sitting in a project), which the word pass deliberately
+/// preserves and this map would falsify.
+///
+/// Also used for clap usage errors (same rendering path as help). Corner:
+/// a user-typed argument that happens to contain one of these spellings
+/// would be echoed back mapped — accepted, the echo still names a file the
+/// engine would treat identically.
+pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
+    const VOCAB: &[(&str, &str)] = &[
+        // Upstream lists both names; nub's list is pnpm-only — dedupe
+        // before the generic mapping below would double the survivor.
+        (
+            "`aube-workspace.yaml`, `pnpm-workspace.yaml`",
+            "`pnpm-workspace.yaml`",
+        ),
+        ("aube-workspace.yaml", "pnpm-workspace.yaml"),
+        ("aube-lock.yaml", "pnpm-lock.yaml"),
+        // "the aube/pnpm global directory", "aube/pnpm sidecar entries" —
+        // prose, never a path token.
+        ("aube/pnpm", "pnpm"),
+        ("package.json#aube.", "package.json#pnpm."),
+        // `$AUBE_HOME` is invisible to nub (env families); the registry
+        // location is described structurally instead.
+        (
+            "`$AUBE_HOME/global-links`",
+            "`global-links` in the engine's data directory",
+        ),
+        // `why --paths` example path: nub's virtualStoreDir default.
+        (".aube/<dep_path>", ".nub/<dep_path>"),
+        // The GVS location (add/install `--no-global-virtual-store` docs);
+        // described structurally — the literal path is engine cache state.
+        (
+            "`~/.cache/aube/virtual-store/`",
+            "the global virtual-store cache",
+        ),
+    ];
+    let mut text = text.as_ref().to_string();
+    for (from, to) in VOCAB {
+        text = text.replace(from, to);
+    }
+    rewrite(&text)
+}
+
 /// The brand rewrite. Order matters: codes first (so the `AUBE` inside
 /// `ERR_AUBE_*` never reaches the word pass), then per-line URL stripping,
 /// then the word-boundary `aube` → `nub` pass.
