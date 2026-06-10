@@ -445,6 +445,86 @@ pub enum Command {
         #[command(subcommand)]
         command: NodeCommand,
     },
+
+    /// Install dependencies from package.json via the embedded engine.
+    ///
+    /// Respects the project's existing lockfile (pnpm-lock.yaml,
+    /// package-lock.json, …) for both resolution and layout; see
+    /// src/pm_engine.rs for the layout policy and the yarn write gate.
+    #[command(visible_alias = "i")]
+    Install {
+        /// Hard-fail if the lockfile is out of date (default in CI).
+        #[arg(long)]
+        frozen_lockfile: bool,
+
+        /// Re-resolve and rewrite the lockfile even when it's stale.
+        #[arg(long, conflicts_with = "frozen_lockfile")]
+        no_frozen_lockfile: bool,
+
+        /// Use the lockfile when fresh, re-resolve when stale (default outside CI).
+        #[arg(
+            long,
+            conflicts_with_all = ["frozen_lockfile", "no_frozen_lockfile"]
+        )]
+        prefer_frozen_lockfile: bool,
+
+        /// Skip devDependencies; install only production deps.
+        #[arg(short = 'P', long, visible_alias = "production")]
+        prod: bool,
+
+        /// Install only devDependencies.
+        #[arg(short = 'D', long, conflicts_with = "prod")]
+        dev: bool,
+
+        /// Skip all lifecycle scripts (root and dependency).
+        #[arg(long)]
+        ignore_scripts: bool,
+
+        /// Skip optionalDependencies.
+        #[arg(long)]
+        no_optional: bool,
+
+        /// Never hit the network; fail if a package isn't cached.
+        #[arg(long)]
+        offline: bool,
+
+        /// Use cached packages when available, network otherwise.
+        #[arg(long, conflicts_with = "offline")]
+        prefer_offline: bool,
+
+        /// Resolve and write the lockfile, but skip linking node_modules.
+        #[arg(long)]
+        lockfile_only: bool,
+
+        /// Re-resolve and relink even when the install state says up-to-date.
+        #[arg(long)]
+        force: bool,
+
+        /// node_modules layout: `isolated` (pnpm-style) or `hoisted` (npm-style).
+        /// Overrides the lockfile-derived default.
+        #[arg(long, value_name = "MODE")]
+        node_linker: Option<String>,
+
+        /// Run as if started in <DIR> (aube/pnpm spelling of `--cwd`).
+        #[arg(short = 'C', long = "dir", value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+
+    /// Clean install for CI: delete node_modules, install strictly from the
+    /// lockfile (drift or a missing lockfile is a hard error).
+    Ci {
+        /// Skip all lifecycle scripts (root and dependency).
+        #[arg(long)]
+        ignore_scripts: bool,
+
+        /// Skip optionalDependencies.
+        #[arg(long)]
+        no_optional: bool,
+
+        /// Run as if started in <DIR> (aube/pnpm spelling of `--cwd`).
+        #[arg(short = 'C', long = "dir", value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
 }
 
 /// The `nub node` version-management verbs. Spec: `wiki/commands/node-versions.md`.
@@ -547,21 +627,23 @@ struct ScriptExecOpts<'a> {
     script_shell: Option<&'a str>,
 }
 
-/// Known subcommand names that clap should handle.
-const SUBCOMMANDS: &[&str] = &["run", "watch", "exec", "upgrade", "help", "node", "pm"];
+/// Known subcommand names that clap should handle. `install`/`i`/`ci` route
+/// to the embedded aube install engine (src/pm_engine.rs).
+const SUBCOMMANDS: &[&str] = &[
+    "run", "watch", "exec", "upgrade", "help", "node", "pm", "install", "i", "ci",
+];
 
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
 /// frontend (A2) was disabled 2026-06-09 in favor of the normalized standard
-/// surface (wiki/research/package-manager-normalized-surface.md — not yet
-/// implemented), so these verbs error with the project's real PM command instead
-/// of dispatching anything. Union of the npm/pnpm/yarn/bun staples plus their
-/// short aliases; must stay disjoint from SUBCOMMANDS (asserted in tests). `dlx`
-/// is deliberately absent — its spelling diverges per PM (`npx`/`bunx`), so a
+/// surface (wiki/research/package-manager-normalized-surface.md), whose first
+/// implemented slice is `install`/`i`/`ci` — those graduated out of this list
+/// into SUBCOMMANDS and dispatch to the embedded aube engine. The remaining
+/// verbs error with the project's real PM command instead of dispatching
+/// anything. Union of the npm/pnpm/yarn/bun staples plus their short aliases;
+/// must stay disjoint from SUBCOMMANDS (asserted in tests). `dlx` is
+/// deliberately absent — its spelling diverges per PM (`npx`/`bunx`), so a
 /// uniform `<pm> dlx` suggestion would be wrong for npm/bun.
 const PM_VERBS: &[&str] = &[
-    "install",
-    "i",
-    "ci",
     "add",
     "remove",
     "rm",
@@ -1209,6 +1291,44 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             run_help(command.as_deref());
             Ok(0)
         }
+        Some(Command::Install {
+            frozen_lockfile,
+            no_frozen_lockfile,
+            prefer_frozen_lockfile,
+            prod,
+            dev,
+            ignore_scripts,
+            no_optional,
+            offline,
+            prefer_offline,
+            lockfile_only,
+            force,
+            node_linker,
+            dir,
+        }) => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
+            frozen_lockfile,
+            no_frozen_lockfile,
+            prefer_frozen_lockfile,
+            prod,
+            dev,
+            ignore_scripts,
+            no_optional,
+            offline,
+            prefer_offline,
+            lockfile_only,
+            force,
+            node_linker,
+            dir,
+        }),
+        Some(Command::Ci {
+            ignore_scripts,
+            no_optional,
+            dir,
+        }) => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+            ignore_scripts,
+            no_optional,
+            dir,
+        }),
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
         // sub-verb match in `run_node`) and never reaches clap here.
         Some(Command::Node { .. }) => unreachable!("`node` is handled before clap dispatch"),
@@ -3821,8 +3941,11 @@ mod tests {
             None,
             "empty project dir must detect no lockfile"
         );
-        std::fs::write(dir.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
-            .expect("write pnpm-lock.yaml");
+        std::fs::write(
+            dir.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .expect("write pnpm-lock.yaml");
         assert_eq!(
             detect_existing_lockfile_kind(dir.path()),
             Some(LockfileKind::Pnpm),
@@ -4287,7 +4410,11 @@ mod tests {
         // Reserved verbs are recognized by the pre-parse and dispatch natively;
         // PM_VERBS exists only to redirect (the A2 passthrough is disabled). A
         // verb in both sets would make the redirect arm unreachable.
-        for verb in ["run", "exec", "node", "pm", "watch", "upgrade", "help"] {
+        // `install`/`i`/`ci` graduated from PM_VERBS to native verbs (the
+        // embedded aube engine, src/pm_engine.rs) — they must stay native.
+        for verb in [
+            "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci",
+        ] {
             assert!(
                 SUBCOMMANDS.contains(&verb),
                 "{verb} must be a reserved native verb"

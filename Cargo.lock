@@ -416,6 +416,7 @@ dependencies = [
 name = "aube-settings"
 version = "1.18.2"
 dependencies = [
+ "aube-util",
  "serde",
  "toml 1.1.2+spec-1.1.0",
  "yaml_serde",
@@ -2902,6 +2903,7 @@ dependencies = [
  "anyhow",
  "aube",
  "aube-lockfile",
+ "aube-manifest",
  "clap",
  "dotenvy",
  "nub-core",
@@ -2909,6 +2911,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
