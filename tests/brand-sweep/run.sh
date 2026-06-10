@@ -69,11 +69,16 @@ if ! "$NUB" install >"$out_file" 2>&1; then
   fail "nub install exited non-zero"
 fi
 
-# 1. No engine-branded codes or URLs in combined stdout+stderr.
-if grep -nE 'ERR_AUBE_|WARN_AUBE_|aube\.jdx\.dev' "$out_file"; then
-  fail "engine-branded code/URL reached nub's output (above)"
+# 1. No engine-branded identity in combined stdout+stderr — not just the
+# ERR_AUBE_/WARN_AUBE_ codes and aube.jdx.dev URLs, but ANY 'aube' token and
+# the 'by jdx.dev' attribution (which caught the real leak this assertion is
+# scar tissue from: the engine's no-op banner printed
+# 'aube 1.18.2-DEBUG by jdx.dev · ✓ Already up to date' verbatim). The fixture
+# is aube-free by construction, so zero occurrences is the right bar.
+if grep -inE 'aube|jdx\.dev' "$out_file"; then
+  fail "engine-branded identity reached nub's output (above)"
 fi
-pass "no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev in install output"
+pass "no aube/jdx.dev identity in install output"
 
 # 2. The AUBE_* canary had no effect.
 [ ! -e "$AUBE_VIRTUAL_STORE_DIR" ] || fail "AUBE_VIRTUAL_STORE_DIR was honored — AUBE_* env family is live"

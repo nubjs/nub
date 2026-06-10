@@ -1,0 +1,47 @@
+# KNOWN-GAP list for the nub-adapted run of aube's bats suite (run.sh beside
+# this). Format: suite.bats|exact @test name|reason
+#
+# Unlike skips.txt (permanent, intended divergences), every entry here is a
+# REAL gap in nub's PM surface that in-flight work is expected to close —
+# verb/flag wiring, presentation passthrough, exit-code mapping. Each lands
+# as `skip "KNOWN-GAP: ..."` so the job stays green while the gap is loud in
+# the bats output. This list must SHRINK: when the wiring lands, delete the
+# entries and let the tests assert for real. Enumerated 2026-06-10 against
+# nub @ the aube-integration branch; reasons name the missing piece.
+
+# ── engine info/warn lines don't surface through nub's output yet ───────────
+install.bats|aube install regenerates lockfile with merge conflict markers|engine 'conflict markers' warning line not surfaced
+install.bats|aube install --lockfile-only warns once for merge conflict markers|engine 'conflict markers' warning line not surfaced
+install.bats|aube install without lockfile resolves from scratch|engine 'No lockfile found' line not surfaced
+install.bats|aube install --no-frozen-lockfile always re-resolves|engine 'No lockfile found' line not surfaced
+install.bats|aube install --prefer-frozen-lockfile re-resolves on drift|engine 'Lockfile out of date' line not surfaced
+install.bats|aube install --prod skips devDependencies|engine '--prod: skipping' line not surfaced
+lockfile_settings.bats|lockfile=false + --frozen-lockfile errors with a clear message|conflict error text not surfaced
+
+# ── global PM flags before the verb fall through to the file-run path ───────
+install.bats|aube install prints direct dependency summary in append-only text mode|global --reporter before the verb reaches node as a node flag
+install.bats|aube install does not print human dependency summary in ndjson mode|global --reporter before the verb reaches node as a node flag
+install.bats|aube install labels workspace dependency summaries by package name|global --reporter before the verb reaches node as a node flag
+
+# ── verbs / aliases / flags not wired yet ───────────────────────────────────
+install.bats|aube recursive install honors nested --frozen-lockfile|'recursive' verb staged (phase Surface)
+install.bats|aube recursive install honors nested --registry|'recursive' verb staged (phase Surface)
+install.bats|aube install --fix-lockfile is a no-op on a fresh lockfile|--fix-lockfile not wired
+install.bats|aube install --fix-lockfile preserves unchanged deps when new dep is added|--fix-lockfile not wired
+install.bats|aube install --fix-lockfile --lockfile-only is a no-op on a fresh lockfile|--fix-lockfile not wired
+install.bats|aube install --fix-lockfile --lockfile-only heals drift without linking|--fix-lockfile not wired
+install.bats|aube install --fix-lockfile conflicts with --frozen-lockfile|--fix-lockfile not wired
+install.bats|aube install --fix-lockfile conflicts with --no-frozen-lockfile|--fix-lockfile not wired
+install.bats|aube install --fix-lockfile conflicts with --prefer-frozen-lockfile|--fix-lockfile not wired
+install.bats|aube install --network-concurrency caps tarball fetches|--network-concurrency / --no-verify-store-integrity / --no-side-effects-cache not wired
+install.bats|aube install --lockfile-only conflicts with --frozen-lockfile|flag-conflict validation not wired
+ci.bats|aube clean-install is an alias for aube ci|clean-install alias not wired
+lockfile_dir.bats|aube install --lockfile-dir: writes lockfile to the named dir, not the project root|--lockfile-dir not wired
+lockfile_dir.bats|aube install --lockfile-dir: importer key is the project's relative path|--lockfile-dir not wired
+lockfile_dir.bats|aube install --lockfile-dir: creates the target directory if missing|--lockfile-dir not wired
+lockfile_dir.bats|aube install --lockfile-dir: refuses to write a lockfile already used by another project|--lockfile-dir not wired
+lockfile_dir.bats|aube install --lockfile-dir: refuses to clobber a parent dir that is itself a project|--lockfile-dir not wired
+lockfile_dir.bats|aube install --lockfile-dir: warm install reads the relocated lockfile|--lockfile-dir not wired
+
+# ── exit-code mapping ───────────────────────────────────────────────────────
+lockfile_settings.bats|lockfile tarball URLs are verified against registry metadata before fetch|expected failure exit not produced (engine exit-code mapping gap)

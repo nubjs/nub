@@ -1,0 +1,38 @@
+# Skip-list for the nub-adapted run of aube's bats suite (run.sh beside this).
+# Format: suite.bats|exact @test name|reason   (reason prints in bats output)
+#
+# ONLY tests asserting aube-branded behavior nub DELIBERATELY toggles off
+# belong here — intended, permanent divergences. Tests failing on in-flight
+# work go in known-gaps.txt instead; tests failing for any other reason are
+# real defects to fix, not to list.
+
+# ── virtual store / engine state are nub-named (node_modules/.nub) ──────────
+install.bats|aube install creates node_modules|virtual store lands at node_modules/.nub, not node_modules/.aube
+install.bats|aube install creates .aube virtual store|virtual store lands at node_modules/.nub
+install.bats|aube install creates transitive dep symlinks in .aube|virtual store lands at node_modules/.nub
+install.bats|aube install writes state at node_modules/.aube-state|engine state stem follows nub's store naming (rename of the leaf-fixed .aube-state basename is tracked separately)
+install.bats|aube install --no-frozen-lockfile restores missing lockfile from fresh state|asserts the node_modules/.aube-state path
+install.bats|aube install self-heals when a CAS shard goes missing under a cached index|asserts the node_modules/.aube path
+install.bats|aube install preserves npm-alias as folder on fresh resolve|walks the node_modules/.aube tree
+add.bats|aube add jsr: resolves against the @jsr scope and writes jsr:<range>|asserts the node_modules/.aube path
+lockfile_settings.bats|modulesDir=custom installs into the configured directory|asserts <modulesDir>/.aube; nub's virtual store stem is .nub
+
+# ── fresh projects default to pnpm-lock.yaml (defaultLockfileFormat=pnpm) ───
+install.bats|aube install in CI generates a lockfile when none is present|fresh projects write pnpm-lock.yaml, not aube-lock.yaml
+install.bats|aube install --lockfile-only writes lockfile without node_modules|fresh projects write pnpm-lock.yaml
+install.bats|aube install --lockfile-only works under CI=1|fresh projects write pnpm-lock.yaml
+install.bats|aube install --lockfile-only skips preinstall hook|fresh projects write pnpm-lock.yaml
+install.bats|aube install --lockfile-only re-resolves on workspace catalog drift|fresh projects write pnpm-lock.yaml
+install.bats|aube install rewrites lockfile when a dep moves between sections|fresh projects write pnpm-lock.yaml
+add.bats|aube add: adds a package to dependencies|fresh projects write pnpm-lock.yaml
+add.bats|aube add --filter updates workspace root lockfile and install layout|fresh projects write pnpm-lock.yaml
+add.bats|aube add -W: adds to workspace root when opted in|fresh projects write pnpm-lock.yaml
+update.bats|aube update --latest: preserves catalog manifest specifiers|fresh projects write pnpm-lock.yaml
+update.bats|aube update preserves cross-platform optional deps in lockfile|fresh projects write pnpm-lock.yaml
+lockfile_settings.bats|lockfileIncludeTarballUrl=true embeds tarball URLs in aube-lock.yaml|fresh projects write pnpm-lock.yaml
+
+# ── verb/flag collisions where nub's own surface wins (settled policy) ──────
+install.bats|aube run auto-reinstalls after --dev install|'run' is nub's native script runner (collision policy); no PM auto-reinstall
+install.bats|aube run auto-reinstalls after --prod install|'run' is nub's native script runner (collision policy); no PM auto-reinstall
+install.bats|aube run auto-installs when installed package metadata is missing|'run' is nub's native script runner (collision policy); also walks node_modules/.aube
+install.bats|aube install ignores --network-concurrency=0 and falls back to default|test invokes 'aube -v' — nub's -v is --version (reserved); re-evaluate when the flag wiring lands

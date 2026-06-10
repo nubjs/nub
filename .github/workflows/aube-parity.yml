@@ -28,12 +28,16 @@ on:
       - "vendor/aube"
       - ".gitmodules"
       - ".github/workflows/aube-parity.yml"
+      # tests/aube-bats/** is the nub-adapted harness (shim + skip lists) the
+      # aube-bats-nub job runs.
+      - "tests/aube-bats/**"
   pull_request:
     branches: [main]
     paths:
       - "vendor/aube"
       - ".gitmodules"
       - ".github/workflows/aube-parity.yml"
+      - "tests/aube-bats/**"
 
 env:
   CARGO_TERM_COLOR: always
@@ -63,7 +67,32 @@ jobs:
       - name: Run aube's own test suite
         working-directory: vendor/aube
         run: cargo test --workspace
-      # TODO: bats e2e + offline-registry shards: phase 4, see epic. aube's
-      # bats suite needs its harness tooling (mise-provisioned bats + the
-      # offline registry fixtures upstream shards 4-ways on linux); don't
-      # bolt it on here without that plumbing.
+      # aube's own bats e2e (aube-as-aube, 4-way linux shards upstream) is
+      # still not bolted on here — it needs mise-provisioned tooling. The
+      # NUB-ADAPTED bats run below is a different animal: it needs only the
+      # vendored bats + committed Verdaccio fixtures, with nub standing in
+      # for aube.
+
+  aube-bats-nub:
+    name: aube bats, nub-adapted (ubuntu)
+    # Runs the curated install-family subset of aube's own bats e2e suite
+    # against NUB's PM surface (tests/aube-bats/run.sh: an `aube` shim that
+    # exec's nub, the offline Verdaccio registry, and the two skip lists —
+    # skips.txt for intended divergences, known-gaps.txt for in-flight
+    # wiring). One ubuntu shard on purpose: the signal is PM-surface
+    # behavior, not OS coverage.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Build nub
+        run: cargo build -p nub-cli
+      - name: Run aube bats suites against nub
+        run: tests/aube-bats/run.sh target/debug/nub
