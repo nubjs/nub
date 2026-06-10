@@ -25,3 +25,10 @@ sha2.workspace = true
 tracing.workspace = true
 tempfile = "3"
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# Embedding-seam spike: the aube *lib* target (command layer behind
+# `aube::cli_main`/`aube::commands`). Dev-only for now so nub's release
+# binary doesn't carry the full aube graph until the real PM integration
+# lands; the #[cfg(test)] smoke in src/cli.rs proves the seam links.
+aube = { path = "../../vendor/aube/crates/aube" }

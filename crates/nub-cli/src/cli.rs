@@ -3830,6 +3830,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn aube_lib_seam_exposes_install_entry_point() {
+        // Embedding-seam spike for the aube *library* target (vendor/aube fork,
+        // lib split landed in nubjs/aube@b15cdcb): proves nub can construct the
+        // install options and reach `commands::install::run` without shelling
+        // out. No network, no install run — this is a link/shape check only.
+        use aube::commands::install::{FrozenMode, InstallOptions};
+
+        let opts = InstallOptions::with_mode(FrozenMode::Prefer);
+        assert!(
+            matches!(opts.mode, FrozenMode::Prefer),
+            "with_mode must store the requested frozen mode"
+        );
+        // Name the async entry point so the seam (not just the options struct)
+        // must resolve and link.
+        let _entry = aube::commands::install::run;
+    }
+
     #[cfg(unix)]
     #[test]
     fn find_posix_sh_locates_sh() {
