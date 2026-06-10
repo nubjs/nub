@@ -116,20 +116,20 @@ const PIECES: {
     blurb: (
       <>
         Not a new package manager — Nub provisions and runs the one your project pins.{' '}
-        Corepack&rsquo;s job, in native Rust: <Mono>nub pm pin</Mono> records the exact version,{' '}
-        and it&rsquo;s fetched, verified, and cached on every machine that needs it. Opt-in shims
-        make even bare <Mono>pnpm</Mono> run the pinned version.
+        Corepack&rsquo;s job, in native Rust: <Mono>nub pm shim</Mono> makes even bare{' '}
+        <Mono>pnpm</Mono> run the pinned version — fetched, verified, and cached on demand —
+        and refuses the wrong manager before it can write a competing lockfile.
       </>
     ),
     replaces: ['corepack'],
     lines: [
-      { cmd: 'nub pm pin pnpm@^9' },
-      { out: 'Fetching pnpm 9.15.4 (4 MB)...' },
+      { cmd: 'nub pm shim', comment: 'opt-in, one-time' },
+      { cmd: 'pnpm --version' },
+      { out: 'Installing pnpm 9.15.4 (4 MB)...' },
       { out: '✓ Installed pnpm 9.15.4 in 0.7s' },
-      { out: 'pinned pnpm@9.15.4 → package.json', bright: true },
-      { cmd: 'nub pm which' },
-      { out: '~/.cache/nub/pm/pnpm/9.15.4/package/bin/pnpm.cjs', bright: true },
-      { out: '» resolved from packageManager (pnpm@9.15.4)' },
+      { out: '9.15.4', bright: true },
+      { cmd: 'npm install' },
+      { out: 'nub: this project pins pnpm — refusing to run npm.', bright: true },
     ],
   },
 ];
