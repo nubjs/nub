@@ -73,16 +73,23 @@ stage_suite() {
   local suite="$1"
   awk -v suite="$suite" -v skipfile="$SKIPLIST" -v gapfile="$GAPLIST" '
     BEGIN {
+      # A "*" test name marks the WHOLE suite (e.g. a verb not wired at
+      # all yet). Specific entries win over the wildcard so permanent
+      # divergences keep their own reason while the wildcard is live.
       while ((getline line < skipfile) > 0) {
         if (line ~ /^[[:space:]]*(#|$)/) continue
         split(line, a, "|")
-        if (a[1] == suite) reasons[a[2]] = "nub-divergence: " a[3]
+        if (a[1] != suite) continue
+        if (a[2] == "*") wildcard = "nub-divergence: " a[3]
+        else reasons[a[2]] = "nub-divergence: " a[3]
       }
       close(skipfile)
       while ((getline line < gapfile) > 0) {
         if (line ~ /^[[:space:]]*(#|$)/) continue
         split(line, a, "|")
-        if (a[1] == suite) reasons[a[2]] = "KNOWN-GAP: " a[3]
+        if (a[1] != suite) continue
+        if (a[2] == "*") wildcard = "KNOWN-GAP: " a[3]
+        else reasons[a[2]] = "KNOWN-GAP: " a[3]
       }
       close(gapfile)
     }
@@ -93,6 +100,8 @@ stage_suite() {
         if (name in reasons) {
           printf "\tskip \"%s\"\n", reasons[name]
           used[name] = 1
+        } else if (wildcard != "") {
+          printf "\tskip \"%s\"\n", wildcard
         }
       }
     }
