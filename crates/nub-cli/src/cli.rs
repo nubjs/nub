@@ -737,8 +737,10 @@ fn run_nub() -> Result<i32> {
             "--watch" => watch = true,
             "--node" => compat = true,
             "--silent" | "-s" => silent = true,
-            "--verbose" => { /* consumed, not forwarded */ }
-            "--show-warnings" => show_warnings = true,
+            // `--verbose` is the user-facing spelling; `--show-warnings` is its
+            // legacy twin. Both raise nub's diagnostic verbosity (e.g. the full
+            // transport-error chain behind the one-line offline message).
+            "--verbose" | "--show-warnings" => show_warnings = true,
             "--cwd" => {
                 i += 1;
                 if i < raw_args.len() {
@@ -3294,6 +3296,27 @@ fn run_help(command: Option<&str>) {
     }
 }
 
+/// Discover the project's Node for the read-only status paths (`nub node` /
+/// `nub node which`), with the `PinnedNotFound` remedy rewritten to nub's model.
+///
+/// The nub-core `DiscoveryError::PinnedNotFound` text is now nub-correct at the
+/// source (it points at `nub node install`, not nvm/compat mode). This remap adds
+/// the status-specific guidance that the root error doesn't carry — *which fields*
+/// establish a pin — since the read-only status paths don't auto-provision and the
+/// user is most likely here to debug where the pin came from.
+fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::ResolvedNode> {
+    use nub_core::node::discovery::DiscoveryError;
+    nub_core::node::discovery::discover_node(cwd).map_err(|e| match e {
+        DiscoveryError::PinnedNotFound { pin, shell_version } => anyhow::anyhow!(
+            "pinned Node version {pin} not found\n\
+             \x20\x20Active shell Node: {shell_version} (does not satisfy the pin)\n\
+             \x20\x20Provision it: nub node install {pin} (or run a file — nub installs the pin on demand)\n\
+             \x20\x20The pin comes from .node-version / .nvmrc / engines.node / devEngines.runtime."
+        ),
+        other => anyhow::Error::new(other),
+    })
+}
+
 /// `nub node …` — the version-management command group (install / ls / uninstall
 /// / pin). Non-forwarding; manual sub-verb match so the bare-usage and the
 /// `nub node <file>` error read exactly as the spec specifies.
@@ -3322,7 +3345,7 @@ fn run_node(args: &[String]) -> Result<i32> {
 
     // Bare `nub node`: status — the resolved version, its path, and why.
     if verb.is_none() {
-        let node = nub_core::node::discovery::discover_node(&cwd)?;
+        let node = discover_node_for_status(&cwd)?;
         println!("node {}", node.version);
         println!("  path      {}", node.path);
         println!("  resolved  {}", resolution_source(&cwd));
@@ -3336,7 +3359,7 @@ fn run_node(args: &[String]) -> Result<i32> {
             // Resolution explainer → stderr (diagnostics), suppressible with
             // `2>/dev/null`. Path is written (and flushed) first so an interactive
             // run shows it above the explainer.
-            let node = nub_core::node::discovery::discover_node(&cwd)?;
+            let node = discover_node_for_status(&cwd)?;
             println!("{}", node.path);
             use std::io::Write as _;
             std::io::stdout().flush().ok();
@@ -3425,6 +3448,86 @@ fn pm_store_root() -> Result<PathBuf> {
     })
 }
 
+/// Preflight a project's `package.json` for parseability. Resolution treats an
+/// unparseable manifest as "no PM pinned" (every read swallows the parse error
+/// into `None` — `detect_project` / `root_manifest`), which misdiagnoses a typo'd
+/// brace as an unpinned project. This walks up from `cwd` to the nearest
+/// `package.json` and, if it exists but doesn't parse, errors with the file path
+/// and serde's reason (line/column) instead. A missing manifest is not this
+/// function's concern — that genuinely IS unpinned, and the caller's own context
+/// covers it.
+fn check_manifest_json(cwd: &Path) -> Result<()> {
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let pkg = d.join("package.json");
+        if pkg.is_file() {
+            let content = std::fs::read_to_string(&pkg)
+                .with_context(|| format!("reading {}", pkg.display()))?;
+            if let Err(e) = serde_json::from_str::<serde_json::Value>(&content) {
+                bail!("package.json is not valid JSON ({}): {e}", pkg.display());
+            }
+            return Ok(());
+        }
+        dir = d.parent();
+    }
+    Ok(())
+}
+
+/// Collapse a registry transport failure (offline, DNS down, connection refused,
+/// TLS handshake) into ONE human sentence naming the registry. `provision_pm` and
+/// the registry resolver surface these as a deep anyhow chain — `failed to
+/// provision … : fetching packument <url>: GET <url>: error sending request …:
+/// … dns error: failed to lookup address …` — five levels of reqwest/hyper/DNS
+/// internals that bury the actionable fact (the network is unreachable). When the
+/// chain has that shape we replace it; the full chain stays available under
+/// `--verbose` (the `SHOW_WARNINGS` flag, set by `--verbose`/`--show-warnings`).
+/// A NON-transport error (a 404 for a bad version, a checksum mismatch) is passed
+/// through untouched — it's already actionable and specific.
+fn humanize_transport_error(err: anyhow::Error, registry: &str) -> anyhow::Error {
+    // Walk the cause chain looking for the transport signature. reqwest stamps
+    // connect/DNS/timeout faults with these phrases; matching on the rendered
+    // chain keeps us off reqwest's private error types (it's a transitive dep of
+    // nub-core, not a direct dep here).
+    let rendered = format!("{err:#}").to_lowercase();
+    const TRANSPORT_NEEDLES: &[&str] = &[
+        "dns error",
+        "failed to lookup address",
+        "error sending request",
+        "connection refused",
+        "connection reset",
+        "tcp connect error",
+        "timed out",
+        "network is unreachable",
+        "could not connect",
+    ];
+    let is_transport = TRANSPORT_NEEDLES.iter().any(|n| rendered.contains(n));
+    if !is_transport {
+        return err;
+    }
+    let one_liner = anyhow::anyhow!(
+        "cannot reach the registry {registry} — check your connection, or set a mirror \
+         (e.g. `npm config set registry <url>`)"
+    );
+    if SHOW_WARNINGS.load(Ordering::Relaxed) {
+        // Keep the underlying chain attached so `--verbose` users can still see it.
+        one_liner.context(format!("transport detail: {err:#}"))
+    } else {
+        one_liner
+    }
+}
+
+/// `provision_pm` with the transport-failure shape humanized (item: offline UX).
+/// Used on the read-only `nub pm which` path, where a provision is a side effect
+/// of resolving the path, not an explicit online action.
+fn provision_pm_humanized(
+    pin: &nub_core::pm::resolve::PmPin,
+    store: &Path,
+    cwd: &Path,
+) -> Result<nub_core::pm::provision::ProvisionedPm> {
+    nub_core::pm::provision::provision_pm(pin, store)
+        .map_err(|e| humanize_transport_error(e, &nub_core::pm::registry::registry_base(cwd)))
+}
+
 /// `nub pm <verb>` — the package-manager management group. Manual sub-verb match
 /// (mirroring [`run_node`]'s shape): bare / `help` list the verbs, an unknown
 /// token errors naming the set. The verbs operate on the project's PM *pin*
@@ -3462,18 +3565,34 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // Path → stdout (so `PM=$(nub pm which)` captures just the path); the
         // provenance explainer → stderr. Byte-for-byte the `nub node which` shape.
         "which" => {
-            let target = resolve::resolve_target(&cwd)
+            // A malformed package.json resolves as "no PM pinned" otherwise — a
+            // misleading diagnosis. Surface the parse failure (and its location)
+            // before resolution silently swallows it.
+            check_manifest_json(&cwd)?;
+            let res = resolve::resolve_target_with_source(&cwd)
                 .context("no package manager is pinned (no .yarnrc.yml yarnPath, packageManager, or devEngines.packageManager) — pin one with `nub pm pin <pm>@<version>`")?;
-            let (path, provenance) = match target {
-                PmTarget::YarnPath(release) => {
-                    (release, "resolved from .yarnrc.yml yarnPath".to_string())
-                }
+            // Drain the structured advisories first (disagreement / range /
+            // ignored-field) so they precede the path on stderr.
+            for w in &res.warnings {
+                eprintln!("{w}");
+            }
+            let (path, provenance) = match res.target {
+                PmTarget::YarnPath(release) => (
+                    release,
+                    format!(
+                        "resolved from {}",
+                        res.source.expect("YarnPath carries a source")
+                    ),
+                ),
                 PmTarget::Provision(pin) => {
-                    let pm = pin.pm;
                     let store = pm_store_root()?;
-                    let prov = nub_core::pm::provision::provision_pm(&pin, &store)?;
-                    let provenance =
-                        format!("resolved from packageManager ({pm}@{})", prov.version);
+                    let prov = provision_pm_humanized(&pin, &store, &cwd)?;
+                    let provenance = format!(
+                        "resolved from {} ({}@{})",
+                        res.source.expect("Provision carries a source"),
+                        pin.pm,
+                        prov.version
+                    );
                     (prov.bin, provenance)
                 }
                 PmTarget::BerryNoYarnPath => bail!(berry_no_yarn_path_msg()),
@@ -3551,9 +3670,14 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // freshly fetched artifact, and a legacy hashless pin gets upgraded to
         // the pair shape even when the version is already newest.
         "update" | "up" => {
-            let pin = resolve::resolve_pin(&cwd).context(
+            check_manifest_json(&cwd)?;
+            let res = resolve::resolve_pin_with_source(&cwd).context(
                 "no package manager is pinned to update — pin one with `nub pm pin <pm>@<version>`",
             )?;
+            for w in &res.warnings {
+                eprintln!("{w}");
+            }
+            let pin = res.pin;
             if pin.pm == Pm::YarnBerry {
                 bail!(
                     "the pinned yarn is Berry (yarn 2+) — nub can't provision or update Berry \
@@ -3708,7 +3832,8 @@ fn resolve_provision_write_pair(
     }
 
     let base = registry::registry_base(cwd);
-    let dist = registry::resolve_version(&base, name, spec)?;
+    let dist = registry::resolve_version(&base, name, spec)
+        .map_err(|e| humanize_transport_error(e, &base))?;
 
     let pm = match name {
         "npm" => Pm::Npm,
@@ -3722,14 +3847,15 @@ fn resolve_provision_write_pair(
         other => unreachable!("split_pm_arg admits only npm/pnpm/yarn, got {other}"),
     };
 
-    let hex = fetch_and_hash_tarball(name, &dist)?;
+    let hex =
+        fetch_and_hash_tarball(name, &dist).map_err(|e| humanize_transport_error(e, &base))?;
 
     let store = pm_store_root()?;
     let pin = resolve::PmPin {
         pm,
         version: Some(format!("{}+sha512.{hex}", dist.version)),
     };
-    provision::provision_pm(&pin, &store)?;
+    provision::provision_pm(&pin, &store).map_err(|e| humanize_transport_error(e, &base))?;
 
     let path = resolve::write_pin_pair(pm, &dist.version, &hex, cwd)?;
     Ok((pm, dist.version, path))
@@ -4837,15 +4963,17 @@ mod tests {
         );
 
         // The same PM passes the guard and reaches resolution — which dies on the
-        // dead registry. Resolve-before-write: the manifest must be untouched.
+        // dead registry (the offline path is humanized to one registry-named
+        // sentence). Resolve-before-write: the manifest must be untouched.
         if !ambient_registry_override() {
             let err = format!(
                 "{:#}",
                 with_cwd(&dir, || run_pm(&["pin".into(), "pnpm@9.2.0".into()])).unwrap_err()
             );
             assert!(
-                err.contains("fetching packument"),
-                "a same-PM pin must pass the guard and fail at the (dead) registry, got: {err}"
+                err.contains("cannot reach the registry") && err.contains("127.0.0.1:1"),
+                "a same-PM pin must pass the guard and fail at the (dead) registry with the \
+                 humanized offline message, got: {err}"
             );
         }
         assert_eq!(
@@ -5084,6 +5212,50 @@ mod tests {
         assert!(
             err.contains("no package manager is pinned") && err.contains("nub pm pin"),
             "which-no-pin must name the unpinned state and the remedy, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_manifest_json_flags_malformed_but_passes_valid_and_missing() {
+        // Malformed → a JSON-parse error naming the file (not "unpinned").
+        let bad = pm_tmpdir("manifest-bad");
+        std::fs::write(bad.join("package.json"), "{ \"name\": ").unwrap();
+        let err = check_manifest_json(&bad).unwrap_err().to_string();
+        assert!(
+            err.contains("package.json is not valid JSON") && err.contains("package.json"),
+            "malformed must name the parse failure + path, got: {err}"
+        );
+
+        // Valid manifest and a dir with no manifest at all are both Ok — a missing
+        // package.json is genuinely unpinned, which the caller's own context covers.
+        let good = pm_tmpdir("manifest-good");
+        std::fs::write(good.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        assert!(check_manifest_json(&good).is_ok());
+        assert!(check_manifest_json(&pm_tmpdir("manifest-none")).is_ok());
+    }
+
+    #[test]
+    fn humanize_transport_error_collapses_only_the_network_shape() {
+        // A reqwest-shaped transport chain → one sentence naming the registry; the
+        // deep DNS/connect internals are dropped (and only restored under verbose).
+        let chain = anyhow::anyhow!("dns error: failed to lookup address information")
+            .context("error sending request for url (https://registry.npmjs.org/pnpm)")
+            .context("fetching packument https://registry.npmjs.org/pnpm");
+        let humanized = humanize_transport_error(chain, "https://registry.npmjs.org").to_string();
+        assert!(
+            humanized.contains("cannot reach the registry https://registry.npmjs.org")
+                && !humanized.contains("dns error"),
+            "the transport stack must collapse to one registry-named sentence, got: {humanized}"
+        );
+
+        // A non-transport error (a real 404 / version miss) is actionable already —
+        // pass it through untouched, never masked as a connectivity problem.
+        let not_transport = anyhow::anyhow!("no version satisfies \"99.0.0\"");
+        let passed = humanize_transport_error(not_transport, "https://registry.npmjs.org");
+        assert_eq!(
+            passed.to_string(),
+            "no version satisfies \"99.0.0\"",
+            "a specific, actionable error must not be rewritten as offline"
         );
     }
 

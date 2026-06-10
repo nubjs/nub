@@ -42,21 +42,182 @@ pub enum PmTarget {
     BerryNoYarnPath,
 }
 
+/// WHICH field supplied the pin — the provenance `nub pm which` must report. The
+/// resolution sources have a precedence order (yarnPath > packageManager >
+/// devEngines), but the source they fire from is not recoverable from a [`PmPin`]
+/// alone: a devEngines-only pin and a packageManager pin both produce the same
+/// `PmPin`, so the CLI mislabels the former as "resolved from packageManager"
+/// unless the resolver hands back the true source. This enum is that signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinSource {
+    /// A committed Berry release named by `.yarnrc.yml`'s `yarnPath:`.
+    YarnPath,
+    /// The Corepack-standard `package.json#packageManager` field.
+    PackageManager,
+    /// The `package.json#devEngines.packageManager` fallback.
+    DevEngines,
+}
+
+impl std::fmt::Display for PinSource {
+    /// The exact provenance phrasing `nub pm which` prints after "resolved from ".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PinSource::YarnPath => ".yarnrc.yml yarnPath",
+            PinSource::PackageManager => "packageManager",
+            PinSource::DevEngines => "devEngines.packageManager",
+        })
+    }
+}
+
+/// A resolved [`PmTarget`] with its provenance and any advisory warnings. The
+/// source is `None` only for [`PmTarget::BerryNoYarnPath`] reached via a bare
+/// Berry `packageManager`/`devEngines` pin — there the CLI surfaces an error, not
+/// a provenance line. Warnings are structured (never printed here): the CLI owns
+/// all stderr output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmTargetResolution {
+    pub target: PmTarget,
+    pub source: Option<PinSource>,
+    pub warnings: Vec<PinWarning>,
+}
+
+/// A resolved [`PmPin`] with its provenance and any advisory warnings — the
+/// pin-level analogue of [`PmTargetResolution`], for `nub pm update`/`switch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmPinResolution {
+    pub pin: PmPin,
+    pub source: PinSource,
+    pub warnings: Vec<PinWarning>,
+}
+
+/// A structured advisory the CLI prints to stderr (resolve.rs never writes to
+/// stderr itself — output is the CLI's). Each variant carries the data its
+/// [`Display`] renders, so the message text lives in one place and tests assert
+/// on the variant, not on a formatted string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinWarning {
+    /// A pin field is present but unusable (`yarn@^4` in the exact-only
+    /// `packageManager`; an unsupported manager; a missing version) — the project
+    /// resolves as unpinned. `field` names where it came from, `spec` is the raw
+    /// value, `reason` is the parser's message.
+    Ignored {
+        field: PinField,
+        spec: String,
+        reason: String,
+    },
+    /// `packageManager` and `devEngines.packageManager` both exist but disagree —
+    /// either a different PM name, or a `packageManager` version the devEngines
+    /// range does not admit. The legacy field is what nub executes, so it wins;
+    /// the warning names the conflict.
+    Disagreement {
+        package_manager: String,
+        dev_engines: String,
+        kind: DisagreementKind,
+    },
+}
+
+/// Which pin field a [`PinWarning::Ignored`] refers to — drives the field name in
+/// the message and keeps the two channels (legacy vs devEngines) distinct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinField {
+    PackageManager,
+    DevEngines,
+}
+
+impl std::fmt::Display for PinField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PinField::PackageManager => "packageManager",
+            PinField::DevEngines => "devEngines.packageManager",
+        })
+    }
+}
+
+/// The two ways `packageManager` and `devEngines.packageManager` can disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisagreementKind {
+    /// Different package managers named (`pnpm` vs `yarn`).
+    Name,
+    /// Same PM, but the `packageManager` exact version is outside the devEngines
+    /// range (`pnpm@9.1.0` vs `devEngines …version: "^10"`).
+    Version,
+}
+
+impl std::fmt::Display for PinWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PinWarning::Ignored {
+                field,
+                spec,
+                reason,
+            } => write!(f, "nub: ignoring {field} \"{spec}\": {reason}"),
+            PinWarning::Disagreement {
+                package_manager,
+                dev_engines,
+                kind,
+            } => match kind {
+                DisagreementKind::Name => write!(
+                    f,
+                    "nub: packageManager \"{package_manager}\" and devEngines.packageManager \
+                     \"{dev_engines}\" name different package managers — running packageManager \
+                     \"{package_manager}\""
+                ),
+                DisagreementKind::Version => write!(
+                    f,
+                    "nub: packageManager \"{package_manager}\" is outside the \
+                     devEngines.packageManager range \"{dev_engines}\" — running packageManager \
+                     \"{package_manager}\""
+                ),
+            },
+        }
+    }
+}
+
 /// Resolve what to run for the project at `cwd`. `None` means unpinned (no
 /// `.yarnrc.yml yarnPath`, no `packageManager`, no `devEngines.packageManager`).
+///
+/// The provenance-free wrapper. New callers that need to report WHICH field
+/// supplied the pin (`nub pm which`) should use [`resolve_target_with_source`].
 pub fn resolve_target(cwd: &Path) -> Option<PmTarget> {
-    // 1. A committed Berry release short-circuits everything.
+    resolve_target_with_source(cwd).map(|r| r.target)
+}
+
+/// [`resolve_target`] plus the provenance and any structured warnings the CLI
+/// should surface. The provenance is what fixes the `nub pm which` mislabel: a
+/// devEngines-only pin now reports `devEngines.packageManager`, not
+/// `packageManager`. Warnings (present-but-unusable specs, packageManager ⇄
+/// devEngines disagreement) are returned, never printed — the CLI owns stderr.
+pub fn resolve_target_with_source(cwd: &Path) -> Option<PmTargetResolution> {
+    // 1. A committed Berry release short-circuits everything — no pin field is
+    //    read, so no field-level warnings can fire.
     if let Some(path) = committed_yarn_path(cwd) {
-        return Some(PmTarget::YarnPath(path));
+        return Some(PmTargetResolution {
+            target: PmTarget::YarnPath(path),
+            source: Some(PinSource::YarnPath),
+            warnings: Vec::new(),
+        });
     }
 
     // 2. + 3. The pin from packageManager / devEngines.
-    let pin = resolve_pin(cwd)?;
-    if pin.pm == Pm::YarnBerry {
+    let manifest = root_manifest(cwd)?;
+    let resolved = pin_from_manifest(&manifest);
+    let Some((pin, source)) = resolved.pin else {
+        // Unpinned, but a present-but-unusable field may still have warned; an
+        // unpinned project surfaces nothing to run, so the warnings are dropped
+        // here (resolve_pin_with_source is the channel that returns them).
+        return None;
+    };
+    let target = if pin.pm == Pm::YarnBerry {
         // Berry pinned but no committed release to run — unresolvable.
-        return Some(PmTarget::BerryNoYarnPath);
-    }
-    Some(PmTarget::Provision(pin))
+        PmTarget::BerryNoYarnPath
+    } else {
+        PmTarget::Provision(pin)
+    };
+    Some(PmTargetResolution {
+        target,
+        source: Some(source),
+        warnings: resolved.warnings,
+    })
 }
 
 /// Resolve just the pin (for `nub pm which` / `nub pm update`). `None` means no
@@ -73,18 +234,36 @@ pub fn resolve_target(cwd: &Path) -> Option<PmTarget> {
 /// raw spec, and why it was ignored. pnpm warns here and corepack hard-errors;
 /// saying nothing and falling through to a PATH PM would be the worst of the three.
 pub fn resolve_pin(cwd: &Path) -> Option<PmPin> {
-    let manifest = root_manifest(cwd)?;
-    let (pin, warning) = pin_from_manifest(&manifest);
-    if let Some(msg) = warning {
-        eprintln!("{msg}");
-    }
-    pin
+    resolve_pin_with_source(cwd).map(|r| r.pin)
 }
 
-/// The pure core of [`resolve_pin`]: the pin from an already-parsed manifest, plus
-/// at most one warning (an `Option` — structurally never two) for a spec that is
-/// present but unusable. Absent fields are silent: `(None, None)`.
-fn pin_from_manifest(manifest: &serde_json::Value) -> (Option<PmPin>, Option<String>) {
+/// [`resolve_pin`] plus provenance and the structured warnings — the channel that
+/// returns the present-but-unusable and disagreement advisories for the CLI to
+/// print. `None` means no usable pin (the same condition as [`resolve_pin`]);
+/// warnings about an *ignored* field are lost on `None` because there is no
+/// resolution to attach them to — they are advisory on a pin that *did* resolve.
+pub fn resolve_pin_with_source(cwd: &Path) -> Option<PmPinResolution> {
+    let manifest = root_manifest(cwd)?;
+    let resolved = pin_from_manifest(&manifest);
+    let (pin, source) = resolved.pin?;
+    Some(PmPinResolution {
+        pin,
+        source,
+        warnings: resolved.warnings,
+    })
+}
+
+/// The pure core of [`resolve_pin`]: the pin (with its source) from an
+/// already-parsed manifest, plus the structured warnings — a present-but-unusable
+/// field, and a `packageManager` ⇄ `devEngines` disagreement when both are
+/// present. Absent fields are silent (`pin: None`, no warnings).
+struct ManifestPin {
+    /// The resolved pin and which field supplied it, or `None` when unpinned.
+    pin: Option<(PmPin, PinSource)>,
+    warnings: Vec<PinWarning>,
+}
+
+fn pin_from_manifest(manifest: &serde_json::Value) -> ManifestPin {
     // `packageManager` wins; `devEngines.packageManager` (object form) is the
     // fallback. Both are parsed by the same spec parser. An unusable
     // `packageManager` does NOT fall through to devEngines — the project stated a
@@ -92,11 +271,26 @@ fn pin_from_manifest(manifest: &serde_json::Value) -> (Option<PmPin>, Option<Str
     // half-matching secondary field.
     if let Some(spec) = manifest.get("packageManager").and_then(|v| v.as_str()) {
         return match parse_spec(spec) {
-            Ok(pin) => (Some(pin), None),
-            Err(err) => (
-                None,
-                Some(format!("nub: ignoring packageManager \"{spec}\": {err}")),
-            ),
+            Ok(pin) => {
+                // Both fields present + agreeing → silent; disagreeing → warn,
+                // packageManager (the field nub executes) wins.
+                let mut warnings = Vec::new();
+                if let Some(w) = disagreement_warning(spec, &pin, manifest) {
+                    warnings.push(w);
+                }
+                ManifestPin {
+                    pin: Some((pin, PinSource::PackageManager)),
+                    warnings,
+                }
+            }
+            Err(err) => ManifestPin {
+                pin: None,
+                warnings: vec![PinWarning::Ignored {
+                    field: PinField::PackageManager,
+                    spec: spec.to_string(),
+                    reason: err.to_string(),
+                }],
+            },
         };
     }
     // devEngines carries name + version as separate keys; feed them straight to
@@ -106,27 +300,101 @@ fn pin_from_manifest(manifest: &serde_json::Value) -> (Option<PmPin>, Option<Str
         .get("devEngines")
         .and_then(|d| d.get("packageManager"))
     else {
-        return (None, None);
+        return ManifestPin {
+            pin: None,
+            warnings: Vec::new(),
+        };
     };
     let Some(name) = dev.get("name").and_then(|v| v.as_str()) else {
-        return (None, None);
+        return ManifestPin {
+            pin: None,
+            warnings: Vec::new(),
+        };
     };
     let version = dev.get("version").and_then(|v| v.as_str());
     match classify(name, version) {
-        Ok(pin) => (Some(pin), None),
+        Ok(pin) => ManifestPin {
+            pin: Some((pin, PinSource::DevEngines)),
+            warnings: Vec::new(),
+        },
         Err(err) => {
             let spec = match version {
                 Some(v) => format!("{name}@{v}"),
                 None => name.to_string(),
             };
-            (
-                None,
-                Some(format!(
-                    "nub: ignoring devEngines.packageManager \"{spec}\": {err}"
-                )),
-            )
+            ManifestPin {
+                pin: None,
+                warnings: vec![PinWarning::Ignored {
+                    field: PinField::DevEngines,
+                    spec,
+                    reason: err.to_string(),
+                }],
+            }
         }
     }
+}
+
+/// When a `packageManager` pin resolves AND a `devEngines.packageManager` exists,
+/// flag a disagreement: a different PM name, or a `packageManager` exact version
+/// the devEngines range does not admit. Returns `None` when they agree, when
+/// devEngines is absent/malformed, or when its version can't be range-checked (a
+/// name-only devEngines entry constrains only the name). The legacy
+/// `packageManager` is what nub runs, so it always "wins"; this only warns.
+fn disagreement_warning(
+    pm_spec: &str,
+    pm_pin: &PmPin,
+    manifest: &serde_json::Value,
+) -> Option<PinWarning> {
+    let dev = manifest
+        .get("devEngines")
+        .and_then(|d| d.get("packageManager"))?;
+    // Mirror the identity probe's array handling: the last named entry governs.
+    let entry = match dev {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .rev()
+            .find(|e| e.get("name").and_then(|n| n.as_str()).is_some())?,
+        other => other,
+    };
+    let dev_name = entry.get("name")?.as_str()?.trim();
+    if dev_name.is_empty() {
+        return None;
+    }
+    let dev_version = entry.get("version").and_then(|v| v.as_str());
+    let dev_spec = match dev_version {
+        Some(v) => format!("{dev_name}@{v}"),
+        None => dev_name.to_string(),
+    };
+
+    // Name mismatch: yarn classic vs Berry both print `yarn`, so compare on the
+    // Display name (the user-visible PM), not the classic/Berry split.
+    if dev_name != pm_pin.pm.to_string() {
+        return Some(PinWarning::Disagreement {
+            package_manager: pm_spec.trim().to_string(),
+            dev_engines: dev_spec,
+            kind: DisagreementKind::Name,
+        });
+    }
+
+    // Same PM: does packageManager's exact version satisfy the devEngines range?
+    // Strip the Corepack hash suffix before parsing (it rides as semver build
+    // metadata and isn't part of the comparison). A devEngines entry with no
+    // version, or a version/range either side can't parse, isn't a checkable
+    // disagreement — skip rather than warn on noise.
+    let (Some(pm_version), Some(dev_range)) = (pm_pin.version.as_deref(), dev_version) else {
+        return None;
+    };
+    let pm_bare = pm_version.split('+').next().unwrap_or(pm_version);
+    let parsed = semver::Version::parse(pm_bare).ok()?;
+    let req = semver::VersionReq::parse(&crate::pm::registry::normalize_range(dev_range)).ok()?;
+    if !req.matches(&parsed) {
+        return Some(PinWarning::Disagreement {
+            package_manager: pm_spec.trim().to_string(),
+            dev_engines: dev_spec,
+            kind: DisagreementKind::Version,
+        });
+    }
+    None
 }
 
 /// The project's PM identity at the NAME level — what the same-PM guard on
@@ -290,14 +558,25 @@ pub fn write_pin_pair(pm: Pm, version: &str, sha512_hex: &str, cwd: &Path) -> Re
 }
 
 /// Detected surface formatting of a manifest: the per-level indent unit (taken
-/// from the first indented line — tabs vs N spaces) and whether the file ends
-/// with a newline. A single-line / unindented file gets the 2-space default.
+/// from the first indented line — tabs vs N spaces), the line ending (CRLF vs
+/// LF), and whether the file ends with a newline. A single-line / unindented file
+/// gets the 2-space default; a file with no newline at all is treated as LF.
 struct ManifestFormat {
     indent: String,
+    /// `true` when the file uses Windows `\r\n` line endings — reproduced on
+    /// write so a pin edit never silently converts a CRLF manifest to LF (which
+    /// reads as a whole-file diff in git).
+    crlf: bool,
     trailing_newline: bool,
 }
 
 fn detect_format(content: &str) -> ManifestFormat {
+    // `\r\n` if any CRLF appears: serde emits `\n`-joined output, so we
+    // post-process to `\r\n` only when the source was CRLF. A lone `\r` (old-Mac)
+    // isn't a case real package.json files hit; treat it as LF.
+    let crlf = content.contains("\r\n");
+    // `.lines()` strips both `\n` and a trailing `\r`, so indent detection is
+    // line-ending-agnostic.
     let indent = content
         .lines()
         .find_map(|line| {
@@ -307,6 +586,9 @@ fn detect_format(content: &str) -> ManifestFormat {
         .unwrap_or_else(|| "  ".to_string());
     ManifestFormat {
         indent,
+        crlf,
+        // A CRLF file's terminator is `\r\n`; either ending counts as "ends with
+        // a newline" for the trailing-newline state.
         trailing_newline: content.ends_with('\n'),
     }
 }
@@ -316,9 +598,9 @@ fn detect_format(content: &str) -> ManifestFormat {
 /// body of every pin writer:
 ///
 ///   - **Formatting-preserving** (the Volta steal): the file's detected indent
-///     unit and trailing-newline presence are reproduced, and `serde_json`'s
-///     `preserve_order` keeps the user's key order — a pin write must not
-///     reformat the manifest. (Caveat: a `\r\n` file is rewritten with `\n`.)
+///     unit, line ending (CRLF vs LF), and trailing-newline presence are
+///     reproduced, and `serde_json`'s `preserve_order` keeps the user's key
+///     order — a pin write must not reformat the manifest.
 ///   - **Atomic, crash-safe rewrite**: write a sibling temp file then `rename`
 ///     over the target. A `package.json` carries the user's whole manifest, so a
 ///     torn write (crash / full disk mid-`write`) must never leave it truncated —
@@ -364,17 +646,26 @@ fn edit_manifest(
 }
 
 /// Pretty-print with the detected indent unit (vs `to_string_pretty`'s hardwired
-/// two spaces) and reproduce the trailing-newline state.
+/// two spaces) and reproduce the line ending (CRLF vs LF) and trailing-newline
+/// state. serde's pretty formatter always emits `\n`; a CRLF source has every
+/// `\n` rewritten to `\r\n` after serialization so the diff stays the two pin
+/// keys, never a line-ending flip across the whole file.
 fn serialize_manifest(manifest: &serde_json::Value, format: &ManifestFormat) -> Result<String> {
     use serde::Serialize;
     let mut buf = Vec::new();
     let formatter = serde_json::ser::PrettyFormatter::with_indent(format.indent.as_bytes());
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
     manifest.serialize(&mut ser).context("serializing JSON")?;
-    if format.trailing_newline {
-        buf.push(b'\n');
+    let mut out = String::from_utf8(buf).context("serialized JSON is not UTF-8")?;
+    if format.crlf {
+        // The serialized body has no `\r` of its own (serde emits `\n`), so a
+        // plain replace is exact and idempotent.
+        out = out.replace('\n', "\r\n");
     }
-    String::from_utf8(buf).context("serialized JSON is not UTF-8")
+    if format.trailing_newline {
+        out.push_str(if format.crlf { "\r\n" } else { "\n" });
+    }
+    Ok(out)
 }
 
 /// Resolve where a pin is written: the workspace root if one is above `cwd`,
@@ -805,34 +1096,193 @@ mod tests {
     fn present_but_unusable_pin_warns_once_and_resolves_unpinned() {
         // A yarn range in `packageManager` is unusable (classify needs an exact
         // version for the classic/Berry split) — it must resolve as unpinned WITH
-        // exactly one warning naming the raw spec and the reason. The warning is
-        // an Option, so "exactly once" is structural.
+        // exactly one structured warning naming the field, the raw spec, and the
+        // reason. The warning vec holds exactly that one entry.
         let manifest: serde_json::Value =
             serde_json::from_str(r#"{"packageManager":"yarn@^4"}"#).unwrap();
-        let (pin, warning) = pin_from_manifest(&manifest);
-        assert_eq!(pin, None, "an unusable pin resolves as unpinned");
-        let msg = warning.expect("a present-but-unusable pin must warn");
+        let resolved = pin_from_manifest(&manifest);
         assert!(
-            msg.contains("yarn@^4") && msg.contains("exact version"),
-            "the warning names the raw spec and the exact-version rule, got: {msg}"
+            resolved.pin.is_none(),
+            "an unusable pin resolves as unpinned"
         );
+        match resolved.warnings.as_slice() {
+            [
+                PinWarning::Ignored {
+                    field: PinField::PackageManager,
+                    spec,
+                    reason,
+                },
+            ] => {
+                assert_eq!(spec, "yarn@^4", "the warning carries the raw spec");
+                assert!(
+                    reason.contains("exact version"),
+                    "the reason names the exact-version rule, got: {reason}"
+                );
+            }
+            other => panic!("expected one packageManager Ignored warning, got: {other:?}"),
+        }
 
         // The same rule covers the devEngines fallback, naming its field.
         let manifest: serde_json::Value = serde_json::from_str(
             r#"{"devEngines":{"packageManager":{"name":"yarn","version":"^4"}}}"#,
         )
         .unwrap();
-        let (pin, warning) = pin_from_manifest(&manifest);
-        assert_eq!(pin, None);
-        let msg = warning.expect("an unusable devEngines pin must warn");
+        let resolved = pin_from_manifest(&manifest);
+        assert!(resolved.pin.is_none());
         assert!(
-            msg.contains("devEngines.packageManager"),
-            "the warning names the field it ignored, got: {msg}"
+            matches!(
+                resolved.warnings.as_slice(),
+                [PinWarning::Ignored {
+                    field: PinField::DevEngines,
+                    ..
+                }]
+            ),
+            "an unusable devEngines pin warns naming its field, got: {:?}",
+            resolved.warnings
         );
 
         // Absent fields are NOT a warning — unpinned is a valid, silent state.
         let manifest: serde_json::Value = serde_json::from_str(r#"{"name":"app"}"#).unwrap();
-        assert_eq!(pin_from_manifest(&manifest), (None, None));
+        let resolved = pin_from_manifest(&manifest);
+        assert!(resolved.pin.is_none());
+        assert!(resolved.warnings.is_empty());
+
+        // The Ignored warning's Display is the stderr line the CLI prints.
+        assert_eq!(
+            PinWarning::Ignored {
+                field: PinField::PackageManager,
+                spec: "yarn@^4".to_string(),
+                reason: "boom".to_string(),
+            }
+            .to_string(),
+            "nub: ignoring packageManager \"yarn@^4\": boom"
+        );
+    }
+
+    #[test]
+    fn resolution_reports_the_true_pin_source() {
+        // A devEngines-only pin must report devEngines.packageManager, not
+        // packageManager — the mislabel the provenance enum fixes.
+        let dir = tmpdir("src-devengines");
+        write_pkg(
+            &dir,
+            r#"{"devEngines":{"packageManager":{"name":"pnpm","version":"9.1.0"}}}"#,
+        );
+        let r = resolve_pin_with_source(&dir).unwrap();
+        assert_eq!(r.source, PinSource::DevEngines);
+        assert_eq!(r.pin.pm, Pm::Pnpm);
+        assert_eq!(
+            r.source.to_string(),
+            "devEngines.packageManager",
+            "the Display is the phrase `nub pm which` prints after 'resolved from '"
+        );
+
+        // A packageManager pin reports packageManager.
+        let dir = tmpdir("src-pkgmgr");
+        write_pkg(&dir, r#"{"packageManager":"pnpm@9.1.0"}"#);
+        let r = resolve_target_with_source(&dir).unwrap();
+        assert_eq!(r.source, Some(PinSource::PackageManager));
+        assert_eq!(PinSource::PackageManager.to_string(), "packageManager");
+
+        // A committed yarnPath reports the yarnPath source and never reads a
+        // pin field (so no warnings).
+        let dir = tmpdir("src-yarnpath");
+        write_pkg(&dir, r#"{"name":"app"}"#);
+        let release = dir.join(".yarn/releases");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(release.join("yarn-4.2.2.cjs"), "// yarn\n").unwrap();
+        std::fs::write(
+            dir.join(".yarnrc.yml"),
+            "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
+        )
+        .unwrap();
+        let r = resolve_target_with_source(&dir).unwrap();
+        assert_eq!(r.source, Some(PinSource::YarnPath));
+        assert!(r.warnings.is_empty());
+        assert_eq!(PinSource::YarnPath.to_string(), ".yarnrc.yml yarnPath");
+    }
+
+    #[test]
+    fn disagreeing_package_manager_and_dev_engines_warn_with_package_manager_winning() {
+        // Different PM named in each field → a Name disagreement; the pin still
+        // resolves to packageManager (the field nub executes).
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"packageManager":"pnpm@9.1.0","devEngines":{"packageManager":{"name":"yarn","version":"^4"}}}"#,
+        )
+        .unwrap();
+        let resolved = pin_from_manifest(&manifest);
+        assert_eq!(resolved.pin.unwrap().0.pm, Pm::Pnpm);
+        match resolved.warnings.as_slice() {
+            [
+                PinWarning::Disagreement {
+                    package_manager,
+                    dev_engines,
+                    kind: DisagreementKind::Name,
+                },
+            ] => {
+                assert_eq!(package_manager, "pnpm@9.1.0");
+                assert_eq!(dev_engines, "yarn@^4");
+            }
+            other => panic!("expected a Name disagreement, got: {other:?}"),
+        }
+
+        // Same PM, but packageManager's exact version is outside the devEngines
+        // range → a Version disagreement.
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"packageManager":"pnpm@9.1.0","devEngines":{"packageManager":{"name":"pnpm","version":"^10"}}}"#,
+        )
+        .unwrap();
+        let resolved = pin_from_manifest(&manifest);
+        assert!(matches!(
+            resolved.warnings.as_slice(),
+            [PinWarning::Disagreement {
+                kind: DisagreementKind::Version,
+                ..
+            }]
+        ));
+
+        // In range → no warning (and the hash suffix is stripped before the
+        // satisfaction check).
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"packageManager":"pnpm@9.1.0+sha512.abc","devEngines":{"packageManager":{"name":"pnpm","version":"^9.0.0"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            pin_from_manifest(&manifest).warnings.is_empty(),
+            "an in-range exact version (hash suffix ignored) must not warn"
+        );
+
+        // A name-only devEngines entry constrains only the name; a matching name
+        // with no range is not a checkable version disagreement.
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"packageManager":"pnpm@9.1.0","devEngines":{"packageManager":{"name":"pnpm"}}}"#,
+        )
+        .unwrap();
+        assert!(pin_from_manifest(&manifest).warnings.is_empty());
+
+        // The two Disagreement Displays both end by naming what nub runs.
+        let name = PinWarning::Disagreement {
+            package_manager: "pnpm@9.1.0".to_string(),
+            dev_engines: "yarn@^4".to_string(),
+            kind: DisagreementKind::Name,
+        }
+        .to_string();
+        assert!(
+            name.contains("different package managers")
+                && name.contains("running packageManager \"pnpm@9.1.0\""),
+            "name-disagreement Display, got: {name}"
+        );
+        let version = PinWarning::Disagreement {
+            package_manager: "pnpm@9.1.0".to_string(),
+            dev_engines: "pnpm@^10".to_string(),
+            kind: DisagreementKind::Version,
+        }
+        .to_string();
+        assert!(
+            version.contains("outside the devEngines.packageManager range")
+                && version.contains("running packageManager"),
+            "version-disagreement Display, got: {version}"
+        );
     }
 
     #[test]
@@ -956,6 +1406,69 @@ mod tests {
                 render(expected, indent, trailing),
                 "indent {indent:?} / trailing newline {trailing} must be preserved"
             );
+        }
+    }
+
+    #[test]
+    fn pair_write_preserves_line_endings_and_trailing_newline_state() {
+        // A pin write must not flip a CRLF manifest to LF (that reads as a
+        // whole-file diff in git), and must match the source's trailing-newline
+        // presence exactly. Four combinations of {CRLF, LF} × {trailing nl,
+        // none}; byte-equality so any drift shows verbatim in the failure.
+        let body = [
+            r#"{"#,
+            r#"  "name": "app","#,
+            r#"  "packageManager": "pnpm@9.1.0+sha512.cafe""#,
+            r#"}"#,
+        ];
+        // The input has no pin yet; the writer inserts both fields. Build the
+        // expected output by hand so the assertion is on real bytes, not a
+        // re-serialization.
+        let expected_lines = [
+            r#"{"#,
+            r#"  "name": "app","#,
+            r#"  "packageManager": "pnpm@9.1.0+sha512.cafe","#,
+            r#"  "devEngines": {"#,
+            r#"    "packageManager": {"#,
+            r#"      "name": "pnpm","#,
+            r#"      "version": "^9.1.0","#,
+            r#"      "onFail": "download""#,
+            r#"    }"#,
+            r#"  }"#,
+            r#"}"#,
+        ];
+
+        for crlf in [false, true] {
+            for trailing in [false, true] {
+                let nl = if crlf { "\r\n" } else { "\n" };
+                let mut input = body.join(nl);
+                if trailing {
+                    input.push_str(nl);
+                }
+                let mut want = expected_lines.join(nl);
+                if trailing {
+                    want.push_str(nl);
+                }
+
+                let dir = tmpdir("pair-eol");
+                write_pkg(&dir, &input);
+                let path = write_pin_pair(Pm::Pnpm, "9.1.0", "cafe", &dir).unwrap();
+                let got = std::fs::read_to_string(&path).unwrap();
+                assert_eq!(
+                    got, want,
+                    "crlf={crlf} trailing_newline={trailing} must round-trip byte-for-byte"
+                );
+                // Cross-check the negatives directly: an LF write has no `\r`; a
+                // no-trailing-newline write doesn't end in a newline.
+                if !crlf {
+                    assert!(!got.contains('\r'), "an LF source must stay LF");
+                }
+                assert_eq!(
+                    got.ends_with('\n'),
+                    trailing,
+                    "trailing-newline presence must match the source"
+                );
+            }
         }
     }
 

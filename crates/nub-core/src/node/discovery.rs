@@ -38,8 +38,8 @@ pub enum DiscoveryError {
     #[error(
         "pinned Node version {pin} not found\n\
          \x20\x20Active shell Node: {shell_version} (does not satisfy pin)\n\
-         \x20\x20Install with: nvm install {pin}\n\
-         \x20\x20Or run in compat mode: nub run --node <script>"
+         \x20\x20Provision it with: nub node install {pin}\n\
+         \x20\x20(nub auto-provisions the pinned Node when you run a file; `nub run` / `nubx` use what's already installed.)"
     )]
     PinnedNotFound { pin: String, shell_version: String },
 
