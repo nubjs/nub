@@ -120,4 +120,32 @@ case "$ua" in
   *) fail "npm_config_user_agent first token is not nub/: '$ua'" ;;
 esac
 
+# 5. Second install pass with the CI mode INVERTED. The engine's linker takes
+# a different path under CI (the global-virtual-store gate flips on `CI`),
+# and the paths can leak independently: the original node_modules/.aube CI
+# leak (probe linker missing the virtualStoreDir override in the non-GVS
+# streaming materializer) reproduced ONLY with CI set. Run the on-disk
+# assertions in both modes so local runs and CI runs each cover the other's
+# mode.
+PROJ2="$SANDBOX/proj2"
+mkdir -p "$PROJ2"
+cp "$PROJ/package.json" "$PROJ2/"
+cd "$PROJ2"
+if [ -n "${CI:-}" ]; then other_mode_env=(env -u CI); other_mode="CI unset"; else other_mode_env=(env CI=1); other_mode="CI=1"; fi
+if ! "${other_mode_env[@]}" "$NUB" install >"$SANDBOX/install-output2.txt" 2>&1; then
+  cat "$SANDBOX/install-output2.txt"
+  fail "nub install ($other_mode) exited non-zero"
+fi
+if grep -inE 'aube|jdx\.dev' "$SANDBOX/install-output2.txt"; then
+  fail "engine-branded identity reached nub's output under $other_mode (above)"
+fi
+[ -d node_modules/.nub ] || fail "($other_mode) expected isolated virtual store at node_modules/.nub"
+[ ! -e node_modules/.aube ] || fail "($other_mode) engine created node_modules/.aube"
+leaks=$(find "$SANDBOX" -name '*aube*' ! -path "$AUBE_VIRTUAL_STORE_DIR" ! -path "$XDG_CACHE_HOME/aube" ! -path "$XDG_CACHE_HOME/aube/*" 2>/dev/null | grep -vE "$allowlist_re" || true)
+if [ -n "$leaks" ]; then
+  echo "$leaks"
+  fail "($other_mode) aube-named paths outside the allowlist (above)"
+fi
+pass "no engine identity leaks with $other_mode either"
+
 echo "brand-sweep: all assertions passed"
