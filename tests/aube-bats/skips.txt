@@ -37,3 +37,27 @@ install.bats|aube run auto-reinstalls after --prod install|'run' is nub's native
 install.bats|aube run auto-installs when installed package metadata is missing|'run' is nub's native script runner (collision policy); also walks node_modules/.aube
 install.bats|aube install ignores --network-concurrency=0 and falls back to default|test invokes 'aube -v' — nub's -v is --version (reserved); re-evaluate when the flag wiring lands
 add.bats|aube add: refuses to add to workspace root with aube-workspace.yaml|nub-divergence: aube-workspace.yaml is not consulted (workspace-yaml toggle restricts discovery to pnpm-workspace.yaml), so it cannot define a workspace root — the pnpm-workspace.yaml variant asserts the guard
+
+# ── aube-lock.yaml is another tool's file (canonical-lockfile name = lock.yaml) ──
+# The basic fixture commits an aube-lock.yaml; under nub the engine's
+# canonical-lockfile slot carries the generic lock.yaml name (two-mode model),
+# so a committed aube-lock.yaml is invisible to detection by design — exactly
+# like aube-workspace.yaml above. Frozen installs see "no lockfile", ci can't
+# install from it, update can't refresh it.
+install.bats|aube install --frozen-lockfile works|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+install.bats|aube install surfaces lockfile parse errors instead of silently re-resolving|garbage written into aube-lock.yaml is never read (file invisible under nub's lock name)
+install.bats|aube install --frozen-lockfile errors when lockfile is stale|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+install.bats|aube install --frozen-lockfile succeeds when lockfile is fresh|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+install.bats|aube install --lockfile-only is a no-op when lockfile is fresh|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+ci.bats|aube ci installs from a committed lockfile|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+ci.bats|aube ci deletes existing node_modules first|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+ci.bats|aube ci errors when lockfile drifts from package.json|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+ci.bats|aube ci --ignore-scripts accepts the flag|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+ci.bats|aube ci removes a symlink node_modules without wiping its target|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+update.bats|aube update: updates a named package to latest matching version|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+update.bats|aube update: all deps updates everything|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+update.bats|aube update: reports version change in output|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+update.bats|aube update --latest --no-save: bumps the lockfile but not package.json|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+update.bats|aube update --lockfile-only: refreshes lockfile without populating node_modules|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+update.bats|aube update --lockfile-only --latest: bumps direct deps without linking|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+update.bats|aube update preserves time: entries for direct deps|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
