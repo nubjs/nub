@@ -1,0 +1,16 @@
+{
+  "name": "conformance-overrides",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "chalk": "^4.1.2"
+  },
+  "overrides": {
+    "supports-color": "8.1.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "supports-color": "8.1.1"
+    }
+  }
+}

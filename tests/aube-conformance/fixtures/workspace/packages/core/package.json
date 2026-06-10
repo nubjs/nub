@@ -1,0 +1,8 @@
+{
+  "name": "@conformance/core",
+  "version": "1.0.0",
+  "dependencies": {
+    "@conformance/util": "workspace:*",
+    "kleur": "^4.1.5"
+  }
+}

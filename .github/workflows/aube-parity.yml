@@ -29,8 +29,10 @@ on:
       - ".gitmodules"
       - ".github/workflows/aube-parity.yml"
       # tests/aube-bats/** is the nub-adapted harness (shim + skip lists) the
-      # aube-bats-nub job runs.
+      # aube-bats-nub job runs; tests/aube-conformance/** is the real-PM
+      # lockfile conformance harness the aube-conformance job runs.
       - "tests/aube-bats/**"
+      - "tests/aube-conformance/**"
   pull_request:
     branches: [main]
     paths:
@@ -38,6 +40,7 @@ on:
       - ".gitmodules"
       - ".github/workflows/aube-parity.yml"
       - "tests/aube-bats/**"
+      - "tests/aube-conformance/**"
 
 env:
   CARGO_TERM_COLOR: always
@@ -96,3 +99,32 @@ jobs:
         run: cargo build -p nub-cli
       - name: Run aube bats suites against nub
         run: tests/aube-bats/run.sh target/debug/nub
+
+  aube-conformance:
+    name: lockfile conformance, real PMs (ubuntu)
+    # nub writes each foreign lockfile format in a hermetic sandbox and the
+    # REAL pinned package manager judges it (tests/aube-conformance/run.sh):
+    # pnpm/npm frozen-accept + zero-churn rewrite, bun frozen-accept, and the
+    # yarn-mutation refusal gate. pnpm and npm are exact-pinned inside the
+    # runner via npx; bun is pinned here (keep in sync with BUN_PIN in
+    # run.sh). Known-red scenarios live in expected-failures.txt and must
+    # shrink — a stale entry fails the job. Real registry installs, one
+    # ubuntu shard: the signal is lockfile semantics, not OS coverage.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: Build nub
+        run: cargo build -p nub-cli
+      - name: Run lockfile conformance matrix
+        run: tests/aube-conformance/run.sh target/debug/nub

@@ -1,0 +1,8 @@
+{
+  "name": "conformance-git-dep",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "ms": "github:vercel/ms#2.1.3"
+  }
+}

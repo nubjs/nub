@@ -1,0 +1,10 @@
+{
+  "name": "conformance-simple",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "debug": "^4.4.0",
+    "kleur": "^4.1.5",
+    "ms": "^2.1.3"
+  }
+}

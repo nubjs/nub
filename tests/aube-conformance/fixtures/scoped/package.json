@@ -1,0 +1,10 @@
+{
+  "name": "conformance-scoped",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@babel/code-frame": "^7.26.2",
+    "@isaacs/string-locale-compare": "^1.1.0",
+    "@sindresorhus/is": "^7.1.0"
+  }
+}

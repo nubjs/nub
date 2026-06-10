@@ -1,0 +1,11 @@
+{
+  "name": "conformance-platform-optional",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "esbuild": "0.25.0"
+  },
+  "optionalDependencies": {
+    "fsevents": "^2.3.3"
+  }
+}
