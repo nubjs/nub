@@ -2150,6 +2150,17 @@ fn build_script_command(
     };
     command.env("PATH", path);
 
+    // Default-on compile cache for script children (same decision as spawn_node,
+    // 2026-06-10): a script's node subtree inherits this env, so heavyweight
+    // single-file tools it launches (tsc/eslint/prettier-class bundles) load
+    // their V8 blobs instead of reparsing. User-set values are untouched —
+    // they're already in the inherited env and this only fills the unset case.
+    if std::env::var_os("NODE_COMPILE_CACHE").is_none() {
+        if let Some(dir) = nub_core::node::spawn::default_compile_cache_dir() {
+            command.env("NODE_COMPILE_CACHE", dir);
+        }
+    }
+
     // $NODE: npm/pnpm point this at the node binary running the script so userland
     // `$NODE child.js` / `spawn(process.env.NODE, …)` invoke "the same Node." When
     // we augment, point it at the PATH-shim `node` (→ nub) instead of the raw binary

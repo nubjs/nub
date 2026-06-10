@@ -367,6 +367,23 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             if write_compile_cache_sentinel(&dir).is_ok() {
                 _ccache_guard = Some(CompileCacheSentinelGuard);
             }
+        } else {
+            // Default-on compile cache (decided 2026-06-10, measured): when the
+            // user hasn't set NODE_COMPILE_CACHE, point it at a nub-owned dir.
+            // Big single-file bundles gain tens of ms per invocation (pnpm −70ms,
+            // typescript.js −67ms — verified working through nub's full hook chain
+            // via NODE_DEBUG_NATIVE=COMPILE_CACHE: blobs accepted on read, persist
+            // skipped when unchanged); small graphs measure at noise, and a stale/
+            // incompatible blob is validated-and-rejected by V8, never trusted.
+            // The dir is nub-owned, so unlike the user-set branch above there is
+            // no pollution concern and NO strip/sentinel dance — the preload chain
+            // caches too. Escape hatches: set NODE_COMPILE_CACHE yourself (takes
+            // the R8 branch), or NODE_DISABLE_COMPILE_CACHE=1 (honored by Node).
+            // Coverage caveat (Node docs: cached code can make coverage less
+            // precise) is documented; the disable var is the answer there.
+            if let Some(dir) = default_compile_cache_dir() {
+                cmd.env("NODE_COMPILE_CACHE", &dir);
+            }
         }
 
         // Dual-channel injection: set NODE_OPTIONS so hardcoded-path `node`
@@ -994,6 +1011,15 @@ pub fn cleanup_shim() {
     if shim_dir.exists() {
         let _ = fs::remove_dir_all(&shim_dir);
     }
+}
+
+/// The nub-owned default compile-cache dir (`<cache>/nub/v8-compile-cache`),
+/// created best-effort. `None` when the cache root can't be resolved (no HOME) —
+/// the spawn simply proceeds uncached, never errors.
+pub fn default_compile_cache_dir() -> Option<std::ffi::OsString> {
+    let dir = crate::node::discovery::cache_dir()?.join("v8-compile-cache");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.into_os_string())
 }
 
 #[cfg(test)]
