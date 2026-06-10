@@ -182,6 +182,7 @@ pub fn resolve_mirror_base(host: &HostTarget) -> String {
 ///      `registry=` is the npm registry, not nodejs.org). Transport config, not
 ///      a pin channel — outside the "no pnpm-specific channels" rule's intent.
 ///   3. The defaults: nodejs.org/dist (glibc), unofficial-builds (musl).
+///
 /// An explicit mirror (env or key) overrides BOTH libc flavors — it's a user
 /// override, trusted as given; musl users need their mirror to carry the
 /// unofficial-builds layout (documented on the site).
