@@ -2732,11 +2732,10 @@ fn run_npm_aliases_map_to_canonical_flags() {
 
 // ── PM-management verbs (A2 passthrough disabled) ────────────────────────────
 
-/// `nub add -D foo` is not a nub command: the A2 pure-passthrough frontend is
-/// disabled (pending the normalized standard surface — see
-/// wiki/research/package-manager-normalized-surface.md), so a PM verb errors
-/// non-zero and names the project's real PM with the exact command to paste.
-/// Nothing is dispatched — stdout stays empty.
+/// A registered-but-unwired engine verb (`patch` — the daily drivers like
+/// `add`/`remove`/`update` are live) errors non-zero and names the project's
+/// real PM with the exact command to paste. Nothing is dispatched — stdout
+/// stays empty.
 #[test]
 fn bareword_pm_verb_errors_with_the_real_pm_command() {
     let dir = unique_test_cache();
@@ -2744,19 +2743,19 @@ fn bareword_pm_verb_errors_with_the_real_pm_command() {
     std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
     std::fs::write(dir.join("pnpm-lock.yaml"), "").unwrap(); // lockfile → pnpm
     let out = Command::new(nub_binary())
-        .args(["add", "-D", "foo"])
+        .args(["patch", "foo"])
         .current_dir(&dir)
         .output()
-        .expect("spawn nub add");
+        .expect("spawn nub patch");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("pnpm add -D foo"),
+        stderr.contains("pnpm patch foo"),
         "the error must carry the pasteable command for the project's PM: {stderr}"
     );
     assert_ne!(
         out.status.code(),
         Some(0),
-        "a PM verb is an error, not a dispatch"
+        "an unwired PM verb is an error, not a dispatch"
     );
     assert!(
         out.stdout.is_empty(),
