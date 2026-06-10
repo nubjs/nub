@@ -199,8 +199,11 @@ pass "no engine identity leaks with $other_mode either"
 #   - direct-stderr stream lines (the transitive-deprecation hint): printed
 #     mid-install where no fd capture runs; the fork drives the product name
 #     from the registered UA token (aube_util::ua::product_name).
-# esbuild = unreviewed dep build (default-deny policy); request = transitively
-# deprecated deps (har-validator, uuid@3). Both version-pinned.
+# core-js = unreviewed dep build (default-deny; NOT on the vendored
+# default-trust list); esbuild = floor-allowed build (listed — nub ships
+# defaultTrust=on, so its build runs and the disclosure line must surface
+# rewritten, never silently); request = transitively deprecated deps
+# (har-validator, uuid@3). All version-pinned.
 PROJ3="$SANDBOX/proj3"
 mkdir -p "$PROJ3"
 cat > "$PROJ3/package.json" <<'EOF'
@@ -208,6 +211,7 @@ cat > "$PROJ3/package.json" <<'EOF'
   "name": "brand-sweep-warnings",
   "private": true,
   "dependencies": {
+    "core-js": "3.40.0",
     "esbuild": "0.28.0",
     "request": "2.88.2"
   }
@@ -224,6 +228,12 @@ fi
 fail_with_output() { echo "---- install output ($out3):"; cat "$out3"; fail "$@"; }
 grep -q 'WARN ignored build scripts' "$out3" || fail_with_output "ignored-build-scripts warning was swallowed (tracing bridge dead)"
 grep -q 'WARN_NUB_IGNORED_BUILD_SCRIPTS' "$out3" || fail_with_output "warning code not rewritten to WARN_NUB_*"
+# The defaultTrust floor (on by default under nub) must never be a silent
+# allow path: the one-line disclosure names esbuild, rewritten like every
+# other warning-channel line.
+grep -q 'WARN defaultTrust: running build scripts' "$out3" || fail_with_output "defaultTrust disclosure line missing (floor allowed builds silently)"
+grep -q 'WARN_NUB_DEFAULT_TRUST_BUILDS' "$out3" || fail_with_output "defaultTrust disclosure code not rewritten to WARN_NUB_*"
+grep -q 'core-js' "$out3" || fail_with_output "deny-side probe (core-js) missing from ignored-builds warning"
 # NB: plain backticks inside single quotes — '\`' would be a literal
 # backslash-backtick, which GNU grep parses as the buffer-start anchor
 # (never matches mid-line) while BSD grep treats it as an escaped
