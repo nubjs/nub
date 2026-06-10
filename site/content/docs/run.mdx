@@ -5,7 +5,7 @@ description: Use nub run as a drop-in for npm run / pnpm run — lifecycle hooks
 
 The `nub run` command executes the scripts in your `package.json`. It is a drop-in replacement for `npm run` and `pnpm run` — an order of magnitude faster on the cold path, with the full workspace and lifecycle-hook surface preserved. It reads your `package.json` directly; package management stays with whatever you already use (`pnpm`, `npm`, `yarn`, `bun`). This page is a cookbook: each section is a task with the exact command to run.
 
-## Run a script
+## `nub run <script>`
 
 Pass the script name after `run`. The name must match a key in your `package.json`'s `"scripts"` field.
 
@@ -83,7 +83,7 @@ nub run build                 # tsc resolves from node_modules/.bin; npm_* vars 
 
 The injected set includes `npm_lifecycle_event`, `npm_lifecycle_script`, `npm_execpath`, `npm_node_execpath`, `npm_command`, and the full `npm_config_*` and `npm_package_*` enumerations, and `INIT_CWD` is set to the directory you invoked `nub run` from. Inside a script, spawning `node` (by shebang or `child_process.spawn("node", …)`) re-enters Nub through the PATH shim, so child processes stay transpiled and augmented — see [Run without augmentation](#run-without-augmentation) below.
 
-## The script shell
+## `--script-shell`
 
 If your `.npmrc` sets `script-shell`, Nub uses it to invoke script bodies. The rest of `.npmrc` (registry, auth, `node-linker`, `hoist-pattern`) is package-manager territory and is deliberately ignored.
 
@@ -98,7 +98,7 @@ You can also override the shell per invocation:
 nub run --script-shell /bin/bash build
 ```
 
-## Run in every package
+## `-r, --recursive`
 
 In a monorepo, `-r` (or `--recursive`) runs the script in every workspace package. Nub reads workspace topology from `package.json`'s `"workspaces"` field (npm / yarn / bun) or `pnpm-workspace.yaml` (pnpm).
 
@@ -110,7 +110,7 @@ nub run --workspaces lint     # --workspaces is the npm-style alias for -r
 
 Packages run in topological order by default: a package's dependencies build before it does. Workspace discovery walks up from your current directory to find the workspace root, so these commands work from anywhere inside the monorepo.
 
-## Filter packages
+## `--filter`
 
 The `--filter` flag (or `-F`) takes pnpm's filter grammar verbatim. Select by exact name, scope glob, name wildcard, or path glob.
 
@@ -128,7 +128,7 @@ Multiple `--filter` flags compose as a union of the matched sets:
 nub run --filter @org/api --filter @org/web build
 ```
 
-## Graph-aware filters
+### `--filter "@org/web..."` — graph selectors
 
 The dependency-graph filter forms walk the workspace package graph. Use the `...` syntax to pull in related packages.
 
@@ -141,7 +141,7 @@ nub run --filter "...^@org/web" build  # @org/web's dependents only
 
 These are exactly the forms `pnpm --filter` supports, so existing monorepo muscle memory carries over directly.
 
-## Run what changed
+### `--filter "[ref]"` — changed since
 
 The `[ref]` filter form selects packages with changes since a git ref — the common CI pattern for testing only what moved.
 
@@ -151,7 +151,7 @@ nub run --filter "[HEAD~1]" build      # packages changed since the last commit
 nub run --filter "...[origin/main]" test  # changed packages AND their dependents
 ```
 
-## Parallelism
+## `--parallel`, `--sequential`
 
 Across a workspace, Nub runs packages concurrently up to a cap (CPU count by default) while respecting topological order. Tune or override that.
 
@@ -163,7 +163,7 @@ nub run -r --sequential migrate               # one at a time, ignore topology
 
 Use `--parallel` for long-running dev servers where there is nothing to order, and `--sequential` for scripts that must not overlap.
 
-## Bail or push through
+## `--no-bail`
 
 By default a workspace run bails on the first package that fails (`--bail`). To run every package regardless and report failures at the end, use `--no-bail`.
 
@@ -172,7 +172,7 @@ nub run -r test               # default: stop at the first failing package
 nub run -r --no-bail test     # run every package, report failures at the end
 ```
 
-## Resume after a failure
+## `--resume-from`
 
 When a long topological run dies partway through, `--resume-from` skips the topological predecessors of a package so you restart where it broke instead of from the top.
 
@@ -180,7 +180,7 @@ When a long topological run dies partway through, `--resume-from` skips the topo
 nub run -r --resume-from @org/api build
 ```
 
-## Run at the root
+## `-w, --workspace-root`
 
 The `-w` flag (pnpm's `--workspace-root`) targets only the root project, regardless of where you invoke it from. To run recursively across members and also include the root package, use the npm-style `--include-workspace-root`.
 
@@ -195,7 +195,7 @@ Note that `-w` is pnpm's boolean root selector, not npm's member selector. To se
 nub run --workspace @org/api --workspace @org/web build
 ```
 
-## Tune workspace output
+## `--stream`, `--aggregate-output`
 
 On a TTY, Nub streams interleaved, per-package-prefixed output (`<pkg> | <line>`, matching `pnpm -r`). On CI / non-TTY it buffers per package and flushes on finish. Override either default explicitly.
 
@@ -211,7 +211,7 @@ And `--silent` (or `-s`) suppresses Nub's `$ <command>` preamble (it does not su
 nub run --silent build
 ```
 
-## Run without augmentation
+## `--node`
 
 By default, the `nub` executable is aliased as `node` for the duration of a `nub run` call, so any subprocess that spawns `node` (a script shebang, `child_process.spawn("node", …)`) gets Nub's TypeScript transpilation, `.env` loading, and polyfills too. Pass `--node` to turn that augmentation off for one invocation.
 

@@ -125,6 +125,10 @@ This matters because the codebase has gone through posture shifts (soft-fork-on,
 
 Colin wants the **minimum words that convey every point**. Tone: a brilliant subject-matter expert who is terse by nature. Sentence fragments, conversational shorthand, no preamble, no recap, no hedging. State conclusions; cut throat-clearing and restatements of the question. This governs chat replies only — docs/code keep their normal rigor. (Concision ≠ omission: keep every distinct point, just strip the words around it.)
 
+## User-facing docs (`site/content/docs/`): terse, command-headed
+
+Register: zod.dev — to the point, code-first, no marketing fluff inside docs pages. **Section headings are the flag/subcommand spellings, not prose, wherever a section maps cleanly onto one** (Colin, 2026-06-10): `## --filter`, `## nub pm pin`, `## --node` — never "Filter packages" / "Pin a version". Prose headings are for sections with no command surface (concepts like "Lifecycle hooks", "What triggers a restart"). Same rule for variants: nest selector/sub-syntax as `###` under the owning flag. Page slugs are command-aligned too (`/docs/run`, `/docs/pm`; the command-less file runner is `/docs/files`). **Terminal mockups show REAL captured output only — never invented lines** (the burned precedent: the site shipped a `nub run dev --watch` example for a flag that never existed, and invented `nub pm switch` output that the real binary errors on).
+
 ## Never hard-wrap markdown paragraphs
 
 **Every paragraph in every `.md` file in this repo is one long line.** Editors do soft-wrap. Hard line breaks inside a paragraph are forbidden. This applies to prose, blockquotes, list items, and table cells. Only code blocks, list-item boundaries, and headers introduce new lines.
@@ -221,6 +225,8 @@ The repo was previously a Node.js fork; the Node source has been moved into `.re
 ## Reference checkouts under `.repos/`
 
 `.repos/` holds local-only clones of other runtimes and tools used as reading material: `.repos/node/` (the Node source — previously the contents of this repo's root, since Nub was originally a Node fork), `.repos/bun/`, `.repos/tsx/`, and `.repos/pnpm/` (the pnpm monorepo, which now absorbs pacquet's in-progress Rust port at `.repos/pnpm/pacquet/crates/`). They are gitignored and never modified. When a research question requires reading the actual source ("how does Node's `lib/internal/modules/esm/resolve.js` handle X?"; "how does `pnpm -r` implement `--resume-from`?"), read from the corresponding `.repos/<name>/` directory. The Nub repo itself contains no vendored Node source, no Node patches, and no upstream-Node remote — see [`wiki/architecture.md#augmenter-not-fork`](wiki/architecture.md#augmenter-not-fork).
+
+**Clone eagerly into `.repos/`; never WebFetch individual GitHub files.** When you need another tool's source — to compare an API surface, check a flag's behavior, or read an implementation — `git clone --depth 1 <repo> .repos/<name>` and then `Read`/`Grep` it locally. Do **not** pull files one at a time off GitHub: a clone is cheap, gives you the entire tree to search, stays internally consistent, and is the established pattern here (`.repos/node`, `.repos/bun`, `.repos/tsx`, `.repos/pnpm`, `.repos/ni`, …). Add a new reference clone the moment a question needs one — don't fetch.
 
 When citing pnpm's implementation in epic todos or research docs, link to the specific file in `.repos/pnpm/` (e.g. [`.repos/pnpm/exec/commands/src/runRecursive.ts`](.repos/pnpm/exec/commands/src/runRecursive.ts)). The canonical workflow for pnpm-parity work is: read the source first, then write a fixture against real pnpm, then verify nub matches.
 
