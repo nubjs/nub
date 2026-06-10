@@ -47,6 +47,7 @@
 
 pub mod info_family;
 pub mod install_family;
+pub mod log;
 pub mod present;
 pub mod publish_family;
 pub mod store_config_family;

@@ -148,4 +148,57 @@ if [ -n "$leaks" ]; then
 fi
 pass "no engine identity leaks with $other_mode either"
 
+# 6. The engine's WARNING CHANNEL surfaces, rewritten. Two leak classes that
+# bypassed the report-path rewrite live here (both were real, found 2026-06-10):
+#   - tracing::warn! events (ignored build scripts): swallowed entirely by the
+#     old no-op subscriber, and leaked raw WARN_AUBE_*/`aube approve-builds`
+#     under RUST_LOG=warn. The pm_engine::log bridge must surface them
+#     rewritten BY DEFAULT.
+#   - direct-stderr stream lines (the transitive-deprecation hint): printed
+#     mid-install where no fd capture runs; the fork drives the product name
+#     from the registered UA token (aube_util::ua::product_name).
+# esbuild = unreviewed dep build (default-deny policy); request = transitively
+# deprecated deps (har-validator, uuid@3). Both version-pinned.
+PROJ3="$SANDBOX/proj3"
+mkdir -p "$PROJ3"
+cat > "$PROJ3/package.json" <<'EOF'
+{
+  "name": "brand-sweep-warnings",
+  "private": true,
+  "dependencies": {
+    "esbuild": "0.28.0",
+    "request": "2.88.2"
+  }
+}
+EOF
+cd "$PROJ3"
+out3="$SANDBOX/install-output3.txt"
+if ! "$NUB" install >"$out3" 2>&1; then
+  cat "$out3"
+  fail "nub install (warning fixture) exited non-zero"
+fi
+grep -q 'WARN ignored build scripts' "$out3" || fail "ignored-build-scripts warning was swallowed (tracing bridge dead)"
+grep -q 'WARN_NUB_IGNORED_BUILD_SCRIPTS' "$out3" || fail "warning code not rewritten to WARN_NUB_*"
+grep -q 'Run \`nub approve-builds\`' "$out3" || fail "approve-builds hint not rebranded"
+grep -q 'deprecation warnings. Run \`nub deprecations' "$out3" || fail "transitive-deprecation hint not rebranded"
+if grep -inE 'aube|jdx\.dev' "$out3"; then
+  fail "engine-branded identity reached the warning channel (above)"
+fi
+pass "warning channel surfaces rewritten (ignored builds + deprecation hint)"
+
+# 7. Help/usage text is leak-free for every wired engine verb. Help renders
+# through present::rewrite_help (config-vocabulary pass + brand rewrite);
+# this loop is the rot-guard for engine help drift after a pin bump.
+for verb in add remove update import dedupe prune rebuild fetch link unlink \
+  approve-builds ignored-builds dlx create init recursive list la ll \
+  outdated why licenses audit peers query view deprecations publish pack \
+  login logout store cache cat-file cat-index find-hash config get set \
+  install ci; do
+  if "$NUB" "$verb" --help 2>&1 | grep -qiE 'aube|jdx\.dev'; then
+    "$NUB" "$verb" --help 2>&1 | grep -inE 'aube|jdx\.dev' | head -3
+    fail "engine branding in \`nub $verb --help\` (above)"
+  fi
+done
+pass "all wired verb helps are leak-free"
+
 echo "brand-sweep: all assertions passed"
