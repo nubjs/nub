@@ -94,6 +94,12 @@ jobs:
       - name: Init node-suite submodule (shallow)
         run: git submodule update --init --depth 1 tests/node-suite
         shell: bash
+      # nub-cli has a path dependency into the vendored aube workspace, so the
+      # cargo build can't resolve without this submodule. Explicit single-path
+      # init (not `submodules: true`) keeps the init list deliberate.
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
+        shell: bash
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v4
@@ -128,6 +134,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # vendor/aube path dep (nub-cli) — without it the build can't resolve
+      # the workspace. Single-path init on purpose: tests/node-suite (the full
+      # nodejs/node clone) stays excluded from the build runners.
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
 
       - uses: dtolnay/rust-toolchain@stable
         with:

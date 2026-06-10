@@ -15,6 +15,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # nub-cli has a path dependency into the vendored aube workspace
+      # (vendor/aube, a submodule), so every job that resolves the cargo
+      # dependency graph needs this one submodule present. Explicit
+      # single-path init on purpose — `submodules: true` on the checkout
+      # would also pull tests/node-suite (the full nodejs/node clone),
+      # which these jobs deliberately exclude. `fmt` is exempt: cargo fmt
+      # tolerates a missing path dep (verified — it never resolves deps).
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
@@ -28,6 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # vendor/aube path dep — see the `check` job for the rationale.
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -67,13 +79,16 @@ jobs:
           - os: ubuntu-latest
             node: '18.19'
     steps:
-      # No submodule here: the fast unit + integration suite reads only
-      # tests/fixtures, never tests/node-suite. The heavyweight Node-suite compat
-      # corpus is #[ignore]'d (a CI-scale gate, not a unit test) and runs in the
-      # dedicated `compat` job below — so this job stays fast across the full
-      # os×node matrix, including the 22.15 floor where the using/ErrorEvent
-      # fallback paths are exercised by the integration tests.
+      # No node-suite submodule here: the fast unit + integration suite reads
+      # only tests/fixtures, never tests/node-suite. The heavyweight Node-suite
+      # compat corpus is #[ignore]'d (a CI-scale gate, not a unit test) — so
+      # this job stays fast across the full os×node matrix, including the 22.15
+      # floor where the using/ErrorEvent fallback paths are exercised by the
+      # integration tests. vendor/aube is the one submodule that IS required
+      # (path dep — see the `check` job).
       - uses: actions/checkout@v4
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v4
@@ -151,6 +166,9 @@ jobs:
             node: '18.19'
     steps:
       - uses: actions/checkout@v4
+      # vendor/aube path dep — see the `check` job for the rationale.
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4

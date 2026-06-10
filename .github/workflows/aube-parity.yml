@@ -1,0 +1,69 @@
+name: Aube parity
+
+# Upstream-parity gate for the vendored aube (vendor/aube — a submodule pinned
+# to the nubjs/aube fork, branch nub-integration). Runs aube's OWN test suite
+# with the same invocation upstream jdx/aube CI uses (`mise run test` =
+# `cargo test`; their Windows leg spells it `cargo test --workspace`), so any
+# nub-motivated change inside the vendor tree provably keeps upstream behavior
+# intact — the doctrine is that everything in vendor/aube stays conceivably
+# upstreamable.
+#
+# This is a separate workflow (not a job in ci.yml) because GitHub path filters
+# only exist at the workflow level, and that makes the gating both correct and
+# the cheapest available: the parity signal is a pure function of the submodule
+# gitlink — nub-side commits can't change aube's own test results (the
+# dependency direction is nub → aube; nothing in the superproject is visible
+# inside vendor/aube's workspace) — so triggering on the gitlink path (plus
+# .gitmodules and this file) costs zero runner minutes until the vendor pointer
+# actually moves, with no dorny/paths-filter gate job burning a runner on every
+# unrelated push. Push covers main + the aube-integration working branch;
+# pull_request covers the eventual PR into main.
+on:
+  push:
+    branches: [main, aube-integration]
+    paths:
+      # The submodule bump shows up in the superproject diff as the bare
+      # gitlink path `vendor/aube` (no trailing slash, no files under it), so
+      # that exact path — not `vendor/aube/**` — is the load-bearing filter.
+      - "vendor/aube"
+      - ".gitmodules"
+      - ".github/workflows/aube-parity.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "vendor/aube"
+      - ".gitmodules"
+      - ".github/workflows/aube-parity.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  aube-parity:
+    name: aube cargo test (ubuntu)
+    # ubuntu-latest only for now; macOS legs come later (10×-billed runners,
+    # same budgeting rationale as release.yml's linux_only debug mode).
+    runs-on: ubuntu-latest
+    # Upstream caps its linux test job at 30 minutes on a warm Namespace
+    # runner; an uncached GitHub runner builds the whole workspace from
+    # scratch, so give it headroom while still killing a hung test long
+    # before the 6-hour default.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # Init ONLY vendor/aube — never `submodules: true`, which would also
+      # pull tests/node-suite (the full nodejs/node clone that every other
+      # job here deliberately excludes).
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vendor/aube
+      - name: Run aube's own test suite
+        working-directory: vendor/aube
+        run: cargo test --workspace
+      # TODO: bats e2e + offline-registry shards: phase 4, see epic. aube's
+      # bats suite needs its harness tooling (mise-provisioned bats + the
+      # offline registry fixtures upstream shards 4-ways on linux); don't
+      # bolt it on here without that plumbing.
