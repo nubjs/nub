@@ -1,0 +1,282 @@
+//! Info-family verbs (`list`/`why`/`outdated`/`audit`/`peers`, …) through
+//! the embedded aube engine, end-to-end through the binary. The wiring under
+//! test lives in `crates/nub-cli/src/pm_engine/info_family.rs`.
+//!
+//! The lockfile-reading verbs are offline-testable against a handcrafted
+//! `pnpm-lock.yaml` (the engine reads the graph straight from the lockfile).
+//! `outdated`/`audit` need registry data and follow the `#[ignore]` +
+//! self-skip convention from `install_engine.rs` — run via
+//! `cargo test -p nub-cli --test info_engine -- --ignored`.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn nub_binary() -> PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop(); // deps/
+    path.pop(); // debug/
+    path.push("nub");
+    path
+}
+
+/// A unique temp project dir under the system temp root (never under $HOME,
+/// so manifest/lockfile walk-ups can't escape into stray ancestors).
+fn pm_tmpdir(tag: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nub-info-{tag}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Spawn `nub <args>` in `dir` with the engine store/cache isolated to fresh
+/// temp roots so tests never touch the dev box's real store.
+fn run_nub(dir: &Path, args: &[&str]) -> (String, String, i32) {
+    let out = Command::new(nub_binary())
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_DATA_HOME", pm_tmpdir("xdg-data"))
+        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"))
+        .output()
+        .expect("failed to spawn nub");
+    (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// Offline guard for the `#[ignore]` network tests.
+fn registry_reachable() -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    "registry.npmjs.org:443"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .is_some_and(|addr| {
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok()
+        })
+}
+
+/// The output brand boundary: no engine name on either stream, ever.
+/// (Temp-dir fixtures keep legitimately-preserved on-disk names — there is
+/// no `aube-lock.yaml` etc. in these projects — so the blanket check is
+/// exact here.)
+fn assert_no_engine_branding(streams: &[(&str, &str)]) {
+    for (name, s) in streams {
+        assert!(
+            !s.to_lowercase().contains("aube"),
+            "engine branding leaked on {name}: {s}"
+        );
+    }
+}
+
+/// A single-dep project with a handcrafted pnpm v9 lockfile — enough for
+/// every lockfile-reading query verb, no install required.
+fn lockfile_fixture(
+    tag: &str,
+    name: &str,
+    specifier: &str,
+    version: &str,
+    integrity: &str,
+) -> PathBuf {
+    let dir = pm_tmpdir(tag);
+    std::fs::write(
+        dir.join("package.json"),
+        format!(
+            r#"{{"name":"{tag}","version":"1.0.0","dependencies":{{"{name}":"{specifier}"}}}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pnpm-lock.yaml"),
+        format!(
+            "lockfileVersion: '9.0'\n\n\
+             importers:\n\n\
+             \x20\x20.:\n\
+             \x20\x20\x20\x20dependencies:\n\
+             \x20\x20\x20\x20\x20\x20{name}:\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: {specifier}\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20version: {version}\n\n\
+             packages:\n\n\
+             \x20\x20{name}@{version}:\n\
+             \x20\x20\x20\x20resolution: {{integrity: {integrity}}}\n\n\
+             snapshots:\n\n\
+             \x20\x20{name}@{version}: {{}}\n"
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+const IS_POSITIVE_310: &str = "sha512-8ND1j3y9/HP94TOvGzr69/FgbkX2ruOldhLEsTWwcJVfo4oRjwemJmJxt7RJkKYH8tz7vYBP9JcKQY8CLuJ90Q==";
+const IS_POSITIVE_300: &str = "sha512-JDkaKp5jWv24ZaFuYDKTcBrC/wBOHdjhzLDkgrrkJD/j7KqqXsGcAkex336qHoOFEajMy7bYqUgm0KH9/MzQvw==";
+const LODASH_41720: &str = "sha512-PlhdFcillOINfeV7Ni6oF1TAEayyZBoZ8bcshTHqOYJYlrqzRK5hagpagky5o4HfCzzd1TRkXPMFq6cKk9rGmA==";
+
+/// The offline read verbs against one lockfile fixture: `list` (plus the
+/// `ls` alias and the `ll` long form), `why`, and `peers check` all read the
+/// handcrafted graph, print the dep on stdout, exit 0, and leak no engine
+/// branding on either stream.
+#[test]
+fn lockfile_read_verbs_work_offline_and_stay_brand_clean() {
+    let dir = lockfile_fixture("reads", "is-positive", "3.1.0", "3.1.0", IS_POSITIVE_310);
+
+    for argv in [
+        &["list"][..],
+        &["ls", "--json"][..],
+        &["ll"][..],
+        &["why", "is-positive"][..],
+        &["peers", "check"][..],
+    ] {
+        let (stdout, stderr, code) = run_nub(&dir, argv);
+        assert_eq!(code, 0, "nub {argv:?}: stdout: {stdout}\nstderr: {stderr}");
+        if argv[0] != "peers" {
+            assert!(
+                stdout.contains("is-positive"),
+                "nub {argv:?} must print the dep: {stdout}"
+            );
+        }
+        assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+    }
+
+    // `--json` is machine-readable and carries the version.
+    let (stdout, _, _) = run_nub(&dir, &["list", "--json"]);
+    assert!(
+        stdout.contains("\"3.1.0\""),
+        "list --json must carry the version: {stdout}"
+    );
+}
+
+/// The no-lockfile pre-flight: the engine's own handling of this case is a
+/// direct branded eprintln, so nub short-circuits it — same message shape,
+/// nub spelling, exit 0 (matching the engine's exit behavior).
+#[test]
+fn missing_lockfile_reports_the_nub_install_hint_and_exits_zero() {
+    let dir = pm_tmpdir("nolock");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"nolock","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_nub(&dir, &["list"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("Run `nub install` to populate node_modules"),
+        "list must speak the rebranded hint: {stderr}"
+    );
+
+    let (stdout, stderr, code) = run_nub(&dir, &["outdated"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("Run `nub install` first."),
+        "outdated must speak the rebranded hint: {stderr}"
+    );
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+}
+
+/// Per-verb `--help` renders (engine verbs bypass nub's top-level clap), is
+/// named for nub, and carries no engine verb spellings.
+#[test]
+fn verb_help_is_rendered_and_rebranded() {
+    let dir = pm_tmpdir("help");
+    let (stdout, stderr, code) = run_nub(&dir, &["outdated", "--help"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("Usage: nub outdated"),
+        "help must be named for nub: {stdout}"
+    );
+    assert!(
+        !stdout.contains("aube outdated") && !stdout.contains("`aube "),
+        "engine verb spellings must rebrand in help: {stdout}"
+    );
+}
+
+/// The audit write gate: `--fix=update` would rewrite the lockfile, which is
+/// refused on yarn projects (write-tier policy), byte-preserving yarn.lock.
+/// Fires pre-network, so this is offline-safe.
+#[test]
+fn audit_fix_update_refuses_to_touch_yarn_lock() {
+    let dir = pm_tmpdir("yarnaudit");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"yarnaudit","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}"#,
+    )
+    .unwrap();
+    let yarn_lock = "# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.\n\
+                     # yarn lockfile v1\n\n\n\
+                     left-pad@^1.3.0:\n\
+                     \x20\x20version \"1.3.0\"\n\
+                     \x20\x20resolved \"https://registry.yarnpkg.com/left-pad/-/left-pad-1.3.0.tgz#5b8a3a7765dfe001261dde915589e782f8c94d1e\"\n\
+                     \x20\x20integrity sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQGinBN9yTQT3bFlCBy/aVx2HrNcqQGsdot8ghrjyrvMCoEA==\n";
+    std::fs::write(dir.join("yarn.lock"), yarn_lock).unwrap();
+
+    let (stdout, stderr, code) = run_nub(&dir, &["audit", "--fix=update"]);
+    assert_ne!(code, 0, "the yarn write gate must refuse: {stdout}{stderr}");
+    assert!(
+        stderr.contains("refusing to modify yarn.lock"),
+        "the gate must name the refusal: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
+        yarn_lock,
+        "yarn.lock must be byte-identical after the refusal"
+    );
+}
+
+/// `outdated` against the real registry: a lockfile pinned behind the
+/// manifest range reports drift and exits 1 (pnpm-compat). is-positive's
+/// latest has been 3.1.0 for years — stable fixture data.
+#[test]
+#[ignore = "network: fetches the is-positive packument from the npm registry"]
+fn outdated_reports_registry_drift_and_exits_one() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = lockfile_fixture(
+        "outdated",
+        "is-positive",
+        "^3.0.0",
+        "3.0.0",
+        IS_POSITIVE_300,
+    );
+    let (stdout, stderr, code) = run_nub(&dir, &["outdated"]);
+    assert_eq!(
+        code, 1,
+        "drift must exit 1: stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("is-positive") && stdout.contains("3.0.0") && stdout.contains("3.1.0"),
+        "the drift row must show current and wanted: {stdout}"
+    );
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+}
+
+/// `audit` against the real registry: lodash 4.17.20 carries published
+/// advisories (advisories are never retracted), so the report is non-empty
+/// and exits 1 (pnpm-compat).
+#[test]
+#[ignore = "network: fetches bulk advisories from the npm registry"]
+fn audit_surfaces_known_advisories_and_exits_one() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = lockfile_fixture("audit", "lodash", "4.17.20", "4.17.20", LODASH_41720);
+    let (stdout, stderr, code) = run_nub(&dir, &["audit"]);
+    assert_eq!(
+        code, 1,
+        "known advisories must exit 1: stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("lodash"),
+        "the advisory table must name the package: {stdout}"
+    );
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+}
