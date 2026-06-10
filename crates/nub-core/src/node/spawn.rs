@@ -41,15 +41,22 @@ use super::flags;
 #[cfg(unix)]
 mod ctrl_c {
     use std::sync::Once;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicI32, Ordering};
 
-    static CURRENT_CHILD: AtomicU32 = AtomicU32::new(0);
+    // The forward TARGET, as the argument to `kill(2)`: a POSITIVE pid signals one
+    // process (the file-run path's `node`, which IS the leaf); a NEGATIVE value
+    // signals the whole PROCESS GROUP `-value` (the script path's `sh -c` child,
+    // made a group leader via `setpgid`, so the signal reaches `sh` AND the `node`
+    // it forks — a non-interactive `sh -c` does NOT relay signals to a forked
+    // child, so single-pid delivery left the workload orphaned under dash). 0 = no
+    // child tracked.
+    static CURRENT_TARGET: AtomicI32 = AtomicI32::new(0);
     static REGISTERED: Once = Once::new();
 
-    /// Record `pid` as the current child, registering the SIGINT handler on the
-    /// first call. Later calls just update the pid.
-    pub(super) fn track(pid: u32) {
-        CURRENT_CHILD.store(pid, Ordering::SeqCst);
+    /// Record the `kill(2)` target (see [`CURRENT_TARGET`]), registering the signal
+    /// handler on the first call. Later calls just update the target.
+    pub(super) fn track(target: i32) {
+        CURRENT_TARGET.store(target, Ordering::SeqCst);
         REGISTERED.call_once(|| {
             use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2};
             use signal_hook::iterator::Signals;
@@ -69,13 +76,14 @@ mod ctrl_c {
             {
                 std::thread::spawn(move || {
                     for signo in signals.forever() {
-                        let pid = CURRENT_CHILD.load(Ordering::SeqCst);
-                        if pid != 0 {
-                            // SAFETY: kill(2) with a stored-live child pid + the
-                            // received signal. Benign if the child already exited
-                            // (ESRCH); pids are cleared to 0 on exit.
+                        let target = CURRENT_TARGET.load(Ordering::SeqCst);
+                        if target != 0 {
+                            // SAFETY: kill(2) with a stored-live target + the received
+                            // signal. A positive target signals one process; a negative
+                            // one signals process group `-target`. Benign if the
+                            // child/group already exited (ESRCH); cleared to 0 on exit.
                             unsafe {
-                                libc::kill(pid as i32, signo);
+                                libc::kill(target, signo);
                             }
                         }
                     }
@@ -84,44 +92,65 @@ mod ctrl_c {
         });
     }
 
-    /// Clear the current child after it exits.
+    /// Clear the current target after the child exits.
     pub(super) fn untrack() {
-        CURRENT_CHILD.store(0, Ordering::SeqCst);
+        CURRENT_TARGET.store(0, Ordering::SeqCst);
     }
 
     #[cfg(test)]
-    pub(super) fn current() -> u32 {
-        CURRENT_CHILD.load(Ordering::SeqCst)
+    pub(super) fn current() -> i32 {
+        CURRENT_TARGET.load(Ordering::SeqCst)
     }
 }
 
-/// Register `pid` as the foreground child so terminating signals Nub receives
-/// (SIGINT/SIGTERM/SIGHUP/SIGQUIT/SIGUSR1/2) are forwarded to it — the exact
-/// machinery [`spawn_node`] uses. Public so the `nub run` script path (which
-/// builds its own `sh -c` Command rather than going through `spawn_node`) gets
-/// identical `docker stop` / Ctrl-C behavior: without it the Nub leader exited on
-/// SIGTERM and the `sh -c <script>` subtree was never signaled — orphaned, and
-/// `docker stop` waited the full grace then SIGKILLed. No-op off Unix (Windows
-/// console-ctrl handling differs and is out of scope here).
-pub fn track_child(pid: u32) {
+/// Track a child's process GROUP as the signal-forward target — for the `nub run`
+/// script path, whose child is `sh -c <script>`. The script child is made a group
+/// leader by [`group_on_spawn`], so signaling group `-pid` reaches `sh` AND the
+/// `node` it forks. This is what `spawn_node`'s single-pid tracking can't do for
+/// scripts: a non-interactive `sh -c` does not relay a forwarded signal to a
+/// forked child, so `docker stop` on a `nub run` entrypoint orphaned the workload
+/// (the Nub leader and `sh` exited; the `node` subtree ran on). No-op off Unix.
+pub fn track_child_group(pid: u32) {
     #[cfg(unix)]
-    ctrl_c::track(pid);
+    ctrl_c::track(-(pid as i32));
     #[cfg(not(unix))]
     let _ = pid;
 }
 
-/// Clear the tracked child after it exits — pair with [`track_child`].
+/// Clear the tracked child/group after it exits — pair with [`track_child_group`].
 pub fn untrack_child() {
     #[cfg(unix)]
     ctrl_c::untrack();
 }
 
-/// Spawn `cmd` and wait, forwarding terminating signals to the child while it
-/// runs — the signal-faithful equivalent of `cmd.status()`. Use wherever Nub
-/// spawns a long-lived foreground child it must relay `docker stop` / Ctrl-C to.
+/// Put the spawned child in its own process group (`setpgid(0, 0)` at exec) so
+/// [`track_child_group`] can signal the whole subtree. No-op off Unix.
+pub fn group_on_spawn(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setpgid(0, 0) only repoints the child's own process-group id
+        // between fork and exec — async-signal-safe, touches no parent state.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
+}
+
+/// Spawn `cmd` in its own process group and wait, forwarding terminating signals
+/// to the whole group while it runs — the signal-faithful, subtree-reaching
+/// equivalent of `cmd.status()` for a `sh -c <script>` child. Use for the `nub
+/// run` script path so `docker stop` / Ctrl-C reach the script and everything it
+/// spawns, not just Nub's leader.
 pub fn status_forwarding_signals(cmd: &mut Command) -> std::io::Result<ExitStatus> {
+    group_on_spawn(cmd);
     let mut child = cmd.spawn()?;
-    track_child(child.id());
+    track_child_group(child.id());
     let status = child.wait();
     untrack_child();
     status
@@ -423,9 +452,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         .with_context(|| format!("failed to spawn {}", config.node.path))?;
 
     // Forward Ctrl-C to the child so it reaches dev servers. Registered once;
-    // the current child's pid lives in a global atomic (see `ctrl_c`).
+    // the current target lives in a global atomic (see `ctrl_c`). The file-run
+    // child IS `node` (the leaf), so a positive single-pid target is correct —
+    // the script path uses group targeting because an `sh -c` sits in the middle.
     #[cfg(unix)]
-    ctrl_c::track(child.id());
+    ctrl_c::track(child.id() as i32);
 
     let status = child.wait().with_context(|| "waiting for Node child")?;
 
@@ -1045,6 +1076,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn group_targeting_stores_a_negative_pid() {
+        // track_child_group must store `-pid` so the forwarder's kill(2) hits the
+        // process GROUP (sh + the node it forks), not just sh — the orphan the
+        // single-pid path left under a dash that forks its `sh -c` child.
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ctrl_c::untrack();
+        track_child_group(4321);
+        assert_eq!(ctrl_c::current(), -4321, "group target is the negated pid");
+        untrack_child();
+        assert_eq!(ctrl_c::current(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn diagnostic_signal_reaches_child_and_parent_survives() {
         let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // SIGUSR2 is the diagnostic-signal exemplar (Node's --report-signal default,
@@ -1079,7 +1124,7 @@ mod tests {
 
         // Register nub's forwarder for this child (installs the SIGUSR2 handler that
         // overrides the parent's terminate-on-USR2 default and relays to the child).
-        ctrl_c::track(child.id());
+        ctrl_c::track(child.id() as i32);
 
         // Give the child's `trap` a moment to install before we deliver the signal.
         std::thread::sleep(std::time::Duration::from_millis(150));

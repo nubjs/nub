@@ -2366,9 +2366,11 @@ fn spawn_script_prefixed(
         exec.script_shell,
     )?;
 
+    nub_core::node::spawn::group_on_spawn(&mut command);
     let mut child = command.spawn()?;
-    // Relay docker stop / Ctrl-C to the streamed child too (workspace `-r` runs).
-    nub_core::node::spawn::track_child(child.id());
+    // Relay docker stop / Ctrl-C to the streamed child's whole process group too
+    // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
+    nub_core::node::spawn::track_child_group(child.id());
     let mut output_buf = String::new();
 
     let stdout = child.stdout.take();
