@@ -112,13 +112,54 @@ fi
 [ -d "$XDG_CACHE_HOME/nub/pm" ] || fail "expected engine cache at \$XDG_CACHE_HOME/nub/pm"
 pass "no aube-named paths anywhere in the sandbox"
 
-# 4. Lifecycle UA identity: first token of npm_config_user_agent is nub/<ver>.
+# 4. Lifecycle UA identity (role-first model, 2026-06-10): a FRESH project has
+# no incumbent PM, so the first token is nub's — in the runner's full dialect
+# (`nub/<v> npm/? node/v<ver> <os> <arch>`), one UA format across `nub run`
+# and engine verbs.
 [ -f ua-seen.txt ] || fail "postinstall did not run (ua-seen.txt missing)"
 ua=$(cat ua-seen.txt)
-case "$ua" in
-  nub/*) pass "npm_config_user_agent starts with nub/: $ua" ;;
-  *) fail "npm_config_user_agent first token is not nub/: '$ua'" ;;
-esac
+if echo "$ua" | grep -qE '^nub/[0-9][^ ]* npm/\? node/v[0-9][^ ]* [a-z0-9]+ [a-z0-9]+$'; then
+  pass "fresh-project npm_config_user_agent is nub-first in the runner dialect: $ua"
+else
+  fail "fresh-project npm_config_user_agent is not nub-first runner-dialect: '$ua'"
+fi
+
+# 4b. Compat mode: a project DECLARING pnpm is served in pnpm's role — the UA
+# leads with pnpm's token at the pinned version, the nub token is ALWAYS
+# second (honesty survives as the second token), and the dialect matches the
+# runner's. The AUBE_* canary from above stays exported, so the dead-env
+# assertion covers this mode through the sandbox-wide find below.
+PROJ_COMPAT="$SANDBOX/proj-compat"
+mkdir -p "$PROJ_COMPAT"
+cat > "$PROJ_COMPAT/package.json" <<'EOF'
+{
+  "name": "brand-sweep-compat",
+  "private": true,
+  "packageManager": "pnpm@10.12.1",
+  "scripts": {
+    "postinstall": "node -e \"require('fs').writeFileSync('ua-seen.txt', process.env.npm_config_user_agent || '<unset>')\""
+  },
+  "dependencies": {
+    "left-pad": "1.3.0"
+  }
+}
+EOF
+cd "$PROJ_COMPAT"
+if ! "$NUB" install >"$SANDBOX/install-output-compat.txt" 2>&1; then
+  cat "$SANDBOX/install-output-compat.txt"
+  fail "nub install (compat fixture) exited non-zero"
+fi
+if grep -inE 'aube|jdx\.dev' "$SANDBOX/install-output-compat.txt"; then
+  fail "engine-branded identity reached nub's output in compat mode (above)"
+fi
+[ -f ua-seen.txt ] || fail "compat postinstall did not run (ua-seen.txt missing)"
+ua=$(cat ua-seen.txt)
+if echo "$ua" | grep -qE '^pnpm/10\.12\.1 nub/[0-9][^ ]* node/v[0-9]'; then
+  pass "compat npm_config_user_agent is pnpm-first with nub second: $ua"
+else
+  fail "compat npm_config_user_agent is not pnpm-first/nub-second: '$ua'"
+fi
+cd "$PROJ"
 
 # 5. Second install pass with the CI mode INVERTED. The engine's linker takes
 # a different path under CI (the global-virtual-store gate flips on `CI`),

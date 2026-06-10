@@ -580,6 +580,14 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
     engine_brand_preflight();
     let cwd = std::env::current_dir()?;
     let detected = resolve_identity_walk_up(&cwd)?;
+    // Role-first lifecycle UA (two-mode model, Colin 2026-06-10): in compat
+    // mode nub plays the incumbent PM's role completely, so the UA dep
+    // postinstalls sniff leads with that PM's token (`pnpm/<ver> nub/<ver>
+    // node/v<ver> …`, nub always second); under nub identity or in a fresh
+    // project the first token is nub's. Lifecycle-only — the registry UA and
+    // stream-time tool naming stay on the `nub/<ver>` product identity set in
+    // [`engine_brand_preflight`] (telemetry never lies).
+    aube::set_lifecycle_user_agent_product(lifecycle_ua_product(detected.as_ref(), &cwd));
     // Set-unless-user-set: ranks below CLI flags, env vars, and every
     // config file in the engine's settings precedence.
     aube::set_embedder_defaults(nub_setting_defaults(detected.as_ref()));
@@ -587,6 +595,86 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
         detected,
         runtime: build_runtime()?,
     })
+}
+
+/// The pnpm version the role-first UA advertises for a pnpm-role project with
+/// no pinned version — the engine's parity claim (full pnpm-v11 settings
+/// catalog + v11 build-policy posture; see the pnpm-11 compat decision,
+/// epics/v0.2-aube). A `packageManager`/`devEngines` pin always outranks this:
+/// the UA impersonates the pinned version when one exists.
+pub(crate) const PNPM_PARITY_VERSION: &str = "11.3.0";
+
+/// Compose the lifecycle-script UA product tokens for the resolved role —
+/// everything before the `<os> <arch>` tail the engine appends. The dialect is
+/// the runner's (`crates/nub-core/src/workspace/scripts.rs`): pnpm's UA shape,
+/// `node/v<ver>` included, so postinstall sniffers parse one format whether a
+/// script ran under `nub run` or an engine verb.
+///
+/// Role resolution mirrors identity (declaration first, lockfile kind second,
+/// fresh last): the declared name wins even when its pin is unusable for
+/// provisioning — the project *said* who manages it — and the version token is
+/// the pinned version when declared, else the engine's parity version for
+/// pnpm and `?` (pnpm's own convention for an unknown version) for the roles
+/// whose real tool nub does not embed.
+fn lifecycle_ua_product(detected: Option<&DetectedLockfile>, cwd: &Path) -> String {
+    let node_version = nub_core::node::discovery::discover_node(cwd)
+        .map(|n| n.version.to_string())
+        .unwrap_or_else(|_| "?".to_string());
+    compose_lifecycle_ua(
+        nub_core::pm::resolve::declared_pm_raw(cwd),
+        detected.map(|d| d.kind),
+        &node_version,
+    )
+}
+
+/// Pure core of [`lifecycle_ua_product`] (unit-tested without a fixture).
+fn compose_lifecycle_ua(
+    declared: Option<(String, Option<String>)>,
+    kind: Option<LockfileKind>,
+    node_version: &str,
+) -> String {
+    let nub_version = env!("CARGO_PKG_VERSION");
+    // The declared name is the role when it names an identity nub recognizes;
+    // an unknown tool name (vlt, deno, …) falls through to the lockfile kind,
+    // exactly like identity resolution does.
+    let declared_role = declared
+        .as_ref()
+        .filter(|(name, _)| matches!(name.as_str(), "npm" | "pnpm" | "yarn" | "bun" | "nub"))
+        .map(|(name, version)| (name.clone(), version.clone()));
+    let role = declared_role
+        .as_ref()
+        .map(|(name, _)| name.clone())
+        .or_else(|| {
+            kind.map(|k| {
+                match k {
+                    LockfileKind::Pnpm => "pnpm",
+                    LockfileKind::Npm | LockfileKind::NpmShrinkwrap => "npm",
+                    LockfileKind::Yarn | LockfileKind::YarnBerry => "yarn",
+                    LockfileKind::Bun => "bun",
+                    // The generically named lock.yaml (the engine's `Aube` slot
+                    // under nub's filename toggle) is nub identity.
+                    LockfileKind::Aube => "nub",
+                }
+                .to_string()
+            })
+        });
+    match role.as_deref() {
+        // Compat mode: the incumbent's token first, nub always second. The
+        // version is the pin when the declaration supplied one, else the
+        // engine's parity version (pnpm) or `?` (roles nub doesn't embed).
+        Some(other) if other != "nub" => {
+            let version = declared_role
+                .and_then(|(_, version)| version)
+                .unwrap_or_else(|| match other {
+                    "pnpm" => PNPM_PARITY_VERSION.to_string(),
+                    _ => "?".to_string(),
+                });
+            format!("{other}/{version} nub/{nub_version} node/v{node_version}")
+        }
+        // Nub identity or a fresh project: nub first, byte-identical to the
+        // runner's dialect (`nub/<v> npm/? node/v<ver>`).
+        _ => format!("nub/{nub_version} npm/? node/v{node_version}"),
+    }
 }
 
 /// `--dir` / `-C` (and the global `--cwd`, which dispatch applies earlier):
@@ -919,6 +1007,73 @@ mod tests {
     // covered behaviorally through the spawned binary instead:
     // `tests/info_engine.rs::aube_workspace_yaml_is_not_consulted` and the
     // engines.aube case in `tests/install_engine.rs`.
+
+    #[test]
+    fn lifecycle_ua_is_role_first_in_compat_and_nub_first_otherwise() {
+        let nub = env!("CARGO_PKG_VERSION");
+        let pin = |name: &str, v: Option<&str>| Some((name.to_string(), v.map(str::to_string)));
+
+        // Compat, pinned: the incumbent's token first with the PINNED version,
+        // nub always second, runner dialect (node/v token present).
+        assert_eq!(
+            compose_lifecycle_ua(
+                pin("pnpm", Some("9.1.0")),
+                Some(LockfileKind::Pnpm),
+                "22.15.0"
+            ),
+            format!("pnpm/9.1.0 nub/{nub} node/v22.15.0")
+        );
+        // Compat, unpinned pnpm (lockfile-inferred): the engine's parity version.
+        assert_eq!(
+            compose_lifecycle_ua(None, Some(LockfileKind::Pnpm), "22.15.0"),
+            format!("pnpm/{PNPM_PARITY_VERSION} nub/{nub} node/v22.15.0")
+        );
+        // npm/bun roles: pnpm's own `?` convention when no version is declared.
+        assert_eq!(
+            compose_lifecycle_ua(None, Some(LockfileKind::Npm), "22.15.0"),
+            format!("npm/? nub/{nub} node/v22.15.0")
+        );
+        assert_eq!(
+            compose_lifecycle_ua(
+                pin("bun", Some("1.2.0")),
+                Some(LockfileKind::Bun),
+                "22.15.0"
+            ),
+            format!("bun/1.2.0 nub/{nub} node/v22.15.0")
+        );
+        // Declaration outranks a stray foreign lockfile for the role, exactly
+        // like identity resolution.
+        assert_eq!(
+            compose_lifecycle_ua(
+                pin("npm", Some("11.0.0")),
+                Some(LockfileKind::Npm),
+                "22.15.0"
+            ),
+            format!("npm/11.0.0 nub/{nub} node/v22.15.0")
+        );
+        // Unknown declared tool falls through to the lockfile kind.
+        assert_eq!(
+            compose_lifecycle_ua(pin("vlt", None), Some(LockfileKind::Yarn), "22.15.0"),
+            format!("yarn/? nub/{nub} node/v22.15.0")
+        );
+
+        // Nub identity (declared, or the lock.yaml kind) and fresh projects:
+        // nub first, byte-identical to the runner's dialect.
+        let nub_first = format!("nub/{nub} npm/? node/v22.15.0");
+        assert_eq!(
+            compose_lifecycle_ua(
+                pin("nub", Some("0.1.0")),
+                Some(LockfileKind::Aube),
+                "22.15.0"
+            ),
+            nub_first
+        );
+        assert_eq!(
+            compose_lifecycle_ua(None, Some(LockfileKind::Aube), "22.15.0"),
+            nub_first
+        );
+        assert_eq!(compose_lifecycle_ua(None, None, "22.15.0"), nub_first);
+    }
 
     #[test]
     fn verb_registry_spellings_are_unique_and_resolvable() {

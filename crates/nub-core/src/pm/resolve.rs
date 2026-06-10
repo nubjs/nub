@@ -417,6 +417,23 @@ pub struct PmIdentity {
     pub berry: bool,
 }
 
+/// The raw `(name, version)` the project's pin fields declare at the workspace
+/// root — no usability filtering, no name allowlist, and the Corepack
+/// `+sha512` suffix stripped from the version. The role-first UA's input: the
+/// lifecycle UA impersonates the *declared* identity (and its pinned version)
+/// even when the pin is unusable for provisioning, so this reader sees what
+/// [`resolve_pin`] would warn about and ignore.
+pub fn declared_pm_raw(cwd: &Path) -> Option<(String, Option<String>)> {
+    let manifest = root_manifest(cwd)?;
+    let (name, version) = raw_pin_name_version(&manifest)?;
+    let version = version.map(|v| {
+        v.split_once('+')
+            .map_or(v.as_str(), |(bare, _)| bare)
+            .to_string()
+    });
+    Some((name, version))
+}
+
 pub fn project_pm_identity(cwd: &Path) -> Option<PmIdentity> {
     if committed_yarn_path(cwd).is_some() {
         return Some(PmIdentity {
