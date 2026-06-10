@@ -151,9 +151,15 @@ fn target_node_version() -> (u32, u32, u32) {
         // Prefer the exact binary nub would pick (`nub node which`); fall back to
         // PATH `node`. Either resolves the same version the spawned-nub tests use.
         // (`nub node which` prints the path to stdout, the explainer to stderr —
-        // capturing stdout gives just the path.)
+        // capturing stdout gives just the path.) Resolved FROM the fixtures dir so
+        // the answer goes through the same pin-free project boundary
+        // (tests/fixtures/package.json) the fixture tests run under — from the
+        // crate dir the walk-up hits the repo-root engines.node (>=22.15.0) and
+        // can report a store/nvm Node instead of the PATH-matrix Node the
+        // fixture tests actually spawn.
         let node = Command::new(nub_binary())
             .args(["node", "which"])
+            .current_dir(fixtures_dir())
             .output()
             .ok()
             .filter(|o| o.status.success())

@@ -1,0 +1,5 @@
+{
+  "name": "nub-test-fixtures-boundary",
+  "private": true,
+  "description": "Deliberately pin-free project boundary for every fixture that has no package.json of its own (float16, vanilla-ts, ts-paths, …). Without it, Node-version discovery walks up to the repo-root package.json, whose engines.node (>=22.15.0) is resolution source #4 — on CI legs whose PATH Node is below that range (18.19/20.11/22.13) every `nub <file>` test then PROVISIONS the newest published Node from nodejs.org (floating 'latest', fresh 33 MB download per invocation since the harness isolates XDG_CACHE_HOME), which both defeats the Node matrix (the test silently runs on provisioned-latest instead of the matrix Node) and makes the suite network-flaky (2026-06-10: Node 26.3.0 released, download EOF broke float16_array_and_helpers_work / type_only_import_erased). Same pattern as tests/fixtures/version-verify/package.json. No 'type' field on purpose: fixtures keep Node's type-less CJS default and detect-module behavior."
+}
