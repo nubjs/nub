@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/nub",
-  "version": "0.0.26",
+  "version": "0.0.27",
   "description": "TypeScript-first developer supertool — a fast script runner and TS runtime powered by Node.js",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
@@ -18,13 +18,13 @@
     "postinstall.js"
   ],
   "optionalDependencies": {
-    "@nubjs/nub-darwin-arm64": "0.0.26",
-    "@nubjs/nub-darwin-x64": "0.0.26",
-    "@nubjs/nub-linux-x64": "0.0.26",
-    "@nubjs/nub-linux-x64-musl": "0.0.26",
-    "@nubjs/nub-linux-arm64": "0.0.26",
-    "@nubjs/nub-linux-arm64-musl": "0.0.26",
-    "@nubjs/nub-win32-x64": "0.0.26",
-    "@nubjs/nub-win32-arm64": "0.0.26"
+    "@nubjs/nub-darwin-arm64": "0.0.27",
+    "@nubjs/nub-darwin-x64": "0.0.27",
+    "@nubjs/nub-linux-x64": "0.0.27",
+    "@nubjs/nub-linux-x64-musl": "0.0.27",
+    "@nubjs/nub-linux-arm64": "0.0.27",
+    "@nubjs/nub-linux-arm64-musl": "0.0.27",
+    "@nubjs/nub-win32-x64": "0.0.27",
+    "@nubjs/nub-win32-arm64": "0.0.27"
   }
 }
