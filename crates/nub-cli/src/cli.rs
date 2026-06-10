@@ -2291,6 +2291,17 @@ fn build_script_command(
     };
     command.env("PATH", path);
 
+    // Default-on compile cache for script children (same decision as spawn_node,
+    // 2026-06-10): a script's node subtree inherits this env, so heavyweight
+    // single-file tools it launches (tsc/eslint/prettier-class bundles) load
+    // their V8 blobs instead of reparsing. User-set values are untouched —
+    // they're already in the inherited env and this only fills the unset case.
+    if std::env::var_os("NODE_COMPILE_CACHE").is_none() {
+        if let Some(dir) = nub_core::node::spawn::default_compile_cache_dir() {
+            command.env("NODE_COMPILE_CACHE", dir);
+        }
+    }
+
     // $NODE: npm/pnpm point this at the node binary running the script so userland
     // `$NODE child.js` / `spawn(process.env.NODE, …)` invoke "the same Node." When
     // we augment, point it at the PATH-shim `node` (→ nub) instead of the raw binary
@@ -3665,7 +3676,7 @@ fn provision_pm_humanized(
     store: &Path,
     cwd: &Path,
 ) -> Result<nub_core::pm::provision::ProvisionedPm> {
-    nub_core::pm::provision::provision_pm(pin, store)
+    nub_core::pm::provision::provision_pm(pin, store, cwd)
         .map_err(|e| humanize_transport_error(e, &nub_core::pm::registry::registry_base(cwd)))
 }
 
@@ -3957,9 +3968,12 @@ fn resolve_provision_declare(
         bail!(berry_pin_refusal(cwd));
     }
 
-    let base = registry::registry_base(cwd);
-    let dist = registry::resolve_version(&base, name, spec)
-        .map_err(|e| humanize_transport_error(e, &base))?;
+    // The full authed config from the PROJECT dir — pin was the one remaining
+    // no-auth caller of the registry stack, 401ing against private mirrors that
+    // every other path (shim provision, update) already authenticated against.
+    let cfg = registry::registry_config(cwd);
+    let dist = registry::resolve_version_authed(&cfg, name, spec)
+        .map_err(|e| humanize_transport_error(e, &cfg.base))?;
 
     let pm = match name {
         "npm" => Some(Pm::Npm),
@@ -3975,8 +3989,8 @@ fn resolve_provision_declare(
         other => unreachable!("split_pm_arg admits only npm/pnpm/yarn/bun, got {other}"),
     };
 
-    let hex =
-        fetch_and_hash_tarball(name, &dist).map_err(|e| humanize_transport_error(e, &base))?;
+    let hex = fetch_and_hash_tarball(name, &dist, cfg.auth.as_ref())
+        .map_err(|e| humanize_transport_error(e, &cfg.base))?;
 
     if let Some(pm) = pm {
         let store = pm_store_root()?;
@@ -3984,7 +3998,8 @@ fn resolve_provision_declare(
             pm,
             version: Some(format!("{}+sha512.{hex}", dist.version)),
         };
-        provision::provision_pm(&pin, &store).map_err(|e| humanize_transport_error(e, &base))?;
+        provision::provision_pm(&pin, &store, cwd)
+            .map_err(|e| humanize_transport_error(e, &cfg.base))?;
     }
 
     let write = resolve::write_declared_pm(name, &dist.version, &hex, cwd, maintain_dev_engines)?;
@@ -4138,15 +4153,17 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
 fn fetch_and_hash_tarball(
     name: &str,
     dist: &nub_core::pm::registry::VersionDist,
+    auth: Option<&nub_core::version_management::download::Auth>,
 ) -> Result<String> {
     use sha2::{Digest, Sha512};
 
     let tmp = tempfile::tempdir().context("creating a temp dir for the pin fetch")?;
     let tarball = tmp.path().join("pm.tgz");
     let mut announced = false;
-    nub_core::version_management::download::download_to_file(
+    nub_core::version_management::download::download_to_file_auth(
         &dist.tarball,
         &tarball,
+        auth,
         |_done, total| {
             if !announced {
                 announced = true;
@@ -4293,9 +4310,8 @@ fn run_pm_shim_install() -> Result<i32> {
     match shim::add_path_block()? {
         ProfileOutcome::Added(profile) => println!(
             "  PATH: added {} to {} — open a new shell or run `source {}`\n\
-             \x20       (that file is read by interactive shells only; for IDE/GUI-spawned\n\
-             \x20        package managers, add the same line to ~/.zprofile or ~/.zshenv (zsh)\n\
-             \x20        / ~/.profile (bash) so non-interactive shells see the shims too)",
+             \x20       (login/non-interactive profiles are wired automatically too, so\n\
+             \x20        IDE- and GUI-spawned package managers see the shims — no manual step)",
             dir.display(),
             profile.display(),
             profile.display()
@@ -4477,7 +4493,7 @@ fn shim_plan(
                 );
             }
             // Cache-first: an exact pin already in the store is zero-network.
-            let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?)?;
+            let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?, cwd)?;
             let bin = shim::sibling_bin(&prov.bin, bin_entry)?;
             exec_under_project_node(cwd, bin, args)
         }
@@ -4505,7 +4521,7 @@ fn shim_plan(
                 pm: invoked.pm(),
                 version: Some(spec),
             };
-            let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?)?;
+            let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?, cwd)?;
             let bin = shim::sibling_bin(&prov.bin, invoked.bin_entry())?;
             exec_under_project_node(cwd, bin, args)
         }
@@ -5910,7 +5926,7 @@ mod tests {
         // A dishonest hash would fail closed here.
         let fresh = pm_tmpdir("use-net-fresh-store");
         let pin = nub_core::pm::resolve::resolve_pin(&dir).expect("the pin just written");
-        nub_core::pm::provision::provision_pm(&pin, &fresh)
+        nub_core::pm::provision::provision_pm(&pin, &fresh, &dir)
             .expect("a fresh store must verify and install from the written pin hash");
         let _ = std::fs::remove_dir_all(&fresh);
     }

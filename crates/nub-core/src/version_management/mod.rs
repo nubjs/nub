@@ -168,7 +168,31 @@ pub fn node_artifact(version: &NodeVersion, host: &HostTarget, base: &str) -> No
 /// override (the nodenv / `n` convention — NODE-namespaced, not a brand
 /// violation) if set, else `nodejs.org/dist` (glibc) or unofficial-builds (musl).
 pub fn resolve_mirror_base(host: &HostTarget) -> String {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    resolve_mirror_base_in(host, &root)
+}
+
+/// [`resolve_mirror_base`] with the project root made explicit (the testable
+/// body). Precedence:
+///   1. `NODEJS_ORG_MIRROR` — the vendor-neutral env convention (nvm/n).
+///   2. `.npmrc` `node-mirror:release=` — pnpm's existing key for "fetch Node
+///      dists from this mirror" (project `.npmrc`, then `~/.npmrc`). Adopted
+///      2026-06-11 (Colin): an existing file + existing key beats inventing a
+///      `NODE_*` var nobody else reads; `.npmrc` alone can't express this (its
+///      `registry=` is the npm registry, not nodejs.org). Transport config, not
+///      a pin channel — outside the "no pnpm-specific channels" rule's intent.
+///   3. The defaults: nodejs.org/dist (glibc), unofficial-builds (musl).
+/// An explicit mirror (env or key) overrides BOTH libc flavors — it's a user
+/// override, trusted as given; musl users need their mirror to carry the
+/// unofficial-builds layout (documented on the site).
+pub fn resolve_mirror_base_in(host: &HostTarget, project_root: &std::path::Path) -> String {
     if let Ok(m) = std::env::var("NODEJS_ORG_MIRROR") {
+        let m = m.trim_end_matches('/');
+        if !m.is_empty() {
+            return m.to_string();
+        }
+    }
+    if let Some(m) = crate::workspace::scripts::npmrc_value(project_root, "node-mirror:release") {
         let m = m.trim_end_matches('/');
         if !m.is_empty() {
             return m.to_string();
@@ -268,6 +292,52 @@ pub fn provision_node(
 
 #[cfg(test)]
 mod tests {
+    // node-mirror:release — the pnpm .npmrc key adopted for Node-dist mirrors.
+    // Env precedence (NODEJS_ORG_MIRROR first) is documented, not asserted:
+    // mutating process env races the parallel test harness.
+    #[test]
+    fn npmrc_node_mirror_key_overrides_the_dist_base() {
+        if std::env::var_os("NODEJS_ORG_MIRROR").is_some() {
+            return; // ambient env outranks the key; skip rather than mutate env
+        }
+        let dir = std::env::temp_dir().join(format!("nub-mirror-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".npmrc"),
+            "node-mirror:release=https://mirror.corp.example/node/\n",
+        )
+        .unwrap();
+        let glibc = super::HostTarget {
+            os: super::NodeOs::Darwin,
+            arch: super::NodeArch::Arm64,
+            musl: false,
+        };
+        let musl = super::HostTarget {
+            os: super::NodeOs::Linux,
+            arch: super::NodeArch::X64,
+            musl: true,
+        };
+        assert_eq!(
+            super::resolve_mirror_base_in(&glibc, &dir),
+            "https://mirror.corp.example/node",
+            "the key overrides the base, trailing slash trimmed"
+        );
+        assert_eq!(
+            super::resolve_mirror_base_in(&musl, &dir),
+            "https://mirror.corp.example/node",
+            "an explicit mirror overrides the musl default too"
+        );
+        let empty = dir.join("none");
+        std::fs::create_dir_all(&empty).unwrap();
+        if crate::workspace::scripts::npmrc_value(&empty, "node-mirror:release").is_none() {
+            assert!(
+                super::resolve_mirror_base_in(&glibc, &empty).starts_with("https://nodejs.org"),
+                "no key, no env: the public default"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn host(os: NodeOs, arch: NodeArch, musl: bool) -> HostTarget {
