@@ -141,11 +141,14 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
 /// `nub ci` — frozen + clean install, npm-ci semantics. Constructed at the
 /// nub layer as a field-for-field mirror of `aube ci`
 /// (`vendor/aube/crates/aube/src/commands/ci.rs`) rather than calling
-/// `commands::ci::run`: the ci entry point builds its `InstallOptions` with an
-/// empty `cli_flags` bag, which would leave no channel for the nodeLinker
-/// layout policy. Semantics shipped: delete `node_modules`, then install with
-/// `FrozenMode::Frozen` + `strict_no_lockfile` (drift or no lockfile ⇒ hard
-/// error), root lifecycle hooks on unless `--ignore-scripts`.
+/// `commands::ci::run`. (Historical reason: the ci entry point's empty
+/// `cli_flags` bag left no channel for the layout policy, which then rode the
+/// CLI tier. The policy now rides the embedder-defaults tier, so the mirror
+/// persists to keep the nub-side yarn drift pre-flight and the clean step
+/// explicit — `commands::ci::run` would be equivalent otherwise.) Semantics
+/// shipped: delete `node_modules`, then install with `FrozenMode::Frozen` +
+/// `strict_no_lockfile` (drift or no lockfile ⇒ hard error), root lifecycle
+/// hooks on unless `--ignore-scripts`.
 pub fn run_ci(flags: CiFlags) -> Result<i32> {
     apply_dir(flags.dir.as_deref())?;
     let cwd = std::env::current_dir()?;
@@ -330,7 +333,10 @@ fn engine_preflight(detected: Option<&DetectedLockfile>) {
 fn nub_setting_defaults(detected: Option<&DetectedLockfile>) -> Vec<(String, String)> {
     let mut defaults = vec![
         ("defaultLockfileFormat".to_string(), "pnpm".to_string()),
-        ("virtualStoreDir".to_string(), "node_modules/.nub".to_string()),
+        (
+            "virtualStoreDir".to_string(),
+            "node_modules/.nub".to_string(),
+        ),
         ("stateDir".to_string(), "node_modules/.nub".to_string()),
     ];
     let hoisted_kind = matches!(

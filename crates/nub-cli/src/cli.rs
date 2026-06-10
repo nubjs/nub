@@ -4041,7 +4041,13 @@ mod tests {
                 if node_linker.as_deref() == Some("hoisted")
         ));
         assert!(
-            parse(&["nub", "install", "--frozen-lockfile", "--no-frozen-lockfile"]).is_err(),
+            parse(&[
+                "nub",
+                "install",
+                "--frozen-lockfile",
+                "--no-frozen-lockfile"
+            ])
+            .is_err(),
             "the frozen-lockfile flags are mutually exclusive"
         );
     }
