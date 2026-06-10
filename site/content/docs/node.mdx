@@ -87,6 +87,17 @@ A few deliberate behaviors:
 
 Whatever spec you give is written verbatim — including an alias like `lts` — and `pin` never hits the network, so it's instant and works offline. The `.node-version` file is the tool-agnostic convention (`nvm`, `fnm`, `volta`, `asdf` all read it), so the pin is portable to your other tools, not just Nub.
 
+## Mirrors and proxies
+
+Corporate network? Node downloads honor `HTTP(S)_PROXY`/`NO_PROXY`, and corporate TLS-intercepting CAs work out of the box (system trust roots). To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both, no Nub-specific config:
+
+```ini
+# .npmrc (project or ~)
+node-mirror:release=https://artifactory.corp.example/node/
+```
+
+`NODEJS_ORG_MIRROR` (the nvm/n convention) takes precedence when set. An explicit mirror is used for musl builds too — point it at a mirror that carries the `unofficial-builds` layout on Alpine.
+
 ## Bring your own version manager
 
 With no pin file, Nub adopts whatever `node` is on your `PATH`. Switch versions with `nvm`, `mise`, `fnm`, `brew`, or the official installer and Nub picks up the active one — it doesn't install a "default" Node of its own and won't shadow the version manager you already use. Nub has no user-level config file; outside a pinned project, your shell's `node` is the answer.
