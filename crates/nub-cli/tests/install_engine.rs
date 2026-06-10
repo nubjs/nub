@@ -67,7 +67,9 @@ fn registry_reachable() -> bool {
 }
 
 /// Fresh project (no lockfile): the engine resolves, links the isolated
-/// (pnpm-style) layout, and writes aube's own lockfile.
+/// (pnpm-style) layout under `node_modules/.nub`, and writes
+/// `pnpm-lock.yaml` (nub's `defaultLockfileFormat=pnpm` embedder default —
+/// fresh projects stay portable to pnpm, not aube-branded).
 #[test]
 #[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn install_fresh_project_links_isolated_and_writes_a_lockfile() {
@@ -85,7 +87,8 @@ fn install_fresh_project_links_isolated_and_writes_a_lockfile() {
     let (stdout, stderr, code) = run_install(&dir, &["install"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
-    // Isolated layout: the top-level entry is a symlink into the virtual store.
+    // Isolated layout: the top-level entry is a symlink into the virtual
+    // store, which nub relocates to `node_modules/.nub`.
     let dep = dir.join("node_modules/is-positive");
     assert!(
         dep.join("package.json").is_file(),
@@ -93,16 +96,26 @@ fn install_fresh_project_links_isolated_and_writes_a_lockfile() {
     );
     assert!(
         dep.symlink_metadata().unwrap().file_type().is_symlink(),
-        "no-lockfile projects default to the isolated layout (symlink into .aube)"
+        "no-lockfile projects default to the isolated layout (symlink into .nub)"
+    );
+    let target = std::fs::read_link(&dep).unwrap();
+    assert!(
+        target.to_string_lossy().contains(".nub/"),
+        "the virtual store must live under node_modules/.nub, got: {}",
+        target.display()
+    );
+    assert!(
+        !dir.join("node_modules/.aube").exists(),
+        "no .aube directory may materialize"
     );
 
-    // TODO(aube-integration/defaultLockfileFormat): CURRENT behavior — a
-    // fresh project gets aube's native lockfile. Once the fork's
-    // `defaultLockfileFormat` toggle is wired through nub, flip this
-    // assertion to whatever format the toggle selects for fresh projects.
     assert!(
-        dir.join("aube-lock.yaml").is_file(),
-        "fresh-project install writes aube-lock.yaml (pinned-engine behavior)"
+        dir.join("pnpm-lock.yaml").is_file(),
+        "fresh-project install writes pnpm-lock.yaml (defaultLockfileFormat=pnpm)"
+    );
+    assert!(
+        !dir.join("aube-lock.yaml").exists(),
+        "no aube-lock.yaml may appear in a fresh project"
     );
 }
 
@@ -163,8 +176,8 @@ fn install_with_package_lock_hoists_and_preserves_the_npm_lockfile() {
         "the npm lockfile must be preserved"
     );
     assert!(
-        !dir.join("aube-lock.yaml").exists(),
-        "no aube-lock.yaml may appear next to package-lock.json"
+        !dir.join("aube-lock.yaml").exists() && !dir.join("pnpm-lock.yaml").exists(),
+        "no foreign lockfile may appear next to package-lock.json"
     );
 }
 

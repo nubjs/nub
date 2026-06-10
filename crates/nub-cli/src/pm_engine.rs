@@ -4,36 +4,44 @@
 //! The dispatch shape mirrors aube's own CLI entry (`vendor/aube/crates/aube/
 //! src/lib.rs::run_install_command`): build the CLI flag bag, resolve the
 //! frozen mode, construct `InstallOptions`, run `commands::install::run` on a
-//! multi-thread tokio runtime. Two nub-layer policies sit on top:
+//! multi-thread tokio runtime. The nub layer sits on top through the engine's
+//! embedder seams (`engine_preflight`) plus one hard gate:
 //!
-//! 1. **Layout policy** — the detected lockfile kind picks the default
-//!    `nodeLinker`: flat-layout ecosystems (`package-lock.json`,
-//!    `npm-shrinkwrap.json`, `yarn.lock`, `bun.lock`) default to `hoisted`;
-//!    `pnpm-lock.yaml` / `aube-lock.yaml` / no lockfile keep aube's `isolated`
-//!    default. An explicit `--node-linker` or a project-level setting
-//!    (`.npmrc` `node-linker`, workspace-yaml `nodeLinker`) wins over the
-//!    policy.
-//! 2. **Yarn write gate** — aube's yarn.lock *write* fidelity is unproven, so
+//! 1. **Env families** — only the npm-compatible (`npm_config_*`) and
+//!    ecosystem-neutral (`CI`, proxies, …) env surfaces are consulted;
+//!    `AUBE_*` variables are invisible. Nub's contract is "configure me the
+//!    way you configure npm/pnpm"; honoring another tool's branded env vars
+//!    would create an accidental config surface.
+//! 2. **Embedder defaults** (set-unless-user-set; CLI flags, env vars, and
+//!    every config file all win over these):
+//!    - `defaultLockfileFormat=pnpm` — a fresh project gets `pnpm-lock.yaml`,
+//!      keeping the project portable to pnpm instead of aube-branded.
+//!    - `virtualStoreDir=node_modules/.nub` + `stateDir=node_modules/.nub` —
+//!      the isolated store materializes under `.nub`, with the engine's
+//!      install-state sidecar tucked inside it. (The state *basename*
+//!      `.aube-state` is a fixed constant in the engine, so the one
+//!      aube-named path that survives is `node_modules/.nub/.aube-state`.)
+//!    - **Layout policy**: the detected lockfile kind picks the default
+//!      `nodeLinker` — flat-layout ecosystems (`package-lock.json`,
+//!      `npm-shrinkwrap.json`, `yarn.lock`, `bun.lock`) default to `hoisted`;
+//!      `pnpm-lock.yaml` / `aube-lock.yaml` / no lockfile keep the engine's
+//!      `isolated` default.
+//!    - User agent: lifecycle scripts see `npm_config_user_agent=nub/<ver> …`
+//!      and registry requests carry the same product token.
+//! 3. **Yarn write gate** — aube's yarn.lock *write* fidelity is unproven, so
 //!    any install that would mutate a detected `yarn.lock` (classic or berry)
 //!    is refused. Frozen-satisfiable installs proceed (the lockfile-read path
 //!    never rewrites the lockfile; only a re-resolve writes).
 //!
-//! KNOWN APPROXIMATIONS (for the integrate agent; the fork's programmatic
-//! settings overlay landing this phase replaces both):
-//! - The layout-policy default rides the *CLI* tier of aube's settings
-//!   precedence (`cli > env > npmrc > workspace > default`), guarded by a
-//!   nub-side scan for project-level `node-linker` settings. An env-var
-//!   override (`npm_config_node_linker`) is NOT detected by the scan and
-//!   would be shadowed by the policy default. Proper fix: inject at the
-//!   *default* tier via the settings overlay.
+//! KNOWN APPROXIMATIONS:
 //! - `preferFrozenLockfile` from `.npmrc` / workspace yaml is not consulted
 //!   when defaulting the frozen mode (aube's `FileSources` is crate-private
-//!   at the pinned API, b15cdcb); without a CLI flag the mode falls back to
-//!   aube's env-aware default (CI ⇒ frozen, else prefer-frozen).
+//!   at the pinned API); without a CLI flag the mode falls back to aube's
+//!   env-aware default (CI ⇒ frozen, else prefer-frozen).
 //! - The yarn gate maps aube's frozen-drift failure by message substring
 //!   ("lockfile is out of date") — the drift errors carry no stable
-//!   `ERR_AUBE_*` code at b15cdcb. Flag for upstream: give the frozen-drift
-//!   and strict-no-lockfile errors diagnostic codes.
+//!   `ERR_AUBE_*` code at the pinned API. Flag for upstream: give the
+//!   frozen-drift and strict-no-lockfile errors diagnostic codes.
 
 use std::path::{Path, PathBuf};
 
@@ -75,6 +83,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     apply_dir(flags.dir.as_deref())?;
     let cwd = std::env::current_dir()?;
     let detected = detect_lockfile_walk_up(&cwd);
+    engine_preflight(detected.as_ref());
 
     // Mirror `run_install_command`: defaults from clap, nub's flags on top.
     let mut args = default_install_args();
@@ -95,8 +104,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
     let global_frozen = args.lockfile.frozen_override();
-    let mut cli_flags = args.to_cli_flag_bag(global_frozen, args.virtual_store.flags());
-    apply_node_linker_policy(&mut cli_flags, detected.as_ref());
+    let cli_flags = args.to_cli_flag_bag(global_frozen, args.virtual_store.flags());
 
     // yaml_prefer_frozen: None — see KNOWN APPROXIMATIONS in the module doc.
     let mut opts = args.into_options(global_frozen, None, cli_flags, env_snapshot());
@@ -142,6 +150,7 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
     apply_dir(flags.dir.as_deref())?;
     let cwd = std::env::current_dir()?;
     let detected = detect_lockfile_walk_up(&cwd);
+    engine_preflight(detected.as_ref());
 
     // Clean first, like `aube ci` / `npm ci`. The project root for nub's
     // purposes is where the lockfile lives (fall back to cwd for the
@@ -153,15 +162,12 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         .unwrap_or_else(|| cwd.clone());
     remove_node_modules(&root.join("node_modules"))?;
 
-    let mut cli_flags: Vec<(String, String)> = Vec::new();
-    apply_node_linker_policy(&mut cli_flags, detected.as_ref());
-
     let opts = InstallOptions {
         mode: FrozenMode::Frozen,
         dep_selection: DepSelection::from_flags(false, false, flags.no_optional),
         ignore_scripts: flags.ignore_scripts,
         strict_no_lockfile: true,
-        cli_flags,
+        cli_flags: Vec::new(),
         env_snapshot: env_snapshot(),
         // `nub ci` is the argumentless-install shape: root lifecycle hooks run.
         skip_root_lifecycle: false,
@@ -290,61 +296,57 @@ fn detect_lockfile_walk_up(cwd: &Path) -> Option<DetectedLockfile> {
     None
 }
 
-/// The layout policy: default `nodeLinker` from the detected lockfile kind —
-/// hoisted for the flat-layout ecosystems, aube's isolated default otherwise.
-/// Only applies when nothing else set it: an explicit `--node-linker` is
-/// already in the bag (and wins by ordering — aube's settings resolver takes
-/// the first matching CLI entry), and a project-level setting disables the
-/// policy entirely. For pnpm/aube/none kinds the policy pushes nothing, so
-/// project/env settings resolve exactly as in stock aube.
-fn apply_node_linker_policy(
-    cli_flags: &mut Vec<(String, String)>,
-    detected: Option<&DetectedLockfile>,
-) {
-    let Some(detected) = detected else { return };
-    let hoisted_kind = matches!(
-        detected.kind,
-        LockfileKind::Npm
-            | LockfileKind::NpmShrinkwrap
-            | LockfileKind::Yarn
-            | LockfileKind::YarnBerry
-            | LockfileKind::Bun
-    );
-    if !hoisted_kind {
-        return;
-    }
-    if cli_flags.iter().any(|(k, _)| k == "node-linker") {
-        return; // explicit --node-linker wins
-    }
-    if project_sets_node_linker(&detected.dir) {
-        return; // project settings win
-    }
-    cli_flags.push(("node-linker".to_string(), "hoisted".to_string()));
+/// Configure the engine's process-wide embedder seams. Called once at the
+/// top of `run_install` / `run_ci`, before any settings resolution; every
+/// seam is an idempotent once-per-process `OnceLock`, which fits nub's
+/// one-command-per-process CLI shape.
+fn engine_preflight(detected: Option<&DetectedLockfile>) {
+    // Env surface: npm-compatible (`npm_config_*`) + ecosystem-neutral
+    // (`CI`, proxies, …). `AUBE_*` stays invisible — nub's config contract
+    // is the npm ecosystem's, not another tool's branded variables.
+    aube::set_env_families(aube::EnvFamilies::NPM.union(aube::EnvFamilies::EXTERNAL));
+    // Lifecycle scripts (npm_config_user_agent) and registry requests
+    // identify the running tool: `nub/<ver> …`.
+    aube::set_user_agent_product(format!("nub/{}", env!("CARGO_PKG_VERSION")));
+    // Set-unless-user-set: ranks below CLI flags, env vars, and every
+    // config file in the engine's settings precedence.
+    aube::set_embedder_defaults(nub_setting_defaults(detected));
 }
 
-/// Best-effort scan for a project-level `nodeLinker` setting so the layout
-/// policy doesn't shadow it. Checks the lockfile dir's `.npmrc`
-/// (`node-linker=` key) and workspace yaml (`nodeLinker:` key) — the two
-/// project-scoped sources in aube's settings precedence. Env/user/global
-/// tiers are not scanned (see KNOWN APPROXIMATIONS in the module doc).
-fn project_sets_node_linker(dir: &Path) -> bool {
-    let npmrc_sets = std::fs::read_to_string(dir.join(".npmrc")).is_ok_and(|s| {
-        s.lines().any(|l| {
-            let l = l.trim();
-            !l.starts_with('#')
-                && !l.starts_with(';')
-                && l.split('=').next().map(str::trim) == Some("node-linker")
-        })
-    });
-    if npmrc_sets {
-        return true;
+/// Nub's replacement setting defaults, fed to the engine's embedder-defaults
+/// tier (below all user sources — a user's `--node-linker`,
+/// `npm_config_node_linker`, `.npmrc`, or workspace yaml all win):
+///
+/// - `defaultLockfileFormat=pnpm` — fresh projects write `pnpm-lock.yaml`.
+/// - `virtualStoreDir` / `stateDir` = `node_modules/.nub` — the isolated
+///   store (and the engine's install-state sidecar) live under `.nub`.
+///   Corner: this replaces the engine's `<modulesDir>/.aube` derivation, so
+///   a project that renames `modulesDir` without setting `virtualStoreDir`
+///   gets the store at `node_modules/.nub` rather than `<modulesDir>/.nub`.
+/// - Layout policy: flat-layout lockfile kinds (npm/yarn/bun) default
+///   `nodeLinker` to `hoisted`; pnpm/aube kinds and fresh projects keep the
+///   engine's `isolated` default (no entry pushed, so user/env settings
+///   resolve exactly as in stock aube).
+fn nub_setting_defaults(detected: Option<&DetectedLockfile>) -> Vec<(String, String)> {
+    let mut defaults = vec![
+        ("defaultLockfileFormat".to_string(), "pnpm".to_string()),
+        ("virtualStoreDir".to_string(), "node_modules/.nub".to_string()),
+        ("stateDir".to_string(), "node_modules/.nub".to_string()),
+    ];
+    let hoisted_kind = matches!(
+        detected.map(|d| d.kind),
+        Some(
+            LockfileKind::Npm
+                | LockfileKind::NpmShrinkwrap
+                | LockfileKind::Yarn
+                | LockfileKind::YarnBerry
+                | LockfileKind::Bun
+        )
+    );
+    if hoisted_kind {
+        defaults.push(("nodeLinker".to_string(), "hoisted".to_string()));
     }
-    ["aube-workspace.yaml", "pnpm-workspace.yaml"]
-        .iter()
-        .any(|f| {
-            std::fs::read_to_string(dir.join(f))
-                .is_ok_and(|s| s.lines().any(|l| l.trim_start().starts_with("nodeLinker:")))
-        })
+    defaults
 }
 
 /// aube's `InstallArgs` at clap defaults, via a throwaway parse (the struct
@@ -404,78 +406,73 @@ fn remove_node_modules(nm: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn node_linker_default(defaults: &[(String, String)]) -> Option<&str> {
+        defaults
+            .iter()
+            .find(|(k, _)| k == "nodeLinker")
+            .map(|(_, v)| v.as_str())
+    }
+
     #[test]
-    fn node_linker_policy_defaults_hoisted_only_for_flat_ecosystem_lockfiles() {
+    fn setting_defaults_pick_the_layout_from_the_lockfile_kind() {
         let dir = tempfile::tempdir().unwrap();
         let detected = |kind| DetectedLockfile {
             kind,
             dir: dir.path().to_path_buf(),
         };
 
-        // npm / yarn / bun kinds ⇒ hoisted default lands in the bag.
+        // Flat-layout kinds ⇒ nodeLinker defaults to hoisted.
         for kind in [
             LockfileKind::Npm,
             LockfileKind::YarnBerry,
             LockfileKind::Bun,
         ] {
-            let mut bag = Vec::new();
-            apply_node_linker_policy(&mut bag, Some(&detected(kind)));
             assert_eq!(
-                bag,
-                vec![("node-linker".to_string(), "hoisted".to_string())],
+                node_linker_default(&nub_setting_defaults(Some(&detected(kind)))),
+                Some("hoisted"),
                 "{kind:?} must default to the hoisted layout"
             );
         }
 
-        // pnpm-shaped kinds and no lockfile ⇒ policy stays silent (isolated default).
+        // pnpm-shaped kinds and no lockfile ⇒ no entry (engine's isolated
+        // default applies, user/env settings resolve as in stock aube).
         for kind in [LockfileKind::Pnpm, LockfileKind::Aube] {
-            let mut bag = Vec::new();
-            apply_node_linker_policy(&mut bag, Some(&detected(kind)));
-            assert!(bag.is_empty(), "{kind:?} must not inject a node-linker");
+            assert_eq!(
+                node_linker_default(&nub_setting_defaults(Some(&detected(kind)))),
+                None,
+                "{kind:?} must not inject a nodeLinker default"
+            );
         }
-        let mut bag = Vec::new();
-        apply_node_linker_policy(&mut bag, None);
-        assert!(bag.is_empty(), "no lockfile must not inject a node-linker");
+        assert_eq!(
+            node_linker_default(&nub_setting_defaults(None)),
+            None,
+            "no lockfile must not inject a nodeLinker default"
+        );
     }
 
     #[test]
-    fn explicit_flag_and_project_settings_beat_the_layout_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        let detected = DetectedLockfile {
-            kind: LockfileKind::Npm,
-            dir: dir.path().to_path_buf(),
-        };
-
-        // Explicit --node-linker already in the bag ⇒ no policy entry appended.
-        let mut bag = vec![("node-linker".to_string(), "isolated".to_string())];
-        apply_node_linker_policy(&mut bag, Some(&detected));
-        assert_eq!(
-            bag.len(),
-            1,
-            "an explicit --node-linker must win over the policy"
-        );
-
-        // Project .npmrc node-linker ⇒ policy stays out of the way.
-        std::fs::write(dir.path().join(".npmrc"), "node-linker = isolated\n").unwrap();
-        let mut bag = Vec::new();
-        apply_node_linker_policy(&mut bag, Some(&detected));
-        assert!(
-            bag.is_empty(),
-            ".npmrc node-linker must disable the policy default"
-        );
-        std::fs::remove_file(dir.path().join(".npmrc")).unwrap();
-
-        // Workspace yaml nodeLinker ⇒ same.
-        std::fs::write(
-            dir.path().join("pnpm-workspace.yaml"),
-            "nodeLinker: isolated\n",
-        )
-        .unwrap();
-        let mut bag = Vec::new();
-        apply_node_linker_policy(&mut bag, Some(&detected));
-        assert!(
-            bag.is_empty(),
-            "workspace nodeLinker must disable the policy default"
-        );
+    fn setting_defaults_always_carry_the_nub_identity_settings() {
+        // Every install gets the pnpm lockfile default and the `.nub`
+        // store/state location, regardless of detection. (These ride the
+        // engine's embedder-defaults tier, so any user source overrides
+        // them — precedence is covered by the engine's own tests and the
+        // install_engine integration tests.)
+        for detected in [None, Some(LockfileKind::Npm), Some(LockfileKind::Pnpm)] {
+            let dir = tempfile::tempdir().unwrap();
+            let detected = detected.map(|kind| DetectedLockfile {
+                kind,
+                dir: dir.path().to_path_buf(),
+            });
+            let defaults = nub_setting_defaults(detected.as_ref());
+            let get = |key: &str| {
+                defaults
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.as_str())
+            };
+            assert_eq!(get("defaultLockfileFormat"), Some("pnpm"));
+            assert_eq!(get("virtualStoreDir"), Some("node_modules/.nub"));
+            assert_eq!(get("stateDir"), Some("node_modules/.nub"));
+        }
     }
 }
