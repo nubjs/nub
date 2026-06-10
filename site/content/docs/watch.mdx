@@ -17,7 +17,7 @@ nub watch src/server.ts
 
 TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath.
 
-## The `--watch` flag
+## `--watch`
 
 Flag and subcommand are aliases: `nub --watch <file>` dispatches to the exact same code path as `nub watch <file>` — same defaults, same behavior. The flag form exists so `node --watch script.ts` muscle memory lands in Nub's improved experience without surprise.
 
@@ -25,15 +25,15 @@ Flag and subcommand are aliases: `nub --watch <file>` dispatches to the exact sa
 nub --watch src/server.ts
 ```
 
-## Watch a dev script
+## Watching a script
 
-Wrap a `package.json` script in watch mode by appending `--watch` to `nub run`. Nub watches the dependency graph of whatever the script launches.
+The watcher takes a file, not a script: point `nub watch` at the entry your `dev` script runs.
 
 ```sh
-nub run dev --watch
+nub watch src/server.ts
 ```
 
-This restarts on source changes the same way the file form does, while still going through `nub run` — so your `npm_*` environment variables, `pre`/`post` lifecycle hooks, and `node_modules/.bin` PATH chain are all in place. See [Running scripts](/docs/run) for the full `nub run` surface.
+A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/run#forward-arguments).
 
 ## Preserve output
 

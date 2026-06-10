@@ -107,7 +107,7 @@ Yes — `nub script.ts` runs TypeScript directly, with the full TS surface (not 
 
 ## Does it replace `nodemon` / `tsx watch`?
 
-For restart-on-change, yes: `nub script.ts --watch` and `nub run dev --watch` restart the process when anything in the resolved dependency graph (plus your `.env*` files and `tsconfig.json`) changes — no glob list to maintain. Full details: [Watch mode](/docs/watch).
+For restart-on-change, yes: `nub watch script.ts` (or `nub --watch script.ts`) restarts the process when anything in the resolved dependency graph (plus your `.env*` files and `tsconfig.json`) changes — no glob list to maintain. (A `--watch` *after* a script name — `nub run dev --watch` — is forwarded to the script itself, like every other argument.) Full details: [Watch mode](/docs/watch).
 
 ## What about `dotenv-cli`?
 

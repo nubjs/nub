@@ -272,7 +272,7 @@ function RunFileBand() {
           <Feature
             accent="ember"
             eyebrow="Architecture"
-            title="Transpiled by Rust, run on real Node"
+            title="Transpiles in Rust, runs on real Node"
             body={
               <>
                 Nub transpiles your code in memory with{' '}

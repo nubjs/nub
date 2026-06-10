@@ -28,7 +28,7 @@ nubx prisma migrate dev --name init
 nubx vitest run --coverage
 ```
 
-## The `nub exec` alias
+## `nub exec`
 
 Though `nubx` is a separate binary entry point, it's an exact alias for `nub exec` — same code path, same resolution, same behavior. Use whichever reads better in your context; `nubx` is shorter for the command line and shebangs, `nub exec` is natural inside a longer `nub` invocation.
 
@@ -51,7 +51,7 @@ nubx tsc --build
 
 The resolved entry runs the right way for what it is: a Node script (a `#!…node` shebang or `.js` / `.mjs` / `.cjs`) runs through augmented `node`, a Windows `.cmd` / `.bat` via `cmd /C`, a `.ps1` via PowerShell, and anything else (a native binary, or a non-node shebang like `#!/bin/sh`) execs directly.
 
-## Run without augmentation
+## `--node`
 
 By default `nubx` runs the tool under Nub's augmentation — the PATH shim makes any `node` the tool spawns resolve back to Nub, with TypeScript transpilation and polyfills active. Pass `--node` to turn that off for the invocation: the bin's `#!/usr/bin/env node` shebang resolves to your real Node binary, no `--import` preload is added, and no experimental flags are injected. Reach for it when a tool's shebang chain needs byte-exact plain Node, when you're bisecting a Nub-vs-Node issue, or when CI wants exact Node runtime behavior with `nubx`'s resolution.
 
