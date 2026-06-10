@@ -24,14 +24,6 @@ install.bats|aube install does not print human dependency summary in ndjson mode
 install.bats|aube install labels workspace dependency summaries by package name|global --reporter before the verb reaches node as a node flag
 
 # ── verbs / aliases / flags not wired yet ───────────────────────────────────
-# Whole-suite wildcards: at the committed HEAD the add/remove/update verbs are
-# staged stubs ("not wired to the embedded engine yet — phase Surface"); the
-# install-family wiring is in flight. Delete each wildcard line the moment the
-# verb lands so the suite asserts for real (the per-test entries elsewhere in
-# this file and in skips.txt then take over for the permanent divergences).
-add.bats|*|'add' verb staged (phase Surface — install-family wiring in flight)
-remove.bats|*|'remove' verb staged (phase Surface — install-family wiring in flight)
-update.bats|*|'update' verb staged (phase Surface — install-family wiring in flight)
 install.bats|aube recursive install honors nested --frozen-lockfile|'recursive' verb staged (phase Surface)
 install.bats|aube recursive install honors nested --registry|'recursive' verb staged (phase Surface)
 install.bats|aube install --fix-lockfile is a no-op on a fresh lockfile|--fix-lockfile not wired

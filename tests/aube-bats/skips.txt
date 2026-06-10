@@ -36,3 +36,4 @@ install.bats|aube run auto-reinstalls after --dev install|'run' is nub's native 
 install.bats|aube run auto-reinstalls after --prod install|'run' is nub's native script runner (collision policy); no PM auto-reinstall
 install.bats|aube run auto-installs when installed package metadata is missing|'run' is nub's native script runner (collision policy); also walks node_modules/.aube
 install.bats|aube install ignores --network-concurrency=0 and falls back to default|test invokes 'aube -v' — nub's -v is --version (reserved); re-evaluate when the flag wiring lands
+add.bats|aube add: refuses to add to workspace root with aube-workspace.yaml|nub-divergence: aube-workspace.yaml is not consulted (workspace-yaml toggle restricts discovery to pnpm-workspace.yaml), so it cannot define a workspace root — the pnpm-workspace.yaml variant asserts the guard
