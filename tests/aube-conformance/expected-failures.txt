@@ -4,7 +4,6 @@
 # is recorded by deleting the entry in the same commit as the fix.
 # All entries are fork-fixable lockfile-writer bugs (vendor/aube); scenarios
 # the ecosystem makes impossible are skip_reason() in run.sh instead.
-peer-heavy pnpm P1 blocker: hoist_auto_installed_peers (aube-resolver/src/resolve.rs) writes auto-installed peers (react) as root importer specifiers absent from package.json; real pnpm fails ERR_PNPM_OUTDATED_LOCKFILE. Fork fix is task P; re-run after the vendor pin bump. (npm writer is clean — same scenario passes the npm gates.)
 workspace pnpm pnpm importer writer records workspace-protocol deps as registry versions (version: 1.0.0) where real pnpm writes link:../<dir>; frozen install fails ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY ("no entry for '@conformance/core@1.0.0'"). Fork-side fix in the pnpm lockfile writer.
 git-dep npm npm writer records github: deps as resolved git+https://github.com/...; real npm canonicalizes to git+ssh://git@github.com/... — npm ci ACCEPTS but the rewrite churns the resolved URL. Fork-side fix: match npm's hosted-git-info canonical form for github: shorthand.
 git-dep bun bun writer drops git-sourced packages entirely (bun.lock has the root spec but an empty packages map); bun fails InvalidPackageInfo / "Failed to resolve root prod dependency". Fork-side fix in the bun lockfile writer.
