@@ -97,13 +97,12 @@
 //! - (resolved) The engine's node-gyp shim re-invokes `current_exe()` as
 //!   `<exe> __node-gyp-bootstrap <dir>`; the fork exports the entry point
 //!   and cli.rs intercepts the verb → `pm_engine::run_node_gyp_bootstrap`.
-//! - `patch-commit`'s binary-file skip warning (`…aube can't diff binary
-//!   files`) is a raw eprintln the rewrite can't reach: the verb chains
-//!   into a real install (progress UI + possible lifecycle children), so
-//!   stderr fd-capture is unsafe there. Fires only when a patch edit
-//!   touches a binary file. Candidate one-line fork fix (neutral message),
-//!   tracked with the fork fix-forward items. The `.aube_patch_state.json`
-//!   sidecar inside the edit parent is on-disk temp state, never printed.
+//! - (resolved) `patch-commit`'s binary-file skip warning is a raw eprintln
+//!   the rewrite can't reach (the verb chains into a real install, so
+//!   stderr fd-capture is unsafe there); the fork now prints
+//!   `ua::product_name()` in it (vendor 781ac4e), so it reads `nub can't
+//!   diff binary files`. The `.aube_patch_state.json` sidecar inside the
+//!   edit parent is on-disk temp state, never printed.
 //!
 //! KNOWN APPROXIMATIONS (install/ci, from slice 2):
 //! - `preferFrozenLockfile` from `.npmrc` / workspace yaml is not consulted
