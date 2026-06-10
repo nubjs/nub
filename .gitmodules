@@ -3,4 +3,5 @@
 	url = https://github.com/nodejs/node.git
 [submodule "vendor/aube"]
 	path = vendor/aube
-	url = https://github.com/jdx/aube
+	url = https://github.com/nubjs/aube
+	branch = nub-integration
