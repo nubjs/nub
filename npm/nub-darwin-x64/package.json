@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/nub-darwin-x64",
-  "version": "0.0.24",
+  "version": "0.0.25",
   "description": "Nub binary for darwin-x64",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
