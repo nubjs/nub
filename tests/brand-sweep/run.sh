@@ -90,22 +90,16 @@ pass "AUBE_VIRTUAL_STORE_DIR canary ignored"
 [ -e node_modules/left-pad ] || fail "left-pad was not installed"
 pass "isolated install landed at node_modules/.nub"
 
-# 3b. No aube-named paths anywhere in the sandbox (covers node_modules/.aube,
-# ~/.local/share/aube, XDG dirs, and anything else). Allowlist: KNOWN leaks
-# whose fixes are tracked separately — keep this list SHRINKING, never growing.
-#   - $XDG_CACHE_HOME/aube/**: the engine's cache BASE is hard-named in
-#     aube-store/src/dirs.rs (+ independent join("aube") derivations in
-#     aube-util/adaptive.rs, aube-resolver/primer.rs, settings_context.rs) with
-#     no settings key — the half-done cacheDir embedder seam (the storeDir half
-#     IS done: the content store lands at $XDG_DATA_HOME/nub/store). DELETE
-#     this entry when the cacheDir seam lands in vendor/aube.
-# (The former .aube-state / .aube-applied-patches.json entries are gone: the
-# sidecar stems now follow the registered product identity in vendor/aube, so
-# nub installs write .nub-state / .nub-applied-patches.json — asserted below.)
-leaks=$(find "$SANDBOX" -name '*aube*' ! -path "$AUBE_VIRTUAL_STORE_DIR" ! -path "$XDG_CACHE_HOME/aube" ! -path "$XDG_CACHE_HOME/aube/*" 2>/dev/null || true)
+# 3b. No aube-named paths anywhere in the sandbox — node_modules/.aube,
+# ~/.local/share/aube, XDG dirs, and anything else. The allowlist is EMPTY:
+# the former residual entries are all fixed in vendor/aube (sidecar stems
+# follow the registered product identity; the cache root moved via the
+# set_cache_root seam to $XDG_CACHE_HOME/nub/pm — asserted below). The find
+# only excludes the AUBE_* env-canary path, which this script itself created.
+leaks=$(find "$SANDBOX" -name '*aube*' ! -path "$AUBE_VIRTUAL_STORE_DIR" 2>/dev/null || true)
 if [ -n "$leaks" ]; then
   echo "$leaks"
-  fail "aube-named paths created outside the documented residual allowlist (above)"
+  fail "aube-named paths created in the sandbox (above)"
 fi
 [ ! -e "$HOME/.local/share/aube" ] || fail "engine wrote ~/.local/share/aube"
 [ ! -e node_modules/.aube ] || fail "engine created node_modules/.aube"
@@ -113,7 +107,10 @@ fi
 # derivation in vendor/aube): .nub-state under the virtual store, and no
 # .aube-state anywhere (covered by the find above).
 [ -d node_modules/.nub/.nub-state ] || fail "expected install state at node_modules/.nub/.nub-state"
-pass "no aube-named paths beyond the documented residual allowlist"
+# The engine cache must land in nub's namespace (set_cache_root seam):
+# packument caches under $XDG_CACHE_HOME/nub/pm/.
+[ -d "$XDG_CACHE_HOME/nub/pm" ] || fail "expected engine cache at \$XDG_CACHE_HOME/nub/pm"
+pass "no aube-named paths anywhere in the sandbox"
 
 # 4. Lifecycle UA identity: first token of npm_config_user_agent is nub/<ver>.
 [ -f ua-seen.txt ] || fail "postinstall did not run (ua-seen.txt missing)"
@@ -145,10 +142,10 @@ fi
 [ -d node_modules/.nub ] || fail "($other_mode) expected isolated virtual store at node_modules/.nub"
 [ ! -e node_modules/.aube ] || fail "($other_mode) engine created node_modules/.aube"
 [ -d node_modules/.nub/.nub-state ] || fail "($other_mode) expected install state at node_modules/.nub/.nub-state"
-leaks=$(find "$SANDBOX" -name '*aube*' ! -path "$AUBE_VIRTUAL_STORE_DIR" ! -path "$XDG_CACHE_HOME/aube" ! -path "$XDG_CACHE_HOME/aube/*" 2>/dev/null || true)
+leaks=$(find "$SANDBOX" -name '*aube*' ! -path "$AUBE_VIRTUAL_STORE_DIR" 2>/dev/null || true)
 if [ -n "$leaks" ]; then
   echo "$leaks"
-  fail "($other_mode) aube-named paths outside the allowlist (above)"
+  fail "($other_mode) aube-named paths in the sandbox (above)"
 fi
 pass "no engine identity leaks with $other_mode either"
 

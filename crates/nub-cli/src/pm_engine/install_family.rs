@@ -94,10 +94,9 @@
 //! - `approve-builds` writes the policy through the engine's workspace-yaml
 //!   selection (fork toggles decide the created filename / package.json
 //!   namespace — not this layer's concern).
-//! - The engine's node-gyp shim re-invokes `current_exe()` as
-//!   `<exe> __node-gyp-bootstrap <dir>`; that verb is not wired (entry is
-//!   crate-private at the pinned API), so an allowlisted node-gyp dependency
-//!   build fails at the shim. Needs the one-line upstreamable fork export.
+//! - (resolved) The engine's node-gyp shim re-invokes `current_exe()` as
+//!   `<exe> __node-gyp-bootstrap <dir>`; the fork exports the entry point
+//!   and cli.rs intercepts the verb → `pm_engine::run_node_gyp_bootstrap`.
 //! - `patch-commit`'s binary-file skip warning (`…aube can't diff binary
 //!   files`) is a raw eprintln the rewrite can't reach: the verb chains
 //!   into a real install (progress UI + possible lifecycle children), so

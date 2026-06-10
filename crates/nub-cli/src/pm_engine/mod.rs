@@ -33,10 +33,11 @@
 //!   `nub upgrade` is self-update). The `External` bare-script catch-all is
 //!   also out: bare `nub <script>` stays banned.
 //! - **tool-identity** (they describe the aube tool, not the project):
-//!   `sponsors`, `diag`, `doctor`, `completion`, `usage`, and the internal
-//!   `__node-gyp-bootstrap` re-entry verb (its engine entry point is
-//!   crate-private at the pinned API; wiring it needs a small upstreamable
-//!   fork export — tracked in install_family's module doc).
+//!   `sponsors`, `diag`, `doctor`, `completion`, `usage`. The internal
+//!   `__node-gyp-bootstrap` re-entry verb is also outside the registry but
+//!   IS wired — as an early intercept in cli.rs dispatching to
+//!   [`run_node_gyp_bootstrap`], because the engine's lazy node-gyp shims
+//!   re-invoke `current_exe()` (= nub) with it mid-lifecycle-script.
 //!
 //! `install`/`i`/`ci` are *not* in the registry: they are live clap verbs
 //! in `cli.rs` (SUBCOMMANDS) dispatching straight to
@@ -498,6 +499,32 @@ pub fn dispatch_verb(
     }
 }
 
+/// The engine's hidden node-gyp re-entry verb: `__node-gyp-bootstrap
+/// <project-dir>` resolves (bootstrapping on first use) the cached
+/// node-gyp and prints its executable path on stdout. The lazy shims the
+/// engine drops into a project's `.bin` re-invoke `current_exe()` with
+/// this verb mid-lifecycle-script — and under nub, `current_exe()` IS
+/// nub — so cli.rs intercepts the spelling before clap and lands here.
+/// The printed path is data for the shim (it lands under nub's own cache
+/// root via the `set_cache_root` registration), so stdout is passed
+/// through; failures route through the brand rewrite like every other
+/// engine report.
+pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
+    let [project_dir] = args else {
+        anyhow::bail!("usage: nub __node-gyp-bootstrap <project-dir>");
+    };
+    let session = engine_session(None)?;
+    let result = session.runtime.block_on(
+        aube::commands::install::node_gyp_bootstrap::print_bootstrapped_binary(Path::new(
+            project_dir,
+        )),
+    );
+    match result {
+        Ok(()) => Ok(0),
+        Err(report) => Ok(present::emit_report(&report)),
+    }
+}
+
 /// The shared stub error for registered-but-unwired verbs: names the verb,
 /// says when it lands ("phase Surface"), and gives the user's real-PM
 /// command so nobody is left stranded mid-skeleton.
@@ -619,6 +646,18 @@ fn engine_brand_preflight() {
         self_version: env!("CARGO_PKG_VERSION").to_string(),
         compatible_names: vec!["pnpm".to_string()],
     });
+    // Engine cache root: `$XDG_CACHE_HOME/nub/pm` (a sibling of nub's own
+    // runtime caches under `<cache_dir>/`, namespaced so engine state never
+    // mixes with nub's Node store / discovery cache). Covers the packument
+    // caches, git clone cache, node-gyp tool cache, resolver primer, and
+    // adaptive state — everything that previously landed at the engine's
+    // hard-named `<XDG_CACHE_HOME>/aube`. An explicit `cache-dir` in
+    // `.npmrc` still wins for the settings-routed consumers. Skipped when
+    // no cache base resolves — the engine then falls back to its own
+    // default, which fails the same way nub would.
+    if let Some(cache) = nub_core::node::discovery::cache_dir() {
+        aube::set_cache_root(cache.join("pm"));
+    }
 }
 
 /// Nub's replacement setting defaults, fed to the engine's embedder-defaults
@@ -637,20 +676,14 @@ fn engine_brand_preflight() {
 ///   `…/nub/store/v1`). Skipped when no home directory resolves — the
 ///   engine then falls back to its own default, which fails the same way
 ///   nub would.
-/// - **KNOWN GAP — `cacheDir` is deliberately NOT set here.** The
-///   packument/dlx cache call sites use `aube_store::dirs::cache_dir()`
-///   (a leaf-fixed `<XDG_CACHE_HOME>/aube`) directly, and the one settings
-///   accessor (`resolved_cache_dir`, vendor/aube/crates/aube/src/commands/
-///   settings_context.rs) only consults the setting when `.npmrc` sets it
-///   *explicitly* — the embedder-defaults tier never reaches it. Verified
-///   empirically 2026-06-09: with a `cacheDir` embedder default set, a real
-///   install still wrote `$XDG_CACHE_HOME/aube/packuments-full-v1/`.
-///   Pushing the default would be a silent no-op, so we don't. Re-homing
-///   the cache to `$XDG_CACHE_HOME/nub/pm` needs an upstreamable fork
-///   change (route the `dirs::cache_dir()` call sites through the settings
-///   ctx, or honor non-file sources in `resolved_cache_dir`); until then
-///   the engine cache stays at `<xdg-cache>/aube` — on-disk state only,
-///   never printed. A user's explicit `cache-dir` in `.npmrc` works today.
+/// - `cacheDir` is still NOT set here — the engine cache moves through the
+///   `aube::set_cache_root` registration in [`engine_brand_preflight`]
+///   instead. The settings accessor (`resolved_cache_dir`) only consults
+///   the setting when `.npmrc` sets it *explicitly* (the embedder-defaults
+///   tier never reaches it, verified empirically 2026-06-09), and the
+///   non-settings consumers (git clone cache, node-gyp tool cache, primer,
+///   adaptive state) never read the setting at all; the process-global
+///   cache root covers every one of them.
 /// - Layout policy: flat-layout lockfile kinds (npm/yarn/bun) default
 ///   `nodeLinker` to `hoisted`; pnpm/aube kinds and fresh projects keep the
 ///   engine's `isolated` default (no entry pushed, so user/env settings

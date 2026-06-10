@@ -850,10 +850,13 @@ fn run_nub() -> Result<i32> {
             }
             _ => {
                 // Check if this is the first positional and matches a subcommand
-                // (nub-native, or a verb registered to the embedded PM engine).
+                // (nub-native, a verb registered to the embedded PM engine, or
+                // the engine's hidden node-gyp re-entry verb — its lazy shims
+                // re-invoke current_exe() with it mid-lifecycle-script).
                 if rest.is_empty()
                     && !arg.starts_with('-')
                     && (SUBCOMMANDS.contains(&arg.as_str())
+                        || arg == "__node-gyp-bootstrap"
                         || crate::pm_engine::lookup_verb(arg).is_some())
                 {
                     subcommand_found = true;
@@ -1092,6 +1095,14 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // read like `nub node`'s and it never reaches clap dispatch.
     if subcommand == "pm" {
         return run_pm(&rest[1..]);
+    }
+
+    // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
+    // with this hidden verb mid-lifecycle-script; intercept it before clap
+    // (it's internal plumbing, not a documented verb) and dispatch straight
+    // to the engine's bootstrap entry point.
+    if subcommand == "__node-gyp-bootstrap" {
+        return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
     }
 
     // Verbs registered to the embedded PM engine (the aube verb surface minus
