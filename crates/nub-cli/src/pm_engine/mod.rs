@@ -795,6 +795,15 @@ pub(crate) fn engine_brand_preflight() {
     // unbranded name). An `aube-lock.yaml` left by another tool is invisible,
     // exactly like `aube-workspace.yaml` above.
     aube_lockfile::set_aube_lock_base_filename(use_align::NUB_LOCKFILE);
+    // Identity detection under nub's strict model (decision-table rows,
+    // identity-policy.md): a declared `nub` is the self-name (accepts every
+    // preservable format; fresh writes lock.yaml), and lock.yaml NEVER
+    // silently outranks a foreign lockfile sitting beside it — that state is
+    // the loud ambiguity/contradiction error, with `nub pm use` as the
+    // remedy. (Upstream keeps the always-wins carve-out for its post-import
+    // flow; nub has no import-style dual-lockfile state.)
+    aube_lockfile::set_detection_self_names(&["nub"]);
+    aube_lockfile::set_canonical_lockfile_always_wins(false);
     // package.json config namespace: `pnpm` only — an `aube` object in a
     // manifest is another tool's state; nub neither consults nor mutates
     // it (`remove`'s sidecar pruning, `--allow-build`'s fallback writes).
