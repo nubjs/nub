@@ -5,7 +5,7 @@ description: Restart-on-change for files and scripts, driven by the resolved dep
 
 Watch mode (`nub watch`) runs your entry point and restarts it whenever something it actually depends on changes. The engine underneath is Node's own `--watch`, with Nub-side glue that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher. The result is a watcher that Just Works for TypeScript projects, with no glob list to maintain.
 
-This page is a cookbook. For how `nub` runs files in the first place, see [Running files](/docs/running-files); for scripts, [Running scripts](/docs/running-scripts).
+This page is a cookbook. For how `nub` runs files in the first place, see [Running files](/docs/files); for scripts, [Running scripts](/docs/run).
 
 ## Watch and restart a file
 
@@ -33,7 +33,7 @@ Wrap a `package.json` script in watch mode by appending `--watch` to `nub run`. 
 nub run dev --watch
 ```
 
-This restarts on source changes the same way the file form does, while still going through `nub run` — so your `npm_*` environment variables, `pre`/`post` lifecycle hooks, and `node_modules/.bin` PATH chain are all in place. See [Running scripts](/docs/running-scripts) for the full `nub run` surface.
+This restarts on source changes the same way the file form does, while still going through `nub run` — so your `npm_*` environment variables, `pre`/`post` lifecycle hooks, and `node_modules/.bin` PATH chain are all in place. See [Running scripts](/docs/run) for the full `nub run` surface.
 
 ## Preserve output
 
@@ -85,7 +85,7 @@ Nub's PATH shim is per-invocation: it only affects descendants of an active `nub
 
 ## Related
 
-- [Running files](/docs/running-files) — how `nub <file>` executes TypeScript and JSX.
-- [Running scripts](/docs/running-scripts) — `nub run` and its workspace surface.
+- [Running files](/docs/files) — how `nub <file>` executes TypeScript and JSX.
+- [Running scripts](/docs/run) — `nub run` and its workspace surface.
 - [nubx](/docs/nubx) — running local CLIs from `node_modules/.bin`.
 - [FAQ](/docs/faq) — short answers across the whole surface.

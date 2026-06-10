@@ -7,10 +7,10 @@ import { source } from '@/lib/source';
 /* Pages that map to a concrete command get a subtle, right-aligned mono chip
    in the sidebar — descriptive label on the left, the command on the right. */
 const COMMAND_BY_URL: Record<string, string> = {
-  '/docs/running-files': 'nub <file>',
-  '/docs/managing-node': 'nub node',
+  '/docs/files': 'nub <file>',
+  '/docs/node': 'nub node',
   '/docs/pm': 'nub pm',
-  '/docs/running-scripts': 'nub run',
+  '/docs/run': 'nub run',
   '/docs/watch': 'nub watch',
   '/docs/nubx': 'nubx',
 };
