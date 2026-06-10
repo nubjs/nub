@@ -3748,8 +3748,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // wiki/commands/pm/identity-policy.md §`nub pm use`). Declarative
         // contract: after it runs, the project's identity is <pm> and the
         // artifacts agree — `packageManager` written (the field's only
-        // sanctioned writer), an existing devEngines reconciled (never
-        // created), and the lockfile aligned (kept / converted / strays
+        // sanctioned writer), `devEngines.packageManager` maintained beside
+        // it ({name, ^range, onFail:warn} — the 2026-06-10 ruling that
+        // killed never-create), and the lockfile aligned (kept / converted / strays
         // removed) through the engine's gated writers. Idempotent: rerunning
         // is a no-op (a bare spec refreshes the pin to latest). Replaces the
         // old `pin` (version-only) and `switch` (cross-PM, declaration-only)
@@ -3770,8 +3771,8 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // latest. Always rewrites `packageManager` — the hash is recomputed
         // from the freshly fetched artifact, and a legacy hashless pin gets
         // upgraded to the exact+hash shape even when the version is already
-        // newest. devEngines is never touched (same-PM by construction —
-        // reconcile is a no-op; Axiom 3: only `use nub`, gated, writes it).
+        // newest. devEngines.packageManager is re-written alongside (same
+        // writer as `use` — both fields move together so they cannot drift).
         "update" | "up" => {
             check_manifest_json(&cwd)?;
             let res = resolve::resolve_pin_with_source(&cwd).context(
@@ -3794,7 +3795,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 .version
                 .as_deref()
                 .map(|v| v.split_once('+').map_or(v, |(bare, _)| bare).to_string());
-            let (version, _) = resolve_provision_declare(&name, &spec, &cwd)?;
+            // Pin-only write: the devEngines range is the user's stated
+            // constraint update floats WITHIN — never rewritten here.
+            let (version, _) = resolve_provision_declare(&name, &spec, &cwd, false)?;
             match current {
                 Some(cur) if cur == version => eprintln!(
                     "{name} is already on the newest version ({version}); pin hash refreshed."
@@ -3921,8 +3924,8 @@ fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
 ///      Skipped for bun: nub declares it but doesn't provision or run it
 ///      (out of scope for v0.x);
 ///   4. write the declaration via [`nub_core::pm::resolve::write_declared_pm`]
-///      — `packageManager: <name>@<exact>+sha512.<hex>`, devEngines reconciled
-///      when it names a different PM, never created.
+///      — `packageManager: <name>@<exact>+sha512.<hex>` plus the always-written
+///      `devEngines.packageManager {name, ^range, onFail:"warn"}`.
 ///
 /// yarn >= 2 (Berry) refuses before anything is written — berry isn't the npm
 /// `yarn` tarball, so a pin nub can't provision would be a lie. The double
@@ -3933,6 +3936,7 @@ fn resolve_provision_declare(
     name: &str,
     spec: &str,
     cwd: &Path,
+    maintain_dev_engines: bool,
 ) -> Result<(String, nub_core::pm::resolve::DeclaredPmWrite)> {
     use nub_core::pm::{Pm, provision, registry, resolve};
 
@@ -3983,7 +3987,7 @@ fn resolve_provision_declare(
         provision::provision_pm(&pin, &store).map_err(|e| humanize_transport_error(e, &base))?;
     }
 
-    let write = resolve::write_declared_pm(name, &dist.version, &hex, cwd)?;
+    let write = resolve::write_declared_pm(name, &dist.version, &hex, cwd, maintain_dev_engines)?;
     Ok((dist.version, write))
 }
 
@@ -4021,7 +4025,7 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
 
     let plan = use_align::plan_alignment(&root, name)?;
 
-    let (version, write) = resolve_provision_declare(name, spec, cwd)?;
+    let (version, write) = resolve_provision_declare(name, spec, cwd, true)?;
 
     // A committed Berry release outranks packageManager in resolution —
     // `use` never edits settings files (.yarnrc.yml), so say so out loud
@@ -4037,9 +4041,9 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     // Step 4 — the file-by-file summary (stdout). Nothing silent.
     println!("using {name}@{version}");
     println!("  package.json: packageManager = {name}@{version} (+sha512)");
-    if write.dev_engines_reconciled {
+    if let Some(range) = &write.dev_engines_range {
         println!(
-            "  package.json: devEngines.packageManager reconciled → {{ \"name\": \"{name}\" }}"
+            "  package.json: devEngines.packageManager = {{ name: \"{name}\", version: \"{range}\", onFail: \"warn\" }}"
         );
     }
     match plan {
@@ -5912,9 +5916,9 @@ mod tests {
     }
 
     /// Real-network e2e for cross-PM `nub pm use`: spec defaults to latest, the
-    /// lockfile converts to the target's format with the source removed, and a
-    /// disagreeing devEngines is reconciled to name-only. `#[ignore]` — downloads
-    /// real npm tarballs.
+    /// lockfile converts to the target's format with the source removed, and
+    /// devEngines.packageManager is rewritten beside the pin ({name, ^range,
+    /// onFail:warn}). `#[ignore]` — downloads real npm tarballs.
     ///   cargo test -p nub-cli --bin nub -- --ignored use_defaults
     #[test]
     #[ignore = "network: moves a pnpm project to npm@latest (real provision + conversion)"]
@@ -5938,10 +5942,16 @@ mod tests {
             pkg_mgr.starts_with("npm@") && pkg_mgr.contains("+sha512."),
             "use must rewrite the pin cross-PM with the resolved exact + hash, got {pkg_mgr}"
         );
+        let exact = pkg_mgr
+            .trim_start_matches("npm@")
+            .split('+')
+            .next()
+            .unwrap()
+            .to_string();
         assert_eq!(
             dev,
-            serde_json::json!({"name": "npm"}),
-            "the disagreeing devEngines must reconcile to name-only"
+            serde_json::json!({"name": "npm", "version": format!("^{exact}"), "onFail": "warn"}),
+            "devEngines must be rewritten beside the pin"
         );
         assert!(
             dir.join("package-lock.json").is_file(),
@@ -5955,8 +5965,8 @@ mod tests {
 
     /// Real-network e2e for `nub pm update`: with a devEngines range present,
     /// update floats within it (^9 stays on 9.x — never a silent cross-major jump
-    /// to 10/11), rewrites the hash, and leaves devEngines byte-untouched (only
-    /// the gated `use nub` ever writes it). `#[ignore]` — hits the registry.
+    /// to 10/11), rewrites the hash, and re-writes devEngines beside the pin
+    /// (the caret of the new exact). `#[ignore]` — hits the registry.
     ///   cargo test -p nub-cli --bin nub -- --ignored update_floats
     #[test]
     #[ignore = "network: re-resolves pnpm@^9.0.0 from the registry (real provision)"]

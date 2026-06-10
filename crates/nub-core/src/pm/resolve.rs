@@ -497,13 +497,14 @@ fn root_manifest(cwd: &Path) -> Option<serde_json::Value> {
     }
 }
 
-/// The result of [`write_declared_pm`]: the manifest written, and whether an
-/// existing `devEngines.packageManager` had its name reconciled (the caller's
-/// summary line depends on it).
+/// The result of [`write_declared_pm`]: the manifest written, and the
+/// `devEngines.packageManager` range written beside the pin (the caller's
+/// summary line echoes it; `None` when the caller asked for the pin-only
+/// write — `nub pm update`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredPmWrite {
     pub path: PathBuf,
-    pub dev_engines_reconciled: bool,
+    pub dev_engines_range: Option<String>,
 }
 
 /// Write the `packageManager` declaration into the workspace-root
@@ -518,18 +519,26 @@ pub struct DeclaredPmWrite {
 ///     already-resolved exact version, and `sha512_hex` the hex digest of the
 ///     verified tarball (computed by the caller — pin-implies-fetch: you can't
 ///     write an honest hash without the bytes).
-///   - `devEngines` is NEVER created (it belongs to the gated, future `nub pm
-///     use nub`). But when an existing `devEngines.packageManager` names a
-///     DIFFERENT manager, its governing entry (the object, or the last named
-///     entry of the spec's array form) is reconciled to `{ "name": "<name>" }`
-///     — name only, version dropped — else this write would manufacture the
-///     very Axiom-1 contradiction `use` exists to clear. Exact pinning lives
-///     in `packageManager` alone: one source of version truth, zero
-///     cross-field drift. An entry already naming this PM is left untouched.
+///   - when `maintain_dev_engines` is true (`nub pm use` — the
+///     identity-setting verb), `devEngines.packageManager` is written
+///     alongside — `{ "name": "<name>", "version": "^<exact>", "onFail":
+///     "warn" }`, replacing any prior value (object or array form) wholesale
+///     while `devEngines` siblings (`runtime`/`os`/`cpu`/`libc`) survive.
+///     Not duplication (the 2026-06-10 ruling that killed never-create):
+///     devEngines is the range + policy npm/pnpm enforce natively (no
+///     corepack needed; survives corepack death), `packageManager` the exact
+///     pin for the corepack/turbo dialect — `use` maintains both together so
+///     they cannot drift. `onFail: "warn"` is load-bearing: npm 11 enforces
+///     devEngines (EBADDEVENGINES), so a bare `{name}` entry hard-breaks
+///     every `npx`/`npm` invocation in the repo for teammates — found live
+///     by the conformance harness's round-trip leg.
+///   - when false (`nub pm update`), the field is untouched: the existing
+///     devEngines range is the USER'S constraint that update floats within —
+///     rewriting it to the caret of the new exact would silently narrow
+///     their stated intent.
 ///
 /// `name` is a string (not [`Pm`]) because `use bun` declares a manager nub
-/// doesn't provision. Existing `devEngines` siblings (`os`/`cpu`/`libc`/
-/// `runtime`) and all other manifest content survive; indentation, line
+/// doesn't provision. All other manifest content survives; indentation, line
 /// endings, and the trailing newline are reproduced (see [`edit_manifest`]).
 /// Errors if no `package.json` exists at the target dir — Nub never creates
 /// one (no silent scaffolding).
@@ -538,6 +547,7 @@ pub fn write_declared_pm(
     version: &str,
     sha512_hex: &str,
     cwd: &Path,
+    maintain_dev_engines: bool,
 ) -> Result<DeclaredPmWrite> {
     // Fail closed on a non-exact version: writing `packageManager: "pnpm@^9"`
     // breaks corepack (hard error), pnpm (warn + drop), and yarn classic 1.22.21+
@@ -550,41 +560,27 @@ pub fn write_declared_pm(
         );
     }
 
-    let mut reconciled = false;
+    let range = maintain_dev_engines.then(|| format!("^{version}"));
     let path = edit_manifest(cwd, |obj| {
         obj.insert(
             "packageManager".to_string(),
             serde_json::Value::String(format!("{name}@{version}+sha512.{sha512_hex}")),
         );
-        // Reconcile-not-create: only an EXISTING devEngines.packageManager that
-        // names a different manager is touched.
-        let Some(dev) = obj
-            .get_mut("devEngines")
-            .and_then(|d| d.get_mut("packageManager"))
-        else {
-            return;
-        };
-        // The governing entry: the array form's LAST named entry (the one the
-        // spec's ignore-earlier/error-last semantics make govern — the same
-        // entry `raw_pin_name_version` reads), else the object itself.
-        let entry = match dev {
-            serde_json::Value::Array(items) => items
-                .iter_mut()
-                .rev()
-                .find(|e| e.get("name").and_then(|n| n.as_str()).is_some()),
-            other => Some(other),
-        };
-        if let Some(entry) = entry {
-            let entry_name = entry.get("name").and_then(|n| n.as_str());
-            if entry_name.is_some_and(|n| n != name) {
-                *entry = serde_json::json!({ "name": name });
-                reconciled = true;
+        if let Some(range) = &range {
+            let dev = obj
+                .entry("devEngines")
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(dev) = dev.as_object_mut() {
+                dev.insert(
+                    "packageManager".to_string(),
+                    serde_json::json!({ "name": name, "version": range, "onFail": "warn" }),
+                );
             }
         }
     })?;
     Ok(DeclaredPmWrite {
         path,
-        dev_engines_reconciled: reconciled,
+        dev_engines_range: range,
     })
 }
 
@@ -1003,7 +999,7 @@ mod tests {
             &dir,
             "{\n  \"name\": \"app\",\n  \"scripts\": {\n    \"build\": \"tsc\"\n  }\n}\n",
         );
-        let written = write_declared_pm("pnpm", "9.1.0", "abc", &dir)
+        let written = write_declared_pm("pnpm", "9.1.0", "abc", &dir, true)
             .unwrap()
             .path;
         assert_eq!(written, dir.join("package.json"));
@@ -1028,7 +1024,7 @@ mod tests {
 
         // No package.json at the target dir → error, never create one.
         let empty = tmpdir("write-pin-empty");
-        let err = write_declared_pm("npm", "10.0.0", "abc", &empty)
+        let err = write_declared_pm("npm", "10.0.0", "abc", &empty, true)
             .unwrap_err()
             .to_string();
         assert!(
@@ -1079,7 +1075,7 @@ mod tests {
         );
         // A `nub pm use` in the member writes to the SAME root file resolve reads.
         assert_eq!(
-            write_declared_pm("pnpm", "9.1.0", "abc", &member)
+            write_declared_pm("pnpm", "9.1.0", "abc", &member, true)
                 .unwrap()
                 .path,
             root.join("package.json")
@@ -1332,11 +1328,12 @@ mod tests {
     }
 
     #[test]
-    fn write_declared_pm_reconciles_a_disagreeing_dev_engines_and_keeps_siblings() {
-        // Axiom 3: `packageManager` gets the exact+hash record; an EXISTING
-        // devEngines.packageManager naming a different PM is reconciled to
-        // name-only (version dropped — packageManager alone pins exactly); the
-        // devEngines siblings survive untouched.
+    fn write_declared_pm_maintains_dev_engines_for_use_and_leaves_it_for_update() {
+        // The identity-setting write (maintain=true): packageManager gets the
+        // exact+hash record AND devEngines.packageManager is rewritten
+        // wholesale to {name, ^exact, onFail:"warn"} — onFail:warn is
+        // load-bearing (npm 11 EBADDEVENGINES would otherwise hard-break
+        // teammates' npx). devEngines siblings survive untouched.
         let dir = tmpdir("pair");
         write_pkg(
             &dir,
@@ -1351,8 +1348,8 @@ mod tests {
                 "}\n"
             ),
         );
-        let write = write_declared_pm("pnpm", "9.1.0", "abc123", &dir).unwrap();
-        assert!(write.dev_engines_reconciled, "npm → pnpm must reconcile");
+        let write = write_declared_pm("pnpm", "9.1.0", "abc123", &dir, true).unwrap();
+        assert_eq!(write.dev_engines_range.as_deref(), Some("^9.1.0"));
         let m: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&write.path).unwrap()).unwrap();
         assert_eq!(
@@ -1362,8 +1359,8 @@ mod tests {
         );
         assert_eq!(
             m["devEngines"]["packageManager"],
-            serde_json::json!({"name": "pnpm"}),
-            "the disagreeing devEngines entry is reconciled to name-only"
+            serde_json::json!({"name": "pnpm", "version": "^9.1.0", "onFail": "warn"}),
+            "use rewrites devEngines wholesale beside the pin"
         );
         assert_eq!(
             m["devEngines"]["runtime"]["version"].as_str(),
@@ -1376,44 +1373,51 @@ mod tests {
             "devEngines.cpu sibling survives"
         );
 
-        // An agreeing devEngines entry (same name) is left byte-untouched — its
-        // version range is the user's update constraint, not drift.
-        let dir = tmpdir("pair-agree");
+        // use on a manifest WITHOUT devEngines creates it (the never-create
+        // rule was killed 2026-06-10 — devEngines is the range + policy
+        // npm/pnpm enforce natively).
+        let dir = tmpdir("pair-fresh");
+        write_pkg(&dir, "{\n  \"name\": \"app\"\n}\n");
+        let write = write_declared_pm("yarn", "1.22.19", "fff", &dir, true).unwrap();
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&write.path).unwrap()).unwrap();
+        assert_eq!(
+            m["devEngines"]["packageManager"],
+            serde_json::json!({"name": "yarn", "version": "^1.22.19", "onFail": "warn"})
+        );
+
+        // The pin-only write (maintain=false — `nub pm update`): an existing
+        // devEngines range is the USER'S constraint update floats within, so
+        // it survives byte-verbatim; an absent one is not created.
+        let dir = tmpdir("pair-update");
         write_pkg(
             &dir,
             r#"{"devEngines":{"packageManager":{"name":"pnpm","version":"^9","onFail":"download"}}}"#,
         );
-        let write = write_declared_pm("pnpm", "9.1.0", "aa", &dir).unwrap();
-        assert!(!write.dev_engines_reconciled, "same name — no reconcile");
+        let write = write_declared_pm("pnpm", "9.1.0", "aa", &dir, false).unwrap();
+        assert_eq!(write.dev_engines_range, None);
         let m: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&write.path).unwrap()).unwrap();
         assert_eq!(
             m["devEngines"]["packageManager"],
             serde_json::json!({"name": "pnpm", "version": "^9", "onFail": "download"}),
-            "an agreeing devEngines entry survives verbatim"
+            "update must leave the user's devEngines constraint verbatim"
         );
-
-        // devEngines is NEVER created: a manifest without one ends with ONLY the
-        // packageManager field written.
-        let dir = tmpdir("pair-fresh");
+        let dir = tmpdir("pair-update-fresh");
         write_pkg(&dir, "{\n  \"name\": \"app\"\n}\n");
-        let write = write_declared_pm("yarn", "1.22.19", "fff", &dir).unwrap();
-        assert!(!write.dev_engines_reconciled);
+        write_declared_pm("pnpm", "9.1.0", "aa", &dir, false).unwrap();
         let m: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&write.path).unwrap()).unwrap();
-        assert_eq!(
-            m["packageManager"].as_str(),
-            Some("yarn@1.22.19+sha512.fff")
-        );
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
         assert!(
             m.get("devEngines").is_none(),
-            "write_declared_pm must never create devEngines"
+            "the pin-only write must not create devEngines"
         );
 
         // A range/tag must be resolved BEFORE the write — the writer fails closed
         // rather than committing a `packageManager` value corepack chokes on.
         for bad in ["^9", "latest", "9.1.0+sha512.abc"] {
-            let err = write_declared_pm("pnpm", bad, "aa", &dir)
+            let err = write_declared_pm("pnpm", bad, "aa", &dir, true)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -1465,7 +1469,7 @@ mod tests {
         for (indent, trailing) in [("  ", true), ("    ", true), ("\t", false)] {
             let dir = tmpdir("pair-fmt");
             write_pkg(&dir, &render(input, indent, trailing));
-            let path = write_declared_pm("pnpm", "9.1.0", "cafe01", &dir)
+            let path = write_declared_pm("pnpm", "9.1.0", "cafe01", &dir, false)
                 .unwrap()
                 .path;
             assert_eq!(
@@ -1512,7 +1516,7 @@ mod tests {
 
                 let dir = tmpdir("pair-eol");
                 write_pkg(&dir, &input);
-                let path = write_declared_pm("pnpm", "9.2.0", "beef", &dir)
+                let path = write_declared_pm("pnpm", "9.2.0", "beef", &dir, false)
                     .unwrap()
                     .path;
                 let got = std::fs::read_to_string(&path).unwrap();
@@ -1540,7 +1544,7 @@ mod tests {
         // litter remains, and the target holds exactly the new pin.
         let dir = tmpdir("write-atomic");
         write_pkg(&dir, "{\n  \"name\": \"app\"\n}\n");
-        write_declared_pm("npm", "10.9.0", "abc", &dir).unwrap();
+        write_declared_pm("npm", "10.9.0", "abc", &dir, true).unwrap();
 
         let leftover: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1562,46 +1566,25 @@ mod tests {
     }
 
     #[test]
-    fn write_declared_pm_reconciles_the_array_forms_governing_entry() {
-        // The devEngines spec allows the array form; the LAST named entry
-        // governs (ignore-earlier/error-last). Reconcile rewrites ONLY that
-        // entry — to name-only — and leaves the earlier entries alone.
+    fn write_declared_pm_replaces_the_array_form_wholesale() {
+        // The devEngines spec allows the array form ("any of these"). `use`
+        // sets ONE identity, so the maintained write replaces the whole value
+        // with the single governing object — keeping a multi-tool array
+        // alongside an exact packageManager pin would preserve exactly the
+        // split-brain state `use` exists to clear.
         let dir = tmpdir("pair-array");
         write_pkg(
             &dir,
             r#"{"devEngines":{"packageManager":[{"name":"bun","onFail":"ignore"},{"name":"npm","version":"10.0.0"}]}}"#,
         );
-        let write = write_declared_pm("pnpm", "9.1.0", "abc", &dir).unwrap();
-        assert!(write.dev_engines_reconciled);
+        let write = write_declared_pm("pnpm", "9.1.0", "abc", &dir, true).unwrap();
+        assert_eq!(write.dev_engines_range.as_deref(), Some("^9.1.0"));
         let m: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&write.path).unwrap()).unwrap();
         assert_eq!(
             m["devEngines"]["packageManager"],
-            serde_json::json!([
-                {"name": "bun", "onFail": "ignore"},
-                {"name": "pnpm"}
-            ]),
-            "the governing (last named) entry is reconciled; the earlier entry survives"
-        );
-
-        // The governing entry already names the target PM → no write, even
-        // when an EARLIER entry disagrees (it never governs).
-        let dir = tmpdir("pair-array-agree");
-        write_pkg(
-            &dir,
-            r#"{"devEngines":{"packageManager":[{"name":"bun","onFail":"ignore"},{"name":"pnpm","version":"^9"}]}}"#,
-        );
-        let write = write_declared_pm("pnpm", "9.1.0", "ff", &dir).unwrap();
-        assert!(!write.dev_engines_reconciled);
-        let m: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&write.path).unwrap()).unwrap();
-        assert_eq!(
-            m["devEngines"]["packageManager"],
-            serde_json::json!([
-                {"name": "bun", "onFail": "ignore"},
-                {"name": "pnpm", "version": "^9"}
-            ]),
-            "an agreeing governing entry survives verbatim"
+            serde_json::json!({"name": "pnpm", "version": "^9.1.0", "onFail": "warn"}),
+            "the array form is replaced wholesale by the single identity entry"
         );
     }
 

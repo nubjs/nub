@@ -18,6 +18,10 @@
 #   yarn — nub must REFUSE to mutate a detected yarn.lock (write fidelity is
 #          unproven, so the refusal IS the pass): non-zero exit, the error
 #          names yarn.lock, the file is untouched, no other lockfile appears.
+#   nub  — the two-mode round trip: drive the mutation in compat (pnpm) mode,
+#          `nub pm use nub` (zero pnpm-named files, lock.yaml present, a
+#          frozen nub-mode install works from it), `nub pm use pnpm@<pin>`
+#          back, and the REAL pnpm judge accepts the regenerated state frozen.
 #
 # Every nub invocation's output is also swept for the string "aube" — the
 # conformance projects double as brand-leak canaries (cheap local complement
@@ -45,7 +49,7 @@ BUN_PIN=1.3.14
 ALL_FIXTURES=(simple workspace peer-heavy overrides platform-optional scoped git-dep patched)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
-FORMATS="${FORMATS:-pnpm npm bun yarn}"
+FORMATS="${FORMATS:-pnpm npm bun yarn nub}"
 
 # Hermetic sandbox: absolute HOME + XDG so neither the dev box's ~/.npmrc,
 # caches, or stores leak in, nor the run leaves residue behind. (Absolute
@@ -232,6 +236,35 @@ leg_bun() {
   return 0
 }
 
+# The nub leg: the bidirectional identity switch over real resolution state.
+# Compat-mode mutation first (pnpm artifacts), then `pm use nub` — the full
+# switch — proving the nub-mode invariants; an actual frozen install from
+# lock.yaml (the engine must resolve+link from the renamed lockfile and the
+# migrated config homes); then `pm use pnpm@<pin>` reverses everything and
+# the REAL pnpm is the judge of the regenerated state. The pin matters:
+# pnpm errors on a packageManager naming a different major.
+leg_nub() {
+  local proj="$1" log="$2" fixture="$3"
+  nub_mutation "$log" "$proj" pnpm "$fixture" || { echo "FAILED: nub step (exit $?)" >>"$log"; return 1; }
+  nub_step "$log" "$proj" pnpm pm use nub || { echo "FAILED: pm use nub (exit $?)" >>"$log"; return 1; }
+  [ -f "$proj/lock.yaml" ] || { echo "FAILED: use nub left no lock.yaml" >>"$log"; return 1; }
+  local pnpm_named
+  pnpm_named=$(find "$proj" -name '*pnpm*' -not -path '*/node_modules/*' 2>/dev/null || true)
+  [ -z "$pnpm_named" ] || { echo "FAILED: pnpm-named files survived use nub: $pnpm_named" >>"$log"; return 1; }
+  wipe_node_modules "$proj"
+  nub_step "$log" "$proj" pnpm install --frozen-lockfile \
+    || { echo "FAILED: nub-mode frozen install from lock.yaml (exit $?)" >>"$log"; return 1; }
+  fixture_post_check "$fixture" "$proj" "$log" || return 1
+  nub_step "$log" "$proj" pnpm pm use "pnpm@$PNPM_PIN" || { echo "FAILED: pm use pnpm (exit $?)" >>"$log"; return 1; }
+  [ -f "$proj/pnpm-lock.yaml" ] && [ ! -f "$proj/lock.yaml" ] \
+    || { echo "FAILED: use pnpm did not rename lock.yaml back" >>"$log"; return 1; }
+  wipe_node_modules "$proj"
+  ( cd "$proj" && step "$log" "real pnpm frozen accept (post round-trip)" run_pnpm install --frozen-lockfile ) \
+    || { echo "FAILED: real pnpm rejected the post-round-trip state (--frozen-lockfile)" >>"$log"; return 1; }
+  fixture_post_check "$fixture" "$proj" "$log" || return 1
+  return 0
+}
+
 # The yarn pass is the refusal: seed a classic yarn.lock, attempt a mutation,
 # and demand a clean refusal that leaves every byte alone.
 leg_yarn() {
@@ -276,6 +309,7 @@ for fixture in "${FIXTURES[@]}"; do
       npm)  leg_npm  "$proj" "$log" "$fixture" || ok=$? ;;
       bun)  leg_bun  "$proj" "$log" "$fixture" || ok=$? ;;
       yarn) leg_yarn "$proj" "$log" "$fixture" || ok=$? ;;
+      nub)  leg_nub  "$proj" "$log" "$fixture" || ok=$? ;;
       *) echo "error: unknown format '$format'" >&2; exit 2 ;;
     esac
     reason="$(expected_reason "$fixture" "$format")"
