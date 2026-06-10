@@ -1035,16 +1035,18 @@ function HypermanagerBand() {
                 time. Registry, scoped, peer-heavy, and platform-specific dependency trees all
                 round-trip through the real tools today — <Mono>workspace:</Mono>{' '}links and git
                 dependencies included. And when you want
-                the original tool itself, <Mono>nub pm</Mono>{' '}pins and provisions the exact
-                version for the whole team — Corepack&rsquo;s job, without the PATH shims.
+                the original tool itself, <Mono>nub pm use</Mono>{' '}declares and provisions the
+                exact version for the whole team — Corepack&rsquo;s job, without the PATH shims.
               </>
             }
             visual={
               <Terminal
                 lines={[
                   { cmd: 'nub install', comment: 'or pnpm install — same lockfile' },
-                  { cmd: 'nub pm pin pnpm@^9' },
-                  { out: 'pinned pnpm@9.15.9 → package.json' },
+                  { cmd: 'nub pm use pnpm@^9' },
+                  { out: 'using pnpm@9.15.9' },
+                  { out: '  package.json: packageManager = pnpm@9.15.9 (+sha512)' },
+                  { out: "  pnpm-lock.yaml: kept (already pnpm's format)" },
                 ]}
               />
             }

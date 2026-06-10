@@ -3671,13 +3671,13 @@ fn provision_pm_humanized(
 
 /// `nub pm <verb>` — the package-manager management group. Manual sub-verb match
 /// (mirroring [`run_node`]'s shape): bare / `help` list the verbs, an unknown
-/// token errors naming the set. The verbs operate on the project's PM *pin*
-/// (`which`/`pin`/`switch`/`update`) and nub's PM cache (`cache`); none mutate
-/// `package.json` implicitly — only the explicit pin-writing verbs (`pin` /
-/// `switch` / `update`) write, each through the shared resolve → provision →
-/// write-the-pair flow ([`resolve_provision_write_pair`]). Eager auto-pinning is
-/// deliberately NOT wired anywhere: its fire points (the normalized-surface
-/// verbs) don't exist yet, so explicit pin/switch/update IS the v0 policy.
+/// token errors naming the set. The verbs operate on the project's PM *identity*
+/// (`which`/`use`/`update`) and nub's PM cache (`cache`); none mutate
+/// `package.json` implicitly — only the explicit declaration-writing verbs
+/// (`use` / `update`) write, both through the shared resolve → provision →
+/// write-the-declaration flow ([`resolve_provision_declare`]). Eager
+/// auto-pinning is deliberately NOT wired anywhere: explicit `use`/`update` IS
+/// the v0 policy (wiki/commands/pm/identity-policy.md, Axiom 3).
 fn run_pm(args: &[String]) -> Result<i32> {
     use nub_core::pm::Pm;
     use nub_core::pm::resolve::{self, PmTarget};
@@ -3690,14 +3690,13 @@ fn run_pm(args: &[String]) -> Result<i32> {
             "nub pm — manage the project's package manager\n\n\
              Usage: nub pm <command>\n\n\
              Commands:\n\
-             \x20 which                 print the resolved package-manager path (why → stderr)\n\
-             \x20 pin <pm>@<spec>       pin the project's PM version (resolves a range/tag, provisions,\n\
-             \x20                       writes packageManager + devEngines.packageManager)\n\
-             \x20 switch <pm>[@<spec>]  switch the project to a different package manager (default: latest)\n\
-             \x20 update                re-resolve within the pinned range and bump the pin (alias: up)\n\
-             \x20 cache [clear]         list cached package managers (or clear the cache)\n\
-             \x20 shim                  link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
-             \x20 unshim                remove the shims and their PATH block"
+             \x20 which              print the resolved package-manager path (why → stderr)\n\
+             \x20 use <pm>[@<spec>]  declare the project's package manager (npm|pnpm|yarn|bun;\n\
+             \x20                    default: latest) — writes packageManager and aligns the lockfile\n\
+             \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
+             \x20 cache [clear]      list cached package managers (or clear the cache)\n\
+             \x20 shim               link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
+             \x20 unshim             remove the shims and their PATH block"
         );
         return Ok(0);
     }
@@ -3711,7 +3710,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
             // before resolution silently swallows it.
             check_manifest_json(&cwd)?;
             let res = resolve::resolve_target_with_source(&cwd)
-                .context("no package manager is pinned (no .yarnrc.yml yarnPath, packageManager, or devEngines.packageManager) — pin one with `nub pm pin <pm>@<version>`")?;
+                .context("no package manager is pinned (no .yarnrc.yml yarnPath, packageManager, or devEngines.packageManager) — declare one with `nub pm use <pm>`")?;
             // Drain the structured advisories first (disagreement / range /
             // ignored-field) so they precede the path on stderr.
             for w in &res.warnings {
@@ -3744,76 +3743,38 @@ fn run_pm(args: &[String]) -> Result<i32> {
             eprintln!("» {provenance}");
             Ok(0)
         }
-        // Pin the VERSION of the project's current PM (`nub pm pin pnpm@^9`).
-        // The spec may be exact / range / dist-tag — resolved before writing,
-        // never a range into `packageManager`. The SAME-PM GUARD makes pin
-        // version-only: a typo'd `nub pm pin yarn@…` in a pnpm project must not
-        // silently change which PM the project uses (that's `switch`'s job). The
-        // guard keys on the project's PM IDENTITY (`project_pm_identity`), not
-        // the resolvable pin, so a yarnPath-only Berry project and a
-        // present-but-unusable spec (`yarn@^4`) still guard — and a Berry
-        // project refuses `pin yarn@1.x` too (classic and Berry yarn.lock
-        // formats are incompatible; crossing them is a switch, not a pin).
-        "pin" => {
+        // `nub pm use <pm>[@<spec>]` — THE identity-setting verb (spec:
+        // wiki/commands/pm/identity-policy.md §`nub pm use`). Declarative
+        // contract: after it runs, the project's identity is <pm> and the
+        // artifacts agree — `packageManager` written (the field's only
+        // sanctioned writer), an existing devEngines reconciled (never
+        // created), and the lockfile aligned (kept / converted / strays
+        // removed) through the engine's gated writers. Idempotent: rerunning
+        // is a no-op (a bare spec refreshes the pin to latest). Replaces the
+        // old `pin` (version-only) and `switch` (cross-PM, declaration-only)
+        // verbs — one command owns identity.
+        "use" => {
             let Some(arg) = args.get(1) else {
                 bail!(
-                    "nub pm pin requires a <pm>@<spec> (e.g. nub pm pin pnpm@9.1.0, pnpm@^9, pnpm@latest)"
+                    "nub pm use requires a package manager — nub pm use <pm>[@<spec>] \
+                     (e.g. nub pm use pnpm, nub pm use npm@10, nub pm use pnpm@latest)"
                 );
             };
             let (name, spec) = split_pm_arg(arg)?;
-            let Some(spec) = spec else {
-                bail!(
-                    "nub pm pin requires a version spec — nub pm pin {name}@<spec> \
-                     (exact, range, or tag: {name}@latest)"
-                );
-            };
-            if let Some(current) = resolve::project_pm_identity(&cwd) {
-                if current.name != name {
-                    bail!(
-                        "this project uses {} — `nub pm pin` only changes its version. \
-                         To change the package manager itself, use `nub pm switch {name}@{spec}`.",
-                        current.name
-                    );
-                }
-                if current.berry && leading_major(spec).is_some_and(|m| m < 2) {
-                    bail!(
-                        "this project uses yarn Berry (yarn 2+) — pinning yarn@{spec} would \
-                         change it to classic yarn, whose yarn.lock format is incompatible. \
-                         To change on purpose, use `nub pm switch yarn@{spec}`."
-                    );
-                }
-            }
-            let (pm, version, path) = resolve_provision_write_pair(name, spec, &cwd)?;
-            println!("pinned {pm}@{version} → {}", path.display());
-            Ok(0)
-        }
-        // Change WHICH PM the project uses (cross-PM pin rewrite; spec defaults
-        // to latest). Same resolve+provision+write-pair flow as `pin`, minus the
-        // same-PM guard. v0 is the pin rewrite only — lockfile migration is the
-        // roadmap item (wiki/research/package-manager-provisioning.md §pin vs switch).
-        "switch" => {
-            let Some(arg) = args.get(1) else {
-                bail!(
-                    "nub pm switch requires a package manager (e.g. nub pm switch yarn, \
-                     nub pm switch pnpm@9.1.0)"
-                );
-            };
-            let (name, spec) = split_pm_arg(arg)?;
-            let (pm, version, path) =
-                resolve_provision_write_pair(name, spec.unwrap_or("latest"), &cwd)?;
-            println!("switched to {pm}@{version} → {}", path.display());
-            Ok(0)
+            run_pm_use(name, spec.unwrap_or("latest"), &cwd)
         }
         // Re-resolve WITHIN THE PINNED INTENT and bump the pin: the
-        // devEngines.packageManager range when the pair is present (so `^9.1.0`
+        // devEngines.packageManager range when one is present (so `^9.1.0`
         // floats inside 9.x, never silently across majors), else the registry
-        // latest. Always rewrites the pair — the hash is recomputed from the
-        // freshly fetched artifact, and a legacy hashless pin gets upgraded to
-        // the pair shape even when the version is already newest.
+        // latest. Always rewrites `packageManager` — the hash is recomputed
+        // from the freshly fetched artifact, and a legacy hashless pin gets
+        // upgraded to the exact+hash shape even when the version is already
+        // newest. devEngines is never touched (same-PM by construction —
+        // reconcile is a no-op; Axiom 3: only `use nub`, gated, writes it).
         "update" | "up" => {
             check_manifest_json(&cwd)?;
             let res = resolve::resolve_pin_with_source(&cwd).context(
-                "no package manager is pinned to update — pin one with `nub pm pin <pm>@<version>`",
+                "no package manager is pinned to update — declare one with `nub pm use <pm>`",
             )?;
             for w in &res.warnings {
                 eprintln!("{w}");
@@ -3832,7 +3793,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 .version
                 .as_deref()
                 .map(|v| v.split_once('+').map_or(v, |(bare, _)| bare).to_string());
-            let (_, version, _) = resolve_provision_write_pair(&name, &spec, &cwd)?;
+            let (version, _) = resolve_provision_declare(&name, &spec, &cwd)?;
             match current {
                 Some(cur) if cur == version => eprintln!(
                     "{name} is already on the newest version ({version}); pin hash refreshed."
@@ -3870,9 +3831,16 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // Install / remove the PM shims (spec: wiki/research/package-manager-shims.md).
         "shim" => run_pm_shim_install(),
         "unshim" => run_pm_unshim(),
-        _ => bail!(
-            "nub pm takes a subcommand (which, pin, switch, update (up), cache, shim, unshim)."
+        // `pin`/`switch` were replaced by `use` (2026-06-10, identity-policy
+        // ratification) — name the successor instead of the generic unknown.
+        "pin" | "switch" => bail!(
+            "`nub pm {}` was replaced by `nub pm use <pm>[@<spec>]` — one verb declares \
+             the package manager and aligns the lockfile.",
+            verb.expect("verb present in this arm")
         ),
+        _ => {
+            bail!("nub pm takes a subcommand (which, use, update (up), cache, shim, unshim).")
+        }
     }
 }
 
@@ -3886,7 +3854,7 @@ fn berry_no_yarn_path_msg() -> String {
         .to_string()
 }
 
-/// The Berry refusal for `pin`/`switch`, aware of whether a `yarnPath` release is
+/// The Berry refusal for `use`/`update`, aware of whether a `yarnPath` release is
 /// ALREADY committed. Without one, the standard message applies (commit a release
 /// or pin classic). With one, that message would instruct the user to do what
 /// they already did — instead, point at `yarn set version`, the tool that
@@ -3906,30 +3874,38 @@ fn berry_pin_refusal(cwd: &Path) -> String {
     }
 }
 
-/// Split a `<pm>[@<spec>]` argument (`pin` / `switch`). The name must be a
-/// manager nub provisions; the spec stays RAW — exact, range, or dist-tag — and
-/// is resolved against the registry before anything is written (never a range
+/// Split a `<pm>[@<spec>]` argument (`nub pm use`). The name must be a `use`
+/// target (npm | pnpm | yarn | bun — bun is declaration+lockfile only, no
+/// provisioning); the spec stays RAW — exact, range, or dist-tag — and is
+/// resolved against the registry before anything is written (never a range
 /// into `packageManager`). Berry (`yarn@<2+>`) is refused later, by the shared
-/// flow, once a concrete major is known.
+/// flow, once a concrete major is known. `use nub` is deliberately NOT
+/// implemented: the devEngines-only declaration it would write is gated on the
+/// ecosystem (corepack/npm) recognizing the name — see
+/// wiki/commands/pm/identity-policy.md §`nub pm use`.
 fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
     let (name, spec) = match arg.split_once('@') {
         Some((n, s)) => (n, Some(s.trim())),
         None => (arg, None),
     };
-    if !matches!(name, "npm" | "pnpm" | "yarn") {
-        bail!("unsupported package manager \"{name}\" — nub manages npm, pnpm, and yarn");
+    if name == "nub" {
+        bail!(
+            "`nub pm use nub` isn't available yet — the ecosystem doesn't recognize \
+             nub as a packageManager value. Declare one of: npm, pnpm, yarn, bun."
+        );
+    }
+    if !matches!(name, "npm" | "pnpm" | "yarn" | "bun") {
+        bail!("unsupported package manager \"{name}\" — nub pm use takes npm, pnpm, yarn, or bun");
     }
     if spec.is_some_and(str::is_empty) {
-        bail!(
-            "\"{arg}\" has an empty version spec — use <pm>@<spec> (e.g. {name}@9.1.0, {name}@latest)"
-        );
+        bail!("\"{arg}\" has an empty version spec — use <pm>@<spec> (e.g. {name}@latest)");
     }
     Ok((name, spec))
 }
 
-/// The shared resolve → provision → write-the-pair body of `pin` / `switch` /
-/// `update` (the ratified pin flow, 2026-06-09 — see
-/// wiki/research/package-manager-provisioning.md §What pin writes):
+/// The shared resolve → provision → write-the-declaration body of `use` /
+/// `update` (the ratified pin flow, 2026-06-09, re-ratified under the identity
+/// policy 2026-06-10 — wiki/commands/pm/identity-policy.md §`nub pm use`):
 ///
 ///   1. resolve the raw spec (exact / range / dist-tag) against the registry to
 ///      a concrete version — never a range into `packageManager`;
@@ -3938,29 +3914,31 @@ fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
 ///      committed hash is computed from the artifact, never copied out of
 ///      registry metadata, so the pin is a registry-independent trust anchor);
 ///   3. provision the exact version into nub's store (a cache hit is free; a
-///      fresh install re-verifies its download against the just-computed hash);
-///   4. write the pair via `write_pin_pair`: `packageManager: <name>@<exact>
-///      +sha512.<hex>` + `devEngines.packageManager: {name, "^<exact>",
-///      onFail: "download"}`.
+///      fresh install re-verifies its download against the just-computed hash).
+///      Skipped for bun: nub declares it but doesn't provision or run it
+///      (out of scope for v0.x);
+///   4. write the declaration via [`nub_core::pm::resolve::write_declared_pm`]
+///      — `packageManager: <name>@<exact>+sha512.<hex>`, devEngines reconciled
+///      when it names a different PM, never created.
 ///
 /// yarn >= 2 (Berry) refuses before anything is written — berry isn't the npm
 /// `yarn` tarball, so a pin nub can't provision would be a lie. The double
 /// download on an uncached version (hash fetch + provision's own fetch) is
-/// accepted: pin/switch/update are rare, explicit, online actions, and
+/// accepted: use/update are rare, explicit, online actions, and
 /// `provision_pm` owns its download internally.
-fn resolve_provision_write_pair(
+fn resolve_provision_declare(
     name: &str,
     spec: &str,
     cwd: &Path,
-) -> Result<(nub_core::pm::Pm, String, PathBuf)> {
+) -> Result<(String, nub_core::pm::resolve::DeclaredPmWrite)> {
     use nub_core::pm::{Pm, provision, registry, resolve};
 
-    // Fail before any network when there's nowhere to write the pin (the same
-    // never-scaffold rule write_pin_pair enforces — but only after a multi-MB
-    // provision, which would be rude).
+    // Fail before any network when there's nowhere to write the declaration
+    // (the same never-scaffold rule write_declared_pm enforces — but only
+    // after a multi-MB provision, which would be rude).
     if nub_core::workspace::detect::detect_project(cwd).is_none() {
         bail!(
-            "no package.json found from {} — the pin is written into the project manifest",
+            "no package.json found from {} — the declaration is written into the project manifest",
             cwd.display()
         );
     }
@@ -3977,34 +3955,134 @@ fn resolve_provision_write_pair(
         .map_err(|e| humanize_transport_error(e, &base))?;
 
     let pm = match name {
-        "npm" => Pm::Npm,
-        "pnpm" => Pm::Pnpm,
+        "npm" => Some(Pm::Npm),
+        "pnpm" => Some(Pm::Pnpm),
         // A tag/range only resolves to a concrete major now — re-apply the
         // classic/Berry split on the resolved version.
         "yarn" if leading_major(&dist.version).is_some_and(|m| m >= 2) => {
             bail!(berry_pin_refusal(cwd))
         }
-        "yarn" => Pm::Yarn,
-        other => unreachable!("split_pm_arg admits only npm/pnpm/yarn, got {other}"),
+        "yarn" => Some(Pm::Yarn),
+        // bun: declaration + lockfile only — no provisioning, no shim target.
+        "bun" => None,
+        other => unreachable!("split_pm_arg admits only npm/pnpm/yarn/bun, got {other}"),
     };
 
     let hex =
         fetch_and_hash_tarball(name, &dist).map_err(|e| humanize_transport_error(e, &base))?;
 
-    let store = pm_store_root()?;
-    let pin = resolve::PmPin {
-        pm,
-        version: Some(format!("{}+sha512.{hex}", dist.version)),
-    };
-    provision::provision_pm(&pin, &store).map_err(|e| humanize_transport_error(e, &base))?;
+    if let Some(pm) = pm {
+        let store = pm_store_root()?;
+        let pin = resolve::PmPin {
+            pm,
+            version: Some(format!("{}+sha512.{hex}", dist.version)),
+        };
+        provision::provision_pm(&pin, &store).map_err(|e| humanize_transport_error(e, &base))?;
+    }
 
-    let path = resolve::write_pin_pair(pm, &dist.version, &hex, cwd)?;
-    Ok((pm, dist.version, path))
+    let write = resolve::write_declared_pm(name, &dist.version, &hex, cwd)?;
+    Ok((dist.version, write))
+}
+
+/// `nub pm use <pm>[@<spec>]` — the four spec'd steps, in refuse-early order:
+/// the lockfile-alignment PLAN is computed first (pure — its refusals fire
+/// before any network or write), then resolve/provision/declare, then the
+/// plan executes, then the file-by-file summary prints. A failure at any step
+/// leaves earlier artifacts consistent: a failed conversion keeps the source
+/// lockfile on disk (the declaration already names the target, and rerunning
+/// `use` resumes the migration — idempotence is the contract, not atomicity).
+fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
+    use crate::pm_engine::use_align::{self, AlignPlan};
+    use nub_core::pm::resolve;
+
+    // A malformed package.json reads as "no project" downstream — surface the
+    // parse failure (with its location) instead.
+    check_manifest_json(cwd)?;
+    let Some(project) = nub_core::workspace::detect::detect_project(cwd) else {
+        bail!(
+            "no package.json found from {} — the declaration is written into the project manifest",
+            cwd.display()
+        );
+    };
+    // The declaration and the lockfiles live at the workspace root — the same
+    // dir write_declared_pm targets.
+    let root = project.workspace_root.unwrap_or(project.root);
+
+    let plan = use_align::plan_alignment(&root, name)?;
+
+    let (version, write) = resolve_provision_declare(name, spec, cwd)?;
+
+    // A committed Berry release outranks packageManager in resolution —
+    // `use` never edits settings files (.yarnrc.yml), so say so out loud
+    // instead of leaving the declaration silently shadowed.
+    if let Some(release) = resolve::committed_yarn_path(cwd) {
+        eprintln!(
+            "nub: .yarnrc.yml yarnPath still points at {} — it outranks packageManager; \
+             remove it to complete the move to {name}.",
+            release.display()
+        );
+    }
+
+    // Step 4 — the file-by-file summary (stdout). Nothing silent.
+    println!("using {name}@{version}");
+    println!("  package.json: packageManager = {name}@{version} (+sha512)");
+    if write.dev_engines_reconciled {
+        println!(
+            "  package.json: devEngines.packageManager reconciled → {{ \"name\": \"{name}\" }}"
+        );
+    }
+    match plan {
+        AlignPlan::Fresh => {
+            println!(
+                "  no lockfile — the next install writes {}",
+                use_align::lockfile_name(name)
+            );
+        }
+        AlignPlan::Keep { kept, remove } => {
+            let kept_name = kept.file_name().unwrap_or_default().to_string_lossy();
+            println!("  {kept_name}: kept (already {name}'s format)");
+            for path in remove {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                println!(
+                    "  {}: removed (stale — {kept_name} is authoritative)",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+        }
+        AlignPlan::Convert {
+            from,
+            from_kind,
+            remove,
+        } => {
+            // Conversion goes through the engine's gated writers; the brand
+            // preflight must be registered before any engine code reads
+            // project state (workspace-yaml names freeze on first read).
+            crate::pm_engine::engine_brand_preflight();
+            let written = use_align::convert_lockfile(&root, &from, from_kind, name)?;
+            println!(
+                "  {}: written (converted from {})",
+                written.file_name().unwrap_or_default().to_string_lossy(),
+                from.file_name().unwrap_or_default().to_string_lossy()
+            );
+            // Sources are removed only after the write succeeded — migrated,
+            // not abandoned (a leftover would recreate the ambiguity).
+            for path in remove {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                println!(
+                    "  {}: removed (migrated)",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+        }
+    }
+    Ok(0)
 }
 
 /// Download the resolved tarball to a temp file, verify it against the registry
 /// dist integrity, and return the sha512 hex of the verified bytes — the digest
-/// `write_pin_pair` commits. This fetch happens even when the version is already
+/// `write_declared_pm` commits. This fetch happens even when the version is already
 /// in nub's store: an honest hash needs the bytes (pin-implies-fetch), and the
 /// store keeps extracted trees, not tarballs.
 fn fetch_and_hash_tarball(
@@ -4048,11 +4126,11 @@ fn leading_major(spec: &str) -> Option<u32> {
 }
 
 /// `devEngines.packageManager.version` from the root manifest, when the field
-/// names the same PM as the pin — `nub pm update`'s re-resolve constraint (the
-/// loose half of the pair `nub pm pin` writes). `None` (field absent, different
-/// PM named, or no version) → update resolves `latest`. The root manifest is the
-/// workspace root when one exists — the same file `resolve_pin` reads and
-/// `write_pin_pair` writes.
+/// names the same PM as the pin — `nub pm update`'s re-resolve constraint (a
+/// user-stated range nub reads but never writes; Axiom 3). `None` (field
+/// absent, different PM named, or no version) → update resolves `latest`. The
+/// root manifest is the workspace root when one exists — the same file
+/// `resolve_pin` reads and `write_declared_pm` writes.
 fn dev_engines_range(cwd: &Path, pm_name: &str) -> Option<String> {
     let project = nub_core::workspace::detect::detect_project(cwd)?;
     let manifest: serde_json::Value = match &project.workspace_root {
@@ -5244,93 +5322,85 @@ mod tests {
     }
 
     #[test]
-    fn pin_same_pm_guard_blocks_cross_pm_and_a_failed_resolve_writes_nothing() {
+    fn use_plans_lockfile_refusals_before_network_and_a_failed_resolve_writes_nothing() {
+        // (a) The yarn write gate fires at the PLAN stage: `use yarn` over a
+        // pnpm lockfile refuses with the gate message, not a fetch error —
+        // proof the alignment plan runs before any network (the registry here
+        // is a dead port).
         let before = r#"{"packageManager":"pnpm@9.1.0"}"#;
-        let dir = offline_project("pin-guard", before);
-
-        // The SAME-PM GUARD: pin is version-only. Naming a different PM errors
-        // pointing at switch — before any network (the dead registry would fail
-        // with a fetch error, not this message).
-        let err = with_cwd(&dir, || run_pm(&["pin".into(), "yarn@1.22.19".into()]))
+        let dir = offline_project("use-yarn-gate", before);
+        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn".into()]))
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("pnpm") && err.contains("nub pm switch"),
-            "a cross-PM pin must name the current PM and the switch remedy, got: {err}"
+            err.contains("refuses to write yarn.lock"),
+            "use yarn needing a conversion must hit the write gate pre-network, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("package.json")).unwrap(),
+            before,
+            "a refused use must write nothing"
         );
 
-        // The same PM passes the guard and reaches resolution — which dies on the
-        // dead registry (the offline path is humanized to one registry-named
-        // sentence). Resolve-before-write: the manifest must be untouched.
+        // (b) Multiple foreign lockfiles without the target's → the ambiguity
+        // refusal, naming the files and the remedy — also pre-network.
+        let dir = offline_project("use-ambig", before);
+        std::fs::write(dir.join("package-lock.json"), "{}").unwrap();
+        std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+        let err = with_cwd(&dir, || run_pm(&["use".into(), "pnpm".into()]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("package-lock.json")
+                && err.contains("yarn.lock")
+                && err.contains("nub pm use pnpm"),
+            "the multi-lockfile refusal must name the files + remedy, got: {err}"
+        );
+
+        // (c) Resolve-before-write: a clean `use` that dies at the (dead)
+        // registry leaves the manifest untouched and creates no lockfile.
         if !ambient_registry_override() {
+            let dir = offline_project("use-offline", before);
             let err = format!(
                 "{:#}",
-                with_cwd(&dir, || run_pm(&["pin".into(), "pnpm@9.2.0".into()])).unwrap_err()
+                with_cwd(&dir, || run_pm(&["use".into(), "pnpm@9.2.0".into()])).unwrap_err()
             );
             assert!(
                 err.contains("cannot reach the registry") && err.contains("127.0.0.1:1"),
-                "a same-PM pin must pass the guard and fail at the (dead) registry with the \
-                 humanized offline message, got: {err}"
+                "an unresolvable spec must fail with the humanized offline message, got: {err}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("package.json")).unwrap(),
+                before,
+                "a failed resolve must write nothing"
+            );
+            assert!(
+                !dir.join("pnpm-lock.yaml").exists(),
+                "a failed use must not create a lockfile"
             );
         }
-        assert_eq!(
-            std::fs::read_to_string(dir.join("package.json")).unwrap(),
-            before,
-            "a failed pin must write nothing"
-        );
     }
 
     #[test]
-    fn pin_guard_keys_on_identity_not_just_the_resolvable_pin() {
-        // (a) A Berry project pinned ONLY via a committed yarnPath (no
-        // packageManager field) resolves as unpinned — but `pin pnpm@9.1.0`
-        // must still refuse: pin never changes WHICH PM a project uses.
-        let dir = offline_project("guard-yarnpath", r#"{"name":"app"}"#);
-        std::fs::write(
-            dir.join(".yarnrc.yml"),
-            "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
-        )
-        .unwrap();
-        let err = with_cwd(&dir, || run_pm(&["pin".into(), "pnpm@9.1.0".into()]))
+    fn use_and_update_refuse_berry_pointing_at_the_committed_release_tool() {
+        // `use yarn@<2+>` refuses before anything is written — nub can't
+        // provision Berry, so a pin it can't honestly hash would be a lie.
+        let before = r#"{"packageManager":"yarn@1.22.19"}"#;
+        let dir = offline_project("use-berry", before);
+        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn@4.2.2".into()]))
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("yarn") && err.contains("nub pm switch"),
-            "a yarnPath-only Berry project must guard a cross-PM pin, got: {err}"
-        );
-
-        // (b) A present-but-unusable spec (yarn@^4) still names yarn — the
-        // cross-PM guard fires even though resolve_pin reads it as unpinned.
-        let dir = offline_project("guard-range", r#"{"packageManager":"yarn@^4"}"#);
-        let err = with_cwd(&dir, || run_pm(&["pin".into(), "pnpm@9.1.0".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("yarn") && err.contains("nub pm switch"),
-            "an unusable yarn spec must still guard a cross-PM pin, got: {err}"
-        );
-
-        // (c) Berry → classic is a PM identity change in disguise (incompatible
-        // yarn.lock formats): `pin yarn@1.x` in a yarn@4 project refuses,
-        // pointing at switch.
-        let before = r#"{"packageManager":"yarn@4.2.2"}"#;
-        let dir = offline_project("guard-berry-classic", before);
-        let err = with_cwd(&dir, || run_pm(&["pin".into(), "yarn@1.22.19".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("Berry") && err.contains("nub pm switch yarn@1.22.19"),
-            "a Berry→classic pin must refuse pointing at switch, got: {err}"
+            err.contains("Berry") && err.contains("committed release"),
+            "use yarn@4.2.2 must refuse with the berry message, got: {err}"
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("package.json")).unwrap(),
             before,
-            "the refused pin must write nothing"
+            "a refused berry use must write nothing"
         );
-    }
 
-    #[test]
-    fn berry_refusal_with_a_committed_yarn_path_points_at_yarn_set_version() {
         // With a yarnPath already committed, the refusal must NOT instruct the
         // user to commit one (they did) — it points at `yarn set version`, the
         // tool that manages the committed release.
@@ -5340,7 +5410,7 @@ mod tests {
             "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
         )
         .unwrap();
-        let err = with_cwd(&dir, || run_pm(&["pin".into(), "yarn@4.9.0".into()]))
+        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn@4.9.0".into()]))
             .unwrap_err()
             .to_string();
         assert!(
@@ -5350,28 +5420,6 @@ mod tests {
         assert!(
             !err.contains("Commit a release"),
             "must not instruct committing a release that already exists, got: {err}"
-        );
-    }
-
-    #[test]
-    fn berry_pins_are_refused_and_update_points_at_yarn_set_version() {
-        // `pin`/`switch` to yarn 2+ refuse with the berry message before anything
-        // is written — nub can't provision Berry, so the pin would be a lie.
-        let before = r#"{"packageManager":"yarn@1.22.19"}"#;
-        let dir = offline_project("pin-berry", before);
-        for verb in ["pin", "switch"] {
-            let err = with_cwd(&dir, || run_pm(&[verb.into(), "yarn@4.2.2".into()]))
-                .unwrap_err()
-                .to_string();
-            assert!(
-                err.contains("Berry") && err.contains("committed release"),
-                "{verb} yarn@4.2.2 must refuse with the berry message, got: {err}"
-            );
-        }
-        assert_eq!(
-            std::fs::read_to_string(dir.join("package.json")).unwrap(),
-            before,
-            "a refused berry pin must write nothing"
         );
 
         // `update` on a Berry-pinned project refuses too, pointing at the tool
@@ -5387,7 +5435,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_and_switch_args_error_naming_the_form_and_the_supported_set() {
+    fn use_args_error_naming_the_form_the_supported_set_and_the_gated_nub() {
         let dir = offline_project("pm-args", r#"{"name":"app"}"#);
         let run = |args: &[&str]| {
             with_cwd(&dir, || {
@@ -5398,34 +5446,39 @@ mod tests {
         };
 
         assert!(
-            run(&["pin"]).contains("<pm>@<spec>"),
-            "bare pin names the form"
+            run(&["use"]).contains("<pm>[@<spec>]"),
+            "bare use names the form"
         );
         assert!(
-            run(&["pin", "pnpm"]).contains("version spec"),
-            "pin without a spec asks for one (switch is the spec-optional verb)"
+            run(&["use", "vlt"]).contains("npm, pnpm, yarn, or bun"),
+            "an unsupported PM names the use target set"
+        );
+        let err = run(&["use", "nub"]);
+        assert!(
+            err.contains("isn't available yet"),
+            "`use nub` is gated, not unknown: {err}"
         );
         assert!(
-            run(&["switch"]).contains("nub pm switch"),
-            "bare switch names its usage"
-        );
-        assert!(
-            run(&["pin", "bun@1.1.0"]).contains("npm, pnpm, and yarn"),
-            "an unmanaged PM names the supported set"
-        );
-        assert!(
-            run(&["switch", "pnpm@"]).contains("empty version spec"),
+            run(&["use", "pnpm@"]).contains("empty version spec"),
             "a trailing @ is named, not treated as latest"
         );
+        // The removed verbs name their successor — a clean break, not an alias.
+        for verb in ["pin", "switch"] {
+            let err = run(&[verb, "pnpm@9.1.0"]);
+            assert!(
+                err.contains("replaced by `nub pm use"),
+                "`{verb}` must name the successor verb, got: {err}"
+            );
+        }
         let err = run(&["frobnicate"]);
         assert!(
-            err.contains("which, pin, switch, update (up), cache"),
+            err.contains("which, use, update (up), cache"),
             "the unknown-verb error names the full verb set, got: {err}"
         );
     }
 
     #[test]
-    fn up_is_an_alias_for_update_and_no_pin_names_the_pin_remedy() {
+    fn up_is_an_alias_for_update_and_no_pin_names_the_use_remedy() {
         let dir = offline_project("up-alias", r#"{"name":"app"}"#);
         for verb in ["update", "up"] {
             let err = with_cwd(&dir, || run_pm(&[verb.into()]))
@@ -5433,7 +5486,7 @@ mod tests {
                 .to_string();
             assert!(
                 err.contains("no package manager is pinned to update")
-                    && err.contains("nub pm pin"),
+                    && err.contains("nub pm use"),
                 "`{verb}` with no pin must name the state and the remedy, got: {err}"
             );
         }
@@ -5465,7 +5518,7 @@ mod tests {
         assert_eq!(dev_engines_range(&dir, "pnpm"), None);
 
         // From a workspace member the range is read at the root — the same file
-        // resolve_pin reads and write_pin_pair writes.
+        // resolve_pin reads and write_declared_pm writes.
         let root = pm_tmpdir("dev-range-ws");
         std::fs::write(
             root.join("package.json"),
@@ -5507,7 +5560,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("no package manager is pinned") && err.contains("nub pm pin"),
+            err.contains("no package manager is pinned") && err.contains("nub pm use"),
             "which-no-pin must name the unpinned state and the remedy, got: {err}"
         );
     }
@@ -5758,9 +5811,10 @@ mod tests {
         );
     }
 
-    /// Read the written pair back out of a manifest: `(packageManager value,
-    /// devEngines.packageManager object)`. Shared by the network e2e tests.
-    fn read_pair(dir: &Path) -> (String, serde_json::Value) {
+    /// Read the declaration back out of a manifest: `(packageManager value,
+    /// devEngines.packageManager value — Null when absent)`. Shared by the
+    /// network e2e tests.
+    fn read_declaration(dir: &Path) -> (String, serde_json::Value) {
         let m: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
                 .unwrap();
@@ -5770,21 +5824,22 @@ mod tests {
         )
     }
 
-    /// Real-network e2e for `nub pm pin`: pin an exact pnpm, and confirm the pair
-    /// lands with an HONEST hash — a fresh store provisioning from the written pin
-    /// must pass the fail-closed pin-hash gate (`verify_pin_hash`). Provisions into
-    /// the real user cache (run_pm has no store override), like a real pin would.
+    /// Real-network e2e for `nub pm use`: declare an exact pnpm, and confirm the
+    /// declaration lands with an HONEST hash — a fresh store provisioning from the
+    /// written pin must pass the fail-closed pin-hash gate (`verify_pin_hash`) —
+    /// and that devEngines is NOT created (Axiom 3). Provisions into the real user
+    /// cache (run_pm has no store override), like a real use would.
     /// `#[ignore]` — downloads real pnpm tarballs.
-    ///   cargo test -p nub-cli --bin nub -- --ignored pin_writes
+    ///   cargo test -p nub-cli --bin nub -- --ignored use_writes
     #[test]
     #[ignore = "network: provisions real pnpm@10.0.0 and verifies the written pin hash"]
-    fn pin_writes_the_verified_pair_end_to_end() {
-        let dir = pm_tmpdir("pin-net");
+    fn use_writes_the_verified_declaration_end_to_end() {
+        let dir = pm_tmpdir("use-net");
         std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
-        let code = with_cwd(&dir, || run_pm(&["pin".into(), "pnpm@10.0.0".into()])).unwrap();
+        let code = with_cwd(&dir, || run_pm(&["use".into(), "pnpm@10.0.0".into()])).unwrap();
         assert_eq!(code, 0);
 
-        let (pkg_mgr, dev) = read_pair(&dir);
+        let (pkg_mgr, dev) = read_declaration(&dir);
         let hex = pkg_mgr
             .strip_prefix("pnpm@10.0.0+sha512.")
             .unwrap_or_else(|| panic!("packageManager must be exact+sha512, got {pkg_mgr}"));
@@ -5794,47 +5849,66 @@ mod tests {
         );
         assert_eq!(
             dev,
-            serde_json::json!({"name": "pnpm", "version": "^10.0.0", "onFail": "download"}),
-            "devEngines must carry the loose intent consistent with the exact pin"
+            serde_json::Value::Null,
+            "use must never create devEngines"
         );
 
         // The committed hash is the true artifact digest: a FRESH store must
         // provision from this pin (downloading + verifying against the hash).
         // A dishonest hash would fail closed here.
-        let fresh = pm_tmpdir("pin-net-fresh-store");
+        let fresh = pm_tmpdir("use-net-fresh-store");
         let pin = nub_core::pm::resolve::resolve_pin(&dir).expect("the pin just written");
         nub_core::pm::provision::provision_pm(&pin, &fresh)
             .expect("a fresh store must verify and install from the written pin hash");
         let _ = std::fs::remove_dir_all(&fresh);
     }
 
-    /// Real-network e2e for `nub pm switch`: cross-PM, spec defaulting to latest,
-    /// no same-PM guard. `#[ignore]` — downloads real npm tarballs.
-    ///   cargo test -p nub-cli --bin nub -- --ignored switch_defaults
+    /// Real-network e2e for cross-PM `nub pm use`: spec defaults to latest, the
+    /// lockfile converts to the target's format with the source removed, and a
+    /// disagreeing devEngines is reconciled to name-only. `#[ignore]` — downloads
+    /// real npm tarballs.
+    ///   cargo test -p nub-cli --bin nub -- --ignored use_defaults
     #[test]
-    #[ignore = "network: switches a pnpm project to npm@latest (real provision)"]
-    fn switch_defaults_to_latest_and_crosses_pm() {
-        let dir = pm_tmpdir("switch-net");
+    #[ignore = "network: moves a pnpm project to npm@latest (real provision + conversion)"]
+    fn use_defaults_to_latest_crosses_pm_and_migrates_the_lockfile() {
+        let dir = pm_tmpdir("use-cross-net");
         std::fs::write(
             dir.join("package.json"),
-            r#"{"packageManager":"pnpm@9.1.0"}"#,
+            r#"{"packageManager":"pnpm@9.1.0","devEngines":{"packageManager":{"name":"pnpm","version":"^9"}}}"#,
         )
         .unwrap();
-        let code = with_cwd(&dir, || run_pm(&["switch".into(), "npm".into()])).unwrap();
+        std::fs::write(
+            dir.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n",
+        )
+        .unwrap();
+        let code = with_cwd(&dir, || run_pm(&["use".into(), "npm".into()])).unwrap();
         assert_eq!(code, 0);
 
-        let (pkg_mgr, dev) = read_pair(&dir);
+        let (pkg_mgr, dev) = read_declaration(&dir);
         assert!(
             pkg_mgr.starts_with("npm@") && pkg_mgr.contains("+sha512."),
-            "switch must rewrite the pin cross-PM with the resolved exact + hash, got {pkg_mgr}"
+            "use must rewrite the pin cross-PM with the resolved exact + hash, got {pkg_mgr}"
         );
-        assert_eq!(dev["name"].as_str(), Some("npm"));
-        assert_eq!(dev["onFail"].as_str(), Some("download"));
+        assert_eq!(
+            dev,
+            serde_json::json!({"name": "npm"}),
+            "the disagreeing devEngines must reconcile to name-only"
+        );
+        assert!(
+            dir.join("package-lock.json").is_file(),
+            "the lockfile must convert to npm's format"
+        );
+        assert!(
+            !dir.join("pnpm-lock.yaml").exists(),
+            "the migrated source lockfile must be removed"
+        );
     }
 
-    /// Real-network e2e for `nub pm update`: with the pair present, update floats
-    /// within the devEngines range (^9 stays on 9.x — never a silent cross-major
-    /// jump to 10/11) and rewrites the hash. `#[ignore]` — hits the registry.
+    /// Real-network e2e for `nub pm update`: with a devEngines range present,
+    /// update floats within it (^9 stays on 9.x — never a silent cross-major jump
+    /// to 10/11), rewrites the hash, and leaves devEngines byte-untouched (only
+    /// the gated `use nub` ever writes it). `#[ignore]` — hits the registry.
     ///   cargo test -p nub-cli --bin nub -- --ignored update_floats
     #[test]
     #[ignore = "network: re-resolves pnpm@^9.0.0 from the registry (real provision)"]
@@ -5848,7 +5922,7 @@ mod tests {
         let code = with_cwd(&dir, || run_pm(&["update".into()])).unwrap();
         assert_eq!(code, 0);
 
-        let (pkg_mgr, dev) = read_pair(&dir);
+        let (pkg_mgr, dev) = read_declaration(&dir);
         assert!(
             pkg_mgr.starts_with("pnpm@9.") && pkg_mgr.contains("+sha512."),
             "update must stay within the ^9 range and carry a fresh hash, got {pkg_mgr}"
@@ -5857,12 +5931,10 @@ mod tests {
             pkg_mgr, "pnpm@9.0.0",
             "the pin must advance past the seed (newer 9.x releases exist)"
         );
-        assert!(
-            dev["version"]
-                .as_str()
-                .unwrap_or_default()
-                .starts_with("^9."),
-            "the devEngines range is rewritten consistent with the new exact"
+        assert_eq!(
+            dev,
+            serde_json::json!({"name": "pnpm", "version": "^9.0.0", "onFail": "download"}),
+            "update must leave devEngines untouched — packageManager alone carries the bump"
         );
     }
 

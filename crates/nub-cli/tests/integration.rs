@@ -2784,7 +2784,7 @@ fn bareword_unknown_verb_errors() {
 }
 
 /// `nub pm which` with no pin errors clearly (names the unpinned state + the
-/// `nub pm pin` remedy) and exits non-zero — exercised through the binary so
+/// `nub pm use` remedy) and exits non-zero — exercised through the binary so
 /// the dispatch routing (`pm` → `run_pm` → `which`) is covered end-to-end.
 #[test]
 fn pm_which_without_a_pin_errors_through_the_binary() {
@@ -2804,7 +2804,7 @@ fn pm_which_without_a_pin_errors_through_the_binary() {
         "no-pin which must exit non-zero"
     );
     assert!(
-        stderr.contains("no package manager is pinned") && stderr.contains("nub pm pin"),
+        stderr.contains("no package manager is pinned") && stderr.contains("nub pm use"),
         "the error must name the unpinned state and the remedy: {stderr}"
     );
 }

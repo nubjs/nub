@@ -475,7 +475,7 @@ pub(crate) fn named_bin_subpath(meta: &Value, entry: &str) -> Option<PathBuf> {
 
 /// Networked wrapper over a bare base URL (no auth): fetch the packument from
 /// `base` and resolve `spec` against it. `pkg` is the package name (`pnpm`, `npm`,
-/// `yarn`). Retained for the no-auth `nub pm pin` caller; provisioning goes through
+/// `yarn`). Retained for the no-auth `nub pm use` caller; provisioning goes through
 /// [`resolve_version_authed`], which carries the host auth and rewrites the tarball
 /// origin onto a configured mirror.
 pub fn resolve_version(base: &str, pkg: &str, spec: &str) -> Result<VersionDist> {

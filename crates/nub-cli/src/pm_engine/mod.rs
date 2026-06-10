@@ -57,6 +57,7 @@ pub mod log;
 pub mod present;
 pub mod publish_family;
 pub mod store_config_family;
+pub mod use_align;
 
 pub use install_family::{CiFlags, InstallFlags, run_ci, run_install};
 
@@ -618,7 +619,7 @@ fn detect_lockfile_walk_up(cwd: &Path) -> Option<DetectedLockfile> {
 /// freeze-on-first-read `OnceLock`s, and even lockfile detection reads the
 /// workspace config transitively (see the ordering note on
 /// [`engine_session`]). Every seam is idempotent.
-fn engine_brand_preflight() {
+pub(crate) fn engine_brand_preflight() {
     // Env surface: npm-compatible (`npm_config_*`) + ecosystem-neutral
     // (`CI`, proxies, …). `AUBE_*` stays invisible — nub's config contract
     // is the npm ecosystem's, not another tool's branded variables.

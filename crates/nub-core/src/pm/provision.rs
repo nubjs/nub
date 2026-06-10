@@ -195,7 +195,7 @@ fn install(
     .with_context(|| format!("downloading {pm} {}", dist.version))?;
 
     // Verify BEFORE extracting. The pin's embedded hash comes first: it is the
-    // registry-INDEPENDENT trust anchor (`nub pm pin` computed it from a tarball
+    // registry-INDEPENDENT trust anchor (`nub pm use` computed it from a tarball
     // it verified), so a tampered artifact fails against the committed digest
     // even if the registry's own metadata is complicit. Note this gates the
     // DOWNLOAD path only — an exact pin already in the store returned from the
@@ -263,7 +263,7 @@ fn normalize_top_dir(staging: &Path, top: &Path) -> Result<()> {
 /// Corepack `+<algo>.<hex>` hash suffix: `10.0.0+sha512.abc…` →
 /// `("10.0.0", Some("sha512.abc…"))`. The bare spec is what reaches the cache
 /// scan and the registry; the suffix is the PIN HASH — the registry-independent
-/// trust anchor `nub pm pin` writes from the artifact it verified — and it gates
+/// trust anchor `nub pm use` writes from the artifact it verified — and it gates
 /// the download path in [`install`] (see [`verify_pin_hash`]). nub does not
 /// honor `COREPACK_INTEGRITY_KEYS` (signature keys are out of scope; the pin
 /// hash plus the registry's `dist` integrity are the whole integrity story).
@@ -276,7 +276,7 @@ fn split_hash_suffix(version: &str) -> (&str, Option<&str>) {
 
 /// Verify a downloaded tarball against the pin's `<algo>.<hex>` suffix. The
 /// digest is HEX-encoded (corepack's format — `createHash(algo).digest("hex")`),
-/// NOT the registry's base64 SRI. `sha512` (what corepack and `nub pm pin` write
+/// NOT the registry's base64 SRI. `sha512` (what corepack and `nub pm use` write
 /// today) and `sha224` (corepack's older default) are supported; anything else
 /// is a fail-closed unsupported-algorithm error — a pin that *claims* a hash nub
 /// can't check must never install silently unverified.
