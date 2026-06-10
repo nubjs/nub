@@ -458,22 +458,51 @@ fn setup_path_shim(nub_binary: &Path) -> Result<Utf8PathBuf> {
     #[cfg(windows)]
     let node_shim = shim_dir.join("node.exe");
 
+    // Concurrent workspace spawns (one nub process, N worker threads — see the
+    // run -r work queue in cli.rs) race this setup, so the shim must be
+    // PUBLISHED ATOMICALLY: materialize under a unique temp name, then rename
+    // into place. A racer can then only ever observe `node`/`node.exe` absent
+    // or complete. The naive `exists()`-then-create had two real failure modes:
+    // on Windows the fallback `fs::copy` (hard_link fails across volumes — on
+    // GitHub runners the repo is on D:, TEMP on C:) leaves a half-written
+    // `node.exe` open for write that a sibling's child shell then tries to
+    // EXECUTE → ERROR_SHARING_VIOLATION ("The process cannot access the file
+    // because it is being used by another process", the run_aggregate CI
+    // flake, 2026-06-10); on Unix two threads could both pass `!exists()` and
+    // the loser's `symlink` EEXIST error silently dropped the shim via the
+    // caller's `.ok()`. Losing the rename race is fine — the winner's shim is
+    // complete by definition; clean up our temp and use theirs.
     if !node_shim.exists() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TMP_N: AtomicU64 = AtomicU64::new(0);
+        let tmp = shim_dir.join(format!(
+            ".node-staging-{pid}-{}",
+            TMP_N.fetch_add(1, Ordering::Relaxed)
+        ));
         #[cfg(unix)]
         {
-            unix_fs::symlink(nub_binary, &node_shim)
+            unix_fs::symlink(nub_binary, &tmp)
                 .with_context(|| format!("creating node shim symlink in {}", shim_dir.display()))?;
         }
         #[cfg(windows)]
         {
-            fs::hard_link(nub_binary, &node_shim)
-                .or_else(|_| fs::copy(nub_binary, &node_shim).map(|_| ()))
+            fs::hard_link(nub_binary, &tmp)
+                .or_else(|_| fs::copy(nub_binary, &tmp).map(|_| ()))
                 .with_context(|| {
                     format!(
                         "creating node shim in {} (tried hard_link then copy)",
                         shim_dir.display()
                     )
                 })?;
+        }
+        if let Err(rename_err) = fs::rename(&tmp, &node_shim) {
+            let _ = fs::remove_file(&tmp);
+            // A sibling published first (their shim is complete) — otherwise
+            // the rename failed for a real reason worth surfacing.
+            if !node_shim.exists() {
+                return Err(rename_err)
+                    .with_context(|| format!("publishing node shim into {}", shim_dir.display()));
+            }
         }
     }
 
@@ -1103,8 +1132,31 @@ mod tests {
     #[test]
     fn path_shim_setup_and_cleanup() {
         let nub_bin = env::current_exe().unwrap();
+        // Race 8 concurrent setups first — the workspace runner calls this from
+        // its worker threads, and publication must be atomic (every call
+        // succeeds and agrees on the dir; no loser errors with EEXIST, no
+        // half-written shim). Then assert on the published result below.
+        let dirs: Vec<_> = std::thread::scope(|s| {
+            (0..8)
+                .map(|_| s.spawn(|| setup_path_shim(&nub_bin).unwrap()))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
+        assert!(
+            dirs.windows(2).all(|w| w[0] == w[1]),
+            "all concurrent setups must agree on one shim dir: {dirs:?}"
+        );
         let shim_dir = setup_path_shim(&nub_bin).unwrap();
         let dir = PathBuf::from(shim_dir.as_str());
+        assert!(
+            !fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().contains("staging")),
+            "lost-race staging temps must be cleaned up"
+        );
 
         // The shim entry is platform-specific: a `node` symlink on Unix, a
         // `node.exe` hardlink/copy on Windows (A-WIN2). Check the right one — and
