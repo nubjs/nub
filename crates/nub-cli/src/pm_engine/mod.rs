@@ -525,9 +525,11 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     }
 }
 
-/// The shared stub error for registered-but-unwired verbs: names the verb,
-/// says when it lands ("phase Surface"), and gives the user's real-PM
-/// command so nobody is left stranded mid-skeleton.
+/// The shared stub error for registered-but-unwired verbs: names the verb
+/// and gives the user's real-PM command so nobody is left stranded. Every
+/// *current* registration has an explicit arm (wired or an honest per-verb
+/// exclusion message), so this only fires for a future verb added to the
+/// registry before its family arm — a safety net, not a backlog marker.
 pub(crate) fn stub_error(typed: &str, args: &[String], pm_hint: &str) -> anyhow::Error {
     let mut fallback = format!("{pm_hint} {typed}");
     for arg in args {
@@ -535,7 +537,7 @@ pub(crate) fn stub_error(typed: &str, args: &[String], pm_hint: &str) -> anyhow:
         fallback.push_str(arg);
     }
     anyhow::anyhow!(
-        "nub {typed}: not wired to the embedded engine yet (wired in phase Surface)\n\
+        "nub {typed}: not wired to the embedded engine yet\n\
          \x20\x20run it with your package manager for now:\n\
          \x20\x20\x20\x20{fallback}"
     )
@@ -910,7 +912,10 @@ mod tests {
         let err = stub_error("rm", &["lodash".to_string()], "pnpm");
         let msg = err.to_string();
         assert!(msg.contains("nub rm"), "{msg}");
-        assert!(msg.contains("wired in phase Surface"), "{msg}");
+        assert!(
+            msg.contains("not wired to the embedded engine yet"),
+            "{msg}"
+        );
         assert!(msg.contains("pnpm rm lodash"), "{msg}");
     }
 }
