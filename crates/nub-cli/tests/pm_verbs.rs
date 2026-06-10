@@ -481,7 +481,9 @@ fn link_unlink_round_trip_through_the_global_registry() {
 #[test]
 fn verb_help_is_rebranded_and_exits_zero() {
     let dir = pm_tmpdir("help");
-    for verb in ["add", "dlx"] {
+    // `create` exercises the nub-side help intercept (its trailing var-arg
+    // swallows --help before clap can settle it, like dlx's bare form).
+    for verb in ["add", "dlx", "create"] {
         let out = run_nub(&dir, &[verb, "--help"]);
         assert_eq!(out.code, 0, "{verb} --help: stderr: {}", out.stderr);
         out.assert_brand_clean();
@@ -491,4 +493,86 @@ fn verb_help_is_rebranded_and_exits_zero() {
             out.stdout
         );
     }
+}
+
+/// `init` is reserved for nub's own project init: not an engine verb, not a
+/// PM redirect — the answer names the coming nub feature and nothing else.
+#[test]
+fn init_is_reserved_and_answers_with_the_coming_note() {
+    let dir = pm_tmpdir("init");
+    std::fs::write(dir.join("package.json"), r#"{"name":"init-fixture"}"#).unwrap();
+    let out = run_nub(&dir, &["init"]);
+    assert_ne!(out.code, 0, "init must error until nub's own init ships");
+    out.assert_brand_clean();
+    assert!(
+        out.stderr.contains("nub's own project init is coming"),
+        "the message must name the coming nub feature: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("package manager") && !out.stderr.contains("pnpm init"),
+        "init must not redirect to a PM: {}",
+        out.stderr
+    );
+}
+
+/// The excluded verbs answer with their honest per-verb status, never the
+/// generic "wired in phase Surface" stub text (nothing is left in backlog).
+#[test]
+fn excluded_verbs_answer_honestly_not_with_stub_text() {
+    let dir = pm_tmpdir("excluded");
+    for (verb, expect) in [
+        ("recursive", "verb's own workspace flags"),
+        ("clean", "not supported"),
+        ("purge", "not supported"),
+        ("deploy", "not yet supported"),
+        ("sbom", "not yet supported"),
+    ] {
+        let out = run_nub(&dir, &[verb]);
+        assert_ne!(out.code, 0, "{verb} must error");
+        out.assert_brand_clean();
+        assert!(
+            out.stderr.contains(expect),
+            "{verb} must explain its status: {}",
+            out.stderr
+        );
+        assert!(
+            !out.stderr.contains("wired in phase Surface"),
+            "{verb} must not use the generic stub text: {}",
+            out.stderr
+        );
+    }
+}
+
+/// `nub create <template>` maps to the create-* package and runs the real
+/// scaffolder end-to-end (create-vite, zero-dep, non-interactive with an
+/// explicit template).
+#[test]
+#[ignore = "network: installs create-vite into a dlx scratch project"]
+fn create_runs_a_real_scaffolder_via_the_dlx_path() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("create");
+    let out = run_nub(
+        &dir,
+        &["create", "vite", "scaffolded", "--template", "vanilla"],
+    );
+    assert_eq!(
+        out.code, 0,
+        "stdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    out.assert_brand_clean();
+    let manifest = dir.join("scaffolded/package.json");
+    assert!(
+        manifest.is_file(),
+        "create-vite must scaffold the project dir: {}",
+        out.stdout
+    );
+    assert!(
+        std::fs::read_to_string(&manifest).unwrap().contains("vite"),
+        "the scaffolded manifest is create-vite's vanilla template"
+    );
 }

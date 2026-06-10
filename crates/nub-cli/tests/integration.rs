@@ -2732,9 +2732,8 @@ fn run_npm_aliases_map_to_canonical_flags() {
 
 // ── PM-management verbs (A2 passthrough disabled) ────────────────────────────
 
-/// A registered-but-unwired engine verb (`deploy` — in the deliberate stub
-/// set; the patch workflow joined the wired surface) errors non-zero and
-/// names the project's real PM with the exact command to paste. Nothing is
+/// A deliberately-excluded engine verb (`deploy`) errors non-zero with its
+/// honest status ("not yet supported") and a real-PM fallback. Nothing is
 /// dispatched — stdout stays empty.
 #[test]
 fn bareword_pm_verb_errors_with_the_real_pm_command() {
@@ -2749,13 +2748,13 @@ fn bareword_pm_verb_errors_with_the_real_pm_command() {
         .expect("spawn nub deploy");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("pnpm deploy out"),
-        "the error must carry the pasteable command for the project's PM: {stderr}"
+        stderr.contains("not yet supported") && stderr.contains("pnpm deploy"),
+        "the error must state the status and the real-PM fallback: {stderr}"
     );
     assert_ne!(
         out.status.code(),
         Some(0),
-        "an unwired PM verb is an error, not a dispatch"
+        "an excluded PM verb is an error, not a dispatch"
     );
     assert!(
         out.stdout.is_empty(),

@@ -2,12 +2,17 @@
 //! embedded aube engine. Live verbs: `nub install` / `nub ci` (clap natives,
 //! slice 2) plus the registry-dispatched `add`, `remove`, `update`, `link`,
 //! `unlink`, `import`, `prune`, `dedupe`, `rebuild`, `fetch`,
-//! `approve-builds`, `ignored-builds`, `dlx`, and the patch workflow
-//! (`patch`, `patch-commit`, `patch-remove`). Still stubbed pending later
-//! slices: `clean`/`purge` (their script-override semantics delegate to the
-//! *engine's* `run`, colliding with nub's reserved script runner — needs a
-//! routing decision), `deploy`, `create`, `init`, `recursive` (workspace
-//! meta-verbs whose nested legs overlap the reserved runner surface).
+//! `approve-builds`, `ignored-builds`, `dlx`, `create` (the dlx sugar), and
+//! the patch workflow (`patch`, `patch-commit`, `patch-remove`).
+//!
+//! Deliberately excluded (honest per-verb errors in [`run_verb`], not
+//! backlog): `recursive` (no meta-verb — its nested legs overlap nub's
+//! reserved runner surface; the per-verb `-r`/`--filter` flags cover the
+//! fanout), `clean`/`purge` (nub doesn't delete node_modules for you, and
+//! their script-override semantics delegate to the *engine's* `run`,
+//! colliding with the reserved script runner), `deploy` (not yet wired).
+//! `init` is excluded one level up — it's nub-reserved and never enters the
+//! engine registry (pm_engine module doc).
 //!
 //! # Wiring shape (registry verbs)
 //!
@@ -148,11 +153,28 @@ pub(crate) fn run_verb(
         "approve-builds" => run_approve_builds(typed, args),
         "ignored-builds" => run_ignored_builds(typed, args),
         "dlx" => run_dlx(typed, args),
+        "create" => run_create(typed, args),
         "patch" => run_patch(typed, args),
         "patch-commit" => run_patch_commit(typed, args),
         "patch-remove" => run_patch_remove(typed, args),
-        // clean / purge / deploy / create / init / recursive — later slices
-        // (see the module doc for the per-verb reasons).
+        // Deliberate exclusions — each errors with an honest per-verb
+        // message instead of dispatching (module doc has the reasons).
+        "recursive" => Err(anyhow::anyhow!(
+            "nub {typed}: not supported — nub has no recursive meta-verb.\n\
+             \x20\x20Use the verb's own workspace flags instead: `nub -r <verb>` /\n\
+             \x20\x20`nub <verb> -r` or `--filter <pattern>` (e.g. `nub run -r build`,\n\
+             \x20\x20`nub update -r`)."
+        )),
+        "clean" | "purge" => Err(anyhow::anyhow!(
+            "nub {typed}: not supported — nub does not delete node_modules for you.\n\
+             \x20\x20Remove it directly (`rm -rf node_modules`) and reinstall with\n\
+             \x20\x20`nub install`; `nub ci` does the clean + frozen install in one step."
+        )),
+        "deploy" => Err(anyhow::anyhow!(
+            "nub {typed}: not yet supported — the engine's deploy (copy a workspace\n\
+             \x20\x20package + its production deps into a self-contained directory) hasn't\n\
+             \x20\x20been wired. For now: pnpm deploy"
+        )),
         _ => Err(stub_error(typed, args, pm_hint)),
     }
 }
@@ -443,6 +465,27 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     // NOTE: on child failure the engine propagates the child's exit code via
     // std::process::exit — control does not return here on that path.
     finish(session.runtime.block_on(aube::commands::dlx::run(verb)))
+}
+
+fn run_create(typed: &str, args: &[String]) -> Result<i32> {
+    let (globals, verb): (_, aube::commands::create::CreateArgs) = parse_or_return!(typed, args);
+    // Bare `nub create` / leading `--help`: the engine's internal help path
+    // prints aube's own CLI help (CreateArgs collapses the template into a
+    // trailing var-arg with the help flag disabled, so clap never settles
+    // it). Render nub's own surface instead, rewritten — same shape as dlx.
+    if matches!(
+        verb.params.first().map(String::as_str),
+        None | Some("--help" | "-h")
+    ) {
+        let help = verb_command::<aube::commands::create::CreateArgs>(typed).render_long_help();
+        println!("{}", present::rewrite_help(help.to_string().trim_end()));
+        return Ok(0);
+    }
+    let session = super::engine_session(globals.dir.as_deref())?;
+    // The engine maps the template to its create-* package (foo → create-foo,
+    // @scope/foo → @scope/create-foo) and chains into dlx; like dlx, on child
+    // failure the engine propagates the exit code via std::process::exit.
+    finish(session.runtime.block_on(aube::commands::create::run(verb)))
 }
 
 // ───────────────────────── patch workflow ──────────────────────────

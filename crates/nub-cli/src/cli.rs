@@ -961,6 +961,17 @@ fn run_nub() -> Result<i32> {
         if is_node_passthrough {
             run_file_with_compat(&rest, compat)
         } else {
+            // `init` is reserved for nub's own project init (not the PM
+            // engine's npm-style manifest scaffold) — deliberately absent
+            // from ENGINE_VERBS, answered with a "coming" note rather than
+            // a PM redirect so nobody scaffolds the wrong shape meanwhile.
+            if first == "init" {
+                bail!(
+                    "nub: \"init\" is reserved — nub's own project init is coming and \
+                     hasn't shipped yet\n\
+                     \x20\x20(to run a package.json script named init: nub run init)"
+                );
+            }
             // No magic auto-run (deliberate divergence from pnpm/bun, which run
             // `<pm> dev` as the dev script). But when the bareword is almost
             // certainly a script — it's defined in the local package.json#scripts,
@@ -5140,19 +5151,44 @@ mod tests {
     }
 
     #[test]
-    fn engine_verbs_dispatch_to_the_family_stub() {
-        // The registered-but-unwired surface must fail loud (stub error
-        // naming the verb + the real-PM fallback), not fall through to the
-        // bareword/redirect arms. `deploy` is in the deliberate stub set
-        // (the patch workflow joined the wired surface — see the
-        // install_family module doc for the remaining stubs' reasons).
-        let spec = crate::pm_engine::lookup_verb("deploy").expect("deploy must be registered");
-        let err = crate::pm_engine::dispatch_verb(spec, "deploy", &["out".to_string()], "pnpm")
-            .expect_err("stub verbs must error until wired");
-        let msg = err.to_string();
-        assert!(msg.contains("wired in phase Surface"), "{msg}");
-        assert!(msg.contains("pnpm deploy out"), "{msg}");
+    fn excluded_engine_verbs_error_with_honest_per_verb_messages() {
+        // The deliberately-excluded verbs must fail loud with a message that
+        // names the verb's actual status — not the generic "wired in phase
+        // Surface" stub text (everything destined for wiring IS wired; these
+        // are exclusions, not backlog). Reasons: install_family module doc.
+        for (verb, expect) in [
+            ("deploy", "not yet supported"),
+            ("recursive", "not supported"),
+            ("multi", "not supported"), // recursive alias keeps the message
+            ("clean", "not supported"),
+            ("purge", "not supported"),
+            ("sbom", "not yet supported"),
+        ] {
+            let spec = crate::pm_engine::lookup_verb(verb)
+                .unwrap_or_else(|| panic!("{verb} must be registered"));
+            let err = crate::pm_engine::dispatch_verb(spec, verb, &[], "pnpm")
+                .expect_err("excluded verbs must error");
+            let msg = err.to_string();
+            assert!(msg.contains(&format!("nub {verb}")), "{verb}: {msg}");
+            assert!(msg.contains(expect), "{verb}: {msg}");
+            assert!(
+                !msg.contains("wired in phase Surface"),
+                "{verb} must not use the generic stub text: {msg}"
+            );
+        }
+        // recursive's remedy points at the per-verb workspace flags.
+        let spec = crate::pm_engine::lookup_verb("recursive").unwrap();
+        let msg = crate::pm_engine::dispatch_verb(spec, "recursive", &[], "pnpm")
+            .expect_err("recursive must error")
+            .to_string();
+        assert!(msg.contains("-r"), "{msg}");
     }
+
+    // `init` reservation: the registry exclusion is asserted in
+    // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs
+    // and the bareword arm's "nub's own init is coming" answer is covered
+    // through the spawned binary in tests/pm_verbs.rs (the arm lives inside
+    // run_nub's argv pre-parse, which has no injectable entry point here).
 
     /// A project dir whose `.npmrc` points the registry at an unroutable port, so
     /// any code path that should NOT reach the network fails fast (connection

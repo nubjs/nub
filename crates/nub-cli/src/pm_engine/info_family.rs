@@ -61,8 +61,16 @@
 //! `documentNamespace` URL or rewriting names inside a structured document
 //! would corrupt it). Wiring `sbom` needs an upstreamable fork seam that
 //! derives the SBOM tool identity from the embedder product override (the
-//! `set_user_agent_product` family) — tracked with the fork fix-forward
-//! items. Until then the verb keeps the standard stub error.
+//! `set_user_agent_product` family). Investigated 2026-06-10: NOT a small
+//! `ua::product_name()`-style fix — the tool-name sites (CycloneDX
+//! `metadata.tools[].name`, sbom.rs:101; SPDX `creators`, sbom.rs:247)
+//! would also need the *version* half of the registered token (a new
+//! `ua::product_version()` accessor — `env!("CARGO_PKG_VERSION")` there is
+//! aube's version, wrong under a registered name), and the SPDX
+//! `documentNamespace` (sbom.rs:228, `https://aube.jdx.dev/spdx/…`) needs a
+//! namespace-base seam plus a nub-side domain decision nobody has made.
+//! Until then the verb errors with an honest "not yet supported" message
+//! (run_verb below).
 //!
 //! # Known cosmetic gaps
 //!
@@ -110,7 +118,13 @@ pub(crate) fn run_verb(
         "bin" => run_bin(typed, args),
         "root" => run_root(typed, args),
         "search" => super::publish_family::run_npm_fallback(spec.canonical, typed, args),
-        // `sbom` stays a stub (brand leak in the document body — module doc).
+        // Deliberately not wired: brand leak in the document body (module
+        // doc has the seam analysis). Honest message, no generic stub text.
+        "sbom" => Err(anyhow::anyhow!(
+            "nub {typed}: not yet supported — the engine stamps its own identity into\n\
+             \x20\x20the SBOM document body, which nub won't emit until the identity\n\
+             \x20\x20derives from the embedder. For now: npm sbom"
+        )),
         _ => Err(stub_error(typed, args, pm_hint)),
     }
 }

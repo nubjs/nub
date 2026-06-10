@@ -41,14 +41,15 @@
 //!
 //! `install`/`i`/`ci` are *not* in the registry: they are live clap verbs
 //! in `cli.rs` (SUBCOMMANDS) dispatching straight to
-//! [`install_family::run_install`] / [`install_family::run_ci`]. Every
-//! other registered verb is wired to the engine through its family module,
-//! except the deliberate stub set — `clean`/`purge`, `deploy`, `create`,
-//! `init`, `recursive` (script-runner / workspace-fanout collisions with
-//! nub's reserved verbs — install_family module doc) and `sbom` (engine
+//! [`install_family::run_install`] / [`install_family::run_ci`]. `init` is
+//! not in the registry either — the spelling is reserved for nub's own
+//! project init; cli.rs's bareword arm answers it with a "coming" note.
+//! Every other registered verb is wired to the engine through its family
+//! module, except the deliberate exclusions — `recursive` (no meta-verb;
+//! use `-r`/`--filter` on the verb), `clean`/`purge` (nub doesn't delete
+//! node_modules for you), `deploy` (not yet wired), and `sbom` (engine
 //! branding in the document body — info_family module doc) — which error
-//! with the "wired in phase Surface" message plus the user's real-PM
-//! fallback command.
+//! with honest per-verb messages in their family dispatchers.
 
 pub mod info_family;
 pub mod install_family;
@@ -217,14 +218,13 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         family: Family::Install,
         aube_args: "commands::create::CreateArgs",
     },
-    VerbSpec {
-        canonical: "init",
-        aliases: &[],
-        family: Family::Install,
-        aube_args: "commands::init::InitArgs",
-    },
-    // Workspace fanout meta-verb. Its nub-reserved nested legs (run/test/…)
-    // stay errors when wired; the install-shaped legs fan out normally.
+    // `init` is deliberately NOT registered: the spelling is reserved for
+    // nub's own project init (Colin owns the verb), not the engine's
+    // npm-style manifest scaffold. cli.rs answers `nub init` with a
+    // "nub's own init is coming" note instead of a PM redirect.
+    // Workspace fanout meta-verb. Registered so it errors with the honest
+    // "use -r on the verb" message rather than the generic not-a-command
+    // fallback (install_family::run_verb).
     VerbSpec {
         canonical: "recursive",
         aliases: &["multi", "m"],
@@ -890,6 +890,7 @@ mod tests {
             "install",
             "i",
             "ci",
+            "init", // reserved for nub's own project init (cli.rs answers it)
             "sponsors",
             "diag",
             "doctor",
