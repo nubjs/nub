@@ -37,10 +37,21 @@
 //!   `.npmrc` alias upstream; nub still writes them verbatim rather than
 //!   inventing a config file (documented trade-off: stored, possibly
 //!   unread).
-//! - `config delete`/`list`/`get` delegate to the engine unchanged. Note
-//!   the scope asymmetry delete inherits: it defaults to `--location user`,
-//!   while nub writes non-shared keys project-scope — `nub config delete
-//!   --local <key>` removes those.
+//! - `config delete`/`list`/`get` delegate to the engine unchanged, with
+//!   one carve-out: `config get registry` at the default merged view
+//!   substitutes the engine's effective default
+//!   (`https://registry.npmjs.org/`) when no config file sets one — the
+//!   engine only reads config files and prints `undefined` for the unset
+//!   key, where pnpm reports the default it would actually install from.
+//!   Other unset keys still print `undefined` (engine behavior; a general
+//!   fix belongs upstream — the settings metadata defaults are display
+//!   strings, several of which name engine paths nub's embedder tier
+//!   replaces, so substituting them wholesale here would lie). On non-unix
+//!   the substitution is inert (it rides the fd capture, a documented
+//!   no-op there) and `undefined` still prints. Note the scope asymmetry
+//!   delete inherits: it defaults to `--location user`, while nub writes
+//!   non-shared keys project-scope — `nub config delete --local <key>`
+//!   removes those.
 //! - `config explain` / `config find` / `config tui` stay unwired: they
 //!   print engine reference docs straight to stdout, bypassing the brand
 //!   rewrite.
@@ -114,6 +125,16 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                 npmrc_first::SetRoute::Refuse(err) => return Err(err),
             }
         }
+        // Unset `registry` at the merged view: substitute the engine's
+        // effective default for its `undefined` (module doc).
+        Some(ConfigCommand::Get(get))
+            if get.key == "registry"
+                && !get.local
+                && matches!(get.location, aube::commands::config::ListLocation::Merged) =>
+        {
+            let json = get.json;
+            return run_config_get_registry(parsed, json);
+        }
         Some(ConfigCommand::Explain(_)) => return Err(unwired_config_sub("explain")),
         Some(ConfigCommand::Find(_)) => return Err(unwired_config_sub("find")),
         Some(ConfigCommand::Tui) => return Err(unwired_config_sub("tui")),
@@ -130,6 +151,36 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
     }
 }
 
+/// `config get registry` with no value in any config file: the engine's
+/// lookup prints `undefined`; pnpm prints the default registry it would
+/// actually install from. Run the engine's own lookup with stdout captured
+/// and substitute only that exact outcome — any configured value passes
+/// through byte-identical. The default literal mirrors the engine's
+/// `NpmConfig` default (vendor/aube/crates/aube-registry/src/config/load.rs).
+fn run_config_get_registry(parsed: ConfigArgs, json: bool) -> Result<i32> {
+    const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org/";
+    let session = super::engine_session(None)?;
+    let (result, captured) = super::install_family::with_fd_captured(1, || {
+        session
+            .runtime
+            .block_on(aube::commands::config::run(parsed))
+    });
+    let code = match result {
+        Ok(()) => 0,
+        Err(report) => present::emit_report(&report),
+    };
+    if code == 0 && captured.trim() == "undefined" {
+        if json {
+            println!("{}", serde_json::Value::String(DEFAULT_REGISTRY.into()));
+        } else {
+            println!("{DEFAULT_REGISTRY}");
+        }
+    } else {
+        print!("{captured}");
+    }
+    Ok(code)
+}
+
 /// The engine prints reference docs for these straight to stdout (no
 /// rewrite seam), so they stay unwired rather than risk a brand leak.
 fn unwired_config_sub(sub: &str) -> anyhow::Error {
@@ -137,6 +188,59 @@ fn unwired_config_sub(sub: &str) -> anyhow::Error {
         "nub config {sub}: not supported yet\n\
          \x20\x20settings reference: https://pnpm.io/settings (nub reads the same `.npmrc` keys)"
     )
+}
+
+#[cfg(test)]
+mod help_tests {
+    use crate::pm_engine::present;
+
+    /// Reviewer #9: `nub config set --help` must state nub's actual
+    /// `--location` contract — non-shared keys go to the project `.npmrc`
+    /// with the location flags ignored, and workspace map writes are
+    /// refused — with zero engine-brand or config.toml vocabulary left.
+    /// This pins the rewrite_help VOCAB entries against upstream doc drift
+    /// after a pin bump.
+    #[test]
+    fn config_set_help_states_the_location_divergence() {
+        use clap::CommandFactory as _;
+        #[derive(clap::Parser)]
+        struct SetCli {
+            #[command(flatten)]
+            args: aube::commands::config::ConfigArgs,
+        }
+        let help = present::rewrite_help(
+            SetCli::command()
+                .name("nub config".to_string())
+                .bin_name("nub config".to_string())
+                .render_long_help()
+                .to_string(),
+        );
+        // The long help of the `set` subcommand renders through the same
+        // path users hit (`nub config set --help`).
+        let mut cmd = SetCli::command()
+            .name("nub config".to_string())
+            .bin_name("nub config".to_string());
+        let set_help = present::rewrite_help(
+            cmd.find_subcommand_mut("set")
+                .expect("config has a set subcommand")
+                .render_long_help()
+                .to_string(),
+        );
+        for (name, text) in [("config", &help), ("config set", &set_help)] {
+            assert!(
+                !text.to_lowercase().contains("aube") && !text.contains("config.toml"),
+                "nub {name} help must be brand-clean and config.toml-free: {text}"
+            );
+        }
+        assert!(
+            set_help.contains("regardless of `--location`/`--local`"),
+            "set help must state the location-ignored contract: {set_help}"
+        );
+        assert!(
+            set_help.contains("are refused at any location"),
+            "set help must state the map-write refusal: {set_help}"
+        );
+    }
 }
 
 /// The npmrc-first write routing for non-shared keys. See the module doc

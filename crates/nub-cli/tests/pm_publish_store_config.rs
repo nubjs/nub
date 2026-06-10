@@ -207,20 +207,50 @@ fn config_set_routes_npmrc_first_and_get_reads_it_back() {
     );
 }
 
+/// An unset `registry` reports the effective default at the (default)
+/// merged view — what install would actually use — instead of the engine's
+/// `undefined` (pnpm parity; reviewer #7). A restricted location still
+/// reports `undefined` (that file genuinely doesn't set it), as do other
+/// unset keys (engine behavior, documented in the family module doc).
+#[test]
+fn config_get_registry_resolves_the_default_when_unset() {
+    let ctx = Ctx::new("get-reg", MANIFEST);
+    let (stdout, _, code) = ctx.run(&["config", "get", "registry"]);
+    assert_eq!((stdout.trim(), code), ("https://registry.npmjs.org/", 0));
+    let (stdout, _, code) = ctx.run(&["config", "get", "--json", "registry"]);
+    assert_eq!(
+        (stdout.trim(), code),
+        ("\"https://registry.npmjs.org/\"", 0)
+    );
+    let (stdout, _, code) = ctx.run(&["config", "get", "--local", "registry"]);
+    assert_eq!((stdout.trim(), code), ("undefined", 0));
+
+    // A configured value passes through byte-identical (no substitution).
+    std::fs::write(
+        ctx.project.join(".npmrc"),
+        "registry=https://mirror.example.test/\n",
+    )
+    .unwrap();
+    let (stdout, _, code) = ctx.run(&["config", "get", "registry"]);
+    assert_eq!((stdout.trim(), code), ("https://mirror.example.test/", 0));
+}
+
 /// The npm-fallback verbs mirror the engine: without an `npmPath` setting
 /// they fail with the rewritten npm-only diagnostic (and the engine's
 /// non-zero exit), pointing the user at npm.
 #[test]
 fn whoami_falls_back_with_the_rewritten_npm_only_error() {
     let ctx = Ctx::new("whoami", MANIFEST);
-    let (stdout, stderr, code) = ctx.run(&["whoami"]);
-    assert_ne!(code, 0, "stdout: {stdout}");
-    assert!(
-        stderr.contains("ERR_NUB_NPM_ONLY_COMMAND"),
-        "diagnostic code must be rewritten to the nub namespace: {stderr}"
-    );
-    assert!(
-        stderr.contains("`npm whoami`"),
-        "the npm remedy must survive the rewrite: {stderr}"
-    );
+    for verb in ["whoami", "search"] {
+        let (stdout, stderr, code) = ctx.run(&[verb]);
+        assert_ne!(code, 0, "{verb}: stdout: {stdout}");
+        assert!(
+            stderr.contains("ERR_NUB_NPM_ONLY_COMMAND"),
+            "{verb}: diagnostic code must be rewritten to the nub namespace: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("`npm {verb}`")),
+            "{verb}: the npm remedy must survive the rewrite: {stderr}"
+        );
+    }
 }

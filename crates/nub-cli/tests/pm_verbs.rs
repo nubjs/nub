@@ -174,6 +174,84 @@ fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
     );
 }
 
+/// The patch workflow round-trips: `patch` extracts into a nub-named edit
+/// dir and prints the rebranded patch-commit hint; `patch-commit` writes
+/// the `.patch` file, records `pnpm.patchedDependencies`, and re-links the
+/// edited content; `patch-remove` reverts all of it. All outputs brand-clean.
+#[test]
+#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
+fn patch_workflow_round_trips_through_commit_and_remove() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("patchwf");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"patchwf","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
+    )
+    .unwrap();
+    let (data, cache) = (pm_tmpdir("patchwf-data"), pm_tmpdir("patchwf-cache"));
+    let install = run_nub_with(&dir, &["install"], &data, &cache);
+    assert_eq!(install.code, 0, "install: {}", install.stderr);
+
+    let patch = run_nub_with(&dir, &["patch", "is-positive@3.1.0"], &data, &cache);
+    assert_eq!(patch.code, 0, "stderr: {}", patch.stderr);
+    patch.assert_brand_clean();
+    assert!(
+        patch.stdout.contains("nub patch-commit"),
+        "the follow-up hint must be rebranded: {}",
+        patch.stdout
+    );
+    // The edit dir is the nub-named default (printed path = real path).
+    let edit_dir = patch
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("You can now edit the following folder: "))
+        .unwrap_or_else(|| panic!("patch must print the edit dir: {}", patch.stdout));
+    assert!(
+        edit_dir.contains("nub-patch-is-positive"),
+        "default edit dir must be nub-named: {edit_dir}"
+    );
+    let edited = Path::new(edit_dir).join("index.js");
+    std::fs::write(&edited, "module.exports = () => 'patched';\n").unwrap();
+
+    let commit = run_nub_with(&dir, &["patch-commit", edit_dir], &data, &cache);
+    assert_eq!(commit.code, 0, "stderr: {}", commit.stderr);
+    commit.assert_brand_clean();
+    assert!(
+        dir.join("patches/is-positive@3.1.0.patch").is_file(),
+        "patch-commit must write the patch file: {}",
+        commit.stderr
+    );
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
+    assert!(
+        manifest.contains("patchedDependencies") && manifest.contains("\"pnpm\""),
+        "patch-commit must record the entry under the pnpm namespace: {manifest}"
+    );
+    let linked = dir.join("node_modules/is-positive/index.js");
+    assert!(
+        std::fs::read_to_string(&linked)
+            .unwrap()
+            .contains("'patched'"),
+        "the chained install must materialize the patched content"
+    );
+
+    let remove = run_nub_with(&dir, &["patch-remove", "is-positive@3.1.0"], &data, &cache);
+    assert_eq!(remove.code, 0, "stderr: {}", remove.stderr);
+    remove.assert_brand_clean();
+    assert!(
+        !dir.join("patches/is-positive@3.1.0.patch").exists(),
+        "patch-remove must delete the patch file"
+    );
+    assert!(
+        !std::fs::read_to_string(dir.join("package.json"))
+            .unwrap()
+            .contains("patchedDependencies"),
+        "patch-remove must drop the manifest entry"
+    );
+}
+
 /// `nub up --latest` moves a pinned manifest range + lockfile resolution
 /// forward (is-positive 3.0.0 → 3.1.0, the package's final release).
 #[test]

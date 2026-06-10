@@ -505,6 +505,11 @@ pub enum Command {
         #[arg(long, value_name = "MODE")]
         node_linker: Option<String>,
 
+        /// Registry URL for this invocation (metadata, tarballs, audit).
+        /// Overrides `registry` from `.npmrc`.
+        #[arg(long, value_name = "URL")]
+        registry: Option<String>,
+
         /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
         #[arg(short = 'C', long = "dir", value_name = "DIR")]
         dir: Option<PathBuf>,
@@ -520,6 +525,11 @@ pub enum Command {
         /// Skip optionalDependencies.
         #[arg(long)]
         no_optional: bool,
+
+        /// Registry URL for this invocation (metadata, tarballs, audit).
+        /// Overrides `registry` from `.npmrc`.
+        #[arg(long, value_name = "URL")]
+        registry: Option<String>,
 
         /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
         #[arg(short = 'C', long = "dir", value_name = "DIR")]
@@ -1289,6 +1299,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             lockfile_only,
             force,
             node_linker,
+            registry,
             dir,
         }) => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
             frozen_lockfile,
@@ -1303,15 +1314,18 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             lockfile_only,
             force,
             node_linker,
+            registry,
             dir,
         }),
         Some(Command::Ci {
             ignore_scripts,
             no_optional,
+            registry,
             dir,
         }) => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
             ignore_scripts,
             no_optional,
+            registry,
             dir,
         }),
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
@@ -4451,15 +4465,15 @@ mod tests {
     fn engine_verbs_dispatch_to_the_family_stub() {
         // The registered-but-unwired surface must fail loud (stub error
         // naming the verb + the real-PM fallback), not fall through to the
-        // bareword/redirect arms. `patch` is still a stub (the install
-        // family's daily drivers — add/rm/up/dlx/… — are wired and no
-        // longer hit this path).
-        let spec = crate::pm_engine::lookup_verb("patch").expect("patch must be registered");
-        let err = crate::pm_engine::dispatch_verb(spec, "patch", &["lodash".to_string()], "pnpm")
+        // bareword/redirect arms. `deploy` is in the deliberate stub set
+        // (the patch workflow joined the wired surface — see the
+        // install_family module doc for the remaining stubs' reasons).
+        let spec = crate::pm_engine::lookup_verb("deploy").expect("deploy must be registered");
+        let err = crate::pm_engine::dispatch_verb(spec, "deploy", &["out".to_string()], "pnpm")
             .expect_err("stub verbs must error until wired");
         let msg = err.to_string();
         assert!(msg.contains("wired in phase Surface"), "{msg}");
-        assert!(msg.contains("pnpm patch lodash"), "{msg}");
+        assert!(msg.contains("pnpm deploy out"), "{msg}");
     }
 
     /// A project dir whose `.npmrc` points the registry at an unroutable port, so

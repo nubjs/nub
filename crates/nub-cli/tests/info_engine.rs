@@ -180,6 +180,54 @@ fn missing_lockfile_reports_the_nub_install_hint_and_exits_zero() {
     assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
+/// The path verbs print the resolved project locations without any install,
+/// `check` on a never-installed project reports zero packages and exits 0,
+/// and `licenses` accepts pnpm's documented `list` spelling beside the
+/// engine's `ls` (reviewer #6). All offline, all brand-clean.
+#[test]
+fn check_bin_root_and_licenses_list_work_offline_and_stay_brand_clean() {
+    let dir = lockfile_fixture("paths", "is-positive", "3.1.0", "3.1.0", IS_POSITIVE_310);
+
+    let (root_out, stderr, code) = run_nub(&dir, &["root"]);
+    assert_eq!(code, 0, "root: stderr: {stderr}");
+    assert!(
+        Path::new(root_out.trim()).ends_with(format!("{}/node_modules", tag_leaf(&dir))),
+        "root must print the project's node_modules: {root_out}"
+    );
+
+    let (bin_out, stderr, code) = run_nub(&dir, &["bin"]);
+    assert_eq!(code, 0, "bin: stderr: {stderr}");
+    assert!(
+        Path::new(bin_out.trim()).ends_with(format!("{}/node_modules/.bin", tag_leaf(&dir))),
+        "bin must print the project's bin dir: {bin_out}"
+    );
+
+    let (check_out, stderr, code) = run_nub(&dir, &["check"]);
+    assert_eq!(code, 0, "check: stdout: {check_out}\nstderr: {stderr}");
+    assert!(
+        check_out.contains("checked 0 packages"),
+        "check without an install must report zero packages: {check_out}"
+    );
+
+    for argv in [&["licenses", "list"][..], &["licenses", "ls"][..]] {
+        let (stdout, stderr, code) = run_nub(&dir, argv);
+        assert_eq!(code, 0, "nub {argv:?}: stdout: {stdout}\nstderr: {stderr}");
+        assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+    }
+    assert_no_engine_branding(&[
+        ("root", &root_out),
+        ("bin", &bin_out),
+        ("check", &check_out),
+        ("stderr", &stderr),
+    ]);
+}
+
+/// Last path segment of a fixture dir (macOS canonicalizes `/var` →
+/// `/private/var`, so suffix comparison is the stable form).
+fn tag_leaf(dir: &Path) -> String {
+    dir.file_name().unwrap().to_string_lossy().into_owned()
+}
+
 /// The workspace-yaml brand toggle: an `aube-workspace.yaml` on disk is
 /// another tool's state and must not change what nub reads. The probe rides
 /// the workspace-root walk — from a member directory with no lockfile of

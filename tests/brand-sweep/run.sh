@@ -190,9 +190,12 @@ pass "warning channel surfaces rewritten (ignored builds + deprecation hint)"
 # through present::rewrite_help (config-vocabulary pass + brand rewrite);
 # this loop is the rot-guard for engine help drift after a pin bump.
 for verb in add remove update import dedupe prune rebuild fetch link unlink \
-  approve-builds ignored-builds dlx create init recursive list la ll \
-  outdated why licenses audit peers query view deprecations publish pack \
-  login logout store cache cat-file cat-index find-hash config get set \
+  approve-builds ignored-builds dlx patch patch-commit patch-remove \
+  create init recursive list la ll \
+  outdated why licenses audit peers query view deprecations check bin root \
+  search publish pack version deprecate undeprecate dist-tag unpublish \
+  login logout whoami owner token stage \
+  store cache cat-file cat-index find-hash config get set pkg set-script \
   install ci; do
   if "$NUB" "$verb" --help 2>&1 | grep -qiE 'aube|jdx\.dev'; then
     "$NUB" "$verb" --help 2>&1 | grep -inE 'aube|jdx\.dev' | head -3

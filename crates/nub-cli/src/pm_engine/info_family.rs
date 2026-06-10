@@ -2,10 +2,19 @@
 //! embedded aube engine.
 //!
 //! **Wired** (this file): `list` (+`ls`, and the hidden long forms
-//! `la`/`ll`), `why` (+`w`), `outdated`, `audit`, `licenses`,
-//! `deprecations`, `peers`, `query`, and `view` (+`info`/`show`/`v`).
-//! **Still stubs**: `check`, `bin`, `root`, the hidden npm-fallback
-//! `search`, and — deliberately — `sbom` (below).
+//! `la`/`ll`), `why` (+`w`), `outdated`, `audit`, `licenses` (the wrapper
+//! also admits pnpm's documented `list` spelling beside the engine's `ls`),
+//! `deprecations`, `peers`, `query`, `view` (+`info`/`show`/`v`), `check`,
+//! `bin`, `root`, and the npm-fallback `search` (delegates to `npm` when
+//! the `npmPath` setting is configured, else fails with the npm-only
+//! diagnostic — same shape as `whoami`/`owner` in the publish family).
+//! **Still a stub**: — deliberately — `sbom` (below).
+//!
+//! `bin -g` / `root -g` print the engine's global-install layout (the
+//! `PNPM_HOME`-compatible home, packages under its `global-aube/` subdir) —
+//! real on-disk paths where the already-wired `add -g` installs, preserved
+//! by the rewrite policy like the global-links residual in the install
+//! family.
 //!
 //! Each wired verb parses its args with the engine's own clap `Args` struct
 //! (flattened into a thin per-verb wrapper that adds `-C/--dir` and, for the
@@ -97,8 +106,11 @@ pub(crate) fn run_verb(
         "peers" => run_peers(typed, args),
         "query" => run_query(typed, args),
         "view" => run_view(typed, args),
-        // `sbom` (brand leak in the document body — module doc), `search`,
-        // `check`, `bin`, `root` are not wired yet.
+        "check" => run_check(typed, args),
+        "bin" => run_bin(typed, args),
+        "root" => run_root(typed, args),
+        "search" => super::publish_family::run_npm_fallback(spec.canonical, typed, args),
+        // `sbom` stays a stub (brand leak in the document body — module doc).
         _ => Err(stub_error(typed, args, pm_hint)),
     }
 }
@@ -193,6 +205,9 @@ verb_cli!(
 );
 verb_cli!(PeersCli, aube::commands::peers::PeersArgs);
 verb_cli!(ViewCli, aube::commands::view::ViewArgs);
+verb_cli!(CheckCli, aube::commands::check::CheckArgs);
+verb_cli!(BinCli, aube::commands::bin::BinArgs);
+verb_cli!(RootCli, aube::commands::root::RootArgs);
 
 /// Outcome of a wrapper parse: real args, or "already handled" (help was
 /// printed / a usage error was reported) with the exit code to return.
@@ -208,8 +223,19 @@ enum Parsed<T> {
 /// help-grade rewrite (brand pass + config-vocabulary map — help describes
 /// nub's configured contract, see [`present::rewrite_help`]).
 fn parse_verb<T: Parser>(typed: &str, args: &[String]) -> Result<Parsed<T>> {
+    parse_verb_with(typed, args, |cmd| cmd)
+}
+
+/// [`parse_verb`] with a pre-parse command tweak, for the one wrapper that
+/// widens an engine arg (`licenses`' subcommand spellings) without
+/// hand-mirroring the whole struct.
+fn parse_verb_with<T: Parser>(
+    typed: &str,
+    args: &[String],
+    tweak: impl FnOnce(clap::Command) -> clap::Command,
+) -> Result<Parsed<T>> {
     let name = format!("nub {typed}");
-    let mut cmd = T::command().name(name.clone()).bin_name(name);
+    let mut cmd = tweak(T::command()).name(name.clone()).bin_name(name);
     let argv = std::iter::once("nub".to_string()).chain(args.iter().cloned());
     match cmd.try_get_matches_from_mut(argv) {
         Ok(matches) => Ok(Parsed::Args(T::from_arg_matches(&matches)?)),
@@ -353,7 +379,7 @@ fn run_audit(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_licenses(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: LicensesCli = match parse_verb(typed, args)? {
+    let cli: LicensesCli = match parse_verb_with(typed, args, licenses_cmd_tweak)? {
         Parsed::Args(c) => c,
         Parsed::Done(code) => return Ok(code),
     };
@@ -413,6 +439,57 @@ fn run_view(typed: &str, args: &[String]) -> Result<i32> {
         session
             .runtime
             .block_on(aube::commands::view::run(cli.args)),
+    )
+}
+
+/// The `licenses` wrapper's pre-parse tweak: pnpm's documented spelling is
+/// `pnpm licenses list`, but the engine's hidden pnpm-compat positional only
+/// admits `ls`. Widen the wrapper to both — the engine ignores the marker's
+/// value, so no normalization is needed after parse.
+fn licenses_cmd_tweak(cmd: clap::Command) -> clap::Command {
+    cmd.mut_arg("subcommand", |arg| arg.value_parser(["ls", "list"]))
+}
+
+fn run_check(typed: &str, args: &[String]) -> Result<i32> {
+    let cli: CheckCli = match parse_verb(typed, args)? {
+        Parsed::Args(c) => c,
+        Parsed::Done(code) => return Ok(code),
+    };
+    let session = super::engine_session(cli.dir.as_deref())?;
+    // Reads the *resolved* virtual store (node_modules/.nub under nub's
+    // defaults); a never-installed project reports `checked 0 packages`
+    // rather than erroring, so no pre-flight applies. Broken links exit 1
+    // via std::process::exit inside the engine (pnpm-compat), like
+    // outdated/audit.
+    finish(
+        session
+            .runtime
+            .block_on(aube::commands::check::run(cli.args)),
+    )
+}
+
+fn run_bin(typed: &str, args: &[String]) -> Result<i32> {
+    let cli: BinCli = match parse_verb(typed, args)? {
+        Parsed::Args(c) => c,
+        Parsed::Done(code) => return Ok(code),
+    };
+    let session = super::engine_session(cli.dir.as_deref())?;
+    // Pure path print (`<modulesDir>/.bin`, or the global bin dir under
+    // `-g`); the directory need not exist.
+    finish(session.runtime.block_on(aube::commands::bin::run(cli.args)))
+}
+
+fn run_root(typed: &str, args: &[String]) -> Result<i32> {
+    let cli: RootCli = match parse_verb(typed, args)? {
+        Parsed::Args(c) => c,
+        Parsed::Done(code) => return Ok(code),
+    };
+    let session = super::engine_session(cli.dir.as_deref())?;
+    // Pure path print (`<modulesDir>`, or the global package dir under `-g`).
+    finish(
+        session
+            .runtime
+            .block_on(aube::commands::root::run(cli.args)),
     )
 }
 
@@ -558,6 +635,45 @@ mod tests {
         let view: ViewCli = parse(&["nub", "react@next", "dist.tarball"]);
         assert_eq!(view.args.package, "react@next");
         assert_eq!(view.args.field.as_deref(), Some("dist.tarball"));
+
+        let check: CheckCli = parse(&["nub", "--json"]);
+        assert!(check.args.json);
+        let bin: BinCli = parse(&["nub", "-g"]);
+        assert!(bin.args.global);
+        let root: RootCli = parse(&["nub", "--global", "-C", "/tmp/x"]);
+        assert!(root.args.global);
+        assert_eq!(root.dir.as_deref(), Some(Path::new("/tmp/x")));
+    }
+
+    /// The licenses wrapper admits pnpm's documented `list` spelling beside
+    /// the engine's `ls` (and still rejects arbitrary positionals).
+    #[test]
+    fn licenses_wrapper_accepts_pnpms_list_spelling() {
+        for sub in ["ls", "list"] {
+            let parsed = parse_verb_with::<LicensesCli>(
+                "licenses",
+                &[sub.to_string(), "--json".to_string()],
+                licenses_cmd_tweak,
+            )
+            .unwrap();
+            match parsed {
+                Parsed::Args(cli) => {
+                    assert_eq!(cli.args.subcommand.as_deref(), Some(sub));
+                    assert!(cli.args.json);
+                }
+                Parsed::Done(code) => panic!("licenses {sub} must parse, settled with {code}"),
+            }
+        }
+        let bad = parse_verb_with::<LicensesCli>(
+            "licenses",
+            &["everything".to_string()],
+            licenses_cmd_tweak,
+        )
+        .unwrap();
+        assert!(
+            matches!(bad, Parsed::Done(code) if code != 0),
+            "an unknown subcommand positional must stay a usage error"
+        );
     }
 
     #[test]
@@ -603,6 +719,9 @@ mod tests {
             (DeprecationsCli::command(), "nub deprecations"),
             (PeersCli::command(), "nub peers"),
             (ViewCli::command(), "nub view"),
+            (CheckCli::command(), "nub check"),
+            (BinCli::command(), "nub bin"),
+            (RootCli::command(), "nub root"),
         ] {
             let help = render(cmd, name);
             assert!(help.contains(name), "usage must carry {name}: {help}");

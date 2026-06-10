@@ -2,9 +2,12 @@
 //! embedded aube engine. Live verbs: `nub install` / `nub ci` (clap natives,
 //! slice 2) plus the registry-dispatched `add`, `remove`, `update`, `link`,
 //! `unlink`, `import`, `prune`, `dedupe`, `rebuild`, `fetch`,
-//! `approve-builds`, `ignored-builds`, and `dlx` (this slice). Still
-//! stubbed pending later slices: `patch`/`patch-commit`/`patch-remove`,
-//! `clean`/`purge`, `deploy`, `create`, `init`, `recursive`.
+//! `approve-builds`, `ignored-builds`, `dlx`, and the patch workflow
+//! (`patch`, `patch-commit`, `patch-remove`). Still stubbed pending later
+//! slices: `clean`/`purge` (their script-override semantics delegate to the
+//! *engine's* `run`, colliding with nub's reserved script runner — needs a
+//! routing decision), `deploy`, `create`, `init`, `recursive` (workspace
+//! meta-verbs whose nested legs overlap the reserved runner surface).
 //!
 //! # Wiring shape (registry verbs)
 //!
@@ -28,9 +31,12 @@
 //! installs proceed — reads never rewrite); `add`/`remove`/`update` re-resolve
 //! by definition and are refused outright (their `--global` forms never touch
 //! the project lockfile and proceed); `dedupe` is refused except `--check`
-//! (which writes nothing). The non-lockfile-writing verbs (`prune`, `rebuild`,
-//! `fetch`, `link`, `unlink`, `approve-builds`, `ignored-builds`, `dlx`,
-//! `import`) are not gated — `import` *reads* yarn.lock and writes nub's own
+//! (which writes nothing); `patch-commit`/`patch-remove` chain into a
+//! prefer-frozen install that only rewrites on drift, so they gate exactly
+//! like `install` does (drifted yarn.lock ⇒ refuse; satisfiable ⇒ proceed,
+//! no write). The non-lockfile-writing verbs (`prune`, `rebuild`, `fetch`,
+//! `link`, `unlink`, `approve-builds`, `ignored-builds`, `dlx`, `import`,
+//! `patch`) are not gated — `import` *reads* yarn.lock and writes nub's own
 //! pnpm-lock.yaml.
 //!
 //! # nub-side divergences from aube's dispatch (each deliberate)
@@ -53,13 +59,20 @@
 //! - **`dlx` with no command / leading `--help`** renders nub-side help: the
 //!   engine's internal help path prints aube's own CLI help (the trailing
 //!   var-arg swallows `--help` before clap can settle it).
-//! - **`approve-builds` stdout, `unlink`/`prune` stderr are fd-captured**
-//!   ([`with_fd_captured`]) and re-emitted through the rewrite: those verbs
-//!   print branded hint lines (`` Run `aube install`… ``, `…from .aube,…`)
-//!   via raw `println!`/`eprintln!` that bypass the report path. Capture is
+//! - **`approve-builds`/`patch` stdout, `unlink`/`prune` stderr are
+//!   fd-captured** ([`with_fd_captured`]) and re-emitted through the
+//!   rewrite: those verbs print branded hint lines (`` Run `aube
+//!   install`… ``, `…from .aube,…`, `` run "aube patch-commit …" ``) via
+//!   raw `println!`/`eprintln!` that bypass the report path. Capture is
 //!   safe exactly there: no child processes, no progress UI, and the
 //!   interactive picker prompts on the *other* stream. On non-unix the
 //!   capture is a documented no-op (see the cfg fallback).
+//! - **`patch` defaults its edit dir at the nub layer** (`nub-patch-…`
+//!   under the system tmpdir): unlike `dlx`'s never-printed scratch dir,
+//!   the engine's `aube-patch-…` fallback path is *printed* in the success
+//!   message, and the rewrite policy preserves on-disk names — so nub names
+//!   the directory itself instead of letting an engine-branded path become
+//!   user-facing output. An explicit `--edit-dir` is honored unchanged.
 //!
 //! # KNOWN GAPS / residuals (documented, deliberate)
 //!
@@ -85,16 +98,22 @@
 //!   `<exe> __node-gyp-bootstrap <dir>`; that verb is not wired (entry is
 //!   crate-private at the pinned API), so an allowlisted node-gyp dependency
 //!   build fails at the shim. Needs the one-line upstreamable fork export.
+//! - `patch-commit`'s binary-file skip warning (`…aube can't diff binary
+//!   files`) is a raw eprintln the rewrite can't reach: the verb chains
+//!   into a real install (progress UI + possible lifecycle children), so
+//!   stderr fd-capture is unsafe there. Fires only when a patch edit
+//!   touches a binary file. Candidate one-line fork fix (neutral message),
+//!   tracked with the fork fix-forward items. The `.aube_patch_state.json`
+//!   sidecar inside the edit parent is on-disk temp state, never printed.
 //!
 //! KNOWN APPROXIMATIONS (install/ci, from slice 2):
 //! - `preferFrozenLockfile` from `.npmrc` / workspace yaml is not consulted
 //!   when defaulting the frozen mode (aube's `FileSources` is crate-private
 //!   at the pinned API); without a CLI flag the mode falls back to aube's
 //!   env-aware default (CI ⇒ frozen, else prefer-frozen).
-//! - The yarn gate maps aube's frozen-drift failure by message substring
-//!   ("lockfile is out of date") — the drift errors carry no stable
-//!   `ERR_AUBE_*` code at the pinned API. Flag for upstream: give the
-//!   frozen-drift and strict-no-lockfile errors diagnostic codes.
+//! - (resolved) The yarn gate now maps aube's frozen-drift failure by its
+//!   stable `ERR_AUBE_OUTDATED_LOCKFILE` diagnostic code; the old message
+//!   substring backstop is gone.
 
 use std::path::{Path, PathBuf};
 
@@ -131,8 +150,11 @@ pub(crate) fn run_verb(
         "approve-builds" => run_approve_builds(typed, args),
         "ignored-builds" => run_ignored_builds(typed, args),
         "dlx" => run_dlx(typed, args),
-        // patch / patch-commit / patch-remove / clean / purge / deploy /
-        // create / init / recursive — later slices.
+        "patch" => run_patch(typed, args),
+        "patch-commit" => run_patch_commit(typed, args),
+        "patch-remove" => run_patch_remove(typed, args),
+        // clean / purge / deploy / create / init / recursive — later slices
+        // (see the module doc for the per-verb reasons).
         _ => Err(stub_error(typed, args, pm_hint)),
     }
 }
@@ -425,6 +447,90 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     finish(session.runtime.block_on(aube::commands::dlx::run(verb)))
 }
 
+// ───────────────────────── patch workflow ──────────────────────────
+
+fn run_patch(typed: &str, args: &[String]) -> Result<i32> {
+    let (globals, mut verb): (_, aube::commands::patch::PatchArgs) = parse_or_return!(typed, args);
+    let session = super::engine_session(globals.dir.as_deref())?;
+    // Default the edit dir nub-side: the engine's fallback tempdir is
+    // `aube-patch-…` and that path IS the success output (module doc).
+    if verb.edit_dir.is_none() {
+        verb.edit_dir = Some(nub_patch_edit_parent(&verb.package));
+    }
+    // The success message ends with `` run "aube patch-commit '<dir>'" `` via
+    // raw println; capture + rewrite (no children, no progress UI here).
+    let (result, captured) = with_fd_captured(1, || {
+        session.runtime.block_on(aube::commands::patch::run(verb))
+    });
+    print!("{}", present::rewrite(&captured));
+    finish(result)
+}
+
+/// nub-named default edit parent for `nub patch`, mirroring the engine's
+/// `<tmp>/<tool>-patch-<name>-<version>-<pid>/` shape (pid-suffixed so
+/// concurrent patches don't collide). The spec is sanitized rather than
+/// parsed — an invalid spec errors in the engine with its own diagnostic,
+/// and the unused empty dir costs nothing.
+fn nub_patch_edit_parent(spec: &str) -> PathBuf {
+    let safe: String = spec
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '+'
+            }
+        })
+        .collect();
+    std::env::temp_dir().join(format!("nub-patch-{safe}-{}", std::process::id()))
+}
+
+fn run_patch_commit(typed: &str, args: &[String]) -> Result<i32> {
+    let (globals, verb): (_, aube::commands::patch_commit::PatchCommitArgs) =
+        parse_or_return!(typed, args);
+    let session = super::engine_session(globals.dir.as_deref())?;
+    patch_chained_install_yarn_gate(typed, &session)?;
+    finish(
+        session
+            .runtime
+            .block_on(aube::commands::patch_commit::run(verb)),
+    )
+}
+
+fn run_patch_remove(typed: &str, args: &[String]) -> Result<i32> {
+    let (globals, verb): (_, aube::commands::patch_remove::PatchRemoveArgs) =
+        parse_or_return!(typed, args);
+    let session = super::engine_session(globals.dir.as_deref())?;
+    patch_chained_install_yarn_gate(typed, &session)?;
+    finish(
+        session
+            .runtime
+            .block_on(aube::commands::patch_remove::run(verb)),
+    )
+}
+
+/// `patch-commit` / `patch-remove` end by chaining into a prefer-frozen
+/// install. On a satisfiable yarn.lock that install reads without writing;
+/// on a drifted one it would re-resolve and rewrite yarn.lock — the same
+/// state `nub install` gates on, refused with the same message shape.
+fn patch_chained_install_yarn_gate(typed: &str, session: &EngineSession) -> Result<()> {
+    if yarn_detected(session) {
+        let dir = &session
+            .detected
+            .as_ref()
+            .expect("yarn implies detection")
+            .dir;
+        if let Some(reason) = yarn_drift_reason(dir) {
+            return Err(yarn_gate_error(
+                typed,
+                &format!("the chained install would re-resolve a stale yarn.lock ({reason})"),
+                "yarn install",
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ───────────────────────── import (nub-side) ──────────────────────────
 
 /// `nub import` — convert a foreign lockfile to `pnpm-lock.yaml` (nub's
@@ -570,12 +676,13 @@ fn yarn_remedy(yarn_verb: &str, packages: &[String]) -> String {
 /// Run `f` with OS-level fd `fd` (1 = stdout, 2 = stderr) redirected into a
 /// pipe; returns `f`'s result plus everything written, so the caller can
 /// re-emit it through the brand rewrite. Only used for verbs that spawn no
-/// children and render no progress UI (see the module doc). Any setup
-/// failure degrades to running `f` unredirected with an empty capture —
-/// output then reaches the console directly (un-rewritten), which beats
-/// losing it.
+/// children and render no progress UI (see the module doc; the config
+/// family borrows it for `config get`'s registry-default substitution).
+/// Any setup failure degrades to running `f` unredirected with an empty
+/// capture — output then reaches the console directly (un-rewritten),
+/// which beats losing it.
 #[cfg(unix)]
-fn with_fd_captured<T>(fd: libc::c_int, f: impl FnOnce() -> T) -> (T, String) {
+pub(super) fn with_fd_captured<T>(fd: libc::c_int, f: impl FnOnce() -> T) -> (T, String) {
     use std::io::{Read as _, Write as _};
     use std::os::unix::io::FromRawFd as _;
 
@@ -627,7 +734,7 @@ fn with_fd_captured<T>(fd: libc::c_int, f: impl FnOnce() -> T) -> (T, String) {
 /// engine's verbs on Windows. Root fix is fork-side (embedder-aware tool
 /// name in those prints); see the module doc.
 #[cfg(not(unix))]
-fn with_fd_captured<T>(_fd: i32, f: impl FnOnce() -> T) -> (T, String) {
+pub(super) fn with_fd_captured<T>(_fd: i32, f: impl FnOnce() -> T) -> (T, String) {
     (f(), String::new())
 }
 
@@ -650,15 +757,18 @@ pub struct InstallFlags {
     pub lockfile_only: bool,
     pub force: bool,
     pub node_linker: Option<String>,
+    pub registry: Option<String>,
     pub dir: Option<std::path::PathBuf>,
 }
 
 /// `nub ci` flags. `ci` is frozen + clean by definition, so only the script /
-/// optional-dep knobs are configurable (mirrors `aube ci`'s `CiArgs`).
+/// optional-dep / registry knobs are configurable (mirrors `aube ci`'s
+/// `CiArgs`, whose flattened NetworkArgs carries `--registry` upstream).
 #[derive(Debug, Default)]
 pub struct CiFlags {
     pub ignore_scripts: bool,
     pub no_optional: bool,
+    pub registry: Option<String>,
     pub dir: Option<std::path::PathBuf>,
 }
 
@@ -677,6 +787,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     args.lockfile_only = flags.lockfile_only;
     args.force = flags.force;
     args.node_linker = flags.node_linker.clone();
+    args.network.registry = flags.registry.clone();
     args.lockfile.frozen_lockfile = flags.frozen_lockfile;
     args.lockfile.no_frozen_lockfile = flags.no_frozen_lockfile;
     args.lockfile.prefer_frozen_lockfile = flags.prefer_frozen_lockfile;
@@ -737,6 +848,15 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
 /// hooks on unless `--ignore-scripts`.
 pub fn run_ci(flags: CiFlags) -> Result<i32> {
     let session = super::engine_session(flags.dir.as_deref())?;
+
+    // `--registry`: mirror `aube ci`'s `args.network.install_overrides()`
+    // (the registry override is process-global; only set when given so the
+    // settings-tier resolution stays untouched otherwise).
+    if flags.registry.is_some() {
+        let mut network = default_install_args().network;
+        network.registry = flags.registry.clone();
+        network.install_overrides();
+    }
 
     // Clean first, like `aube ci` / `npm ci`. The project root for nub's
     // purposes is where the lockfile lives (fall back to cwd for the
@@ -828,9 +948,14 @@ fn run_engine(session: &EngineSession, opts: InstallOptions, yarn_gated: bool) -
         // Frozen-drift on a gated yarn project: the install *would* rewrite
         // yarn.lock if allowed to re-resolve. Surface the gate, not aube's
         // "run without --frozen-lockfile" hint (which would punch through it).
-        // KNOWN GAP: substring match — the drift errors carry no stable
-        // diagnostic code at the pinned API (see module doc).
-        Err(report) if yarn_gated && report.to_string().contains("lockfile is out of date") => {
+        // Matched on the engine's stable drift code (both frozen-drift sites
+        // carry it), not the human message.
+        Err(report)
+            if yarn_gated
+                && report.code().is_some_and(|code| {
+                    code.to_string() == aube_codes::errors::ERR_AUBE_OUTDATED_LOCKFILE
+                }) =>
+        {
             Err(yarn_gate_error(
                 "install",
                 &format!("yarn.lock is out of date ({report})"),
@@ -933,6 +1058,34 @@ mod tests {
         assert!(imp.force);
         let (_, rb): (_, aube::commands::rebuild::RebuildArgs) = parse("rb", &["esbuild"]);
         assert_eq!(rb.packages, ["esbuild"]);
+
+        let (_, patch): (_, aube::commands::patch::PatchArgs) =
+            parse("patch", &["lodash@4.17.21", "--edit-dir", "/tmp/edit"]);
+        assert_eq!(patch.package, "lodash@4.17.21");
+        assert_eq!(patch.edit_dir.as_deref(), Some(Path::new("/tmp/edit")));
+        let (_, pc): (_, aube::commands::patch_commit::PatchCommitArgs) = parse(
+            "patch-commit",
+            &["/tmp/edit/user", "--patches-dir", "fixes"],
+        );
+        assert_eq!(pc.edit_dir, Path::new("/tmp/edit/user"));
+        assert_eq!(pc.patches_dir, Path::new("fixes"));
+        let (_, pr): (_, aube::commands::patch_remove::PatchRemoveArgs) =
+            parse("patch-remove", &["lodash@4.17.21"]);
+        assert_eq!(pr.packages, ["lodash@4.17.21"]);
+    }
+
+    /// The nub-side default edit parent is nub-named (the engine's fallback
+    /// would print an `aube-patch-…` path — module doc) and survives scoped
+    /// package specs.
+    #[test]
+    fn patch_edit_parent_is_nub_named_and_filesystem_safe() {
+        let dir = nub_patch_edit_parent("@scope/pkg@1.0.0");
+        let leaf = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            leaf.starts_with("nub-patch-+scope+pkg+1.0.0-"),
+            "scoped spec must sanitize into the nub-named parent: {leaf}"
+        );
+        assert!(!leaf.contains('/') && !leaf.contains('@'), "{leaf}");
     }
 
     /// The nub-honored global flags ride every engine verb and merge into
@@ -991,6 +1144,15 @@ mod tests {
                 help_of::<c::ignored_builds::IgnoredBuildsArgs>("ignored-builds"),
             ),
             ("dlx", help_of::<c::dlx::DlxArgs>("dlx")),
+            ("patch", help_of::<c::patch::PatchArgs>("patch")),
+            (
+                "patch-commit",
+                help_of::<c::patch_commit::PatchCommitArgs>("patch-commit"),
+            ),
+            (
+                "patch-remove",
+                help_of::<c::patch_remove::PatchRemoveArgs>("patch-remove"),
+            ),
         ] {
             assert!(
                 !help.to_lowercase().contains("aube"),

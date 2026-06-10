@@ -40,10 +40,14 @@
 //!
 //! `install`/`i`/`ci` are *not* in the registry: they are live clap verbs
 //! in `cli.rs` (SUBCOMMANDS) dispatching straight to
-//! [`install_family::run_install`] / [`install_family::run_ci`]. The
-//! registry covers the not-yet-wired remainder; its entries currently
-//! dispatch to per-family stubs that error with a "wired in phase Surface"
-//! message plus the user's real-PM fallback command.
+//! [`install_family::run_install`] / [`install_family::run_ci`]. Every
+//! other registered verb is wired to the engine through its family module,
+//! except the deliberate stub set — `clean`/`purge`, `deploy`, `create`,
+//! `init`, `recursive` (script-runner / workspace-fanout collisions with
+//! nub's reserved verbs — install_family module doc) and `sbom` (engine
+//! branding in the document body — info_family module doc) — which error
+//! with the "wired in phase Surface" message plus the user's real-PM
+//! fallback command.
 
 pub mod info_family;
 pub mod install_family;
