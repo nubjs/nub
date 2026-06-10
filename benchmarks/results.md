@@ -73,3 +73,15 @@ So `nubx`'s real wrapper speed is **~17–20×** (native bin); end-to-end for a 
 - TS execution: `hello.ts` / `hello.js` = `console.log("hello")`; transpile cache warmed before timing.
 - Bin runner: real, locally-installed CLIs run as `<tool> --version` — `esbuild` 0.28.0 (native Go binary, the wrapper-speed measure) and `tsc` 5.9.3 (Node-based, the diluted case). Same tool on all three sides, so the delta is purely wrapper overhead.
 - All comparisons run on the same machine, same session.
+
+## PM shim: `pnpm -v` through nub vs corepack
+
+**Date:** 2026-06-10 · corepack 0.34.6 · pnpm 9.15.4 pinned, warm caches everywhere (incl. V8 compile cache on all three — corepack warms its own; nub sets `NODE_COMPILE_CACHE` on the PM exec as of this date). `hyperfine --warmup 5 --runs 30`.
+
+| Command | Mean [ms] | overhead vs pnpm itself |
+|---------|-----------|--------------------------|
+| `node pnpm.cjs -v` (the artifact both wrappers run) | 181.7 | — |
+| nub shim `pnpm -v` | 186.6 | **+4.9 ms** |
+| corepack shim `pnpm -v` | 195.7 | **+14.0 ms** |
+
+The honest framing: **~3× less wrapper overhead than corepack (≈10 ms saved per bare PM call)** — NOT an order of magnitude. Modern corepack runs the PM *in-process* (one Node boot total, `runMain` after its JS resolver), so there is no second ~150 ms Node boot to delete; its tax is ~14 ms of resolver JS inside a boot pnpm needed anyway. The wrapper-tax math behind the `nub run` 18× does not transfer here. Found along the way: corepack enables the V8 compile cache for the PM bundle and nub didn't — before that fix the nub shim was ~70 ms *slower* per call than corepack (pnpm's ~10 MB bundle parse). A "20× faster corepack" claim is not supportable; do not put one on the site.

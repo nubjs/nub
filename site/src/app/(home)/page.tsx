@@ -280,7 +280,7 @@ function RunFileBand() {
                 (compiled into a{' '}
                 <DocLink href="https://nodejs.org/api/n-api.html">native Node addon</DocLink>) and
                 runs the output on the stock{' '}
-                <Mono>node</Mono>{' '}binary — there&rsquo;s no Nub runtime, just real Node.
+                <Mono>node</Mono>{' '}binary. There&rsquo;s no Nub runtime, just real Node.
                 Your code is run by the version of Node your project expects. If unavailable,
                 it&rsquo;s installed on the fly. Runs on Node.js 18 LTS and newer.
               </>
@@ -364,7 +364,7 @@ class Invoice extends Model {
             body={
               <>
                 Nub reads <Mono>.env</Mono>, <Mono>.env.local</Mono>, and{' '}
-                <Mono>.env.[NODE_ENV]</Mono>{' '}and injects them before Node starts — no{' '}
+                <Mono>.env.[NODE_ENV]</Mono>{' '}and injects them before Node starts. No{' '}
                 <Mono>dotenv</Mono>{' '}required. Automatic var expansion via{' '}
                 <Mono>{'${VAR}'}</Mono>{' '}just like Vite and Next.js.
               </>
@@ -498,7 +498,7 @@ import { host, port } from "./config.yaml" // named exports`}
             body={
               <>
                 Nub is <span className="text-fd-foreground">not a runtime</span>. Your code
-                runs on the real <Mono>node</Mono>{' '}binary — no Nub engine, no
+                runs on the real <Mono>node</Mono>{' '}binary: no Nub engine, no
                 reimplementation, no proprietary API surface. Everything Nub ships is a web
                 standard, a TC39 proposal, an unflagged Node feature, or a pragmatic
                 TypeScript affordance. Remove Nub tomorrow and your code keeps working,
@@ -586,8 +586,8 @@ function NodeVersionBand() {
           subhead={
             <>
               Nub reads your <Mono>.node-version</Mono>{' '}or <Mono>.nvmrc</Mono>{' '}and, if
-              that Node isn&rsquo;t installed, downloads it from nodejs.org —
-              checksum-verified and installed. Replaces <Mono>nvm</Mono>{' '}and <Mono>fnm</Mono>.
+              that Node isn&rsquo;t installed, downloads it from nodejs.org, verifies the
+              checksum, and installs it. Replaces <Mono>nvm</Mono>{' '}and <Mono>fnm</Mono>.
             </>
           }
           accent="orchid"
@@ -599,9 +599,9 @@ function NodeVersionBand() {
             title="Resolves your project's Node version"
             body={
               <>
-                Nub resolves the right Node for each project from <Mono>.node-version</Mono>,{' '}
-                <Mono>.nvmrc</Mono>, or <Mono>package.json#engines</Mono> — automatically,
-                before your code runs.
+                Nub automatically resolves the right Node for each project from{' '}
+                <Mono>.node-version</Mono>, <Mono>.nvmrc</Mono>, or{' '}
+                <Mono>package.json#engines</Mono>{' '}before your code runs.
               </>
             }
             visual={
@@ -623,7 +623,7 @@ function NodeVersionBand() {
             body={
               <>
                 If the resolved version isn&rsquo;t on your machine, Nub downloads it from
-                nodejs.org — checksum-verified and installed — then runs your code on it.
+                nodejs.org (checksum-verified), then runs your code on it.
                 No <Mono>nvm use</Mono>, no prompt, no second step.
               </>
             }
@@ -733,7 +733,7 @@ function RunScriptBand() {
               <>
                 Nub implements pnpm&rsquo;s <Mono>--filter</Mono>{' '}grammar and{' '}
                 <Mono>-r</Mono>, reading workspaces from <Mono>package.json#workspaces</Mono>{' '}
-                or <Mono>pnpm-workspace.yaml</Mono>. Packages run in dependency order —
+                or <Mono>pnpm-workspace.yaml</Mono>. Packages run in dependency order,
                 without the per-package Node bootstrap.
               </>
             }
@@ -766,7 +766,7 @@ function NubxBand() {
           subhead={
             <>
               <Mono>nubx</Mono>{' '}resolves <Mono>node_modules/.bin</Mono>{' '}in Rust and
-              execs the binary directly — no Node process in the wrapper. A drop-in for{' '}
+              execs the binary directly; no Node process in the wrapper. A drop-in for{' '}
               <Mono>npx</Mono>{' '}and <Mono>pnpm exec</Mono>.
             </>
           }
@@ -781,7 +781,7 @@ function NubxBand() {
             body={
               <>
                 When invoking native CLIs like <Mono>esbuild</Mono>, <Mono>npx</Mono>{' '}
-                itself (written in JS) adds a noticeable 200ms of cold-start latency — even
+                itself (written in JS) adds a noticeable 200ms of cold-start latency, even
                 when running a CLI command that&rsquo;s instantaneous. Nub walks{' '}
                 <Mono>node_modules/.bin</Mono>{' '}and execs the binary directly.
               </>
@@ -820,7 +820,7 @@ function NubxBand() {
             body={
               <>
                 Nub resolves the CLI the way <Mono>pnpm</Mono>,{' '}<Mono>yarn</Mono>, and{' '}
-                <Mono>npm</Mono>{' '}do, so it runs the exact binary your install put there —
+                <Mono>npm</Mono>{' '}do, so it runs the exact binary your install put there,
                 even in a monorepo. Add <Mono>--node</Mono>{' '}to run one under plain Node.
               </>
             }
