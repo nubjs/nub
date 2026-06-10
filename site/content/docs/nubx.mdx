@@ -3,11 +3,11 @@ title: Package runner
 description: Use nubx (or nub exec) to run the CLIs in your project's node_modules/.bin — a drop-in for npx and pnpm exec, an order of magnitude faster on cold start.
 ---
 
-`nubx` runs the command-line tools your project already depends on — the ones installed into `node_modules/.bin` by `pnpm`, `npm`, `yarn`, or `bun`. It's a drop-in for `npx` and `pnpm exec`: it does the `node_modules/.bin` walk-up in Rust and exec's the resolved binary directly, so the wrapper overhead that `npx` and `pnpm exec` pay on every call (a full Node bootstrap) approximately disappears — `~17–20×` lighter on a native CLI like `esbuild`. The tool that actually runs is identical to what `npx` would run; only the wrapper gets out of the way.
+The `nubx` command runs the command-line tools your project already depends on — the ones installed into `node_modules/.bin` by `pnpm`, `npm`, `yarn`, or `bun`. It's a drop-in for `npx` and `pnpm exec`: it does the `node_modules/.bin` walk-up in Rust and exec's the resolved binary directly, so the wrapper overhead that `npx` and `pnpm exec` pay on every call (a full Node bootstrap) approximately disappears — `~17–20×` lighter on a native CLI like `esbuild`. The tool that actually runs is identical to what `npx` would run; only the wrapper gets out of the way.
 
 This page is task-oriented. For the bigger picture see the [Introduction](/docs); for running files and scripts see [running files](/docs/running-files) and [running scripts](/docs/running-scripts).
 
-## Run a CLI installed in your project
+## Run a local CLI
 
 Point `nubx` at the bin name and let it resolve from `node_modules/.bin`. No `node` bootstrap in the wrapper, so resolution returns in single-digit milliseconds.
 
@@ -17,7 +17,7 @@ nubx prisma generate
 nubx tsc
 ```
 
-## Pass arguments and flags to the tool
+## Pass arguments
 
 Everything after the bin name goes straight to the underlying tool, untouched. There is no `--` separator to remember — `nubx` doesn't interpret your tool's flags.
 
@@ -28,18 +28,18 @@ nubx prisma migrate dev --name init
 nubx vitest run --coverage
 ```
 
-## Use `nub exec` instead of `nubx`
+## The `nub exec` alias
 
-`nubx` is a separate binary entry point, but it's an exact alias for `nub exec` — same code path, same resolution, same behavior. Use whichever reads better in your context; `nubx` is shorter for the command line and shebangs, `nub exec` is natural inside a longer `nub` invocation.
+Though `nubx` is a separate binary entry point, it's an exact alias for `nub exec` — same code path, same resolution, same behavior. Use whichever reads better in your context; `nubx` is shorter for the command line and shebangs, `nub exec` is natural inside a longer `nub` invocation.
 
 ```sh
 nubx prettier --write .
 nub exec prettier --write .   # identical
 ```
 
-## Understand how a bin gets resolved
+## How bins resolve
 
-`nubx` walks `node_modules/.bin/<name>` starting from your current directory and moving upward through ancestor `node_modules/.bin` directories — the same chain `nub run` builds for `PATH`. In a monorepo that means the package member's own `.bin` is checked first, then the workspace root, then any further ancestors. This matches how `npm`, `pnpm`, `yarn`, and `bun` resolve bins, so a tool installed at the workspace root is reachable from any member.
+Resolution walks `node_modules/.bin/<name>` starting from your current directory and moving upward through ancestor `node_modules/.bin` directories — the same chain `nub run` builds for `PATH`. In a monorepo that means the package member's own `.bin` is checked first, then the workspace root, then any further ancestors. This matches how `npm`, `pnpm`, `yarn`, and `bun` resolve bins, so a tool installed at the workspace root is reachable from any member.
 
 ```sh
 # from packages/api in a monorepo:
@@ -49,9 +49,9 @@ nub exec prettier --write .   # identical
 nubx tsc --build
 ```
 
-`nubx` runs the resolved entry the right way for what it is: a Node script (a `#!…node` shebang or `.js` / `.mjs` / `.cjs`) runs through augmented `node`, a Windows `.cmd` / `.bat` via `cmd /C`, a `.ps1` via PowerShell, and anything else (a native binary, or a non-node shebang like `#!/bin/sh`) execs directly.
+The resolved entry runs the right way for what it is: a Node script (a `#!…node` shebang or `.js` / `.mjs` / `.cjs`) runs through augmented `node`, a Windows `.cmd` / `.bat` via `cmd /C`, a `.ps1` via PowerShell, and anything else (a native binary, or a non-node shebang like `#!/bin/sh`) execs directly.
 
-## Run a tool without runtime augmentation
+## Run without augmentation
 
 By default `nubx` runs the tool under Nub's augmentation — the PATH shim makes any `node` the tool spawns resolve back to Nub, with TypeScript transpilation and polyfills active. Pass `--node` to turn that off for the invocation: the bin's `#!/usr/bin/env node` shebang resolves to your real Node binary, no `--import` preload is added, and no experimental flags are injected. Reach for it when a tool's shebang chain needs byte-exact plain Node, when you're bisecting a Nub-vs-Node issue, or when CI wants exact Node runtime behavior with `nubx`'s resolution.
 
@@ -62,9 +62,9 @@ nub exec --node tsc --noEmit
 
 What still happens under `--node`: the workspace-aware `node_modules/.bin` walk-up, the not-installed message below, and `nubx`'s own CLI machinery. Only the runtime augmentation is disabled. There is no `NODE_COMPAT=1` env var — pass `--node` per invocation that needs it.
 
-## Handle a tool that isn't installed
+## When a tool isn't installed
 
-`nubx` runs already-installed bins only — it does not fetch from the registry in v0.1 (no Nub-side cache, no `nub dlx` verb, no interactive prompt). If the bin isn't on the `node_modules/.bin` chain, `nubx` exits non-zero and prints a one-line suggestion. It detects your package manager from the nearest lockfile (`pnpm-lock.yaml` → `yarn.lock` → `bun.lock` → `package-lock.json`, falling back to a `$PATH` priority of `pnpm > yarn > bun > npm`) and points you at that PM's own dlx/exec verb — so installs and ad-hoc fetches stay in the tool that owns your lockfile, keeping it consistent.
+Already-installed bins are the whole scope — `nubx` does not fetch from the registry. If the bin isn't on the `node_modules/.bin` chain, `nubx` exits non-zero and prints a one-line suggestion. It detects your package manager from the nearest lockfile (`pnpm-lock.yaml` → `yarn.lock` → `bun.lock` → `package-lock.json`, falling back to a `$PATH` priority of `pnpm > yarn > bun > npm`) and points you at that PM's own dlx/exec verb — so installs and ad-hoc fetches stay in the tool that owns your lockfile, keeping it consistent.
 
 ```sh
 $ nubx prettier
@@ -73,9 +73,9 @@ nubx: prettier is not installed locally.
         pnpm dlx prettier
 ```
 
-`nubx` prints the suggestion but never runs it — you copy the command. The exact suggestion varies with the detected PM (`pnpm dlx <pkg>`, `npx <pkg>`, `yarn dlx <pkg>`, `bunx <pkg>`).
+The suggestion is printed, never run — you copy the command. The exact suggestion varies with the detected PM (`pnpm dlx <pkg>`, `npx <pkg>`, `yarn dlx <pkg>`, `bunx <pkg>`).
 
-## Pin a specific version
+## Version specifiers
 
 Version specifiers like `nubx prettier@3.5` are accepted, but they always miss the local-bin lookup — `nubx` doesn't match against installed versions. You'll get the not-installed message. Install the version you want, or run your PM's dlx verb directly.
 
@@ -84,7 +84,7 @@ pnpm add -D prettier@3.5    # then: nubx prettier
 pnpm dlx prettier@3.5       # ad-hoc, no install
 ```
 
-## Use `nubx` with Yarn Berry (PnP caveat)
+## Yarn Plug'n'Play
 
 Yarn Berry's Plug'n'Play mode replaces `node_modules/.bin/` with a runtime resolution table managed by Yarn's own loader. Tools that walk the `.bin/` tree — `npx`, `pnpm exec`, `bunx`, and `nubx` — don't see it. If you're on Yarn Berry and want `nubx` to resolve your bins, opt into the conventional layout by setting `nodeLinker: node-modules` in `.yarnrc.yml`.
 

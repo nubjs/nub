@@ -109,6 +109,10 @@ function CursorIcon() {
 const pill =
   'inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/60 px-3.5 py-1.5 text-[0.8rem] text-fd-foreground backdrop-blur transition hover:border-ember/60 disabled:opacity-60';
 
+/* Newsreader's ink mass rides high in its line box (the eye discounts descender
+   space), so serif labels need a ~1px optical down-nudge inside the pills. */
+const label = 'translate-y-[1px]';
+
 function CopyMarkdownButton({ markdownUrl }: { markdownUrl: string }) {
   const [loading, setLoading] = useState(false);
   const [checked, onClick] = useCopyButton(async () => {
@@ -140,7 +144,7 @@ function CopyMarkdownButton({ markdownUrl }: { markdownUrl: string }) {
       <span className="inline-flex w-4 justify-center text-fd-muted-foreground transition group-hover:text-ember">
         {checked ? <CheckIcon /> : <CopyIcon />}
       </span>
-      {checked ? 'Copied' : 'Copy Markdown'}
+      <span className={label}>{checked ? 'Copied' : 'Copy Markdown'}</span>
     </button>
   );
 }
@@ -234,7 +238,7 @@ function ViewOptions({
         aria-haspopup="menu"
         className={`${pill} ${open ? 'border-ember/60' : ''}`}
       >
-        Open
+        <span className={label}>Open</span>
         <span className="text-fd-muted-foreground">
           <ChevronDownIcon />
         </span>
@@ -254,7 +258,7 @@ function ViewOptions({
               className="inline-flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[0.82rem] text-fd-foreground transition hover:bg-fd-accent hover:text-fd-accent-foreground"
             >
               <span className="text-fd-muted-foreground">{item.icon}</span>
-              {item.title}
+              <span className={label}>{item.title}</span>
               <span className="ms-auto text-fd-muted-foreground">
                 <ExternalIcon />
               </span>

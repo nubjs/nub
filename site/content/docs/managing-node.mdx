@@ -5,7 +5,7 @@ description: Manage the Node versions Nub provisions — pin a version and it's 
 
 Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/running-files#the-node-version) covers the common case completely, so you rarely manage versions by hand. The `nub node` subcommands exist for the cases the automatic path can't reach: warming the cache before you run, seeing what's installed, reclaiming disk, and recording a pin.
 
-The whole group is optional. `nub <file>` behavior never changes whether you use it or not.
+The whole group is optional — `nub <file>` behavior never changes whether you use it or not.
 
 ## Versions install themselves
 
@@ -56,7 +56,7 @@ $ nub node ls
   20.11.0
 ```
 
-`ls` shows Nub's own download cache only — it doesn't enumerate your `nvm` / `fnm` / system installs, because Nub doesn't manage those stores. The `→` marker appears only when the resolved version is one Nub has cached.
+Only Nub's own download cache is shown — `ls` doesn't enumerate your `nvm` / `fnm` / system installs, because Nub doesn't manage those stores. The `→` marker appears only when the resolved version is one Nub has cached.
 
 ## `nub node uninstall`
 
@@ -85,7 +85,7 @@ A few deliberate behaviors:
 - **It edits the pin file you already have.** If the project carries a `.nvmrc` but no `.node-version`, `pin` updates the `.nvmrc` in place rather than dropping a second file that would silently shadow it.
 - **It always prints where it wrote.** No guessing which file changed.
 
-`pin` writes whatever spec you give it verbatim — including an alias like `lts` — and never hits the network, so it's instant and works offline. `.node-version` is the tool-agnostic convention (`nvm`, `fnm`, `volta`, `asdf` all read it), so the pin is portable to your other tools, not just Nub.
+Whatever spec you give is written verbatim — including an alias like `lts` — and `pin` never hits the network, so it's instant and works offline. The `.node-version` file is the tool-agnostic convention (`nvm`, `fnm`, `volta`, `asdf` all read it), so the pin is portable to your other tools, not just Nub.
 
 ## Bring your own version manager
 
@@ -96,11 +96,11 @@ nvm use 24
 nub node which       # prints the exact Node binary Nub will spawn here
 ```
 
-`nub node which` is the quickest way to answer "which Node runs here, and where is it?" — it prints the resolved binary path to stdout (so `NODE=$(nub node which)` captures just the path), with a `» resolved from <source>` explainer on stderr, whether the version came from a pin, the cache, or your `PATH`. Bare `nub node` reports the same as a status block.
+The quickest way to answer "which Node runs here, and where is it?" is `nub node which` — it prints the resolved binary path to stdout (so `NODE=$(nub node which)` captures just the path), with a `» resolved from <source>` explainer on stderr, whether the version came from a pin, the cache, or your `PATH`. Bare `nub node` reports the same as a status block.
 
-## The explicit surface is intentionally small
+## A deliberately small surface
 
-`which`, `install`, `ls`, `uninstall`, and `pin` are the whole group (plus bare `nub node` for a status readout). There's deliberately no `ls-remote`, no `prune`, `--force`, custom aliases, or a global-default command — the automatic provisioning covers the common path, and the small surface keeps "you don't have to think about Node versions" true. If a workflow genuinely needs one of these, it's a candidate for a later release.
+Five verbs — `which`, `install`, `ls`, `uninstall`, and `pin` — are the whole group (plus bare `nub node` for a status readout). There's deliberately no `ls-remote`, no `prune`, `--force`, custom aliases, or a global-default command — the automatic provisioning covers the common path, and the small surface keeps "you don't have to think about Node versions" true.
 
 ## Related
 
