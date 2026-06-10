@@ -524,7 +524,7 @@ pub fn run() -> Result<i32> {
             // Post-uninstall there's no other nub → fall through and run self.
             if let Some(real) = nub_core::pm::shim::nub_passthrough_target() {
                 let args: Vec<String> = env::args().skip(1).collect();
-                return exec_program(&real, &args);
+                return exec_program(&real, &args, &[]);
             }
             run_nub()
         }
@@ -4112,8 +4112,13 @@ fn path_contains_dir(dir: &Path) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 enum ShimPlan {
     /// Replace this process with `program args…` (Unix `exec`; spawn+wait
-    /// where exec doesn't exist).
-    Exec { program: PathBuf, args: Vec<String> },
+    /// where exec doesn't exist). `env` is applied to the exec'd image —
+    /// today the PM exec's `NODE_COMPILE_CACHE` (see [`exec_under_project_node`]).
+    Exec {
+        program: PathBuf,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
     /// The strict agreement check refused: print `message` on stderr, exit 1.
     Refuse { message: String },
 }
@@ -4126,7 +4131,7 @@ fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result
             eprintln!("{message}");
             Ok(1)
         }
-        ShimPlan::Exec { program, args } => exec_program(&program, &args),
+        ShimPlan::Exec { program, args, env } => exec_program(&program, &args, &env),
     }
 }
 
@@ -4194,6 +4199,7 @@ fn shim_plan(
                     return Ok(ShimPlan::Exec {
                         program: system,
                         args: args.to_vec(),
+                        env: Vec::new(),
                     });
                 }
                 pin.version = Some(
@@ -4214,6 +4220,7 @@ fn shim_plan(
                 return Ok(ShimPlan::Exec {
                     program: system,
                     args: args.to_vec(),
+                    env: Vec::new(),
                 });
             }
             // True PATH miss: provision a dynamic default of the INVOKED PM —
@@ -4390,27 +4397,55 @@ fn exec_under_project_node(cwd: &Path, bin: PathBuf, args: &[String]) -> Result<
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(bin.to_string_lossy().into_owned());
     argv.extend(args.iter().cloned());
+    // V8 compile cache for the PM bundle. pnpm/npm/yarn are multi-MB single-file
+    // bundles whose parse+compile dominates their startup; corepack enables the
+    // compile cache for the PM it runs (Module.enableCompileCache in its runner)
+    // and is measurably faster for it. NODE_COMPILE_CACHE is Node's own env
+    // surface (22.1+; older Node ignores it) — set it to a nub-owned dir so PM
+    // cache artifacts never pollute a user's cache dir, and never override a
+    // value the user already set (their program, their cache policy).
+    let mut env = Vec::new();
+    if std::env::var_os("NODE_COMPILE_CACHE").is_none() {
+        if let Ok(store) = pm_store_root() {
+            let dir = store.join("v8-compile-cache");
+            let _ = std::fs::create_dir_all(&dir);
+            env.push((
+                "NODE_COMPILE_CACHE".to_string(),
+                dir.to_string_lossy().into_owned(),
+            ));
+        }
+    }
     Ok(ShimPlan::Exec {
         program: node.path.into_std_path_buf(),
         args: argv,
+        env,
     })
 }
 
 /// The final act: replace this process's image (Unix `exec` — one process, the
 /// PM owns the terminal/signals). Returns only on failure.
 #[cfg(unix)]
-fn exec_program(program: &Path, args: &[String]) -> Result<i32> {
+fn exec_program(program: &Path, args: &[String], envs: &[(String, String)]) -> Result<i32> {
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(program).args(args).exec();
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let err = cmd.exec();
     Err(anyhow::Error::new(err).context(format!("could not exec {}", program.display())))
 }
 
 /// No `exec` on Windows: spawn + wait, forwarding the exit code. Honest
 /// cfg-gated code — runtime-unverified until the Windows CI leg.
 #[cfg(not(unix))]
-fn exec_program(program: &Path, args: &[String]) -> Result<i32> {
-    let status = std::process::Command::new(program)
-        .args(args)
+fn exec_program(program: &Path, args: &[String], envs: &[(String, String)]) -> Result<i32> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let status = cmd
         .status()
         .with_context(|| format!("could not run {}", program.display()))?;
     Ok(nub_core::node::spawn::exit_code_from_status(&status))
@@ -5301,6 +5336,37 @@ mod tests {
     }
 
     // ── PM shim: plan / provenance / dynamic default ─────────────────────
+
+    #[test]
+    fn pinned_exec_plan_carries_the_compile_cache_env() {
+        // The PM bundle's parse+compile dominates its startup; the exec plan must
+        // point NODE_COMPILE_CACHE at a nub-owned dir (corepack does the
+        // equivalent in-process and was measurably faster until this landed).
+        // Skipped when the ambient env already sets it — the user's value wins
+        // and mutating process env under the parallel harness is the flaky thing
+        // this suite deliberately avoids.
+        if std::env::var_os("NODE_COMPILE_CACHE").is_some() {
+            return;
+        }
+        let (dir, _release) = yarn_path_fixture("ccache");
+        let plan = shim_plan(
+            nub_core::pm::shim::ShimName::Yarn,
+            &["--version".to_string()],
+            &dir,
+        )
+        .unwrap();
+        let ShimPlan::Exec { env, .. } = plan else {
+            panic!("a yarnPath project execs the committed release");
+        };
+        let (_, v) = env
+            .iter()
+            .find(|(k, _)| k == "NODE_COMPILE_CACHE")
+            .expect("the exec plan sets NODE_COMPILE_CACHE for the PM bundle");
+        assert!(
+            v.ends_with("v8-compile-cache"),
+            "the cache dir is nub-owned, got {v}"
+        );
+    }
 
     #[test]
     fn shim_plan_refuses_a_mismatched_pm_naming_pin_provenance_and_paste() {
