@@ -932,6 +932,14 @@ fn nub_identity_dir(cwd: &Path) -> Option<PathBuf> {
 ///   non-settings consumers (git clone cache, node-gyp tool cache, primer,
 ///   adaptive state) never read the setting at all; the process-global
 ///   cache root covers every one of them.
+/// - `defaultTrust=true` — the gated default-trust floor (curated list ∧
+///   registry-resolved ∧ OSV MAL-* gate active ∧ past the cooling window)
+///   is ON under nub in both modes; upstream aube keeps it off. Precedence
+///   stays the settled chain (explicit `allowBuilds` true/false always wins
+///   — `false` carves a package OUT of the floor; the map's *existence*
+///   never disables it). Off-switch: `.npmrc default-trust=false` /
+///   `npm_config_default_trust=false` — this is the embedder tier, below
+///   every user source.
 /// - Layout policy: flat-layout lockfile kinds (npm/yarn/bun) default
 ///   `nodeLinker` to `hoisted`; pnpm/aube kinds and fresh projects keep the
 ///   engine's `isolated` default (no entry pushed, so user/env settings
@@ -939,6 +947,7 @@ fn nub_identity_dir(cwd: &Path) -> Option<PathBuf> {
 fn nub_setting_defaults(detected: Option<&DetectedLockfile>) -> Vec<(String, String)> {
     let mut defaults = vec![
         ("defaultLockfileFormat".to_string(), "pnpm".to_string()),
+        ("defaultTrust".to_string(), "true".to_string()),
         (
             "virtualStoreDir".to_string(),
             "node_modules/.nub".to_string(),

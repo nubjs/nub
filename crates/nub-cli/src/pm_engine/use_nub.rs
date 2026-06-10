@@ -162,6 +162,7 @@ const NPMRC_KEYS: &[&str] = &[
     "provenance",
     // aube-only keys a yaml the engine wrote may carry; all have npmrc homes.
     "defaultLockfileFormat",
+    "defaultTrust",
     "deprecationWarnings",
     "advisoryCheck",
     "advisoryCheckOnInstall",
