@@ -91,7 +91,18 @@ yarn@1.22.22
 $ nub pm cache clear
 ```
 
-Versions live at `~/.cache/nub/pm/<pm>/<version>`. An exact pin that's already cached runs fully offline — the registry is only contacted to resolve ranges and fetch missing versions.
+Versions live at `~/.cache/nub/pm/<pm>/<version>`. An exact pin that's already cached runs fully offline — the registry is only contacted to resolve ranges and fetch missing versions. Provisioned package managers also run with a warm V8 compile cache (`NODE_COMPILE_CACHE`), so the PM's multi-megabyte bundle loads as cached bytecode instead of re-parsing on every call.
+
+## Private registries
+
+The PM download — packument and tarball — goes through your `.npmrc`: `registry=` picks the mirror, `//host/:_authToken=` authenticates against it. An auth-required Artifactory/Nexus mirror works with the config you already have:
+
+```ini
+registry=https://npm.corp.example
+//npm.corp.example/:_authToken=${CORP_NPM_TOKEN}
+```
+
+To fetch package managers from a different registry than your dependencies, `COREPACK_NPM_REGISTRY` (+ `COREPACK_NPM_TOKEN`) overrides the PM-download registry specifically — teams migrating off corepack keep their existing CI vars.
 
 ## `nub pm shim`
 
@@ -108,6 +119,8 @@ With shims active, a bare command resolves against the project it runs in:
 - **Pinned, matching name** — runs the pinned version, provisioning it on first use. A cached pin runs fully offline.
 - **Pinned, different name** — refuses: `npm install` in a pnpm project would write a competing `package-lock.json`; the error names the pinned manager and the command to paste. (`npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs are exempt — `npm create vite` works anywhere.)
 - **Unpinned** — falls through to the package manager already on your `PATH`, exactly as if the shim weren't there. If there is none, nub provisions a sensible default (matched to your lockfile's format, else latest) and says so.
+
+Strictness applies to commands you type. When a package manager is already running above the shim — a lifecycle script shelling out to a different PM, detected via `npm_config_user_agent` — a name mismatch falls through to the system PM instead of refusing, so a pnpm `postinstall` that calls `npm` doesn't break an install you never issued.
 
 The shim never writes to your `package.json`. Re-run `nub pm shim` after upgrading nub to refresh the links.
 
