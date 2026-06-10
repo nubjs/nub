@@ -95,6 +95,38 @@ mod ctrl_c {
     }
 }
 
+/// Register `pid` as the foreground child so terminating signals Nub receives
+/// (SIGINT/SIGTERM/SIGHUP/SIGQUIT/SIGUSR1/2) are forwarded to it — the exact
+/// machinery [`spawn_node`] uses. Public so the `nub run` script path (which
+/// builds its own `sh -c` Command rather than going through `spawn_node`) gets
+/// identical `docker stop` / Ctrl-C behavior: without it the Nub leader exited on
+/// SIGTERM and the `sh -c <script>` subtree was never signaled — orphaned, and
+/// `docker stop` waited the full grace then SIGKILLed. No-op off Unix (Windows
+/// console-ctrl handling differs and is out of scope here).
+pub fn track_child(pid: u32) {
+    #[cfg(unix)]
+    ctrl_c::track(pid);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Clear the tracked child after it exits — pair with [`track_child`].
+pub fn untrack_child() {
+    #[cfg(unix)]
+    ctrl_c::untrack();
+}
+
+/// Spawn `cmd` and wait, forwarding terminating signals to the child while it
+/// runs — the signal-faithful equivalent of `cmd.status()`. Use wherever Nub
+/// spawns a long-lived foreground child it must relay `docker stop` / Ctrl-C to.
+pub fn status_forwarding_signals(cmd: &mut Command) -> std::io::Result<ExitStatus> {
+    let mut child = cmd.spawn()?;
+    track_child(child.id());
+    let status = child.wait();
+    untrack_child();
+    status
+}
+
 /// Configuration for spawning an augmented Node process.
 pub struct SpawnConfig<'a> {
     /// The resolved Node binary.
@@ -985,6 +1017,29 @@ mod tests {
             ctrl_c::current(),
             0,
             "untrack clears the pid after the child exits"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_forwarding_signals_runs_then_clears_the_tracked_pid() {
+        // The `nub run` script path routes through this instead of a raw
+        // `command.status()` so docker stop / Ctrl-C reach the script child. It
+        // must return the child's real status AND leave the global untracked, so a
+        // stray signal after the script exits can't kill a reused pid.
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ctrl_c::untrack();
+        let status = status_forwarding_signals(Command::new("sh").arg("-c").arg("exit 7"))
+            .expect("spawn sh");
+        assert_eq!(
+            exit_code_from_status(&status),
+            7,
+            "the child's code passes through"
+        );
+        assert_eq!(
+            ctrl_c::current(),
+            0,
+            "the tracked pid is cleared once the child exits"
         );
     }
 

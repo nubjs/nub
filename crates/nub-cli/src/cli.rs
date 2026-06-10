@@ -2211,7 +2211,11 @@ fn spawn_script(
     if !SILENT.load(Ordering::Relaxed) {
         eprintln!("$ {cmd}");
     }
-    let status = command.status()?;
+    // Forward terminating signals to the `sh -c <script>` child while it runs, so
+    // `docker stop` / Ctrl-C / systemd reach the workload — not just Nub's leader.
+    // A raw `command.status()` left the child orphaned on SIGTERM (the file-run
+    // path already forwards via spawn_node; this path did not).
+    let status = nub_core::node::spawn::status_forwarding_signals(&mut command)?;
     Ok(nub_core::node::spawn::exit_code_from_status(&status))
 }
 
@@ -2363,6 +2367,8 @@ fn spawn_script_prefixed(
     )?;
 
     let mut child = command.spawn()?;
+    // Relay docker stop / Ctrl-C to the streamed child too (workspace `-r` runs).
+    nub_core::node::spawn::track_child(child.id());
     let mut output_buf = String::new();
 
     let stdout = child.stdout.take();
@@ -2427,6 +2433,7 @@ fn spawn_script_prefixed(
     });
 
     let status = child.wait()?;
+    nub_core::node::spawn::untrack_child();
     let out_lines = out_handle.join().unwrap_or_default();
     let err_lines = err_handle.join().unwrap_or_default();
     let exit_code = nub_core::node::spawn::exit_code_from_status(&status);

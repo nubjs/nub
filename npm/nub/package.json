@@ -9,9 +9,13 @@
     "nub": "bin/nub",
     "nubx": "bin/nubx"
   },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
   "files": [
     "bin",
-    "platform.js"
+    "platform.js",
+    "postinstall.js"
   ],
   "optionalDependencies": {
     "@nubjs/nub-darwin-arm64": "0.0.25",
