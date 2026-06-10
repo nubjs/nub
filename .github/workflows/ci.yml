@@ -144,6 +144,18 @@ jobs:
             cp target/release/libnub_native.so runtime/addons/nub-native.node
           fi
       - run: cargo test
+      # Brand-boundary sweep for the embedded PM engine: a real `nub install`
+      # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
+      # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev
+      # in output, AUBE_* env vars dead, no aube-named on-disk paths beyond the
+      # documented shrinking allowlist in the script, and
+      # npm_config_user_agent's first token == nub/<ver>. One leg is enough:
+      # the assertions are OS- and Node-version-independent.
+      - name: Brand sweep (embedded PM engine)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        run: |
+          cargo build -p nub-cli
+          tests/brand-sweep/run.sh target/debug/nub
 
   pnp:
     name: Yarn PnP (${{ matrix.os }}, node ${{ matrix.node }})
