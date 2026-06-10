@@ -4030,6 +4030,23 @@ mod tests {
     }
 
     #[test]
+    fn install_parses_with_the_i_alias_and_engine_flags() {
+        // `nub i -P --node-linker hoisted` ≡ `nub install …` (npm/pnpm muscle
+        // memory); the engine flags land on the variant, and the three frozen
+        // flags are mutually exclusive.
+        let cli = parse(&["nub", "i", "-P", "--node-linker", "hoisted"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Install { prod: true, ref node_linker, .. })
+                if node_linker.as_deref() == Some("hoisted")
+        ));
+        assert!(
+            parse(&["nub", "install", "--frozen-lockfile", "--no-frozen-lockfile"]).is_err(),
+            "the frozen-lockfile flags are mutually exclusive"
+        );
+    }
+
+    #[test]
     fn subcommand_run_without_script_parses_to_none() {
         // `nub run` (no script) must parse — not a clap "required arg" error —
         // so run_script can list available scripts (A46).
