@@ -184,6 +184,21 @@ pub(crate) fn bin_subpath(meta: &Value) -> Option<PathBuf> {
     chosen.as_str().map(PathBuf::from)
 }
 
+/// The bin path of a NAMED entry in a `bin` map (`npx`, `pnpx`, `yarnpkg`) —
+/// the shim's seam for a package's SIBLING launchers, where [`bin_subpath`]
+/// picks the entry named for the package itself (see `shim::sibling_bin`).
+/// The string form declares a single bin named after the package, so it
+/// matches only when `entry` IS the package name. Works on a packument
+/// `versions[X.Y.Z]` entry and an installed `package/package.json` alike.
+pub(crate) fn named_bin_subpath(meta: &Value, entry: &str) -> Option<PathBuf> {
+    let bin = meta.get("bin")?;
+    if let Some(path) = bin.as_str() {
+        return (meta.get("name").and_then(Value::as_str) == Some(entry))
+            .then(|| PathBuf::from(path));
+    }
+    bin.as_object()?.get(entry)?.as_str().map(PathBuf::from)
+}
+
 /// Networked wrapper: fetch the packument from `base` and resolve `spec` against
 /// it. `pkg` is the package name (`pnpm`, `npm`, `yarn`).
 pub fn resolve_version(base: &str, pkg: &str, spec: &str) -> Result<VersionDist> {
@@ -402,6 +417,37 @@ mod tests {
         // 8.0.0's bin map has two entries; the one keyed by the package name wins.
         let dist = resolve_dist(&packument(), "8.0.0").unwrap();
         assert_eq!(dist.bin_subpath, PathBuf::from("bin/pnpm.cjs"));
+    }
+
+    #[test]
+    fn named_bin_subpath_picks_arbitrary_entries_but_string_form_only_the_package_name() {
+        // The map form: any entry resolves by name (the npx/pnpx seam).
+        let meta: Value = serde_json::json!({
+            "name": "npm",
+            "bin": { "npm": "bin/npm-cli.js", "npx": "bin/npx-cli.js" }
+        });
+        assert_eq!(
+            named_bin_subpath(&meta, "npx"),
+            Some(PathBuf::from("bin/npx-cli.js"))
+        );
+        assert_eq!(
+            named_bin_subpath(&meta, "corepack"),
+            None,
+            "an entry the package doesn't declare is a miss, not a guess"
+        );
+
+        // The string form declares a single bin named for the PACKAGE — it
+        // satisfies only that name.
+        let meta: Value = serde_json::json!({ "name": "yarn", "bin": "bin/yarn.js" });
+        assert_eq!(
+            named_bin_subpath(&meta, "yarn"),
+            Some(PathBuf::from("bin/yarn.js"))
+        );
+        assert_eq!(
+            named_bin_subpath(&meta, "yarnpkg"),
+            None,
+            "a string-form bin must not satisfy a sibling entry name"
+        );
     }
 
     #[test]

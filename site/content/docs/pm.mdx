@@ -89,6 +89,33 @@ $ nub pm cache clear
 
 Versions live at `~/.cache/nub/pm/<pm>/<version>`. An exact pin that's already cached runs fully offline — the registry is only contacted to resolve ranges and fetch missing versions.
 
+## `nub pm shim`
+
+Make **bare** `npm` / `pnpm` / `yarn` commands (plus `npx`, `pnpx`, `yarnpkg`) use the project's pinned package manager — typed from muscle memory, or spawned by tools you don't control. This is what `corepack enable` does, without the corepack tax: each shim *is* the nub binary (a hardlink), so deciding which PM to run costs zero Node boots.
+
+```sh
+$ nub pm shim
+created 7 shims in ~/.nub/shims
+added PATH entry to ~/.zshrc — restart your shell or: source ~/.zshrc
+```
+
+With shims active, a bare command resolves against the project it runs in:
+
+- **Pinned, matching name** — runs the pinned version, provisioning it on first use. A cached pin runs fully offline.
+- **Pinned, different name** — refuses. `npm install` in a pnpm project would write a competing `package-lock.json`; the error names the pinned manager and the command to paste. (`npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs are exempt — `npm create vite` works anywhere.)
+- **Unpinned** — falls through to the package manager already on your `PATH`, exactly as if the shim weren't there. If there is none, nub provisions a sensible default (matched to your lockfile's format, else latest) and says so.
+
+The shim never writes to your `package.json`. Re-run `nub pm shim` after upgrading nub to refresh the links.
+
+## `nub pm unshim`
+
+Remove the shims and the `PATH` entry. Works even after the nub binary itself has been uninstalled — the shim directory carries its own copy for exactly this cleanup.
+
+```sh
+$ nub pm unshim
+removed ~/.nub/shims · PATH entry stripped from ~/.zshrc
+```
+
 ## Yarn Berry
 
 Yarn 2+ ships as a release committed to your repo (`.yarnrc.yml` `yarnPath`) — nub runs that file directly. Nub doesn't provision Berry: a `yarn@2+` pin without a committed release is an error. Yarn classic (1.x) provisions like any other package manager.

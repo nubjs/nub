@@ -14,6 +14,7 @@ pub mod lockfile_version;
 pub mod provision;
 pub mod registry;
 pub mod resolve;
+pub mod shim;
 
 use std::fmt;
 

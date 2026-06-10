@@ -172,6 +172,10 @@ pub enum Argv0 {
     Nubx,
     /// Invoked as `node` via the PATH shim — augmented top-level execution.
     Node,
+    /// Invoked as `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` via a
+    /// `~/.nub/shims` hardlink (`nub pm shim`) — the PM-shim dispatch
+    /// ([`run_pm_shim`]). Spec: wiki/research/package-manager-shims.md.
+    PmShim(nub_core::pm::shim::ShimName),
 }
 
 impl Argv0 {
@@ -186,7 +190,12 @@ impl Argv0 {
         match basename.as_str() {
             "nubx" => Self::Nubx,
             "node" => Self::Node,
-            _ => Self::Nub,
+            // `file_stem` already stripped any `.exe`, so the same parse serves
+            // the Windows shim names.
+            other => match nub_core::pm::shim::ShimName::parse(other) {
+                Some(name) => Self::PmShim(name),
+                None => Self::Nub,
+            },
         }
     }
 }
@@ -501,7 +510,24 @@ pub fn run() -> Result<i32> {
     match argv0 {
         Argv0::Nubx => run_nubx(),
         Argv0::Node => run_as_node(),
-        Argv0::Nub => run_nub(),
+        Argv0::PmShim(name) => {
+            // The PM owns its argv — no nub flag parsing, everything after
+            // argv[0] is handed through verbatim.
+            let args: Vec<String> = env::args().skip(1).collect();
+            run_pm_shim(name, &args)
+        }
+        Argv0::Nub => {
+            // Running from the shim dir's own `nub` hardlink (it's first on
+            // PATH once shims are installed): defer to the real binary so an
+            // upgraded nub takes effect — the hardlink pins the OLD bytes, and
+            // without this even `nub pm shim` (the re-link) would run stale.
+            // Post-uninstall there's no other nub → fall through and run self.
+            if let Some(real) = nub_core::pm::shim::nub_passthrough_target() {
+                let args: Vec<String> = env::args().skip(1).collect();
+                return exec_program(&real, &args);
+            }
+            run_nub()
+        }
     }
 }
 
@@ -2962,7 +2988,15 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                 .arg("-c")
                 .arg(&cmd)
                 .status()?;
-            Ok(nub_core::node::spawn::exit_code_from_status(&status))
+            let code = nub_core::node::spawn::exit_code_from_status(&status);
+            // npm wrote a NEW inode; existing shim hardlinks still carry the
+            // old bytes until `nub pm shim` re-links them.
+            if code == 0 {
+                if let Some(msg) = shim_relink_reminder() {
+                    eprintln!("{msg}");
+                }
+            }
+            Ok(code)
         }
         UpgradeChannel::Homebrew => {
             println!("nub upgrade: running `brew upgrade nub`");
@@ -2970,10 +3004,19 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                 .arg("upgrade")
                 .arg("nub")
                 .status()?;
-            Ok(nub_core::node::spawn::exit_code_from_status(&status))
+            let code = nub_core::node::spawn::exit_code_from_status(&status);
+            if code == 0 {
+                if let Some(msg) = shim_relink_reminder() {
+                    eprintln!("{msg}");
+                }
+            }
+            Ok(code)
         }
         UpgradeChannel::SelfOwned { install_dir } => {
             perform_selfowned_upgrade(&install_dir, target)?;
+            // nub owns the swapped-in binary's path — re-link the shims to the
+            // new inode in place (the post-upgrade re-link story).
+            relink_shims_after_selfowned(&install_dir);
             Ok(0)
         }
         UpgradeChannel::Unknown => {
@@ -3399,7 +3442,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20                       writes packageManager + devEngines.packageManager)\n\
              \x20 switch <pm>[@<spec>]  switch the project to a different package manager (default: latest)\n\
              \x20 update                re-resolve within the pinned range and bump the pin (alias: up)\n\
-             \x20 cache [clear]         list cached package managers (or clear the cache)"
+             \x20 cache [clear]         list cached package managers (or clear the cache)\n\
+             \x20 shim                  link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
+             \x20 unshim                remove the shims and their PATH block"
         );
         return Ok(0);
     }
@@ -3548,7 +3593,12 @@ fn run_pm(args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        _ => bail!("nub pm takes a subcommand (which, pin, switch, update (up), cache)."),
+        // Install / remove the PM shims (spec: wiki/research/package-manager-shims.md).
+        "shim" => run_pm_shim_install(),
+        "unshim" => run_pm_unshim(),
+        _ => bail!(
+            "nub pm takes a subcommand (which, pin, switch, update (up), cache, shim, unshim)."
+        ),
     }
 }
 
@@ -3778,6 +3828,457 @@ fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+// ── PM shims (`nub pm shim` / `unshim` + the argv0 dispatch) ──────────
+//
+// Spec: wiki/research/package-manager-shims.md (mechanism + strict-by-default
+// agreement check, ratified 2026-06-09). The library core — shim dir, profile
+// block, decision matrix, PATH scan — lives in `nub_core::pm::shim`; this
+// section owns argv handling, the messages, and the final exec.
+
+/// `nub pm shim`: hardlink the running nub under the six PM names (plus `nub`)
+/// in `~/.nub/shims`, write the marked PATH block into the shell profile
+/// (install.sh's mechanism), and verify reachability. Idempotent — re-running
+/// re-links, which is also how shims are refreshed after `nub upgrade`.
+fn run_pm_shim_install() -> Result<i32> {
+    use nub_core::pm::shim::{self, ProfileOutcome, ShimAction};
+
+    // Canonicalized, so a symlinked `nub` on PATH links the real bytes (the
+    // same posture as every other `current_nub_binary` call site).
+    let nub_binary = nub_core::node::spawn::current_nub_binary()?;
+    let dir = shim::shim_dir()?;
+    let report = shim::install_shims(&nub_binary)?;
+
+    let count = |action: ShimAction| report.iter().filter(|s| s.action == action).count();
+    let (created, relinked, current) = (
+        count(ShimAction::Created),
+        count(ShimAction::Relinked),
+        count(ShimAction::Current),
+    );
+    let mut parts = Vec::new();
+    if created > 0 {
+        parts.push(format!("{created} created"));
+    }
+    if relinked > 0 {
+        parts.push(format!("{relinked} re-linked"));
+    }
+    if current > 0 {
+        parts.push(format!("{current} already current"));
+    }
+    println!(
+        "nub pm shim: {} entries in {} ({})",
+        report.len(),
+        dir.display(),
+        parts.join(", ")
+    );
+    if report.iter().any(|s| s.copied) {
+        println!(
+            "  note: {} is on a different filesystem than the nub binary — \
+             copies were made instead of hardlinks",
+            dir.display()
+        );
+    }
+
+    // The PATH block. Windows profile/registry editing is out of scope for v0 —
+    // print the line to add instead (honest, not automated).
+    if cfg!(windows) {
+        println!(
+            "  PATH: add {} to your PATH (PATH editing isn't automated on Windows yet)",
+            dir.display()
+        );
+        return Ok(0);
+    }
+    match shim::add_path_block()? {
+        ProfileOutcome::Added(profile) => println!(
+            "  PATH: added {} to {} — open a new shell or run `source {}`",
+            dir.display(),
+            profile.display(),
+            profile.display()
+        ),
+        ProfileOutcome::AlreadyPresent(profile) => {
+            println!("  PATH: already present in {}", profile.display())
+        }
+        // No writable profile for this shell: print the line and exit 0 (the
+        // spec's manual fallback — the shims themselves are installed).
+        ProfileOutcome::Manual { line } => println!(
+            "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
+        ),
+    }
+
+    // Reachability (Volta's check_shim_reachable idea): meaningful only once
+    // the shim dir is on THIS process's PATH — right after a fresh install the
+    // block hasn't been sourced yet, and "nothing resolves" would be a false
+    // alarm the source hint above already covers.
+    if path_contains_dir(&dir) {
+        for r in shim::check_shims_reachable(&dir) {
+            if r.ok {
+                continue;
+            }
+            match &r.first_hit {
+                Some(hit) => eprintln!(
+                    "warning: {} resolves to {} which shadows the shim — move {} earlier \
+                     in PATH, or remove that binary",
+                    r.name,
+                    hit.display(),
+                    dir.display()
+                ),
+                None => eprintln!(
+                    "warning: {} resolves to nothing on PATH even though {} is on it — \
+                     is the shim dir readable?",
+                    r.name,
+                    dir.display()
+                ),
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// `nub pm unshim`: delete the shim dir and strip the marked PATH block from
+/// every known profile. Touches only profiles + the shim dir, so it keeps
+/// working after the official nub is uninstalled (the shim dir's own `nub`
+/// hardlink is what's running then). Idempotent.
+fn run_pm_unshim() -> Result<i32> {
+    use nub_core::pm::shim;
+
+    let dir = shim::shim_dir()?;
+    let existed = shim::remove_shims()?;
+    let changed = shim::remove_path_block()?;
+    if existed {
+        println!("nub pm unshim: removed {}", dir.display());
+    } else {
+        println!("nub pm unshim: {} was already gone", dir.display());
+    }
+    for profile in &changed {
+        println!("  PATH: removed the shims block from {}", profile.display());
+    }
+    if changed.is_empty() {
+        println!("  PATH: no profile carried the shims block");
+    }
+    Ok(0)
+}
+
+/// Whether `dir` is one of the current process's `PATH` entries (compared
+/// canonicalized, so a symlinked entry still counts).
+fn path_contains_dir(dir: &Path) -> bool {
+    let Ok(canon) = dir.canonicalize() else {
+        return false;
+    };
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|d| d.canonicalize().ok().as_deref() == Some(&canon))
+}
+
+/// The fully resolved plan for one shim invocation — the spawn-free seam (the
+/// `bin_launcher` pattern): [`shim_plan`] computes it, [`run_pm_shim`] acts on
+/// it, and tests assert the exact program + argv without exec'ing anything.
+#[derive(Debug, PartialEq, Eq)]
+enum ShimPlan {
+    /// Replace this process with `program args…` (Unix `exec`; spawn+wait
+    /// where exec doesn't exist).
+    Exec { program: PathBuf, args: Vec<String> },
+    /// The strict agreement check refused: print `message` on stderr, exit 1.
+    Refuse { message: String },
+}
+
+/// Entry point for an `npm`/`pnpm`/`yarn`/… argv0 invocation through the shim.
+fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result<i32> {
+    let cwd = env::current_dir()?;
+    match shim_plan(invoked, args, &cwd)? {
+        ShimPlan::Refuse { message } => {
+            eprintln!("{message}");
+            Ok(1)
+        }
+        ShimPlan::Exec { program, args } => exec_program(&program, &args),
+    }
+}
+
+/// Resolve the invocation to a [`ShimPlan`]: pin resolve at the workspace root
+/// (the same [`resolve_target`] the `nub pm` verbs use) → the pure decision
+/// core → provision / PATH-scan as the decision directs. May provision (network
+/// on a cold cache); never spawns.
+fn shim_plan(
+    invoked: nub_core::pm::shim::ShimName,
+    args: &[String],
+    cwd: &Path,
+) -> Result<ShimPlan> {
+    use nub_core::pm::Pm;
+    use nub_core::pm::resolve::{self, PmTarget};
+    use nub_core::pm::shim::{self, ShimDecision};
+
+    let target = resolve::resolve_target(cwd);
+    let pin_state = shim_pin_state(cwd, target.as_ref());
+
+    match shim::decide(invoked, &pin_state, args.first().map(String::as_str)) {
+        ShimDecision::Refuse {
+            pinned_pm,
+            provenance,
+        } => Ok(ShimPlan::Refuse {
+            message: shim_refusal_message(invoked, pinned_pm, provenance, args),
+        }),
+        // A Berry pin never provisions: exec the committed `yarnPath` release
+        // under the project's Node, or surface the no-release error.
+        ShimDecision::RunPinned {
+            pm: Pm::YarnBerry, ..
+        } => {
+            let Some(PmTarget::YarnPath(release)) = target else {
+                bail!(berry_no_yarn_path_msg());
+            };
+            exec_under_project_node(cwd, release, args)
+        }
+        ShimDecision::RunPinned { bin_entry, .. } => {
+            let Some(PmTarget::Provision(mut pin)) = target else {
+                unreachable!("RunPinned with a provisionable pm implies a Provision target")
+            };
+            // A name-only pin (devEngines.packageManager without a version)
+            // constrains the NAME, not the version — prefer the user's own
+            // matching PM on PATH: zero network (a spec like "latest" or a
+            // lockfile family re-resolves against the registry on EVERY
+            // invocation) and no run-to-run drift as new versions publish.
+            // Provision the lockfile-implied family / registry latest only on
+            // a true PATH miss.
+            if pin.version.is_none() {
+                let shim_dir = shim::shim_dir()?;
+                if let Some(system) = shim::find_system_pm(invoked.as_str(), &shim_dir) {
+                    return Ok(ShimPlan::Exec {
+                        program: system,
+                        args: args.to_vec(),
+                    });
+                }
+                pin.version = Some(
+                    lockfile_family_spec(pin.pm, &shim_lockfile_root(cwd))
+                        .unwrap_or_else(|| "latest".to_string()),
+                );
+            }
+            // Cache-first: an exact pin already in the store is zero-network.
+            let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?)?;
+            let bin = shim::sibling_bin(&prov.bin, bin_entry)?;
+            exec_under_project_node(cwd, bin, args)
+        }
+        ShimDecision::FallThrough { invoked } => {
+            // The recursion guard: the next real <invoked> on PATH, skipping
+            // the shim dir itself.
+            let shim_dir = shim::shim_dir()?;
+            if let Some(system) = shim::find_system_pm(invoked.as_str(), &shim_dir) {
+                return Ok(ShimPlan::Exec {
+                    program: system,
+                    args: args.to_vec(),
+                });
+            }
+            // True PATH miss: provision a dynamic default of the INVOKED PM —
+            // announced, never a baked version, and the shim never writes a pin.
+            let root = shim_lockfile_root(cwd);
+            let (spec, why) = dynamic_default_spec(invoked.pm(), &root)?;
+            eprintln!(
+                "nub: no {} on PATH — provisioning {}@{spec} ({why}); one-time default, no pin written",
+                invoked.as_str(),
+                invoked.pm()
+            );
+            let pin = resolve::PmPin {
+                pm: invoked.pm(),
+                version: Some(spec),
+            };
+            let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?)?;
+            let bin = shim::sibling_bin(&prov.bin, invoked.bin_entry())?;
+            exec_under_project_node(cwd, bin, args)
+        }
+    }
+}
+
+/// Derive the decision core's [`PinState`] from the resolved [`PmTarget`].
+/// `resolve_target` doesn't report WHICH field carried the pin, so provenance
+/// is derived here: a committed `yarnPath` short-circuit is `YarnPath`; for the
+/// field-borne pins, `packageManager` presence at the workspace-root manifest
+/// wins over `devEngines` (mirroring `resolve_pin`'s precedence).
+fn shim_pin_state(
+    cwd: &Path,
+    target: Option<&nub_core::pm::resolve::PmTarget>,
+) -> nub_core::pm::shim::PinState {
+    use nub_core::pm::Pm;
+    use nub_core::pm::resolve::PmTarget;
+    use nub_core::pm::shim::{PinProvenance, PinState};
+
+    match target {
+        None => PinState::Unpinned,
+        Some(PmTarget::YarnPath(_)) => PinState::Pinned {
+            pm: Pm::YarnBerry,
+            provenance: PinProvenance::YarnPath,
+        },
+        Some(PmTarget::Provision(pin)) => PinState::Pinned {
+            pm: pin.pm,
+            provenance: field_pin_provenance(cwd),
+        },
+        // Berry pinned by field, no committed release: still a yarn pin at the
+        // name level (npm/pnpm refuse; invoked yarn surfaces the no-release
+        // error from the RunPinned arm).
+        Some(PmTarget::BerryNoYarnPath) => PinState::Pinned {
+            pm: Pm::YarnBerry,
+            provenance: field_pin_provenance(cwd),
+        },
+    }
+}
+
+/// Which manifest field carries the pin: `packageManager` if present at the
+/// workspace root (it wins in `resolve_pin`), else `devEngines.packageManager`.
+/// Only called when a field-borne pin resolved, so the binary split is total.
+fn field_pin_provenance(cwd: &Path) -> nub_core::pm::shim::PinProvenance {
+    use nub_core::pm::shim::PinProvenance;
+    let has_package_manager_field = nub_core::workspace::detect::detect_project(cwd)
+        .and_then(|project| {
+            let manifest: serde_json::Value = match &project.workspace_root {
+                Some(ws) if *ws != project.root => {
+                    serde_json::from_str(&std::fs::read_to_string(ws.join("package.json")).ok()?)
+                        .ok()?
+                }
+                _ => project.manifest,
+            };
+            Some(manifest.get("packageManager").is_some())
+        })
+        .unwrap_or(false);
+    if has_package_manager_field {
+        PinProvenance::PackageManagerField
+    } else {
+        PinProvenance::DevEngines
+    }
+}
+
+/// The strict refusal (decision 1): name the pinned PM, its provenance, the
+/// command to paste, and the escapes. Exit code is the caller's (1).
+fn shim_refusal_message(
+    invoked: nub_core::pm::shim::ShimName,
+    pinned: nub_core::pm::Pm,
+    provenance: nub_core::pm::shim::PinProvenance,
+    args: &[String],
+) -> String {
+    let invoked = invoked.as_str();
+    let paste = if args.is_empty() {
+        pinned.to_string()
+    } else {
+        format!("{pinned} {}", args.join(" "))
+    };
+    format!(
+        "nub: this project pins {pinned} (via {provenance}) — refusing to run {invoked}.\n\
+         A different package manager here would write a competing lockfile and node_modules.\n\
+         \n\
+         \x20 run instead:  {paste}\n\
+         \x20 to bypass:    invoke the system {invoked} by absolute path, or remove the shims: nub pm unshim"
+    )
+}
+
+/// The dir whose lockfile governs inference: the workspace root when one
+/// exists, else the nearest project root, else `cwd` itself.
+fn shim_lockfile_root(cwd: &Path) -> PathBuf {
+    match nub_core::workspace::detect::detect_project(cwd) {
+        Some(p) => p.workspace_root.clone().unwrap_or(p.root),
+        None => cwd.to_path_buf(),
+    }
+}
+
+/// The lockfile-implied version family of `pm` itself, when the committed
+/// lockfile belongs to that PM (`lockfile_version::infer`); `None` otherwise.
+/// Name-level comparison (Display collapses classic/Berry yarn).
+fn lockfile_family_spec(pm: nub_core::pm::Pm, root: &Path) -> Option<String> {
+    use nub_core::pm::lockfile_version::{LockfileHint, infer};
+    match infer(root) {
+        Some(LockfileHint::Pm(hint)) if hint.pm.to_string() == pm.to_string() => Some(hint.range),
+        _ => None,
+    }
+}
+
+/// The dynamic-default spec for a PATH miss (decision 3): the lockfile-implied
+/// family of the invoked PM, else the registry `latest`; a bun lockfile errors
+/// naming bun (nub never provisions bun). Returns `(spec, why)` — `why` feeds
+/// the stderr announcement.
+fn dynamic_default_spec(pm: nub_core::pm::Pm, root: &Path) -> Result<(String, String)> {
+    use nub_core::pm::lockfile_version::{LockfileHint, infer};
+    Ok(match infer(root) {
+        Some(LockfileHint::Bun) => bail!(
+            "this project has a bun lockfile (bun.lock / bun.lockb) — nub never provisions bun. \
+             Install bun yourself, or remove the bun lockfile to use {pm}."
+        ),
+        Some(LockfileHint::Pm(hint)) if hint.pm.to_string() == pm.to_string() => {
+            let why = format!("the committed lockfile implies {} {}", hint.pm, hint.range);
+            (hint.range, why)
+        }
+        Some(LockfileHint::Pm(hint)) => (
+            "latest".to_string(),
+            format!(
+                "the committed lockfile belongs to {}; using the registry latest",
+                hint.pm
+            ),
+        ),
+        None => (
+            "latest".to_string(),
+            "no lockfile to infer a version from; using the registry latest".to_string(),
+        ),
+    })
+}
+
+/// Exec plan for a node-runnable PM entry (`<pm-bin>.cjs`, a committed Berry
+/// release): `node <bin> <args…>` under the PROJECT's resolved/provisioned
+/// Node (`discover_or_provision_node` — never the shell's `node`).
+fn exec_under_project_node(cwd: &Path, bin: PathBuf, args: &[String]) -> Result<ShimPlan> {
+    let node = nub_core::node::discovery::discover_or_provision_node(cwd)?;
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(bin.to_string_lossy().into_owned());
+    argv.extend(args.iter().cloned());
+    Ok(ShimPlan::Exec {
+        program: node.path.into_std_path_buf(),
+        args: argv,
+    })
+}
+
+/// The final act: replace this process's image (Unix `exec` — one process, the
+/// PM owns the terminal/signals). Returns only on failure.
+#[cfg(unix)]
+fn exec_program(program: &Path, args: &[String]) -> Result<i32> {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(program).args(args).exec();
+    Err(anyhow::Error::new(err).context(format!("could not exec {}", program.display())))
+}
+
+/// No `exec` on Windows: spawn + wait, forwarding the exit code. Honest
+/// cfg-gated code — runtime-unverified until the Windows CI leg.
+#[cfg(not(unix))]
+fn exec_program(program: &Path, args: &[String]) -> Result<i32> {
+    let status = std::process::Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("could not run {}", program.display()))?;
+    Ok(nub_core::node::spawn::exit_code_from_status(&status))
+}
+
+/// After a successful upgrade through a channel nub doesn't own (npm /
+/// homebrew), existing shims still hardlink the PRE-upgrade inode — remind the
+/// user to re-link. `None` when no shim dir exists (nothing to remind about).
+fn shim_relink_reminder() -> Option<String> {
+    let dir = nub_core::pm::shim::shim_dir().ok()?;
+    dir.is_dir().then(|| {
+        format!(
+            "note: the PM shims in {} still run the previous nub until re-linked — run `nub pm shim`.",
+            dir.display()
+        )
+    })
+}
+
+/// The self-owned channel owns the new binary's path, so re-link in place
+/// right after the swap (best-effort: a failure downgrades to the reminder).
+fn relink_shims_after_selfowned(install_dir: &Path) {
+    let Ok(dir) = nub_core::pm::shim::shim_dir() else {
+        return;
+    };
+    if !dir.is_dir() {
+        return;
+    }
+    let new_bin = install_dir.join("bin").join("nub");
+    match nub_core::pm::shim::install_shims(&new_bin) {
+        Ok(_) => println!("nub upgrade: re-linked the PM shims in {}", dir.display()),
+        Err(e) => {
+            eprintln!("nub upgrade: could not re-link the PM shims: {e:#} — run `nub pm shim`.")
+        }
+    }
 }
 
 /// Human description of WHERE the resolved Node version requirement came from:
@@ -4585,6 +5086,136 @@ mod tests {
             }
             other => panic!("expected YarnPath, got {other:?}"),
         }
+    }
+
+    // ── PM shim: plan / provenance / dynamic default ─────────────────────
+
+    #[test]
+    fn shim_plan_refuses_a_mismatched_pm_naming_pin_provenance_and_paste() {
+        use nub_core::pm::shim::ShimName;
+
+        // packageManager-pinned pnpm project: bare `npm install react` refuses
+        // before any network (the dead registry would yield a fetch error, not
+        // a Refuse plan), naming the pin, the field, the paste, and the escape.
+        let dir = offline_project("shim-refuse", r#"{"packageManager":"pnpm@9.1.0"}"#);
+        let args = vec!["install".to_string(), "react".to_string()];
+        match shim_plan(ShimName::Npm, &args, &dir).unwrap() {
+            ShimPlan::Refuse { message } => {
+                for needle in [
+                    "pnpm",
+                    "package.json#packageManager",
+                    "pnpm install react",
+                    "nub pm unshim",
+                ] {
+                    assert!(
+                        message.contains(needle),
+                        "refusal must contain {needle:?}, got:\n{message}"
+                    );
+                }
+            }
+            other => panic!("a mismatched npm must refuse, got {other:?}"),
+        }
+
+        // A committed-yarnPath project refuses invoked pnpm naming the yarnrc
+        // provenance (decision 2: yarnPath projects, wrong name → refuse).
+        let (dir, _release) = yarn_path_fixture("shim-refuse-yarnpath");
+        match shim_plan(ShimName::Pnpm, &["install".to_string()], &dir).unwrap() {
+            ShimPlan::Refuse { message } => assert!(
+                message.contains("yarn") && message.contains(".yarnrc.yml#yarnPath"),
+                "the yarnPath refusal must name yarn + the yarnrc provenance, got:\n{message}"
+            ),
+            other => panic!("pnpm in a yarnPath project must refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shim_pin_state_reports_the_field_that_carried_the_pin() {
+        use nub_core::pm::Pm;
+        use nub_core::pm::resolve::resolve_target;
+        use nub_core::pm::shim::{PinProvenance, PinState};
+
+        let state = |dir: &Path| shim_pin_state(dir, resolve_target(dir).as_ref());
+
+        let dir = pm_tmpdir("pinstate-field");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"packageManager":"pnpm@9.1.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            state(&dir),
+            PinState::Pinned {
+                pm: Pm::Pnpm,
+                provenance: PinProvenance::PackageManagerField
+            }
+        );
+
+        let dir = pm_tmpdir("pinstate-dev");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"packageManager":{"name":"pnpm","version":"9.1.0"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            state(&dir),
+            PinState::Pinned {
+                pm: Pm::Pnpm,
+                provenance: PinProvenance::DevEngines
+            }
+        );
+
+        let (dir, _release) = yarn_path_fixture("pinstate-yarnpath");
+        assert_eq!(
+            state(&dir),
+            PinState::Pinned {
+                pm: Pm::YarnBerry,
+                provenance: PinProvenance::YarnPath
+            },
+            "a committed yarnPath is a Berry pin with yarnrc provenance"
+        );
+
+        let dir = pm_tmpdir("pinstate-none");
+        std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        assert_eq!(state(&dir), PinState::Unpinned);
+    }
+
+    #[test]
+    fn dynamic_default_spec_follows_the_lockfile_and_errors_on_bun() {
+        use nub_core::pm::Pm;
+
+        // Matching lockfile → the implied family (pnpm-lock 6.0 → pnpm 8).
+        let dir = pm_tmpdir("dyndef-pnpm");
+        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '6.0'\n").unwrap();
+        let (spec, why) = dynamic_default_spec(Pm::Pnpm, &dir).unwrap();
+        assert_eq!(spec, "8", "lockfileVersion 6.0 implies the pnpm 8 family");
+        assert!(
+            why.contains("pnpm 8"),
+            "the announcement names the family: {why}"
+        );
+
+        // A DIFFERENT PM's lockfile → the invoked PM's latest, never the
+        // lockfile owner's (decision 3).
+        let (spec, why) = dynamic_default_spec(Pm::Npm, &dir).unwrap();
+        assert_eq!(spec, "latest");
+        assert!(
+            why.contains("pnpm"),
+            "the why names whose lockfile it actually is: {why}"
+        );
+
+        // No lockfile at all → latest.
+        let bare = pm_tmpdir("dyndef-bare");
+        assert_eq!(dynamic_default_spec(Pm::Yarn, &bare).unwrap().0, "latest");
+
+        // A bun lockfile errors naming bun — nub never provisions bun.
+        let dir = pm_tmpdir("dyndef-bun");
+        std::fs::write(dir.join("bun.lockb"), b"\x00bun\x00").unwrap();
+        let err = dynamic_default_spec(Pm::Pnpm, &dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("bun") && err.contains("never provisions"),
+            "the bun lockfile error must name bun, got: {err}"
+        );
     }
 
     /// Read the written pair back out of a manifest: `(packageManager value,
