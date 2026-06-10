@@ -29,7 +29,7 @@ const PIECES: {
   title: string;
   blurb: ReactNode;
   replaces: string[];
-  lines: { cmd?: string; comment?: string; out?: string }[];
+  lines: { cmd?: string; comment?: string; out?: string; bright?: boolean }[];
 }[] = [
   {
     accent: 'ember',
@@ -115,10 +115,9 @@ const PIECES: {
     title: 'A package hypermanager',
     blurb: (
       <>
-        All package-management commands (<Mono>install</Mono>, <Mono>add</Mono>, <Mono>remove</Mono> …)
-        delegate to your project&rsquo;s configured package manager. It <em>auto-detects</em>{' '}
-        <Mono>package.json#packageManager</Mono> (or infers from an existing lockfile), installs it if
-        needed, and delegates to it. No Corepack required.
+        Not a new package manager — Nub runs the one your project already uses.{' '}
+        <Mono>nub install</Mono> detects npm, pnpm, or yarn from <Mono>package.json</Mono>, fetches the
+        right version if it&rsquo;s missing, and runs it. Same commands, no setup.
       </>
     ),
     replaces: ['corepack'],
