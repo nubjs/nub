@@ -823,6 +823,9 @@ mod tests {
             // The global store lands in nub's XDG data namespace (dev boxes
             // always resolve a home dir, so the entry is present here).
             let store = get(&defaults, "storeDir").expect("storeDir default");
+            // Normalize separators: on Windows the default resolves with
+            // `\` components (and a mixed `/` from the XDG-style fallback).
+            let store = store.replace('\\', "/");
             assert!(
                 store.ends_with("nub/store") && !store.contains("aube"),
                 "storeDir must live under nub's data namespace: {store}"
