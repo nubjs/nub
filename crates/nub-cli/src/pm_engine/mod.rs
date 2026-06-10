@@ -786,10 +786,42 @@ pub(crate) fn engine_brand_preflight() {
     // Lifecycle scripts (npm_config_user_agent) and registry requests
     // identify the running tool: `nub/<ver> …`.
     aube::set_user_agent_product(format!("nub/{}", env!("CARGO_PKG_VERSION")));
-    // Workspace yamls: `pnpm-workspace.yaml` only. An `aube-workspace.yaml`
-    // some other tool left on disk is neither read nor chosen as the
-    // fresh-write target (`approve-builds` writes its allowlist there).
-    aube::set_workspace_yaml_names(&["pnpm-workspace.yaml"]);
+    // Config surface follows role (two-mode model, Colin 2026-06-10): under
+    // NUB identity the pnpm surface is OFF — `pnpm-workspace.yaml` unread
+    // (empty yaml-name list) and the `package.json#pnpm.*` namespace swapped
+    // for the manifest ROOT (`""`), so top-level `workspaces` (+ catalogs),
+    // `overrides`, `patchedDependencies`, and the three-state `allowBuilds`
+    // map are the config homes (and `approve-builds` writes top-level). In
+    // compat mode (any other role, incl. fresh) nub plays the incumbent
+    // completely: `pnpm-workspace.yaml` + `pnpm.*` stay live exactly as
+    // before. The probe is engine-free (plain manifest/lockfile-presence
+    // reads) because these getters freeze before identity resolution runs.
+    let nub_identity = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| nub_identity_dir(&cwd));
+    if let Some(dir) = &nub_identity {
+        aube::set_workspace_yaml_names(&[]);
+        aube::set_manifest_config_namespaces(&[""]);
+        // A stray pnpm-workspace.yaml under nub identity (branch merge,
+        // tutorial copy-paste) is ignore-with-warning, never read and never
+        // silent: deterministic nub-pure behavior, one warning, remedies
+        // named (Colin 2026-06-10, supersedes read-with-warning).
+        if dir.join("pnpm-workspace.yaml").is_file() {
+            eprintln!(
+                "nub: pnpm-workspace.yaml is not read under nub identity — migrate it \
+                 (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`)."
+            );
+        }
+    } else {
+        // Workspace yamls: `pnpm-workspace.yaml` only. An `aube-workspace.yaml`
+        // some other tool left on disk is neither read nor chosen as the
+        // fresh-write target (`approve-builds` writes its allowlist there).
+        aube::set_workspace_yaml_names(&["pnpm-workspace.yaml"]);
+        // package.json config namespace: `pnpm` only — an `aube` object in a
+        // manifest is another tool's state; nub neither consults nor mutates
+        // it (`remove`'s sidecar pruning, `--allow-build`'s fallback writes).
+        aube::set_manifest_config_namespaces(&["pnpm"]);
+    }
     // The engine's canonical-lockfile slot carries nub's generic `lock.yaml`
     // (two-mode model: nub identity = lock.yaml, pnpm-v9 bytes, deliberately
     // unbranded name). An `aube-lock.yaml` left by another tool is invisible,
@@ -804,10 +836,6 @@ pub(crate) fn engine_brand_preflight() {
     // flow; nub has no import-style dual-lockfile state.)
     aube_lockfile::set_detection_self_names(&["nub"]);
     aube_lockfile::set_canonical_lockfile_always_wins(false);
-    // package.json config namespace: `pnpm` only — an `aube` object in a
-    // manifest is another tool's state; nub neither consults nor mutates
-    // it (`remove`'s sidecar pruning, `--allow-build`'s fallback writes).
-    aube::set_manifest_config_namespaces(&["pnpm"]);
     // `engines.aube` pins gate a tool nub's users aren't running; skip
     // them like the engine already skips `engines.pnpm`. `engines.node`
     // stays validated.
@@ -834,6 +862,50 @@ pub(crate) fn engine_brand_preflight() {
     if let Some(cache) = nub_core::node::discovery::cache_dir() {
         aube::set_cache_root(cache.join("pm"));
     }
+}
+
+/// Engine-free probe: is the project at `cwd` (walking up, same 16-level
+/// budget as identity resolution) under NUB identity? Drives the role-gated
+/// config surface in [`engine_brand_preflight`], which must decide BEFORE
+/// any engine code reads project state (the config getters freeze on first
+/// read — full identity resolution itself reads workspace config
+/// transitively, so it can't be the input here). Plain `package.json` and
+/// lockfile-presence reads only.
+///
+/// Per level: a declaration decides (`nub` → nub identity, anything else →
+/// compat); undeclared, a lone `lock.yaml` decides nub; any foreign lockfile
+/// decides compat (a `lock.yaml` BESIDE a foreign one is the ambiguity state
+/// — compat surface here, and resolution errors loudly right after).
+/// Nothing anywhere = fresh = compat surface (a pnpm-workspace.yaml with no
+/// lockfile is still a pnpm-shaped project; Axiom 4 gives fresh projects
+/// pnpm-format artifacts). Returns the deciding directory so the caller can
+/// warn about a stray yaml sitting next to it.
+fn nub_identity_dir(cwd: &Path) -> Option<PathBuf> {
+    const FOREIGN: &[&str] = &[
+        "pnpm-lock.yaml",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+    ];
+    let mut dir = cwd.to_path_buf();
+    for _ in 0..16 {
+        if let Some(decl) = aube_lockfile::declared_package_manager(&dir) {
+            return (decl.name == "nub").then_some(dir);
+        }
+        let nub_lock = dir.join(use_align::NUB_LOCKFILE).is_file();
+        let foreign = FOREIGN.iter().any(|f| dir.join(f).is_file());
+        match (nub_lock, foreign) {
+            (true, false) => return Some(dir),
+            (false, false) => {}
+            _ => return None,
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
 }
 
 /// Nub's replacement setting defaults, fed to the engine's embedder-defaults
@@ -1022,6 +1094,55 @@ mod tests {
     // covered behaviorally through the spawned binary instead:
     // `tests/info_engine.rs::aube_workspace_yaml_is_not_consulted` and the
     // engines.aube case in `tests/install_engine.rs`.
+
+    #[test]
+    fn nub_identity_probe_follows_declaration_then_lone_lock_yaml() {
+        let root = |files: &[(&str, &str)]| {
+            let dir = tempfile::tempdir().unwrap();
+            for (name, body) in files {
+                std::fs::write(dir.path().join(name), body).unwrap();
+            }
+            dir
+        };
+
+        // Declaration decides, both ways.
+        let d = root(&[("package.json", r#"{"packageManager":"nub@0.1.0"}"#)]);
+        assert!(nub_identity_dir(d.path()).is_some());
+        let d = root(&[
+            ("package.json", r#"{"packageManager":"pnpm@10.0.0"}"#),
+            ("lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+        assert!(
+            nub_identity_dir(d.path()).is_none(),
+            "a pnpm declaration beats a lock.yaml for the config surface"
+        );
+
+        // Undeclared: a lone lock.yaml is nub; beside a foreign lockfile it
+        // is the ambiguity state (compat surface, resolution errors loudly).
+        let d = root(&[
+            ("package.json", "{}"),
+            ("lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+        assert!(nub_identity_dir(d.path()).is_some());
+        let d = root(&[
+            ("package.json", "{}"),
+            ("lock.yaml", "lockfileVersion: '9.0'\n"),
+            ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+        assert!(nub_identity_dir(d.path()).is_none());
+
+        // Fresh (nothing anywhere within the walk) = compat surface; and the
+        // probe walks up from a member dir to the deciding root.
+        let d = root(&[("package.json", "{}")]);
+        assert!(nub_identity_dir(d.path()).is_none());
+        let d = root(&[
+            ("package.json", r#"{"packageManager":"nub@0.1.0"}"#),
+            ("lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+        let member = d.path().join("packages/a");
+        std::fs::create_dir_all(&member).unwrap();
+        assert_eq!(nub_identity_dir(&member).as_deref(), Some(d.path()));
+    }
 
     #[test]
     fn lifecycle_ua_is_role_first_in_compat_and_nub_first_otherwise() {
