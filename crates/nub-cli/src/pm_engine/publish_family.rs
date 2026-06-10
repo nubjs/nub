@@ -94,7 +94,10 @@ pub(super) fn parse_verb<P: clap::Parser>(bin: &str, args: &[String]) -> Parsed<
     match P::try_parse_from(argv) {
         Ok(parsed) => Parsed::Ok(parsed),
         Err(err) => {
-            let rendered = present::rewrite(&err.render().to_string());
+            // Help-grade rewrite: help/usage text describes nub's configured
+            // contract (workspace-yaml list, config namespaces, ...), not
+            // runtime facts -- same routing as the other families.
+            let rendered = present::rewrite_help(err.render().to_string());
             if matches!(
                 err.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion

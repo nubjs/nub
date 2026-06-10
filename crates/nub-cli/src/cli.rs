@@ -505,7 +505,7 @@ pub enum Command {
         #[arg(long, value_name = "MODE")]
         node_linker: Option<String>,
 
-        /// Run as if started in <DIR> (aube/pnpm spelling of `--cwd`).
+        /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
         #[arg(short = 'C', long = "dir", value_name = "DIR")]
         dir: Option<PathBuf>,
     },
@@ -521,7 +521,7 @@ pub enum Command {
         #[arg(long)]
         no_optional: bool,
 
-        /// Run as if started in <DIR> (aube/pnpm spelling of `--cwd`).
+        /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
         #[arg(short = 'C', long = "dir", value_name = "DIR")]
         dir: Option<PathBuf>,
     },

@@ -111,6 +111,31 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
             "`~/.cache/aube/virtual-store/`",
             "the global virtual-store cache",
         ),
+        // The engine's own config file (config --location docs); described
+        // structurally like the GVS path — the literal `.config/aube`
+        // location is engine state (re-homing it is an open fork item,
+        // same as cacheDir).
+        (
+            "(`~/.config/aube/config.toml` + `~/.npmrc`)",
+            "(the engine's user config + `~/.npmrc`)",
+        ),
+        (
+            "(`~/.config/aube/config.toml` for known aube settings",
+            "(the engine's user config for known engine settings",
+        ),
+        // `set --location` long help: upstream routes non-npm-shared keys
+        // to its own config.toml; nub's npmrc-first routing decision (the
+        // store_config_family module doc) writes them to the project
+        // `.npmrc` instead — the help must describe nub's contract.
+        (
+            "land in aube's own config (`~/.config/aube/config.toml` at user scope, \
+             `<cwd>/.config/aube/config.toml` at project scope) where sibling tools \
+             don't see them",
+            "are written to the project `.npmrc`, the same file install reads",
+        ),
+        // "Aube-only and pnpm-only settings" — prose, but the `-` welds
+        // the brand to the suffix so the word pass must preserve it.
+        ("Aube-only", "Engine-only"),
     ];
     let mut text = text.as_ref().to_string();
     for (from, to) in VOCAB {
