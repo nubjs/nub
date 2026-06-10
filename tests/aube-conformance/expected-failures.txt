@@ -4,4 +4,3 @@
 # is recorded by deleting the entry in the same commit as the fix.
 # All entries are fork-fixable lockfile-writer bugs (vendor/aube); scenarios
 # the ecosystem makes impossible are skip_reason() in run.sh instead.
-git-dep bun bun writer drops git-sourced packages entirely (bun.lock has the root spec but an empty packages map); bun fails InvalidPackageInfo / "Failed to resolve root prod dependency". Fork-side fix in the bun lockfile writer.
