@@ -1275,9 +1275,15 @@ mod tests {
             42
         });
         assert_eq!(value, 42);
-        assert_eq!(
-            present::rewrite(&captured),
-            "Run `nub install` to execute their scripts.\n"
+        // ends_with, not equality: fd 1 redirection is process-global, so the
+        // libtest harness's own progress lines ("test … ok") from parallel
+        // tests can land in the capture window ahead of our write. The
+        // contract under test — the raw write survives the capture and the
+        // rewrite reaches it — is fully pinned by the suffix.
+        let rewritten = present::rewrite(&captured);
+        assert!(
+            rewritten.ends_with("Run `nub install` to execute their scripts.\n"),
+            "captured+rewritten stream must end with the rewritten engine line, got: {rewritten:?}"
         );
     }
 }

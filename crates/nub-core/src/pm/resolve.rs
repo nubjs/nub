@@ -522,8 +522,9 @@ pub struct DeclaredPmWrite {
 ///   - when `maintain_dev_engines` is true (`nub pm use` — the
 ///     identity-setting verb), `devEngines.packageManager` is written
 ///     alongside — `{ "name": "<name>", "version": "^<exact>", "onFail":
-///     "warn" }`, replacing any prior value (object or array form) wholesale
-///     while `devEngines` siblings (`runtime`/`os`/`cpu`/`libc`) survive.
+///     "warn" }`, replacing the prior object-form value (array form is
+///     spliced — see below) while `devEngines` siblings
+///     (`runtime`/`os`/`cpu`/`libc`) survive.
 ///     Not duplication (the 2026-06-10 ruling that killed never-create):
 ///     devEngines is the range + policy npm/pnpm enforce natively (no
 ///     corepack needed; survives corepack death), `packageManager` the exact
@@ -538,10 +539,14 @@ pub struct DeclaredPmWrite {
 ///     their stated intent.
 ///
 /// `name` is a string (not [`Pm`]) because `use bun` declares a manager nub
-/// doesn't provision. All other manifest content survives; indentation, line
-/// endings, and the trailing newline are reproduced (see [`edit_manifest`]).
-/// Errors if no `package.json` exists at the target dir — Nub never creates
-/// one (no silent scaffolding).
+/// doesn't provision. Existing `devEngines` siblings (`os`/`cpu`/`libc`/
+/// `runtime`) and all other manifest content survive; an ARRAY-form
+/// `devEngines.packageManager` is spliced (the entry naming this PM replaced
+/// in place, else appended), never clobbered wholesale — the spec allows the
+/// array and the user's other declared managers are their data, not ours.
+/// Indentation, line endings, and the trailing newline are reproduced (see
+/// [`edit_manifest`]). Errors if no `package.json` exists at the target dir —
+/// Nub never creates one (no silent scaffolding).
 pub fn write_declared_pm(
     name: &str,
     version: &str,
@@ -566,15 +571,34 @@ pub fn write_declared_pm(
             "packageManager".to_string(),
             serde_json::Value::String(format!("{name}@{version}+sha512.{sha512_hex}")),
         );
-        if let Some(range) = &range {
-            let dev = obj
-                .entry("devEngines")
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-            if let Some(dev) = dev.as_object_mut() {
-                dev.insert(
-                    "packageManager".to_string(),
-                    serde_json::json!({ "name": name, "version": range, "onFail": "warn" }),
-                );
+        let Some(range) = &range else { return };
+        let entry = serde_json::json!({ "name": name, "version": range, "onFail": "warn" });
+        let dev = obj
+            .entry("devEngines".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !dev.is_object() {
+            // A malformed (non-object) devEngines can't carry the pin; replace it.
+            *dev = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let dev = dev
+            .as_object_mut()
+            .expect("devEngines is an object per the guard above");
+        match dev.get_mut("packageManager") {
+            // The spec's ARRAY form: splice the entry naming this PM in place
+            // (its array position and the other declared managers survive), else
+            // append — never clobber a user's multi-manager declaration with the
+            // object form.
+            Some(serde_json::Value::Array(items)) => {
+                match items
+                    .iter_mut()
+                    .find(|e| e.get("name").and_then(|n| n.as_str()) == Some(name))
+                {
+                    Some(slot) => *slot = entry,
+                    None => items.push(entry),
+                }
+            }
+            _ => {
+                dev.insert("packageManager".to_string(), entry);
             }
         }
     })?;
@@ -582,6 +606,18 @@ pub fn write_declared_pm(
         path,
         dev_engines_range: range,
     })
+}
+
+/// Whether a `devEngines.packageManager.version` is exactly the shape nub
+/// itself writes — `^<exact>` (a caret over a full semver, e.g. `^9.1.0`,
+/// [`write_declared_pm`]'s form). Anything else (`>=9 <10`, `~9.2`, even a
+/// partial `^9`) is a hand-written range: `nub pm update` re-derives a
+/// nub-shaped range from the new exact but preserves a hand-written one
+/// verbatim (`maintain_dev_engines = false`).
+pub fn nub_shaped_range(range: &str) -> bool {
+    range
+        .strip_prefix('^')
+        .is_some_and(|v| semver::Version::parse(v).is_ok())
 }
 
 /// Detected surface formatting of a manifest: the per-level indent unit (taken
@@ -859,12 +895,22 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A unique temp dir under the system temp root (NOT under $HOME, so the
-    /// detect walk-up can't escape into a stray ancestor package.json). Mirrors
-    /// `manage.rs`'s `tmpdir`.
+    /// detect walk-up can't escape into a stray ancestor package.json). The
+    /// startup-nanos component keeps names unique ACROSS suite runs: stale
+    /// dirs accumulate, PIDs recycle, and a recycled-PID run re-entering a
+    /// stale sibling inherits its old files (a stale `.yarnrc.yml` flips a
+    /// pin test's resolution) — see tests/pm_shim.rs `tmp` for the post-mortem.
     fn tmpdir(tag: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
+        static STARTED_NANOS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+        let nanos = STARTED_NANOS.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        });
         let dir = std::env::temp_dir().join(format!(
-            "nub-pm-{tag}-{}-{}",
+            "nub-pm-{tag}-{}-{nanos:x}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1035,6 +1081,50 @@ mod tests {
             !empty.join("package.json").exists(),
             "write_declared_pm must not scaffold a package.json"
         );
+    }
+
+    #[test]
+    fn keeping_dev_engines_preserves_a_hand_written_range_while_the_record_bumps() {
+        // The pair semantics under `nub pm update`: devEngines is the user's
+        // INTENT, packageManager the resolved record. A hand-written range
+        // (">=9 <10" — not nub's ^x.y.z shape) plus its sibling keys must
+        // survive verbatim while packageManager gets the fresh exact + hash.
+        let dir = tmpdir("keep-range");
+        write_pkg(
+            &dir,
+            r#"{"packageManager":"pnpm@9.1.0+sha512.old","devEngines":{"packageManager":{"name":"pnpm","version":">=9 <10","onFail":"error"}}}"#,
+        );
+        write_declared_pm("pnpm", "9.15.0", "new", &dir, false).unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest["packageManager"].as_str(),
+            Some("pnpm@9.15.0+sha512.new"),
+            "the resolved record always advances"
+        );
+        let dev = &manifest["devEngines"]["packageManager"];
+        assert_eq!(
+            dev["version"].as_str(),
+            Some(">=9 <10"),
+            "the hand-written range is the user's intent and stays verbatim"
+        );
+        assert_eq!(
+            dev["onFail"].as_str(),
+            Some("error"),
+            "sibling keys of the kept entry survive too — the entry is untouched"
+        );
+
+        // The shape gate the caller keys on: only nub's own ^<exact> is
+        // rewritable; everything else is hand-written.
+        assert!(nub_shaped_range("^9.1.0"));
+        for hand_written in [">=9 <10", "~9.2", "^9", "9.x", "*"] {
+            assert!(
+                !nub_shaped_range(hand_written),
+                "{hand_written:?} must read as hand-written"
+            );
+        }
     }
 
     #[test]
@@ -1566,12 +1656,13 @@ mod tests {
     }
 
     #[test]
-    fn write_declared_pm_replaces_the_array_form_wholesale() {
-        // The devEngines spec allows the array form ("any of these"). `use`
-        // sets ONE identity, so the maintained write replaces the whole value
-        // with the single governing object — keeping a multi-tool array
-        // alongside an exact packageManager pin would preserve exactly the
-        // split-brain state `use` exists to clear.
+    fn write_declared_pm_splices_the_array_form_in_place() {
+        // The devEngines spec allows the array form ("any of these"). The
+        // maintained write splices: the entry naming this PM is replaced in
+        // place (appended when absent) and the user's OTHER declared managers
+        // survive — they're the user's data, not ours. No split-brain risk:
+        // identity resolution is declared-first off `packageManager`, which
+        // this write always sets to the one governing pin.
         let dir = tmpdir("pair-array");
         write_pkg(
             &dir,
@@ -1583,8 +1674,27 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&write.path).unwrap()).unwrap();
         assert_eq!(
             m["devEngines"]["packageManager"],
-            serde_json::json!({"name": "pnpm", "version": "^9.1.0", "onFail": "warn"}),
-            "the array form is replaced wholesale by the single identity entry"
+            serde_json::json!([
+                {"name": "bun", "onFail": "ignore"},
+                {"name": "npm", "version": "10.0.0"},
+                {"name": "pnpm", "version": "^9.1.0", "onFail": "warn"}
+            ]),
+            "absent from the array → appended; the other declared managers survive"
+        );
+        // Re-running with a new version splices the existing pnpm entry in
+        // place rather than appending a duplicate.
+        write_declared_pm("pnpm", "9.2.0", "def", &dir, true).unwrap();
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&write.path).unwrap()).unwrap();
+        assert_eq!(
+            m["devEngines"]["packageManager"][2],
+            serde_json::json!({"name": "pnpm", "version": "^9.2.0", "onFail": "warn"}),
+            "present in the array → replaced in place, position kept"
+        );
+        assert_eq!(
+            m["devEngines"]["packageManager"].as_array().map(Vec::len),
+            Some(3),
+            "no duplicate entry on re-run"
         );
     }
 

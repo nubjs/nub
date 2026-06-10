@@ -12,7 +12,7 @@ exclude = ["vendor/aube"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.30"
+version = "0.0.31"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"

@@ -275,7 +275,10 @@ fn verb_absent_on(pinned: Pm, verb: &str) -> bool {
 /// What the refusal should tell the user to run instead. The redirect must never
 /// invent a verb the pinned PM lacks (the bug: a blind `<pm> <args…>` swap that
 /// suggested `pnpm ci`). The rule:
-///   - empty argv → just the bare PM name (`pnpm`);
+///   - empty argv, or a first token that is a flag, not a verb (`npm --version`)
+///     → `None`: there is no command to honestly redirect, and echoing argv back
+///     produced nonsense advice ("run instead: pnpm --version") for a read-only
+///     invocation — the caller drops its "run instead" line entirely;
 ///   - a first verb the pinned PM also implements → the project PM with the SAME
 ///     verb and its remaining args (`pnpm install react`);
 ///   - a first verb the pinned PM does NOT implement → just `use <pinned-pm>`,
@@ -283,16 +286,14 @@ fn verb_absent_on(pinned: Pm, verb: &str) -> bool {
 ///
 /// Returns the redirect TEXT (without the surrounding message framing) so the
 /// CLI owns the prose and this stays a pure, unit-testable decision.
-pub fn safe_redirect(pinned: Pm, args: &[String]) -> String {
-    let Some(verb) = args.first() else {
-        return pinned.to_string();
-    };
-    if verb_absent_on(pinned, verb) {
+pub fn safe_redirect(pinned: Pm, args: &[String]) -> Option<String> {
+    let verb = args.first().filter(|a| !a.starts_with('-'))?;
+    Some(if verb_absent_on(pinned, verb) {
         // No honest same-verb suggestion exists — don't fabricate one.
         format!("use {pinned}")
     } else {
         format!("{pinned} {}", args.join(" "))
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -440,8 +441,10 @@ pub fn install_shims(nub_binary: &Path) -> Result<Vec<InstalledShim>> {
 /// re-linking is a rare explicit action, and a rename-based swap would need a
 /// staging link with its own failure modes — documented risk over doubled
 /// complexity. The same-inode check skips the window entirely when the entry
-/// is already current. On Windows, replacing a RUNNING shim `.exe` fails (the
-/// OS locks executing images) — unverified here, for the future CI leg.
+/// is already current. The Windows naming/dispatch of this body runs on the
+/// windows-latest CI leg (nub-cli's `pm_shim_windows.rs`); what that leg does
+/// NOT cover: replacing a RUNNING shim `.exe` fails (the OS locks executing
+/// images) — still unverified, no test swaps a live image.
 pub fn install_shims_into(dir: &Path, nub_binary: &Path) -> Result<Vec<InstalledShim>> {
     // Serialize concurrent writers (a re-link racing a `pnpm -r` shim storm) on
     // a best-effort advisory lock — see [`ShimLock`]. Held until this returns.
@@ -547,6 +550,61 @@ fn same_file(a: &Path, b: &Path) -> bool {
             _ => false,
         }
     }
+}
+
+/// Whether `dir` sits on a filesystem mounted `noexec` — there the shims
+/// install cleanly (linking is allowed) and then EVERY invocation dies with a
+/// bare "Permission denied" (the kernel refuses the exec). The CLI probes this
+/// once after [`install_shims`] and warns naming the dir and the fix, instead
+/// of letting every later `pnpm`/`npm` call fail cryptically.
+///
+/// Mechanism: the filesystem-stat mount-flag word — cheap (one syscall) and
+/// direct, where the plausible alternatives both fail: access(2)/`X_OK` PASSES
+/// on a noexec mount (it checks permission bits, not mount flags), and actually
+/// exec'ing a probe binary costs a spawn per install. The flag word differs
+/// per OS — note the same bit value means different things on each:
+///   - **macOS**: statfs(2)'s `f_flags` (u32) carries the BSD `MNT_*` mount
+///     flags — `MNT_NOEXEC` is 0x4. (macOS statvfs exposes only
+///     RDONLY/NOSUID, so statfs is the only road here.)
+///   - **Linux**: statvfs(3)'s `f_flag` (`c_ulong`) carries the `ST_*` flags —
+///     `ST_NOEXEC` is 0x8, a DIFFERENT bit than the BSD value. statvfs is the
+///     glibc/musl-portable surface (libc's raw `statfs` struct doesn't expose
+///     `f_flags` on every Linux target — aarch64-gnu lacks it — and libc
+///     doesn't export `ST_NOEXEC` for gnu/musl, so the POSIX constant is
+///     named locally). Both libcs populate it from the kernel's mount flags.
+///
+/// Best-effort by contract: any probe failure (unstattable dir, interior NUL,
+/// other unixes, Windows) returns `false` — a missed warning is acceptable,
+/// a false alarm or a failed install over the probe is not.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn dir_is_noexec(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(c_path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(c_path.as_ptr(), &mut st) } != 0 {
+            return false;
+        }
+        st.f_flags & (libc::MNT_NOEXEC as u32) != 0
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // POSIX statvfs: ST_NOEXEC in f_flag. Not exported by libc for gnu/musl.
+        const ST_NOEXEC: libc::c_ulong = 0x8;
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c_path.as_ptr(), &mut st) } != 0 {
+            return false;
+        }
+        st.f_flag & ST_NOEXEC != 0
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn dir_is_noexec(_dir: &Path) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,9 +1074,10 @@ pub fn nub_passthrough_target() -> Option<PathBuf> {
 }
 
 /// The on-disk spellings to probe per PATH dir. Windows additionally probes
-/// the launcher extensions npm-on-Windows actually ships (`.cmd`) — honest
-/// cfg-gated code, runtime-unverified until the Windows CI leg (PATHEXT
-/// resolution can't be exercised from macOS/Linux).
+/// the launcher extensions npm-on-Windows actually ships (`.cmd`): the
+/// `.exe`-miss → `.cmd`-hit probe runs for real on the windows-latest CI leg
+/// (nub-cli's `pm_shim_windows.rs` fall-through resolves a `pnpm.cmd`); the
+/// `.bat` spelling is probed by the same loop but no test plants one.
 #[cfg(unix)]
 fn candidate_names(name: &str) -> [String; 1] {
     [name.to_string()]
@@ -1102,11 +1161,22 @@ mod tests {
 
     /// Unique temp dir under the system temp root (mirrors `resolve.rs`'s
     /// `tmpdir` — never under $HOME, so nothing here can touch real profiles
-    /// or the real ~/.nub/shims).
+    /// or the real ~/.nub/shims). The startup-nanos component keeps names
+    /// unique ACROSS suite runs, not just within one: stale dirs are never
+    /// cleaned, PIDs recycle, and a recycled-PID run re-entering a stale
+    /// sibling finds last run's links/files (the tests/pm_shim.rs `tmp` flake
+    /// — see its doc for the full post-mortem).
     fn tmpdir(tag: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
+        static STARTED_NANOS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+        let nanos = STARTED_NANOS.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        });
         let dir = std::env::temp_dir().join(format!(
-            "nub-shim-{tag}-{}-{}",
+            "nub-shim-{tag}-{}-{nanos:x}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1369,26 +1439,36 @@ mod tests {
 
         // A verb the pinned PM implements is suggested verbatim with its args.
         assert_eq!(
-            safe_redirect(Pm::Pnpm, &v(&["install", "react"])),
-            "pnpm install react"
+            safe_redirect(Pm::Pnpm, &v(&["install", "react"])).as_deref(),
+            Some("pnpm install react")
         );
         // `ci` is npm-only: the OLD code blindly suggested `pnpm ci`, which is
         // not a real command. The redirect now drops to a verbless `use pnpm`
         // rather than fabricating a verb pnpm/yarn lack.
         assert_eq!(
-            safe_redirect(Pm::Pnpm, &v(&["ci"])),
-            "use pnpm",
+            safe_redirect(Pm::Pnpm, &v(&["ci"])).as_deref(),
+            Some("use pnpm"),
             "pnpm has no `ci` — suggest the PM, not a nonexistent verb"
         );
         assert_eq!(
-            safe_redirect(Pm::YarnBerry, &v(&["ci"])),
-            "use yarn",
+            safe_redirect(Pm::YarnBerry, &v(&["ci"])).as_deref(),
+            Some("use yarn"),
             "yarn has no `ci` either; Berry still prints `yarn`"
         );
         // npm DOES have `ci` — there the same-verb suggestion is honest.
-        assert_eq!(safe_redirect(Pm::Npm, &v(&["ci"])), "npm ci");
-        // No argv → bare PM name (nothing to swap).
-        assert_eq!(safe_redirect(Pm::Pnpm, &[]), "pnpm");
+        assert_eq!(
+            safe_redirect(Pm::Npm, &v(&["ci"])).as_deref(),
+            Some("npm ci")
+        );
+        // No verb to redirect → None, the caller drops its "run instead" line:
+        // a bare `npm` names nothing to swap, and a flags-only `npm --version`
+        // must not be echoed back as "run instead: pnpm --version".
+        assert_eq!(safe_redirect(Pm::Pnpm, &[]), None);
+        assert_eq!(
+            safe_redirect(Pm::Pnpm, &v(&["--version"])),
+            None,
+            "a flags-only invocation has no honest redirect"
+        );
     }
 
     #[cfg(unix)]
@@ -1459,6 +1539,52 @@ mod tests {
             shims.join("nub").is_file() && shims.join("pnpm").is_file(),
             "the shim dir survives a re-link from its own nub"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn noexec_probe_never_false_alarms_and_detects_a_real_noexec_mount() {
+        // Negative: the temp dir is exec-allowed on every dev/CI box — the
+        // probe must not warn there. Best-effort contract: an unstattable
+        // path is also "not noexec", never an error.
+        assert!(
+            !dir_is_noexec(&tmpdir("noexec")),
+            "the temp dir must not read as noexec"
+        );
+        assert!(
+            !dir_is_noexec(Path::new("/nonexistent-nub-noexec-probe")),
+            "a missing path is a silent miss, not a warning"
+        );
+
+        // Positive: only reachable on a real noexec mount. Virtually every
+        // Linux system has one (/proc, /sys/fs/cgroup, /dev/shm variants) —
+        // find one in /proc/self/mounts and assert the probe sees it. macOS
+        // has no noexec mount by default and creating one needs root, so the
+        // positive arm is Linux-only (the Docker/CI legs run it).
+        #[cfg(target_os = "linux")]
+        {
+            let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+            let noexec_mount = mounts.lines().find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let (_dev, point, _fs, opts) = (
+                    fields.next()?,
+                    fields.next()?,
+                    fields.next()?,
+                    fields.next()?,
+                );
+                (opts.split(',').any(|o| o == "noexec") && Path::new(point).is_dir())
+                    .then(|| PathBuf::from(point))
+            });
+            match noexec_mount {
+                Some(dir) => assert!(
+                    dir_is_noexec(&dir),
+                    "{} is mounted noexec but the probe missed it",
+                    dir.display()
+                ),
+                // Honest skip beats a ceremonial fake — but say so in the log.
+                None => eprintln!("no noexec mount on this system; positive arm not exercised"),
+            }
+        }
     }
 
     #[test]

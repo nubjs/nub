@@ -3779,11 +3779,11 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // Re-resolve WITHIN THE PINNED INTENT and bump the pin: the
         // devEngines.packageManager range when one is present (so `^9.1.0`
         // floats inside 9.x, never silently across majors), else the registry
-        // latest. Always rewrites `packageManager` — the hash is recomputed
-        // from the freshly fetched artifact, and a legacy hashless pin gets
-        // upgraded to the exact+hash shape even when the version is already
-        // newest. devEngines.packageManager is re-written alongside (same
-        // writer as `use` — both fields move together so they cannot drift).
+        // latest. Always rewrites `packageManager` — the hash is recomputed from
+        // the freshly fetched artifact, and a legacy hashless pin gets upgraded
+        // to the exact+hash shape even when the version is already newest. The
+        // devEngines half is rewritten only when it carries nub's own ^<exact>
+        // shape; a hand-written range is the user's intent and stays verbatim.
         "update" | "up" => {
             check_manifest_json(&cwd)?;
             let res = resolve::resolve_pin_with_source(&cwd).context(
@@ -3801,14 +3801,24 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 );
             }
             let name = pin.pm.to_string();
-            let spec = dev_engines_range(&cwd, &name).unwrap_or_else(|| "latest".to_string());
+            let range = dev_engines_range(&cwd, &name);
+            let spec = range.clone().unwrap_or_else(|| "latest".to_string());
+            // The pair semantics: devEngines = intent, packageManager = resolved
+            // record. A nub-shaped range (^x.y.z — what pin/update themselves
+            // write) is re-derived from the new exact; a hand-written one
+            // (">=9 <10", "~9.2") survives untouched. The update just resolved
+            // WITHIN that range, so the new exact satisfies it by construction.
+            let keep_dev_engines = range
+                .as_deref()
+                .is_some_and(|r| !resolve::nub_shaped_range(r));
             let current = pin
                 .version
                 .as_deref()
                 .map(|v| v.split_once('+').map_or(v, |(bare, _)| bare).to_string());
-            // Pin-only write: the devEngines range is the user's stated
-            // constraint update floats WITHIN — never rewritten here.
-            let (version, _) = resolve_provision_declare(&name, &spec, &cwd, false)?;
+            // A nub-shaped devEngines range moves with the pin (same writer as
+            // `use`, onFail:"warn"); a hand-written one is the user's stated
+            // constraint update floats WITHIN — never rewritten.
+            let (version, _) = resolve_provision_declare(&name, &spec, &cwd, !keep_dev_engines)?;
             match current {
                 Some(cur) if cur == version => eprintln!(
                     "{name} is already on the newest version ({version}); pin hash refreshed."
@@ -3935,8 +3945,12 @@ fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
 ///      Skipped for bun: nub declares it but doesn't provision or run it
 ///      (out of scope for v0.x);
 ///   4. write the declaration via [`nub_core::pm::resolve::write_declared_pm`]
-///      — `packageManager: <name>@<exact>+sha512.<hex>` plus the always-written
-///      `devEngines.packageManager {name, ^range, onFail:"warn"}`.
+///      — `packageManager: <name>@<exact>+sha512.<hex>` plus, when
+///      `maintain_dev_engines`, `devEngines.packageManager {name, ^range,
+///      onFail:"warn"}`. `use` always maintains the pair; `update` passes
+///      false on a hand-written devEngines range (the user's stated intent —
+///      only the resolved record advances) and true on nub's own ^<exact>
+///      shape, which moves with the pin.
 ///
 /// yarn >= 2 (Berry) refuses before anything is written — berry isn't the npm
 /// `yarn` tarball, so a pin nub can't provision would be a lie. The double
@@ -4298,6 +4312,20 @@ fn run_pm_shim_install() -> Result<i32> {
         );
     }
 
+    // A shim dir on a `noexec` mount installs cleanly (linking is allowed) and
+    // then fails EVERY invocation with a bare "Permission denied" — warn now,
+    // naming the dir and the fix, instead of letting each later call fail
+    // cryptically. Best-effort (the filesystem's mount-flag word, see
+    // shim::dir_is_noexec); the install itself is never failed over the probe.
+    if shim::dir_is_noexec(&dir) {
+        eprintln!(
+            "warning: {} is on a filesystem mounted noexec — the shims are installed but every \
+             invocation will fail with \"Permission denied\". Remount without noexec, or use a \
+             HOME on an exec-allowed filesystem.",
+            dir.display()
+        );
+    }
+
     // The PATH block. Windows profile/registry editing is out of scope for v0 —
     // print the line to add instead (honest, not automated).
     if cfg!(windows) {
@@ -4597,14 +4625,20 @@ fn shim_refusal_message(
     // The redirect must never synthesize a verb the pinned PM lacks: a blind
     // `<pm> <args…>` swap suggested `pnpm ci`, but pnpm has no `ci`.
     // `safe_redirect` returns `<pm> <same-verb> <args…>` only when the verb
-    // exists, else a verbless `use <pm>` — see shim::safe_redirect.
-    let paste = nub_core::pm::shim::safe_redirect(pinned, args);
+    // exists, else a verbless `use <pm>` — and `None` when there is no verb at
+    // all (empty argv / flags-only, e.g. `npm --version`): a read-only
+    // invocation needs no redirect, so the "run instead" line is dropped
+    // entirely rather than echoing argv back as advice.
+    let run_instead = match nub_core::pm::shim::safe_redirect(pinned, args) {
+        Some(paste) => format!("\x20 run instead:  {paste}\n"),
+        None => String::new(),
+    };
     format!(
         "nub: the nub package-manager shims on your PATH (installed via `nub pm shim`) intercepted this.\n\
          This project pins {pinned} (via {provenance}) — refusing to run {invoked}.\n\
          A different package manager here would write a competing lockfile and node_modules.\n\
          \n\
-         \x20 run instead:  {paste}\n\
+         {run_instead}\
          \x20 to bypass:    invoke the system {invoked} by absolute path, or remove the shims: nub pm unshim"
     )
 }
@@ -4721,8 +4755,10 @@ fn exec_program(program: &Path, args: &[String], envs: &[(String, String)]) -> R
     Err(anyhow::Error::new(err).context(format!("could not exec {}", program.display())))
 }
 
-/// No `exec` on Windows: spawn + wait, forwarding the exit code. Honest
-/// cfg-gated code — runtime-unverified until the Windows CI leg.
+/// No `exec` on Windows: spawn + wait, forwarding the exit code. Exit-code
+/// fidelity through this path is asserted on the windows-latest CI leg
+/// (`tests/pm_shim_windows.rs` — both the `.cmd` fall-through and the
+/// node-run pinned PM).
 #[cfg(not(unix))]
 fn exec_program(program: &Path, args: &[String], envs: &[(String, String)]) -> Result<i32> {
     let mut cmd = std::process::Command::new(program);
@@ -5777,6 +5813,23 @@ mod tests {
             other => panic!("a mismatched npm must refuse, got {other:?}"),
         }
 
+        // A flags-only invocation (`npm --version`) still refuses, but with NO
+        // "run instead" line: there is no verb to redirect, and echoing argv
+        // back produced the nonsense "run instead: pnpm --version".
+        match shim_plan(ShimName::Npm, &["--version".to_string()], &dir).unwrap() {
+            ShimPlan::Refuse { message } => {
+                assert!(
+                    message.contains("pins pnpm") && message.contains("nub pm unshim"),
+                    "the flags-only refusal keeps the why + the escape, got:\n{message}"
+                );
+                assert!(
+                    !message.contains("run instead"),
+                    "a flags-only invocation must drop the redirect line, got:\n{message}"
+                );
+            }
+            other => panic!("a flags-only mismatched npm still refuses, got {other:?}"),
+        }
+
         // A committed-yarnPath project refuses invoked pnpm naming the yarnrc
         // provenance (decision 2: yarnPath projects, wrong name → refuse).
         let (dir, _release) = yarn_path_fixture("shim-refuse-yarnpath");
@@ -6005,10 +6058,47 @@ mod tests {
             pkg_mgr, "pnpm@9.0.0",
             "the pin must advance past the seed (newer 9.x releases exist)"
         );
+        assert!(
+            dev["version"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("^9."),
+            "the nub-shaped devEngines range is rewritten consistent with the new exact"
+        );
+    }
+
+    /// Real-network e2e for the hand-written-range half of `nub pm update`: a
+    /// devEngines range the user wrote themselves (">=9 <10" — not nub's
+    /// ^x.y.z shape) constrains the resolve AND survives verbatim, while
+    /// `packageManager` bumps within it.
+    ///   cargo test -p nub-cli --bin nub -- --ignored update_preserves
+    #[test]
+    #[ignore = "network: re-resolves pnpm@'>=9 <10' from the registry (real provision)"]
+    fn update_preserves_a_hand_written_dev_engines_range() {
+        let dir = pm_tmpdir("update-keep-range");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0","devEngines":{"packageManager":{"name":"pnpm","version":">=9 <10","onFail":"error"}}}"#,
+        )
+        .unwrap();
+        let code = with_cwd(&dir, || run_pm(&["update".into()])).unwrap();
+        assert_eq!(code, 0);
+
+        let (pkg_mgr, dev) = read_declaration(&dir);
+        assert!(
+            pkg_mgr.starts_with("pnpm@9.") && pkg_mgr.contains("+sha512."),
+            "the record must bump within the hand-written range, got {pkg_mgr}"
+        );
+        assert_ne!(pkg_mgr, "pnpm@9.0.0", "newer 9.x releases exist");
         assert_eq!(
-            dev,
-            serde_json::json!({"name": "pnpm", "version": "^9.0.0", "onFail": "download"}),
-            "update must leave devEngines untouched — packageManager alone carries the bump"
+            dev["version"].as_str(),
+            Some(">=9 <10"),
+            "the hand-written range is the user's intent and stays verbatim"
+        );
+        assert_eq!(
+            dev["onFail"].as_str(),
+            Some("error"),
+            "the kept devEngines entry is untouched — onFail included"
         );
     }
 
