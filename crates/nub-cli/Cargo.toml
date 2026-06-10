@@ -20,6 +20,13 @@ nub-core = { path = "../nub-core" }
 aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
 aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
 aube = { path = "../../vendor/aube/crates/aube" }
+# `EffectiveFilter` for the workspace-aware engine verbs (`nub publish
+# --filter/-r`); same type aube's own dispatch passes to publish/list/etc.
+aube-workspace = { path = "../../vendor/aube/crates/aube-workspace" }
+# Settings metadata (`meta::SETTINGS`): drives the npmrc-first config write
+# routing in pm_engine/store_config_family.rs (npmShared flag, alias
+# spellings, scalar-vs-map types).
+aube-settings = { path = "../../vendor/aube/crates/aube-settings" }
 # Engine error-code constants + the bespoke exit-code table; consumed by the
 # presentation layer (src/pm_engine/present.rs) for the ERR_AUBE_→ERR_NUB_
 # rewrite and the cli_main-compatible exit mapping.
@@ -41,3 +48,8 @@ tempfile = "3"
 # nub code path.
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# fd-level capture of the engine's raw println/eprintln hint lines so the
+# brand rewrite can reach them (pm_engine/install_family.rs::with_fd_captured).
+libc.workspace = true
