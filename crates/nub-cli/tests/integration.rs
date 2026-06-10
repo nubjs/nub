@@ -3057,3 +3057,138 @@ fn exec_recursive_node_bin_uses_each_members_cwd_and_env() {
         "member b's bin must see b's cwd/.env (WHO=b): {stdout}"
     );
 }
+
+// ── `nub pm` / `nub node` UX-message fixes ───────────────────────────────────
+
+/// `nub pm which` must name the TRUE pin source. A project pinned ONLY via
+/// `devEngines.packageManager` (no `packageManager` field) used to be mislabeled
+/// "resolved from packageManager"; the provenance now reads
+/// "resolved from devEngines.packageManager". Seeds nub's PM cache with the exact
+/// version so the provision under `which` is a pure cache hit — no network.
+#[test]
+fn pm_which_reports_dev_engines_provenance() {
+    let work = unique_test_cache();
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    // devEngines-ONLY pin (no `packageManager` field), exact version so the
+    // cache-hit path fires without touching the registry.
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{"name":"app","devEngines":{"packageManager":{"name":"pnpm","version":"9.1.0"}}}"#,
+    )
+    .unwrap();
+
+    // Seed <XDG_CACHE_HOME>/nub/pm/pnpm/9.1.0/package/ — the shape provision_pm's
+    // cache-hit reads (a manifest naming the bin + the bin file itself).
+    let cache = work.join("cache");
+    let pkg = cache.join("nub/pm/pnpm/9.1.0/package");
+    std::fs::create_dir_all(pkg.join("bin")).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        r#"{"name":"pnpm","bin":"bin/pnpm.cjs"}"#,
+    )
+    .unwrap();
+    std::fs::write(pkg.join("bin/pnpm.cjs"), "// pnpm\n").unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["pm", "which"])
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", &cache)
+        .output()
+        .expect("spawn nub pm which");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("bin/pnpm.cjs"),
+        "the cached pnpm bin path goes to stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("resolved from devEngines.packageManager"),
+        "a devEngines-only pin must report its true source, not packageManager: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("resolved from packageManager"),
+        "the old hard-coded packageManager label must be gone: {stderr:?}"
+    );
+}
+
+/// A truncated / invalid `package.json` must be diagnosed as a JSON parse failure
+/// (naming the file), not as "no package manager is pinned" — the misleading
+/// message it produced when resolution silently swallowed the parse error.
+#[test]
+fn pm_which_reports_malformed_manifest_not_unpinned() {
+    let work = unique_test_cache();
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    // Truncated mid-object — serde_json errors with a line/column.
+    std::fs::write(
+        proj.join("package.json"),
+        "{\n  \"packageManager\": \"pnpm@9.1.0\"",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["pm", "which"])
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub pm which");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_ne!(out.status.code(), Some(0), "a malformed manifest must fail");
+    assert!(
+        stderr.contains("package.json is not valid JSON") && stderr.contains("package.json"),
+        "malformed JSON must be named as such (with the path): {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("no package manager is pinned"),
+        "a parse failure must NOT be misreported as unpinned: {stderr:?}"
+    );
+}
+
+/// `nub node which` against an unsatisfiable pin must give nub-correct remedy:
+/// provision via `nub node install` and the pin fields nub honors — NOT the old
+/// `nvm install` + nonexistent "compat mode" suggestion that contradicts nub's
+/// model. Pins `.nvmrc` to a version no PATH node satisfies, with an empty store
+/// and NVM_DIR so discovery exhausts every source and hits `PinnedNotFound`.
+#[test]
+fn node_which_unsatisfiable_pin_gives_nub_remedy_not_nvm() {
+    let work = unique_test_cache();
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    // 0.0.1 is real-shaped but no installed Node satisfies it.
+    std::fs::write(proj.join(".nvmrc"), "0.0.1\n").unwrap();
+    let empty_nvm = work.join("empty-nvm");
+    std::fs::create_dir_all(&empty_nvm).unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["node", "which"])
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", work.join("cache")) // empty store
+        .env("NVM_DIR", &empty_nvm)
+        .output()
+        .expect("spawn nub node which");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&work);
+
+    // No node on PATH at all surfaces a different (NoNodeOnPath) error — skip,
+    // since this test is specifically about the PinnedNotFound remedy text.
+    if stderr.contains("no Node binary found on PATH") {
+        eprintln!("skipping: no node on PATH to drive PinnedNotFound");
+        return;
+    }
+    assert_ne!(out.status.code(), Some(0), "an unsatisfiable pin must fail");
+    assert!(
+        stderr.contains("nub node install"),
+        "the remedy must point at nub's own provisioning: {stderr:?}"
+    );
+    assert!(
+        !stderr.to_lowercase().contains("nvm install")
+            && !stderr.to_lowercase().contains("compat mode"),
+        "the nvm-install / compat-mode suggestions contradict nub and must be gone: {stderr:?}"
+    );
+}

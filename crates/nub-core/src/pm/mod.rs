@@ -14,6 +14,7 @@ pub mod lockfile_version;
 pub mod provision;
 pub mod registry;
 pub mod resolve;
+pub mod shim;
 
 use std::fmt;
 
@@ -40,4 +41,17 @@ impl fmt::Display for Pm {
         };
         f.write_str(name)
     }
+}
+
+/// Lowercase-hex render of a digest (`[0xab, 0xcd]` → `"abcd"`). The one home
+/// for this across the PM surface — provisioning, the registry's sha1 check,
+/// and the CLI's tarball-hash all share it instead of re-deriving it inline.
+pub fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }

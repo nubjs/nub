@@ -9,7 +9,7 @@ This page is a cookbook of concrete tasks. For the "what is it / how does it wor
 
 ## Running a file
 
-Point `nub` at a file. `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, and `.jsx` all run directly — no build step, no `ts-node`, no `tsx` wrapper.
+Point `nub` at a file — `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, and `.jsx` all run directly. No build step, no `ts-node`, no `tsx` wrapper.
 
 ```sh
 nub index.ts
@@ -55,7 +55,7 @@ Nub runs the whole TypeScript surface, not just the erasable subset Node's built
 
 ### Non-erasable syntax
 
-`enum`, `namespace`, and parameter properties require transformation, not just type removal — Node's type-stripping rejects them. Nub's oxc transpiler handles them as part of the normal pipeline.
+Syntax like `enum`, `namespace`, and parameter properties requires transformation, not just type removal — Node's type-stripping rejects it. Nub's oxc transpiler handles it as part of the normal pipeline.
 
 ```ts
 enum Color { Red, Green, Blue }
@@ -95,9 +95,9 @@ class Account {
 }
 ```
 
-`emitDecoratorMetadata` emits calls to `Reflect.metadata`, so install and import `reflect-metadata` yourself, exactly as on plain TypeScript — Nub does not auto-inject it.
+Because `emitDecoratorMetadata` emits calls to `Reflect.metadata`, install and import `reflect-metadata` yourself, exactly as on plain TypeScript — Nub does not auto-inject it.
 
-> **Stage 3 decorators are not in v0.1.** TypeScript 5+ defaults to the spec-aligned Stage 3 form when neither decorator flag is set; that transform is an upstream gap in oxc, so Nub rejects it with a clear diagnostic pointing you at `experimentalDecorators: true`. NestJS / TypeORM / class-validator users already set that flag and are unaffected. Stage 3 support is on the roadmap, blocked on landing the transform upstream in oxc.
+> **Stage 3 decorators aren't supported.** TypeScript 5+ defaults to the spec-aligned Stage 3 form when neither decorator flag is set; that transform is an upstream gap in oxc, so Nub rejects it with a clear diagnostic pointing you at `experimentalDecorators: true`. NestJS / TypeORM / class-validator users already set that flag and are unaffected.
 
 ### Extensionless imports
 
@@ -112,9 +112,9 @@ import data from "./fixtures";       // resolves ./fixtures/index.ts (or its pac
 
 This probing is scoped to TypeScript-family parent files only. A plain `.js` file stays strict about extensions, exactly like vanilla Node, so reversible `.js` code behaves identically under `nub` and `node`.
 
-### `.js` imports that resolve to `.ts`
+### Resolving `.js` imports to `.ts`
 
-`moduleResolution: "nodenext"` makes `tsc` want `.js` on relative imports even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
+With `moduleResolution: "nodenext"`, `tsc` wants `.js` on relative imports even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
 
 ```ts
 import { handler } from "./handler.js";  // resolves ./handler.ts when no ./handler.js exists
@@ -157,7 +157,7 @@ If you ever want it off, pass `--no-enable-source-maps`.
 
 ## JSX
 
-`.jsx` and `.tsx` files execute directly through the same load hook. JSX is recognized in `.jsx` / `.tsx` only, never in plain `.js`. The defaults are the modern ones — automatic runtime, `react` as the import source — matching oxc-transformer, Vite's React plugins, Rolldown, and Bun, so a React project needs no setup.
+Files ending in `.jsx` and `.tsx` execute directly through the same load hook. JSX is recognized in `.jsx` / `.tsx` only, never in plain `.js`. The defaults are the modern ones — automatic runtime, `react` as the import source — matching oxc-transformer, Vite's React plugins, Rolldown, and Bun, so a React project needs no setup.
 
 ```sh
 nub render.tsx
@@ -183,7 +183,7 @@ export default function Page() {
 }
 ```
 
-`compilerOptions.jsx` (`preserve`, `react`, `react-jsx`, `react-jsxdev`, `react-native`) and `compilerOptions.jsxImportSource` are honored. Preact, Hono, and Vue JSX work via passthrough. Solid is the exception — its JSX needs `babel-preset-solid`'s reactive-graph compilation, which a per-file transpiler can't do, so run Solid through its bundler (e.g. `nub run vite`).
+Both `compilerOptions.jsx` (`preserve`, `react`, `react-jsx`, `react-jsxdev`, `react-native`) and `compilerOptions.jsxImportSource` are honored. Preact, Hono, and Vue JSX work via passthrough. Solid is the exception — its JSX needs `babel-preset-solid`'s reactive-graph compilation, which a per-file transpiler can't do, so run Solid through its bundler (e.g. `nub run vite`).
 
 ## Data-format loaders
 
@@ -235,7 +235,7 @@ const stream = new EventSource("https://api/stream");  // auto-unflagged
 const worker = new Worker(new URL("./w.ts", import.meta.url), { type: "module" });
 ```
 
-`localStorage` / `sessionStorage` also work without you setting `--localstorage-file` — Nub defaults the storage file under `~/.cache/nub` so persistence just works. `reportError`, `vm.Module` (used by Jest/Vitest), and `node:sqlite` are likewise available where Node still gates them.
+The storage globals — `localStorage` / `sessionStorage` — also work without you setting `--localstorage-file`; Nub defaults the storage file under `~/.cache/nub` so persistence just works. And `reportError`, `vm.Module` (used by Jest/Vitest), and `node:sqlite` are likewise available where Node still gates them.
 
 ## The Node version
 

@@ -17,7 +17,7 @@ use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha512};
 
-use crate::version_management::download;
+use crate::version_management::download::{self, Auth};
 use crate::workspace::scripts::npmrc_value;
 
 /// A single resolved version's dist: where to fetch it, how to verify it, and the
@@ -43,21 +43,295 @@ pub enum Integrity {
     Sha1(String),
 }
 
+/// The public npm registry — the floor of the precedence stack and the marker
+/// for "no mirror configured" (the tarball-origin rewrite is a no-op against it).
+pub const PUBLIC_REGISTRY: &str = "https://registry.npmjs.org";
+
+/// The resolved registry for PM downloads: its base URL plus any auth that
+/// applies to the base's host. Carries enough to fetch the packument AND the
+/// tarball — both must present the same `Authorization` to an auth-required
+/// mirror, and the tarball URL is rewritten onto `base`'s origin (see
+/// [`rewrite_tarball_origin`]) when `base` is non-public.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryConfig {
+    /// Trailing-slash-trimmed base URL — callers concatenate `/<pkg>`.
+    pub base: String,
+    /// The `Authorization` credential for `base`'s host, if any.
+    pub auth: Option<Auth>,
+}
+
 /// The registry base URL, in precedence order:
 ///   1. `npm_config_registry` (npm/pnpm/yarn all export this when they shell out).
 ///   2. `.npmrc`'s `registry` key (project, then `~/.npmrc`).
 ///   3. the public registry.
 ///
-/// Deliberately single-override per source (no `COREPACK_NPM_REGISTRY` layer —
-/// matching `resolve_mirror_base`'s single-env shape). The trailing slash is
-/// normalized off so callers concatenate `/<pkg>` without doubling it.
+/// Thin wrapper over [`registry_config`] — the auth-free base for the callers
+/// (and tests) that only need the URL. `COREPACK_NPM_REGISTRY` is the most-specific
+/// override on top of this stack; see [`registry_config`].
 pub fn registry_base(root: &std::path::Path) -> String {
-    let raw = std::env::var("npm_config_registry")
-        .ok()
+    registry_config(root).base
+}
+
+/// The full registry config — base + host auth — for PM downloads, in precedence
+/// order (most specific first):
+///   1. `COREPACK_NPM_REGISTRY` (+ `COREPACK_NPM_TOKEN` / `_USERNAME`+`_PASSWORD`):
+///      the only convention for a PM-download registry distinct from the dep
+///      registry. When set, its companion auth vars are the ONLY auth consulted
+///      (a deliberate clean override — you don't blend a corepack registry with
+///      `.npmrc` host auth).
+///   2. `npm_config_registry` (exported by npm/pnpm/yarn when they shell out).
+///   3. `.npmrc`'s `registry` key (project, then `~/.npmrc`).
+///   4. the public registry.
+///
+/// For sources 2–4, auth comes from `.npmrc` `//host[/path]/:_authToken` (bearer)
+/// or `:_auth` / `:username`+`:_password` (basic), longest-host-prefix match
+/// against the resolved base — npm's own resolution. `${VAR}` interpolation is
+/// honored throughout (npm expands env in `.npmrc` values). Behavioral `COREPACK_*`
+/// vars (STRICT/AUTO_PIN/HOME/…) are NOT consulted — they map to nub's own surface.
+pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
+    // 1. COREPACK_NPM_REGISTRY wins outright, with its own companion auth.
+    if let Some(raw) = env_nonempty("COREPACK_NPM_REGISTRY") {
+        let base = interpolate_env(&raw).trim_end_matches('/').to_string();
+        return RegistryConfig {
+            base,
+            auth: corepack_auth(),
+        };
+    }
+
+    // 2–4. The ecosystem-standard stack: env override, then `.npmrc registry`,
+    // then public. The selection rule is the pure [`resolve_base`].
+    let base = resolve_base(
+        env_nonempty("npm_config_registry"),
+        npmrc_value(root, "registry"),
+    );
+    let auth = npmrc_auth_for(root, &base);
+    RegistryConfig { base, auth }
+}
+
+/// PURE base selection for the ecosystem-standard stack (the COREPACK override is
+/// handled by the caller, ABOVE this): `npm_config_registry` wins over the
+/// `.npmrc registry` value, which wins over the public registry. Trailing slash
+/// trimmed; `${VAR}` interpolated. Unit-tested without mutating process env.
+fn resolve_base(npm_config_registry: Option<String>, npmrc_registry: Option<String>) -> String {
+    let raw = npm_config_registry
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| npmrc_value(root, "registry"))
-        .unwrap_or_else(|| "https://registry.npmjs.org/".to_string());
-    raw.trim_end_matches('/').to_string()
+        .or(npmrc_registry)
+        .unwrap_or_else(|| PUBLIC_REGISTRY.to_string());
+    interpolate_env(&raw).trim_end_matches('/').to_string()
+}
+
+/// `COREPACK_NPM_TOKEN` (bearer) wins over `COREPACK_NPM_USERNAME`+`_PASSWORD`
+/// (basic). Username/password are base64-encoded into a Basic credential (npm's
+/// `_auth` form). `${VAR}` interpolation applies to each.
+fn corepack_auth() -> Option<Auth> {
+    if let Some(tok) = env_nonempty("COREPACK_NPM_TOKEN") {
+        return Some(Auth::Bearer(interpolate_env(&tok)));
+    }
+    let user = env_nonempty("COREPACK_NPM_USERNAME")?;
+    let pass = env_nonempty("COREPACK_NPM_PASSWORD").unwrap_or_default();
+    Some(Auth::Basic(base64_encode(
+        format!("{}:{}", interpolate_env(&user), interpolate_env(&pass)).as_bytes(),
+    )))
+}
+
+/// Read `VAR` from the environment, treating empty/whitespace as unset.
+fn env_nonempty(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|s| !s.trim().is_empty())
+}
+
+/// Expand `${VAR}` references against the process environment — the wrapper over
+/// the pure [`interpolate_with`], with `std::env::var` as the lookup.
+fn interpolate_env(value: &str) -> String {
+    interpolate_with(value, |name| std::env::var(name).ok())
+}
+
+/// Expand `${VAR}` references in an `.npmrc` / env value, the way npm does, using
+/// `lookup` to resolve each name (PURE — the env source is injected so the
+/// expansion rules are unit-tested without mutating the process environment). An
+/// undefined variable expands to the empty string (npm's behavior); `$VAR`
+/// without braces is left verbatim (npm only interpolates the braced form). The
+/// common shapes are `${NPM_TOKEN}` in a token line and `${HOME}` in a path.
+fn interpolate_with(value: &str, mut lookup: impl FnMut(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            if let Some(close) = value[i + 2..].find('}') {
+                let name = &value[i + 2..i + 2 + close];
+                out.push_str(&lookup(name).unwrap_or_default());
+                i = i + 2 + close + 1;
+                continue;
+            }
+        }
+        let ch = value[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Collect every line of the relevant `.npmrc` files (project, then `~/.npmrc`)
+/// and pick the auth credential whose `//host[/path]/` prefix is the longest one
+/// matching `registry_base`. This is npm's nerfDart resolution: an auth line is
+/// keyed by a registry URL minus its scheme (`//npm.example.com/path/:_authToken`),
+/// and the most-specific (longest) matching prefix wins.
+fn npmrc_auth_for(root: &std::path::Path, registry_base: &str) -> Option<Auth> {
+    let mut text = String::new();
+    let candidates = [
+        root.join(".npmrc"),
+        dirs_next::home_dir()
+            .map(|h| h.join(".npmrc"))
+            .unwrap_or_default(),
+    ];
+    for path in &candidates {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            text.push_str(&content);
+            text.push('\n');
+        }
+    }
+    parse_npmrc_auth(&text, registry_base, |name| std::env::var(name).ok())
+}
+
+/// PURE auth resolver over already-read `.npmrc` text — no filesystem, no network,
+/// env injected via `lookup` — so longest-prefix / token-vs-basic /
+/// env-interpolation are unit-tested offline. `registry_base` is the resolved
+/// registry URL (e.g. `https://npm.example.com/artifactory/api/npm/npm`); the
+/// chosen credential is the one whose `//host[/path]` key is the longest prefix of
+/// the base (compared scheme-stripped, npm's nerfDart form).
+///
+/// Per host-prefix, `:_authToken` (bearer) wins over `:_auth` (basic) wins over
+/// `:username`+`:_password` (basic). All values are `${VAR}`-interpolated through
+/// `lookup`.
+fn parse_npmrc_auth(
+    npmrc: &str,
+    registry_base: &str,
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> Option<Auth> {
+    // The base, scheme-stripped and trailing-slash-trimmed: `//host/path`.
+    let base_nerf = strip_scheme(registry_base).trim_end_matches('/');
+
+    // Group auth fields by their `//host[/path]` prefix.
+    #[derive(Default)]
+    struct Fields {
+        auth_token: Option<String>,
+        auth_basic: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    }
+    let mut by_prefix: std::collections::HashMap<String, Fields> = std::collections::HashMap::new();
+
+    for line in npmrc.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((key, raw_val)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        // Only `//…:field` lines carry auth. The prefix is everything before the
+        // final `:` that introduces the field name.
+        if !key.starts_with("//") {
+            continue;
+        }
+        let Some((prefix, field)) = key.rsplit_once(':') else {
+            continue;
+        };
+        let prefix = prefix.trim_end_matches('/');
+        let val = interpolate_with(
+            raw_val.trim().trim_matches('"').trim_matches('\''),
+            &mut lookup,
+        );
+        let entry = by_prefix.entry(prefix.to_string()).or_default();
+        match field {
+            "_authToken" => entry.auth_token = Some(val),
+            "_auth" => entry.auth_basic = Some(val),
+            "username" => entry.username = Some(val),
+            "_password" => entry.password = Some(decode_npmrc_password(&val)),
+            _ => {}
+        }
+    }
+
+    // Longest `//host[/path]` prefix that is a prefix of the base wins.
+    let best = by_prefix
+        .keys()
+        .filter(|prefix| {
+            let p = prefix.trim_start_matches("//");
+            let base = base_nerf.trim_start_matches("//");
+            base == p || base.starts_with(&format!("{p}/"))
+        })
+        .max_by_key(|prefix| prefix.len())
+        .cloned()?;
+    let f = by_prefix.get(&best)?;
+
+    if let Some(tok) = f.auth_token.as_ref().filter(|t| !t.is_empty()) {
+        return Some(Auth::Bearer(tok.clone()));
+    }
+    if let Some(basic) = f.auth_basic.as_ref().filter(|b| !b.is_empty()) {
+        return Some(Auth::Basic(basic.clone()));
+    }
+    if let Some(user) = f.username.as_ref().filter(|u| !u.is_empty()) {
+        let pass = f.password.clone().unwrap_or_default();
+        return Some(Auth::Basic(base64_encode(
+            format!("{user}:{pass}").as_bytes(),
+        )));
+    }
+    None
+}
+
+/// npm stores `:_password` base64-encoded; decode it back to plaintext before
+/// re-encoding `user:pass`. A value that doesn't decode (someone wrote a literal)
+/// is used verbatim — fail-soft, since a malformed password line shouldn't abort
+/// provisioning before the registry even gets a chance to reject it.
+fn decode_npmrc_password(b64: &str) -> String {
+    match base64_decode(b64) {
+        Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|_| b64.to_string()),
+        Err(_) => b64.to_string(),
+    }
+}
+
+/// Strip the `https:` / `http:` scheme, leaving the `//host/path` nerfDart form
+/// npm keys auth lines by. A value with no scheme is returned unchanged.
+fn strip_scheme(url: &str) -> &str {
+    url.strip_prefix("https:")
+        .or_else(|| url.strip_prefix("http:"))
+        .unwrap_or(url)
+}
+
+/// Rewrite a packument's `dist.tarball` so it is fetched from the SAME registry
+/// the packument came from. `dist.tarball` is an ABSOLUTE URL that the publisher
+/// (or a replicating mirror) often hardcodes to the public registry even when the
+/// packument was served by a private mirror — so a mirrored/air-gapped install
+/// would otherwise download the tarball from the wrong (often unreachable) host.
+/// npm/pnpm rewrite the origin: keep the path + query, swap scheme+host+port to
+/// the configured registry's. Only rewritten when a NON-public registry is
+/// configured; a public-registry config leaves the URL untouched (the common
+/// case, and the safe one — never redirect a public tarball).
+pub fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
+    // No rewrite when the configured registry is the public one.
+    if origin_of(registry_base) == Some(origin_of(PUBLIC_REGISTRY).unwrap()) {
+        return tarball.to_string();
+    }
+    let (Some(reg_origin), Some(tar_origin)) = (origin_of(registry_base), origin_of(tarball))
+    else {
+        return tarball.to_string(); // unparseable → leave it alone
+    };
+    if reg_origin == tar_origin {
+        return tarball.to_string(); // already on the mirror
+    }
+    // Swap the origin (scheme+host[+port]); keep the rest of the URL verbatim.
+    let rest = &tarball[tar_origin.len()..];
+    format!("{reg_origin}{rest}")
+}
+
+/// The `scheme://host[:port]` origin of a URL — everything up to (not including)
+/// the first `/` after the `://`. Returns `None` for a URL with no `://`.
+fn origin_of(url: &str) -> Option<&str> {
+    let scheme_end = url.find("://")?;
+    let after = scheme_end + 3;
+    let host_len = url[after..].find('/').unwrap_or(url.len() - after);
+    Some(&url[..after + host_len])
 }
 
 /// Resolve `spec` against an already-fetched packument. PURE — no network, no env
@@ -184,14 +458,53 @@ pub(crate) fn bin_subpath(meta: &Value) -> Option<PathBuf> {
     chosen.as_str().map(PathBuf::from)
 }
 
-/// Networked wrapper: fetch the packument from `base` and resolve `spec` against
-/// it. `pkg` is the package name (`pnpm`, `npm`, `yarn`).
+/// The bin path of a NAMED entry in a `bin` map (`npx`, `pnpx`, `yarnpkg`) —
+/// the shim's seam for a package's SIBLING launchers, where [`bin_subpath`]
+/// picks the entry named for the package itself (see `shim::sibling_bin`).
+/// The string form declares a single bin named after the package, so it
+/// matches only when `entry` IS the package name. Works on a packument
+/// `versions[X.Y.Z]` entry and an installed `package/package.json` alike.
+pub(crate) fn named_bin_subpath(meta: &Value, entry: &str) -> Option<PathBuf> {
+    let bin = meta.get("bin")?;
+    if let Some(path) = bin.as_str() {
+        return (meta.get("name").and_then(Value::as_str) == Some(entry))
+            .then(|| PathBuf::from(path));
+    }
+    bin.as_object()?.get(entry)?.as_str().map(PathBuf::from)
+}
+
+/// Networked wrapper over a bare base URL (no auth): fetch the packument from
+/// `base` and resolve `spec` against it. `pkg` is the package name (`pnpm`, `npm`,
+/// `yarn`). Retained for the no-auth `nub pm pin` caller; provisioning goes through
+/// [`resolve_version_authed`], which carries the host auth and rewrites the tarball
+/// origin onto a configured mirror.
 pub fn resolve_version(base: &str, pkg: &str, spec: &str) -> Result<VersionDist> {
-    let url = format!("{}/{pkg}", base.trim_end_matches('/'));
-    let body = download::fetch_text(&url).with_context(|| format!("fetching packument {url}"))?;
+    resolve_version_authed(
+        &RegistryConfig {
+            base: base.trim_end_matches('/').to_string(),
+            auth: None,
+        },
+        pkg,
+        spec,
+    )
+}
+
+/// Networked wrapper: fetch the packument from `cfg.base` (presenting `cfg.auth`
+/// to an auth-required mirror) and resolve `spec` against it. `pkg` is the package
+/// name (`pnpm`, `npm`, `yarn`). The resolved `dist.tarball` is rewritten onto the
+/// configured registry's origin ([`rewrite_tarball_origin`]) so a mirrored install
+/// fetches the tarball from the same host the packument came from, not a hardcoded
+/// public URL.
+pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
+    let url = format!("{}/{pkg}", cfg.base.trim_end_matches('/'));
+    let body = download::fetch_text_auth(&url, cfg.auth.as_ref())
+        .with_context(|| format!("fetching packument {url}"))?;
     let packument: Value =
         serde_json::from_str(&body).with_context(|| format!("parsing packument {url}"))?;
-    resolve_dist(&packument, spec).with_context(|| format!("resolving {pkg}@{spec}"))
+    let mut dist =
+        resolve_dist(&packument, spec).with_context(|| format!("resolving {pkg}@{spec}"))?;
+    dist.tarball = rewrite_tarball_origin(&dist.tarball, &cfg.base);
+    Ok(dist)
 }
 
 /// Verify a downloaded tarball against its dist integrity. Fail-closed: a mismatch
@@ -217,7 +530,7 @@ pub fn verify_integrity(file: &std::path::Path, want: &Integrity) -> Result<()> 
             }
         }
         Integrity::Sha1(expected_hex) => {
-            let got = hex_lower(&Sha1::digest(&bytes));
+            let got = super::hex_lower(&Sha1::digest(&bytes));
             if !got.eq_ignore_ascii_case(expected_hex) {
                 bail!(
                     "sha1 integrity mismatch for {}: expected {expected_hex}, got {got}",
@@ -275,16 +588,6 @@ fn base64_encode(bytes: &[u8]) -> String {
         }
     }
     out
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 #[cfg(test)]
@@ -402,6 +705,37 @@ mod tests {
         // 8.0.0's bin map has two entries; the one keyed by the package name wins.
         let dist = resolve_dist(&packument(), "8.0.0").unwrap();
         assert_eq!(dist.bin_subpath, PathBuf::from("bin/pnpm.cjs"));
+    }
+
+    #[test]
+    fn named_bin_subpath_picks_arbitrary_entries_but_string_form_only_the_package_name() {
+        // The map form: any entry resolves by name (the npx/pnpx seam).
+        let meta: Value = serde_json::json!({
+            "name": "npm",
+            "bin": { "npm": "bin/npm-cli.js", "npx": "bin/npx-cli.js" }
+        });
+        assert_eq!(
+            named_bin_subpath(&meta, "npx"),
+            Some(PathBuf::from("bin/npx-cli.js"))
+        );
+        assert_eq!(
+            named_bin_subpath(&meta, "corepack"),
+            None,
+            "an entry the package doesn't declare is a miss, not a guess"
+        );
+
+        // The string form declares a single bin named for the PACKAGE — it
+        // satisfies only that name.
+        let meta: Value = serde_json::json!({ "name": "yarn", "bin": "bin/yarn.js" });
+        assert_eq!(
+            named_bin_subpath(&meta, "yarn"),
+            Some(PathBuf::from("bin/yarn.js"))
+        );
+        assert_eq!(
+            named_bin_subpath(&meta, "yarnpkg"),
+            None,
+            "a string-form bin must not satisfy a sibling entry name"
+        );
     }
 
     #[test]

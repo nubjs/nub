@@ -436,7 +436,7 @@ What IS dramatically faster is the **CLI surface**. `nub run` and `nubx` outperf
 
 ### What npm packages can I stop using once I install Nub?
 
-Two buckets. **Nub replaces directly:** `dotenv` (multi-file `.env*` loading with `${VAR}` expansion is built in), `cross-env` (same), `tsx` / `ts-node` (native TS via oxc), `nodemon` (`nub --watch` in v0.x), `tsconfig-paths` / `tsconfig-paths/register` (native `paths` resolution), `npx` (`nubx` / `nub exec`). **Modern Node already obsoletes; Nub lets you inherit:** `node-fetch` / `cross-fetch` / `isomorphic-fetch` / `whatwg-fetch` (native `fetch` since 18), `abort-controller` (native since 15), `uuid` for the v4 case (`crypto.randomUUID` since 14.17), `rimraf` (`fs.rmSync({ recursive: true, force: true })` since 14.14), `mkdirp` (`fs.mkdirSync({ recursive: true })` since 10.12), `glob` / `globby` (basic) (`fs.glob` since 22), `form-data` (native `FormData` since 18), `ws` client (native `WebSocket` since 22.5, Nub polyfills on older). The second bucket's credit is Node's; the relevance to Nub is that running on a modern Node floor is what makes the inheritance practical. Full catalog with weekly download counts and Node-version notes: `runtime/polyfill-obsoletion-catalog.md`.
+Two buckets. **Nub replaces directly:** `dotenv` (multi-file `.env*` loading with `${VAR}` expansion is built in), `cross-env` (same), `tsx` / `ts-node` (native TS via oxc), `nodemon` (`nub watch`), `tsconfig-paths` / `tsconfig-paths/register` (native `paths` resolution), `npx` (`nubx` / `nub exec`). **Modern Node already obsoletes; Nub lets you inherit:** `node-fetch` / `cross-fetch` / `isomorphic-fetch` / `whatwg-fetch` (native `fetch` since 18), `abort-controller` (native since 15), `uuid` for the v4 case (`crypto.randomUUID` since 14.17), `rimraf` (`fs.rmSync({ recursive: true, force: true })` since 14.14), `mkdirp` (`fs.mkdirSync({ recursive: true })` since 10.12), `glob` / `globby` (basic) (`fs.glob` since 22), `form-data` (native `FormData` since 18), `ws` client (native `WebSocket` since 22.5, Nub polyfills on older). The second bucket's credit is Node's; the relevance to Nub is that running on a modern Node floor is what makes the inheritance practical.
 
 ### Why not just use Node's built-in TypeScript support?
 
@@ -494,10 +494,10 @@ A few other things you might expect from a tool this shape, and where we landed 
 - **A dev server** — Vite already owns this. `nub run dev` runs whatever your project's `dev` script is — faster
 - **A type checker** — `tsc` already owns this. Nub strips types to execute them; it never claims to verify them
 - **A bundler or test runner** — Same answer. Use the one you already use, faster
-- **A server primitive** — Nub does not ship a `Bun.serve`-style HTTP server API or an auto-fetch-handler runtime. The standards-aligned `export default { fetch(req) {...} }` pattern — used by Bun, Deno, Cloudflare Workers, Vercel Edge, and Fastly — is on the v0.x roadmap, tracked at `runtime/fetch-handler-server.md`, but is deliberately not in v0.1. For v0.1, use Hono, Fastify, Express, or `node:http` directly; `nub run dev` runs whatever your project's `dev` script invokes
+- **A server primitive** — Nub does not ship a `Bun.serve`-style HTTP server API or an auto-fetch-handler runtime. Use Hono, Fastify, Express, or `node:http` directly; `nub run dev` runs whatever your project's `dev` script invokes
 - **A `Bun.*` API mirror** — Cross-runtime portability through WHATWG and Node primitives, not through copying another runtime's proprietary namespace
 
-*For the long-form list of "is X in scope?" questions, see [FAQ → Out of scope / future](/docs/faq).*
+*For the long-form list of "is X in scope?" questions, see the [FAQ](/docs/faq).*
 
 ---
 

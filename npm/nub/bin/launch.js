@@ -28,7 +28,8 @@
 // The native binary selects its verb from argv[0]'s basename (nub vs nubx); the
 // healed trampoline exec's bin/<verb> in the platform package (which ships both
 // names), so no argv0 override is needed past the heal.
-const { spawnSync } = require("child_process");
+const { spawn } = require("child_process");
+const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const { platformPackage } = require("../platform.js");
@@ -140,13 +141,35 @@ module.exports = function launch(argv0Name) {
   healPathEntry(verb, binPath);
   // This call still runs through Node; spawn the native binary. argv0 basename of
   // binPath is the verb (bin/nub or bin/nubx), so the Rust CLI dispatches correctly
-  // without an argv0 override.
+  // without an argv0 override. We use async `spawn` (not `spawnSync`) ONLY so this
+  // Node launcher can forward terminating signals to the native child: `spawnSync`
+  // blocks the event loop, so a SIGTERM (docker stop on a `nub run` entrypoint whose
+  // first-ever call hasn't been healed to the sh trampoline yet) would terminate
+  // this launcher and orphan the workload. With async spawn we relay SIGTERM/INT/HUP
+  // to the child — which then relays to its own subtree — and mirror its exit
+  // status. (Subsequent calls skip Node entirely via the healed trampoline's `exec`,
+  // where signals reach the binary directly.)
   const opts = { stdio: "inherit", windowsHide: true };
   if (argv0Name) opts.argv0 = argv0Name; // belt-and-suspenders for the bin/nub fallback path
-  const result = spawnSync(binPath, process.argv.slice(2), opts);
-  if (result.error) {
-    console.error(`@nubjs/nub: failed to launch ${binPath}: ${result.error.message}`);
+  const child = spawn(binPath, process.argv.slice(2), opts);
+  let forwarding = true;
+  const forward = (sig) => {
+    if (forwarding && child.pid) {
+      try { process.kill(child.pid, sig); } catch {}
+    }
+  };
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, () => forward(sig));
+  child.on("error", (err) => {
+    console.error(`@nubjs/nub: failed to launch ${binPath}: ${err.message}`);
     process.exit(1);
-  }
-  process.exit(result.status == null ? 1 : result.status);
+  });
+  child.on("exit", (code, signal) => {
+    forwarding = false;
+    if (signal) {
+      // Mirror death-by-signal as 128+signo, matching the native binary and a shell.
+      const signo = (os.constants && os.constants.signals && os.constants.signals[signal]) || 0;
+      process.exit(signo ? 128 + signo : 1);
+    }
+    process.exit(code == null ? 1 : code);
+  });
 };

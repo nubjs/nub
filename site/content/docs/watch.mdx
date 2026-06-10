@@ -3,7 +3,7 @@ title: Watch mode
 description: Restart-on-change for files and scripts, driven by the resolved dependency graph plus your .env*, tsconfig.json, and package.json — no glob hygiene required.
 ---
 
-`nub watch` runs your entry point and restarts it whenever something it actually depends on changes. The engine underneath is Node's own `--watch`, with Nub-side glue that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher. The result is a watcher that Just Works for TypeScript projects, with no glob list to maintain. For the v0.1 scope and what is on the roadmap, see [Does it replace `nodemon` / `tsx watch`?](/docs/faq) in the FAQ.
+Watch mode (`nub watch`) runs your entry point and restarts it whenever something it actually depends on changes. The engine underneath is Node's own `--watch`, with Nub-side glue that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher. The result is a watcher that Just Works for TypeScript projects, with no glob list to maintain.
 
 This page is a cookbook. For how `nub` runs files in the first place, see [Running files](/docs/running-files); for scripts, [Running scripts](/docs/running-scripts).
 
@@ -17,9 +17,9 @@ nub watch src/server.ts
 
 TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath.
 
-## Use the `--watch` flag instead of the subcommand
+## The `--watch` flag
 
-`nub --watch <file>` dispatches to the exact same code path as `nub watch <file>`. The two are aliases — same defaults, same behavior. The flag form exists so `node --watch script.ts` muscle memory lands in Nub's improved experience without surprise.
+Flag and subcommand are aliases: `nub --watch <file>` dispatches to the exact same code path as `nub watch <file>` — same defaults, same behavior. The flag form exists so `node --watch script.ts` muscle memory lands in Nub's improved experience without surprise.
 
 ```sh
 nub --watch src/server.ts
@@ -35,7 +35,7 @@ nub run dev --watch
 
 This restarts on source changes the same way the file form does, while still going through `nub run` — so your `npm_*` environment variables, `pre`/`post` lifecycle hooks, and `node_modules/.bin` PATH chain are all in place. See [Running scripts](/docs/running-scripts) for the full `nub run` surface.
 
-## Preserve the previous run's output across restarts
+## Preserve output
 
 Nub preserves terminal output by default and prints a restart banner, rather than clearing the screen. The previous run's error message is usually the most important thing on screen, so wiping it on every restart is the wrong default.
 
@@ -50,9 +50,9 @@ If you prefer Node's clear-on-restart behavior, opt in:
 nub watch --clear src/server.ts
 ```
 
-## Understand what triggers a restart
+## What triggers a restart
 
-`nub watch` is loader-instrumented, not glob-based: it only watches files that were actually loaded as part of the run, plus a small set of off-graph files that invalidate the process when they change. Concretely, a restart fires on a change to:
+The watch set is loader-instrumented, not glob-based: `nub watch` only watches files that were actually loaded as part of the run, plus a small set of off-graph files that invalidate the process when they change. Concretely, a restart fires on a change to:
 
 - Any file in the **resolved dependency graph** of the entry — including `.ts` / `.tsx` files transpiled in-memory through `module.registerHooks()` that Node never sees on disk.
 - Your **`.env*` files** in their normal precedence (`.env`, `.env.local`, `.env.<NODE_ENV>`, …) — these are read once at boot and aren't in any import graph, so Nub reports them to the watcher explicitly.
@@ -61,7 +61,7 @@ nub watch --clear src/server.ts
 
 This is why a plain `node --watch` silently goes stale on a tsconfig edit, and why Nub reports those off-graph files over Node's internal `WATCH_REPORT_DEPENDENCIES` channel.
 
-## Understand what does NOT trigger a restart
+## What doesn't trigger a restart
 
 Because the watch set is the import graph rather than a directory glob, files that nothing in the run actually loads are simply not watched. A rebuild that emits `dist/foo.js` doesn't trigger a restart unless something in the run imported `dist/foo.js`.
 
@@ -73,29 +73,19 @@ nub watch src/server.ts
 
 There is no ignore list to maintain. Most of the `ignore` / restart-loop-guard hygiene that glob-based watchers require is unnecessary in a loader-instrumented model.
 
-## Get strict, byte-for-byte Node `--watch` behavior
+## Plain Node `--watch`
 
-`nub watch` is intentionally not byte-for-byte Node — it adds the banner, preserve-output default, and off-graph reporting described above. When you want vanilla Node `--watch` with no Nub-side glue at all, type `node --watch` directly in your shell.
+Nub's watch mode is intentionally not byte-for-byte Node — it adds the banner, preserve-output default, and off-graph reporting described above. When you want vanilla Node `--watch` with no Nub-side glue at all, type `node --watch` directly in your shell.
 
 ```sh
 node --watch script.js
 ```
 
-Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node. `nub watch` does not carry a `--node` compat flag — for strict-Node watch behavior, this is the path. See [the `--node` flag](/docs/faq) for where compat mode does and doesn't apply.
-
-## Roadmap — not in v0.1
-
-The v0.1 `nub watch` ships in restart-only mode on top of Node's `--watch` engine. The subcommand verb is committed so the eventual engine swap is internal and your invocations don't change. The following are explicitly **not in v0.1** and land in a later v0.x release when Nub's own Rust watcher replaces Node's engine underneath:
-
-- **Glob `--watch-path` / `--watch-ignore`** — extending or excluding the watch set by glob pattern.
-- **Polling fallback** for Docker bind-mounts and WSL, where inotify doesn't propagate through the overlay filesystem.
-- **Manual `rs` stdin restart** — typing `rs` to force a restart.
-- **Configurable kill timeout** — a tunable SIGTERM-to-SIGKILL grace period.
-- **`--hot` state-preserving hot reload** — re-evaluating changed modules in place while `globalThis`, open sockets, and in-memory caches survive, with a Vite-compatible `import.meta.hot` API. This is a mode flag on `nub watch` whose API shape is committed in v0.1 but whose implementation lands in v0.x; see [What's the hot-reload story?](/docs/faq).
+Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node. There is no `--node` compat flag on `nub watch` — for strict-Node watch behavior, this is the path. See [the `--node` flag](/docs/faq) for where compat mode does and doesn't apply.
 
 ## Related
 
 - [Running files](/docs/running-files) — how `nub <file>` executes TypeScript and JSX.
 - [Running scripts](/docs/running-scripts) — `nub run` and its workspace surface.
 - [nubx](/docs/nubx) — running local CLIs from `node_modules/.bin`.
-- [FAQ](/docs/faq) — the hot-reload story and v0.1 scope.
+- [FAQ](/docs/faq) — short answers across the whole surface.

@@ -19,7 +19,7 @@ function LabelWithChip({ label, command }: { label: ReactNode; command: string }
   return (
     <span className="flex w-full items-center justify-between gap-2">
       <span>{label}</span>
-      <code className="rounded border border-fd-border/50 bg-fd-muted px-1 py-px font-mono text-[0.58rem] leading-tight font-normal text-fd-muted-foreground">
+      <code className="rounded border border-fd-border/50 bg-fd-muted px-1 py-px font-mono text-[0.58rem] leading-tight font-normal text-fd-muted-foreground in-data-[active=true]:border-fd-primary/30 in-data-[active=true]:bg-fd-primary/10 in-data-[active=true]:text-fd-primary">
         {command}
       </code>
     </span>

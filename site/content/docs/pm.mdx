@@ -1,6 +1,6 @@
 ---
 title: Package meta-manager
-description: nub pm provisions and runs the package manager your project pins — corepack's job, in native Rust. Pin a version and the exact pnpm/npm/yarn is fetched, verified, cached, and run on the project's Node.
+description: Provision and run the package manager your project pins — corepack's job, in native Rust. Pin a version and the exact pnpm/npm/yarn is fetched, verified, cached, and run on the project's Node.
 ---
 
 Nub reads your project's package-manager pin, downloads that exact version from the npm registry — integrity-verified before extraction, cached under `~/.cache/nub/pm` — and runs it under the project's Node. No corepack, no `enable` step, no baked version table: a nub binary from six months ago provisions today's pnpm.
@@ -11,15 +11,19 @@ $ nub pm which
 » resolved from packageManager (pnpm@9.15.4)
 ```
 
-## The pin
+## Pin resolution
 
-The package manager resolves from, in order:
+The pinned package manager resolves from three sources, in order:
 
 1. **`.yarnrc.yml` `yarnPath`** — a committed Yarn Berry release. Run directly; nothing to provision.
-2. **`package.json#packageManager`** — `name@x.y.z`, optionally `+sha512.<hash>`. The corepack field; nub is contract-compatible with it.
+2. **`package.json#packageManager`** — `name@x.y.z`, optionally `+sha512.<hash>`. The corepack field; Nub is contract-compatible with it.
 3. **`package.json#devEngines.packageManager`** — `{ name, version }`, where `version` may be a range.
 
-Pins are read at the workspace root. `packageManager` must be exact — the entire ecosystem enforces this (corepack, pnpm, yarn all reject ranges there); ranges belong in `devEngines`. With no pin, there's nothing to manage — `nub pm which` says so and the commands below tell you how to pin.
+Pins are read at the workspace root. The `packageManager` field must be exact — the entire ecosystem enforces this (corepack, pnpm, yarn all reject ranges there); ranges belong in `devEngines`. With no pin, there's nothing to manage — `nub pm which` says so and the commands below tell you how to pin.
+
+<Callout title="Yarn Berry">
+Yarn 2+ ships as a release committed to your repo (`.yarnrc.yml` `yarnPath`) — Nub runs that file directly and doesn't provision Berry: a `yarn@2+` pin without a committed release is an error. Yarn classic (1.x) provisions like any other package manager.
+</Callout>
 
 ## `nub pm which`
 
@@ -41,7 +45,7 @@ nub pm pin pnpm@^9        # resolves to the newest 9.x
 nub pm pin pnpm@latest
 ```
 
-`pin` fetches and verifies the version it's about to pin, then writes both fields — preserving your file's indentation:
+Before writing, `pin` fetches and verifies the version, then records both fields — preserving your file's indentation:
 
 ```json
 {
@@ -65,7 +69,7 @@ nub pm switch pnpm        # move the project to pnpm (newest version)
 nub pm switch npm@10
 ```
 
-`switch` rewrites the pin. It does not yet migrate your lockfile — that's planned.
+Only the pin is rewritten — migrating the lockfile to the new manager's format is on you.
 
 ## `nub pm update`
 
@@ -89,6 +93,29 @@ $ nub pm cache clear
 
 Versions live at `~/.cache/nub/pm/<pm>/<version>`. An exact pin that's already cached runs fully offline — the registry is only contacted to resolve ranges and fetch missing versions.
 
-## Yarn Berry
+## `nub pm shim`
 
-Yarn 2+ ships as a release committed to your repo (`.yarnrc.yml` `yarnPath`) — nub runs that file directly. Nub doesn't provision Berry: a `yarn@2+` pin without a committed release is an error. Yarn classic (1.x) provisions like any other package manager.
+Make **bare** `npm` / `pnpm` / `yarn` commands (plus `npx`, `pnpx`, `yarnpkg`) use the project's pinned package manager — typed from muscle memory, or spawned by tools you don't control. This is what `corepack enable` does, without the corepack tax: each shim *is* the nub binary (a hardlink), so deciding which PM to run costs zero Node boots.
+
+```sh
+$ nub pm shim
+created 7 shims in ~/.nub/shims
+added PATH entry to ~/.zshrc — restart your shell or: source ~/.zshrc
+```
+
+With shims active, a bare command resolves against the project it runs in:
+
+- **Pinned, matching name** — runs the pinned version, provisioning it on first use. A cached pin runs fully offline.
+- **Pinned, different name** — refuses: `npm install` in a pnpm project would write a competing `package-lock.json`; the error names the pinned manager and the command to paste. (`npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs are exempt — `npm create vite` works anywhere.)
+- **Unpinned** — falls through to the package manager already on your `PATH`, exactly as if the shim weren't there. If there is none, nub provisions a sensible default (matched to your lockfile's format, else latest) and says so.
+
+The shim never writes to your `package.json`. Re-run `nub pm shim` after upgrading nub to refresh the links.
+
+## `nub pm unshim`
+
+Remove the shims and the `PATH` entry. Works even after the nub binary itself has been uninstalled — the shim directory carries its own copy for exactly this cleanup.
+
+```sh
+$ nub pm unshim
+removed ~/.nub/shims · PATH entry stripped from ~/.zshrc
+```

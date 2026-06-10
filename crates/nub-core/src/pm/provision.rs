@@ -76,8 +76,8 @@ pub fn provision_pm(pin: &PmPin, store_root: &Path) -> Result<ProvisionedPm> {
         }
     }
 
-    let base = registry::registry_base(store_root);
-    let dist = match registry::resolve_version(&base, &pm.to_string(), spec) {
+    let cfg = registry::registry_config(store_root);
+    let dist = match registry::resolve_version_authed(&cfg, &pm.to_string(), spec) {
         Ok(dist) => dist,
         // 3. Registry unreachable: a range can still resolve against the cache.
         // Exact pins were handled above (and an exact spec parses as a *caret*
@@ -107,7 +107,14 @@ pub fn provision_pm(pin: &PmPin, store_root: &Path) -> Result<ProvisionedPm> {
         }); // cache hit — silent
     }
 
-    install(pm, &dist, &pm_store, &final_dir, pin_hash)?;
+    install(
+        pm,
+        &dist,
+        &pm_store,
+        &final_dir,
+        pin_hash,
+        cfg.auth.as_ref(),
+    )?;
     Ok(ProvisionedPm {
         bin,
         version: dist.version,
@@ -156,18 +163,27 @@ fn install(
     pm_store: &Path,
     final_dir: &Path,
     pin_hash: Option<&str>,
+    auth: Option<&download::Auth>,
 ) -> Result<()> {
     // Sibling temp dir on the same filesystem → final placement is an atomic
-    // rename. The guard cleans it up on every exit path.
+    // rename. The guard cleans it up on every exit path. A failure here is the
+    // canonical read-only-store symptom (a CI/container with an unwritable cache):
+    // name the dir and the fix so it isn't an opaque ENOENT/EACCES.
     let work = pm_store.join(format!(".tmp-{}-{}", dist.version, std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).with_context(|| format!("create {}", work.display()))?;
+    std::fs::create_dir_all(&work).with_context(|| {
+        format!(
+            "cannot create the package-manager store dir {} — its parent is missing or \
+             read-only (set XDG_CACHE_HOME to a writable path)",
+            work.display()
+        )
+    })?;
     let _guard = WorkGuard(work.clone());
 
     let started = Instant::now();
     let tarball = work.join("package.tgz");
     let mut announced = false;
-    download::download_to_file(&dist.tarball, &tarball, |_done, total| {
+    download::download_to_file_auth(&dist.tarball, &tarball, auth, |_done, total| {
         if !announced {
             announced = true;
             match total {
@@ -272,8 +288,8 @@ fn verify_pin_hash(file: &Path, suffix: &str) -> Result<()> {
     })?;
     let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let got = match algo {
-        "sha512" => hex_lower(&Sha512::digest(&bytes)),
-        "sha224" => hex_lower(&Sha224::digest(&bytes)),
+        "sha512" => super::hex_lower(&Sha512::digest(&bytes)),
+        "sha224" => super::hex_lower(&Sha224::digest(&bytes)),
         other => bail!(
             "unsupported pin hash algorithm \"{other}\" in \"+{suffix}\" — nub verifies \
              sha512 and sha224 (hex digests, corepack's format); refusing to install unverified"
@@ -287,18 +303,6 @@ fn verify_pin_hash(file: &Path, suffix: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Lowercase-hex render of a digest. Mirrors `registry::hex_lower` (private
-/// there; four lines — duplicating beats widening that module's surface).
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 /// Best-effort cleanup of the temp work dir on any return path (the same guard

@@ -38,8 +38,8 @@ pub enum DiscoveryError {
     #[error(
         "pinned Node version {pin} not found\n\
          \x20\x20Active shell Node: {shell_version} (does not satisfy pin)\n\
-         \x20\x20Install with: nvm install {pin}\n\
-         \x20\x20Or run in compat mode: nub run --node <script>"
+         \x20\x20Provision it with: nub node install {pin}\n\
+         \x20\x20(nub auto-provisions the pinned Node when you run a file; `nub run` / `nubx` use what's already installed.)"
     )]
     PinnedNotFound { pin: String, shell_version: String },
 
@@ -305,6 +305,12 @@ pub fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
         for filename in &[".node-version", ".nvmrc"] {
             let pin_path = dir.join(filename);
             if let Ok(content) = fs::read_to_string(&pin_path) {
+                // Strip a leading UTF-8 BOM (str::trim does not — U+FEFF is not
+                // whitespace) so a BOM-prefixed `.nvmrc`/`.node-version` (the
+                // default for many Windows editors) still parses instead of
+                // silently dropping the pin. The serde_json path
+                // (packageManager/devEngines) handles BOMs already.
+                let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
                 let trimmed = content.trim();
                 if !trimmed.is_empty() {
                     if let Ok(pin) = trimmed.parse::<VersionPin>() {
@@ -953,6 +959,19 @@ mod tests {
             ".node-version must win over .nvmrc"
         );
         assert_eq!(raw, "20.11.0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bom_prefixed_pin_file_still_parses() {
+        // Windows editors default to writing a UTF-8 BOM; str::trim does not
+        // strip U+FEFF, so without the explicit BOM strip the pin would be
+        // dropped silently. The parsed pin must match the BOM-free version.
+        let dir = resolution_tmpdir("bom");
+        std::fs::write(dir.join(".nvmrc"), "\u{FEFF}20.11.0\n").unwrap();
+        let (raw, _pin, source) = walk_up_for_pin(&dir).expect("a BOM-prefixed pin file");
+        assert_eq!(raw, "20.11.0", "the BOM must be stripped before parsing");
+        assert_eq!(source, ".nvmrc");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
