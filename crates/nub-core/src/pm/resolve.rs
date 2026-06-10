@@ -504,6 +504,49 @@ fn root_manifest(cwd: &Path) -> Option<serde_json::Value> {
 /// Errors if no `package.json` exists at the target dir — Nub never creates one
 /// (no silent scaffolding).
 pub fn write_pin_pair(pm: Pm, version: &str, sha512_hex: &str, cwd: &Path) -> Result<PathBuf> {
+    write_pin_pair_impl(pm, version, sha512_hex, true, cwd)
+}
+
+/// [`write_pin_pair`] that leaves `devEngines.packageManager` UNTOUCHED —
+/// `nub pm update`'s hand-written-range path. The pair's semantics: devEngines
+/// is the user's INTENT, `packageManager` the resolved record. `update`
+/// re-resolves within the devEngines range and always rewrites the record
+/// (fresh exact + hash), but when the range is not nub-shaped (see
+/// [`nub_shaped_range`]) it is the user's hand-stated intent and survives
+/// byte-for-byte — the whole entry, `onFail` and any sibling keys included,
+/// not just the version string. The new exact satisfies the kept range by
+/// construction: it was resolved FROM that range, so a range that limited the
+/// update stays consistent without a recheck.
+pub fn write_pin_pair_keeping_dev_engines(
+    pm: Pm,
+    version: &str,
+    sha512_hex: &str,
+    cwd: &Path,
+) -> Result<PathBuf> {
+    write_pin_pair_impl(pm, version, sha512_hex, false, cwd)
+}
+
+/// Whether a `devEngines.packageManager.version` is exactly the shape nub
+/// itself writes — `^<exact>` (a caret over a full semver, e.g. `^9.1.0`,
+/// [`write_pin_pair`]'s form). Anything else (`>=9 <10`, `~9.2`, even a
+/// partial `^9`) is a hand-written range: `nub pm update` re-derives a
+/// nub-shaped range from the new exact but preserves a hand-written one
+/// verbatim ([`write_pin_pair_keeping_dev_engines`]).
+pub fn nub_shaped_range(range: &str) -> bool {
+    range
+        .strip_prefix('^')
+        .is_some_and(|v| semver::Version::parse(v).is_ok())
+}
+
+/// The shared body of the two pin-pair writers: `rewrite_dev_engines` controls
+/// whether the `devEngines.packageManager` half is (re)written or left as-is.
+fn write_pin_pair_impl(
+    pm: Pm,
+    version: &str,
+    sha512_hex: &str,
+    rewrite_dev_engines: bool,
+    cwd: &Path,
+) -> Result<PathBuf> {
     // Fail closed on a non-exact version: writing `packageManager: "pnpm@^9"`
     // breaks corepack (hard error), pnpm (warn + drop), and yarn classic 1.22.21+
     // (startup exit 1) — the caller resolves ranges/tags BEFORE writing. A '+' is
@@ -520,6 +563,9 @@ pub fn write_pin_pair(pm: Pm, version: &str, sha512_hex: &str, cwd: &Path) -> Re
             "packageManager".to_string(),
             serde_json::Value::String(format!("{pm}@{version}+sha512.{sha512_hex}")),
         );
+        if !rewrite_dev_engines {
+            return;
+        }
         let entry = serde_json::json!({
             "name": pm.to_string(),
             "version": format!("^{version}"),
@@ -821,12 +867,22 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A unique temp dir under the system temp root (NOT under $HOME, so the
-    /// detect walk-up can't escape into a stray ancestor package.json). Mirrors
-    /// `manage.rs`'s `tmpdir`.
+    /// detect walk-up can't escape into a stray ancestor package.json). The
+    /// startup-nanos component keeps names unique ACROSS suite runs: stale
+    /// dirs accumulate, PIDs recycle, and a recycled-PID run re-entering a
+    /// stale sibling inherits its old files (a stale `.yarnrc.yml` flips a
+    /// pin test's resolution) — see tests/pm_shim.rs `tmp` for the post-mortem.
     fn tmpdir(tag: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
+        static STARTED_NANOS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+        let nanos = STARTED_NANOS.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        });
         let dir = std::env::temp_dir().join(format!(
-            "nub-pm-{tag}-{}-{}",
+            "nub-pm-{tag}-{}-{nanos:x}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -995,6 +1051,50 @@ mod tests {
             !empty.join("package.json").exists(),
             "write_pin_pair must not scaffold a package.json"
         );
+    }
+
+    #[test]
+    fn keeping_dev_engines_preserves_a_hand_written_range_while_the_record_bumps() {
+        // The pair semantics under `nub pm update`: devEngines is the user's
+        // INTENT, packageManager the resolved record. A hand-written range
+        // (">=9 <10" — not nub's ^x.y.z shape) plus its sibling keys must
+        // survive verbatim while packageManager gets the fresh exact + hash.
+        let dir = tmpdir("keep-range");
+        write_pkg(
+            &dir,
+            r#"{"packageManager":"pnpm@9.1.0+sha512.old","devEngines":{"packageManager":{"name":"pnpm","version":">=9 <10","onFail":"error"}}}"#,
+        );
+        write_pin_pair_keeping_dev_engines(Pm::Pnpm, "9.15.0", "new", &dir).unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest["packageManager"].as_str(),
+            Some("pnpm@9.15.0+sha512.new"),
+            "the resolved record always advances"
+        );
+        let dev = &manifest["devEngines"]["packageManager"];
+        assert_eq!(
+            dev["version"].as_str(),
+            Some(">=9 <10"),
+            "the hand-written range is the user's intent and stays verbatim"
+        );
+        assert_eq!(
+            dev["onFail"].as_str(),
+            Some("error"),
+            "sibling keys of the kept entry survive too — the entry is untouched"
+        );
+
+        // The shape gate the caller keys on: only nub's own ^<exact> is
+        // rewritable; everything else is hand-written.
+        assert!(nub_shaped_range("^9.1.0"));
+        for hand_written in [">=9 <10", "~9.2", "^9", "9.x", "*"] {
+            assert!(
+                !nub_shaped_range(hand_written),
+                "{hand_written:?} must read as hand-written"
+            );
+        }
     }
 
     #[test]

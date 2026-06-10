@@ -9,7 +9,7 @@
 //! provisioning failure path runs against a dead-registry `.npmrc`
 //! (`127.0.0.1:1`). Only the `#[ignore]` e2e touches the real registry.
 
-#![cfg(unix)] // exec + shell-script fakes; the Windows shim path is CI-leg work.
+#![cfg(unix)] // exec + shell-script fakes; the Windows half is pm_shim_windows.rs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,11 +24,29 @@ fn nub_binary() -> PathBuf {
 
 /// Unique temp dir under the system temp root (never under $HOME — the
 /// manifest walk-up must not escape into a stray ancestor package.json).
+///
+/// The name carries a per-process startup-nanos component BESIDES the PID +
+/// counter. PID + counter alone collided with STALE dirs from earlier suite
+/// runs: these dirs are never cleaned (a panicking test must leave its state
+/// inspectable), thousands accumulate in $TMPDIR across a work session, and
+/// macOS recycles PIDs (the observed leftovers already spanned a full wrap of
+/// the ~99k PID space) — so a later run with a recycled PID re-entered a stale
+/// sibling and found last run's links, failing `shim_link`'s hard_link/symlink
+/// with EEXIST. That was the intermittent full-suite flake (seen as
+/// `nub_from_the_shim_dir_defers_to_the_real_nub_on_path` failing); the nanos
+/// component makes names unique across runs, the counter within one.
 fn tmp(tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
+    static STARTED_NANOS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let nanos = STARTED_NANOS.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    });
     let dir = std::env::temp_dir().join(format!(
-        "nub-pmshim-{tag}-{}-{}",
+        "nub-pmshim-{tag}-{}-{nanos:x}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
@@ -96,6 +114,12 @@ fn run(program: &Path, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (Stri
 /// [`run`] with a watchdog: kills the child and panics if it outlives `secs`.
 /// For regressions whose failure mode is an infinite exec loop (recursion-guard
 /// holes) — a plain `.output()` would hang the suite forever instead of failing.
+///
+/// Signal-deaths retry once, the same policy (and reason) as [`run`]: macOS
+/// very occasionally SIGKILLs a freshly-hardlinked binary on exec (the
+/// signature-cache transient), which here surfaced as an intermittent
+/// `code == -1` with empty output. A watchdog expiry is NOT retried — an
+/// exec loop is deterministic and the panic should name it immediately.
 fn run_with_timeout(
     program: &Path,
     args: &[&str],
@@ -103,33 +127,42 @@ fn run_with_timeout(
     env: &[(&str, &str)],
     secs: u64,
 ) -> (String, String, i32) {
-    let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(cwd);
-    cmd.env_remove("npm_config_registry");
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().expect("failed to spawn");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    loop {
-        match child.try_wait().expect("wait failed") {
-            Some(_) => break,
-            None if std::time::Instant::now() > deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("child still running after {secs}s — exec-loop regression?");
+    let attempt = || {
+        let mut cmd = Command::new(program);
+        cmd.args(args).current_dir(cwd);
+        cmd.env_remove("npm_config_registry");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("failed to spawn");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            match child.try_wait().expect("wait failed") {
+                Some(_) => break,
+                None if std::time::Instant::now() > deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("child still running after {secs}s — exec-loop regression?");
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(25)),
             }
-            None => std::thread::sleep(std::time::Duration::from_millis(25)),
+        }
+        let out = child.wait_with_output().expect("collecting output");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code(),
+        )
+    };
+    match attempt() {
+        (out, err, Some(code)) => (out, err, code),
+        (_, _, None) => {
+            let (out, err, code) = attempt();
+            (out, err, code.unwrap_or(-1))
         }
     }
-    let out = child.wait_with_output().expect("collecting output");
-    (
-        String::from_utf8_lossy(&out.stdout).to_string(),
-        String::from_utf8_lossy(&out.stderr).to_string(),
-        out.status.code().unwrap_or(-1),
-    )
 }
 
 #[test]

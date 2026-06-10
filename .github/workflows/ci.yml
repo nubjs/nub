@@ -44,6 +44,22 @@ jobs:
         # darwin-arm64 release target (A24). darwin-x64 is built in release.yml
         # but not yet exercised here; add macos-13 (Intel) if x64 coverage is
         # wanted later.
+        #
+        # The windows-latest leg is the ONLY place the PM-shim's cfg(windows)
+        # code executes (Docker on the dev box is Linux-only): `cargo test`
+        # picks up nub-cli's tests/pm_shim_windows.rs, which covers
+        # install_shims_into's `.exe` entry naming, argv0 dispatch through a
+        # pnpm.exe/npm.exe link, the `.exe`/`.cmd` PATH probing of the
+        # fall-through scan, the pinned-PM cached run under the project Node,
+        # the strict refusal, and exit-code fidelity through the spawn+wait
+        # exec replacement. (The portable pm::shim unit tests — decision
+        # matrix, profile-block edits, lockfile/redirect logic — already ran
+        # here; the #[cfg(unix)] ones — inode/hardlink, exec-bit, symlink
+        # tests and all of tests/pm_shim.rs — still don't.) Not covered
+        # anywhere yet: replacing a RUNNING shim .exe (image lock), and a
+        # `nub pm shim`/`unshim` round trip (dirs_next ignores env HOME on
+        # Windows, so an end-to-end run would write the runner's real
+        # profile — kept out deliberately).
         os: [ubuntu-latest, windows-latest, macos-14]
         # Node matrix spans the support range so the integration suite (which
         # nub runs against whatever `node` is first on PATH) exercises every
