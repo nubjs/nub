@@ -22,6 +22,7 @@ Every nub invocation's captured output is additionally swept for the string `aub
 | `platform-optional` | platform-conditional optionals: `esbuild`'s per-platform optional deps + direct `fsevents` (darwin-only) | `install` |
 | `scoped` | scoped packages, including scoped transitives (`@babel/code-frame`) | `install` |
 | `git-dep` | a git dependency pinned to a tag (`github:vercel/ms#2.1.3`) | `install` |
+| `patched` | the full patch workflow — `nub patch ms@2.1.3` → edit → `nub patch-commit`, then the real PM must both accept the lockfile *and* link the patched content (`fixture_post_check`) | `install` + `patch` + `patch-commit` |
 
 ## Red list
 

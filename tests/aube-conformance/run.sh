@@ -42,7 +42,7 @@ PNPM_PIN=10.15.1
 NPM_PIN=11.13.0
 BUN_PIN=1.3.14
 
-ALL_FIXTURES=(simple workspace peer-heavy overrides platform-optional scoped git-dep)
+ALL_FIXTURES=(simple workspace peer-heavy overrides platform-optional scoped git-dep patched)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 FORMATS="${FORMATS:-pnpm npm bun yarn}"
@@ -91,6 +91,38 @@ fixture_cmd() {
   esac
 }
 
+# nub_mutation <log> <proj> <format> <fixture> — drive the fixture's nub
+# mutation. `patched` is the only multi-step fixture: the full patch
+# workflow (install → patch → edit → patch-commit, whose chained install
+# is what must land the patch entry in the lockfile). Everything else is
+# the single fixture_cmd verb.
+nub_mutation() {
+  local log="$1" proj="$2" format="$3" fixture="$4"
+  if [ "$fixture" = patched ]; then
+    local edit="$proj/.patch-edit"
+    nub_step "$log" "$proj" "$format" install || return $?
+    nub_step "$log" "$proj" "$format" patch ms@2.1.3 --edit-dir "$edit" || return $?
+    printf '\nmodule.exports.NUB_PATCHED = true;\n' >>"$edit/user/index.js" || return 1
+    nub_step "$log" "$proj" "$format" patch-commit "$edit/user" || return $?
+  else
+    # shellcheck disable=SC2046
+    nub_step "$log" "$proj" "$format" $(fixture_cmd "$fixture")
+  fi
+}
+
+# fixture_post_check <fixture> <proj> <log> — fixture-specific assertion on
+# the tree the REAL package manager just linked. patched: the real PM must
+# have applied the committed patch from the lockfile entry — an install that
+# silently drops the patch is exactly the failure this fixture exists for.
+fixture_post_check() {
+  case "$1" in
+    patched)
+      grep -q NUB_PATCHED "$2/node_modules/ms/index.js" 2>/dev/null \
+        || { echo "FAILED: real PM install did not apply the patch" >>"$3"; return 1; } ;;
+  esac
+  return 0
+}
+
 expected_reason() {
   # expected-failures.txt lines: "<fixture> <format> <reason...>"
   awk -v f="$1" -v m="$2" '$1==f && $2==m { $1=""; $2=""; sub(/^  */,""); print; exit }' \
@@ -106,6 +138,10 @@ skip_reason() {
     # parsing the member manifests themselves — no lockfile nub could write
     # changes that.
     workspace--npm) echo "npm has no workspace: protocol support" ;;
+    # npm has no patched-dependency construct at all: package-lock.json
+    # cannot carry a patch entry and `npm ci` will never apply one, so no
+    # lockfile nub writes can make the post-check pass.
+    patched--npm) echo "npm has no patched-dependency construct" ;;
     *) echo "" ;;
   esac
 }
@@ -154,12 +190,12 @@ stage_fixture() {
 
 leg_pnpm() {
   local proj="$1" log="$2" fixture="$3"
-  # shellcheck disable=SC2046
-  nub_step "$log" "$proj" pnpm $(fixture_cmd "$fixture") || { echo "FAILED: nub step (exit $?)" >>"$log"; return 1; }
+  nub_mutation "$log" "$proj" pnpm "$fixture" || { echo "FAILED: nub step (exit $?)" >>"$log"; return 1; }
   [ -f "$proj/pnpm-lock.yaml" ] || { echo "FAILED: nub wrote no pnpm-lock.yaml" >>"$log"; return 1; }
   wipe_node_modules "$proj"
   ( cd "$proj" && step "$log" "real pnpm frozen accept" run_pnpm install --frozen-lockfile ) \
     || { echo "FAILED: real pnpm rejected the lockfile (--frozen-lockfile)" >>"$log"; return 1; }
+  fixture_post_check "$fixture" "$proj" "$log" || return 1
   cp "$proj/pnpm-lock.yaml" "$log.lock-before"
   ( cd "$proj" && step "$log" "real pnpm zero-churn rewrite" run_pnpm install ) \
     || { echo "FAILED: real pnpm mutable install errored" >>"$log"; return 1; }
@@ -170,12 +206,12 @@ leg_pnpm() {
 
 leg_npm() {
   local proj="$1" log="$2" fixture="$3"
-  # shellcheck disable=SC2046
-  nub_step "$log" "$proj" npm $(fixture_cmd "$fixture") || { echo "FAILED: nub step (exit $?)" >>"$log"; return 1; }
+  nub_mutation "$log" "$proj" npm "$fixture" || { echo "FAILED: nub step (exit $?)" >>"$log"; return 1; }
   [ -f "$proj/package-lock.json" ] || { echo "FAILED: nub wrote no package-lock.json" >>"$log"; return 1; }
   wipe_node_modules "$proj"
   ( cd "$proj" && step "$log" "real npm ci accept" run_npm ci ) \
     || { echo "FAILED: real npm ci rejected the lockfile" >>"$log"; return 1; }
+  fixture_post_check "$fixture" "$proj" "$log" || return 1
   cp "$proj/package-lock.json" "$log.lock-before"
   ( cd "$proj" && step "$log" "real npm zero-churn rewrite" run_npm install --no-audit --no-fund ) \
     || { echo "FAILED: real npm mutable install errored" >>"$log"; return 1; }
@@ -187,12 +223,12 @@ leg_npm() {
 leg_bun() {
   local proj="$1" log="$2" fixture="$3"
   command -v bun >/dev/null || { echo "FAILED: bun not on PATH" >>"$log"; return 1; }
-  # shellcheck disable=SC2046
-  nub_step "$log" "$proj" bun $(fixture_cmd "$fixture") || { echo "FAILED: nub step (exit $?)" >>"$log"; return 1; }
+  nub_mutation "$log" "$proj" bun "$fixture" || { echo "FAILED: nub step (exit $?)" >>"$log"; return 1; }
   [ -f "$proj/bun.lock" ] || { echo "FAILED: nub wrote no bun.lock" >>"$log"; return 1; }
   wipe_node_modules "$proj"
   ( cd "$proj" && step "$log" "real bun frozen accept" bun install --frozen-lockfile ) \
     || { echo "FAILED: real bun rejected the lockfile (--frozen-lockfile)" >>"$log"; return 1; }
+  fixture_post_check "$fixture" "$proj" "$log" || return 1
   return 0
 }
 

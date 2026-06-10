@@ -4,3 +4,5 @@
 # is recorded by deleting the entry in the same commit as the fix.
 # All entries are fork-fixable lockfile-writer bugs (vendor/aube); scenarios
 # the ecosystem makes impossible are skip_reason() in run.sh instead.
+patched pnpm install never carries manifest patch entries into pnpm-lock.yaml (no top-level patchedDependencies {hash,path} block, no (patch_hash=...) snapshot suffixes) — real pnpm rejects with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH; upstream design keeps patches out of the lockfile (patch_commit.rs "avoid touching the lockfile") and only the linker merges manifest entries (patches.rs load_patches_for_linker), so the writer-side fix must thread pnpm's patch-hash through graph + dep-path suffixes
+patched bun patch entries are recorded under pnpm.patchedDependencies only, which bun ignores — bun.lock gets no patchedDependencies block (graph.patched_dependencies is empty at install), real bun frozen-accepts the patchless lockfile and links UNPATCHED content; fix is the same graph-population seam plus bun's top-level manifest namespace
