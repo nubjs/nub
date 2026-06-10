@@ -2902,10 +2902,13 @@ version = "0.0.24"
 dependencies = [
  "anyhow",
  "aube",
+ "aube-codes",
  "aube-lockfile",
  "aube-manifest",
  "clap",
+ "dirs-next",
  "dotenvy",
+ "miette",
  "nub-core",
  "semver",
  "serde_json",

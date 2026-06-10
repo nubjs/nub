@@ -450,7 +450,7 @@ pub enum Command {
     ///
     /// Respects the project's existing lockfile (pnpm-lock.yaml,
     /// package-lock.json, …) for both resolution and layout; see
-    /// src/pm_engine.rs for the layout policy and the yarn write gate.
+    /// src/pm_engine/ for the layout policy and the yarn write gate.
     #[command(visible_alias = "i")]
     Install {
         /// Hard-fail if the lockfile is out of date (default in CI).
@@ -628,56 +628,25 @@ struct ScriptExecOpts<'a> {
 }
 
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
-/// to the embedded aube install engine (src/pm_engine.rs).
+/// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
     "run", "watch", "exec", "upgrade", "help", "node", "pm", "install", "i", "ci",
 ];
 
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
 /// frontend (A2) was disabled 2026-06-09 in favor of the normalized standard
-/// surface (wiki/research/package-manager-normalized-surface.md), whose first
-/// implemented slice is `install`/`i`/`ci` — those graduated out of this list
-/// into SUBCOMMANDS and dispatch to the embedded aube engine. The remaining
-/// verbs error with the project's real PM command instead of dispatching
-/// anything. Union of the npm/pnpm/yarn/bun staples plus their short aliases;
-/// must stay disjoint from SUBCOMMANDS (asserted in tests). `dlx` is
-/// deliberately absent — its spelling diverges per PM (`npx`/`bunx`), so a
-/// uniform `<pm> dlx` suggestion would be wrong for npm/bun.
+/// surface (wiki/research/package-manager-normalized-surface.md):
+/// `install`/`i`/`ci` graduated into SUBCOMMANDS (live engine dispatch), and
+/// the rest of the aube verb surface graduated into the engine verb registry
+/// (`pm_engine::ENGINE_VERBS` — stubs today, family fill-ins next). What's
+/// left here is the rump of PM verbs that exist in *other* package managers
+/// but not in the embedded engine; they error with the project's real PM
+/// command instead of dispatching anything. Must stay disjoint from
+/// SUBCOMMANDS and the engine registry (asserted in tests).
 const PM_VERBS: &[&str] = &[
-    "add",
-    "remove",
-    "rm",
-    "uninstall",
-    "update",
-    "up",
-    "outdated",
-    "audit",
-    "publish",
-    "pack",
-    "version",
-    "link",
-    "unlink",
-    "dedupe",
-    "rebuild",
-    "why",
-    "list",
-    "ls",
-    "info",
-    "view",
-    "init",
-    "create",
-    "login",
-    "logout",
-    "whoami",
-    "config",
-    "store",
-    "cache",
-    "import",
+    // yarn (berry) / bun lockfile migration verb; the engine spells the
+    // equivalent `import`, which is engine-routed.
     "migrate",
-    "prune",
-    "deprecate",
-    "dist-tag",
-    "patch",
 ];
 
 /// Accept pnpm's flag-before-subcommand order. pnpm takes `pnpm -r run build` AND
@@ -870,8 +839,13 @@ fn run_nub() -> Result<i32> {
                 }
             }
             _ => {
-                // Check if this is the first positional and matches a subcommand.
-                if rest.is_empty() && !arg.starts_with('-') && SUBCOMMANDS.contains(&arg.as_str()) {
+                // Check if this is the first positional and matches a subcommand
+                // (nub-native, or a verb registered to the embedded PM engine).
+                if rest.is_empty()
+                    && !arg.starts_with('-')
+                    && (SUBCOMMANDS.contains(&arg.as_str())
+                        || crate::pm_engine::lookup_verb(arg).is_some())
+                {
                     subcommand_found = true;
                 }
                 rest.push(arg.clone());
@@ -1108,6 +1082,17 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // read like `nub node`'s and it never reaches clap dispatch.
     if subcommand == "pm" {
         return run_pm(&rest[1..]);
+    }
+
+    // Verbs registered to the embedded PM engine (the aube verb surface minus
+    // nub-reserved and tool-identity verbs — see pm_engine::ENGINE_VERBS).
+    // Dispatched before clap: these aren't clap variants; each family module
+    // owns its own args parsing (today: stubs that error with the user's
+    // real-PM fallback). `install`/`i`/`ci` are NOT in the registry — they
+    // are live clap verbs handled below.
+    if let Some(spec) = crate::pm_engine::lookup_verb(&subcommand) {
+        let pm = detect_package_manager(&env::current_dir()?);
+        return crate::pm_engine::dispatch_verb(spec, &subcommand, &rest[1..], &pm);
     }
 
     let forwards = matches!(subcommand.as_str(), "run" | "exec" | "watch");
@@ -4430,11 +4415,12 @@ mod tests {
 
     #[test]
     fn pm_verbs_and_reserved_verbs_stay_disjoint() {
-        // Reserved verbs are recognized by the pre-parse and dispatch natively;
-        // PM_VERBS exists only to redirect (the A2 passthrough is disabled). A
-        // verb in both sets would make the redirect arm unreachable.
-        // `install`/`i`/`ci` graduated from PM_VERBS to native verbs (the
-        // embedded aube engine, src/pm_engine.rs) — they must stay native.
+        // Three verb sets, three dispatch paths: SUBCOMMANDS (clap natives),
+        // the engine verb registry (pm_engine::ENGINE_VERBS, family
+        // dispatch), and PM_VERBS (redirect-only rump). Any overlap makes a
+        // later arm unreachable. `install`/`i`/`ci` graduated from PM_VERBS
+        // to native verbs (the embedded aube engine, src/pm_engine/) — they
+        // must stay native and out of the registry.
         for verb in [
             "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci",
         ] {
@@ -4448,7 +4434,31 @@ mod tests {
                 !SUBCOMMANDS.contains(verb),
                 "{verb} is in both PM_VERBS and SUBCOMMANDS — the redirect arm would be unreachable"
             );
+            assert!(
+                crate::pm_engine::lookup_verb(verb).is_none(),
+                "{verb} is in both PM_VERBS and ENGINE_VERBS — the redirect arm would be unreachable"
+            );
         }
+        for verb in SUBCOMMANDS {
+            assert!(
+                crate::pm_engine::lookup_verb(verb).is_none(),
+                "{verb} is in both SUBCOMMANDS and ENGINE_VERBS — engine dispatch would shadow the native verb"
+            );
+        }
+    }
+
+    #[test]
+    fn engine_verbs_dispatch_to_the_family_stub() {
+        // The registered-but-unwired surface must fail loud (stub error
+        // naming the verb + the real-PM fallback), not fall through to the
+        // bareword/redirect arms. Exercise one alias through the real
+        // dispatch path.
+        let spec = crate::pm_engine::lookup_verb("rm").expect("rm must be registered");
+        let err = crate::pm_engine::dispatch_verb(spec, "rm", &["lodash".to_string()], "pnpm")
+            .expect_err("stub verbs must error until wired");
+        let msg = err.to_string();
+        assert!(msg.contains("wired in phase Surface"), "{msg}");
+        assert!(msg.contains("pnpm rm lodash"), "{msg}");
     }
 
     /// A project dir whose `.npmrc` points the registry at an unroutable port, so

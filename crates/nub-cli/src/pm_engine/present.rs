@@ -1,0 +1,256 @@
+//! Presentation layer for engine output. **All** engine text that reaches
+//! nub's stdout/stderr flows through here — error reports, warnings, and the
+//! occasional informational line a family verb relays.
+//!
+//! Three jobs (Colin's hard requirement: no `ERR_AUBE_*`/`WARN_AUBE_*`
+//! strings and no `aube.jdx.dev` URLs may reach nub's output; the rewrite
+//! happens at presentation time, never by renaming codes in the fork):
+//!
+//! 1. **Rewrite** rendered text: `ERR_AUBE_*` → `ERR_NUB_*`, `WARN_AUBE_*` →
+//!    `WARN_NUB_*`, `aube.jdx.dev` URLs stripped (a line left holding only a
+//!    dangling label like `Details:` is dropped whole), and message-level
+//!    `aube`/`Aube` verb/binary spellings rebranded to `nub` — while
+//!    preserving real on-disk names (`aube-lock.yaml`,
+//!    `aube-workspace.yaml`, `.aube-state`, path segments like
+//!    `share/aube/store`) that genuinely exist in the user's project or
+//!    filesystem.
+//! 2. **Exit codes**: map a failing report's diagnostic code through the
+//!    engine's own exit table (`aube_codes::exit::EXIT_TABLE`), mirroring
+//!    aube's `cli_main` (`vendor/aube/crates/aube/src/lib.rs::
+//!    report_exit_code`): codeless or unlisted codes exit
+//!    [`aube_codes::exit::EXIT_GENERIC`] (1).
+//! 3. **Passthrough**: [`warn`] / [`info`] for family code that emits its
+//!    own lines — both route through the same rewrite so no call site can
+//!    bypass the brand boundary.
+//!
+//! Known accepted gaps (documented, not bugs): a sentence-final bare
+//! `aube.` (token followed by `.`) is left alone — indistinguishable from a
+//! domain/filename prefix without grammar; the multicall spellings
+//! `aubx`/`aubr` are not rewritten (they never appear in the embedded
+//! command layer's messages).
+
+/// Render a failing engine report for nub's stderr: miette's fancy Debug
+/// render (exactly what aube's own `cli_main` prints), then the brand
+/// rewrite.
+pub(crate) fn render_report(report: &miette::Report) -> String {
+    rewrite(&format!("{report:?}"))
+}
+
+/// Print a failing engine report to stderr and return the exit code its
+/// diagnostic maps to. The one-stop failure path for family verbs.
+pub(crate) fn emit_report(report: &miette::Report) -> i32 {
+    eprintln!("{}", render_report(report));
+    exit_code(report)
+}
+
+/// Resolve a report's exit code against the engine's own table, mirroring
+/// `vendor/aube/crates/aube/src/lib.rs::report_exit_code`: the diagnostic's
+/// `code()` is looked up in `aube_codes::exit::EXIT_TABLE`; no code or no
+/// entry falls back to `EXIT_GENERIC` (1).
+pub(crate) fn exit_code(report: &miette::Report) -> i32 {
+    report
+        .code()
+        .and_then(|code| aube_codes::exit::exit_code_for(&code.to_string()))
+        .unwrap_or(aube_codes::exit::EXIT_GENERIC)
+}
+
+/// Warning passthrough for family verbs (stderr, rewritten). Use for
+/// non-fatal engine-adjacent notices.
+#[allow(dead_code)] // first consumers land with the family fill-ins
+pub(crate) fn warn(msg: &str) {
+    eprintln!("{}", rewrite(msg));
+}
+
+/// Info passthrough for family verbs (stderr, rewritten — the engine's
+/// convention: stdout is data, progress/status lines go to stderr).
+pub(crate) fn info(msg: &str) {
+    eprintln!("{}", rewrite(msg));
+}
+
+/// The brand rewrite. Order matters: codes first (so the `AUBE` inside
+/// `ERR_AUBE_*` never reaches the word pass), then per-line URL stripping,
+/// then the word-boundary `aube` → `nub` pass.
+pub(crate) fn rewrite(text: &str) -> String {
+    let text = text
+        .replace("ERR_AUBE_", "ERR_NUB_")
+        .replace("WARN_AUBE_", "WARN_NUB_");
+    let mut out = String::with_capacity(text.len());
+    let mut emitted = false;
+    for line in text.split('\n') {
+        let Some(line) = strip_engine_urls(line) else {
+            continue; // line reduced to a dangling label — drop it whole
+        };
+        if emitted {
+            out.push('\n');
+        }
+        out.push_str(&rebrand_words(&line));
+        emitted = true;
+    }
+    out
+}
+
+/// Host of the engine's documentation site. Any URL token containing it is
+/// stripped; nub has no equivalent page to substitute, and pointing users at
+/// another tool's docs is the leak this module exists to stop.
+const ENGINE_DOC_HOST: &str = "aube.jdx.dev";
+
+/// Remove engine-doc URL tokens from one line. Returns `None` when the line
+/// should be dropped entirely (nothing left but whitespace, or a dangling
+/// label such as `Details:` that only existed to introduce the URL).
+fn strip_engine_urls(line: &str) -> Option<String> {
+    if !line.contains(ENGINE_DOC_HOST) {
+        return Some(line.to_string());
+    }
+    let mut s = line.to_string();
+    while let Some(at) = s.find(ENGINE_DOC_HOST) {
+        // Expand to the whole whitespace-delimited token (catches the
+        // https:// prefix and any path suffix).
+        let start = s[..at]
+            .rfind(char::is_whitespace)
+            .map(|i| i + char::len_utf8(s[i..].chars().next().unwrap_or(' ')))
+            .unwrap_or(0);
+        let end = s[at..]
+            .find(char::is_whitespace)
+            .map(|i| at + i)
+            .unwrap_or(s.len());
+        s.replace_range(start..end, "");
+    }
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Rebrand standalone `aube` / `Aube` word tokens to `nub` / `Nub`.
+///
+/// A token is "standalone" when the neighboring characters are not
+/// name-continuation characters: alphanumerics, `.`, `-`, `_`, `/`, `@`,
+/// `~`. That single rule keeps every real on-disk name intact —
+/// `aube-lock.yaml` (next `-`), `.aube-state` (prev `.`), `aube.jdx.dev`
+/// (next `.`), `aube_codes` (next `_`), `share/aube/store` (prev/next `/`)
+/// — while catching the spellings that are genuinely the tool's name in
+/// prose or a command line: `` `aube install` ``, `another aube install is
+/// using this store`, `run "aube import"`.
+fn rebrand_words(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = next_token(rest) {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let token = &from[..4];
+        let prev_ok = before.chars().next_back().is_none_or(is_word_boundary);
+        let next_ok = from[4..].chars().next().is_none_or(is_word_boundary);
+        if prev_ok && next_ok {
+            out.push_str(if token == "Aube" { "Nub" } else { "nub" });
+        } else {
+            out.push_str(token);
+        }
+        rest = &from[4..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Byte offset of the next `aube`/`Aube` occurrence, if any.
+fn next_token(s: &str) -> Option<usize> {
+    match (s.find("aube"), s.find("Aube")) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Characters that do NOT continue a file/path/identifier name. See
+/// [`rebrand_words`].
+fn is_word_boundary(c: char) -> bool {
+    !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | '@' | '~'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_diagnostic_codes_from_the_real_constants() {
+        // Built from the real aube-codes constant so a fork-side rename
+        // breaks this test instead of silently leaking the old code.
+        let report = miette::miette!(
+            code = aube_codes::errors::ERR_AUBE_NO_LOCKFILE,
+            "no lockfile found and --frozen-lockfile is set"
+        );
+        let rendered = render_report(&report);
+        assert!(
+            rendered.contains("ERR_NUB_NO_LOCKFILE"),
+            "rendered report must carry the rewritten code: {rendered}"
+        );
+        assert!(
+            !rendered.contains("AUBE") && !rendered.contains("aube"),
+            "no engine branding may survive the render: {rendered}"
+        );
+    }
+
+    #[test]
+    fn rewrites_message_level_engine_verb_spellings() {
+        // The literal `nub ci` missing-lockfile hint from
+        // vendor/aube/crates/aube/src/commands/install/mod.rs — the message
+        // names the engine binary + verb, which must read as nub's.
+        let msg = "no lockfile found and --frozen-lockfile is set\n\
+                   help: commit pnpm-lock.yaml to your repository, or run \
+                   `aube install --no-frozen-lockfile` to generate one";
+        let out = rewrite(msg);
+        assert!(
+            out.contains("`nub install --no-frozen-lockfile`"),
+            "verb spelling must be rebranded: {out}"
+        );
+        assert!(!out.contains("aube"), "{out}");
+    }
+
+    #[test]
+    fn preserves_real_on_disk_engine_names() {
+        // These name actual files/dirs that can exist in a user's project;
+        // rewriting them would point users at paths that don't exist.
+        for name in [
+            "aube-lock.yaml",
+            "aube-workspace.yaml",
+            "node_modules/.nub/.aube-state",
+            "node_modules/.aube-applied-patches.json",
+            "~/.local/share/aube/store/v1",
+        ] {
+            assert_eq!(rewrite(name), name, "on-disk name must survive");
+        }
+        // …while the same stem as a standalone word still rebrands.
+        assert_eq!(
+            rewrite("another aube install is using this store"),
+            "another nub install is using this store"
+        );
+    }
+
+    #[test]
+    fn strips_engine_doc_urls_and_dangling_labels() {
+        // Shape of vendor/aube/crates/aube/src/commands/install/gvs.rs: the
+        // URL sits on its own labeled line, which must vanish entirely.
+        let msg = "global virtual store is not supported\n\
+                   Details: https://aube.jdx.dev/package-manager/global-virtual-store\n\
+                   use a per-project virtual store instead";
+        let out = rewrite(msg);
+        assert!(!out.contains("aube.jdx.dev"), "{out}");
+        assert!(!out.contains("Details:"), "dangling label must drop: {out}");
+        assert!(out.contains("use a per-project virtual store instead"));
+        // Inline URL: only the token goes, the sentence stays.
+        let inline = rewrite("see https://aube.jdx.dev/cli for flags");
+        assert_eq!(inline, "see  for flags");
+    }
+
+    #[test]
+    fn exit_codes_follow_the_engine_exit_table() {
+        // ERR_AUBE_NO_LOCKFILE carries bespoke exit 10 in the engine's
+        // EXIT_TABLE (lockfile range); drift upstream should fail here.
+        let coded = miette::miette!(code = aube_codes::errors::ERR_AUBE_NO_LOCKFILE, "x");
+        assert_eq!(exit_code(&coded), 10);
+        // Codeless reports (e.g. the ci missing-lockfile error) fall back
+        // to the generic exit, matching aube's own cli_main.
+        let plain = miette::miette!("no lockfile found");
+        assert_eq!(exit_code(&plain), aube_codes::exit::EXIT_GENERIC);
+    }
+}

@@ -16,12 +16,20 @@ nub-core = { path = "../nub-core" }
 # is a pure library crate (no CLI/tokio surface); `aube` is the command layer
 # as a library (lib target landed in nubjs/aube@b15cdcb) — `nub install` /
 # `nub ci` route through `aube::commands::install::run` in-process instead of
-# shelling out. See vendor/aube/AGENTS.md and src/pm_engine.rs.
+# shelling out. See vendor/aube/AGENTS.md and src/pm_engine/.
 aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
 aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
 aube = { path = "../../vendor/aube/crates/aube" }
+# Engine error-code constants + the bespoke exit-code table; consumed by the
+# presentation layer (src/pm_engine/present.rs) for the ERR_AUBE_→ERR_NUB_
+# rewrite and the cli_main-compatible exit mapping.
+aube-codes = { path = "../../vendor/aube/crates/aube-codes" }
+# Same major + `fancy` as vendor/aube — present.rs renders the engine's
+# miette::Report exactly as aube's own cli_main would, then rewrites it.
+miette = { version = "7", features = ["fancy"] }
 anyhow.workspace = true
 clap.workspace = true
+dirs-next.workspace = true
 dotenvy = "0.15"
 serde_json.workspace = true
 semver = "1"
