@@ -111,25 +111,21 @@ const PIECES: {
   {
     accent: 'pink',
     command: 'nub install',
-    label: 'Package hypermanager',
-    title: 'A package hypermanager',
+    label: 'Package manager',
+    title: 'A built-in package manager',
     blurb: (
       <>
-        All package-management commands (<Mono>install</Mono>, <Mono>add</Mono>, <Mono>remove</Mono> …)
-        delegate to your project&rsquo;s configured package manager. It <em>auto-detects</em>{' '}
-        <Mono>package.json#packageManager</Mono> (or infers from an existing lockfile), installs it if
-        needed, and delegates to it. No Corepack required.
+        A pnpm-compatible package manager, built in. <Mono>nub install</Mono>{' '}reads the lockfile
+        your project already has — pnpm, npm, or bun, with yarn honored read-only — writes the same
+        format back, and configures itself from your <Mono>.npmrc</Mono>{' '}and workspaces.
       </>
     ),
-    replaces: ['corepack'],
+    replaces: ['pnpm install', 'npm install', 'corepack'],
     lines: [
+      { out: '# a real install, against your lockfile' },
       { cmd: 'nub install' },
-      { out: '» resolved package manager is pnpm @11' },
-      { out: '» resolved from package.json#packageManager' },
-      { out: '» found pnpm@11 in $PATH' },
-      { out: '» pnpm install' },
-      { out: 'Already up to date', bright: true },
-      { out: 'Done in 0.4s', bright: true },
+      { out: '# frozen + clean, for CI' },
+      { cmd: 'nub ci' },
     ],
   },
 ];

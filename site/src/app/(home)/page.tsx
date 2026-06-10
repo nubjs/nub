@@ -926,7 +926,7 @@ const RULES = [
 
 /* -------------------------------------------------------------- Final CTA */
 
-/* ----------------------------------------------------------- Package hypermanager */
+/* ----------------------------------------------------------- Built-in package manager */
 
 function HypermanagerBand() {
   return (
@@ -934,12 +934,12 @@ function HypermanagerBand() {
       <Container className="py-32 md:py-[180px]">
         <BandHeader
           command="nub install"
-          title="A package hypermanager"
+          title="A built-in package manager"
           subhead={
             <>
-              Not a new package manager — Nub runs the one your project already uses. Type{' '}
-              <Mono>nub install</Mono>{' '}and it detects npm, pnpm, or yarn, fetches the right version if
-              it&rsquo;s missing, and runs it.
+              Nub ships a pnpm-compatible package manager — powered by the embedded{' '}
+              <Mono>aube</Mono>{' '}engine, built in partnership with jdx. It reads the lockfile your
+              project already has and writes the same format back.
             </>
           }
           accent="pink"
@@ -948,22 +948,76 @@ function HypermanagerBand() {
         <div className="mt-10 divide-y divide-fd-border/60">
           <Feature
             accent="pink"
-            eyebrow="Detect + install"
-            title="Detects and installs your package manager"
+            eyebrow="Your lockfile"
+            title="Keeps the lockfile you already have"
             body={
               <>
-                Nub reads <Mono>package.json</Mono>{' '}(or infers from your lockfile) to see which
-                manager the project uses, then fetches and caches that exact version on demand — on
-                every machine and in CI. You never install or pin a package manager by hand.
+                <Mono>nub install</Mono>{' '}detects your existing lockfile and writes the same format
+                back — <Mono>pnpm-lock.yaml</Mono>, <Mono>package-lock.json</Mono>, and{' '}
+                <Mono>bun.lock</Mono>{' '}are read and written in place, never replaced with a foreign
+                file. Fresh projects get a standard <Mono>pnpm-lock.yaml</Mono>. <Mono>yarn.lock</Mono>{' '}
+                is honored read-only for now: an install that would rewrite it is refused, with the
+                exact yarn command to run instead.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub install', comment: 'pnpm-lock.yaml → read, written back' },
+                  { cmd: 'nub install', comment: 'package-lock.json → read, written back' },
+                  { cmd: 'nub install', comment: 'bun.lock → read, written back' },
+                  { cmd: 'nub install', comment: 'yarn.lock → honored read-only' },
+                ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            reverse
+            eyebrow="Layout"
+            title="Isolated installs, hoisted where you expect them"
+            body={
+              <>
+                pnpm projects and fresh ones get strict, symlinked, pnpm-style installs, with the
+                virtual store tucked under <Mono>node_modules/.nub</Mono>. Projects with an npm,
+                yarn, or bun lockfile default to the flat hoisted layout those tools produce — so
+                nothing about your tree surprises the code that walks it. One{' '}
+                <Mono>.npmrc</Mono>{' '}line (<Mono>node-linker</Mono>) overrides either default.
               </>
             }
             visual={
               <Terminal
                 lines={[
                   { cmd: 'nub install' },
-                  { out: '» detected pnpm@11 (package.json)' },
-                  { out: '» fetched + cached → ~/.cache/nub' },
-                  { out: '» pnpm install' },
+                  { out: 'node_modules/express → .nub/express@5.1.0/…' },
+                  { cmd: 'nub install --node-linker=hoisted', comment: 'or one .npmrc line' },
+                ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            eyebrow="Config"
+            title="Reads .npmrc, honors your workspaces"
+            body={
+              <>
+                Configuration comes from the files you already maintain: <Mono>.npmrc</Mono>{' '}
+                (registry, auth, flags), <Mono>pnpm-workspace.yaml</Mono>, and{' '}
+                <Mono>package.json#workspaces</Mono>. Nub&rsquo;s own defaults rank below every user
+                source — a CLI flag, env var, <Mono>.npmrc</Mono>{' '}entry, or workspace yaml always
+                wins. No new config file, no <Mono>&quot;nub&quot;</Mono>{' '}field in{' '}
+                <Mono>package.json</Mono>.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'cat .npmrc' },
+                  { out: 'registry=https://npm.example.com' },
+                  { out: 'node-linker=hoisted' },
+                  { cmd: 'nub install', comment: 'your config wins, always' },
                 ]}
               />
             }
@@ -972,67 +1026,23 @@ function HypermanagerBand() {
           <Feature
             accent="pink"
             reverse
-            eyebrow="Normalized"
-            title="One spelling, every manager"
+            eyebrow="Keep your tools"
+            title="Your package manager still works"
             body={
               <>
-                The everyday verbs — <Mono>install</Mono>, <Mono>add</Mono>, <Mono>remove</Mono>,{' '}
-                <Mono>update</Mono>{' '}— are spelled once and mapped to your package manager&rsquo;s
-                own flags. Nub never emulates a missing feature: anything it can&rsquo;t map fails
-                fast and tells you to run your manager directly.
+                Because Nub writes the same lockfile your package manager does, pnpm, npm, and bun
+                keep working side by side — run either tool, commit the same file, switch back any
+                time. And when you want the original tool itself, <Mono>nub pm</Mono>{' '}pins and
+                provisions the exact version for the whole team — Corepack&rsquo;s job, without the
+                PATH shims.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub add -D vitest', comment: '→ pnpm add -D vitest' },
-                  { cmd: 'nub install --frozen', comment: '→ pnpm install --frozen-lockfile' },
-                  { cmd: 'nub install --frozen', comment: '→ yarn install --immutable' },
-                ]}
-              />
-            }
-          />
-
-          <Feature
-            accent="pink"
-            eyebrow="vs Corepack"
-            title="Replaces Corepack, without the shims"
-            body={
-              <>
-                Corepack does the same version provisioning — but by installing shims that hijack npm,
-                pnpm, and yarn on your <Mono>PATH</Mono>. Nub installs nothing global and intercepts
-                nothing: it&rsquo;s one binary you call explicitly. Same manager-agnostic result, no
-                PATH surgery, and your manager&rsquo;s exact output and lockfile.
-              </>
-            }
-            visual={
-              <Terminal
-                lines={[
-                  { cmd: 'corepack enable', comment: 'hijacks npm/pnpm/yarn on PATH' },
-                  { cmd: 'nub install', comment: 'no shims, nothing global' },
-                ]}
-              />
-            }
-          />
-
-          <Feature
-            accent="pink"
-            reverse
-            eyebrow="nub pm"
-            title="Take control when you want it"
-            body={
-              <>
-                The <Mono>nub pm</Mono>{' '}commands surface it all explicitly: see what resolves,
-                switch or pin a version, bump to the latest, or inspect the binary cache.
-              </>
-            }
-            visual={
-              <Terminal
-                lines={[
-                  { cmd: 'nub pm which' },
-                  { out: 'pnpm 11.2.0  ·  ~/.cache/nub/pm/pnpm' },
-                  { cmd: 'nub pm switch yarn@4' },
-                  { out: 'pinned yarn@4 in package.json' },
+                  { cmd: 'nub install', comment: 'or pnpm install — same lockfile' },
+                  { cmd: 'nub pm pin pnpm@^9' },
+                  { out: 'pinned pnpm@9.15.9 → package.json' },
                 ]}
               />
             }
