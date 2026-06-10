@@ -3760,10 +3760,7 @@ fn fetch_and_hash_tarball(
         .with_context(|| format!("verifying {name} {}", dist.version))?;
     let bytes =
         std::fs::read(&tarball).with_context(|| format!("reading {}", tarball.display()))?;
-    Ok(Sha512::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(nub_core::pm::hex_lower(&Sha512::digest(&bytes)))
 }
 
 /// The leading numeric major of a version/spec (`4.2.2` → 4, `9` → 9; `^9` /
@@ -3891,7 +3888,10 @@ fn run_pm_shim_install() -> Result<i32> {
     }
     match shim::add_path_block()? {
         ProfileOutcome::Added(profile) => println!(
-            "  PATH: added {} to {} — open a new shell or run `source {}`",
+            "  PATH: added {} to {} — open a new shell or run `source {}`\n\
+             \x20       (that file is read by interactive shells only; for IDE/GUI-spawned\n\
+             \x20        package managers, add the same line to ~/.zprofile or ~/.zshenv (zsh)\n\
+             \x20        / ~/.profile (bash) so non-interactive shells see the shims too)",
             dir.display(),
             profile.display(),
             profile.display()
@@ -4159,7 +4159,8 @@ fn shim_refusal_message(
         format!("{pinned} {}", args.join(" "))
     };
     format!(
-        "nub: this project pins {pinned} (via {provenance}) — refusing to run {invoked}.\n\
+        "nub: the nub package-manager shims on your PATH (installed via `nub pm shim`) intercepted this.\n\
+         This project pins {pinned} (via {provenance}) — refusing to run {invoked}.\n\
          A different package manager here would write a competing lockfile and node_modules.\n\
          \n\
          \x20 run instead:  {paste}\n\
@@ -4177,9 +4178,12 @@ fn shim_lockfile_root(cwd: &Path) -> PathBuf {
 }
 
 /// The lockfile-implied version family of `pm` itself, when the committed
-/// lockfile belongs to that PM (`lockfile_version::infer`); `None` otherwise.
-/// Name-level comparison (Display collapses classic/Berry yarn).
-fn lockfile_family_spec(pm: nub_core::pm::Pm, root: &Path) -> Option<String> {
+/// lockfile belongs to that PM (`lockfile_version::infer`); `None` otherwise
+/// (no lockfile, or it belongs to a different PM — bun included). The single
+/// home for the name-level family rule (Display collapses classic/Berry yarn);
+/// both [`lockfile_family_spec`] and [`dynamic_default_spec`] route their
+/// "same PM → its range" branch through here so the comparison can't drift.
+fn lockfile_family(pm: nub_core::pm::Pm, root: &Path) -> Option<String> {
     use nub_core::pm::lockfile_version::{LockfileHint, infer};
     match infer(root) {
         Some(LockfileHint::Pm(hint)) if hint.pm.to_string() == pm.to_string() => Some(hint.range),
@@ -4187,32 +4191,45 @@ fn lockfile_family_spec(pm: nub_core::pm::Pm, root: &Path) -> Option<String> {
     }
 }
 
+/// The lockfile-implied version family of `pm` itself; `None` → caller defaults
+/// to `latest`. Thin alias over [`lockfile_family`] for the cache-first PATH-miss
+/// site, which wants silent fallthrough with no bun bail and no why-string.
+fn lockfile_family_spec(pm: nub_core::pm::Pm, root: &Path) -> Option<String> {
+    lockfile_family(pm, root)
+}
+
 /// The dynamic-default spec for a PATH miss (decision 3): the lockfile-implied
 /// family of the invoked PM, else the registry `latest`; a bun lockfile errors
 /// naming bun (nub never provisions bun). Returns `(spec, why)` — `why` feeds
-/// the stderr announcement.
+/// the stderr announcement. Layers the bun-bail and the why-strings on top of
+/// the shared [`lockfile_family`] name rule.
 fn dynamic_default_spec(pm: nub_core::pm::Pm, root: &Path) -> Result<(String, String)> {
     use nub_core::pm::lockfile_version::{LockfileHint, infer};
-    Ok(match infer(root) {
-        Some(LockfileHint::Bun) => bail!(
+    // The bun lockfile is a hard error before the name rule: nub never
+    // provisions bun, so we refuse rather than silently fall to `latest`.
+    if let Some(LockfileHint::Bun) = infer(root) {
+        bail!(
             "this project has a bun lockfile (bun.lock / bun.lockb) — nub never provisions bun. \
              Install bun yourself, or remove the bun lockfile to use {pm}."
-        ),
-        Some(LockfileHint::Pm(hint)) if hint.pm.to_string() == pm.to_string() => {
-            let why = format!("the committed lockfile implies {} {}", hint.pm, hint.range);
-            (hint.range, why)
+        );
+    }
+    Ok(match lockfile_family(pm, root) {
+        Some(range) => {
+            let why = format!("the committed lockfile implies {pm} {range}");
+            (range, why)
         }
-        Some(LockfileHint::Pm(hint)) => (
-            "latest".to_string(),
-            format!(
-                "the committed lockfile belongs to {}; using the registry latest",
-                hint.pm
-            ),
-        ),
-        None => (
-            "latest".to_string(),
-            "no lockfile to infer a version from; using the registry latest".to_string(),
-        ),
+        None => {
+            // No lockfile, or one belonging to a different PM — both land on
+            // `latest`, but the why-string distinguishes them for the user.
+            let why = match infer(root) {
+                Some(LockfileHint::Pm(hint)) => format!(
+                    "the committed lockfile belongs to {}; using the registry latest",
+                    hint.pm
+                ),
+                _ => "no lockfile to infer a version from; using the registry latest".to_string(),
+            };
+            ("latest".to_string(), why)
+        }
     })
 }
 

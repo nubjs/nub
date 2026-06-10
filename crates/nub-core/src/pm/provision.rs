@@ -272,8 +272,8 @@ fn verify_pin_hash(file: &Path, suffix: &str) -> Result<()> {
     })?;
     let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let got = match algo {
-        "sha512" => hex_lower(&Sha512::digest(&bytes)),
-        "sha224" => hex_lower(&Sha224::digest(&bytes)),
+        "sha512" => super::hex_lower(&Sha512::digest(&bytes)),
+        "sha224" => super::hex_lower(&Sha224::digest(&bytes)),
         other => bail!(
             "unsupported pin hash algorithm \"{other}\" in \"+{suffix}\" — nub verifies \
              sha512 and sha224 (hex digests, corepack's format); refusing to install unverified"
@@ -287,18 +287,6 @@ fn verify_pin_hash(file: &Path, suffix: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Lowercase-hex render of a digest. Mirrors `registry::hex_lower` (private
-/// there; four lines — duplicating beats widening that module's surface).
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 /// Best-effort cleanup of the temp work dir on any return path (the same guard

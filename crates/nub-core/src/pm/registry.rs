@@ -232,7 +232,7 @@ pub fn verify_integrity(file: &std::path::Path, want: &Integrity) -> Result<()> 
             }
         }
         Integrity::Sha1(expected_hex) => {
-            let got = hex_lower(&Sha1::digest(&bytes));
+            let got = super::hex_lower(&Sha1::digest(&bytes));
             if !got.eq_ignore_ascii_case(expected_hex) {
                 bail!(
                     "sha1 integrity mismatch for {}: expected {expected_hex}, got {got}",
@@ -290,16 +290,6 @@ fn base64_encode(bytes: &[u8]) -> String {
         }
     }
     out
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 #[cfg(test)]
