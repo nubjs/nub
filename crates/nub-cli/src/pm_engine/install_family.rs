@@ -739,10 +739,20 @@ fn yarn_remedy(yarn_verb: &str, packages: &[String]) -> String {
 /// Any setup failure degrades to running `f` unredirected with an empty
 /// capture — output then reaches the console directly (un-rewritten),
 /// which beats losing it.
+///
+/// Captures are serialized process-wide: the fd table is process-global, so
+/// two concurrent dup2 swaps of the same fd interleave into a torn state
+/// (writes landing on a closed pipe). Production runs one capture per
+/// command, so the lock is free there; it exists for the unit-test binary,
+/// where parallel tests genuinely raced it (flaky
+/// `fd_capture_round_trips_raw_prints`).
 #[cfg(unix)]
 pub(super) fn with_fd_captured<T>(fd: libc::c_int, f: impl FnOnce() -> T) -> (T, String) {
     use std::io::{Read as _, Write as _};
     use std::os::unix::io::FromRawFd as _;
+
+    static FD_SWAP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = FD_SWAP.lock().unwrap_or_else(|p| p.into_inner());
 
     let flush = |fd: libc::c_int| {
         // Rust's stdout is buffered; push pending bytes to whichever target

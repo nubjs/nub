@@ -40,6 +40,9 @@ dirs-next.workspace = true
 dotenvy = "0.15"
 serde_json.workspace = true
 semver = "1"
+# pnpm-workspace.yaml read + regeneration for `nub pm use nub` / `use pnpm`
+# (pm_engine/use_nub.rs). Same 0.9 line vendor/aube already pins.
+serde_yaml = "0.9"
 sha2.workspace = true
 tracing.workspace = true
 tempfile = "3"

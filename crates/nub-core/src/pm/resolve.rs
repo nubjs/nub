@@ -676,6 +676,17 @@ fn edit_manifest(
     Ok(path)
 }
 
+/// Public face of [`edit_manifest`] for the CLI's `pm use nub` / `use pnpm`
+/// migration edits (the one verb sanctioned to restructure identity-bearing
+/// manifest fields). Same contract: format-preserving, atomic, never
+/// scaffolds a missing `package.json`.
+pub fn edit_root_manifest(
+    cwd: &Path,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<PathBuf> {
+    edit_manifest(cwd, edit)
+}
+
 /// Pretty-print with the detected indent unit (vs `to_string_pretty`'s hardwired
 /// two spaces) and reproduce the line ending (CRLF vs LF) and trailing-newline
 /// state. serde's pretty formatter always emits `\n`; a CRLF source has every

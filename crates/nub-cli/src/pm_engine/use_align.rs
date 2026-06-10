@@ -17,13 +17,21 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use aube_lockfile::LockfileKind;
 
+/// Nub's own lockfile name under nub identity (the two-mode model): the
+/// engine's canonical-lockfile slot under a generic, deliberately unbranded
+/// filename — bytes stay pnpm-lock v9 compatible. Registered with the engine
+/// via `aube_lockfile::set_aube_lock_base_filename` in the brand preflight.
+pub(crate) const NUB_LOCKFILE: &str = "lock.yaml";
+
 /// The known lockfile artifacts, in the engine's candidate precedence order
 /// *within* each family (npm-shrinkwrap.json outranks package-lock.json as a
 /// conversion source, matching npm and `aube_lockfile::lockfile_candidates`).
-/// `aube-lock.yaml` is deliberately absent: it is another tool's artifact,
-/// not part of nub's identity model (nub never writes it and `use` neither
-/// keeps, converts, nor removes it).
+/// `lock.yaml` is nub's own artifact (the `nub` family). `aube-lock.yaml` is
+/// deliberately absent: it is another tool's artifact, not part of nub's
+/// identity model (nub never writes it and `use` neither keeps, converts,
+/// nor removes it).
 const LOCKFILES: &[(&str, &str)] = &[
+    (NUB_LOCKFILE, "nub"),
     ("pnpm-lock.yaml", "pnpm"),
     ("bun.lock", "bun"),
     ("bun.lockb", "bun"),
@@ -40,7 +48,8 @@ pub(crate) fn lockfile_name(target: &str) -> &'static str {
         "pnpm" => "pnpm-lock.yaml",
         "yarn" => "yarn.lock",
         "bun" => "bun.lock",
-        other => unreachable!("use targets are npm/pnpm/yarn/bun, got {other}"),
+        "nub" => NUB_LOCKFILE,
+        other => unreachable!("use targets are npm/pnpm/yarn/bun/nub, got {other}"),
     }
 }
 
@@ -62,6 +71,11 @@ pub(crate) enum AlignPlan {
         from_kind: LockfileKind,
         remove: Vec<PathBuf>,
     },
+    /// The pnpm ↔ nub pair: same bytes (lock.yaml IS pnpm-v9 format under a
+    /// generic name), different filename — a rename, never a parse/rewrite,
+    /// so the file stays byte-identical and the real PM's `--frozen-lockfile`
+    /// acceptance is preserved exactly.
+    Rename { from: PathBuf, remove: Vec<PathBuf> },
 }
 
 /// Decide the alignment for `root` → `target` (one of npm/pnpm/yarn/bun).
@@ -139,7 +153,7 @@ pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
         );
     }
 
-    let (from, _) = foreign
+    let (from, from_pm) = foreign
         .first()
         .cloned()
         .expect("foreign is non-empty past the present.is_empty() guard");
@@ -149,6 +163,13 @@ pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
              --save-text-lockfile` to generate a bun.lock text file first, then \
              rerun `nub pm use {target}`."
         );
+    }
+    // pnpm ↔ nub is a filename change over identical bytes: rename, never
+    // parse/rewrite (byte fidelity is the real-pnpm acceptance story). The
+    // rename consumes `from`, so only the OTHER foreign files stay removable.
+    if matches!((from_pm, target), ("pnpm", "nub") | ("nub", "pnpm")) {
+        let remove = remove.into_iter().filter(|p| *p != from).collect();
+        return Ok(AlignPlan::Rename { from, remove });
     }
     let from_kind = source_kind(&from);
     Ok(AlignPlan::Convert {
@@ -162,6 +183,7 @@ pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
 /// yarn.lock, mirroring the engine's `refine_yarn_kind`).
 fn source_kind(path: &Path) -> LockfileKind {
     match path.file_name().and_then(|n| n.to_str()) {
+        Some(NUB_LOCKFILE) => LockfileKind::Aube,
         Some("pnpm-lock.yaml") => LockfileKind::Pnpm,
         Some("bun.lock") => LockfileKind::Bun,
         Some("npm-shrinkwrap.json") => LockfileKind::NpmShrinkwrap,
@@ -173,13 +195,16 @@ fn source_kind(path: &Path) -> LockfileKind {
 }
 
 /// The target's write format. yarn never reaches here ([`plan_alignment`]
-/// refuses every converting `use yarn`).
+/// refuses every converting `use yarn`); `nub` maps to the engine's
+/// canonical-lockfile slot, whose filename the brand preflight registers as
+/// [`NUB_LOCKFILE`] (pnpm-v9 bytes either way).
 fn target_kind(target: &str) -> LockfileKind {
     match target {
         "npm" => LockfileKind::Npm,
         "pnpm" => LockfileKind::Pnpm,
         "bun" => LockfileKind::Bun,
-        other => unreachable!("conversion targets are npm/pnpm/bun, got {other}"),
+        "nub" => LockfileKind::Aube,
+        other => unreachable!("conversion targets are npm/pnpm/bun/nub, got {other}"),
     }
 }
 
@@ -358,6 +383,64 @@ mod tests {
             plan_alignment(&dir, "bun").unwrap(),
             AlignPlan::Keep { .. }
         ));
+    }
+
+    #[test]
+    fn pnpm_nub_pair_renames_byte_identically_in_both_directions() {
+        // pnpm → nub: a rename — the source is consumed, nothing to remove.
+        // (pnpm + a second foreign family stays the spec's ambiguity error,
+        // covered below: the rename shortcut never widens the multi-lockfile
+        // rules.)
+        let dir = root("to-nub", &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")]);
+        assert_eq!(
+            plan_alignment(&dir, "nub").unwrap(),
+            AlignPlan::Rename {
+                from: dir.join("pnpm-lock.yaml"),
+                remove: vec![]
+            }
+        );
+
+        // nub → pnpm: the reverse rename.
+        let dir = root("to-pnpm", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
+        assert_eq!(
+            plan_alignment(&dir, "pnpm").unwrap(),
+            AlignPlan::Rename {
+                from: dir.join(NUB_LOCKFILE),
+                remove: vec![]
+            }
+        );
+
+        // lock.yaml under `use nub` is already nub's artifact: kept.
+        let dir = root("keep-nub", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
+        assert!(matches!(
+            plan_alignment(&dir, "nub").unwrap(),
+            AlignPlan::Keep { .. }
+        ));
+
+        // lock.yaml → npm is a real format change: converted, not renamed.
+        let dir = root("nub-to-npm", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
+        assert!(matches!(
+            plan_alignment(&dir, "npm").unwrap(),
+            AlignPlan::Convert {
+                from_kind: LockfileKind::Aube,
+                ..
+            }
+        ));
+
+        // lock.yaml + a foreign family with neither being the target:
+        // ambiguity, loud, naming both files.
+        let dir = root(
+            "nub-ambig",
+            &[
+                (NUB_LOCKFILE, "lockfileVersion: '9.0'\n"),
+                ("package-lock.json", "{}"),
+            ],
+        );
+        let err = plan_alignment(&dir, "bun").unwrap_err().to_string();
+        assert!(
+            err.contains(NUB_LOCKFILE) && err.contains("package-lock.json"),
+            "ambiguity must name lock.yaml and package-lock.json, got: {err}"
+        );
     }
 
     #[test]

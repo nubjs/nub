@@ -3691,8 +3691,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
              Usage: nub pm <command>\n\n\
              Commands:\n\
              \x20 which              print the resolved package-manager path (why → stderr)\n\
-             \x20 use <pm>[@<spec>]  declare the project's package manager (npm|pnpm|yarn|bun;\n\
-             \x20                    default: latest) — writes packageManager and aligns the lockfile\n\
+             \x20 use <pm>[@<spec>]  declare the project's package manager (npm|pnpm|yarn|bun|nub;\n\
+             \x20                    default: latest) — writes packageManager and aligns the lockfile;\n\
+             \x20                    `use nub` migrates the full config surface, `use pnpm` reverses it\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
              \x20 shim               link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
@@ -3875,27 +3876,29 @@ fn berry_pin_refusal(cwd: &Path) -> String {
 }
 
 /// Split a `<pm>[@<spec>]` argument (`nub pm use`). The name must be a `use`
-/// target (npm | pnpm | yarn | bun — bun is declaration+lockfile only, no
-/// provisioning); the spec stays RAW — exact, range, or dist-tag — and is
+/// target (npm | pnpm | yarn | bun | nub — bun is declaration+lockfile only,
+/// no provisioning); the spec stays RAW — exact, range, or dist-tag — and is
 /// resolved against the registry before anything is written (never a range
 /// into `packageManager`). Berry (`yarn@<2+>`) is refused later, by the shared
-/// flow, once a concrete major is known. `use nub` is deliberately NOT
-/// implemented: the devEngines-only declaration it would write is gated on the
-/// ecosystem (corepack/npm) recognizing the name — see
-/// wiki/commands/pm/identity-policy.md §`nub pm use`.
+/// flow, once a concrete major is known. `use nub` (the full switch into nub
+/// identity, 2026-06-10 reversal) takes no version spec: it pins the running
+/// nub's own version — there is nothing to resolve.
 fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
     let (name, spec) = match arg.split_once('@') {
         Some((n, s)) => (n, Some(s.trim())),
         None => (arg, None),
     };
-    if name == "nub" {
+    if name == "nub" && spec.is_some() {
         bail!(
-            "`nub pm use nub` isn't available yet — the ecosystem doesn't recognize \
-             nub as a packageManager value. Declare one of: npm, pnpm, yarn, bun."
+            "`nub pm use nub` takes no version — it pins the running nub ({}); \
+             update nub itself with `nub upgrade`.",
+            env!("CARGO_PKG_VERSION")
         );
     }
-    if !matches!(name, "npm" | "pnpm" | "yarn" | "bun") {
-        bail!("unsupported package manager \"{name}\" — nub pm use takes npm, pnpm, yarn, or bun");
+    if !matches!(name, "npm" | "pnpm" | "yarn" | "bun" | "nub") {
+        bail!(
+            "unsupported package manager \"{name}\" — nub pm use takes npm, pnpm, yarn, bun, or nub"
+        );
     }
     if spec.is_some_and(str::is_empty) {
         bail!("\"{arg}\" has an empty version spec — use <pm>@<spec> (e.g. {name}@latest)");
@@ -4008,6 +4011,14 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     // dir write_declared_pm targets.
     let root = project.workspace_root.unwrap_or(project.root);
 
+    // `use nub` — the full switch into nub identity (no registry resolve, no
+    // provisioning: the target is the running binary). Whole flow lives in
+    // pm_engine::use_nub (manifest fields, lockfile rename/convert,
+    // workspace-yaml migration, printed summary).
+    if name == "nub" {
+        return crate::pm_engine::use_nub::run_use_nub(&root);
+    }
+
     let plan = use_align::plan_alignment(&root, name)?;
 
     let (version, write) = resolve_provision_declare(name, spec, cwd)?;
@@ -4075,6 +4086,41 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
                     path.file_name().unwrap_or_default().to_string_lossy()
                 );
             }
+        }
+        // nub → pnpm: lock.yaml renamed back, byte-identical (the two-mode
+        // eject — the format was never forked, so the rename IS the eject).
+        AlignPlan::Rename { from, remove } => {
+            let to = root.join(use_align::lockfile_name(name));
+            std::fs::rename(&from, &to).with_context(|| {
+                format!(
+                    "renaming {} to {}",
+                    from.display(),
+                    use_align::lockfile_name(name)
+                )
+            })?;
+            println!(
+                "  {}: renamed from {} (bytes unchanged)",
+                use_align::lockfile_name(name),
+                from.file_name().unwrap_or_default().to_string_lossy()
+            );
+            for path in remove {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                println!(
+                    "  {}: removed (migrated)",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+        }
+    }
+
+    // `use pnpm` regenerates pnpm-workspace.yaml from the nub-mode package.json
+    // homes (workspaces + catalogs, top-level overrides/patchedDependencies/
+    // allowBuilds/auditConfig) — the exact reverse of `use nub`'s migration.
+    // No-op on a project that never carried them.
+    if name == "pnpm" {
+        for line in crate::pm_engine::use_nub::regenerate_workspace_yaml(&root)? {
+            println!("  {line}");
         }
     }
     Ok(0)
@@ -5450,13 +5496,15 @@ mod tests {
             "bare use names the form"
         );
         assert!(
-            run(&["use", "vlt"]).contains("npm, pnpm, yarn, or bun"),
+            run(&["use", "vlt"]).contains("npm, pnpm, yarn, bun, or nub"),
             "an unsupported PM names the use target set"
         );
-        let err = run(&["use", "nub"]);
+        // `use nub` is a live target (the full switch) but takes no version:
+        // it pins the running nub.
+        let err = run(&["use", "nub@1.2.3"]);
         assert!(
-            err.contains("isn't available yet"),
-            "`use nub` is gated, not unknown: {err}"
+            err.contains("takes no version") && err.contains("nub upgrade"),
+            "`use nub@<v>` must refuse with the self-version rule: {err}"
         );
         assert!(
             run(&["use", "pnpm@"]).contains("empty version spec"),

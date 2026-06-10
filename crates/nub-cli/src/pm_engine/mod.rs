@@ -58,6 +58,7 @@ pub mod present;
 pub mod publish_family;
 pub mod store_config_family;
 pub mod use_align;
+pub mod use_nub;
 
 pub use install_family::{CiFlags, InstallFlags, run_ci, run_install};
 
@@ -789,6 +790,11 @@ pub(crate) fn engine_brand_preflight() {
     // some other tool left on disk is neither read nor chosen as the
     // fresh-write target (`approve-builds` writes its allowlist there).
     aube::set_workspace_yaml_names(&["pnpm-workspace.yaml"]);
+    // The engine's canonical-lockfile slot carries nub's generic `lock.yaml`
+    // (two-mode model: nub identity = lock.yaml, pnpm-v9 bytes, deliberately
+    // unbranded name). An `aube-lock.yaml` left by another tool is invisible,
+    // exactly like `aube-workspace.yaml` above.
+    aube_lockfile::set_aube_lock_base_filename(use_align::NUB_LOCKFILE);
     // package.json config namespace: `pnpm` only — an `aube` object in a
     // manifest is another tool's state; nub neither consults nor mutates
     // it (`remove`'s sidecar pruning, `--allow-build`'s fallback writes).
