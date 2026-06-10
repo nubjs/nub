@@ -3,7 +3,7 @@ title: Node manager
 description: Manage the Node versions Nub provisions — pin a version and it's fetched automatically, or drive the cache explicitly with nub node install / ls / uninstall / pin.
 ---
 
-Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/running-files#the-node-version) covers the common case completely, so you rarely manage versions by hand. The `nub node` subcommands exist for the cases the automatic path can't reach: warming the cache before you run, seeing what's installed, reclaiming disk, and recording a pin.
+Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/files#the-node-version) covers the common case completely, so you rarely manage versions by hand. The `nub node` subcommands exist for the cases the automatic path can't reach: warming the cache before you run, seeing what's installed, reclaiming disk, and recording a pin.
 
 The whole group is optional — `nub <file>` behavior never changes whether you use it or not.
 
@@ -19,7 +19,7 @@ Installing Node 22.15.0 from nodejs.org (25 MB)...
 # ...your script runs, on exactly the Node you pinned
 ```
 
-This is the headline. Everything below is for when you want to do one of these steps deliberately instead of letting it happen on the next run. For the full provisioning story — precedence, the `~/.cache/nub` layout, the per-invocation shim — see [Running files → The Node version](/docs/running-files#the-node-version).
+This is the headline. Everything below is for when you want to do one of these steps deliberately instead of letting it happen on the next run. For the full provisioning story — precedence, the `~/.cache/nub` layout, the per-invocation shim — see [Running files → The Node version](/docs/files#the-node-version).
 
 ## `nub node install`
 
@@ -104,5 +104,5 @@ Five verbs — `which`, `install`, `ls`, `uninstall`, and `pin` — are the whol
 
 ## Related
 
-- [Running files](/docs/running-files#the-node-version) — how provisioning fires during a normal `nub <file>` run.
+- [Running files](/docs/files#the-node-version) — how provisioning fires during a normal `nub <file>` run.
 - [FAQ](/docs/faq) — supported Node floor and compatibility.

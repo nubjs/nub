@@ -103,7 +103,7 @@ Yes — `nubx` (also available as `nub exec`) is the equivalent. Locally install
 
 ## Does it replace `tsx` / `ts-node`?
 
-Yes — `nub script.ts` runs TypeScript directly, with the full TS surface (not just type stripping), respecting your `tsconfig.json`, with inline source maps so stack traces point at your `.ts` source. Full details: [File runner → TypeScript](/docs/running-files#typescript).
+Yes — `nub script.ts` runs TypeScript directly, with the full TS surface (not just type stripping), respecting your `tsconfig.json`, with inline source maps so stack traces point at your `.ts` source. Full details: [File runner → TypeScript](/docs/files#typescript).
 
 ## Does it replace `nodemon` / `tsx watch`?
 
@@ -111,7 +111,7 @@ For restart-on-change, yes: `nub script.ts --watch` and `nub run dev --watch` re
 
 ## What about `dotenv-cli`?
 
-Not needed. Nub loads `.env`, `.env.local`, `.env.<NODE_ENV>`, and `.env.<NODE_ENV>.local` automatically — with the Vite/Bun-style precedence rules — and injects them into the process environment *before* Node starts. Expansion of `${VAR}` and `$VAR` is supported, including nested references and cycle detection. Under `NODE_ENV=test`, `.env.local` is intentionally skipped, following the Next.js convention — local secrets shouldn't leak into your test suite. Full details: [File runner → Environment variables](/docs/running-files#environment-variables).
+Not needed. Nub loads `.env`, `.env.local`, `.env.<NODE_ENV>`, and `.env.<NODE_ENV>.local` automatically — with the Vite/Bun-style precedence rules — and injects them into the process environment *before* Node starts. Expansion of `${VAR}` and `$VAR` is supported, including nested references and cycle detection. Under `NODE_ENV=test`, `.env.local` is intentionally skipped, following the Next.js convention — local secrets shouldn't leak into your test suite. Full details: [File runner → Environment variables](/docs/files#environment-variables).
 
 ## How does it work under the hood?
 

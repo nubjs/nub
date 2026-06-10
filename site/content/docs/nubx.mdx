@@ -5,7 +5,7 @@ description: Use nubx (or nub exec) to run the CLIs in your project's node_modul
 
 The `nubx` command runs the command-line tools your project already depends on — the ones installed into `node_modules/.bin` by `pnpm`, `npm`, `yarn`, or `bun`. It's a drop-in for `npx` and `pnpm exec`: it does the `node_modules/.bin` walk-up in Rust and exec's the resolved binary directly, so the wrapper overhead that `npx` and `pnpm exec` pay on every call (a full Node bootstrap) approximately disappears — `~17–20×` lighter on a native CLI like `esbuild`. The tool that actually runs is identical to what `npx` would run; only the wrapper gets out of the way.
 
-This page is task-oriented. For the bigger picture see the [Introduction](/docs); for running files and scripts see [running files](/docs/running-files) and [running scripts](/docs/running-scripts).
+This page is task-oriented. For the bigger picture see the [Introduction](/docs); for running files and scripts see [running files](/docs/files) and [running scripts](/docs/run).
 
 ## Run a local CLI
 
@@ -95,7 +95,7 @@ nodeLinker: node-modules
 
 ## Related
 
-- [Running files](/docs/running-files) — `nub index.ts`, TypeScript-first execution.
-- [Running scripts](/docs/running-scripts) — `nub run`, the workspace-aware script runner that shares the `.bin` resolution chain.
+- [Running files](/docs/files) — `nub index.ts`, TypeScript-first execution.
+- [Running scripts](/docs/run) — `nub run`, the workspace-aware script runner that shares the `.bin` resolution chain.
 - [Watch mode](/docs/watch) — `nub watch`, restart on change.
 - [FAQ](/docs/faq) — short answers, including the `--node` flag and the Yarn PnP caveat.
