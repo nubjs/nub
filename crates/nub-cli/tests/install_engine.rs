@@ -78,14 +78,21 @@ fn install_fresh_project_links_isolated_and_writes_a_lockfile() {
         return;
     }
     let dir = pm_tmpdir("fresh");
+    // The impossible `engines.aube` pin proves the embedder toggle: stock
+    // aube would warn (or hard-fail under engine-strict) on the mismatch;
+    // nub skips the field entirely — its users aren't running that tool.
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"fresh","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
+        r#"{"name":"fresh","version":"1.0.0","engines":{"aube":"999.0.0"},"dependencies":{"is-positive":"3.1.0"}}"#,
     )
     .unwrap();
 
     let (stdout, stderr, code) = run_install(&dir, &["install"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stderr.to_lowercase().contains("engine"),
+        "engines.aube must be ignored, not warned about: {stderr}"
+    );
 
     // Isolated layout: the top-level entry is a symlink into the virtual
     // store, which nub relocates to `node_modules/.nub`.

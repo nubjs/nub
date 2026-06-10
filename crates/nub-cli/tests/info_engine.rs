@@ -180,6 +180,44 @@ fn missing_lockfile_reports_the_nub_install_hint_and_exits_zero() {
     assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
+/// The workspace-yaml brand toggle: an `aube-workspace.yaml` on disk is
+/// another tool's state and must not change what nub reads. The probe rides
+/// the workspace-root walk — from a member directory with no lockfile of
+/// its own, `nub list` resolves the workspace root (which holds a lockfile)
+/// only if the yaml is honored. With the toggle, the member is a standalone
+/// project and the no-lockfile short-circuit fires; an identical fixture
+/// keyed by `pnpm-workspace.yaml` resolves the root and runs the engine.
+#[test]
+fn aube_workspace_yaml_is_not_consulted_for_workspace_discovery() {
+    let fixture = |yaml_name: &str| {
+        let root = pm_tmpdir(&format!("wsyaml-{}", &yaml_name[..4]));
+        std::fs::write(root.join(yaml_name), "packages:\n  - 'pkgs/*'\n").unwrap();
+        std::fs::write(
+            root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  pkgs/app: {}\n",
+        )
+        .unwrap();
+        let member = root.join("pkgs/app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        member
+    };
+
+    let (_, stderr, code) = run_nub(&fixture("aube-workspace.yaml"), &["list"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stderr.contains("No lockfile found"),
+        "aube-workspace.yaml must not promote the member into a workspace: {stderr}"
+    );
+
+    let (_, stderr, code) = run_nub(&fixture("pnpm-workspace.yaml"), &["list"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stderr.contains("No lockfile found"),
+        "pnpm-workspace.yaml must resolve the root's lockfile: {stderr}"
+    );
+}
+
 /// Per-verb `--help` renders (engine verbs bypass nub's top-level clap), is
 /// named for nub, and carries no engine verb spellings.
 #[test]

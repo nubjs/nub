@@ -519,15 +519,27 @@ pub(crate) struct EngineSession {
 }
 
 /// Build the shared engine context for one verb invocation: apply `--dir`,
-/// detect the project lockfile (walking up), configure the engine's
-/// process-wide embedder seams, and construct the runtime. Idempotent at the
-/// seam level (every seam is a `OnceLock`), which fits nub's
-/// one-command-per-process CLI shape.
+/// register the brand/seam toggles, detect the project lockfile (walking
+/// up), push the embedder setting defaults, and construct the runtime.
+/// Idempotent at the seam level (every seam is a `OnceLock`), which fits
+/// nub's one-command-per-process CLI shape.
+///
+/// Ordering is load-bearing: the brand preflight must run before *any*
+/// engine code touches project config — even lockfile detection reads the
+/// workspace yaml transitively (`detect_existing_lockfile_kind` →
+/// `aube_lock_filename` → `git_branch_lockfile_enabled` → workspace-config
+/// load), and the toggled getters freeze on first read. The embedder
+/// defaults are the one seam that *needs* the detection result, so they
+/// land after it (they feed settings resolution, which no detection-path
+/// code consults).
 pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
     apply_dir(dir)?;
+    engine_brand_preflight();
     let cwd = std::env::current_dir()?;
     let detected = detect_lockfile_walk_up(&cwd);
-    engine_preflight(detected.as_ref());
+    // Set-unless-user-set: ranks below CLI flags, env vars, and every
+    // config file in the engine's settings precedence.
+    aube::set_embedder_defaults(nub_setting_defaults(detected.as_ref()));
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
@@ -566,10 +578,13 @@ fn detect_lockfile_walk_up(cwd: &Path) -> Option<DetectedLockfile> {
     None
 }
 
-/// Configure the engine's process-wide embedder seams. Called once per
-/// command (via [`engine_session`]), before any settings resolution; every
-/// seam is an idempotent once-per-process `OnceLock`.
-fn engine_preflight(detected: Option<&DetectedLockfile>) {
+/// Register nub's brand/seam toggles on the engine's process-wide embedder
+/// seams. Called once per command (via [`engine_session`]) **before any
+/// engine code reads project state** — the getters behind these setters are
+/// freeze-on-first-read `OnceLock`s, and even lockfile detection reads the
+/// workspace config transitively (see the ordering note on
+/// [`engine_session`]). Every seam is idempotent.
+fn engine_brand_preflight() {
     // Env surface: npm-compatible (`npm_config_*`) + ecosystem-neutral
     // (`CI`, proxies, …). `AUBE_*` stays invisible — nub's config contract
     // is the npm ecosystem's, not another tool's branded variables.
@@ -577,9 +592,28 @@ fn engine_preflight(detected: Option<&DetectedLockfile>) {
     // Lifecycle scripts (npm_config_user_agent) and registry requests
     // identify the running tool: `nub/<ver> …`.
     aube::set_user_agent_product(format!("nub/{}", env!("CARGO_PKG_VERSION")));
-    // Set-unless-user-set: ranks below CLI flags, env vars, and every
-    // config file in the engine's settings precedence.
-    aube::set_embedder_defaults(nub_setting_defaults(detected));
+    // Workspace yamls: `pnpm-workspace.yaml` only. An `aube-workspace.yaml`
+    // some other tool left on disk is neither read nor chosen as the
+    // fresh-write target (`approve-builds` writes its allowlist there).
+    aube::set_workspace_yaml_names(&["pnpm-workspace.yaml"]);
+    // package.json config namespace: `pnpm` only — an `aube` object in a
+    // manifest is another tool's state; nub neither consults nor mutates
+    // it (`remove`'s sidecar pruning, `--allow-build`'s fallback writes).
+    aube::set_manifest_config_namespaces(&["pnpm"]);
+    // `engines.aube` pins gate a tool nub's users aren't running; skip
+    // them like the engine already skips `engines.pnpm`. `engines.node`
+    // stays validated.
+    aube::set_aube_engine_check(false);
+    // `packageManager` acceptance: nub is the running tool, pnpm the
+    // compatible drop-in. Inert through nub's dispatch today (the
+    // guardrail runs in aube's own CLI entry, which nub bypasses), but any
+    // future engine path that consults the registered names must see
+    // nub's, never the engine's.
+    aube::set_package_manager_names(aube::PackageManagerNames {
+        self_names: vec!["nub".to_string()],
+        self_version: env!("CARGO_PKG_VERSION").to_string(),
+        compatible_names: vec!["pnpm".to_string()],
+    });
 }
 
 /// Nub's replacement setting defaults, fed to the engine's embedder-defaults
@@ -761,6 +795,14 @@ mod tests {
             assert_eq!(get(&defaults, "cacheDir"), None);
         }
     }
+
+    // The brand-surface toggles (workspace-yaml list, manifest config
+    // namespace, engines.aube check, packageManager acceptance set) are
+    // process-global OnceLocks that freeze on first read, so in-process
+    // assertions here would race other tests in this binary. They are
+    // covered behaviorally through the spawned binary instead:
+    // `tests/info_engine.rs::aube_workspace_yaml_is_not_consulted` and the
+    // engines.aube case in `tests/install_engine.rs`.
 
     #[test]
     fn verb_registry_spellings_are_unique_and_resolvable() {
