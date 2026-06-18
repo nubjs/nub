@@ -2,10 +2,11 @@
 //! `transform` + post-processing + `cacheSet`. Byte-identical on-disk format to
 //! the old JS cache, so warm caches survive the JS→Rust move (no global miss).
 //!
-//! Cache key preimage (no trailing separator), matching the old JS exactly:
+//! Cache key preimage (no trailing separator):
 //!   `NUB_VERSION \0 CACHE_SCHEMA \0 source \0 ext \0 tsconfig_hash \0 (pkg_type||"")`
-//!   → sha256 → 64-hex lowercase → cache FILENAME.
-//! On-disk entry: `[16-hex integrity = sha256(body)[..16]][body]`, where
+//!   → blake3 → 64-hex lowercase → cache FILENAME. (SCHEMA "4" = blake3 era; the
+//!   old JS / SCHEMA "3" used SHA-256.)
+//! On-disk entry: `[16-hex integrity = blake3(body)[..16]][body]`, where
 //!   `body = format_byte('c'|'m') + post_processed_code`.
 //! Atomic write via a `*.tmp` sibling + rename (the `*.tmp` suffix is what
 //! `runtime/cache-evict.mjs` recognizes as an in-flight temp).
@@ -20,13 +21,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use napi::Result;
 use napi_derive::napi;
 use oxc_napi::OxcError;
-use sha2::{Digest, Sha256};
 
 use crate::transform::{TransformOptions, transform};
 
-/// On-disk entry format version. Bump ONLY if the byte layout diverges from the
-/// old JS (it does not), so the two regimes never read each other's files.
-const CACHE_SCHEMA: &str = "3";
+/// On-disk entry format version. Bumped to "4" with the blake3 migration: the
+/// cache key + integrity prefix switched from SHA-256 to blake3, so a "3"-era
+/// (SHA-256-named) entry must never be read by a "4" build, and vice versa.
+/// Both regimes hash this constant INTO the key, so the filenames are disjoint
+/// across schemas — old entries are silently ignored (a miss), never mis-read.
+const CACHE_SCHEMA: &str = "4";
 const INTEGRITY_LEN: usize = 16;
 /// Lockstep with `runtime/version.mjs` via `make version`; the sole version
 /// component of the key (a new nub release ships any emit change + a rebuilt addon).
@@ -129,10 +132,10 @@ pub fn transform_cached(
     })
 }
 
-/// sha256(NUB_VERSION \0 SCHEMA \0 source \0 ext \0 tsconfig_hash \0 pkg_type)
-/// → 64-hex lowercase.
+/// blake3(NUB_VERSION \0 SCHEMA \0 source \0 ext \0 tsconfig_hash \0 pkg_type)
+/// → 64-hex lowercase. blake3 (SIMD) replaces SHA-256 on the hot path.
 fn cache_key(source: &str, ext: &str, tsconfig_hash: &str, pkg_type: &str) -> String {
-    let mut h = Sha256::new();
+    let mut h = blake3::Hasher::new();
     h.update(NUB_VERSION.as_bytes());
     h.update(b"\0");
     h.update(CACHE_SCHEMA.as_bytes());
@@ -144,14 +147,11 @@ fn cache_key(source: &str, ext: &str, tsconfig_hash: &str, pkg_type: &str) -> St
     h.update(tsconfig_hash.as_bytes());
     h.update(b"\0");
     h.update(pkg_type.as_bytes());
-    to_hex(&h.finalize())
+    h.finalize().to_hex().to_string()
 }
 
-fn integrity(body: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(body.as_bytes());
-    let full = to_hex(&h.finalize());
-    full[..INTEGRITY_LEN].to_string()
+fn integrity(body: &[u8]) -> String {
+    blake3::hash(body).to_hex()[..INTEGRITY_LEN].to_string()
 }
 
 fn cache_get(dir: &str, key: &str) -> Option<String> {
@@ -161,7 +161,7 @@ fn cache_get(dir: &str, key: &str) -> Option<String> {
         return None;
     }
     let body = &raw[INTEGRITY_LEN..];
-    if raw[..INTEGRITY_LEN] != integrity(body) {
+    if raw[..INTEGRITY_LEN] != integrity(body.as_bytes()) {
         // Self-heal: any mismatch (truncation, corruption, edits) ⇒ miss.
         return None;
     }
@@ -173,7 +173,7 @@ fn cache_set(dir: &str, key: &str, body: &str) {
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let tmp_path = std::path::Path::new(dir).join(format!("{key}.{pid}.{counter}.tmp"));
-    let contents = format!("{}{}", integrity(body), body);
+    let contents = format!("{}{}", integrity(body.as_bytes()), body);
     if std::fs::write(&tmp_path, contents).is_ok() {
         if std::fs::rename(&tmp_path, &final_path).is_err() {
             let _ = std::fs::remove_file(&tmp_path);
@@ -295,15 +295,6 @@ fn serialize_source_map(map: &oxc_sourcemap::napi::SourceMap, source: &str) -> S
         parts.push(content_entry);
     }
     format!("{{{}}}", parts.join(","))
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
-    }
-    s
 }
 
 /// Standard base64 (RFC 4648, with padding) — matches JS `Buffer.from(x).toString("base64")`.

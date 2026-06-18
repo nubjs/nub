@@ -3081,6 +3081,7 @@ name = "nub-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "camino",
  "criterion",
  "dirs-next",
@@ -3107,6 +3108,7 @@ dependencies = [
 name = "nub-native"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "json5",
  "jsonc-parser",
  "napi",
@@ -3118,7 +3120,6 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "toml 0.8.23",
  "yaml-rust2",
 ]

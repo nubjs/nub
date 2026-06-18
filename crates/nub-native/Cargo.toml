@@ -40,9 +40,10 @@ oxc_sourcemap.workspace = true
 rustc-hash.workspace = true
 # tsconfig discovery/parse/extends + the transpile cache (moved in-process from
 # the get-tsconfig npm package and the JS cache). serde drives the RawTsconfig /
-# CompilerOptions deserialization; sha2 computes the cache key + integrity prefix.
+# CompilerOptions deserialization; blake3 computes the cache key + integrity
+# prefix (SIMD content hash, replaced SHA-256 on the warm path).
 serde.workspace = true
-sha2.workspace = true
+blake3.workspace = true
 
 [build-dependencies]
 napi-build = "2"

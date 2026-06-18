@@ -66,6 +66,9 @@ yaml-rust2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# blake3 content hash for the transpile-cache key + integrity prefix (SIMD,
+# replaced SHA-256 on the warm path; schema v4).
+blake3 = "1"
 # Node provisioning download (wiki/research/node-provisioning-implementation.md):
 # blocking + rustls (no OpenSSL/cross-compile pain), native roots so corporate
 # MITM CAs work, socks for SOCKS proxies. reqwest gives HTTP(S)_PROXY/NO_PROXY
