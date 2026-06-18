@@ -11,6 +11,17 @@ members = ["crates/nub-cli", "crates/nub-core", "crates/nub-native"]
 exclude = ["vendor/aube"]
 resolver = "3"
 
+# Tier-0 release tuning. `panic` is intentionally left at the default "unwind":
+# Cargo's panic setting is profile-global (not per-crate), and crates/nub-native
+# is a cdylib loaded INTO the user's Node process via napi — abort-on-panic there
+# would kill the Node process instead of surfacing a JS error. Governs the nub
+# workspace only; vendor/aube is a separate workspace.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
