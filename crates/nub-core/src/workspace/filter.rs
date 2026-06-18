@@ -623,45 +623,71 @@ fn traverse_deps(graph: &[HashSet<usize>], start: usize, visited: &mut HashSet<u
 /// Topological sort producing chunks (levels). Each chunk contains
 /// packages that can run in parallel — all their deps are in earlier
 /// chunks. Kahn's algorithm collecting one wave per level.
+///
+/// Proper O(V+E) Kahn's: in-degrees are computed once from the dependency
+/// edges restricted to `nodes`, a reverse-adjacency (dependents) list is
+/// precomputed so emitting a node decrements only its actual successors, and
+/// each wave is the set of currently-zero-in-degree nodes. This replaces the
+/// earlier O(remaining × deps)-per-wave rescan that re-examined every
+/// remaining node on every level.
 pub fn topological_chunks(nodes: &HashSet<usize>, deps: &[HashSet<usize>]) -> Vec<Vec<usize>> {
+    // In-degree per node: number of its dependencies that are also in `nodes`.
+    // Reverse adjacency: for each node, the in-set nodes that depend on it, so
+    // emitting a node touches only its dependents (not every remaining node).
     let mut in_degree: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut dependents: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
     for &node in nodes {
         let count = if node < deps.len() {
-            deps[node].iter().filter(|d| nodes.contains(d)).count()
+            deps[node]
+                .iter()
+                .filter(|d| nodes.contains(d))
+                .inspect(|&&dep| dependents.entry(dep).or_default().push(node))
+                .count()
         } else {
             0
         };
         in_degree.insert(node, count);
     }
 
+    // Seed the ready queue with every zero-in-degree node — the first wave.
+    let mut ready: Vec<usize> = in_degree
+        .iter()
+        .filter(|&(_, &deg)| deg == 0)
+        .map(|(&n, _)| n)
+        .collect();
+
     let mut chunks = Vec::new();
-    let mut remaining: HashSet<usize> = nodes.clone();
+    let mut emitted = 0usize;
 
-    while !remaining.is_empty() {
-        let wave: Vec<usize> = remaining
-            .iter()
-            .filter(|n| in_degree.get(n).copied().unwrap_or(0) == 0)
-            .copied()
-            .collect();
-
-        if wave.is_empty() {
-            // Cycle detected — dump remaining into one chunk.
-            chunks.push(remaining.into_iter().collect());
-            break;
-        }
-
+    while !ready.is_empty() {
+        let wave = std::mem::take(&mut ready);
+        emitted += wave.len();
+        // Emitting this wave: decrement each emitted node's dependents; any that
+        // reach zero in-degree become the next wave.
         for &node in &wave {
-            remaining.remove(&node);
-            for &other in &remaining {
-                if other < deps.len() && deps[other].contains(&node) {
+            if let Some(succ) = dependents.get(&node) {
+                for &other in succ {
                     if let Some(deg) = in_degree.get_mut(&other) {
-                        *deg = deg.saturating_sub(1);
+                        *deg -= 1;
+                        if *deg == 0 {
+                            ready.push(other);
+                        }
                     }
                 }
             }
         }
-
         chunks.push(wave);
+    }
+
+    // Cycle: any node never reached zero in-degree → dump the remainder in one
+    // chunk (preserving the prior cycle-handling contract).
+    if emitted < nodes.len() {
+        let leftover: Vec<usize> = nodes
+            .iter()
+            .copied()
+            .filter(|n| in_degree.get(n).copied().unwrap_or(0) != 0)
+            .collect();
+        chunks.push(leftover);
     }
 
     chunks
