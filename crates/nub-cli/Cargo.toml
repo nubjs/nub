@@ -59,8 +59,10 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 rustc-hash.workspace = true
 semver = "1"
 # pnpm-workspace.yaml read + regeneration for `nub pm use nub` / `use pnpm`
-# (pm_engine/use_nub.rs). Same 0.9 line vendor/aube already pins.
-serde_yaml = "0.9"
+# (pm_engine/use_nub.rs). serde_yaml is archived/unmaintained; serde_yaml_ng
+# is the maintained, API-compatible fork, aliased as `serde_yaml` so the
+# source paths are unchanged.
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sha2.workspace = true
 tracing.workspace = true
 tempfile = "3"
