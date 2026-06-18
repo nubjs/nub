@@ -25,6 +25,7 @@ use super::node_index;
 use super::{HostTarget, provision_node, resolve_mirror_base};
 use crate::node::discovery;
 use crate::node::version::{NodeVersion, VersionPin};
+use crate::pm::shim;
 
 /// True when `<dir>` holds an installed Node (`bin/node` unix, `node.exe`
 /// windows) — the cache-hit / install-complete signal, matching the store
@@ -239,18 +240,21 @@ fn ls_with(store: &Path, active: Option<NodeVersion>) -> Vec<LsEntry> {
 
 /// Remove `version` from nub's cache. `version` is the literal spec the user
 /// typed; it must name a concrete cached version (`X.Y.Z`). Errors when the
-/// version isn't cached, or when the cwd currently resolves to it (removing the
-/// live version would break the current project's runs).
+/// version isn't cached, when the cwd currently resolves to it (removing the
+/// live version would break the current project's runs), or when it's the
+/// user-global default (removing it would dangle the default + `~/.nub/current`).
 pub fn uninstall(version_spec: &str, store: &Path, cwd: &Path) -> Result<NodeVersion> {
-    uninstall_with(version_spec, store, resolved_version(cwd))
+    let default = discovery::default_file().and_then(|f| read_default_record(&f));
+    uninstall_with(version_spec, store, resolved_version(cwd), default)
 }
 
-/// `uninstall` core, parameterized over the resolved version so the active-guard
-/// is testable without touching `discover_node`'s real store.
+/// `uninstall` core, parameterized over the resolved + default versions so the
+/// active- and default-guards are testable without touching the real store.
 fn uninstall_with(
     version_spec: &str,
     store: &Path,
     active: Option<NodeVersion>,
+    default: Option<NodeVersion>,
 ) -> Result<NodeVersion> {
     let version: NodeVersion = version_spec.trim().parse().map_err(|_| {
         anyhow::anyhow!(
@@ -267,6 +271,13 @@ fn uninstall_with(
         bail!(
             "Node {version} is the version this directory currently resolves to — \
              change the pin (or cd elsewhere) before uninstalling it"
+        );
+    }
+
+    if default.as_ref() == Some(&version) {
+        bail!(
+            "Node {version} is your default (nub node default) — \
+             set another default or clear it (nub node default --unset) before uninstalling it"
         );
     }
 
@@ -338,6 +349,196 @@ pub fn pin(spec: &str, cwd: &Path) -> Result<PinResult> {
     })
 }
 
+// ── default ────────────────────────────────────────────────────────────────
+
+/// Outcome of putting the default on PATH (step 2 of `nub node default`). The
+/// record (step 1) is already written regardless of this; a `Failed` here is a
+/// warning, not a command failure — re-running just retries this step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Exposure {
+    /// `~/.nub/current` was wired onto PATH; carries the profile outcome (file to
+    /// source, already present, or a manual line).
+    Path(shim::ProfileOutcome),
+    /// PATH editing isn't automated on Windows yet (its own PR) — `dir` is the
+    /// version's bin dir for the user to add by hand.
+    Unsupported(PathBuf),
+    /// The symlink/profile write failed; `0` is the reason. Non-fatal.
+    Failed(String),
+}
+
+/// What [`set_default`] resolved + did, so the CLI can print a tailored line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultResult {
+    /// The concrete version now recorded as the user-global default.
+    pub version: NodeVersion,
+    /// True when the version had to be downloaded (vs. already in nub's cache).
+    pub installed: bool,
+    /// How (and whether) the default was put on PATH for other programs.
+    pub exposure: Exposure,
+}
+
+/// Set the user-global default Node (`nub node default <spec>`): resolve `spec`
+/// to a concrete version, provision it if absent, record it in `~/.nub/default`
+/// (resolution rung #5), and expose its bin dir on PATH via `~/.nub/current`.
+///
+/// Two design choices: provision into nub's OWN store even if the version is
+/// already on PATH (the default needs a copy nub controls — it's what
+/// `~/.nub/current` links), and store the CONCRETE version not the alias (so the
+/// record and store can't drift; re-run to bump an `lts`/`22`).
+///
+/// Step 2 (`expose_default`) is non-fatal: the record is written first, so a
+/// PATH-wiring failure still leaves a working default and is reported as a
+/// warning, not an error.
+pub fn set_default(spec: &str, store: &Path) -> Result<DefaultResult> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        bail!("nub node default requires a version (e.g. 22, lts, 22.13.0)");
+    }
+    let (version, installed) = resolve_and_provision(spec, store)?;
+    write_default(&version)?;
+    let exposure = expose_default(store, &version);
+    Ok(DefaultResult {
+        version,
+        installed,
+        exposure,
+    })
+}
+
+/// Resolve `spec` to a concrete cached version, downloading it when absent.
+/// Returns `(version, installed)` — `installed` true only when a download
+/// happened. Fast offline path: an exact already-cached version needs no index
+/// fetch.
+fn resolve_and_provision(spec: &str, store: &Path) -> Result<(NodeVersion, bool)> {
+    if let Ok(exact) = spec.parse::<NodeVersion>() {
+        if version_dir_has_node(&store.join(exact.to_string())) {
+            return Ok((exact, false));
+        }
+    }
+    let host = HostTarget::detect()
+        .ok_or_else(|| anyhow::anyhow!("this host is not a platform nodejs.org publishes"))?;
+    let concrete = resolve_to_concrete(spec, store, &host)?;
+    if version_dir_has_node(&store.join(concrete.to_string())) {
+        return Ok((concrete, false));
+    }
+    provision_node(&concrete, &host, store_root_of(store), None)
+        .with_context(|| format!("installing Node {concrete}"))?;
+    Ok((concrete, true))
+}
+
+/// Clear the user-global default (`nub node default --unset`): remove
+/// `~/.nub/default` and tear down the PATH exposure ([`unexpose_default`]).
+/// Returns the version that was set, or `None` when none was. Idempotent —
+/// clearing an unset default is a no-op, not an error.
+pub fn unset_default() -> Result<Option<NodeVersion>> {
+    let Some(file) = discovery::default_file() else {
+        return Ok(None);
+    };
+    let prev = read_default_record(&file);
+    match std::fs::remove_file(&file) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("removing {}", file.display())),
+    }
+    unexpose_default()?;
+    Ok(prev)
+}
+
+/// `~/.nub/current` — the symlink to the default Node's bin dir that carries it
+/// (and its `npm`/`npx`/`corepack`) onto PATH. A sibling of `~/.nub/shims` and
+/// install.sh's `~/.nub/bin`.
+fn current_link() -> Result<PathBuf> {
+    dirs_next::home_dir()
+        .map(|h| h.join(".nub").join("current"))
+        .ok_or_else(|| anyhow::anyhow!("cannot locate the home directory for ~/.nub/current"))
+}
+
+/// Put the default on PATH (step 2). Infallible by design — any error becomes
+/// `Exposure::Failed` so a wiring failure can't undo the already-written record;
+/// the CLI surfaces it as a warning.
+#[cfg(unix)]
+fn expose_default(store: &Path, version: &NodeVersion) -> Exposure {
+    match try_expose_default(store, version) {
+        Ok(outcome) => Exposure::Path(outcome),
+        Err(e) => Exposure::Failed(format!("{e:#}")),
+    }
+}
+
+/// Atomically re-point `~/.nub/current` at `<store>/<version>/bin` (temp link +
+/// rename, so the swap never leaves `current` missing) and wire it onto PATH via
+/// `shim::add_path_block` (which orders shims ahead of it).
+#[cfg(unix)]
+fn try_expose_default(store: &Path, version: &NodeVersion) -> Result<shim::ProfileOutcome> {
+    let current = current_link()?;
+    if let Some(parent) = current.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let bin = store.join(version.to_string()).join("bin");
+    let tmp = current.with_file_name(format!("current.nub-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(&bin, &tmp)
+        .with_context(|| format!("linking {} -> {}", tmp.display(), bin.display()))?;
+    std::fs::rename(&tmp, &current).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    shim::add_path_block()
+}
+
+/// Windows: PATH editing isn't automated yet (its own PR) — report the version's
+/// bin dir for the user to add by hand. The record is already written, so nub's
+/// own resolution + the PM shims still pick the default up.
+#[cfg(not(unix))]
+fn expose_default(store: &Path, version: &NodeVersion) -> Exposure {
+    Exposure::Unsupported(store.join(version.to_string()))
+}
+
+/// Remove `~/.nub/current` and recompute the managed PATH block (which drops
+/// `current` while keeping `~/.nub/shims` if it's still installed). Unix only.
+#[cfg(unix)]
+fn unexpose_default() -> Result<()> {
+    let current = current_link()?;
+    match std::fs::remove_file(&current) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("removing {}", current.display())),
+    }
+    shim::remove_path_block()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn unexpose_default() -> Result<()> {
+    Ok(())
+}
+
+/// Write the concrete default version to `~/.nub/default`, creating `~/.nub` if
+/// missing. Thin real-path wrapper over [`write_default_record`].
+fn write_default(version: &NodeVersion) -> Result<()> {
+    let file = discovery::default_file()
+        .ok_or_else(|| anyhow::anyhow!("could not locate ~/.nub for the default record"))?;
+    write_default_record(&file, version)
+}
+
+/// Write `<version>\n` to `file` (creating its parent), parameterized over the
+/// path so the record format is testable against a temp file. The single
+/// newline-terminated version line mirrors the pin files `pin` writes.
+fn write_default_record(file: &Path, version: &NodeVersion) -> Result<()> {
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(file, format!("{version}\n"))
+        .with_context(|| format!("writing {}", file.display()))
+}
+
+/// Read the concrete default version from `file`; `None` when absent, empty, or
+/// unparseable. Strips a leading BOM, matching the pin-file readers.
+fn read_default_record(file: &Path) -> Option<NodeVersion> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+    content.trim().parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +564,32 @@ mod tests {
         let bin = store.join(version).join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("node"), "").unwrap();
+    }
+
+    #[test]
+    fn default_record_round_trips_and_rejects_garbage() {
+        // The `~/.nub/default` record is a single concrete-version line: what
+        // `write_default` writes is what `unset_default` reads back. Exercised via
+        // the path-injected core (`write_default_record`/`read_default_record`) so
+        // it never touches the real ~/.nub.
+        let dir = tmpdir("default-record");
+        let file = dir.join("default");
+
+        assert_eq!(read_default_record(&file), None, "absent file → no default");
+
+        write_default_record(&file, &NodeVersion::new(22, 15, 0)).unwrap();
+        assert_eq!(
+            read_default_record(&file),
+            Some(NodeVersion::new(22, 15, 0)),
+            "the written concrete version reads back"
+        );
+
+        // A blank or unparseable record falls through to None — a corrupt default
+        // must not error the resolver, the same posture as an unparseable pin file.
+        std::fs::write(&file, "  \n").unwrap();
+        assert_eq!(read_default_record(&file), None, "blank record → no default");
+        std::fs::write(&file, "not-a-version\n").unwrap();
+        assert_eq!(read_default_record(&file), None, "garbage → no default");
     }
 
     #[test]
@@ -466,7 +693,7 @@ mod tests {
         let active = NodeVersion::new(22, 13, 0);
         plant(&store, &active.to_string());
 
-        let err = uninstall_with(&active.to_string(), &store, Some(active.clone()))
+        let err = uninstall_with(&active.to_string(), &store, Some(active.clone()), None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -480,6 +707,28 @@ mod tests {
                 .join("node")
                 .is_file(),
             "the guarded version is NOT removed"
+        );
+    }
+
+    #[test]
+    fn uninstall_guards_the_global_default() {
+        // The global default can't be uninstalled even from a dir that doesn't
+        // resolve to it (active != default) — otherwise `~/.nub/default` and
+        // `~/.nub/current` would dangle. Injected so the guard is hermetic.
+        let store = tmpdir("guard-default-store");
+        let default = NodeVersion::new(22, 15, 0);
+        plant(&store, &default.to_string());
+
+        let err = uninstall_with(&default.to_string(), &store, None, Some(default.clone()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("is your default"),
+            "the default guard fires with a clear message: {err}"
+        );
+        assert!(
+            store.join(default.to_string()).join("bin").join("node").is_file(),
+            "the default version is NOT removed"
         );
     }
 

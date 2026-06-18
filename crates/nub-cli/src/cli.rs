@@ -4330,7 +4330,8 @@ fn run_node(args: &[String]) -> Result<i32> {
              \x20 install [<version>...]   provision version(s) into nub's cache (bare: the project pin)\n\
              \x20 ls                       list versions in nub's cache\n\
              \x20 uninstall <version>      remove a version from nub's cache\n\
-             \x20 pin <version>            write the project's Node pin"
+             \x20 pin <version>            write the project's Node pin\n\
+             \x20 default <version>        set the user-global default Node (--unset to clear)"
         );
         return Ok(0);
     }
@@ -4417,6 +4418,28 @@ fn run_node(args: &[String]) -> Result<i32> {
             println!("pinned Node {} → {}", result.spec, result.path.display());
             Ok(0)
         }
+        "default" => {
+            use nub_core::version_management::manage;
+            match args.get(1).map(String::as_str) {
+                Some("--unset") | Some("--clear") => {
+                    match manage::unset_default()? {
+                        Some(prev) => println!("Cleared the default Node ({prev})."),
+                        None => println!("No default Node was set."),
+                    }
+                    Ok(0)
+                }
+                // Auto-installs the version if it isn't cached.
+                Some(spec) => {
+                    let result = manage::set_default(spec, &store)?;
+                    report_default_set(&result);
+                    Ok(0)
+                }
+                None => bail!(
+                    "nub node default requires a version (e.g. 22, lts, 22.13.0), \
+                     or --unset to clear the current default"
+                ),
+            }
+        }
         // `nub node <file>` (or any non-verb positional) is an error, NOT a
         // passthrough — the exact wording is locked by the spec
         // (node-versions.md line 25). The literal `<file>` placeholder is part of
@@ -4428,6 +4451,40 @@ fn run_node(args: &[String]) -> Result<i32> {
                  To run a file, use 'nub <file>'."
             );
         }
+    }
+}
+
+/// Print the outcome of `nub node default <version>` — the version set, then how
+/// (and whether) it reached PATH for other programs.
+fn report_default_set(result: &nub_core::version_management::manage::DefaultResult) {
+    use nub_core::pm::shim::ProfileOutcome;
+    use nub_core::version_management::manage::Exposure;
+
+    let installed = if result.installed { " (installed)" } else { "" };
+    println!("Set default Node to {}{installed}.", result.version);
+    match &result.exposure {
+        Exposure::Path(ProfileOutcome::Added(profile)) => println!(
+            "  the default Node (node, npm, npx) is on PATH via ~/.nub/current\n  \
+             restart your shell, or run: source {}",
+            profile.display()
+        ),
+        Exposure::Path(ProfileOutcome::AlreadyPresent(_)) => {
+            println!("  the default Node (node, npm, npx) is on PATH via ~/.nub/current")
+        }
+        Exposure::Path(ProfileOutcome::Manual { line }) => println!(
+            "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
+        ),
+        Exposure::Unsupported(dir) => println!(
+            "  PATH: add {} to your PATH (PATH editing isn't automated on Windows yet)",
+            dir.display()
+        ),
+        // Step 2 failed — the default is still recorded and in use; only the PATH
+        // exposure is missing, and re-running retries just that step.
+        Exposure::Failed(reason) => eprintln!(
+            "  warning: couldn't put it on PATH ({reason})\n  \
+             the default is set and nub will use it — re-run `nub node default {}` to retry the PATH setup",
+            result.version
+        ),
     }
 }
 

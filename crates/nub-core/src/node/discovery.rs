@@ -422,6 +422,11 @@ const DEV_ENGINES_RUNTIME_SOURCE: &str = "package.json#devEngines.runtime";
 /// Source label for the `engines.node` pin channel (precedence #4).
 const ENGINES_NODE_SOURCE: &str = "package.json#engines.node";
 
+/// Source label for the user-global default pin (`nub node default`) — the
+/// lowest rung (precedence #5), consulted only when no project source (#1–#4)
+/// pins a version.
+const DEFAULT_SOURCE: &str = "nub node default";
+
 /// The governing `package.json` for `cwd`, parsed: the WORKSPACE ROOT's manifest
 /// when one exists above `cwd`, else the nearest one. This is the one manifest
 /// both `devEngines.runtime` (#1) and `engines.node` (#4) read from.
@@ -457,6 +462,22 @@ fn read_engines_node(cwd: &Path) -> Option<(String, String)> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)?;
     Some((range, ENGINES_NODE_SOURCE.to_string()))
+}
+
+/// Read the user-global default pin (precedence #5) from [`default_file`].
+/// Returns `(raw, parsed)`, or `None` when the file is absent, empty, or
+/// unparseable — a corrupt default falls through to the PATH node rather than
+/// erroring, mirroring `walk_up_for_pin`'s skip-an-unparseable-pin posture.
+fn read_default_pin() -> Option<(String, VersionPin)> {
+    let content = fs::read_to_string(default_file()?).ok()?;
+    // Strip a leading UTF-8 BOM, same as walk_up_for_pin (a Windows-editor default).
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let pin = trimmed.parse::<VersionPin>().ok()?;
+    Some((trimmed.to_string(), pin))
 }
 
 /// One entry of `devEngines.runtime` (the object form is a single entry).
@@ -592,10 +613,23 @@ pub struct PinChain {
 /// The pin-source chain in spec precedence order
 /// (`wiki/runtime/node-version-management.md` §"Resolution order"):
 /// `package.json#devEngines.runtime` (#1) → `.node-version` (#2) → `.nvmrc`
-/// (#3) → `package.json#engines.node` (#4, a resolution range). Errs with
-/// [`DiscoveryError::RuntimeNotNode`] when `devEngines.runtime` declares a
-/// non-Node runtime that refuses (its default).
+/// (#3) → `package.json#engines.node` (#4, a resolution range) → the user-global
+/// default `~/.nub/default` (#5, only when no project source pins a version).
+/// Errs with [`DiscoveryError::RuntimeNotNode`] when `devEngines.runtime`
+/// declares a non-Node runtime that refuses (its default).
 pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
+    resolve_pin_chain_with(cwd, read_default_pin())
+}
+
+/// Body of [`resolve_pin_chain`] with the #5 default injected, so the rung is
+/// unit-testable against a chosen value instead of the real `~/.nub/default`
+/// (which in-process tests must not touch). Same testable-body split as
+/// `nub_store_node_in`, `ls_with`, and `add_path_block_for`; production code only
+/// ever calls `resolve_pin_chain`.
+fn resolve_pin_chain_with(
+    cwd: &Path,
+    default_pin: Option<(String, VersionPin)>,
+) -> Result<PinChain, DiscoveryError> {
     let mut warnings = Vec::new();
     let manifest = project_manifest(cwd);
     if let Some(field) = manifest
@@ -638,6 +672,17 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
                  using node on PATH."
             )),
         }
+    }
+    // #5: the user-global default (`nub node default`). The lowest rung — only
+    // reached when no project source pinned a version — so it never overrides a
+    // project's own pin; it's the fallback for a no-pin project (which would
+    // otherwise dead-end at the PATH node, or `NoNodeOnPath` when nub installed
+    // the only Node it has).
+    if let Some((raw, pin)) = default_pin {
+        return Ok(PinChain {
+            pin: Some((raw, pin, DEFAULT_SOURCE.to_string())),
+            warnings,
+        });
     }
     Ok(PinChain {
         pin: None,
@@ -819,6 +864,13 @@ pub fn cache_dir() -> Option<PathBuf> {
 /// group (`ls`/`uninstall`/`install` all key off this dir).
 pub fn node_store_dir() -> Option<PathBuf> {
     Some(cache_dir()?.join("node"))
+}
+
+/// The user-global default-version record: `~/.nub/default`, a single concrete
+/// version line. Under `~/.nub` (not the wipeable cache) so a cache clear can't
+/// drop the opted-into default — same reasoning as the PM shims.
+pub fn default_file() -> Option<PathBuf> {
+    dirs_next::home_dir().map(|h| h.join(".nub").join("default"))
 }
 
 fn read_version_cache(node_path: &Path) -> Option<NodeVersion> {
@@ -1187,6 +1239,38 @@ mod tests {
         let chain = resolve_pin_chain(&dir).unwrap();
         let (_, _, source) = chain.pin.expect("a pin");
         assert_eq!(source, ".node-version", "a pin file must beat engines.node");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_pin_applies_when_no_project_source() {
+        // Precedence #5: with no devEngines/.node-version/.nvmrc/engines.node, the
+        // user-global default (`nub node default`) is what resolves — the rung that
+        // keeps a no-pin project from dead-ending at NoNodeOnPath.
+        let dir = resolution_tmpdir("default-applies");
+        let default = Some(("22.15.0".to_string(), "22.15.0".parse::<VersionPin>().unwrap()));
+        let chain = resolve_pin_chain_with(&dir, default).unwrap();
+        let (raw, pin, source) = chain.pin.expect("the default pins when nothing else does");
+        assert_eq!(source, DEFAULT_SOURCE);
+        assert_eq!(raw, "22.15.0");
+        assert_eq!(pin, VersionPin::Exact(NodeVersion::new(22, 15, 0)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_source_outranks_the_default() {
+        // The default is the LOWEST rung: a project pin file (#2) must win over it,
+        // so a global default never hijacks a project that pins its own Node.
+        let dir = resolution_tmpdir("default-loses");
+        std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
+        let default = Some(("22.15.0".to_string(), "22.15.0".parse::<VersionPin>().unwrap()));
+        let chain = resolve_pin_chain_with(&dir, default).unwrap();
+        let (raw, _pin, source) = chain.pin.expect("a pin");
+        assert_eq!(
+            source, ".node-version",
+            "a project pin must beat the global default"
+        );
+        assert_eq!(raw, "20.11.0");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

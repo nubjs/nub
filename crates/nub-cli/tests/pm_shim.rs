@@ -493,8 +493,8 @@ fn pm_shim_and_unshim_round_trip_against_a_temp_home() {
     let profile = std::fs::read_to_string(&zshrc).unwrap();
     assert_eq!(
         profile,
-        format!("{original}\n# nub shims\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
-        "the marked PATH block lands once, install.sh-shaped"
+        format!("{original}\n# nub path\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        "the unified managed PATH block lands once, install.sh-shaped"
     );
     assert!(
         stdout.contains("source") && stdout.contains(".zshrc"),

@@ -18,7 +18,6 @@
 
 use std::ffi::OsStr;
 use std::fmt;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -642,18 +641,55 @@ pub fn dir_is_noexec(_dir: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Shell-profile PATH block (the install.sh mechanism, ported)
+// Shell-profile PATH block (the install.sh mechanism, ported + unified)
 // ---------------------------------------------------------------------------
+//
+// ONE marked block lists every nub-managed dir in fixed priority order, so the
+// layering is deterministic whichever feature wired PATH first. `add_path_block`
+// (called by `pm shim` + `node default`) and `remove_path_block` both rewrite it
+// from current on-disk state.
 
-/// The PATH lines, exactly install.sh's shape (`$HOME`-relative so the profile
-/// stays portable across machines), pointing at the SHIMS dir.
-pub const SHIMS_POSIX_PATH_LINE: &str = r#"export PATH="$HOME/.nub/shims:$PATH""#;
-pub const SHIMS_FISH_PATH_LINE: &str = "set -gx PATH $HOME/.nub/shims $PATH";
+/// nub-managed PATH dirs, highest priority first; only the active ones (dir
+/// present). `shims` outranks `current` so a shimmed npm still routes through
+/// nub's PM engine. `$HOME`-relative for a portable profile line.
+fn managed_path_dirs(home: &Path) -> Vec<&'static str> {
+    let mut dirs = Vec::new();
+    if home.join(".nub").join("shims").is_dir() {
+        dirs.push("$HOME/.nub/shims");
+    }
+    // symlink_metadata: the link's own presence, not its (possibly dangling) target.
+    if home
+        .join(".nub")
+        .join("current")
+        .symlink_metadata()
+        .is_ok()
+    {
+        dirs.push("$HOME/.nub/current");
+    }
+    dirs
+}
 
-/// The block's marker comment. install.sh writes `# nub` above its `~/.nub/bin`
-/// line; this is deliberately DISTINCT so `nub pm unshim` strips exactly the
-/// shims block and never the installer's.
-const BLOCK_MARKER: &str = "# nub shims";
+/// The POSIX `export PATH=…` line wiring `dirs` in priority order, `$HOME`-relative
+/// like install.sh's own line. `None` when nothing is active (the block is then
+/// removed, never written as an empty `:$PATH` that would put cwd on PATH).
+fn posix_path_line(dirs: &[&str]) -> Option<String> {
+    (!dirs.is_empty()).then(|| format!(r#"export PATH="{}:$PATH""#, dirs.join(":")))
+}
+
+/// The fish equivalent of [`posix_path_line`].
+fn fish_path_line(dirs: &[&str]) -> Option<String> {
+    (!dirs.is_empty()).then(|| format!("set -gx PATH {} $PATH", dirs.join(" ")))
+}
+
+/// The managed block's marker comment. install.sh writes `# nub` above its
+/// `~/.nub/bin` line; this is deliberately DISTINCT so a rewrite touches exactly
+/// our block and never the installer's.
+const MANAGED_MARKER: &str = "# nub path";
+
+/// The pre-unification marker — `nub pm shim` wrote this for the shims-only
+/// block. Recognized and stripped on every rewrite so existing installs converge
+/// onto the unified [`MANAGED_MARKER`] block.
+const LEGACY_MARKER: &str = "# nub shims";
 
 /// Outcome of [`add_path_block`], for the CLI's "what changed" report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -664,16 +700,20 @@ pub enum ProfileOutcome {
     AlreadyPresent(PathBuf),
     /// No known profile exists / is writable for this shell — the CLI prints
     /// `line` as "add this to your shell config yourself" and exits 0.
-    Manual { line: &'static str },
+    Manual { line: String },
 }
 
-/// Append the marked PATH block to ALL of the current shell's profile files —
+/// Rewrite the managed PATH block in ALL of the current shell's profile files —
 /// both the INTERACTIVE rc and the NON-INTERACTIVE/LOGIN files a GUI-app-spawned
 /// shell, an IDE integrated terminal, an `ssh host command`, or a build tool's
 /// bare `pnpm` actually reads. install.sh only wires the interactive rc; the
-/// shim widens coverage (mise's lesson — [`shell_profiles`] documents which
-/// files and why), since intercepting tool-spawned bare PMs is the shim's whole
-/// reason to exist and those processes never source an interactive rc.
+/// managed block widens coverage (mise's lesson — [`shell_profiles`] documents
+/// which files and why), since intercepting tool-spawned bare PMs is the shims'
+/// whole reason to exist and those processes never source an interactive rc.
+///
+/// The block lists every active managed dir ([`managed_path_dirs`]) in priority
+/// order, so callers (`nub pm shim`, `nub node default`) need not coordinate —
+/// each just creates its dir, then calls this to re-derive the block.
 ///
 /// File selection per shell (`$SHELL` basename):
 ///   - **zsh** → `~/.zshrc` (interactive) **and** `~/.zshenv` (read by ALL zsh
@@ -698,34 +738,42 @@ pub fn add_path_block() -> Result<ProfileOutcome> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    add_path_block_for(&shell, &home, xdg.as_deref())
+    let dirs = managed_path_dirs(&home);
+    add_path_block_for(&shell, &home, xdg.as_deref(), &dirs)
 }
 
-/// [`add_path_block`] with the environment made explicit (the testable body).
+/// [`add_path_block`] with the environment + active dirs made explicit (the
+/// testable body).
 ///
-/// Writes the block to every target [`shell_profiles`] yields and folds their
+/// Rewrites the block in every target [`shell_profiles`] yields and folds their
 /// per-file outcomes into one (the result cli.rs prints, kept a single
 /// [`ProfileOutcome`] so the CLI surface is unchanged): the FIRST file actually
-/// added is reported as `Added` (the interactive rc, the one the user sources to
-/// pick the shims up in their current shell); if every target already carried
-/// the line it's `AlreadyPresent` (naming the first); if nothing could be
+/// written is reported as `Added` (the interactive rc, the one the user sources
+/// to pick the dirs up in their current shell); if every target already carried
+/// the exact block it's `AlreadyPresent` (naming the first); if nothing could be
 /// written it's `Manual`. Non-interactive files are wired silently as extra
 /// coverage — the per-file detail isn't surfaced to keep one headline outcome.
 pub fn add_path_block_for(
     shell: &str,
     home: &Path,
     xdg_config: Option<&Path>,
+    dirs: &[&str],
 ) -> Result<ProfileOutcome> {
-    let targets = shell_profiles(shell, home, xdg_config);
+    let posix = posix_path_line(dirs);
+    let fish = fish_path_line(dirs);
+    let targets = shell_profiles(shell, home, xdg_config, posix.as_deref(), fish.as_deref());
+    // Manual hint uses the POSIX line; `dirs.is_empty()` (nothing to add) yields
+    // an empty string the caller never reaches via the add path.
+    let manual = || ProfileOutcome::Manual {
+        line: posix.clone().unwrap_or_default(),
+    };
     if targets.is_empty() {
-        return Ok(ProfileOutcome::Manual {
-            line: SHIMS_POSIX_PATH_LINE,
-        });
+        return Ok(manual());
     }
     let mut first_added: Option<PathBuf> = None;
     let mut first_present: Option<PathBuf> = None;
     for target in &targets {
-        match append_block(target)? {
+        match write_block(target)? {
             ProfileOutcome::Added(p) => {
                 first_added.get_or_insert(p);
             }
@@ -741,28 +789,34 @@ pub fn add_path_block_for(
     Ok(match (first_added, first_present) {
         (Some(p), _) => ProfileOutcome::Added(p),
         (None, Some(p)) => ProfileOutcome::AlreadyPresent(p),
-        (None, None) => ProfileOutcome::Manual {
-            line: SHIMS_POSIX_PATH_LINE,
-        },
+        (None, None) => manual(),
     })
 }
 
-/// One profile-file target: which file, which line dialect, and whether a
-/// missing file may be created.
+/// One profile-file target: which file, the desired managed line in that file's
+/// dialect (`None` = no active dirs → remove the block), and whether a missing
+/// file may be created.
 struct ProfileTarget {
     path: PathBuf,
-    line: &'static str,
+    line: Option<String>,
     may_create: bool,
 }
 
 /// The set of profile files to wire for `shell`, interactive first. See
 /// [`add_path_block`] for the per-shell rationale. Empty = unknown shell
 /// (Manual). The order matters: the first element is the one cli.rs reports as
-/// the "source this" file, so it must be the interactive rc.
-fn shell_profiles(shell: &str, home: &Path, xdg_config: Option<&Path>) -> Vec<ProfileTarget> {
-    let posix = |path: PathBuf, may_create: bool| ProfileTarget {
+/// the "source this" file, so it must be the interactive rc. `posix`/`fish` are
+/// the desired line in each dialect (`None` when no dirs are active).
+fn shell_profiles(
+    shell: &str,
+    home: &Path,
+    xdg_config: Option<&Path>,
+    posix: Option<&str>,
+    fish: Option<&str>,
+) -> Vec<ProfileTarget> {
+    let posix_t = |path: PathBuf, may_create: bool| ProfileTarget {
         path,
-        line: SHIMS_POSIX_PATH_LINE,
+        line: posix.map(str::to_string),
         may_create,
     };
     match shell {
@@ -771,8 +825,8 @@ fn shell_profiles(shell: &str, home: &Path, xdg_config: Option<&Path>) -> Vec<Pr
         // single file that guarantees a GUI/IDE-spawned shell sees the shims.
         // Both are canonical zsh files — created if missing.
         "zsh" => vec![
-            posix(home.join(".zshrc"), true),
-            posix(home.join(".zshenv"), true),
+            posix_t(home.join(".zshrc"), true),
+            posix_t(home.join(".zshenv"), true),
         ],
         "bash" => {
             let mut targets = Vec::with_capacity(2);
@@ -781,7 +835,7 @@ fn shell_profiles(shell: &str, home: &Path, xdg_config: Option<&Path>) -> Vec<Pr
             // is what a fresh HOME gets).
             let bashrc = home.join(".bashrc");
             if bashrc.is_file() && appendable(&bashrc) {
-                targets.push(posix(bashrc, false));
+                targets.push(posix_t(bashrc, false));
             }
             // Login / non-interactive: bash reads `.bash_profile` (then
             // `.bash_login`, then `.profile`) for login shells. Prefer an
@@ -791,9 +845,9 @@ fn shell_profiles(shell: &str, home: &Path, xdg_config: Option<&Path>) -> Vec<Pr
             // silent Manual punt.
             let bash_profile = home.join(".bash_profile");
             if bash_profile.is_file() && appendable(&bash_profile) {
-                targets.push(posix(bash_profile, false));
+                targets.push(posix_t(bash_profile, false));
             } else {
-                targets.push(posix(home.join(".profile"), true));
+                targets.push(posix_t(home.join(".profile"), true));
             }
             targets
         }
@@ -803,7 +857,7 @@ fn shell_profiles(shell: &str, home: &Path, xdg_config: Option<&Path>) -> Vec<Pr
                 .unwrap_or_else(|| home.join(".config"));
             vec![ProfileTarget {
                 path: base.join("fish").join("config.fish"),
-                line: SHIMS_FISH_PATH_LINE,
+                line: fish.map(str::to_string),
                 may_create: true,
             }]
         }
@@ -816,25 +870,42 @@ fn appendable(path: &Path) -> bool {
     std::fs::OpenOptions::new().append(true).open(path).is_ok()
 }
 
-/// Append `\n# nub shims\n<line>\n` — byte-for-byte what install.sh's three
-/// `echo`s produce for its own block. Idempotency keys on the PATH line itself
-/// (trimmed line equality), so a hand-added identical line also counts as
-/// present — and is then deliberately NOT ours to remove.
-fn append_block(target: &ProfileTarget) -> Result<ProfileOutcome> {
+/// Rewrite `target` so it carries exactly the managed block for `target.line`
+/// (`\n# nub path\n<line>\n` — byte-for-byte install.sh's three-`echo` shape).
+/// Idempotency keys on the PATH line itself (trimmed equality), so a hand-added
+/// identical line also counts as present and is then deliberately NOT rewritten.
+/// Otherwise any stale managed/legacy block is stripped and the fresh one
+/// appended — handling both a content change (shims-only → shims+current) and
+/// migration off the legacy `# nub shims` marker.
+fn write_block(target: &ProfileTarget) -> Result<ProfileOutcome> {
+    // No active dirs → nothing to add here (full removal is the sweep's job).
+    let Some(line) = target.line.as_deref() else {
+        return Ok(ProfileOutcome::AlreadyPresent(target.path.clone()));
+    };
     let existing = match std::fs::read_to_string(&target.path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if !target.may_create {
-                return Ok(ProfileOutcome::Manual { line: target.line });
+                return Ok(ProfileOutcome::Manual {
+                    line: line.to_string(),
+                });
             }
             String::new()
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Ok(ProfileOutcome::Manual { line: target.line });
+            return Ok(ProfileOutcome::Manual {
+                line: line.to_string(),
+            });
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", target.path.display())),
     };
-    if existing.lines().any(|l| l.trim() == target.line) {
+    // Already exactly present — UNLESS a legacy `# nub shims` block is still
+    // there, which must be migrated to the unified marker even when the PATH line
+    // itself is unchanged (the common shims-only re-run). The line check (not a
+    // full-block check) also leaves a hand-added identical line in place rather
+    // than appending a duplicate.
+    let has_legacy = existing.lines().any(|l| l.trim() == LEGACY_MARKER);
+    if !has_legacy && existing.lines().any(|l| l.trim() == line) {
         return Ok(ProfileOutcome::AlreadyPresent(target.path.clone()));
     }
     if target.may_create {
@@ -843,29 +914,50 @@ fn append_block(target: &ProfileTarget) -> Result<ProfileOutcome> {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
     }
-    let mut file = match std::fs::OpenOptions::new()
-        .append(true)
-        .create(target.may_create)
-        .open(&target.path)
-    {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Ok(ProfileOutcome::Manual { line: target.line });
-        }
-        Err(e) => return Err(e).with_context(|| format!("opening {}", target.path.display())),
-    };
-    write!(file, "\n{BLOCK_MARKER}\n{}\n", target.line)
-        .with_context(|| format!("appending to {}", target.path.display()))?;
-    Ok(ProfileOutcome::Added(target.path.clone()))
+    // Strip any stale managed/legacy block first, then append the fresh one, so
+    // re-running with a changed dir set (or an old `# nub shims` block) converges
+    // to exactly one canonical block.
+    let new = format!("{}\n{MANAGED_MARKER}\n{line}\n", strip_managed(&existing));
+    match write_profile_atomically(&target.path, &new) {
+        Ok(()) => Ok(ProfileOutcome::Added(target.path.clone())),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(ProfileOutcome::Manual {
+            line: line.to_string(),
+        }),
+        Err(e) => Err(e).with_context(|| format!("writing {}", target.path.display())),
+    }
 }
 
-/// Strip the marked block from EVERY profile [`add_path_block`] may have
-/// written — across all shells, both the interactive rc and the
-/// non-interactive/login files — not just the current `$SHELL`'s, since the user
-/// may have switched shells since `nub pm shim` ran. Returns the files that
-/// changed. Unreadable / missing profiles are skipped (nothing of ours to
-/// strip); write failures propagate. Must keep working when the official nub is
-/// gone — it touches only profile files, never `current_exe`'s install dir.
+/// Replace `path`'s contents with `new` via temp + rename, so a torn write can
+/// never truncate a shell profile. The rename targets the CANONICALIZED path — a
+/// `~/.zshrc` that is a symlink into a dotfiles repo stays a symlink, with the
+/// edit landing in the linked-to file; renaming onto the symlink path would
+/// replace the link with a regular file and orphan the dotfiles copy. The
+/// original file's permissions are copied over so a 600 profile stays 600.
+fn write_profile_atomically(path: &Path, new: &str) -> std::io::Result<()> {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let tmp = target.with_file_name(format!(
+        "{}.nub-path-{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, new)?;
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Re-derive the managed block across EVERY profile it may live in (all shells,
+/// interactive + login files — the user may have switched shells). Call AFTER a
+/// feature tears down its dir: any STILL-active dir is re-written, so unshimming
+/// with a default set keeps `~/.nub/current` on PATH (and vice versa); when none
+/// remain the block is dropped. Returns the changed files; profiles without our
+/// block are left untouched. Touches only profiles, so it works even when the
+/// official nub is gone.
 pub fn remove_path_block() -> Result<Vec<PathBuf>> {
     let home = dirs_next::home_dir().context("cannot locate the home directory")?;
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
@@ -893,65 +985,80 @@ pub fn remove_path_block_from_profiles(
         home.join(".profile"),
         fish_base.join("fish").join("config.fish"),
     ];
+    // Whatever's still active after the caller's teardown — re-added to any file
+    // that carried our block, or omitted entirely (full strip) when none remain.
+    let dirs = managed_path_dirs(home);
+    let posix = posix_path_line(&dirs);
+    let fish = fish_path_line(&dirs);
     let mut changed = Vec::new();
     for path in candidates {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Some(stripped) = strip_block(&content) else {
-            continue;
+        let stripped = strip_managed(&content);
+        if stripped == content {
+            continue; // no managed block in this file — leave it untouched
+        }
+        // config.fish takes the fish dialect; everything else POSIX.
+        let line = if path.ends_with("config.fish") {
+            fish.as_deref()
+        } else {
+            posix.as_deref()
         };
-        // Temp + rename: a torn write must never truncate a shell profile.
-        // The rename targets the CANONICALIZED path — a `~/.zshrc` that is a
-        // symlink into a dotfiles repo must stay a symlink, with the edit
-        // landing in the linked-to file; renaming onto the symlink path would
-        // replace the link with a regular file and orphan the dotfiles copy.
-        // Permissions are copied over so a 600 profile stays 600.
-        let target = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let tmp = target.with_file_name(format!(
-            "{}.nub-unshim-{}",
-            target.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        ));
-        std::fs::write(&tmp, &stripped).with_context(|| format!("writing {}", tmp.display()))?;
-        if let Ok(meta) = std::fs::metadata(&target) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
-        }
-        if let Err(e) = std::fs::rename(&tmp, &target) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("replacing {}", target.display()));
-        }
+        let new = match line {
+            Some(l) => format!("{stripped}\n{MANAGED_MARKER}\n{l}\n"),
+            None => stripped,
+        };
+        write_profile_atomically(&path, &new)
+            .with_context(|| format!("replacing {}", path.display()))?;
         changed.push(path);
     }
     Ok(changed)
 }
 
-/// Remove exactly the bytes [`append_block`] wrote — `"\n{BLOCK_MARKER}\n{line}\n"`
-/// — and nothing else. `None` = no block, file untouched. A hand-added PATH line
-/// without the marker is NOT removed (we only strip what we wrote).
+/// Remove EVERY managed block — both the unified `# nub path` marker and the
+/// legacy `# nub shims` one — leaving everything else byte-for-byte intact. A
+/// hand-added PATH line without our marker is NOT removed (we only strip what we
+/// wrote). Loops [`strip_one_block`] so a file carrying both a legacy and a
+/// unified block (or two of either) is fully cleaned.
+fn strip_managed(content: &str) -> String {
+    let mut s = content.to_string();
+    while let Some(stripped) = strip_one_block(&s) {
+        s = stripped;
+    }
+    s
+}
+
+/// Remove ONE managed block (whichever managed/legacy marker appears first),
+/// byte-exactly; `None` once none remain.
 ///
 /// This is byte-exact string-slicing, NOT a line-split/rejoin, specifically so
 /// the result preserves the ORIGINAL file's trailing-newline state: a profile
-/// that had no trailing newline before `nub pm shim` ran must regain none after
-/// `unshim` (the old line-rejoin gained one — the breaker's byte-cleanliness
-/// nit). The block carries its own leading `\n` separator and a trailing `\n`
-/// after the path line; we excise that whole span, so whatever surrounded it —
-/// including "the file ended right here, no newline" — is restored verbatim.
-fn strip_block(content: &str) -> Option<String> {
-    // The marker as it sits on its own line: find a line whose trimmed text is
-    // exactly BLOCK_MARKER. We scan line starts so an in-prose mention of the
-    // string can't be mistaken for the marker.
-    let marker_line_start = content
-        .match_indices(BLOCK_MARKER)
-        .map(|(idx, _)| idx)
-        .find(|&idx| {
-            let at_line_start = idx == 0 || content.as_bytes()[idx - 1] == b'\n';
-            let rest = &content[idx + BLOCK_MARKER.len()..];
-            let to_eol_blank = rest.starts_with('\n') || rest.is_empty();
-            at_line_start && to_eol_blank
-        })?;
+/// that had no trailing newline before the block was written must regain none
+/// after it's removed (a line-rejoin would gain one). The block carries its own
+/// leading `\n` separator and a trailing `\n` after the path line; we excise
+/// that whole span, so whatever surrounded it — including "the file ended right
+/// here, no newline" — is restored verbatim.
+fn strip_one_block(content: &str) -> Option<String> {
+    // The earliest marker (either dialect) sitting on its own line. We scan line
+    // starts so an in-prose mention of the string can't be mistaken for it.
+    let (marker_line_start, marker_len) = [MANAGED_MARKER, LEGACY_MARKER]
+        .iter()
+        .filter_map(|marker| {
+            content
+                .match_indices(marker)
+                .map(|(idx, _)| idx)
+                .find(|&idx| {
+                    let at_line_start = idx == 0 || content.as_bytes()[idx - 1] == b'\n';
+                    let rest = &content[idx + marker.len()..];
+                    let to_eol_blank = rest.starts_with('\n') || rest.is_empty();
+                    at_line_start && to_eol_blank
+                })
+                .map(|idx| (idx, marker.len()))
+        })
+        .min_by_key(|(idx, _)| *idx)?;
 
-    // The block starts at the single `\n` separator we appended right before the
+    // The block starts at the single `\n` separator written right before the
     // marker (if present — the marker can be the very first byte of the file).
     let block_start = if marker_line_start > 0 && content.as_bytes()[marker_line_start - 1] == b'\n'
     {
@@ -960,11 +1067,12 @@ fn strip_block(content: &str) -> Option<String> {
         marker_line_start
     };
 
-    // The block end: past the marker's newline, then past our PATH line's
-    // newline — but only consume that next line when it really names
-    // `.nub/shims` (defensive: a malformed half-block without the line stops at
-    // the marker rather than eating an unrelated following line).
-    let after_marker = marker_line_start + BLOCK_MARKER.len();
+    // The block end: past the marker's newline, then past the PATH line's
+    // newline — but only consume that next line when it names one of OUR managed
+    // dirs (defensive: a half-block whose line was hand-deleted stops at the
+    // marker, and a user's own `.nub/`-containing PATH line is never eaten — it
+    // must be exactly `.nub/shims` or `.nub/current`).
+    let after_marker = marker_line_start + marker_len;
     let mut block_end = after_marker;
     if content.as_bytes().get(block_end) == Some(&b'\n') {
         block_end += 1; // the marker's trailing newline
@@ -972,8 +1080,9 @@ fn strip_block(content: &str) -> Option<String> {
             .find('\n')
             .map(|n| block_end + n + 1)
             .unwrap_or(content.len());
-        if content[block_end..path_line_end].contains(".nub/shims") {
-            block_end = path_line_end; // our PATH line + its newline
+        let path_line = &content[block_end..path_line_end];
+        if path_line.contains(".nub/shims") || path_line.contains(".nub/current") {
+            block_end = path_line_end; // the PATH line + its newline
         }
     }
 
@@ -1229,6 +1338,15 @@ pub fn sibling_bin(primary_bin: &Path, entry: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// The managed-dir set + its rendered lines for the PATH-block tests. A
+    /// shims-only block (the common case); `managed_path_dirs` is exercised
+    /// separately via the real-state paths. These mirror what
+    /// `posix_path_line(SHIMS_DIRS)` / `fish_path_line(SHIMS_DIRS)` render, kept
+    /// as literals so the expected profile bytes read at a glance.
+    const SHIMS_DIRS: &[&str] = &["$HOME/.nub/shims"];
+    const SHIMS_POSIX: &str = r#"export PATH="$HOME/.nub/shims:$PATH""#;
+    const SHIMS_FISH: &str = "set -gx PATH $HOME/.nub/shims $PATH";
 
     /// Unique temp dir under the system temp root (mirrors `resolve.rs`'s
     /// `tmpdir` — never under $HOME, so nothing here can touch real profiles
@@ -1753,27 +1871,27 @@ mod tests {
         // file every zsh invocation reads — the non-interactive coverage). The
         // reported outcome is the interactive rc, the file the user sources.
         assert_eq!(
-            add_path_block_for("zsh", &home, None).unwrap(),
+            add_path_block_for("zsh", &home, None, SHIMS_DIRS).unwrap(),
             ProfileOutcome::Added(zshrc.clone()),
             "the headline outcome names the interactive rc the user sources"
         );
         let with_block = std::fs::read_to_string(&zshrc).unwrap();
         assert_eq!(
             with_block,
-            format!("{original}\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n"),
+            format!("{original}\n# nub path\n{SHIMS_POSIX}\n"),
             "the appended block must be byte-for-byte install.sh's shape"
         );
         // .zshenv was created from scratch and carries the same block — this is
         // what a GUI/IDE-spawned non-interactive zsh actually reads.
         assert_eq!(
             std::fs::read_to_string(&zshenv).unwrap(),
-            format!("\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n"),
+            format!("\n# nub path\n{SHIMS_POSIX}\n"),
             ".zshenv gets the block so non-interactive shells see the shims"
         );
 
         // Adding twice is a no-op on every target.
         assert_eq!(
-            add_path_block_for("zsh", &home, None).unwrap(),
+            add_path_block_for("zsh", &home, None, SHIMS_DIRS).unwrap(),
             ProfileOutcome::AlreadyPresent(zshrc.clone())
         );
         assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), with_block);
@@ -1806,9 +1924,9 @@ mod tests {
 
         // zsh: both .zshrc (interactive) and .zshenv (all invocations) are
         // created; the headline outcome is the interactive rc.
-        let outcome = add_path_block_for("zsh", &home, None).unwrap();
+        let outcome = add_path_block_for("zsh", &home, None, SHIMS_DIRS).unwrap();
         assert_eq!(outcome, ProfileOutcome::Added(home.join(".zshrc")));
-        let zsh_block = format!("\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n");
+        let zsh_block = format!("\n# nub path\n{SHIMS_POSIX}\n");
         assert_eq!(
             std::fs::read_to_string(home.join(".zshrc")).unwrap(),
             zsh_block
@@ -1823,20 +1941,20 @@ mod tests {
         let xdg = home.join("xdg");
         let fish_config = xdg.join("fish").join("config.fish");
         assert_eq!(
-            add_path_block_for("fish", &home, Some(&xdg)).unwrap(),
+            add_path_block_for("fish", &home, Some(&xdg), SHIMS_DIRS).unwrap(),
             ProfileOutcome::Added(fish_config.clone())
         );
         let fish_content = std::fs::read_to_string(&fish_config).unwrap();
         assert!(
-            fish_content.contains(SHIMS_FISH_PATH_LINE) && !fish_content.contains("export PATH"),
+            fish_content.contains(SHIMS_FISH) && !fish_content.contains("export PATH"),
             "fish gets `set -gx`, never the posix line, got: {fish_content}"
         );
 
         // An unknown shell still can only be handled manually.
         assert_eq!(
-            add_path_block_for("tcsh", &home, None).unwrap(),
+            add_path_block_for("tcsh", &home, None, SHIMS_DIRS).unwrap(),
             ProfileOutcome::Manual {
-                line: SHIMS_POSIX_PATH_LINE
+                line: SHIMS_POSIX.to_string()
             }
         );
     }
@@ -1850,13 +1968,13 @@ mod tests {
         // actually work.
         let home = tmpdir("fresh-bash");
         assert_eq!(
-            add_path_block_for("bash", &home, None).unwrap(),
+            add_path_block_for("bash", &home, None, SHIMS_DIRS).unwrap(),
             ProfileOutcome::Added(home.join(".profile")),
             "a fresh bash HOME must get a created+wired login profile, not Manual"
         );
         assert_eq!(
             std::fs::read_to_string(home.join(".profile")).unwrap(),
-            format!("\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n")
+            format!("\n# nub path\n{SHIMS_POSIX}\n")
         );
         // .bashrc is NOT conjured (install.sh parity — interactive rc is only
         // touched when it already exists); the login file alone carries it.
@@ -1870,19 +1988,19 @@ mod tests {
         let home = tmpdir("bash-with-rc");
         std::fs::write(home.join(".bashrc"), "# rc\n").unwrap();
         assert_eq!(
-            add_path_block_for("bash", &home, None).unwrap(),
+            add_path_block_for("bash", &home, None, SHIMS_DIRS).unwrap(),
             ProfileOutcome::Added(home.join(".bashrc"))
         );
         assert!(
             std::fs::read_to_string(home.join(".bashrc"))
                 .unwrap()
-                .contains(SHIMS_POSIX_PATH_LINE),
+                .contains(SHIMS_POSIX),
             "the existing interactive rc is wired"
         );
         assert!(
             std::fs::read_to_string(home.join(".profile"))
                 .unwrap()
-                .contains(SHIMS_POSIX_PATH_LINE),
+                .contains(SHIMS_POSIX),
             "and the login file too, for non-interactive coverage"
         );
 
@@ -1890,7 +2008,7 @@ mod tests {
         let home = tmpdir("bash-with-profile");
         std::fs::write(home.join(".bash_profile"), "# hello\n").unwrap();
         assert_eq!(
-            add_path_block_for("bash", &home, None).unwrap(),
+            add_path_block_for("bash", &home, None, SHIMS_DIRS).unwrap(),
             ProfileOutcome::Added(home.join(".bash_profile")),
             "an existing .bash_profile is preferred as the login target"
         );
@@ -1908,10 +2026,10 @@ mod tests {
         let home = tmpdir("sweep");
         let xdg = home.join("xdg");
 
-        add_path_block_for("zsh", &home, None).unwrap(); // .zshrc + .zshenv
-        add_path_block_for("fish", &home, Some(&xdg)).unwrap(); // config.fish
+        add_path_block_for("zsh", &home, None, SHIMS_DIRS).unwrap(); // .zshrc + .zshenv
+        add_path_block_for("fish", &home, Some(&xdg), SHIMS_DIRS).unwrap(); // config.fish
         std::fs::write(home.join(".bashrc"), "# rc\n").unwrap();
-        add_path_block_for("bash", &home, None).unwrap(); // .bashrc + .profile
+        add_path_block_for("bash", &home, None, SHIMS_DIRS).unwrap(); // .bashrc + .profile
 
         let mut changed = remove_path_block_from_profiles(&home, Some(&xdg)).unwrap();
         changed.sort();
@@ -1945,11 +2063,11 @@ mod tests {
         let original = "export EDITOR=vi"; // deliberately no trailing newline
         std::fs::write(&zshrc, original).unwrap();
 
-        add_path_block_for("zsh", &home, None).unwrap();
+        add_path_block_for("zsh", &home, None, SHIMS_DIRS).unwrap();
         // Sanity: the block landed after the original's last byte.
         assert_eq!(
             std::fs::read_to_string(&zshrc).unwrap(),
-            format!("{original}\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n")
+            format!("{original}\n# nub path\n{SHIMS_POSIX}\n")
         );
 
         remove_path_block_from_profiles(&home, None).unwrap();
@@ -1961,45 +2079,161 @@ mod tests {
     }
 
     #[test]
-    fn strip_block_is_byte_exact_across_block_positions_and_newline_states() {
-        let line = SHIMS_POSIX_PATH_LINE;
-        let block = format!("\n# nub shims\n{line}\n");
-
-        // No block present → None, file untouched.
-        assert_eq!(strip_block("just some config\n"), None);
-        // A `# nub` (installer) block is NOT our `# nub shims` marker → untouched.
+    fn managed_block_lists_dirs_in_fixed_priority_order_and_rewrites_in_place() {
+        // The unified block's whole reason to exist: `~/.nub/shims` (PM shims)
+        // outranks `~/.nub/current` (the default Node's bin) regardless of which
+        // feature wired PATH first, so a shimmed npm keeps routing through nub.
+        let home = tmpdir("order");
+        let zshrc = home.join(".zshrc");
         assert_eq!(
-            strip_block("# nub\nexport PATH=\"$HOME/.nub/bin:$PATH\"\n"),
-            None
+            add_path_block_for("zsh", &home, None, &["$HOME/.nub/shims", "$HOME/.nub/current"])
+                .unwrap(),
+            ProfileOutcome::Added(zshrc.clone())
         );
+        assert_eq!(
+            std::fs::read_to_string(&zshrc).unwrap(),
+            "\n# nub path\nexport PATH=\"$HOME/.nub/shims:$HOME/.nub/current:$PATH\"\n",
+            "shims precede current in the one managed line"
+        );
+
+        // Re-running with a different dir set REWRITES the block in place (a
+        // content change is not a no-op), converging on exactly one block.
+        assert_eq!(
+            add_path_block_for("zsh", &home, None, SHIMS_DIRS).unwrap(),
+            ProfileOutcome::Added(zshrc.clone())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&zshrc).unwrap(),
+            format!("\n# nub path\n{SHIMS_POSIX}\n"),
+            "the block is rewritten, never duplicated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_path_dirs_reflects_on_disk_state_in_priority_order() {
+        let home = tmpdir("managed-dirs");
+        let nub = home.join(".nub");
+        std::fs::create_dir_all(&nub).unwrap();
+
+        assert!(managed_path_dirs(&home).is_empty(), "nothing active");
+
+        std::fs::create_dir_all(nub.join("shims")).unwrap();
+        assert_eq!(managed_path_dirs(&home), vec!["$HOME/.nub/shims"]);
+
+        // current is a symlink to a NON-existent target (dangling) — it must still
+        // count (symlink_metadata sees the link, not the target), and rank after
+        // shims.
+        std::os::unix::fs::symlink(home.join("store/bin"), nub.join("current")).unwrap();
+        assert_eq!(
+            managed_path_dirs(&home),
+            vec!["$HOME/.nub/shims", "$HOME/.nub/current"],
+            "shims outranks current; a dangling current still counts"
+        );
+
+        std::fs::remove_dir_all(nub.join("shims")).unwrap();
+        assert_eq!(managed_path_dirs(&home), vec!["$HOME/.nub/current"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_re_adds_still_active_dirs_in_each_dialect() {
+        // Unshim with a default still set: the block keeps ~/.nub/current rather
+        // than being fully stripped — in both the posix and fish dialects.
+        let home = tmpdir("remove-readd");
+        let nub = home.join(".nub");
+        std::fs::create_dir_all(&nub).unwrap();
+        // current active, shims NOT (the just-removed one).
+        std::os::unix::fs::symlink(home.join("store/bin"), nub.join("current")).unwrap();
+
+        let zshrc = home.join(".zshrc");
+        std::fs::write(
+            &zshrc,
+            "# nub path\nexport PATH=\"$HOME/.nub/shims:$HOME/.nub/current:$PATH\"\n",
+        )
+        .unwrap();
+        let xdg = home.join("xdg");
+        let fishrc = xdg.join("fish").join("config.fish");
+        std::fs::create_dir_all(fishrc.parent().unwrap()).unwrap();
+        std::fs::write(
+            &fishrc,
+            "# nub path\nset -gx PATH $HOME/.nub/shims $HOME/.nub/current $PATH\n",
+        )
+        .unwrap();
+
+        let changed = remove_path_block_from_profiles(&home, Some(&xdg)).unwrap();
+        assert!(changed.contains(&zshrc) && changed.contains(&fishrc));
+        assert_eq!(
+            std::fs::read_to_string(&zshrc).unwrap(),
+            "\n# nub path\nexport PATH=\"$HOME/.nub/current:$PATH\"\n",
+            "shims dropped (gone), current re-added in the posix dialect"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fishrc).unwrap(),
+            "\n# nub path\nset -gx PATH $HOME/.nub/current $PATH\n",
+            "the fish profile is re-added in the fish dialect"
+        );
+    }
+
+    #[test]
+    fn add_migrates_a_legacy_shims_block_even_when_the_line_is_unchanged() {
+        // A pre-unification user (legacy `# nub shims` marker, identical PATH line)
+        // re-running `pm shim` must converge to the unified `# nub path` marker —
+        // the line-equality idempotency check must not short-circuit the migration.
+        let home = tmpdir("migrate");
+        let zshrc = home.join(".zshrc");
+        std::fs::write(&zshrc, format!("# keep\n\n# nub shims\n{SHIMS_POSIX}\n")).unwrap();
+
+        let outcome = add_path_block_for("zsh", &home, None, SHIMS_DIRS).unwrap();
+        assert_eq!(outcome, ProfileOutcome::Added(zshrc.clone()));
+        assert_eq!(
+            std::fs::read_to_string(&zshrc).unwrap(),
+            format!("# keep\n\n# nub path\n{SHIMS_POSIX}\n"),
+            "the legacy marker migrates to the unified one, the PATH line unchanged"
+        );
+    }
+
+    #[test]
+    fn strip_managed_is_byte_exact_across_block_positions_and_newline_states() {
+        let block = format!("\n# nub path\n{SHIMS_POSIX}\n");
+
+        // No block present → unchanged.
+        assert_eq!(strip_managed("just some config\n"), "just some config\n");
+        // A `# nub` (installer) block is NOT a managed marker → untouched.
+        let installer = "# nub\nexport PATH=\"$HOME/.nub/bin:$PATH\"\n";
+        assert_eq!(strip_managed(installer), installer);
 
         // Original with trailing newline: restored exactly.
-        let orig = "a\nb\n";
-        assert_eq!(
-            strip_block(&format!("{orig}{block}")).as_deref(),
-            Some(orig)
-        );
+        assert_eq!(strip_managed(&format!("a\nb\n{block}")), "a\nb\n");
         // Original without trailing newline: restored exactly (no NL gained).
-        let orig = "a\nb";
-        assert_eq!(
-            strip_block(&format!("{orig}{block}")).as_deref(),
-            Some(orig)
-        );
-        // Empty original (a file we created solely for the block): back to empty.
-        assert_eq!(strip_block(&block).as_deref(), Some(""));
+        assert_eq!(strip_managed(&format!("a\nb{block}")), "a\nb");
+        // Empty original (a file created solely for the block): back to empty.
+        assert_eq!(strip_managed(&block), "");
         // Block followed by later user content: only our bytes are excised.
         assert_eq!(
-            strip_block(&format!("a\n{block}c\n")).as_deref(),
-            Some("a\nc\n"),
+            strip_managed(&format!("a\n{block}c\n")),
+            "a\nc\n",
             "content appended after our block survives the strip"
         );
-        // A half-block (marker but the line was hand-deleted) stops at the
-        // marker rather than eating the unrelated next line.
+        // A half-block (marker but the line was hand-deleted) stops at the marker
+        // rather than eating the unrelated next line.
         assert_eq!(
-            strip_block("a\n\n# nub shims\nunrelated line\n").as_deref(),
-            Some("a\nunrelated line\n"),
+            strip_managed("a\n\n# nub path\nunrelated line\n"),
+            "a\nunrelated line\n",
             "a marker without our PATH line must not consume the following line"
         );
+        // A user's OWN `.nub/`-containing PATH line under a half-block is NOT eaten
+        // — only an exact `.nub/shims` or `.nub/current` line is ours to consume.
+        assert_eq!(
+            strip_managed("# nub path\nexport PATH=\"/opt/.nub/bin:$PATH\"\nKEEP=1\n"),
+            "export PATH=\"/opt/.nub/bin:$PATH\"\nKEEP=1\n",
+            "a foreign .nub/ PATH line survives — only our managed dirs are consumed"
+        );
+        // Migration: the legacy `# nub shims` block is stripped the same way, and
+        // a file carrying BOTH a legacy and a unified block is fully cleaned.
+        let legacy = format!("\n# nub shims\n{SHIMS_POSIX}\n");
+        assert_eq!(strip_managed(&format!("x\n{legacy}")), "x\n");
+        assert_eq!(strip_managed(&format!("x\n{legacy}{block}")), "x\n");
     }
 
     #[cfg(unix)]
@@ -2082,7 +2316,7 @@ mod tests {
         let real = dotfiles.join("zshrc");
         std::fs::write(
             &real,
-            format!("export EDITOR=vi\n\n{BLOCK_MARKER}\n{SHIMS_POSIX_PATH_LINE}\n"),
+            format!("export EDITOR=vi\n\n# nub path\n{SHIMS_POSIX}\n"),
         )
         .unwrap();
         std::os::unix::fs::symlink(&real, home.join(".zshrc")).unwrap();
