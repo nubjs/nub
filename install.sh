@@ -64,7 +64,7 @@ if [[ "$version" == latest ]]; then
     # GITHUB_TOKEN use the anonymous path unchanged.
     api_auth=()
     [[ -n "${GITHUB_TOKEN:-}" ]] && api_auth=(-H "Authorization: token ${GITHUB_TOKEN}")
-    version=$(curl -fsSL "${api_auth[@]}" "https://api.github.com/repos/nubjs/nub/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v(.*)".*/\1/')
+    version=$(curl -fsSL ${api_auth[@]+"${api_auth[@]}"} "https://api.github.com/repos/nubjs/nub/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v(.*)".*/\1/')
     if [[ -z "$version" ]]; then
         error "Failed to determine latest version"
     fi
