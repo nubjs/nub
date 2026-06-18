@@ -3,9 +3,9 @@
 //! the old JS cache, so warm caches survive the JS→Rust move (no global miss).
 //!
 //! Cache key preimage (no trailing separator):
-//!   `NUB_VERSION \0 CACHE_SCHEMA \0 source \0 ext \0 tsconfig_hash \0 (pkg_type||"")`
+//!   `NUB_VERSION \0 CACHE_SCHEMA \0 exe_hash \0 source \0 ext \0 tsconfig_hash \0 (pkg_type||"")`
 //!   → blake3 → 64-hex lowercase → cache FILENAME. (SCHEMA "4" = blake3 era; the
-//!   old JS / SCHEMA "3" used SHA-256.)
+//!   old JS / SCHEMA "3" used SHA-256 and a key without the exe-hash component.)
 //! On-disk entry: `[16-hex integrity = blake3(body)[..16]][body]`, where
 //!   `body = format_byte('c'|'m') + post_processed_code`.
 //! Atomic write via a `*.tmp` sibling + rename (the `*.tmp` suffix is what
@@ -16,6 +16,7 @@
 //! `export {};` marker for CJS, append the inline base64 sourceMap, append the
 //! `//# sourceURL=<absolute path>` magic comment.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use napi::Result;
@@ -132,13 +133,42 @@ pub fn transform_cached(
     })
 }
 
-/// blake3(NUB_VERSION \0 SCHEMA \0 source \0 ext \0 tsconfig_hash \0 pkg_type)
-/// → 64-hex lowercase. blake3 (SIMD) replaces SHA-256 on the hot path.
+/// Hash of the running nub binary, memoized for the process lifetime. Folding
+/// this into the cache key auto-invalidates every entry when nub is rebuilt /
+/// upgraded — a dev rebuild that changes emit no longer serves stale artifacts
+/// (the phantom-stale-cache failure mode). Belt-and-suspenders alongside
+/// NUB_VERSION: NUB_VERSION catches *released* bumps, the exe hash also catches
+/// *unreleased* local rebuilds at the same version (e.g. CI / `cargo build`
+/// during development) where NUB_VERSION is unchanged but the emit differs.
+///
+/// On any failure to resolve/read the binary we fall back to "" — the key is
+/// still well-formed and stable for that process; we simply lose the
+/// auto-invalidation benefit rather than poisoning the cache.
+fn exe_hash() -> &'static str {
+    static EXE_HASH: OnceLock<String> = OnceLock::new();
+    EXE_HASH
+        .get_or_init(|| {
+            let bytes = std::env::current_exe()
+                .ok()
+                .and_then(|p| std::fs::read(p).ok());
+            match bytes {
+                Some(b) => blake3::hash(&b).to_hex().to_string(),
+                None => String::new(),
+            }
+        })
+        .as_str()
+}
+
+/// blake3(NUB_VERSION \0 SCHEMA \0 exe_hash \0 source \0 ext \0 tsconfig_hash \0
+/// pkg_type) → 64-hex lowercase. blake3 (SIMD) replaces SHA-256 on the hot path;
+/// `exe_hash` is folded in so a rebuilt binary auto-invalidates the cache.
 fn cache_key(source: &str, ext: &str, tsconfig_hash: &str, pkg_type: &str) -> String {
     let mut h = blake3::Hasher::new();
     h.update(NUB_VERSION.as_bytes());
     h.update(b"\0");
     h.update(CACHE_SCHEMA.as_bytes());
+    h.update(b"\0");
+    h.update(exe_hash().as_bytes());
     h.update(b"\0");
     h.update(source.as_bytes());
     h.update(b"\0");
