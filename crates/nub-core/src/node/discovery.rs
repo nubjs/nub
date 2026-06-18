@@ -382,26 +382,37 @@ pub fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
     let max_depth = 16;
 
     for _ in 0..max_depth {
-        for filename in &[".node-version", ".nvmrc"] {
-            let pin_path = dir.join(filename);
-            if let Ok(content) = fs::read_to_string(&pin_path) {
-                // Strip a leading UTF-8 BOM (str::trim does not — U+FEFF is not
-                // whitespace) so a BOM-prefixed `.nvmrc`/`.node-version` (the
-                // default for many Windows editors) still parses instead of
-                // silently dropping the pin. The serde_json path
-                // (packageManager/devEngines) handles BOMs already.
-                let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    if let Ok(pin) = trimmed.parse::<VersionPin>() {
-                        tracing::debug!(path = %pin_path.display(), pin = trimmed, "found pin file");
-                        return Some((trimmed.to_string(), pin, (*filename).to_string()));
+        // A `.nvmrc`/`.node-version` shipped inside an installed dependency (under
+        // `node_modules`) is that package's own CI pin, not the consumer's. Honoring
+        // it would run e.g. a dependency's lifecycle script under the dep's pinned
+        // Node instead of the project's — and inherited NODE_OPTIONS flags computed
+        // for the project Node (e.g. `--experimental-webstorage`) then abort the
+        // older one. npm/pnpm/nvm never let a dependency's bundled pin drive the
+        // consumer. Skip pin files inside `node_modules`, but keep walking up so the
+        // project pin above it still resolves.
+        let in_node_modules = dir.components().any(|c| c.as_os_str() == "node_modules");
+        if !in_node_modules {
+            for filename in &[".node-version", ".nvmrc"] {
+                let pin_path = dir.join(filename);
+                if let Ok(content) = fs::read_to_string(&pin_path) {
+                    // Strip a leading UTF-8 BOM (str::trim does not — U+FEFF is not
+                    // whitespace) so a BOM-prefixed `.nvmrc`/`.node-version` (the
+                    // default for many Windows editors) still parses instead of
+                    // silently dropping the pin. The serde_json path
+                    // (packageManager/devEngines) handles BOMs already.
+                    let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(pin) = trimmed.parse::<VersionPin>() {
+                            tracing::debug!(path = %pin_path.display(), pin = trimmed, "found pin file");
+                            return Some((trimmed.to_string(), pin, (*filename).to_string()));
+                        }
+                        tracing::debug!(
+                            path = %pin_path.display(),
+                            content = trimmed,
+                            "pin file found but unparseable — skipping"
+                        );
                     }
-                    tracing::debug!(
-                        path = %pin_path.display(),
-                        content = trimmed,
-                        "pin file found but unparseable — skipping"
-                    );
                 }
             }
         }
@@ -1040,6 +1051,28 @@ mod tests {
         );
         assert_eq!(raw, "20.11.0");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pin_files_inside_node_modules_are_ignored() {
+        // A dependency's bundled `.nvmrc`/`.node-version` (under `node_modules`) is
+        // that package's own CI pin, not the consumer's. The walk must skip it and
+        // keep climbing to the project pin above `node_modules`. Regression: a dep's
+        // nested `.nvmrc` pinning an old Node ran the dep's lifecycle script under
+        // that Node, which aborted on the inherited `--experimental-webstorage` in
+        // NODE_OPTIONS (valid only on Node >= 22.4), failing the whole install.
+        let root = resolution_tmpdir("nm-skip");
+        std::fs::write(root.join(".node-version"), "24.3.0\n").unwrap();
+        let dep = root.join("node_modules").join("tldjs");
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(dep.join(".nvmrc"), "20\n").unwrap();
+        let (raw, _pin, source) = walk_up_for_pin(&dep).expect("project pin above node_modules");
+        assert_eq!(
+            source, ".node-version",
+            "the dep's nested pin must be skipped"
+        );
+        assert_eq!(raw, "24.3.0", "the project pin above node_modules must win");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
