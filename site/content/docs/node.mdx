@@ -1,13 +1,13 @@
 ---
 title: Node manager
-description: Manage the Node versions Nub provisions — pin a version and it's fetched automatically, or drive the cache explicitly with the install, list, uninstall, and pin subcommands.
+description: Manage the Node versions Nub provisions — pin a version and it's fetched automatically, or drive the cache explicitly with the install, list, uninstall, pin, and default subcommands.
 ---
 
-Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/runtime#node-version-resolution) covers the common case, so you rarely manage versions by hand. The `nub node` subcommands cover what the automatic path can't reach: warming the cache before you run, listing what's installed, reclaiming disk, and recording a pin.
+Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/runtime#node-version-resolution) covers the common case, so you rarely manage versions by hand. The `nub node` subcommands cover what the automatic path can't reach: warming the cache before you run, listing what's installed, reclaiming disk, recording a pin, and setting a global default.
 
 ## Automatic provisioning
 
-Drop a `.node-version` or `.nvmrc` in your project (or an `engines.node` range in `package.json`) and run `nub`. If that Node is already on your machine it's used as-is; if not, Nub downloads the matching stock build from nodejs.org — SHA-256 verified and cached under `~/.cache/nub/node` — then runs your code. Nub provisions the pinned version itself rather than handing off to `nvm`, `fnm`, or `mise`; with nothing pinned anywhere up the tree, it uses whatever `node` is already on your `PATH`.
+Drop a `.node-version` or `.nvmrc` in your project (or an `engines.node` range in `package.json`) and run `nub`. If that Node is already on your machine it's used as-is; if not, Nub downloads the matching stock build from nodejs.org — SHA-256 verified and cached under `~/.cache/nub/node` — then runs your code. Nub provisions the pinned version itself rather than handing off to `nvm`, `fnm`, or `mise`; with nothing pinned anywhere up the tree, it uses your [global default](#nub-node-default) when one is set, otherwise whatever `node` is already on your `PATH`.
 
 ```console
 $ echo 22.15.0 > .node-version
@@ -59,7 +59,7 @@ Only Nub's own download cache is shown — `ls` doesn't enumerate your `nvm` / `
 
 ## `nub node uninstall`
 
-Reclaim disk by deleting a cached version. Nub guards against removing the version your current directory resolves to.
+Reclaim disk by deleting a cached version. Nub guards against removing the version your current directory resolves to, or the one set as your global default.
 
 ```console
 $ nub node uninstall 20.11.0
@@ -85,6 +85,26 @@ A few deliberate behaviors:
 
 Whatever spec you give is written verbatim — including an alias like `lts` — and `pin` works offline. The `.node-version` file is the tool-agnostic convention (`nvm`, `fnm`, `volta`, `asdf` all read it), so the pin is portable to your other tools.
 
+## `nub node default`
+
+Set a user-global default Node — your baseline version, used anywhere a project pins nothing. Setting it also puts that Node on your `PATH`, so a bare `node` at the shell, and any tool that calls one, resolves to it.
+
+```console
+$ nub node default 24.17.0
+Set default Node to 24.17.0.
+  the default Node (node, npm, npx) is on PATH via ~/.nub/current
+  restart your shell, or run: source /Users/you/.zshrc
+```
+
+The spec resolves like any pin — `lts`, a bare major, an exact version — and is downloaded if the cache doesn't already hold it. A project pin always wins; the default only fills in where nothing in the project does. Clear it with `--unset`:
+
+```console
+$ nub node default --unset
+Cleared the default Node (24.17.0).
+```
+
+On Windows the version is recorded the same way, but the `PATH` step isn't automated yet — Nub prints the directory to add by hand.
+
 ## `nub node which`
 
 Resolve which Node runs here and where it lives. The binary path goes to stdout; a `» resolved from <source>` explainer goes to stderr, so it never pollutes a captured value.
@@ -104,7 +124,7 @@ $ echo "$NODE"
 /Users/you/.nvm/versions/node/v22.15.0/bin/node
 ```
 
-With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node` prints a status block instead — the version, path, and resolution source on separate lines.
+With no pin the explainer reads `» resolved from node on PATH`, or `» resolved from nub node default (…)` when a default is set. Bare `nub node` prints a status block instead — the version, path, and resolution source on separate lines.
 
 ## Mirrors and proxies
 

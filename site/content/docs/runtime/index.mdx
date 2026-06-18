@@ -26,7 +26,8 @@ Nub resolves the project's pinned Node before running anything, walking up from 
 - `.node-version`
 - `.nvmrc`
 - `package.json` → `engines.node` (a range)
-- the `node` on your `PATH`, when nothing is pinned
+- the global default set with [`nub node default`](/docs/node#nub-node-default)
+- the `node` on your `PATH`, when nothing above is set
 
 When a pinned version isn't installed, Nub fetches it — see [Managing Node versions](/docs/node).
 
