@@ -11,7 +11,8 @@
 //! `pkg-(N-1)`, `pkg-(N-2)`, `pkg-(N-3)`), producing a deep, wide DAG that
 //! forces many topo waves — a realistic shape for a layered monorepo.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashMap as HashMap;
+use std::collections::HashSet;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use nub_core::workspace::filter::{WorkspacePackage, build_dep_graph, topological_chunks};

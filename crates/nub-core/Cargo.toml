@@ -16,6 +16,7 @@ flate2.workspace = true
 glob-match = "0.2"
 liblzma.workspace = true
 reqwest.workspace = true
+rustc-hash.workspace = true
 semver = "1"
 serde.workspace = true
 # `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed).

@@ -11,7 +11,9 @@
 //!   union (or from the whole workspace if every filter is an exclusion)
 //! - `-r` / `--recursive` — all workspace packages
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
+
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -384,7 +386,7 @@ fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
 fn raw_matched_set(
     members: &[WorkspacePackage],
     filter: &Filter,
-    name_to_idx: &HashMap<&str, usize>,
+    name_to_idx: &FxHashMap<&str, usize>,
     workspace_root: Option<&Path>,
 ) -> HashSet<usize> {
     // Find initial matches.
@@ -480,7 +482,7 @@ pub fn apply_filters(
     filters: &[Filter],
     workspace_root: Option<&Path>,
 ) -> Vec<usize> {
-    let name_to_idx: HashMap<&str, usize> = members
+    let name_to_idx: FxHashMap<&str, usize> = members
         .iter()
         .enumerate()
         .map(|(i, p)| (p.name.as_str(), i))
@@ -570,7 +572,7 @@ fn matches_pattern(name: &str, rel_dir: &str, pattern: &str) -> bool {
 /// Build a dependency graph: index → set of dependency indices.
 pub fn build_dep_graph(
     members: &[WorkspacePackage],
-    name_to_idx: &HashMap<&str, usize>,
+    name_to_idx: &FxHashMap<&str, usize>,
 ) -> Vec<HashSet<usize>> {
     members
         .iter()
@@ -592,7 +594,7 @@ pub fn build_dep_graph(
 
 fn build_reverse_dependency_graph(
     members: &[WorkspacePackage],
-    name_to_idx: &HashMap<&str, usize>,
+    name_to_idx: &FxHashMap<&str, usize>,
 ) -> Vec<HashSet<usize>> {
     let forward = build_dep_graph(members, name_to_idx);
     let mut reverse: Vec<HashSet<usize>> = vec![HashSet::new(); members.len()];
@@ -622,7 +624,7 @@ fn traverse_deps(graph: &[HashSet<usize>], start: usize, visited: &mut HashSet<u
 /// packages that can run in parallel — all their deps are in earlier
 /// chunks. Kahn's algorithm collecting one wave per level.
 pub fn topological_chunks(nodes: &HashSet<usize>, deps: &[HashSet<usize>]) -> Vec<Vec<usize>> {
-    let mut in_degree: HashMap<usize, usize> = HashMap::new();
+    let mut in_degree: FxHashMap<usize, usize> = FxHashMap::default();
     for &node in nodes {
         let count = if node < deps.len() {
             deps[node].iter().filter(|d| nodes.contains(d)).count()

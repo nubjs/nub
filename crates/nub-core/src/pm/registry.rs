@@ -219,7 +219,7 @@ fn parse_npmrc_auth(
         username: Option<String>,
         password: Option<String>,
     }
-    let mut by_prefix: std::collections::HashMap<String, Fields> = std::collections::HashMap::new();
+    let mut by_prefix: rustc_hash::FxHashMap<String, Fields> = rustc_hash::FxHashMap::default();
 
     for line in npmrc.lines() {
         let line = line.trim();

@@ -2157,7 +2157,7 @@ fn run_workspace_target(
     }
 
     // Build dependency graph for topological chunking.
-    let name_to_idx: std::collections::HashMap<&str, usize> = members
+    let name_to_idx: rustc_hash::FxHashMap<&str, usize> = members
         .iter()
         .enumerate()
         .map(|(i, p)| (p.name.as_str(), i))
