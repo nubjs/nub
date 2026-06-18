@@ -39,3 +39,14 @@ tracing.workspace = true
 # Gated so the Windows build (which uses a different ctrl_c path) doesn't pull it.
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "workspace_filter"
+harness = false
+
+[[bench]]
+name = "cache_hash"
+harness = false
