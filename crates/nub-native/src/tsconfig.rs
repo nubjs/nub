@@ -99,13 +99,13 @@ pub fn load_tsconfig(dir: String) -> TsconfigResult {
 /// Shared internal entry — returns the cached `Loaded` (with its matcher) so the
 /// resolver can reuse the same per-dir state without re-reading the FS.
 fn load_for_dir(dir: &str) -> Arc<Loaded> {
-    if let Some(hit) = cache().lock().unwrap().get(dir) {
+    if let Some(hit) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(dir) {
         return hit.clone();
     }
     let loaded = Arc::new(build_loaded(dir));
     cache()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .insert(dir.to_string(), loaded.clone());
     loaded
 }
