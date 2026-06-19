@@ -26,7 +26,10 @@ fn synthetic_members() -> Vec<WorkspacePackage> {
             let mut deps = serde_json::Map::new();
             for d in 1..=3 {
                 if i >= d {
-                    deps.insert(format!("pkg-{:03}", i - d), serde_json::json!("workspace:*"));
+                    deps.insert(
+                        format!("pkg-{:03}", i - d),
+                        serde_json::json!("workspace:*"),
+                    );
                 }
             }
             let manifest = serde_json::json!({
@@ -53,7 +56,12 @@ fn bench_workspace_topo(c: &mut Criterion) {
     // `build_dep_graph` (parse the manifests into an index→deps adjacency) runs
     // once per filter resolution.
     c.bench_function("workspace/build_dep_graph/200", |b| {
-        b.iter(|| build_dep_graph(std::hint::black_box(&members), std::hint::black_box(&name_to_idx)));
+        b.iter(|| {
+            build_dep_graph(
+                std::hint::black_box(&members),
+                std::hint::black_box(&name_to_idx),
+            )
+        });
     });
 
     let deps = build_dep_graph(&members, &name_to_idx);
@@ -62,7 +70,12 @@ fn bench_workspace_topo(c: &mut Criterion) {
     // The topo-sort proper — the hot path whose per-wave rescan we want a
     // baseline for.
     c.bench_function("workspace/topological_chunks/200", |b| {
-        b.iter(|| topological_chunks(std::hint::black_box(&all_nodes), std::hint::black_box(&deps)));
+        b.iter(|| {
+            topological_chunks(
+                std::hint::black_box(&all_nodes),
+                std::hint::black_box(&deps),
+            )
+        });
     });
 }
 
