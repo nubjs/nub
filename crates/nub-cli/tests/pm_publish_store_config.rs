@@ -313,8 +313,14 @@ fn global_set_writes_neutral_never_a_pm_branded_global_file() {
     // pnpm-branded file; the global path must not.
     let ctx = Ctx::new("global-write", PNPM_MANIFEST);
 
-    let (_, stderr, code) =
-        ctx.run(&["config", "set", "network-concurrency", "5", "--location", "user"]);
+    let (_, stderr, code) = ctx.run(&[
+        "config",
+        "set",
+        "network-concurrency",
+        "5",
+        "--location",
+        "user",
+    ]);
     assert_eq!(code, 0, "stderr: {stderr}");
 
     // Neutral home: user ~/.npmrc carries the value.
@@ -341,7 +347,12 @@ fn global_set_writes_neutral_never_a_pm_branded_global_file() {
     // An auth/registry key at global scope → the neutral user ~/.npmrc too
     // (the engine's own user-scope writer), never a pnpm-branded global file.
     let (_, stderr, code) = ctx.run(&[
-        "config", "set", "registry", "https://g.example.test/", "--location", "user",
+        "config",
+        "set",
+        "registry",
+        "https://g.example.test/",
+        "--location",
+        "user",
     ]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
