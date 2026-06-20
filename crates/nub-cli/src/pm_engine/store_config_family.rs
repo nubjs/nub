@@ -236,10 +236,19 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
         // Non-pnpm incumbent or nub identity: never a pnpm-branded file.
         return config_model::ScalarHome::Npmrc;
     }
+    // The version may only select the pnpm yaml/version-gated route when the
+    // declared name is LITERALLY "pnpm". `resolve_config_surface` maps an
+    // UNKNOWN declared tool name (e.g. `deno`, `vlt`) to `PnpmOrFresh` too
+    // (conservative — keeps the full pnpm-compat surface live), so without this
+    // name-gate a `packageManager: "deno@11.0.0"` would feed major 11 into the
+    // pnpm gate and leak a `pnpm-workspace.yaml` (brand boundary). Gating the
+    // version on `name == "pnpm"` means any non-pnpm / unknown declared name —
+    // and a genuine fresh / lockfile-only pnpm project, which has NO declaration
+    // (name `None`) — resolves to major `None` → the `.npmrc` model.
     let major = std::env::current_dir()
         .ok()
         .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
-        .and_then(|(_name, version)| version)
+        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
         .and_then(|v| super::parse_major_minor(&v).0);
     config_model::pnpm_scalar_home(major)
 }

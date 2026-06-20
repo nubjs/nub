@@ -313,6 +313,31 @@ fn config_set_under_unversioned_pnpm_defaults_to_npmrc() {
     );
 }
 
+/// An UNKNOWN declared PM name at a high major must NOT leak a pnpm-branded
+/// file. `resolve_config_surface` maps an unknown declared tool (`deno`, …) to
+/// the pnpm-shaped surface (conservative), so a `packageManager: "deno@11.0.0"`
+/// reaches the scalar router with `pnpm_incumbent = true` — but the version
+/// gate only applies to a name of literally `pnpm`, so the major-11 here is
+/// ignored and the scalar lands in the neutral `.npmrc`, never
+/// `pnpm-workspace.yaml`. (Regression guard for the discarded-name bug.)
+#[test]
+fn config_set_under_unknown_pm_name_at_high_major_does_not_leak_yaml() {
+    const UNKNOWN_PM_HIGH_MAJOR: &str =
+        r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"deno@11.0.0"}"#;
+    let ctx = Ctx::new("config-unknown-pm", UNKNOWN_PM_HIGH_MAJOR);
+
+    let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"),
+        "an unknown PM name must route the scalar to the neutral .npmrc"
+    );
+    assert!(
+        !ctx.project.join("pnpm-workspace.yaml").exists(),
+        "an unknown PM name at major >=11 must NEVER leak a pnpm-workspace.yaml (brand boundary)"
+    );
+}
+
 /// GLOBAL config is read BROAD and cwd-INDEPENDENT (decision 2026-06-20,
 /// asymmetric read/write model): nub honors a pnpm GLOBAL `config.yaml` value
 /// regardless of the cwd's incumbent PM. This locks the global-by-cwd bug fix:
