@@ -59,7 +59,7 @@
 use anyhow::Result;
 use aube::commands::config::{ConfigArgs, ConfigCommand};
 
-use super::publish_family::{Parsed, VerbArgs, parse_verb, run_async, run_npm_fallback};
+use super::publish_family::{Parsed, VerbArgs, parse_verb, run_async};
 use super::{VerbSpec, present, stub_error};
 
 /// Dispatcher for the family's verbs (see [`super::publish_family::run_verb`]
@@ -84,7 +84,10 @@ pub(crate) fn run_verb(
             run_async::<cmd::find_hash::FindHashArgs, _, _>(typed, args, cmd::find_hash::run)
         }
         "config" | "get" | "set" => run_config(spec.canonical, typed, args),
-        "pkg" | "set-script" => run_npm_fallback(spec.canonical, typed, args),
+        "pkg" => run_async::<cmd::pkg::PkgArgs, _, _>(typed, args, cmd::pkg::run),
+        "set-script" => {
+            run_async::<cmd::set_script::SetScriptArgs, _, _>(typed, args, cmd::set_script::run)
+        }
         // Unreachable while the registry and this match agree; kept so a
         // future registry addition degrades to the stub instead of panicking.
         _ => Err(stub_error(typed, args, pm_hint)),

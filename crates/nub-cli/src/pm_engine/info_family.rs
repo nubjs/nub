@@ -5,9 +5,9 @@
 //! `la`/`ll`), `why` (+`w`), `outdated`, `audit`, `licenses` (the wrapper
 //! also admits pnpm's documented `list` spelling beside the engine's `ls`),
 //! `deprecations`, `peers`, `query`, `view` (+`info`/`show`/`v`), `check`,
-//! `bin`, `root`, and the npm-fallback `search` (delegates to `npm` when
-//! the `npmPath` setting is configured, else fails with the npm-only
-//! diagnostic — same shape as `whoami`/`owner` in the publish family).
+//! `bin`, `root`, and `search` (native registry full-text search via the
+//! `/-/v1/search` endpoint — same registry client as the publish family's
+//! `whoami`/`owner`).
 //! **Still a stub** (deliberately): `sbom` (below).
 //!
 //! `bin -g` / `root -g` print the engine's global-install layout (the
@@ -117,7 +117,11 @@ pub(crate) fn run_verb(
         "check" => run_check(typed, args),
         "bin" => run_bin(typed, args),
         "root" => run_root(typed, args),
-        "search" => super::publish_family::run_npm_fallback(spec.canonical, typed, args),
+        "search" => super::publish_family::run_async::<aube::commands::search::SearchArgs, _, _>(
+            typed,
+            args,
+            aube::commands::search::run,
+        ),
         // Deliberately not wired: brand leak in the document body (module
         // doc has the seam analysis). Honest message, no generic stub text.
         "sbom" => Err(anyhow::anyhow!(

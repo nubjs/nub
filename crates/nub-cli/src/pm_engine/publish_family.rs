@@ -1,8 +1,8 @@
 //! Publish family — registry writes, packaging, and auth through the
 //! embedded aube engine: `publish`, `pack`, `version`, `deprecate`,
 //! `undeprecate`, `dist-tag` (+`dist-tags`), `unpublish`, `login`
-//! (+`adduser`), `logout`, and the npm-fallback verbs `whoami`, `owner`,
-//! `token`, `stage`.
+//! (+`adduser`), `logout`, and the native account/registry verbs
+//! `whoami`, `owner` (+`owners`), and `token`.
 //!
 //! Wiring shape (shared by every wired engine verb; the generic helpers
 //! live here and are borrowed by `store_config_family` — hoist them into
@@ -28,10 +28,12 @@
 //!   the env-families seam, so it is invisible under nub (brand boundary:
 //!   nub doesn't honor another tool's branded env vars) — non-interactive
 //!   token entry is piped stdin (`echo "$TOKEN" | nub login`).
-//! - npm-fallback verbs (`whoami`, `owner`, `token`, `stage`): upstream
-//!   doesn't implement these; nub mirrors its behavior — delegate to `npm`
-//!   when the `npmPath` setting is configured, otherwise fail with the
-//!   npm-only-command diagnostic (rendered as `ERR_NUB_NPM_ONLY_COMMAND`).
+//! - account/registry verbs (`whoami`, `owner`, `token`): native engine
+//!   implementations that hit the registry directly with the same
+//!   `.npmrc` auth resolution as the publish writes (`whoami` →
+//!   `/-/whoami`; `owner` → collaborators GET + maintainers PUT; `token`
+//!   → `/-/npm/v1/tokens` CRUD). `stage` is dropped (not a real npm/pnpm
+//!   command) — it falls through to the unknown-command path.
 
 use std::future::Future;
 
@@ -68,7 +70,9 @@ pub(crate) fn run_verb(
         }
         "login" => run_async::<cmd::login::LoginArgs, _, _>(typed, args, cmd::login::run),
         "logout" => run_async::<cmd::logout::LogoutArgs, _, _>(typed, args, cmd::logout::run),
-        "whoami" | "owner" | "token" | "stage" => run_npm_fallback(spec.canonical, typed, args),
+        "whoami" => run_async::<cmd::whoami::WhoamiArgs, _, _>(typed, args, cmd::whoami::run),
+        "owner" => run_async::<cmd::owner::OwnerArgs, _, _>(typed, args, cmd::owner::run),
+        "token" => run_async::<cmd::token::TokenArgs, _, _>(typed, args, cmd::token::run),
         // Unreachable while the registry and this match agree; kept so a
         // future registry addition degrades to the stub instead of panicking.
         _ => Err(stub_error(typed, args, pm_hint)),
@@ -138,28 +142,6 @@ where
     let session = super::engine_session_quiet(None)?;
     match session.runtime.block_on(run(parsed)) {
         Ok(()) => Ok(0),
-        Err(report) => Ok(present::emit_report(&report)),
-    }
-}
-
-/// npm-fallback verbs. The engine entry is synchronous, but it resolves
-/// the `npmPath` setting through the env/settings seams, so the session's
-/// embedder preflight must still run first (the runtime it builds idles).
-pub(super) fn run_npm_fallback(
-    canonical: &'static str,
-    typed: &str,
-    args: &[String],
-) -> Result<i32> {
-    let parsed = match parse_verb::<VerbArgs<aube::commands::npm_fallback::FallbackArgs>>(
-        &format!("nub {typed}"),
-        args,
-    ) {
-        Parsed::Ok(wrap) => wrap.args,
-        Parsed::Exit(code) => return Ok(code),
-    };
-    let _session = super::engine_session_quiet(None)?;
-    match aube::commands::npm_fallback::run(canonical, &parsed) {
-        Ok(code) => Ok(code),
         Err(report) => Ok(present::emit_report(&report)),
     }
 }

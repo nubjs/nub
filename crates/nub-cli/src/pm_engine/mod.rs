@@ -343,12 +343,12 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         family: Family::Info,
         aube_args: "commands::view::ViewArgs",
     },
-    // hidden npm-fallback upstream ("not implemented — use npm search").
+    // Native registry full-text search (formerly an npm-only fallback).
     VerbSpec {
         canonical: "search",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::npm_fallback::FallbackArgs",
+        aube_args: "commands::search::SearchArgs",
     },
     // ── publish family: registry writes, packaging, auth ────────────────
     VerbSpec {
@@ -405,30 +405,26 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         family: Family::Publish,
         aube_args: "commands::logout::LogoutArgs",
     },
-    // hidden npm-fallbacks upstream (whoami/owner/token/stage).
+    // Native account/registry verbs (formerly npm-only fallbacks upstream).
+    // `stage` is intentionally absent: it is not a real npm/pnpm command, so
+    // it falls through to the unknown-command path rather than being refused.
     VerbSpec {
         canonical: "whoami",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::npm_fallback::FallbackArgs",
+        aube_args: "commands::whoami::WhoamiArgs",
     },
     VerbSpec {
         canonical: "owner",
-        aliases: &[],
+        aliases: &["owners"],
         family: Family::Publish,
-        aube_args: "commands::npm_fallback::FallbackArgs",
+        aube_args: "commands::owner::OwnerArgs",
     },
     VerbSpec {
         canonical: "token",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::npm_fallback::FallbackArgs",
-    },
-    VerbSpec {
-        canonical: "stage",
-        aliases: &[],
-        family: Family::Publish,
-        aube_args: "commands::npm_fallback::FallbackArgs",
+        aube_args: "commands::token::TokenArgs",
     },
     // ── store/config family: store + cache forensics, settings ──────────
     VerbSpec {
@@ -480,18 +476,18 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         family: Family::StoreConfig,
         aube_args: "commands::config::SetArgs",
     },
-    // hidden npm-fallbacks upstream (pkg/set-script).
+    // Native package.json editors (formerly npm-only fallbacks).
     VerbSpec {
         canonical: "pkg",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::npm_fallback::FallbackArgs",
+        aube_args: "commands::pkg::PkgArgs",
     },
     VerbSpec {
         canonical: "set-script",
-        aliases: &[],
+        aliases: &["ss"],
         family: Family::StoreConfig,
-        aube_args: "commands::npm_fallback::FallbackArgs",
+        aube_args: "commands::set_script::SetScriptArgs",
     },
 ];
 

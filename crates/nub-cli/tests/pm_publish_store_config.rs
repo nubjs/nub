@@ -241,22 +241,69 @@ fn config_get_registry_resolves_the_default_when_unset() {
     assert_eq!((stdout.trim(), code), ("https://mirror.example.test/", 0));
 }
 
-/// The npm-fallback verbs mirror the engine: without an `npmPath` setting
-/// they fail with the rewritten npm-only diagnostic (and the engine's
-/// non-zero exit), pointing the user at npm.
+/// `pkg` and `set-script` are native package.json editors — fully offline.
+/// Round-trip a set → get and a set-script, asserting the manifest is
+/// edited in place (and key order preserved).
 #[test]
-fn whoami_falls_back_with_the_rewritten_npm_only_error() {
-    let ctx = Ctx::new("whoami", MANIFEST);
-    for verb in ["whoami", "search"] {
-        let (stdout, stderr, code) = ctx.run(&[verb]);
-        assert_ne!(code, 0, "{verb}: stdout: {stdout}");
+fn pkg_and_set_script_edit_the_manifest_in_place() {
+    let ctx = Ctx::new("pkg", MANIFEST);
+
+    // get an existing field.
+    let (stdout, _, code) = ctx.run(&["pkg", "get", "name"]);
+    assert_eq!((stdout.trim(), code), ("pmfam-fixture", 0));
+
+    // set a nested field, then read it back.
+    let (_, _, code) = ctx.run(&["pkg", "set", "scripts.test=vitest"]);
+    assert_eq!(code, 0);
+    let (stdout, _, code) = ctx.run(&["pkg", "get", "scripts.test"]);
+    assert_eq!((stdout.trim(), code), ("vitest", 0));
+
+    // set-script is the scripts-map sugar.
+    let (_, _, code) = ctx.run(&["set-script", "build", "tsc", "-p", "."]);
+    assert_eq!(code, 0);
+    let (stdout, _, code) = ctx.run(&["pkg", "get", "scripts.build"]);
+    assert_eq!((stdout.trim(), code), ("tsc -p .", 0));
+
+    // The original top-level fields survive the edits.
+    let (stdout, _, code) = ctx.run(&["pkg", "get", "version"]);
+    assert_eq!((stdout.trim(), code), ("1.2.3", 0));
+}
+
+/// `whoami` / `search` / `owner` / `token` are native registry verbs now,
+/// not npm-only fallbacks — they must NOT emit the old npm-only diagnostic
+/// or point the user at npm. (They still fail offline / unauthenticated,
+/// but with their own engine error, not `ERR_NUB_NPM_ONLY_COMMAND`.)
+#[test]
+fn registry_verbs_are_native_not_npm_only_fallbacks() {
+    let ctx = Ctx::new("registry-verbs", MANIFEST);
+    for args in [
+        vec!["whoami"],
+        vec!["search", "lodash"],
+        vec!["owner", "ls", "lodash"],
+        vec!["token", "list"],
+    ] {
+        let (_stdout, stderr, _code) = ctx.run(&args);
         assert!(
-            stderr.contains("ERR_NUB_NPM_ONLY_COMMAND"),
-            "{verb}: diagnostic code must be rewritten to the nub namespace: {stderr}"
+            !stderr.contains("ERR_NUB_NPM_ONLY_COMMAND"),
+            "{args:?}: must not surface the npm-only diagnostic: {stderr}"
         );
         assert!(
-            stderr.contains(&format!("`npm {verb}`")),
-            "{verb}: the npm remedy must survive the rewrite: {stderr}"
+            !stderr.contains("npm-only command") && !stderr.contains("run it with `npm"),
+            "{args:?}: must not steer the user to npm: {stderr}"
         );
     }
+}
+
+/// `stage` is not a real npm/pnpm command and is no longer in the verb
+/// table — it falls through to the generic unknown-command path, never the
+/// npm-only diagnostic.
+#[test]
+fn stage_is_an_unknown_command_not_an_npm_only_fallback() {
+    let ctx = Ctx::new("stage", MANIFEST);
+    let (_stdout, stderr, code) = ctx.run(&["stage"]);
+    assert_ne!(code, 0);
+    assert!(
+        !stderr.contains("ERR_NUB_NPM_ONLY_COMMAND"),
+        "stage must not be an npm-only fallback: {stderr}"
+    );
 }
