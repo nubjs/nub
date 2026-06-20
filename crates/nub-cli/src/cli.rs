@@ -2054,6 +2054,21 @@ fn run_as_node() -> Result<i32> {
 
 // ── Subcommand implementations ───────────────────────────────────────
 
+/// The project/tree-wide augmentation opt-out: a truthy `NODE_COMPAT` env var
+/// forces compat mode (zero runtime augmentation — identical to the `--node`
+/// flag) across every runtime entrypoint. Because env vars inherit to
+/// descendants, setting it once (shell, `.envrc`, CI) covers the whole process
+/// tree — the persistent form of `--node`. Version resolution/provisioning
+/// stays ON (compat = no augmentation, not no-pinning), exactly like `--node`.
+/// Truthy = `1`/`true`/`yes` (case-insensitive); empty/`0`/`false`/unset = off.
+/// Brand-clean: `NODE_*` prefix (Node doesn't claim the name), not `NUB_*`/`AUBE_*`.
+fn node_compat_env() -> bool {
+    match env::var("NODE_COMPAT") {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
+        Err(_) => false,
+    }
+}
+
 fn run_file(args: &[String]) -> Result<i32> {
     run_file_with_compat(args, false)
 }
@@ -2072,6 +2087,10 @@ fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
 /// child's cwd is set on `SpawnConfig` so the override reaches Node itself, not
 /// just nub's discovery (spawn_node otherwise inherits the parent's cwd).
 fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path) -> Result<i32> {
+    // A truthy `NODE_COMPAT` forces compat tree-wide (the persistent `--node`);
+    // OR it into the per-invocation bit so `NODE_COMPAT=1 nub foo.ts` /
+    // `NODE_COMPAT=1 node foo.ts` (via the hijack → run_file → here) run vanilla.
+    let compat_mode = compat_mode || node_compat_env();
     // Preflight the project manifest first: an EACCES/unparseable package.json
     // otherwise reads as "no project" through every Option-returning reader on
     // this path (pin resolution, .env, PnP), so the run silently drops the
@@ -2135,6 +2154,8 @@ fn run_script(
     ws: &WorkspaceOpts,
     args: &[String],
 ) -> Result<i32> {
+    // Truthy `NODE_COMPAT` forces compat tree-wide (the persistent `--node`).
+    let compat_mode = compat_mode || node_compat_env();
     let cwd = env::current_dir()?;
     // Preflight: a package.json that exists but is unreadable (EACCES) or
     // unparseable would otherwise be swallowed by detect_project into the
@@ -2230,6 +2251,8 @@ fn run_workspace_target(
     compat_mode: bool,
     ws: &WorkspaceOpts,
 ) -> Result<i32> {
+    // Truthy `NODE_COMPAT` forces compat tree-wide (the persistent `--node`).
+    let compat_mode = compat_mode || node_compat_env();
     let cwd = env::current_dir()?;
     // See run_script: surface an unreadable/unparseable manifest with its coded
     // cause instead of the misleading "no package.json found".
@@ -3614,6 +3637,8 @@ fn run_exec_with_dlx(
     args: &[String],
     dlx_flags: Option<&NubxDlxFlags>,
 ) -> Result<i32> {
+    // Truthy `NODE_COMPAT` forces compat tree-wide (the persistent `--node`).
+    let compat_mode = compat_mode || node_compat_env();
     let cwd = env::current_dir()?;
 
     // `-p <spec>` forces the fetch path: the bin to run may not match any local

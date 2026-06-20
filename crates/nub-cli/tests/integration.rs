@@ -3934,6 +3934,123 @@ fn node_hijack_node_flag_opts_out_of_augmentation() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A truthy `NODE_COMPAT` env var is the tree-wide augmentation opt-out — the
+/// persistent form of `--node`. It must force vanilla Node on BOTH a direct
+/// `nub <file>` run and the `node`-PATH-hijack (so `NODE_COMPAT=1 node foo.js`
+/// runs plain), while leaving the default (unset) augmented. `.env` eager-load
+/// is the discriminator (only loaded when augmented). Unix-only (the hijack is
+/// reached via an argv0=`node` symlink).
+#[cfg(unix)]
+#[test]
+fn node_compat_env_forces_vanilla_tree_wide() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nub-nodecompat-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let shim_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let node_shim = shim_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &node_shim).expect("symlink nub → node");
+
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), r#"{"name":"nodecompat"}"#).unwrap();
+    std::fs::write(proj.join(".env"), "COMPAT_ENV=from_dotenv\n").unwrap();
+    std::fs::write(
+        proj.join("probe.js"),
+        "console.log('NODE_OPTIONS=' + (process.env.NODE_OPTIONS || ''));\n\
+         console.log('execArgv=' + process.execArgv.join(' '));\n\
+         console.log('COMPAT_ENV=' + (process.env.COMPAT_ENV || ''));\n",
+    )
+    .unwrap();
+
+    // Drive the file run two ways: the hijacked `node` symlink, and `nub` itself.
+    let run = |bin: &std::path::Path, args: &[&str], compat: Option<&str>| {
+        let mut cmd = Command::new(bin);
+        cmd.args(args)
+            .current_dir(&proj)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env_remove("NODE_COMPAT");
+        if let Some(v) = compat {
+            cmd.env("NODE_COMPAT", v);
+        }
+        cmd.output().expect("spawn")
+    };
+
+    let assert_vanilla = |out: &std::process::Output, ctx: &str| {
+        let s = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{ctx} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !s.contains("preload"),
+            "{ctx} must run vanilla (no preload): {s}"
+        );
+        assert!(
+            s.contains("NODE_OPTIONS=\n") || s.contains("NODE_OPTIONS=$"),
+            "{ctx} must not inject NODE_OPTIONS: {s:?}"
+        );
+        assert!(
+            s.contains("execArgv=\n"),
+            "{ctx} must have empty execArgv: {s:?}"
+        );
+        assert!(
+            s.contains("COMPAT_ENV=\n") || s.contains("COMPAT_ENV=$"),
+            "{ctx} must NOT load `.env` (compat mode): {s:?}"
+        );
+    };
+
+    // 1. Default (NODE_COMPAT unset) via the hijack stays AUGMENTED — `.env` loads.
+    let aug = run(&node_shim, &["probe.js"], None);
+    let aug_out = String::from_utf8_lossy(&aug.stdout);
+    assert_eq!(
+        aug.status.code(),
+        Some(0),
+        "default hijack run failed: {}",
+        String::from_utf8_lossy(&aug.stderr)
+    );
+    assert!(
+        aug_out.contains("COMPAT_ENV=from_dotenv"),
+        "default (no NODE_COMPAT) `node probe.js` must stay augmented (`.env` loads): {aug_out}"
+    );
+
+    // 2. NODE_COMPAT=1 via the hijack forces vanilla.
+    assert_vanilla(
+        &run(&node_shim, &["probe.js"], Some("1")),
+        "NODE_COMPAT=1 node probe.js",
+    );
+
+    // 3. NODE_COMPAT=1 on a direct `nub <file>` run forces vanilla too.
+    assert_vanilla(
+        &run(&nub_binary(), &["probe.js"], Some("1")),
+        "NODE_COMPAT=1 nub probe.js",
+    );
+
+    // 4. Truthy variants (`true`, case-insensitive) also force compat; falsy (`0`)
+    //    does not (stays augmented).
+    assert_vanilla(
+        &run(&node_shim, &["probe.js"], Some("TRUE")),
+        "NODE_COMPAT=TRUE",
+    );
+    let falsy = run(&node_shim, &["probe.js"], Some("0"));
+    let falsy_out = String::from_utf8_lossy(&falsy.stdout);
+    assert!(
+        falsy_out.contains("COMPAT_ENV=from_dotenv"),
+        "NODE_COMPAT=0 must be falsy — run stays augmented (`.env` loads): {falsy_out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The npm/pnpm aliases map to their canonical flags (`-F` is `--filter`, `-s`
 /// is `--silent`, `--workspaces` is `--recursive`). One run exercises all three
 /// at once (no per-alias test): `-F` selects a member (proving the alias plus
