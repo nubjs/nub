@@ -41,7 +41,7 @@ use super::flags;
 #[cfg(unix)]
 mod ctrl_c {
     use std::sync::Once;
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     // The forward TARGET, as the argument to `kill(2)`: a POSITIVE pid signals one
     // process (the file-run path's `node`, which IS the leaf); a NEGATIVE value
@@ -52,6 +52,33 @@ mod ctrl_c {
     // child tracked.
     static CURRENT_TARGET: AtomicI32 = AtomicI32::new(0);
     static REGISTERED: Once = Once::new();
+
+    // When the controlling terminal's FOREGROUND process group has been handed to
+    // the child (the interactive TTY path — see `foreground_child` in spawn.rs),
+    // the kernel delivers a terminal Ctrl-C straight to the child. nub is no longer
+    // in the foreground group, so it does NOT receive the TTY SIGINT — but a
+    // `kill -INT <nub>` (non-TTY: a parent process, some CI cancels) still reaches
+    // nub directly, and re-forwarding THAT to the foreground child would deliver
+    // SIGINT twice (issue #26). So while the child owns the terminal we SUPPRESS
+    // nub's SIGINT *forward* only: the TTY path is already exactly-once via the
+    // kernel, and a direct `kill -INT <nub>` is intentionally swallowed (the child
+    // is the foreground job; a shell running a foreground job behaves the same —
+    // its own SIGINT isn't relayed to the job). SIGTERM/SIGHUP and the diagnostic
+    // signals are unaffected and always forward. Reset on child exit.
+    static SUPPRESS_SIGINT_FORWARD: AtomicBool = AtomicBool::new(false);
+
+    /// Suppress (or re-enable) forwarding of SIGINT specifically — used while the
+    /// child owns the terminal foreground, where the TTY already delivers Ctrl-C to
+    /// the child directly and a forward would double it (issue #26). All other
+    /// forwarded signals are unaffected.
+    pub(super) fn set_suppress_sigint_forward(suppress: bool) {
+        SUPPRESS_SIGINT_FORWARD.store(suppress, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(super) fn sigint_forward_suppressed() -> bool {
+        SUPPRESS_SIGINT_FORWARD.load(Ordering::SeqCst)
+    }
 
     /// Record the `kill(2)` target (see [`CURRENT_TARGET`]), registering the signal
     /// handler on the first call. Later calls just update the target.
@@ -76,6 +103,13 @@ mod ctrl_c {
             {
                 std::thread::spawn(move || {
                     for signo in signals.forever() {
+                        // While the child owns the terminal foreground, the kernel
+                        // already delivered a TTY Ctrl-C to it directly — so a
+                        // SIGINT forward here would double it (issue #26). Suppress
+                        // SIGINT only; every other signal still forwards.
+                        if signo == SIGINT && SUPPRESS_SIGINT_FORWARD.load(Ordering::SeqCst) {
+                            continue;
+                        }
                         let target = CURRENT_TARGET.load(Ordering::SeqCst);
                         if target != 0 {
                             // SAFETY: kill(2) with a stored-live target + the received
@@ -123,6 +157,88 @@ pub fn untrack_child() {
     ctrl_c::untrack();
 }
 
+/// Hand the controlling terminal's FOREGROUND process group to a just-spawned
+/// child so an interactive full-screen TUI (Nx, turbo, `vitest --ui`, …) can read
+/// the terminal and receive Ctrl-C directly — restoring nub's own group as
+/// foreground when the returned guard drops (child exit).
+///
+/// Why this exists: #26 (f41f9a3) put the script/file child in its OWN process
+/// group via [`group_on_spawn`] to make a terminal Ctrl-C deliver SIGINT exactly
+/// once. But an own-group child is a BACKGROUND group w.r.t. the controlling TTY,
+/// and a program that reads the terminal in raw mode then gets SIGTTIN and STOPS —
+/// the unkillable "hang" of issue #27. The fix is the missing half of how a shell
+/// runs a foreground job: `tcsetpgrp` the child's group to the terminal's
+/// foreground. Now the TUI can read the terminal, and the kernel delivers Ctrl-C
+/// straight to it — so we also suppress nub's now-redundant SIGINT forward (see
+/// [`ctrl_c::set_suppress_sigint_forward`]) to keep #26's exactly-once.
+///
+/// Only meaningful when stdin is a real TTY and stdio is inherited — callers gate
+/// on `foreground_handoff_applicable`. Returns `None` (no-op) off a TTY, off Unix,
+/// or if the handoff syscalls fail, in which case behavior is exactly the prior
+/// own-group-without-tcsetpgrp path (correct for non-interactive children).
+#[cfg(unix)]
+#[must_use]
+pub fn foreground_child(child_pid: u32) -> Option<ForegroundGuard> {
+    // SAFETY: pure FFI reads; STDIN_FILENO is always valid in this process.
+    let stdin_is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
+    if !stdin_is_tty {
+        return None;
+    }
+    // nub's own (current) foreground group, to restore on the child's exit. If we
+    // can't read it, don't attempt the handoff — we'd have nothing to restore to.
+    // SAFETY: tcgetpgrp on a TTY fd; returns -1 on error, which we treat as opt-out.
+    let nub_pgrp = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+    if nub_pgrp < 0 {
+        return None;
+    }
+
+    // `tcsetpgrp` from a process whose group is NOT the terminal's foreground
+    // raises SIGTTOU (whose default disposition would STOP us). nub IS currently
+    // the foreground group here, so it wouldn't fire — but ignore SIGTTOU around
+    // the calls defensively (and because the restore on drop runs after we've
+    // backgrounded ourselves, where it genuinely would). Save/restore the prior
+    // disposition so we don't perturb anything else.
+    // SAFETY: signal(2)/tcsetpgrp(3) FFI with valid args; child_pid is the live
+    // group leader (it ran setpgid(0,0) at exec, so its pgid == its pid).
+    unsafe {
+        let prev = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        let rc = libc::tcsetpgrp(libc::STDIN_FILENO, child_pid as libc::pid_t);
+        libc::signal(libc::SIGTTOU, prev);
+        if rc != 0 {
+            return None;
+        }
+    }
+
+    // The child now owns the terminal: the kernel delivers TTY Ctrl-C to it
+    // directly, so suppress nub's redundant SIGINT forward (#26 exactly-once).
+    ctrl_c::set_suppress_sigint_forward(true);
+
+    Some(ForegroundGuard { nub_pgrp })
+}
+
+/// Restores nub's own process group as the terminal foreground on drop, and
+/// re-enables SIGINT forwarding. Pair with [`foreground_child`]; must outlive the
+/// child's `wait()`.
+#[cfg(unix)]
+pub struct ForegroundGuard {
+    nub_pgrp: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl Drop for ForegroundGuard {
+    fn drop(&mut self) {
+        // We are a BACKGROUND group at this point (the child held the foreground),
+        // so `tcsetpgrp` here WOULD raise SIGTTOU — ignore it across the call.
+        // SAFETY: FFI with a saved-valid pgrp and the controlling-TTY fd.
+        unsafe {
+            let prev = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            libc::tcsetpgrp(libc::STDIN_FILENO, self.nub_pgrp);
+            libc::signal(libc::SIGTTOU, prev);
+        }
+        ctrl_c::set_suppress_sigint_forward(false);
+    }
+}
+
 /// Put the spawned child in its own process group (`setpgid(0, 0)` at exec) so
 /// [`track_child_group`] can signal the whole subtree. No-op off Unix.
 pub fn group_on_spawn(cmd: &mut Command) {
@@ -151,6 +267,12 @@ pub fn status_forwarding_signals(cmd: &mut Command) -> std::io::Result<ExitStatu
     group_on_spawn(cmd);
     let mut child = cmd.spawn()?;
     track_child_group(child.id());
+    // Interactive path (stdin is a TTY + inherited stdio): hand the terminal
+    // foreground to the child so a full-screen TUI can read it / receive Ctrl-C
+    // (issue #27); the guard restores nub's foreground group on drop. No-op off a
+    // TTY — the `kill -INT` forward then stays the sole, correct SIGINT path.
+    #[cfg(unix)]
+    let _fg = foreground_child(child.id());
     let status = child.wait();
     untrack_child();
     status
@@ -618,6 +740,13 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // negative target signals the child and its descendants exactly once.
     // (No-op off Unix.)
     track_child_group(child.id());
+
+    // Interactive path: hand the terminal foreground to the child (issue #27) so a
+    // `nub <file>` that draws a full-screen TUI can read the terminal and receive
+    // Ctrl-C directly. Gated on stdin being a TTY inside `foreground_child`; the
+    // guard restores nub's foreground group + re-enables SIGINT forward on drop.
+    #[cfg(unix)]
+    let _fg = foreground_child(child.id());
 
     let status = child.wait().with_context(|| "waiting for Node child")?;
 
@@ -1926,6 +2055,226 @@ mod tests {
         );
         // Reaching here at all is the parent-survival half: a process killed by USR2
         // never runs these assertions.
+    }
+
+    // ---- issue #27: terminal-foreground hand-off to an interactive child ----
+
+    /// The PTY-scenario worker, run as its OWN fresh process (NOT a fork of the
+    /// multithreaded test harness — that hazards a malloc-lock deadlock). The test
+    /// re-execs the test binary with `NUB_PTY_SCENARIO=0|1` set; that re-exec lands
+    /// in `interactive_tui_*`, which calls this immediately and exits with the
+    /// verdict as its process exit code. Here we play the "nub" role on a brand-new
+    /// PTY of our own: `setsid()` for a new session with no controlling terminal,
+    /// open the PTY slave so it becomes this session's controlling terminal, then
+    /// `dup2` the slave onto stdin so `STDIN_FILENO` is that terminal.
+    ///
+    /// Then spawn a `sh` grandchild in its OWN process group (exactly what
+    /// `group_on_spawn` does) that BLOCKS reading the terminal — the TUI's raw-mode
+    /// read. An own-group child is a BACKGROUND group, so that read raises SIGTTIN
+    /// and the child STOPS (the unkillable #27 hang). When `apply_fix` is set we call
+    /// [`foreground_child`] first, handing the terminal to the grandchild's group so
+    /// the read succeeds. Returns the verdict exit code: 0 = child read OK (fix
+    /// works), 1 = child SIGTTIN-stopped / hung (no fix), 2 = setup error.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn pty_scenario_worker(apply_fix: bool) -> i32 {
+        use std::os::unix::io::RawFd;
+
+        // Becoming a session leader with the PTY as controlling terminal means a
+        // hangup on that terminal would SIGHUP us; ignore it so the worker always
+        // runs to its verdict. Do NOT touch SIGTTIN/SIGTTOU here: SIG_IGN is
+        // inherited across exec, and the grandchild MUST keep the default SIGTTIN
+        // disposition for the background-read STOP to reproduce (`foreground_child`
+        // already brackets its own tcsetpgrp with a local SIGTTOU ignore).
+        // SAFETY: signal(2) with a constant disposition.
+        unsafe {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        }
+
+        // SAFETY: openpty(3) gives a connected master/slave fd pair.
+        let mut master: RawFd = -1;
+        let mut slave: RawFd = -1;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != 0 {
+            return 2;
+        }
+
+        // New session → no controlling terminal, then claim the slave as ours.
+        // SAFETY: setsid()/ioctl(TIOCSCTTY)/dup2 on the fresh session leader (us).
+        unsafe {
+            if libc::setsid() < 0 {
+                return 2;
+            }
+            libc::ioctl(slave, libc::TIOCSCTTY as libc::c_ulong, 0);
+            libc::dup2(slave, libc::STDIN_FILENO);
+            if slave > 2 {
+                libc::close(slave);
+            }
+        }
+
+        // Spawn the "TUI" grandchild in its OWN process group (like group_on_spawn):
+        // it BLOCKS reading the controlling terminal (stdin). As a background group
+        // that read raises SIGTTIN → STOP, unless we hand it the foreground first.
+        // stdout/stderr go to /dev/null so the worker's own captured output stays
+        // clean; stdin is inherited (our pty slave) — that's the terminal under test.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("read x; exit 0");
+        cmd.stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        group_on_spawn(&mut cmd);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => return 2,
+        };
+        let child_pid = child.id();
+
+        // Apply the fix under test (or not).
+        let _fg = if apply_fix {
+            foreground_child(child_pid)
+        } else {
+            None
+        };
+
+        // Let the grandchild reach its blocking terminal read; if it's going to
+        // SIGTTIN-stop (no fix), it will have stopped by now.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // The "keystroke": a newline to the PTY master. With the fix the child is
+        // foreground and reads it → exits 0; without it the child is stopped.
+        // SAFETY: write to the live master fd.
+        unsafe {
+            let nl = b"\n";
+            libc::write(master, nl.as_ptr() as *const libc::c_void, 1);
+        }
+
+        // Observe the child with WUNTRACED so a SIGTTIN STOP is reported, polling ~2s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let verdict = loop {
+            let mut status: libc::c_int = 0;
+            // SAFETY: waitpid on our child, non-blocking + report-stops.
+            let r = unsafe {
+                libc::waitpid(
+                    child_pid as libc::pid_t,
+                    &mut status,
+                    libc::WNOHANG | libc::WUNTRACED,
+                )
+            };
+            if r == child_pid as libc::pid_t {
+                if libc::WIFSTOPPED(status) {
+                    break 1; // stopped (SIGTTIN) → the hang
+                }
+                if libc::WIFEXITED(status) {
+                    break 0; // read the keystroke and exited cleanly
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break 1; // never exited → stuck
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+
+        // Clean up the (possibly stopped) grandchild so we never leak it.
+        // SAFETY: SIGKILL + reap; benign if already gone.
+        unsafe {
+            libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+            libc::close(master);
+        }
+        let _ = child.wait();
+        verdict
+    }
+
+    /// Re-exec the test binary to run [`pty_scenario_worker`] as a fresh process and
+    /// return its verdict exit code (0 read-OK / 1 hung / 2 error / other = crash).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn run_pty_scenario(apply_fix: bool) -> i32 {
+        let exe = std::env::current_exe().expect("current_exe");
+        let status = Command::new(exe)
+            .args([
+                "--exact",
+                "node::spawn::tests::interactive_tui_child_can_read_terminal_only_with_foreground_handoff",
+            ])
+            .env("NUB_PTY_SCENARIO", if apply_fix { "1" } else { "0" })
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("re-exec test binary for PTY scenario");
+        status.code().unwrap_or(-1)
+    }
+
+    /// Issue #27 PTY repro. Normally (no `NUB_PTY_SCENARIO`) this is the DRIVER: it
+    /// re-execs itself twice — once without the fix (the child must SIGTTIN-hang) and
+    /// once with it (the child must read the terminal and exit). When the re-exec
+    /// sets `NUB_PTY_SCENARIO`, this same `#[test]` instead BECOMES the worker and
+    /// exits with the scenario verdict as its process code (so the worker runs as a
+    /// fresh, non-forked process — avoiding fork-in-a-multithreaded-harness).
+    ///
+    /// The worker re-exec uses `--exact <this test>` so only this test runs in the
+    /// child process; the driver runs in the normal suite.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn interactive_tui_child_can_read_terminal_only_with_foreground_handoff() {
+        // Worker mode: we were re-exec'd to BE the scenario. Run it and exit with the
+        // verdict code so the driver can read it (no normal test-harness teardown).
+        if let Ok(v) = std::env::var("NUB_PTY_SCENARIO") {
+            let code = pty_scenario_worker(v == "1");
+            std::process::exit(code);
+        }
+
+        // Driver mode: spawn the worker twice as fresh processes.
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let without = run_pty_scenario(false);
+        assert_eq!(
+            without, 1,
+            "without the foreground hand-off the own-group TUI child must SIGTTIN-stop \
+             (the #27 hang); worker verdict code {without} (0=read-ok 1=hung 2=setup-err)"
+        );
+
+        let with = run_pty_scenario(true);
+        assert_eq!(
+            with, 0,
+            "with the tcsetpgrp foreground hand-off the TUI child must read the \
+             terminal and exit cleanly (no #27 hang); worker verdict code {with} \
+             (0=read-ok 1=hung 2=setup-err)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_child_is_noop_off_a_tty() {
+        // The non-TTY / CI / piped path must be unchanged: with stdin NOT a TTY,
+        // `foreground_child` returns None (no tcsetpgrp attempted) and does NOT
+        // suppress SIGINT forwarding — so a `kill -INT <nub>` still relays to the
+        // child exactly as before (issue #26's non-TTY contract).
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ctrl_c::set_suppress_sigint_forward(false);
+
+        // The cargo test harness runs with stdin redirected (not a TTY), so a direct
+        // call here exercises the off-TTY branch. If a developer somehow runs the
+        // suite attached to a TTY, skip rather than perturb their terminal.
+        // SAFETY: isatty on STDIN_FILENO.
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+            return;
+        }
+        let guard = foreground_child(std::process::id());
+        assert!(
+            guard.is_none(),
+            "foreground_child must be a no-op when stdin is not a TTY"
+        );
+        assert!(
+            !ctrl_c::sigint_forward_suppressed(),
+            "off a TTY, SIGINT forwarding must NOT be suppressed (non-TTY kill -INT \
+             must still reach the child — issue #26)"
+        );
     }
 
     /// Wait up to `timeout` for `child` to exit, polling so an async relay has time
