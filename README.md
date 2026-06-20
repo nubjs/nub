@@ -126,3 +126,5 @@ Ambient TypeScript declarations for the modern globals ship via `@types/node` 25
 ## License
 
 MIT
+
+<!-- wt-probe throwaway marker -->
