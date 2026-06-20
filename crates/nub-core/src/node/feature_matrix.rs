@@ -190,6 +190,30 @@ pub static FEATURES: &[Feature] = &[
         ],
         evidence: "flag added Node 22.5.0 (#53752); unflagged 22.13.0 (22.x) and 23.4.0 (23.x)",
     },
+    // ── addon-modules (ESM import of native .node addons) ────────────────────
+    // `--experimental-addon-modules` makes the ESM resolver return format
+    // "addon" for a `.node` URL, so `import x from './foo.node'` loads the native
+    // addon directly. Flag added on the 23.x line at 23.6.0 and backported to the
+    // 22.x LTS line at 22.20.0 (the same dual-line split as node:sqlite). It is
+    // Stability 1.0 (Early development) and NEVER default-on through Node 27
+    // nightly, so the Unflag bands are open-ended on the high side — there is no
+    // native cutover. The flag does not exist below 22.20.0 or on [23.0, 23.6)
+    // (the 23.x line before the backport landed), where injecting it is a "bad
+    // option" startup abort. Injection set: [22.20.0, 23.0.0) ∪ [23.6.0, ∞).
+    Feature {
+        name: "addon-modules",
+        mitigations: &[
+            (
+                band((22, 20, 0), Some((23, 0, 0))),
+                Mitigation::Unflag("--experimental-addon-modules"),
+            ),
+            (
+                band((23, 6, 0), None),
+                Mitigation::Unflag("--experimental-addon-modules"),
+            ),
+        ],
+        evidence: "flag added 23.6.0 (23.x) / 22.20.0 (22.x backport); Stability 1.0; never default-on through Node 27",
+    },
     // ── WebSocket global ────────────────────────────────────────────────────
     // Flag-gated on [20.10.0, 22.0.0) — the global exists on 20.10+ and all of the
     // 21.x line behind `--experimental-websocket`, then becomes default-on at
@@ -571,6 +595,15 @@ mod tests {
         assert!(!unflag_flags_for(&v(22, 13, 0)).contains(&"--experimental-sqlite"));
         assert!(unflag_flags_for(&v(23, 3, 0)).contains(&"--experimental-sqlite"));
         assert!(!unflag_flags_for(&v(24, 0, 0)).contains(&"--experimental-sqlite"));
+        // addon-modules: [22.20, 23.0) ∪ [23.6, ∞); the [23.0, 23.6) hole and
+        // the whole compat tier below 22.20 are excluded (flag doesn't exist).
+        let addon = "--experimental-addon-modules";
+        assert!(!unflag_flags_for(&v(22, 19, 0)).contains(&addon));
+        assert!(unflag_flags_for(&v(22, 20, 0)).contains(&addon));
+        assert!(!unflag_flags_for(&v(23, 0, 0)).contains(&addon));
+        assert!(!unflag_flags_for(&v(23, 5, 0)).contains(&addon));
+        assert!(unflag_flags_for(&v(23, 6, 0)).contains(&addon));
+        assert!(unflag_flags_for(&v(26, 2, 0)).contains(&addon));
         // websocket: [20.10, 22.0).
         assert!(!unflag_flags_for(&v(20, 9, 0)).contains(&"--experimental-websocket"));
         assert!(unflag_flags_for(&v(20, 10, 0)).contains(&"--experimental-websocket"));
