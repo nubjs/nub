@@ -143,17 +143,18 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
             "(the engine's user config for known engine settings",
         ),
         // `set --location` long help: upstream routes non-npm-shared keys
-        // to its own config.toml; nub's npmrc-first routing decision (the
-        // store_config_family module doc) writes them to the project
-        // `.npmrc` instead, ignoring `--location` for those keys — the
-        // help must describe nub's contract, divergence included.
+        // to its own config.toml; nub mirrors pnpm v11 instead (the
+        // store_config_family module doc) — non-shared scalars go to
+        // `pnpm-workspace.yaml` under a pnpm incumbent, else the project
+        // `.npmrc`; `--location`/`--local` are ignored for these. The help
+        // must describe nub's contract, divergence included.
         (
             "land in aube's own config (`~/.config/aube/config.toml` at user scope, \
              `<cwd>/.config/aube/config.toml` at project scope) where sibling tools \
              don't see them",
-            "are written to the project `.npmrc` — the same file install reads — \
-             regardless of `--location`/`--local` (the confirmation line names the \
-             file written)",
+            "are written to `pnpm-workspace.yaml` in a pnpm project, else the project \
+             `.npmrc` — the same files install reads — regardless of \
+             `--location`/`--local` (the confirmation line names the file written)",
         ),
         // `patch-commit`'s arg help names the engine's on-disk state
         // sidecar; help describes the mechanism structurally.

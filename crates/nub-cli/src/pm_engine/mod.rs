@@ -1322,6 +1322,18 @@ pub(crate) fn engine_brand_preflight() {
     let read_bun_config = read_bun_config_for_surface(&surface);
     aube_util::update_engine_context(|c| {
         c.read_branded_pnpm_config = read_branded_pnpm_config;
+        // GLOBAL config is read PM-AGNOSTICALLY and UNGATED by cwd incumbency:
+        // nub honors whatever global config the user already has from any tool —
+        // npm's `~/.npmrc`, pnpm's global `config.yaml`, pnpm's global `auth.ini`.
+        // Set `true` UNCONDITIONALLY (cwd-independent). The original bug was that
+        // these global reads were GATED on the cwd-derived `read_branded_pnpm_config`
+        // (so nub read pnpm's global config only when standing in a pnpm project);
+        // the fix is to DECOUPLE them from the cwd, not to stop reading them. The
+        // separate `read_pnpm_global_config` posture exists precisely so the GLOBAL
+        // reads don't ride the project-scoped gate. (Global WRITES are neutral-only —
+        // enforced in store_config_family: `config set -g` never writes a
+        // pnpm-branded global file.)
+        c.read_pnpm_global_config = true;
         c.read_yarn_config = read_yarn_config;
         c.yarn_is_classic = yarn_is_classic;
         c.read_bun_config = read_bun_config;
