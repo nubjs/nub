@@ -3503,6 +3503,26 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     }
     nub_core::node::discovery::check_min_version(&node)?;
 
+    // `nub watch` has no `--node` flag (the watch loop is nub's, so there's no
+    // "vanilla watch" CLI escape — use `node --watch` in your shell for that).
+    // But a truthy `NODE_COMPAT` is the AMBIENT tree-wide augmentation opt-out and
+    // must be honored here too: run the pinned Node with `--watch` and ONLY the
+    // user's argv — no flag injection, no preload, no eager `.env*` — matching the
+    // zero-augmentation contract of `--node`/compat everywhere else. Version
+    // provisioning above still applies (compat = no augmentation, not no-pinning).
+    if node_compat_env() {
+        let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
+        node_args.push(file.to_string());
+        node_args.extend(args.iter().cloned());
+        let status = std::process::Command::new(node.path.as_str())
+            .args(&node_args)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()?;
+        return Ok(nub_core::node::spawn::exit_code_from_status(&status));
+    }
+
     // Auto-loaded `.env*` files are handed to the watched Node as `--env-file`
     // args (below) so Node watches each path and re-reads it on every restart.
     // However Node's own `--env-file` parser does NOT expand `${VAR}` cross-

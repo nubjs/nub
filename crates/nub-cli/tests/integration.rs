@@ -4051,6 +4051,97 @@ fn node_compat_env_forces_vanilla_tree_wide() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `nub watch` has no `--node` flag, but a truthy `NODE_COMPAT` (the ambient
+/// tree-wide opt-out) must still force vanilla — no flag injection, no preload,
+/// no eager `.env*`. The watch loop never exits on its own, so the probe writes
+/// its augmentation findings to a sentinel file on its first run; the test polls
+/// for the file, then kills the watcher. Unix-only (uses a process kill).
+#[cfg(unix)]
+#[test]
+fn node_compat_env_forces_vanilla_under_watch() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nub-watchcompat-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"watchcompat"}"#).unwrap();
+    std::fs::write(dir.join(".env"), "WATCH_ENV=from_dotenv\n").unwrap();
+    let out_file = dir.join("probe-out.txt");
+    // Write the augmentation snapshot to the sentinel file (not stdout — avoids
+    // racing `--watch`'s own control output through the pipe).
+    std::fs::write(
+        dir.join("probe.js"),
+        format!(
+            "const fs=require('fs');\n\
+             fs.writeFileSync({out:?},\n\
+               'NODE_OPTIONS='+(process.env.NODE_OPTIONS||'')+'\\n'+\n\
+               'execArgv='+process.execArgv.join(' ')+'\\n'+\n\
+               'WATCH_ENV='+(process.env.WATCH_ENV||'')+'\\n');\n",
+            out = out_file.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(nub_binary())
+        .args(["watch", "probe.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .env("NODE_COMPAT", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn nub watch");
+
+    // Poll for the sentinel (the watched run executed); cap the wait so a failure
+    // doesn't hang the suite.
+    let mut snapshot = None;
+    for _ in 0..100 {
+        if let Ok(s) = std::fs::read_to_string(&out_file) {
+            if s.contains("WATCH_ENV=") {
+                snapshot = Some(s);
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let snapshot = snapshot.expect("`nub watch` probe never ran (no sentinel file)");
+    assert!(
+        !snapshot.contains("preload"),
+        "NODE_COMPAT=1 `nub watch` must run vanilla — no preload: {snapshot}"
+    );
+    assert!(
+        snapshot.contains("NODE_OPTIONS=\n"),
+        "NODE_COMPAT=1 `nub watch` must not inject NODE_OPTIONS: {snapshot:?}"
+    );
+    // execArgv carries only the watch flags themselves (`--watch`,
+    // `--watch-preserve-output`) — never an injected augmentation flag like
+    // `--enable-source-maps` / `--experimental-*` / `--require` / `--import`.
+    let exec_argv = snapshot
+        .lines()
+        .find_map(|l| l.strip_prefix("execArgv="))
+        .unwrap_or("");
+    for tok in exec_argv.split_whitespace() {
+        assert!(
+            tok == "--watch" || tok == "--watch-preserve-output",
+            "NODE_COMPAT=1 `nub watch` execArgv must hold only watch flags, found {tok:?}: {snapshot:?}"
+        );
+    }
+    assert!(
+        snapshot.contains("WATCH_ENV=\n"),
+        "NODE_COMPAT=1 `nub watch` must NOT eager-load `.env` (compat mode): {snapshot:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The npm/pnpm aliases map to their canonical flags (`-F` is `--filter`, `-s`
 /// is `--silent`, `--workspaces` is `--recursive`). One run exercises all three
 /// at once (no per-alias test): `-F` selects a member (proving the alias plus
