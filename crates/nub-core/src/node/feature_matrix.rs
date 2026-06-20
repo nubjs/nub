@@ -149,6 +149,23 @@ pub static FEATURES: &[Feature] = &[
         )],
         evidence: "flag added Node 9.6.0 (#14253); never unflagged through Node 26",
     },
+    // ── ShadowRealm global ──────────────────────────────────────────────────
+    // `--experimental-shadow-realm` gates `globalThis.ShadowRealm` (TC39 Stage 3:
+    // an isolated global with fresh intrinsics). The flag was added in Node
+    // 18.13.0 / 19.0.0 — below nub's 18.19 floor — and has NEVER been made
+    // default-on through Node 26 (still experimental, rides the V8
+    // `--harmony-shadow-realm` staging). So, like vm-modules, inject across the
+    // ENTIRE supported floor: [18.19.0, ∞). It survives as an accepted bool at
+    // every higher version, so the open-ended band never over-injects into an
+    // unsupported range.
+    Feature {
+        name: "shadow-realm",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Unflag("--experimental-shadow-realm"),
+        )],
+        evidence: "flag added Node 18.13.0/19.0.0; never default-on through 26 (TC39 Stage 3)",
+    },
     // ── EventSource global ──────────────────────────────────────────────────
     // #51575 ("add EventSource Client"). Landed on the 22.x line at 22.3.0 and was
     // backported to the 20.x LTS line at 20.18.0. The 21.x line was already EOL
@@ -189,6 +206,33 @@ pub static FEATURES: &[Feature] = &[
             ),
         ],
         evidence: "flag added Node 22.5.0 (#53752); unflagged 22.13.0 (22.x) and 23.4.0 (23.x)",
+    },
+    // ── Wasm ES-module imports (import of `.wasm`) ──────────────────────────
+    // `--experimental-wasm-modules` gates `import` of `.wasm` files (instance-
+    // phase `import * as M from './x.wasm'` and source-phase `import source M
+    // from './x.wasm'`). The flag has existed since Node 12 — far below nub's
+    // 18.19 floor — so it both EXISTS and is REQUIRED across the whole compat
+    // range below the default-on cutover. It became default-on (flag → NoOp) at
+    // 24.5.0 on the 24.x line and was backported to 22.19.0 on the 22.x line
+    // (PR #57038); the 23.x line was EOL before the backport, so it never went
+    // default-on there and stays flagged through the end of the 23.x line.
+    // Inject only where the flag is still required:
+    //   [18.19.0, 22.19.0) ∪ [23.0.0, 24.5.0).
+    // (Injecting in the default-on range would be a harmless no-op — the flag
+    // survives as a NoOp — but the bands are kept tight, matching sqlite.)
+    Feature {
+        name: "wasm-modules",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 19, 0))),
+                Mitigation::Unflag("--experimental-wasm-modules"),
+            ),
+            (
+                band((23, 0, 0), Some((24, 5, 0))),
+                Mitigation::Unflag("--experimental-wasm-modules"),
+            ),
+        ],
+        evidence: "flag since Node 12; default-on 24.5.0 (24.x) and 22.19.0 (22.x) via #57038; never default-on on 23.x (EOL)",
     },
     // ── addon-modules (ESM import of native .node addons) ────────────────────
     // `--experimental-addon-modules` makes the ESM resolver return format
@@ -586,6 +630,10 @@ mod tests {
         // vm-modules: whole floor.
         assert!(unflag_flags_for(&v(18, 19, 0)).contains(&"--experimental-vm-modules"));
         assert!(unflag_flags_for(&v(26, 2, 0)).contains(&"--experimental-vm-modules"));
+        // shadow-realm: whole floor, open-ended (never default-on).
+        assert!(unflag_flags_for(&v(18, 19, 0)).contains(&"--experimental-shadow-realm"));
+        assert!(unflag_flags_for(&v(22, 19, 0)).contains(&"--experimental-shadow-realm"));
+        assert!(unflag_flags_for(&v(26, 0, 0)).contains(&"--experimental-shadow-realm"));
         // eventsource: the 21.x hole.
         assert!(!unflag_flags_for(&v(21, 0, 0)).contains(&"--experimental-eventsource"));
         assert!(unflag_flags_for(&v(20, 18, 0)).contains(&"--experimental-eventsource"));
@@ -595,6 +643,19 @@ mod tests {
         assert!(!unflag_flags_for(&v(22, 13, 0)).contains(&"--experimental-sqlite"));
         assert!(unflag_flags_for(&v(23, 3, 0)).contains(&"--experimental-sqlite"));
         assert!(!unflag_flags_for(&v(24, 0, 0)).contains(&"--experimental-sqlite"));
+        // wasm-modules: two disjoint bands [18.19, 22.19) ∪ [23.0, 24.5).
+        // 22.x line: flagged below 22.19, native at/after (backport).
+        assert!(unflag_flags_for(&v(18, 19, 0)).contains(&"--experimental-wasm-modules"));
+        assert!(unflag_flags_for(&v(20, 18, 0)).contains(&"--experimental-wasm-modules"));
+        assert!(unflag_flags_for(&v(22, 13, 0)).contains(&"--experimental-wasm-modules"));
+        assert!(unflag_flags_for(&v(22, 18, 0)).contains(&"--experimental-wasm-modules"));
+        assert!(!unflag_flags_for(&v(22, 19, 0)).contains(&"--experimental-wasm-modules"));
+        // 23.x line: flagged the whole line (never got the backport).
+        assert!(unflag_flags_for(&v(23, 2, 0)).contains(&"--experimental-wasm-modules"));
+        assert!(unflag_flags_for(&v(24, 4, 0)).contains(&"--experimental-wasm-modules"));
+        // 24.5+: native (flag → NoOp).
+        assert!(!unflag_flags_for(&v(24, 5, 0)).contains(&"--experimental-wasm-modules"));
+        assert!(!unflag_flags_for(&v(26, 0, 0)).contains(&"--experimental-wasm-modules"));
         // addon-modules: [22.20, 23.0) ∪ [23.6, ∞); the [23.0, 23.6) hole and
         // the whole compat tier below 22.20 are excluded (flag doesn't exist).
         let addon = "--experimental-addon-modules";
