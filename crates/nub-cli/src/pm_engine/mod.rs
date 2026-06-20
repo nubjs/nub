@@ -914,7 +914,7 @@ fn catalog_unsupported_error(role: config_scope::Role, spec: &str) -> anyhow::Er
 /// version token. Tolerant of ranges/dist-tags (`^9`, `latest`) — returns
 /// `None` for any component it can't read, which the matrix treats as
 /// "assume modern/honoring".
-fn parse_major_minor(version: &str) -> (Option<u64>, Option<u64>) {
+pub(crate) fn parse_major_minor(version: &str) -> (Option<u64>, Option<u64>) {
     let trimmed = version.trim_start_matches(['^', '~', '>', '=', '<', 'v', ' ']);
     let mut parts = trimmed.split('.');
     let major = parts.next().and_then(|p| {

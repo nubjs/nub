@@ -18,32 +18,33 @@
 //!   because `cacheDir` can't ride the embedder-defaults tier at the pinned
 //!   API. Paths printed by `cache view --json` / `cache delete` are real
 //!   on-disk paths, which the rewrite policy deliberately preserves.
-//! - `config` write routing MIRRORS pnpm v11's `getConfigFileInfo`
-//!   (decision 2026-06-20, supersedes the earlier "npmrc-first" routing;
-//!   **no `config.toml`, ever**). The split pivots on incumbency + nub's
-//!   `is_npm_shared_key` (≡ pnpm's `isIniConfigKey`):
-//!     - **npm-shared keys** (`registry`, proxies, per-host auth templates,
-//!       `@scope:registry`, bare auth scalars, …) delegate to the engine,
-//!       which writes `.npmrc` at the requested `--location` (default user)
-//!       so npm/yarn/pnpm see the same value. Unchanged.
-//!     - **non-shared scalars under a PNPM incumbent** → `pnpm-workspace.yaml`
-//!       (created if absent), via the engine's typed comment-preserving
-//!       workspace-yaml writer. This is pnpm v11 parity: pnpm routes every
-//!       non-`isIniConfigKey` setting to the workspace yaml, so the write
-//!       round-trips with a subsequent `pnpm config get` / install.
-//!     - **non-shared scalars under nub identity / npm / yarn / bun** → the
-//!       *project* `.npmrc` (the neutral home every tool reads — what
-//!       `nub pm use nub` migration writes; never a pnpm-branded file, never
-//!       `config.toml`). `--location`/`--local` are ignored for these.
-//!   The engine reads every setting from both `.npmrc` and the workspace
-//!   yaml (YAML outranks `.npmrc`, matching pnpm v11), so each write is
-//!   read-coherent with install. Workspace *map* settings (`allowBuilds.<pkg>`,
-//!   `overrides.<pkg>`, bare `allowBuilds`, …) are refused with a
-//!   pnpm-workspace.yaml pointer at any incumbency: upstream's fallback would
-//!   write a `package.json#aube.<map>` field — a foreign-brand field in the
-//!   user's manifest — and `.npmrc` lines for map entries would be silently
-//!   unread. A free-form unknown key has no workspace-yaml schema, so it goes
-//!   to `.npmrc` verbatim even under a pnpm incumbent.
+//! - `config` write routing is pnpm-VERSION-AWARE (decision 2026-06-20,
+//!   supersedes the earlier "npmrc-first" routing; **no `config.toml`, ever**).
+//!   The config home for SCALAR settings is pnpm-version-dependent — there is
+//!   no single file that round-trips on every pnpm — so the router gates on the
+//!   incumbent pnpm version (see [`config_model`] + [`project_scalar_home`]).
+//!   npm-shared keys (`registry`, proxies, per-host auth templates,
+//!   `@scope:registry`, bare auth scalars, …) → `.npmrc` (engine writer), so
+//!   npm/yarn/pnpm of every version see the same value (unchanged). Non-shared
+//!   scalars under a pnpm-v11+ incumbent → `pnpm-workspace.yaml` (created if
+//!   absent), because v11 reads scalars SOLELY from the workspace yaml
+//!   (`isIniConfigKey` keeps only auth/network in `.npmrc`) so a `.npmrc` scalar
+//!   would no-op. Non-shared scalars under a pnpm-v10/v9 incumbent, the
+//!   UNKNOWN-pnpm-version default, and nub identity / npm / yarn / bun → the
+//!   *project* `.npmrc` (the neutral home): v10/v9 read scalars from `.npmrc`,
+//!   and the unknown default picks `.npmrc` as the safest target for the
+//!   dominant v9/v10 base (a v11-shaped yaml written into a v10 project silently
+//!   no-ops). Never a pnpm-branded file for these, never `config.toml`;
+//!   `--location`/`--local` are ignored. READS are version-AGNOSTIC and need no
+//!   gate: the resolver reads every scalar from BOTH `pnpm-workspace.yaml` AND
+//!   `.npmrc`, so nub honors a v10 project's `.npmrc` scalars and a v11
+//!   project's yaml scalars at once — only the WRITE target is version-dependent.
+//!   Workspace *map* settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, bare
+//!   `allowBuilds`, …) are refused with a pnpm-workspace.yaml pointer at any
+//!   incumbency/version (upstream's fallback would write a
+//!   `package.json#aube.<map>` field, and `.npmrc` lines for map entries are
+//!   unread). A free-form unknown key has no workspace-yaml schema, so it goes
+//!   to `.npmrc` verbatim even under a pnpm-v11 incumbent.
 //! - **GLOBAL config is ASYMMETRIC — read broad, write neutral** (decision
 //!   2026-06-20):
 //!     - **Reads:** nub honors WHATEVER global config the user already has,
@@ -165,6 +166,84 @@ fn explicit_global_scope(args: &[String]) -> bool {
     false
 }
 
+/// Per-(package-manager, major-version) config-home registry.
+///
+/// nub's compat targets are tracked PER MAJOR VERSION of each package manager
+/// (the AGENTS.md core design position): a PM's config home can move between
+/// majors, so the WRITE target for a scalar setting is a small LOOKUP keyed by
+/// `(pm, major)` rather than a hardcoded compare. This keeps it cheap to slot in
+/// a new major (or a new PM) when one materially diverges — it is the
+/// architecture, NOT a mandate to populate every PM. Today only pnpm's config
+/// home actually moves across the majors people run (v10 vs v11), so pnpm is the
+/// only populated row; npm / yarn-classic vs yarn-berry / bun are EXTENSION
+/// POINTS (their scalar settings live in `.npmrc` for the versions nub targets,
+/// so they take the neutral default — add a row if a future major moves a home).
+///
+/// This governs ONLY the project WRITE target for a non-auth SCALAR setting.
+/// Auth/registry keys always go to `.npmrc`; map settings are refused; global
+/// writes are neutral (`~/.npmrc`); READS are version-agnostic (the resolver
+/// reads scalars from both `.npmrc` and the workspace yaml at once).
+mod config_model {
+    /// Where a non-auth scalar setting must be WRITTEN so the incumbent PM
+    /// reads it back — the home that round-trips, per PM+major.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum ScalarHome {
+        /// Project `.npmrc` (INI). The lowest-common-denominator home: read by
+        /// npm/yarn/bun and by pnpm v9/v10 (and by pnpm v11 for AUTH, though not
+        /// for scalars). nub's neutral default + the pnpm-unknown default.
+        Npmrc,
+        /// Project `pnpm-workspace.yaml` (YAML). pnpm v11+ reads scalar settings
+        /// SOLELY from here (`isIniConfigKey` reserves `.npmrc` for auth), so a
+        /// `.npmrc` scalar no-ops on v11.
+        PnpmWorkspaceYaml,
+    }
+
+    /// The scalar config home for a pnpm incumbent at `major` (`None` = pnpm
+    /// declared but version unknown).
+    ///
+    /// pnpm table (verified against pnpm source at the v9.15.9 / v10.15.1 /
+    /// v11.3.0 tags):
+    /// - **pnpm ≤ 10, and UNKNOWN version → `.npmrc`.** v9 is INI-only; v10
+    ///   reads scalars from both `.npmrc` and yaml, so `.npmrc` round-trips and
+    ///   avoids emitting a pnpm-branded file. Unknown defaults here too: the
+    ///   dominant + most-compatible target (v9/v10 read `.npmrc`; v11 still
+    ///   reads AUTH from `.npmrc`; only a v11 SCALAR is missed, which is
+    ///   recoverable, whereas a v11-shaped yaml written into a v10 project
+    ///   silently no-ops).
+    /// - **pnpm ≥ 11 → `pnpm-workspace.yaml`.** v11 reads scalars SOLELY from
+    ///   yaml; a `.npmrc` scalar no-ops.
+    pub(super) fn pnpm_scalar_home(major: Option<u64>) -> ScalarHome {
+        match major {
+            Some(m) if m >= 11 => ScalarHome::PnpmWorkspaceYaml,
+            // pnpm 9, 10, anything earlier, and unknown → .npmrc.
+            _ => ScalarHome::Npmrc,
+        }
+    }
+}
+
+/// Resolve the project's scalar config-WRITE home. Detection: the declared
+/// `packageManager` / `devEngines` pin (`declared_pm_raw`, packageManager
+/// first) gives the pnpm major. The installed-PM `--version` probe and
+/// lockfile-version signal from the agreed detection chain are intentionally
+/// NOT consulted: both only matter to move an UNKNOWN version off its default,
+/// and the pnpm-unknown default is already the dominant/most-compatible home
+/// (`.npmrc`) — so a brittle subprocess probe buys nothing. `pnpm_incumbent`
+/// (the resolved config surface) gates whether a pnpm-branded yaml may be
+/// written at all (brand boundary): when false (non-pnpm / nub identity) the
+/// home is always the neutral `.npmrc`.
+fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
+    if !pnpm_incumbent {
+        // Non-pnpm incumbent or nub identity: never a pnpm-branded file.
+        return config_model::ScalarHome::Npmrc;
+    }
+    let major = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
+        .and_then(|(_name, version)| version)
+        .and_then(|v| super::parse_major_minor(&v).0);
+    config_model::pnpm_scalar_home(major)
+}
+
 fn dispatch_config(parsed: ConfigArgs, explicit_global: bool) -> Result<i32> {
     match &parsed.command {
         // Write routing (module doc). GLOBAL writes (`--location user|global`)
@@ -195,8 +274,16 @@ fn dispatch_config(parsed: ConfigArgs, explicit_global: bool) -> Result<i32> {
                     return npmrc_first::set_user_npmrc(&set.key, &set.value);
                 }
             } else {
+                // A non-shared scalar lands in `pnpm-workspace.yaml` ONLY under
+                // a pnpm-v11+ incumbent (v11 reads scalars solely from YAML); a
+                // pnpm-v10/v9 incumbent — and the unknown-version default — keep
+                // scalars in the neutral project `.npmrc` (v9/v10 read them from
+                // there, and v11 still reads auth from there). Non-pnpm and
+                // nub-identity surfaces also keep `.npmrc` (read_branded off).
                 let pnpm_incumbent = aube_util::engine_context().read_branded_pnpm_config;
-                match npmrc_first::classify_set(&set.key, pnpm_incumbent) {
+                let scalar_to_yaml = project_scalar_home(pnpm_incumbent)
+                    == config_model::ScalarHome::PnpmWorkspaceYaml;
+                match npmrc_first::classify_set(&set.key, scalar_to_yaml) {
                     npmrc_first::SetRoute::Engine => {} // fall through to delegate
                     npmrc_first::SetRoute::ProjectWorkspaceYaml => {
                         return npmrc_first::set_project_workspace_yaml(&set.key, &set.value);
@@ -344,17 +431,20 @@ mod npmrc_first {
         /// nub's `isIniConfigKey` equivalent: registry/auth/`@scope:`/`//host`
         /// keys npm + yarn + pnpm all read from `.npmrc`.
         Engine,
-        /// Non-shared scalar under a PNPM incumbent → `pnpm-workspace.yaml`.
-        /// pnpm v11 routes every non-`isIniConfigKey` setting to the workspace
-        /// yaml (`getConfigFileInfo`), and always creates it; nub mirrors that
-        /// for round-trip fidelity so a subsequent `pnpm config get` / install
-        /// reads the same value from the same file. Only fires when pnpm is the
-        /// provable incumbent — a pnpm-named file is never written otherwise
-        /// (brand boundary).
+        /// Non-shared scalar under a pnpm-**v11+** incumbent →
+        /// `pnpm-workspace.yaml`. v11 reads scalar settings SOLELY from the
+        /// workspace yaml (`isIniConfigKey` keeps only auth/network in
+        /// `.npmrc`), so a scalar written to `.npmrc` would no-op; nub mirrors
+        /// v11 and creates the yaml so a subsequent `pnpm config get` / install
+        /// reads it back. Only fires under a provable pnpm-v11+ incumbent — a
+        /// pnpm-named file is never written for v10/v9 (they read `.npmrc`), nor
+        /// for non-pnpm / nub identity (brand boundary).
         ProjectWorkspaceYaml,
-        /// Non-shared scalar under nub identity / npm / yarn / bun → the
-        /// project `.npmrc` (the neutral home: every tool reads it, no
-        /// pnpm-branded file emitted, never `config.toml`). Matches what
+        /// Non-shared scalar everywhere else → the project `.npmrc` (the
+        /// neutral home: every tool reads it, no pnpm-branded file emitted,
+        /// never `config.toml`). Covers pnpm v10/v9 (they read scalars from
+        /// `.npmrc`), the unknown-pnpm-version default (safest for the dominant
+        /// v9/v10 base), and nub identity / npm / yarn / bun. Matches what
         /// `nub pm use nub` migration writes for a nub-identity project.
         ProjectNpmrc,
         /// Workspace map settings and scalar-nested misuses.
@@ -365,17 +455,18 @@ mod npmrc_first {
     /// unit-testable; the write itself happens in [`set_project_npmrc`] /
     /// [`set_project_workspace_yaml`].
     ///
-    /// `pnpm_incumbent` is the resolved config-surface posture (pnpm is the
-    /// project's active PM, or the project is fresh) — the same
-    /// `read_branded_pnpm_config` signal install uses. It decides ONLY where a
-    /// non-shared scalar lands: `pnpm-workspace.yaml` under a pnpm incumbent
-    /// (pnpm parity), the neutral project `.npmrc` otherwise. npm-shared keys
-    /// (`.npmrc`) and map refusals are independent of incumbency.
-    pub(super) fn classify_set(key: &str, pnpm_incumbent: bool) -> SetRoute {
+    /// `scalar_to_yaml` is true ONLY for a pnpm-**v11+** incumbent — the one
+    /// version whose config home for scalar settings is `pnpm-workspace.yaml`
+    /// (see `pnpm_uses_yaml_scalar_home`). It decides ONLY where a non-shared
+    /// scalar lands: `pnpm-workspace.yaml` under v11, the neutral project
+    /// `.npmrc` for pnpm v10/v9, the unknown-version default, and every
+    /// non-pnpm / nub-identity surface. npm-shared keys (`.npmrc`) and map
+    /// refusals are independent of this signal.
+    pub(super) fn classify_set(key: &str, scalar_to_yaml: bool) -> SetRoute {
         if is_npm_shared_key(key) {
             return SetRoute::Engine;
         }
-        let scalar_route = if pnpm_incumbent {
+        let scalar_route = if scalar_to_yaml {
             SetRoute::ProjectWorkspaceYaml
         } else {
             SetRoute::ProjectNpmrc
@@ -663,9 +754,9 @@ mod npmrc_first {
         }
 
         #[test]
-        fn non_shared_scalar_routes_by_incumbency() {
-            // Under a PNPM incumbent a non-shared scalar lands in
-            // pnpm-workspace.yaml (pnpm v11 parity / round-trip fidelity)…
+        fn non_shared_scalar_routes_by_scalar_home() {
+            // `scalar_to_yaml = true` is the pnpm-v11+ case: a non-shared scalar
+            // lands in pnpm-workspace.yaml (v11 reads scalars solely from yaml)…
             assert!(matches!(
                 classify_set("autoInstallPeers", true),
                 SetRoute::ProjectWorkspaceYaml
@@ -674,8 +765,9 @@ mod npmrc_first {
                 classify_set("auto-install-peers", true),
                 SetRoute::ProjectWorkspaceYaml
             ));
-            // …under nub identity / npm / yarn / bun it lands in the neutral
-            // project `.npmrc` (no pnpm-branded file emitted — brand boundary).
+            // …`false` is pnpm v10/v9, the unknown-version default, and every
+            // non-pnpm / nub-identity surface: the neutral project `.npmrc` (no
+            // pnpm-branded file emitted — brand boundary; v9/v10 read `.npmrc`).
             assert!(matches!(
                 classify_set("autoInstallPeers", false),
                 SetRoute::ProjectNpmrc
@@ -686,7 +778,7 @@ mod npmrc_first {
             ));
 
             // A known scalar `some-custom-key` is unknown to the registry, so
-            // it's free-form → `.npmrc` even under a pnpm incumbent (no
+            // it's free-form → `.npmrc` even in the yaml-home (v11) case (no
             // workspace-yaml schema for an arbitrary key).
             assert!(matches!(
                 classify_set("some-custom-key", true),
@@ -696,6 +788,21 @@ mod npmrc_first {
                 classify_set("some-custom-key", false),
                 SetRoute::ProjectNpmrc
             ));
+        }
+
+        #[test]
+        fn pnpm_scalar_home_table_gates_v11_yaml_from_v10_npmrc() {
+            use super::super::config_model::{ScalarHome, pnpm_scalar_home};
+            // pnpm v11+ → yaml; v10, v9, earlier, and unknown → .npmrc.
+            assert_eq!(pnpm_scalar_home(Some(11)), ScalarHome::PnpmWorkspaceYaml);
+            assert_eq!(pnpm_scalar_home(Some(12)), ScalarHome::PnpmWorkspaceYaml);
+            assert_eq!(pnpm_scalar_home(Some(10)), ScalarHome::Npmrc);
+            assert_eq!(pnpm_scalar_home(Some(9)), ScalarHome::Npmrc);
+            assert_eq!(
+                pnpm_scalar_home(None),
+                ScalarHome::Npmrc,
+                "unknown pnpm version must default to the dominant .npmrc model"
+            );
         }
 
         #[test]

@@ -150,20 +150,36 @@ fn store_path_prints_the_nub_namespaced_store() {
     );
 }
 
-/// A pnpm-incumbent manifest (declares `packageManager: pnpm@…`), so the
-/// config surface resolves to a pnpm incumbent and non-shared scalars route
-/// to `pnpm-workspace.yaml`.
-const PNPM_MANIFEST: &str =
-    r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"pnpm@9.0.0"}"#;
+/// A pnpm-**v11** manifest. v11 reads scalar settings solely from
+/// `pnpm-workspace.yaml`, so non-shared scalars route there.
+const PNPM11_MANIFEST: &str =
+    r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"pnpm@11.3.0"}"#;
 
-/// Write routing (pnpm v11 `getConfigFileInfo` parity) under a PNPM
-/// incumbent: a non-shared scalar lands in `pnpm-workspace.yaml` (created if
-/// absent) for round-trip fidelity with pnpm; an npm-shared key (registry)
-/// delegates to the engine and lands in the *user* `~/.npmrc`. No
-/// `config.toml` is ever written, and `config get` reads both values back.
+/// A pnpm-**v10** manifest. v10 reads scalars from `.npmrc`, so non-shared
+/// scalars route to the project `.npmrc` (round-trips with real pnpm@10) —
+/// NOT to `pnpm-workspace.yaml` (the bug this guards against).
+const PNPM10_MANIFEST: &str =
+    r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"pnpm@10.15.1"}"#;
+
+/// A pnpm incumbent with NO declared version: `packageManager: "pnpm"` (bare
+/// name, no `@version`) resolves to a pnpm surface with an unknown major,
+/// exercising the unknown-version default. (A versionless name is what
+/// `declared_pm_raw` returns name=pnpm/version=None for.)
+const PNPM_UNVERSIONED_MANIFEST: &str =
+    r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"pnpm"}"#;
+
+/// Generic pnpm-incumbent manifest used where the SCALAR home is irrelevant
+/// (the global read/write tests). Points at v11.
+const PNPM_MANIFEST: &str = PNPM11_MANIFEST;
+
+/// Write routing under a pnpm-**v11** incumbent: a non-shared scalar lands in
+/// `pnpm-workspace.yaml` (created if absent) for round-trip fidelity with pnpm
+/// v11; an npm-shared key (registry) delegates to the engine and lands in the
+/// *user* `~/.npmrc`. No `config.toml` is ever written, and `config get` reads
+/// both values back.
 #[test]
-fn config_set_under_pnpm_incumbent_routes_scalar_to_workspace_yaml() {
-    let ctx = Ctx::new("config-pnpm", PNPM_MANIFEST);
+fn config_set_under_pnpm_v11_incumbent_routes_scalar_to_workspace_yaml() {
+    let ctx = Ctx::new("config-pnpm11", PNPM11_MANIFEST);
 
     // Non-shared scalar → pnpm-workspace.yaml (top-level `set` shorthand).
     let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
@@ -252,6 +268,49 @@ fn config_set_under_nub_identity_routes_scalar_to_neutral_npmrc() {
 
     let (stdout, _, code) = ctx.run(&["get", "autoInstallPeers"]);
     assert_eq!((stdout.trim(), code), ("false", 0));
+}
+
+/// Write routing under a pnpm-**v10** incumbent: v10 reads scalar settings
+/// from `.npmrc`, so a non-shared scalar must land there (and round-trip), NOT
+/// in `pnpm-workspace.yaml`. This is the correctness bug the version-aware
+/// router fixes: a v11-shaped yaml write would silently no-op on v10.
+#[test]
+fn config_set_under_pnpm_v10_incumbent_routes_scalar_to_npmrc() {
+    let ctx = Ctx::new("config-pnpm10", PNPM10_MANIFEST);
+
+    let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"),
+        "under a pnpm-v10 incumbent a non-shared scalar must land in the project .npmrc"
+    );
+    assert!(
+        !ctx.project.join("pnpm-workspace.yaml").exists(),
+        "pnpm-v10 scalar must NOT be written to pnpm-workspace.yaml (v10 wouldn't read it back)"
+    );
+
+    // Read-back works (the resolver reads scalars from .npmrc too).
+    let (stdout, _, code) = ctx.run(&["get", "autoInstallPeers"]);
+    assert_eq!((stdout.trim(), code), ("false", 0));
+}
+
+/// Unknown pnpm version (no `packageManager` pin) → the dominant/most-
+/// compatible default: the v10 `.npmrc` model. A non-shared scalar lands in
+/// `.npmrc`, never a pnpm-branded yaml.
+#[test]
+fn config_set_under_unversioned_pnpm_defaults_to_npmrc() {
+    let ctx = Ctx::new("config-pnpm-unversioned", PNPM_UNVERSIONED_MANIFEST);
+
+    let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"),
+        "unknown pnpm version must default to the .npmrc model"
+    );
+    assert!(
+        !ctx.project.join("pnpm-workspace.yaml").exists(),
+        "unknown-version default must NOT write pnpm-workspace.yaml"
+    );
 }
 
 /// GLOBAL config is read BROAD and cwd-INDEPENDENT (decision 2026-06-20,
