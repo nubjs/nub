@@ -40,7 +40,70 @@ jobs:
     outputs:
       test: ${{ steps.plan.outputs.test }}
       pnp: ${{ steps.plan.outputs.pnp }}
+      # Path-awareness: skip the expensive Rust suite for changes that provably
+      # cannot affect Rust behavior (docs-only / site-only). FAIL SAFE TOWARD
+      # RUNNING — any ambiguity (push:main, schedule, a paths-filter error, an
+      # unmatched non-doc change) sets run_rust=true so a Rust change is NEVER
+      # skipped. The merge gate stays honest via the always-running `ci-gate`
+      # aggregator below, so a skipped Rust matrix still resolves the gate green
+      # (a SKIPPED branch-protection-required check would otherwise hang the PR
+      # on "Expected — waiting for status" forever — see the aggregator).
+      run_rust: ${{ steps.paths.outputs.run_rust }}
+      run_site: ${{ steps.paths.outputs.run_site }}
+      run_types: ${{ steps.paths.outputs.run_types }}
     steps:
+      - uses: actions/checkout@v5
+      # Detect which path groups changed. On a pull_request dorny/paths-filter
+      # diffs against the PR base; on push it diffs against the before-SHA. Only
+      # docs/site-only changes flip a group OFF — everything else (including the
+      # vendor/aube submodule gitlink, so a pin bump triggers the full suite) is
+      # Rust-relevant. .github/workflows/** is Rust-relevant so a CI change still
+      # exercises the matrix it edits.
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # On push events with no diff base, dorny treats everything as changed
+          # (its documented fallback), which is the fail-safe direction we want.
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'vendor/aube'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'Makefile'
+              - 'rust-toolchain*'
+              - 'tests/**'
+              - 'runtime/**'
+              - '.github/workflows/**'
+            site:
+              - 'site/**'
+            types:
+              - 'npm/nub-types/**'
+      - id: paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          # FAIL SAFE: only a pull_request whose paths-filter ran cleanly may
+          # turn run_rust OFF. push:main, schedule, workflow_dispatch, or any
+          # event where the filter outcome is unavailable run the full suite.
+          run_rust=true
+          run_site=true
+          run_types=true
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            run_rust="${{ steps.filter.outputs.rust }}"
+            run_site="${{ steps.filter.outputs.site }}"
+            run_types="${{ steps.filter.outputs.types }}"
+          fi
+          # Guard against an empty/garbled filter output → default to running.
+          [[ "$run_rust" == "true" || "$run_rust" == "false" ]] || run_rust=true
+          [[ "$run_site" == "true" || "$run_site" == "false" ]] || run_site=true
+          [[ "$run_types" == "true" || "$run_types" == "false" ]] || run_types=true
+          {
+            echo "run_rust=$run_rust"
+            echo "run_site=$run_site"
+            echo "run_types=$run_types"
+          } >> "$GITHUB_OUTPUT"
+          echo "run_rust=$run_rust run_site=$run_site run_types=$run_types (event=${{ github.event_name }})"
       - id: plan
         shell: bash
         run: |
@@ -66,6 +129,8 @@ jobs:
 
   check:
     name: Check
+    needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -88,6 +153,8 @@ jobs:
 
   clippy:
     name: Clippy
+    needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -103,6 +170,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})
     needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -255,6 +323,7 @@ jobs:
   pnp:
     name: Yarn PnP (${{ matrix.os }}, node ${{ matrix.node }})
     needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -315,6 +384,8 @@ jobs:
 
   fmt:
     name: Format
+    needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -325,6 +396,11 @@ jobs:
 
   types-fixtures:
     name: "@nubjs/types typecheck fixtures"
+    needs: matrix-plan
+    # The @nubjs/types declarations live under npm/nub-types/**; skip the tsc
+    # fixtures when only docs/site/Rust changed. run_rust includes .github/** so
+    # a CI edit still re-runs them.
+    if: needs.matrix-plan.outputs.run_types == 'true' || needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     # Catches @nubjs/types declaration regressions: each fixture runs `tsc --noEmit`
     # and asserts the expected pass/fail. The package's index.d.ts is exercised
@@ -343,3 +419,46 @@ jobs:
       - name: Run @nubjs/types typecheck fixtures
         run: node run.mjs
         working-directory: npm/nub-types/test
+
+  # Single aggregator gate — the ONE check branch protection should require.
+  #
+  # Why this exists: the Rust jobs above are path-gated (`if:
+  # needs.matrix-plan.outputs.run_rust == 'true'`). A SKIPPED job reports a
+  # "skipped" conclusion, NOT success — and a skipped branch-protection-REQUIRED
+  # check never reports a passing status, so the PR would hang on "Expected —
+  # waiting for status" forever. This job runs on EVERY event (`if: always()`)
+  # and collapses all the conditional jobs into one deterministic verdict:
+  #   - every dependency is `success` or `skipped` → PASS
+  #   - any dependency is `failure` or `cancelled` → FAIL
+  # Make THIS job (`CI gate`) the sole required status check in branch protection.
+  # A docs-only PR → Rust matrix skipped → this gate green → mergeable. A Rust PR
+  # → matrix runs → this gate reflects it. The merge gate is never weakened: a
+  # real failure still fails here.
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [matrix-plan, check, clippy, test, pnp, fmt, types-fixtures]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify no required job failed or was cancelled
+        shell: bash
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "Dependency results:"
+          echo "$RESULTS" | jq -r 'to_entries[] | "  \(.key): \(.value.result)"'
+          # Any job that did not end in success or skipped is a gate failure.
+          # (skipped is expected for path-gated jobs on docs/site-only changes.)
+          bad=$(echo "$RESULTS" | jq -r '
+            to_entries
+            | map(select(.value.result != "success" and .value.result != "skipped"))
+            | .[].key')
+          if [[ -n "$bad" ]]; then
+            echo "::error::CI gate failed — these jobs did not pass:"
+            while IFS= read -r job; do
+              echo "  - $job"
+            done <<< "$bad"
+            exit 1
+          fi
+          echo "CI gate passed."
