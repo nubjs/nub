@@ -3,19 +3,216 @@ title: Package manager
 description: Nub ships its own installer with a pnpm-shaped CLI and lockfile-compatibility with whatever your project already uses — npm, pnpm, and Bun round-trip, Yarn read-only.
 ---
 
-Nub has its own install engine: it resolves the dependency graph and links `node_modules`. What makes it a new kind of package manager is that it does not force incumbent projects into a Nub-only format — three properties carry the whole design:
+Nub has its own install engine: it resolves the dependency graph and links `node_modules`. What makes it a new kind of package manager is that it does not force incumbent projects into a Nub-only format — it reads *and* rewrites the project's native lockfile, so npm, pnpm, and Bun round-trip cleanly and Yarn is consumed read-only. The CLI is pnpm-shaped; the engine is the vendored [aube](https://github.com/jdx/aube) engine, embedded as a library and driven by Nub's own CLI.
 
-- **Bring your own lockfile.** Nub installs in whatever lockfile your project already has. Under explicit Nub identity, its own canonical lockfile is `lock.yaml`: a different basename, but byte-for-byte the pnpm v9 lockfile format.
-- **Bidirectional read and write.** Nub reads *and* rewrites the project's native lockfile: npm `package-lock.json`, `pnpm-lock.yaml`, and `bun.lock` round-trip cleanly. Yarn's `yarn.lock` is read-only — consumed, never rewritten.
-- **Round-trip fidelity.** Read a foreign lockfile, install, and write it back, and it stays faithful — byte-for-byte where the format allows (npm `package-lock.json` v2/v3).
+Nub never asks which package manager you use — it [infers the incumbent](#compatibility) and mirrors it. Each one has its own page covering lockfile fidelity, config surfaces, and gaps: [pnpm](/docs/install/pnpm), [npm](/docs/install/npm), [Bun](/docs/install/bun), [Yarn](/docs/install/yarn).
 
-Each incumbent gets its own page covering lockfile fidelity, config surfaces, and gaps: [pnpm](/docs/install/pnpm), [npm](/docs/install/npm), [Bun](/docs/install/bun), [Yarn](/docs/install/yarn).
+## Compatibility
 
-Nub never asks which package manager you use — it [infers the incumbent](#package-manager-inference) from the `packageManager` field or the lockfile on disk and mirrors it. The CLI itself is pnpm-shaped. The engine is the vendored [aube](https://github.com/jdx/aube) engine, embedded as a library and driven by Nub's own CLI.
+Run Nub in a repo that already uses npm, pnpm, Yarn, or Bun and it behaves *as that package manager* — no migration, no new files. Nub infers the incumbent, then mirrors it: the same lockfile format, the same config files, the same manifest fields. The incumbent is decided by one precedence chain:
+
+- **`packageManager`** field — the Corepack standard, outranks any lockfile
+- **`devEngines.packageManager`** field — fallback declaration, object or array form
+- **lockfile on disk** — consulted only when no declaration names a manager
+
+A declaration always beats a stray lockfile, so a pnpm project that picked up a `package-lock.json` still resolves as pnpm. Two lockfiles for different managers, with no declaration, is a hard error rather than a guess. The same chain runs in a workspace from any member: Nub walks up to the root, which carries the declaration and lockfile.
+
+That one decision drives the whole table below — which lockfile round-trips, which config Nub reads, and which manifest fields it honors:
+
+| Incumbent | Lockfile | Round-trip | Full page |
+|---|---|---|---|
+| **npm** | `package-lock.json`, `npm-shrinkwrap.json` | read + write | [npm](/docs/install/npm) |
+| **pnpm** | `pnpm-lock.yaml` (v9) | read + write | [pnpm](/docs/install/pnpm) |
+| **Yarn** | `yarn.lock` | **read-only** | [Yarn](/docs/install/yarn) |
+| **Bun** | `bun.lock` | read + write | [Bun](/docs/install/bun) |
+| **Nub** | `lock.yaml` (pnpm v9 bytes) | read + write | [pm](/docs/pm) |
+
+A no-churn guard leaves a graph-equal lockfile untouched, so Nub never fights your other tool over byte-level formatting, and it never drops its own lockfile into a project it doesn't own. The `bun.lockb` binary format is rejected — convert to text `bun.lock` first.
+
+### Config it reads
+
+Config reads are symmetric with the lockfile: under each incumbent Nub reads that tool's branded config and no other's. The neutral `.npmrc` cascade and `npm_config_*` are read under every incumbent; a pnpm project's `bunfig.toml` is ignored, a Yarn project's `pnpm-workspace.yaml` is ignored. Each chip below is grounded in the detailed table on that incumbent's page — hover a partial chip for the breakdown.
+
+<PmSupport
+  rows={[
+    {
+      pm: 'npm',
+      href: '/docs/install/npm',
+      items: [
+        {
+          code: 'package-lock.json',
+          ok: true,
+          note: 'lockfileVersion 1 errors — re-lock under npm 7+ first.',
+        },
+        { code: 'npm-shrinkwrap.json', ok: true },
+        { code: '.npmrc', ok: true },
+        { code: 'overrides', ok: true },
+        { code: 'workspaces', ok: true },
+        { code: 'engines / os / cpu / libc', ok: true },
+        { code: 'npm_config_*', ok: true, note: 'Registry-client keys only.' },
+      ],
+    },
+    {
+      pm: 'pnpm',
+      href: '/docs/install/pnpm',
+      items: [
+        { code: 'pnpm-lock.yaml', ok: true, note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
+        { code: 'pnpm-workspace.yaml', ok: true },
+        { code: '.pnpmfile.cjs', ok: true },
+        { code: '.npmrc', ok: true },
+        { code: 'package.json#pnpm', ok: true },
+        { code: 'resolutions', ok: true },
+        { code: 'catalog:', ok: true },
+        { code: 'workspace:', ok: true },
+        { code: 'workspaces', ok: true },
+        { code: 'dependenciesMeta.injected', ok: true, partial: true, note: 'Not honored under Nub-identity migration.' },
+        { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — node-linker=pnp errors.' },
+        { code: 'engines / os / cpu', ok: true },
+        { code: 'pnpm_config_*', ok: true, note: 'Registry-client keys only.' },
+        { code: 'npm_config_*', ok: true },
+      ],
+    },
+    {
+      pm: 'Yarn',
+      href: '/docs/install/yarn',
+      qualifier: 'read-only',
+      items: [
+        {
+          code: 'yarn.lock',
+          ok: true,
+          partial: true,
+          note: 'Read-only; writes refused.',
+        },
+        {
+          code: '.yarnrc.yml',
+          ok: true,
+          partial: true,
+          note: 'Not read: per-host proxies, PnP.',
+        },
+        {
+          code: '.yarnrc',
+          ok: true,
+          partial: true,
+          note: 'Registry and auth keys only.',
+        },
+        {
+          code: 'YARN_*',
+          ok: true,
+          partial: true,
+          note: 'Reads the registry, auth token/ident, node-linker, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.',
+        },
+        { code: '.npmrc', ok: true },
+        { code: 'resolutions', ok: true },
+        { code: 'workspace:', ok: true },
+        { code: 'workspaces', ok: true },
+        { code: 'packageExtensions', ok: true },
+        { code: 'dependenciesMeta.built', ok: true },
+        { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — warns and links node_modules instead.' },
+        { code: 'engines / os / cpu', ok: true },
+      ],
+    },
+    {
+      pm: 'Bun',
+      href: '/docs/install/bun',
+      items: [
+        { code: 'bun.lock', ok: true },
+        { code: 'bun.lockb', ok: false, note: 'Binary lockfile rejected — convert to bun.lock text first.' },
+        {
+          code: 'bunfig.toml',
+          ok: true,
+          partial: true,
+          note: '[install] section only.',
+        },
+        { code: 'trustedDependencies', ok: true },
+        { code: 'overrides', ok: true },
+        { code: 'resolutions', ok: true },
+        { code: 'patchedDependencies', ok: true },
+        { code: 'catalog:', ok: true },
+        { code: 'workspace:', ok: true },
+        { code: 'workspaces', ok: true },
+        {
+          code: 'BUN_CONFIG_*',
+          ok: true,
+          partial: true,
+          note: 'Registry and token only.',
+        },
+        { code: 'engines / os / cpu', ok: true },
+      ],
+    },
+    {
+      pm: 'nub',
+      href: '/docs/pm',
+      highlight: true,
+      items: [
+        { code: 'lock.yaml', ok: true },
+        { code: '.npmrc', ok: true },
+        { code: 'overrides', ok: true },
+        { code: 'resolutions', ok: true },
+        { code: 'patchedDependencies', ok: true },
+        { code: 'catalog:', ok: true },
+        { code: 'workspace:', ok: true },
+        { code: 'workspaces', ok: true },
+        { code: 'engines.node', ok: true },
+        { code: 'npm_config_*', ok: true },
+      ],
+    },
+  ]}
+/>
 
 <Callout title="You don't need to use Nub's package manager">
 The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly as you do today, and reach for Nub for everything else — running files, scripts, and binaries.
 </Callout>
+
+### Nub identity
+
+A project is Nub's own when it declares Nub through `nub pm use nub`, or when `lock.yaml` is the only lockfile signal, or when a fresh project has no declaration and no lockfile at all. That switch aligns the manifest and lockfile, migrates pnpm workspace config into neutral `package.json` fields, and moves the project onto a deliberately neutral surface:
+
+- **Lockfile:** `lock.yaml` — the pnpm v9 schema byte-for-byte, under Nub's own basename
+- **Package fields:** `workspaces`, `overrides`, `resolutions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
+- **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
+- **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own directories
+
+This is the brand boundary in both directions: Nub never emits its own brand into your config, and under its own identity it reads *only* neutral, cross-tool config — never `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `pnpm.*` namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, or aube's `AUBE_*` knobs. Injected dependencies are also unsupported under Nub identity; `nub pm use nub` refuses a project that relies on `dependenciesMeta.injected`. To keep pnpm hooks or workspace config active, keep the project pnpm-owned or run `nub pm use pnpm`.
+
+```console
+# captured: a Nub-identity project (lock.yaml present) with a stray pnpm-workspace.yaml
+$ nub install
+nub: pnpm-workspace.yaml is not read under nub identity — migrate it (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`).
+```
+
+<Callout title="Contradictions are loud">
+When signals disagree, Nub stops and reports it. Two lockfiles, no declaration:
+
+```console
+$ nub install
+Error: ERR_NUB_LOCKFILE_AMBIGUOUS
+
+  × multiple lockfiles found: pnpm-lock.yaml, package-lock.json — cannot tell
+  │ which package manager owns this project
+  help: set the declaration: nub pm use <pm> — or remove the stale lockfile
+```
+
+A declaration whose lockfile is missing:
+
+```console
+$ nub install                                     # packageManager: "pnpm@9.0.0"
+Error: ERR_NUB_LOCKFILE_DECLARATION_MISMATCH
+
+  × package.json declares `pnpm` (via `packageManager`), but pnpm-lock.yaml is
+  │ missing — found package-lock.json instead
+  help: set the declaration: nub pm use <pm> — or remove the stale lockfile
+```
+
+Under Nub identity, `lock.yaml` beside a foreign lockfile is the ambiguity error.
+</Callout>
+
+<Callout title="Inference vs the pinned PM">
+This inference picks the *install engine's* incumbent — the format Nub reads and writes. It is separate from the version `nub pm` provisions: the meta-manager resolves a *pin* (`.yarnrc.yml` `yarnPath` → `packageManager` → `devEngines`) to fetch and run an exact PM binary. Same signals, different questions: "which format do I install in?" versus "which PM binary do I run?".
+</Callout>
+
+### Compat mode
+
+The augmentation Nub applies to your runtime is reversible. Passing `--node`, or setting a truthy `NODE_COMPAT` for a whole tree, disables every Nub runtime augmentation and runs the project's pinned Node vanilla — version provisioning stays on, the augmentation comes off. See [the runtime overview](/docs/runtime#--node) for the full contract.
 
 ## CLI
 
@@ -141,138 +338,6 @@ The install engine is distinct from `nub pm`, the [package meta-manager](/docs/p
 
 The two compose: `nub pm shim` routes bare `npm` / `pnpm` / `yarn` through the pin while you keep using whatever installer you prefer.
 
-## Compat mode
-
-What Nub reads and writes keys off the project's incumbent package manager — inferred from the `packageManager` field or the lockfile on disk:
-
-<PmSupport
-  rows={[
-    {
-      pm: 'npm',
-      href: '/docs/install/npm',
-      items: [
-        {
-          code: 'package-lock.json',
-          ok: true,
-          note: 'lockfileVersion 1 errors — re-lock under npm 7+ first.',
-        },
-        { code: 'npm-shrinkwrap.json', ok: true },
-        { code: '.npmrc', ok: true },
-        { code: 'overrides', ok: true },
-        { code: 'workspaces', ok: true },
-        { code: 'engines / os / cpu / libc', ok: true },
-        { code: 'npm_config_*', ok: true, note: 'Registry-client keys only.' },
-      ],
-    },
-    {
-      pm: 'pnpm',
-      href: '/docs/install/pnpm',
-      items: [
-        { code: 'pnpm-lock.yaml', ok: true, note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
-        { code: 'pnpm-workspace.yaml', ok: true },
-        { code: '.pnpmfile.cjs', ok: true },
-        { code: '.npmrc', ok: true },
-        { code: 'package.json#pnpm', ok: true },
-        { code: 'resolutions', ok: true },
-        { code: 'catalog:', ok: true },
-        { code: 'workspace:', ok: true },
-        { code: 'workspaces', ok: true },
-        { code: 'dependenciesMeta.injected', ok: true, partial: true, note: 'Not honored under Nub-identity migration.' },
-        { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — node-linker=pnp errors.' },
-        { code: 'engines / os / cpu', ok: true },
-        { code: 'pnpm_config_*', ok: true, note: 'Registry-client keys only.' },
-        { code: 'npm_config_*', ok: true },
-      ],
-    },
-    {
-      pm: 'Yarn',
-      href: '/docs/install/yarn',
-      qualifier: 'read-only',
-      items: [
-        {
-          code: 'yarn.lock',
-          ok: true,
-          partial: true,
-          note: 'Read-only; writes refused.',
-        },
-        {
-          code: '.yarnrc.yml',
-          ok: true,
-          partial: true,
-          note: 'Not read: supportedArchitectures, npmAlwaysAuth, file-path TLS cert/key, per-host proxies, PnP.',
-        },
-        {
-          code: '.yarnrc',
-          ok: true,
-          partial: true,
-          note: 'Registry and auth keys only.',
-        },
-        {
-          code: 'YARN_*',
-          ok: true,
-          partial: true,
-          note: 'Reads the registry, auth token/ident, node-linker, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.',
-        },
-        { code: '.npmrc', ok: true },
-        { code: 'resolutions', ok: true },
-        { code: 'workspace:', ok: true },
-        { code: 'workspaces', ok: true },
-        { code: 'packageExtensions', ok: true },
-        { code: 'dependenciesMeta.built', ok: true },
-        { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — warns and links node_modules instead.' },
-        { code: 'engines / os / cpu', ok: true },
-      ],
-    },
-    {
-      pm: 'Bun',
-      href: '/docs/install/bun',
-      items: [
-        { code: 'bun.lock', ok: true },
-        { code: 'bun.lockb', ok: false, note: 'Binary lockfile rejected — convert to bun.lock text first.' },
-        {
-          code: 'bunfig.toml',
-          ok: true,
-          partial: true,
-          note: '[install] section only.',
-        },
-        { code: 'trustedDependencies', ok: true },
-        { code: 'overrides', ok: true },
-        { code: 'resolutions', ok: true },
-        { code: 'patchedDependencies', ok: true },
-        { code: 'catalog:', ok: true },
-        { code: 'workspace:', ok: true },
-        { code: 'workspaces', ok: true },
-        {
-          code: 'BUN_CONFIG_*',
-          ok: true,
-          partial: true,
-          note: 'Registry and token only.',
-        },
-        { code: 'engines / os / cpu', ok: true },
-      ],
-    },
-    {
-      pm: 'nub',
-      href: '/docs/pm',
-      highlight: true,
-      items: [
-        { code: 'lock.yaml', ok: true },
-        { code: '.npmrc', ok: true },
-        { code: 'overrides', ok: true },
-        { code: 'resolutions', ok: true },
-        { code: 'patchedDependencies', ok: true },
-        { code: 'catalog:', ok: true },
-        { code: 'workspace:', ok: true },
-        { code: 'workspaces', ok: true },
-        { code: 'engines.node', ok: true },
-        { code: 'npm_config_*', ok: true },
-      ],
-    },
-  ]}
-/>
-
-Each incumbent has its own page with the full lockfile, config, and gaps detail: [pnpm](/docs/install/pnpm), [npm](/docs/install/npm), [Bun](/docs/install/bun), [Yarn](/docs/install/yarn).
-
 ## Lifecycle scripts
 
 Some dependencies run build steps on install — `preinstall`, `install`, and `postinstall` scripts declared in their own `package.json`. This applies across pnpm, npm, and Bun, so it lives here once. Nub does **not** run them indiscriminately the way npm does; you control which packages are allowed to build.
@@ -331,75 +396,6 @@ Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inhe
 ### Build jail
 
 The OS-level build jail — a network-blocked, filesystem-scoped sandbox around every build script — is compiled in but **off by default**. Opt in with the neutral `paranoid` / `npm_config_paranoid` setting, which also flips the advisory gate to fail-closed. The jail covers macOS and Linux; Windows is a passthrough.
-
-## Package manager inference
-
-Which lockfile Nub reads and writes, which config it honors, whether a write is allowed — all key off one decision: **which package manager owns this project.** Nub infers the incumbent and mirrors it; it never asks.
-
-To make Nub the project owner explicitly, run:
-
-```bash
-nub pm use nub
-```
-
-That is the intentional identity switch. It aligns the manifest and lockfile, migrates pnpm workspace config into neutral `package.json` fields, and moves the project onto Nub's own config surface. If your project is already npm, pnpm, Bun, or Yarn, use the corresponding compatibility page first: [pnpm](/docs/install/pnpm), [npm](/docs/install/npm), [Bun](/docs/install/bun), [Yarn](/docs/install/yarn).
-
-Signals, in precedence order:
-
-1. **`packageManager` field** (`package.json`) — the Corepack standard, and a stronger signal than any lockfile on disk. A pnpm project that picked up a stray `package-lock.json` keeps resolving as pnpm.
-2. **`devEngines.packageManager` field** — the fallback declaration, object (`{ "name": "pnpm" }`) or array form. Outranked by `packageManager`: when `packageManager` is present, it decides the identity and `devEngines` isn't consulted for it. The hard error is a *declaration vs. on-disk lockfile* mismatch (shown below), not a disagreement between these two fields.
-3. **The lockfile on disk** — consulted only when no declaration names a manager. There is no precedence: exactly one recognized lockfile may be present, and it selects the incumbent:
-   - `pnpm-lock.yaml` → pnpm
-   - `bun.lock` → Bun
-   - `yarn.lock` → Yarn
-   - `package-lock.json` / `npm-shrinkwrap.json` → npm
-   - `lock.yaml` → Nub
-
-   Lockfiles for two different managers are a hard error (`ERR_AUBE_LOCKFILE_AMBIGUOUS`) — Nub refuses to guess which owns the project. Declare one with `nub pm use <pm>`, or remove the stale lockfile.
-4. **Nothing present** — a fresh project starts in Nub identity and writes `lock.yaml`.
-
-In a workspace, only the **root** carries the declaration and lockfile; Nub walks up from the working directory, so a member package resolves to the root's identity.
-
-### Nub identity
-
-A project is Nub identity when it declares Nub through `nub pm use nub` or when `lock.yaml` is the only lockfile signal. In that mode, Nub's surface is deliberately neutral:
-
-- **Lockfile:** `lock.yaml`, using the pnpm v9 lockfile schema byte-for-byte under Nub's own basename.
-- **Package fields:** `workspaces` (array form, or object form with `packages`, `catalog`, and `catalogs`), top-level `overrides` and `resolutions`, top-level `patchedDependencies`, top-level `allowBuilds`, `engines.node`, and lifecycle `scripts`.
-- **Config and env:** the standard `.npmrc` cascade, `npm_config_*`, neutral env such as `CI` and proxy variables, plus Nub's own PM knobs: `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, and `NUB_PRIMER_TTL`.
-- **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own cache/data directories.
-
-Nub identity does **not** read another package manager's branded project config. The `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.pnpmfile.mjs`, `pnpm.*` package.json namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, and aube's `AUBE_*` runtime knobs are outside the Nub identity surface. Injected dependencies are also not implemented under Nub identity; `nub pm use nub` refuses projects that rely on `dependenciesMeta.injected`. If you want pnpm hooks or pnpm workspace config to apply, keep the project pnpm-owned or run `nub pm use pnpm`.
-
-<Callout title="Contradictions are loud">
-When signals disagree, Nub stops and reports it. Two lockfiles, no declaration:
-
-```console
-$ nub install
-Error: ERR_NUB_LOCKFILE_AMBIGUOUS
-
-  × multiple lockfiles found: pnpm-lock.yaml, package-lock.json — cannot tell
-  │ which package manager owns this project
-  help: set the declaration: nub pm use <pm> — or remove the stale lockfile
-```
-
-A declaration whose lockfile is missing:
-
-```console
-$ nub install                                     # packageManager: "pnpm@9.0.0"
-Error: ERR_NUB_LOCKFILE_DECLARATION_MISMATCH
-
-  × package.json declares `pnpm` (via `packageManager`), but pnpm-lock.yaml is
-  │ missing — found package-lock.json instead
-  help: set the declaration: nub pm use <pm> — or remove the stale lockfile
-```
-
-Under Nub identity, `lock.yaml` beside a foreign lockfile is the ambiguity error.
-</Callout>
-
-<Callout title="Inference vs the pinned PM">
-This inference picks the *install engine's* incumbent — the format Nub reads and writes. It is separate from the version `nub pm` provisions: the meta-manager resolves a *pin* (`.yarnrc.yml` `yarnPath` → `packageManager` → `devEngines`) to fetch and run an exact PM binary. Same signals, different questions: "which format do I install in?" versus "which PM binary do I run?".
-</Callout>
 
 ## Store and disk layout
 

@@ -41,6 +41,13 @@ on:
       - ".github/workflows/aube-parity.yml"
       - "tests/aube-bats/**"
       - "tests/aube-conformance/**"
+  schedule:
+    # Nightly at 06:30 UTC. The Windows conformance leg is gated off
+    # pull_request (it is the only Windows-runner contributor in this workflow);
+    # the nightly schedule keeps that Windows coverage running on a cadence even
+    # between vendor/aube bumps. Scheduled runs ignore the path filters above and
+    # exercise the full workflow, Windows leg included.
+    - cron: "30 6 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -135,6 +142,10 @@ jobs:
 
   aube-conformance-windows:
     name: lockfile conformance, real PMs (windows)
+    # Gated off pull_request to keep Windows runners off the PR hot path; runs on
+    # push (main / aube-integration, on a vendor/aube bump) and the nightly
+    # schedule. The Linux conformance legs above still gate every PR.
+    if: github.event_name != 'pull_request'
     # Windows leg of the conformance matrix (the maintainer 2026-06-10). Budgeted
     # subset: the pnpm + npm judge legs over the simple, peer-heavy, and
     # workspace fixtures — the signal is lockfile semantics crossed with

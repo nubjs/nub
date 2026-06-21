@@ -90,3 +90,6 @@ epics/
 tests/bench/RESULTS.md
 /bun.lockb
 .claude/jobs/
+
+# fray orchestration runtime — local-only, never tracked (internal deliberation; PUBLIC repo)
+.fray/

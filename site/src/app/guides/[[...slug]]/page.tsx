@@ -1,11 +1,10 @@
 import type { Metadata } from 'next';
-import { source } from '@/lib/source';
+import { guidesSource } from '@/lib/source';
 import {
   DocsPage,
   DocsBody,
   DocsDescription,
   DocsTitle,
-  EditOnGitHub,
 } from 'fumadocs-ui/page';
 import { notFound } from 'next/navigation';
 import { AIActions } from '@/components/ai-actions';
@@ -25,7 +24,7 @@ function GitHubIcon({ className }: { className?: string }) {
   );
 }
 
-/* Footer node injected into the docs TOC panel — an HR then a GitHub repo link. */
+/* Footer node injected into the guides TOC panel — an HR then a GitHub repo link. */
 function TocGitHubLink() {
   return (
     <>
@@ -43,45 +42,17 @@ function TocGitHubLink() {
   );
 }
 
-/* Small footer rendered below the prev/next pager: GitHub star link. */
-function PageStarFooter() {
-  return (
-    <div className="mt-6 flex items-center justify-center">
-      <a
-        href="https://github.com/nubjs/nub"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex items-center gap-1.5 text-xs text-fd-muted-foreground transition-colors hover:text-fd-foreground"
-      >
-        <GitHubIcon className="h-3 w-3 shrink-0" />
-        <span>Star Nub on GitHub</span>
-      </a>
-    </div>
-  );
-}
-
 export default async function Page(props: {
   params: Promise<{ slug?: string[] }>;
 }) {
   const params = await props.params;
-  const page = source.getPage(params.slug);
+  const page = guidesSource.getPage(params.slug);
   if (!page) notFound();
 
   const MDXContent = page.data.body;
 
-  /* Construct the GitHub edit URL from the virtual file path fumadocs exposes on
-     the page object. The path is relative to the docs content root (e.g.
-     "runtime/index.mdx"), so we prepend the repo-relative prefix to build the
-     full edit URL. */
-  const editHref = `https://github.com/nubjs/nub/edit/main/site/content/docs/${(page as { path?: string }).path ?? ''}`;
-
   return (
-    <DocsPage
-      toc={page.data.toc}
-      full={page.data.full}
-      tableOfContent={{ footer: <TocGitHubLink /> }}
-      footer={{ children: <PageStarFooter /> }}
-    >
+    <DocsPage toc={page.data.toc} full={page.data.full} tableOfContent={{ footer: <TocGitHubLink /> }}>
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription>{page.data.description}</DocsDescription>
       <AIActions
@@ -94,35 +65,17 @@ export default async function Page(props: {
       <DocsBody role="main">
         <MDXContent components={getMDXComponents()} />
       </DocsBody>
-      <EditOnGitHub href={editHref} />
     </DocsPage>
   );
 }
 
 export function generateStaticParams() {
-  return source.generateParams();
+  return guidesSource.generateParams();
 }
 
-/* Pages mapping to a concrete command surface get the command spelling as the
-   social-card eyebrow (matching the sidebar chips in docs/layout.tsx); others
-   fall back to a plain "Documentation" label. */
-const EYEBROW_BY_URL: Record<string, string> = {
-  '/docs/runtime': 'nub <file>',
-  '/docs/run': 'nub run',
-  '/docs/nubx': 'nubx',
-  '/docs/install': 'nub install',
-  '/docs/node': 'nub node',
-  '/docs/pm': 'nub pm',
-  '/docs/watch': 'nub watch',
-};
-
-/* Build the per-page social-card URL handled by `app/og/route.tsx`. The card
-   shows the eyebrow and title only — no description (it rarely fit). */
-function ogImageUrl({ url, title }: { url: string; title: string }): string {
-  const params = new URLSearchParams({
-    title,
-    eyebrow: EYEBROW_BY_URL[url] ?? 'Documentation',
-  });
+/* Build the per-page social-card URL handled by `app/og/route.tsx`. */
+function ogImageUrl({ title }: { title: string }): string {
+  const params = new URLSearchParams({ title, eyebrow: 'Guide' });
   return `/og?${params.toString()}`;
 }
 
@@ -130,16 +83,16 @@ export async function generateMetadata(props: {
   params: Promise<{ slug?: string[] }>;
 }): Promise<Metadata> {
   const params = await props.params;
-  const page = source.getPage(params.slug);
+  const page = guidesSource.getPage(params.slug);
   if (!page) notFound();
 
   const { title, description } = page.data;
-  const ogImage = ogImageUrl({ url: page.url, title });
+  const ogImage = ogImageUrl({ title });
 
   return {
     title,
     description,
-    // Self-canonical: each docs page points at its own URL rather than
+    // Self-canonical: each guide page points at its own URL rather than
     // inheriting the root layout's `/` canonical.
     alternates: { canonical: page.url },
     openGraph: {

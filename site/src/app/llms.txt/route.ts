@@ -1,4 +1,4 @@
-import { source, blog } from '@/lib/source';
+import { source, guidesSource, blog } from '@/lib/source';
 
 // Static at build time — the content set only changes on rebuild.
 export const dynamic = 'force-static';
@@ -94,6 +94,7 @@ export function GET() {
   };
 
   section('Docs', orderedDocPages());
+  section('Guides', guidesSource.getPages());
   section('Blog', blog.getPages());
 
   return new Response(lines.join('\n'), {

@@ -361,6 +361,14 @@ pre .line[data-output] span {
   }
 }
 
+/* Prev/next pager — the fumadocs FooterItem link is text-sm (14px) and the page-name
+   title <p> inherits it, which reads too small. Target the title paragraph inside
+   .font-medium (the wrapper div that holds the chevron icon + page name) to bring it
+   up to 0.9375rem (15px) — one step below body prose, comfortable and consistent. */
+#nd-page .\@container > a .font-medium p {
+  font-size: 0.9375rem;
+}
+
 /* Clickable elements always get the pointer cursor. */
 button:not(:disabled),
 [role='button'],
