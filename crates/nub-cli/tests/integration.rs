@@ -4102,7 +4102,8 @@ fn node_compat_env_forces_vanilla_under_watch() {
     let mut snapshot = None;
     for _ in 0..100 {
         if let Ok(s) = std::fs::read_to_string(&out_file)
-            && s.contains("WATCH_ENV=") {
+            && s.contains("WATCH_ENV=")
+        {
             snapshot = Some(s);
             break;
         }
