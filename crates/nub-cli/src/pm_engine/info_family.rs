@@ -302,8 +302,16 @@ fn run_list(typed: &str, args: &[String], force_long: bool) -> Result<i32> {
         cli.args.long = true;
     }
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
+    // `--json` (or `--format json`) must emit a parseable empty array on
+    // stdout in the never-installed state, not empty-stdout + a prose note.
+    let want_json = cli.args.json || cli.args.format == aube::commands::list::ListFormat::Json;
+    let empty = if want_json {
+        EmptyState::ListJson
+    } else {
+        EmptyState::Prose(MSG_POPULATE)
+    };
     if !cli.args.global
-        && let Some(code) = no_lockfile_short_circuit(EngineRoot::WorkspaceOrProject, MSG_POPULATE)?
+        && let Some(code) = no_lockfile_short_circuit(EngineRoot::WorkspaceOrProject, empty)?
     {
         return Ok(code);
     }
@@ -321,7 +329,9 @@ fn run_why(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Done(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
-    if let Some(code) = no_lockfile_short_circuit(EngineRoot::WorkspaceOrProject, MSG_FIRST)? {
+    if let Some(code) =
+        no_lockfile_short_circuit(EngineRoot::WorkspaceOrProject, EmptyState::Prose(MSG_FIRST))?
+    {
         return Ok(code);
     }
     let filter = effective_filter(&cli.filter);
@@ -347,7 +357,14 @@ fn run_outdated(typed: &str, args: &[String]) -> Result<i32> {
     } else {
         EngineRoot::Project
     };
-    if let Some(code) = no_lockfile_short_circuit(root, MSG_FIRST)? {
+    // `--json` must emit a parseable empty object on stdout in the
+    // never-installed state, not empty-stdout + a prose note.
+    let empty = if cli.args.json {
+        EmptyState::OutdatedJson
+    } else {
+        EmptyState::Prose(MSG_FIRST)
+    };
+    if let Some(code) = no_lockfile_short_circuit(root, empty)? {
         return Ok(code);
     }
     finish_code(
@@ -363,7 +380,9 @@ fn run_query(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Done(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
-    if let Some(code) = no_lockfile_short_circuit(EngineRoot::WorkspaceOrProject, MSG_FIRST)? {
+    if let Some(code) =
+        no_lockfile_short_circuit(EngineRoot::WorkspaceOrProject, EmptyState::Prose(MSG_FIRST))?
+    {
         return Ok(code);
     }
     let filter = effective_filter(&cli.filter);
@@ -412,7 +431,9 @@ fn run_licenses(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Done(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
-    if let Some(code) = no_lockfile_short_circuit(EngineRoot::Project, MSG_FIRST)? {
+    if let Some(code) =
+        no_lockfile_short_circuit(EngineRoot::Project, EmptyState::Prose(MSG_FIRST))?
+    {
         return Ok(code);
     }
     finish(
@@ -428,7 +449,9 @@ fn run_deprecations(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Done(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
-    if let Some(code) = no_lockfile_short_circuit(EngineRoot::Project, MSG_FIRST)? {
+    if let Some(code) =
+        no_lockfile_short_circuit(EngineRoot::Project, EmptyState::Prose(MSG_FIRST))?
+    {
         return Ok(code);
     }
     // `deprecations` is the one info verb whose engine `run` returns its
@@ -543,13 +566,31 @@ enum EngineRoot {
     WorkspaceOrProject,
 }
 
-/// When the engine's read directory holds no lockfile, print the engine's
-/// own message (rebranded) and exit 0 — exactly what the engine would do,
-/// minus the brand leak. `None` means "let the engine run": either a
-/// lockfile exists, no root resolves (the engine's own error is
-/// brand-clean), or only a binary `bun.lockb` exists (the engine's
-/// actionable error is brand-clean too).
-fn no_lockfile_short_circuit(root: EngineRoot, msg: &str) -> Result<Option<i32>> {
+/// What the no-lockfile short-circuit emits in place of running the engine.
+/// The default `Prose` path prints the engine's rebranded "No lockfile found…"
+/// note to stderr (exit 0). The JSON variants exist because a `--json` query
+/// must ALWAYS emit parseable JSON on stdout — never empty-stdout + a prose
+/// stderr note — so `nub list --json | jq` / `nub outdated --json | jq`
+/// behave like pnpm's, which emit the empty shape (an array of importer
+/// headers for `list`, `{}` for `outdated`) in the never-installed state.
+enum EmptyState<'a> {
+    /// Rebranded engine note to stderr; exit 0 (`why`, `query`, `licenses`,
+    /// `deprecations`, and the non-JSON `list`/`outdated` paths).
+    Prose(&'a str),
+    /// Empty `list --json` shape: a JSON array with one importer header
+    /// (`{name, version, path}`) on stdout; exit 0.
+    ListJson,
+    /// Empty `outdated --json` shape: `{}` on stdout; exit 0.
+    OutdatedJson,
+}
+
+/// When the engine's read directory holds no lockfile, emit the no-install
+/// empty state (see [`EmptyState`]) and exit 0 — exactly what the engine
+/// would do, minus the brand leak and the missing-JSON divergence. `None`
+/// means "let the engine run": either a lockfile exists, no root resolves
+/// (the engine's own error is brand-clean), or only a binary `bun.lockb`
+/// exists (the engine's actionable error is brand-clean too).
+fn no_lockfile_short_circuit(root: EngineRoot, empty: EmptyState<'_>) -> Result<Option<i32>> {
     let cwd = std::env::current_dir()?;
     let dir = match root {
         EngineRoot::Project => find_project_root(&cwd),
@@ -563,10 +604,45 @@ fn no_lockfile_short_circuit(root: EngineRoot, msg: &str) -> Result<Option<i32>>
     if aube_lockfile::detect_existing_lockfile_kind(&dir).is_none()
         && !dir.join("bun.lockb").exists()
     {
-        present::info(msg);
+        match empty {
+            EmptyState::Prose(msg) => present::info(msg),
+            EmptyState::OutdatedJson => println!("{{}}"),
+            EmptyState::ListJson => println!("{}", empty_list_json(&dir)),
+        }
         return Ok(Some(0));
     }
     Ok(None)
+}
+
+/// Build the empty `list --json` shape: a one-element array whose object
+/// carries the project's `name`/`version`/`path`, matching the importer
+/// header nub's populated `list --json` emits (and pnpm's empty-state array).
+/// Reads the project's `package.json` at `dir`; falls back to `(unnamed)` and
+/// omits `version` when the manifest is missing/unreadable, mirroring the
+/// engine's own `unwrap_or_else` for the name field.
+fn empty_list_json(dir: &Path) -> String {
+    let manifest = aube_manifest::PackageJson::from_path(&dir.join("package.json")).ok();
+    let mut importer = serde_json::Map::new();
+    importer.insert(
+        "name".to_string(),
+        serde_json::Value::String(
+            manifest
+                .as_ref()
+                .and_then(|m| m.name.clone())
+                .unwrap_or_else(|| "(unnamed)".to_string()),
+        ),
+    );
+    if let Some(v) = manifest.as_ref().and_then(|m| m.version.clone()) {
+        importer.insert("version".to_string(), serde_json::Value::String(v));
+    }
+    importer.insert(
+        "path".to_string(),
+        serde_json::Value::String(dir.display().to_string()),
+    );
+    serde_json::to_string_pretty(&serde_json::Value::Array(vec![serde_json::Value::Object(
+        importer,
+    )]))
+    .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Replica of the engine's `dirs::find_project_root`: nearest ancestor with

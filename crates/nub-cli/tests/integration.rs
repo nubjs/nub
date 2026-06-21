@@ -2941,27 +2941,53 @@ fn lifecycle_hooks() {
 
 #[test]
 fn run_without_script_lists_available_scripts() {
-    // `nub run` with no script name lists available scripts (A46) instead of a
-    // raw clap "required argument" error — same shape as the missing-named path.
+    // `nub run` with no script name mirrors `pnpm run` with no args: exit 0,
+    // listing the package's scripts on stdout (D3). This is distinct from
+    // nub's "no implicit script shortcuts" stance, which only bans bareword
+    // `nub test`/`nub start`; the explicit no-arg `run` verb legitimately
+    // mirrors pnpm so CI that branches on `pnpm run`'s exit code matches.
     let fixture = fixtures_dir().join("lifecycle");
     let output = Command::new(nub_binary())
         .arg("run")
         .current_dir(&fixture)
         .output()
         .expect("failed to spawn nub");
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
         Some(0),
-        "`nub run` with no script must not exit 0"
+        "`nub run` with no script must exit 0 like `pnpm run`"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("Available scripts"),
-        "should list scripts: {stderr}"
+        stdout.contains("Available scripts"),
+        "should list scripts on stdout: {stdout}"
     );
     assert!(
-        stderr.contains("greet"),
-        "should include the greet script: {stderr}"
+        stdout.contains("greet"),
+        "should include the greet script: {stdout}"
+    );
+}
+
+#[test]
+fn run_without_script_in_scriptless_package_exits_zero() {
+    // No scripts at all: `nub run` prints pnpm's exact "There are no scripts
+    // specified." message and exits 0 (D3 / pnpm parity).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"name":"scriptless","version":"1.0.0"}"#,
+    )
+    .expect("write package.json");
+    let output = Command::new(nub_binary())
+        .arg("run")
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to spawn nub");
+    assert_eq!(output.status.code(), Some(0), "must exit 0 with no scripts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("There are no scripts specified."),
+        "should print pnpm's no-scripts message: {stdout}"
     );
 }
 

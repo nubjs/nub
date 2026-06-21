@@ -2164,10 +2164,22 @@ fn run_script(
     // No script name (`nub run`): list available scripts instead of a raw clap
     // "required argument" error — same shape as the missing-named-script path.
     let Some(script) = script else {
-        bail!(
-            "no script specified\n\nAvailable scripts:\n{}",
-            list_scripts(&project.manifest)
-        );
+        // `nub run` with no script name mirrors `pnpm run` with no args: it is
+        // not an error (exit 0), it lists the package's runnable scripts. This
+        // is distinct from nub's "no implicit script shortcuts" stance (which
+        // bans bareword `nub test`/`nub start`); the explicit no-arg `run` verb
+        // legitimately mirrors pnpm here so CI that probes `pnpm run` and
+        // branches on the exit code sees the same success.
+        match project.manifest.get("scripts") {
+            Some(serde_json::Value::Object(map)) if !map.is_empty() => {
+                println!("Available scripts:");
+                println!("{}", list_scripts(&project.manifest));
+            }
+            _ => {
+                println!("There are no scripts specified.");
+            }
+        }
+        return Ok(0);
     };
 
     // Workspace-wide execution: -r, --filter, or --parallel.

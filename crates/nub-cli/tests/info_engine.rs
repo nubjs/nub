@@ -180,6 +180,50 @@ fn missing_lockfile_reports_the_nub_install_hint_and_exits_zero() {
     assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
+/// `--json` must ALWAYS emit parseable JSON on stdout — never empty-stdout +
+/// a prose stderr note — in the never-installed (no-lockfile) state, so
+/// `nub list --json | jq` / `nub outdated --json | jq` behave like pnpm's,
+/// which emit the empty shape (an importer-header array for `list`, `{}` for
+/// `outdated`). Regression for D2.
+#[test]
+fn json_queries_emit_parseable_empty_shape_without_a_lockfile() {
+    let dir = pm_tmpdir("nolock-json");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"nolock-json","version":"2.3.4","dependencies":{"is-positive":"3.1.0"}}"#,
+    )
+    .unwrap();
+
+    // list --json: a one-element array with the project's name/version/path.
+    let (stdout, stderr, code) = run_nub(&dir, &["list", "--json"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("list --json must be parseable JSON");
+    assert_eq!(v[0]["name"], "nolock-json", "importer name: {stdout}");
+    assert_eq!(v[0]["version"], "2.3.4", "importer version: {stdout}");
+    assert!(v[0]["path"].is_string(), "importer path: {stdout}");
+
+    // `--format json` (the long spelling) goes through the same path.
+    let (stdout, _, code) = run_nub(&dir, &["list", "--format", "json"]);
+    assert_eq!(code, 0);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok(),
+        "list --format json must be parseable JSON: {stdout}"
+    );
+
+    // outdated --json: the empty object.
+    let (stdout, stderr, code) = run_nub(&dir, &["outdated", "--json"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(stdout.trim())
+            .expect("outdated --json must be parseable JSON"),
+        serde_json::json!({}),
+        "outdated --json empty shape must be {{}}: {stdout}"
+    );
+
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+}
+
 /// The path verbs print the resolved project locations without any install,
 /// `check` on a never-installed project reports zero packages and exits 0,
 /// and `licenses` accepts pnpm's documented `list` spelling beside the
