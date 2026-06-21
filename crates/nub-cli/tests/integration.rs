@@ -1452,90 +1452,142 @@ fn workspace_topological_order() {
     assert!(utils_pos < app_pos, "utils should build before app");
 }
 
-/// --parallel runs all packages concurrently — wall clock should be
-/// ~1 script duration, not N * duration.
+/// --parallel runs all packages concurrently, not sequentially.
 ///
-/// The intent is a RELATIVE speedup: the three `slow` scripts each sleep
-/// ~1s, so a parallel run is bounded by a single sleep (~1s of work) while a
-/// sequential run pays all three (~3s). We assert parallel is meaningfully
-/// faster than serial on the SAME fixture rather than against an absolute
-/// wall-clock budget — the old `< 3s` budget conflated the runner's parallel
-/// speedup with cold debug-binary transpile/startup (~3.4s cold, ~1.1s warm),
-/// which made it flake under test-harness parallelism. A warm-up run primes
-/// the cache so both timed runs measure the steady-state path, and the
-/// comparison stays robust regardless of absolute startup cost.
+/// Uses a structural concurrency assertion: each `slow-stamp` script writes
+/// millisecond-precision start/end timestamps to files in a temp directory.
+/// After the parallel run, the test verifies that the three execution windows
+/// overlap (at least two packages were running at the same time), which is
+/// impossible in a truly serial execution.  The serial control run
+/// (--workspace-concurrency=1) is checked to produce non-overlapping windows
+/// so the assertion is meaningful — it would catch a regression where
+/// --parallel silently ran packages one at a time.
+///
+/// This replaces the previous wall-clock delta approach (parallel ≥1s faster
+/// than serial) which was flaky on contended Windows CI runners.
 #[test]
 fn workspace_parallel_timing() {
+    use std::fs;
+
     let fixture = fixtures_dir().join("monorepo-deps");
+    let stamp_dir = std::env::temp_dir().join(format!(
+        "nub-parallel-timing-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    ));
+    fs::create_dir_all(&stamp_dir).expect("failed to create stamp dir");
 
-    // Warm-up: prime the transpile/startup cache so the timed runs below
-    // measure steady-state execution, not first-run cold startup.
-    let warm = Command::new(nub_binary())
-        .args(["run", "-r", "--parallel", "slow"])
-        .current_dir(&fixture)
-        .output()
-        .expect("failed to spawn nub");
-    assert_eq!(
-        warm.status.code(),
-        Some(0),
-        "warm-up run failed: stderr={}\nstdout={}",
-        String::from_utf8_lossy(&warm.stderr),
-        String::from_utf8_lossy(&warm.stdout)
-    );
+    // Helper: read a u64 millisecond timestamp from a stamp file.
+    let read_stamp = |name: &str| -> u64 {
+        let path = stamp_dir.join(name);
+        fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("missing stamp file {name}: {e}"))
+            .trim()
+            .parse::<u64>()
+            .unwrap_or_else(|e| panic!("bad stamp in {name}: {e}"))
+    };
 
-    // Timed parallel run.
-    let start = std::time::Instant::now();
+    // Helper: returns true if two [start, end] intervals overlap.
+    let overlaps = |s1: u64, e1: u64, s2: u64, e2: u64| s1 < e2 && s2 < e1;
+
+    // ── Parallel run ──────────────────────────────────────────────────────────
     let output = Command::new(nub_binary())
-        .args(["run", "-r", "--parallel", "slow"])
+        .args(["run", "-r", "--parallel", "slow-stamp"])
         .current_dir(&fixture)
+        .env("NUB_STAMP_DIR", &stamp_dir)
         .output()
         .expect("failed to spawn nub");
-    let parallel_elapsed = start.elapsed();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
         Some(0),
-        "stderr: {stderr}\nstdout: {stdout}"
+        "parallel run failed\nstderr: {stderr}\nstdout: {stdout}"
     );
     assert!(stdout.contains("core-done"), "core missing: {stdout}");
     assert!(stdout.contains("utils-done"), "utils missing: {stdout}");
     assert!(stdout.contains("app-done"), "app missing: {stdout}");
 
-    // Timed serial run (concurrency=1) on the now-warm cache for the
-    // relative comparison.
-    let start = std::time::Instant::now();
+    let core_s = read_stamp("core-start");
+    let core_e = read_stamp("core-end");
+    let utils_s = read_stamp("utils-start");
+    let utils_e = read_stamp("utils-end");
+    let app_s = read_stamp("app-start");
+    let app_e = read_stamp("app-end");
+
+    // At least two of the three execution windows must overlap, proving that
+    // packages ran concurrently.  On a loaded runner one pair might complete
+    // before another starts, but all three running strictly in sequence is
+    // impossible when --parallel is working.
+    let any_overlap = overlaps(core_s, core_e, utils_s, utils_e)
+        || overlaps(core_s, core_e, app_s, app_e)
+        || overlaps(utils_s, utils_e, app_s, app_e);
+    assert!(
+        any_overlap,
+        "parallel run: no execution windows overlap — packages ran sequentially\n\
+         core:  {}..{}\n\
+         utils: {}..{}\n\
+         app:   {}..{}",
+        core_s, core_e, utils_s, utils_e, app_s, app_e
+    );
+
+    // ── Serial control run (concurrency=1) ───────────────────────────────────
+    // Clear stamp files so we can re-read fresh values.
+    for name in [
+        "core-start",
+        "core-end",
+        "utils-start",
+        "utils-end",
+        "app-start",
+        "app-end",
+    ] {
+        let _ = fs::remove_file(stamp_dir.join(name));
+    }
+
     let serial = Command::new(nub_binary())
         .args([
             "run",
             "-r",
             "--parallel",
             "--workspace-concurrency=1",
-            "slow",
+            "slow-stamp",
         ])
         .current_dir(&fixture)
+        .env("NUB_STAMP_DIR", &stamp_dir)
         .output()
         .expect("failed to spawn nub");
-    let serial_elapsed = start.elapsed();
     assert_eq!(
         serial.status.code(),
         Some(0),
-        "serial run failed: stderr={}\nstdout={}",
+        "serial control run failed\nstderr: {}\nstdout: {}",
         String::from_utf8_lossy(&serial.stderr),
         String::from_utf8_lossy(&serial.stdout)
     );
 
-    // Parallel must be meaningfully faster than serial. Three 1s sleeps mean
-    // serial pays ~3s of sleep + 3 startups while parallel pays ~1s of sleep
-    // + 1 startup-batch; a >=1s gap is a conservative floor that catches a
-    // genuine regression (parallelism broken → both ~equal) without flaking
-    // on absolute startup cost.
+    let core_s = read_stamp("core-start");
+    let core_e = read_stamp("core-end");
+    let utils_s = read_stamp("utils-start");
+    let utils_e = read_stamp("utils-end");
+    let app_s = read_stamp("app-start");
+    let app_e = read_stamp("app-end");
+
+    // With concurrency=1 no two windows should overlap — this validates that
+    // the overlap assertion above is meaningful and not trivially always true.
+    let serial_overlap = overlaps(core_s, core_e, utils_s, utils_e)
+        || overlaps(core_s, core_e, app_s, app_e)
+        || overlaps(utils_s, utils_e, app_s, app_e);
     assert!(
-        parallel_elapsed + std::time::Duration::from_secs(1) <= serial_elapsed,
-        "parallel ({}ms) should be >=1s faster than serial ({}ms) — not concurrent",
-        parallel_elapsed.as_millis(),
-        serial_elapsed.as_millis()
+        !serial_overlap,
+        "concurrency=1 control: windows overlap — expected strictly sequential\n\
+         core:  {}..{}\n\
+         utils: {}..{}\n\
+         app:   {}..{}",
+        core_s, core_e, utils_s, utils_e, app_s, app_e
     );
+
+    let _ = fs::remove_dir_all(&stamp_dir);
 }
 
 /// --workspace-concurrency=1 forces sequential execution even with --parallel.
