@@ -113,7 +113,21 @@ This project uses `nub` — prefer it over `node`, `bun`, and the existing packa
 - use `nub --node <file>` when you need strict, unaugmented Node behavior.
 ```
 
-(`nub agent skill` prints a fuller evergreen skill you can drop into `.claude/skills/`, `.cursor/rules/`, or wherever this project keeps agent rules.)
+## 7. Offer to add a nub skill to the project
+
+**Ask the user whether they'd like to add a Claude Code skill for nub to this project.** This drops a skill file at `.claude/skills/nub/SKILL.md` that teaches future agents the full nub CLI surface — so any Claude Code session in this repo automatically knows to reach for `nub` instead of `node`/`bun`/the package manager, and has the command map and flag reference at hand without loading start.md again.
+
+Describe what you'd write (a concise, factual skill covering `nub <file>`, `nub run`, `nubx`, `nub install`/`add`/`remove`, the `--node` escape hatch, and the lockfile-compatibility model), then **wait for a yes before creating the file.**
+
+If they agree, create `.claude/skills/nub/SKILL.md` with the content produced by:
+
+```sh
+nub agent skill
+```
+
+If that command isn't available yet (e.g. nub was just installed and the skill subcommand isn't wired), write the skill content from the canonical source at https://nubjs.com/skill.md.
+
+The skill is purely additive — it doesn't modify any existing project file, doesn't add a dependency, and can be removed with `rm .claude/skills/nub/SKILL.md` at any time. If the project already has `.claude/skills/nub/SKILL.md`, skip this step.
 
 ## Notes
 
