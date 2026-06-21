@@ -5,6 +5,7 @@ import {
   DocsBody,
   DocsDescription,
   DocsTitle,
+  EditOnGitHub,
 } from 'fumadocs-ui/page';
 import { notFound } from 'next/navigation';
 import { AIActions } from '@/components/ai-actions';
@@ -42,6 +43,23 @@ function TocGitHubLink() {
   );
 }
 
+/* Small footer rendered below the prev/next pager: GitHub star link. */
+function PageStarFooter() {
+  return (
+    <div className="mt-6 flex items-center justify-center">
+      <a
+        href="https://github.com/nubjs/nub"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center gap-1.5 text-xs text-fd-muted-foreground transition-colors hover:text-fd-foreground"
+      >
+        <GitHubIcon className="h-3 w-3 shrink-0" />
+        <span>Star Nub on GitHub</span>
+      </a>
+    </div>
+  );
+}
+
 export default async function Page(props: {
   params: Promise<{ slug?: string[] }>;
 }) {
@@ -51,8 +69,19 @@ export default async function Page(props: {
 
   const MDXContent = page.data.body;
 
+  /* Construct the GitHub edit URL from the virtual file path fumadocs exposes on
+     the page object. The path is relative to the docs content root (e.g.
+     "runtime/index.mdx"), so we prepend the repo-relative prefix to build the
+     full edit URL. */
+  const editHref = `https://github.com/nubjs/nub/edit/main/site/content/docs/${(page as { path?: string }).path ?? ''}`;
+
   return (
-    <DocsPage toc={page.data.toc} full={page.data.full} tableOfContent={{ footer: <TocGitHubLink /> }}>
+    <DocsPage
+      toc={page.data.toc}
+      full={page.data.full}
+      tableOfContent={{ footer: <TocGitHubLink /> }}
+      footer={{ children: <PageStarFooter /> }}
+    >
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription>{page.data.description}</DocsDescription>
       <AIActions
@@ -65,6 +94,7 @@ export default async function Page(props: {
       <DocsBody role="main">
         <MDXContent components={getMDXComponents()} />
       </DocsBody>
+      <EditOnGitHub href={editHref} />
     </DocsPage>
   );
 }
