@@ -36,39 +36,29 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 const DOCS_ROOT = join(REPO_ROOT, "site", "content", "docs");
 
-// github-slugger is fumadocs-core's heading-slug dependency; resolve it from
-// the site workspace so we slugify identically to the rendered site. It is a
-// transitive dep (pnpm-hoisted into .pnpm), so try the normal resolver first,
-// then fall back to scanning the pnpm virtual store.
+// github-slugger slugifies headings identically to the rendered site (it is
+// fumadocs-core's heading-slug dependency, pinned to the SAME version in
+// site/package.json so anchor matching stays byte-exact). It is an EXPLICIT
+// devDependency of the site workspace, so it links into site/node_modules and
+// resolves with a plain require — no pnpm virtual-store scanning. github-slugger
+// is ESM-only ("type":"module"); Node 22+/24 require(esm) returns its default
+// export. Resolving from site/ keeps it independent of the repo-root install.
 function resolveGithubSlugger(): any {
-  // 1. Normal resolution (works under npm flat installs / if hoisted).
   try {
-    return require(require.resolve("github-slugger", {
-      paths: [join(REPO_ROOT, "site")],
-    })).default;
-  } catch {
-    /* fall through to the pnpm store scan */
+    return require(
+      require.resolve("github-slugger", { paths: [join(REPO_ROOT, "site")] }),
+    ).default;
+  } catch (err) {
+    console.error(
+      "check-docs-links: could not resolve github-slugger from site/node_modules.",
+    );
+    console.error("Run `pnpm install` in site/ first.");
+    console.error(String((err as Error)?.message ?? err));
+    process.exit(2);
   }
-  // 2. pnpm virtual store: site/node_modules/.pnpm/github-slugger@*/node_modules/github-slugger
-  const pnpmDir = join(REPO_ROOT, "site", "node_modules", ".pnpm");
-  if (existsSync(pnpmDir)) {
-    for (const entry of readdirSync(pnpmDir)) {
-      if (!entry.startsWith("github-slugger@")) continue;
-      const pkg = join(pnpmDir, entry, "node_modules", "github-slugger");
-      if (existsSync(pkg)) return require(pkg).default;
-    }
-  }
-  return null;
 }
 
 const GithubSlugger = resolveGithubSlugger();
-if (!GithubSlugger) {
-  console.error(
-    "check-docs-links: could not resolve github-slugger from site/node_modules.",
-  );
-  console.error("Run `pnpm install` (or `npm install`) in site/ first.");
-  process.exit(2);
-}
 
 // ---- file discovery ---------------------------------------------------------
 

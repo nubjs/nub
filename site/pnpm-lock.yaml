@@ -51,6 +51,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.0
         version: 19.2.3(@types/react@19.2.15)
+      github-slugger:
+        specifier: 2.0.0
+        version: 2.0.0
       postcss:
         specifier: ^8.4.49
         version: 8.5.15

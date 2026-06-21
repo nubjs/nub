@@ -25,6 +25,7 @@
     "@types/node": "^22.10.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "github-slugger": "2.0.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^4.3.0",
     "typescript": "^5.7.2"
