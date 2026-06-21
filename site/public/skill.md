@@ -77,7 +77,7 @@ nub run --node test      # nub's CLI orchestration, runtime augmentation off
 nubx --node prisma generate
 ```
 
-It still runs the project's pinned Node; it only turns augmentation off. Use it to confirm behavior against vanilla Node. (There is no `NODE_COMPAT=1` env var, and no `--node` on `nub watch` — for strict-Node watch, type `node --watch` in your shell. Your shell's bare `node` is always your real, unaugmented Node.)
+It still runs the project's pinned Node; it only turns augmentation off. Use it to confirm behavior against vanilla Node. A truthy `NODE_COMPAT` env var (`1`/`true`/`yes`) does the same thing for a whole process tree — the persistent form of `--node`, inherited by every descendant `node`/`nub` so you don't repeat the flag. It applies to every runtime entrypoint, `nub watch` included (which has no `--node` flag of its own). Your shell's bare `node` is always your real, unaugmented Node.
 
 ## Type-checking the added surfaces
 

@@ -21,7 +21,7 @@ For GitHub Actions, use [`nubjs/setup-nub`](https://github.com/nubjs/setup-nub) 
 
 ```diff
 - - uses: actions/setup-node@v4
-+ - uses: nubjs/setup-nub@v1
++ - uses: nubjs/setup-nub@v0
 ```
 
 It installs Nub, can pre-provision the project's Node, and can cache Nub's store.

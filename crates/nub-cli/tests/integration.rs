@@ -3934,6 +3934,214 @@ fn node_hijack_node_flag_opts_out_of_augmentation() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A truthy `NODE_COMPAT` env var is the tree-wide augmentation opt-out — the
+/// persistent form of `--node`. It must force vanilla Node on BOTH a direct
+/// `nub <file>` run and the `node`-PATH-hijack (so `NODE_COMPAT=1 node foo.js`
+/// runs plain), while leaving the default (unset) augmented. `.env` eager-load
+/// is the discriminator (only loaded when augmented). Unix-only (the hijack is
+/// reached via an argv0=`node` symlink).
+#[cfg(unix)]
+#[test]
+fn node_compat_env_forces_vanilla_tree_wide() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nub-nodecompat-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let shim_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let node_shim = shim_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &node_shim).expect("symlink nub → node");
+
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), r#"{"name":"nodecompat"}"#).unwrap();
+    std::fs::write(proj.join(".env"), "COMPAT_ENV=from_dotenv\n").unwrap();
+    std::fs::write(
+        proj.join("probe.js"),
+        "console.log('NODE_OPTIONS=' + (process.env.NODE_OPTIONS || ''));\n\
+         console.log('execArgv=' + process.execArgv.join(' '));\n\
+         console.log('COMPAT_ENV=' + (process.env.COMPAT_ENV || ''));\n",
+    )
+    .unwrap();
+
+    // Drive the file run two ways: the hijacked `node` symlink, and `nub` itself.
+    let run = |bin: &std::path::Path, args: &[&str], compat: Option<&str>| {
+        let mut cmd = Command::new(bin);
+        cmd.args(args)
+            .current_dir(&proj)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env_remove("NODE_COMPAT");
+        if let Some(v) = compat {
+            cmd.env("NODE_COMPAT", v);
+        }
+        cmd.output().expect("spawn")
+    };
+
+    let assert_vanilla = |out: &std::process::Output, ctx: &str| {
+        let s = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{ctx} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !s.contains("preload"),
+            "{ctx} must run vanilla (no preload): {s}"
+        );
+        assert!(
+            s.contains("NODE_OPTIONS=\n") || s.contains("NODE_OPTIONS=$"),
+            "{ctx} must not inject NODE_OPTIONS: {s:?}"
+        );
+        assert!(
+            s.contains("execArgv=\n"),
+            "{ctx} must have empty execArgv: {s:?}"
+        );
+        assert!(
+            s.contains("COMPAT_ENV=\n") || s.contains("COMPAT_ENV=$"),
+            "{ctx} must NOT load `.env` (compat mode): {s:?}"
+        );
+    };
+
+    // 1. Default (NODE_COMPAT unset) via the hijack stays AUGMENTED — `.env` loads.
+    let aug = run(&node_shim, &["probe.js"], None);
+    let aug_out = String::from_utf8_lossy(&aug.stdout);
+    assert_eq!(
+        aug.status.code(),
+        Some(0),
+        "default hijack run failed: {}",
+        String::from_utf8_lossy(&aug.stderr)
+    );
+    assert!(
+        aug_out.contains("COMPAT_ENV=from_dotenv"),
+        "default (no NODE_COMPAT) `node probe.js` must stay augmented (`.env` loads): {aug_out}"
+    );
+
+    // 2. NODE_COMPAT=1 via the hijack forces vanilla.
+    assert_vanilla(
+        &run(&node_shim, &["probe.js"], Some("1")),
+        "NODE_COMPAT=1 node probe.js",
+    );
+
+    // 3. NODE_COMPAT=1 on a direct `nub <file>` run forces vanilla too.
+    assert_vanilla(
+        &run(&nub_binary(), &["probe.js"], Some("1")),
+        "NODE_COMPAT=1 nub probe.js",
+    );
+
+    // 4. Truthy variants (`true`, case-insensitive) also force compat; falsy (`0`)
+    //    does not (stays augmented).
+    assert_vanilla(
+        &run(&node_shim, &["probe.js"], Some("TRUE")),
+        "NODE_COMPAT=TRUE",
+    );
+    let falsy = run(&node_shim, &["probe.js"], Some("0"));
+    let falsy_out = String::from_utf8_lossy(&falsy.stdout);
+    assert!(
+        falsy_out.contains("COMPAT_ENV=from_dotenv"),
+        "NODE_COMPAT=0 must be falsy — run stays augmented (`.env` loads): {falsy_out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `nub watch` has no `--node` flag, but a truthy `NODE_COMPAT` (the ambient
+/// tree-wide opt-out) must still force vanilla — no flag injection, no preload,
+/// no eager `.env*`. The watch loop never exits on its own, so the probe writes
+/// its augmentation findings to a sentinel file on its first run; the test polls
+/// for the file, then kills the watcher. Unix-only (uses a process kill).
+#[cfg(unix)]
+#[test]
+fn node_compat_env_forces_vanilla_under_watch() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nub-watchcompat-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"watchcompat"}"#).unwrap();
+    std::fs::write(dir.join(".env"), "WATCH_ENV=from_dotenv\n").unwrap();
+    let out_file = dir.join("probe-out.txt");
+    // Write the augmentation snapshot to the sentinel file (not stdout — avoids
+    // racing `--watch`'s own control output through the pipe).
+    std::fs::write(
+        dir.join("probe.js"),
+        format!(
+            "const fs=require('fs');\n\
+             fs.writeFileSync({out:?},\n\
+               'NODE_OPTIONS='+(process.env.NODE_OPTIONS||'')+'\\n'+\n\
+               'execArgv='+process.execArgv.join(' ')+'\\n'+\n\
+               'WATCH_ENV='+(process.env.WATCH_ENV||'')+'\\n');\n",
+            out = out_file.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(nub_binary())
+        .args(["watch", "probe.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .env("NODE_COMPAT", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn nub watch");
+
+    // Poll for the sentinel (the watched run executed); cap the wait so a failure
+    // doesn't hang the suite.
+    let mut snapshot = None;
+    for _ in 0..100 {
+        if let Ok(s) = std::fs::read_to_string(&out_file)
+            && s.contains("WATCH_ENV=")
+        {
+            snapshot = Some(s);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let snapshot = snapshot.expect("`nub watch` probe never ran (no sentinel file)");
+    assert!(
+        !snapshot.contains("preload"),
+        "NODE_COMPAT=1 `nub watch` must run vanilla — no preload: {snapshot}"
+    );
+    assert!(
+        snapshot.contains("NODE_OPTIONS=\n"),
+        "NODE_COMPAT=1 `nub watch` must not inject NODE_OPTIONS: {snapshot:?}"
+    );
+    // execArgv carries only the watch flags themselves (`--watch`,
+    // `--watch-preserve-output`) — never an injected augmentation flag like
+    // `--enable-source-maps` / `--experimental-*` / `--require` / `--import`.
+    let exec_argv = snapshot
+        .lines()
+        .find_map(|l| l.strip_prefix("execArgv="))
+        .unwrap_or("");
+    for tok in exec_argv.split_whitespace() {
+        assert!(
+            tok == "--watch" || tok == "--watch-preserve-output",
+            "NODE_COMPAT=1 `nub watch` execArgv must hold only watch flags, found {tok:?}: {snapshot:?}"
+        );
+    }
+    assert!(
+        snapshot.contains("WATCH_ENV=\n"),
+        "NODE_COMPAT=1 `nub watch` must NOT eager-load `.env` (compat mode): {snapshot:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The npm/pnpm aliases map to their canonical flags (`-F` is `--filter`, `-s`
 /// is `--silent`, `--workspaces` is `--recursive`). One run exercises all three
 /// at once (no per-alias test): `-F` selects a member (proving the alias plus

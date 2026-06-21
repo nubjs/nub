@@ -379,6 +379,33 @@ mod tests {
     }
 
     #[test]
+    fn wasm_modules_injected_only_in_the_two_flagged_bands() {
+        // Wasm ES-module imports: flag exists since Node 12 (below the floor),
+        // default-on at 24.5.0 (24.x) and 22.19.0 (22.x) via #57038; never
+        // default-on on the 23.x line (EOL before the backport). Inject on
+        // [18.19, 22.19) ∪ [23.0, 24.5).
+        let w = "--experimental-wasm-modules";
+        assert!(compute_inject_flags(v(18, 19, 0), &[], None, false).contains(&w)); // floor
+        assert!(compute_inject_flags(v(22, 13, 0), &[], None, false).contains(&w));
+        assert!(compute_inject_flags(v(22, 18, 0), &[], None, false).contains(&w));
+        assert!(!compute_inject_flags(v(22, 19, 0), &[], None, false).contains(&w)); // default-on 22.x
+        assert!(compute_inject_flags(v(23, 2, 0), &[], None, false).contains(&w)); // 23.x stays flagged
+        assert!(compute_inject_flags(v(24, 4, 0), &[], None, false).contains(&w));
+        assert!(!compute_inject_flags(v(24, 5, 0), &[], None, false).contains(&w)); // default-on 24.x
+        assert!(!compute_inject_flags(v(26, 0, 0), &[], None, false).contains(&w));
+    }
+
+    #[test]
+    fn shadow_realm_injected_across_the_whole_floor() {
+        // ShadowRealm: flag exists from 18.13/19.0 (below the floor), never made
+        // default-on through Node 26 (TC39 Stage 3). Inject from 18.19 to infinity.
+        let s = "--experimental-shadow-realm";
+        assert!(compute_inject_flags(v(18, 19, 0), &[], None, false).contains(&s));
+        assert!(compute_inject_flags(v(22, 19, 0), &[], None, false).contains(&s));
+        assert!(compute_inject_flags(v(26, 0, 0), &[], None, false).contains(&s));
+    }
+
+    #[test]
     fn user_opt_out_via_argv() {
         let argv = vec!["--no-experimental-vm-modules".to_string()];
         let flags = compute_inject_flags(v(22, 15, 0), &argv, None, false);

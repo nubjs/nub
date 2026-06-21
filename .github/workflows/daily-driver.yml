@@ -31,6 +31,10 @@ on:
       - "tests/daily-driver/**"
       - ".github/workflows/daily-driver.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 

@@ -30,6 +30,10 @@ on:
       - "tests/docker-smoke/**"
       - ".github/workflows/docker-smoke.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   glibc:
     name: Docker smoke (glibc, node:22-slim)

@@ -150,25 +150,48 @@ fn store_path_prints_the_nub_namespaced_store() {
     );
 }
 
-/// npmrc-first write routing: a pnpm-surface (non-npm-shared) key lands in
-/// the *project* `.npmrc`; an npm-shared key (registry) delegates to the
-/// engine and lands in the *user* `~/.npmrc`. No `config.toml` is ever
-/// written, and `config get` reads both values back.
-#[test]
-fn config_set_routes_npmrc_first_and_get_reads_it_back() {
-    let ctx = Ctx::new("config", MANIFEST);
+/// A pnpm-**v11** manifest. v11 reads scalar settings solely from
+/// `pnpm-workspace.yaml`, so non-shared scalars route there.
+const PNPM11_MANIFEST: &str =
+    r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"pnpm@11.3.0"}"#;
 
-    // Non-shared key → project .npmrc (top-level `set` shorthand).
+/// A pnpm-**v10** manifest. v10 reads scalars from `.npmrc`, so non-shared
+/// scalars route to the project `.npmrc` (round-trips with real pnpm@10) —
+/// NOT to `pnpm-workspace.yaml` (the bug this guards against).
+const PNPM10_MANIFEST: &str =
+    r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"pnpm@10.15.1"}"#;
+
+/// A pnpm incumbent with NO declared version: `packageManager: "pnpm"` (bare
+/// name, no `@version`) resolves to a pnpm surface with an unknown major,
+/// exercising the unknown-version default. (A versionless name is what
+/// `declared_pm_raw` returns name=pnpm/version=None for.)
+const PNPM_UNVERSIONED_MANIFEST: &str =
+    r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"pnpm"}"#;
+
+/// Generic pnpm-incumbent manifest used where the SCALAR home is irrelevant
+/// (the global read/write tests). Points at v11.
+const PNPM_MANIFEST: &str = PNPM11_MANIFEST;
+
+/// Write routing under a pnpm-**v11** incumbent: a non-shared scalar lands in
+/// `pnpm-workspace.yaml` (created if absent) for round-trip fidelity with pnpm
+/// v11; an npm-shared key (registry) delegates to the engine and lands in the
+/// *user* `~/.npmrc`. No `config.toml` is ever written, and `config get` reads
+/// both values back.
+#[test]
+fn config_set_under_pnpm_v11_incumbent_routes_scalar_to_workspace_yaml() {
+    let ctx = Ctx::new("config-pnpm11", PNPM11_MANIFEST);
+
+    // Non-shared scalar → pnpm-workspace.yaml (top-level `set` shorthand).
     let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    let project_npmrc = read(&ctx.project.join(".npmrc"));
+    let ws_yaml = read(&ctx.project.join("pnpm-workspace.yaml"));
     assert!(
-        project_npmrc.contains("auto-install-peers=false"),
-        "non-shared key must land in the project .npmrc: {project_npmrc:?}"
+        ws_yaml.contains("autoInstallPeers") && ws_yaml.contains("false"),
+        "non-shared scalar must land in pnpm-workspace.yaml under a pnpm incumbent: {ws_yaml:?}"
     );
     assert!(
-        !read(&ctx.home.join(".npmrc")).contains("auto-install-peers"),
-        "non-shared key must not touch the user .npmrc"
+        !read(&ctx.project.join(".npmrc")).contains("auto-install-peers"),
+        "under a pnpm incumbent the scalar must NOT go to the project .npmrc"
     );
 
     // npm-shared key → user ~/.npmrc via the engine's own writer.
@@ -179,7 +202,7 @@ fn config_set_routes_npmrc_first_and_get_reads_it_back() {
         "npm-shared key must land in the user .npmrc"
     );
 
-    // No config.toml anywhere (the npmrc-first rule's hard line).
+    // No config.toml anywhere (the hard line — nub never writes config.toml).
     for forbidden in [ctx.home.join("xdg-config"), ctx.project.join(".config")] {
         assert!(
             !forbidden.join("aube/config.toml").exists()
@@ -189,7 +212,7 @@ fn config_set_routes_npmrc_first_and_get_reads_it_back() {
         );
     }
 
-    // Read-back through both spellings of get.
+    // Read-back: the YAML value resolves (YAML outranks .npmrc, pnpm v11).
     let (stdout, _, code) = ctx.run(&["get", "autoInstallPeers"]);
     assert_eq!((stdout.trim(), code), ("false", 0));
     let (stdout, _, code) = ctx.run(&["config", "get", "registry"]);
@@ -206,6 +229,223 @@ fn config_set_routes_npmrc_first_and_get_reads_it_back() {
     assert!(
         !read(&ctx.project.join("package.json")).contains("allowBuilds"),
         "refused map write must not touch package.json"
+    );
+}
+
+/// A nub-identity manifest (declares `packageManager: nub@…`), so the config
+/// surface resolves to nub identity. Non-shared scalars route to the NEUTRAL
+/// project `.npmrc` — never a pnpm-branded `pnpm-workspace.yaml`, never
+/// `config.toml` (brand boundary). An npm-shared key still goes to `.npmrc`.
+const NUB_MANIFEST: &str =
+    r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"nub@0.1.0"}"#;
+
+#[test]
+fn config_set_under_nub_identity_routes_scalar_to_neutral_npmrc() {
+    let ctx = Ctx::new("config-nub", NUB_MANIFEST);
+
+    // Non-shared scalar → project .npmrc (the neutral home); NO pnpm-branded
+    // file is emitted under nub identity.
+    let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"),
+        "under nub identity a non-shared scalar must land in the neutral project .npmrc"
+    );
+    assert!(
+        !ctx.project.join("pnpm-workspace.yaml").exists(),
+        "nub identity must NEVER write a pnpm-branded pnpm-workspace.yaml (brand boundary)"
+    );
+
+    // No config.toml under nub identity either.
+    for forbidden in [ctx.home.join("xdg-config"), ctx.project.join(".config")] {
+        assert!(
+            !forbidden.join("aube/config.toml").exists()
+                && !forbidden.join("nub/config.toml").exists(),
+            "config set must never write a config.toml under {}",
+            forbidden.display()
+        );
+    }
+
+    let (stdout, _, code) = ctx.run(&["get", "autoInstallPeers"]);
+    assert_eq!((stdout.trim(), code), ("false", 0));
+}
+
+/// Write routing under a pnpm-**v10** incumbent: v10 reads scalar settings
+/// from `.npmrc`, so a non-shared scalar must land there (and round-trip), NOT
+/// in `pnpm-workspace.yaml`. This is the correctness bug the version-aware
+/// router fixes: a v11-shaped yaml write would silently no-op on v10.
+#[test]
+fn config_set_under_pnpm_v10_incumbent_routes_scalar_to_npmrc() {
+    let ctx = Ctx::new("config-pnpm10", PNPM10_MANIFEST);
+
+    let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"),
+        "under a pnpm-v10 incumbent a non-shared scalar must land in the project .npmrc"
+    );
+    assert!(
+        !ctx.project.join("pnpm-workspace.yaml").exists(),
+        "pnpm-v10 scalar must NOT be written to pnpm-workspace.yaml (v10 wouldn't read it back)"
+    );
+
+    // Read-back works (the resolver reads scalars from .npmrc too).
+    let (stdout, _, code) = ctx.run(&["get", "autoInstallPeers"]);
+    assert_eq!((stdout.trim(), code), ("false", 0));
+}
+
+/// Unknown pnpm version (no `packageManager` pin) → the dominant/most-
+/// compatible default: the v10 `.npmrc` model. A non-shared scalar lands in
+/// `.npmrc`, never a pnpm-branded yaml.
+#[test]
+fn config_set_under_unversioned_pnpm_defaults_to_npmrc() {
+    let ctx = Ctx::new("config-pnpm-unversioned", PNPM_UNVERSIONED_MANIFEST);
+
+    let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"),
+        "unknown pnpm version must default to the .npmrc model"
+    );
+    assert!(
+        !ctx.project.join("pnpm-workspace.yaml").exists(),
+        "unknown-version default must NOT write pnpm-workspace.yaml"
+    );
+}
+
+/// An UNKNOWN declared PM name at a high major must NOT leak a pnpm-branded
+/// file. `resolve_config_surface` maps an unknown declared tool (`deno`, …) to
+/// the pnpm-shaped surface (conservative), so a `packageManager: "deno@11.0.0"`
+/// reaches the scalar router with `pnpm_incumbent = true` — but the version
+/// gate only applies to a name of literally `pnpm`, so the major-11 here is
+/// ignored and the scalar lands in the neutral `.npmrc`, never
+/// `pnpm-workspace.yaml`. (Regression guard for the discarded-name bug.)
+#[test]
+fn config_set_under_unknown_pm_name_at_high_major_does_not_leak_yaml() {
+    const UNKNOWN_PM_HIGH_MAJOR: &str =
+        r#"{"name":"pmfam-fixture","version":"1.2.3","packageManager":"deno@11.0.0"}"#;
+    let ctx = Ctx::new("config-unknown-pm", UNKNOWN_PM_HIGH_MAJOR);
+
+    let (_, stderr, code) = ctx.run(&["set", "auto-install-peers", "false"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.project.join(".npmrc")).contains("auto-install-peers=false"),
+        "an unknown PM name must route the scalar to the neutral .npmrc"
+    );
+    assert!(
+        !ctx.project.join("pnpm-workspace.yaml").exists(),
+        "an unknown PM name at major >=11 must NEVER leak a pnpm-workspace.yaml (brand boundary)"
+    );
+}
+
+/// GLOBAL config is read BROAD and cwd-INDEPENDENT (decision 2026-06-20,
+/// asymmetric read/write model): nub honors a pnpm GLOBAL `config.yaml` value
+/// regardless of the cwd's incumbent PM. This locks the global-by-cwd bug fix:
+/// the value must be visible to `nub config get` whether the cwd is a pnpm
+/// project OR a nub-identity project — the outcome is IDENTICAL across cwd
+/// incumbency (the original bug was that only the pnpm-incumbent cwd saw it).
+#[cfg(unix)]
+#[test]
+fn global_pnpm_config_is_read_regardless_of_cwd_incumbency() {
+    // One shared fake HOME carrying a pnpm GLOBAL config.yaml.
+    let home = pm_tmpdir("global-read-home");
+    let pnpm_cfg = home.join("xdg-config").join("pnpm");
+    std::fs::create_dir_all(&pnpm_cfg).unwrap();
+    // A global scalar pnpm resolves from config.yaml — nub must too.
+    std::fs::write(pnpm_cfg.join("config.yaml"), "networkConcurrency: 7\n").unwrap();
+
+    let run = |project: &Path, args: &[&str]| -> (String, i32) {
+        let out = Command::new(nub_binary())
+            .args(args)
+            .current_dir(project)
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", home.join("xdg-data"))
+            .env("XDG_CACHE_HOME", home.join("xdg-cache"))
+            .env("XDG_CONFIG_HOME", home.join("xdg-config"))
+            .output()
+            .expect("failed to spawn nub");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            out.status.code().unwrap_or(-1),
+        )
+    };
+
+    // Two project surfaces sharing the same global config: pnpm incumbent and
+    // nub identity. BOTH must surface the global config.yaml value — the
+    // outcome is identical across cwd incumbency, ungated by the cwd.
+    for (tag, manifest) in [("gread-pnpm", PNPM_MANIFEST), ("gread-nub", NUB_MANIFEST)] {
+        let project = pm_tmpdir(tag);
+        std::fs::write(project.join("package.json"), manifest).unwrap();
+        let (stdout, code) = run(&project, &["config", "get", "networkConcurrency"]);
+        assert_eq!(code, 0, "[{tag}] get exited non-zero: {stdout}");
+        assert!(
+            stdout.contains('7'),
+            "[{tag}] nub must read the pnpm GLOBAL config.yaml value ungated by cwd (got: {stdout:?})"
+        );
+    }
+}
+
+/// GLOBAL writes (`config set --location user|global`) are NEUTRAL-ONLY: nub
+/// never writes back a PM-branded global file (pnpm's `config.yaml`/`auth.ini`)
+/// nor a `config.toml`. A non-shared scalar lands in the user `~/.npmrc` (the
+/// neutral global home), regardless of the cwd's incumbent PM — even under a
+/// pnpm incumbent, where a PROJECT write would go to `pnpm-workspace.yaml`.
+#[cfg(unix)]
+#[test]
+fn global_set_writes_neutral_never_a_pm_branded_global_file() {
+    // pnpm incumbent cwd — the case where the project path WOULD pick a
+    // pnpm-branded file; the global path must not.
+    let ctx = Ctx::new("global-write", PNPM_MANIFEST);
+
+    let (_, stderr, code) = ctx.run(&[
+        "config",
+        "set",
+        "network-concurrency",
+        "5",
+        "--location",
+        "user",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    // Neutral home: user ~/.npmrc carries the value.
+    assert!(
+        read(&ctx.home.join(".npmrc")).contains("network-concurrency=5"),
+        "global non-shared scalar must land in the neutral user ~/.npmrc"
+    );
+    // NOT a pnpm-branded global file, NOT config.toml, NOT the project.
+    let pnpm_cfg = ctx.home.join("xdg-config").join("pnpm");
+    assert!(
+        !pnpm_cfg.join("config.yaml").exists(),
+        "global write must NEVER create pnpm's global config.yaml"
+    );
+    assert!(
+        !ctx.home.join("xdg-config/aube/config.toml").exists()
+            && !ctx.home.join("xdg-config/nub/config.toml").exists(),
+        "global write must never create a config.toml"
+    );
+    assert!(
+        !ctx.project.join("pnpm-workspace.yaml").exists(),
+        "a GLOBAL write must not touch the project pnpm-workspace.yaml"
+    );
+
+    // An auth/registry key at global scope → the neutral user ~/.npmrc too
+    // (the engine's own user-scope writer), never a pnpm-branded global file.
+    let (_, stderr, code) = ctx.run(&[
+        "config",
+        "set",
+        "registry",
+        "https://g.example.test/",
+        "--location",
+        "user",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&ctx.home.join(".npmrc")).contains("registry=https://g.example.test/"),
+        "global auth/registry key must land in the neutral user ~/.npmrc"
+    );
+    assert!(
+        !pnpm_cfg.join("auth.ini").exists(),
+        "global write must NEVER create pnpm's global auth.ini"
     );
 }
 
