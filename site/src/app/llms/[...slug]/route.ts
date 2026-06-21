@@ -1,4 +1,4 @@
-import { source, blog } from '@/lib/source';
+import { source, guidesSource, blog } from '@/lib/source';
 import { getLLMText } from '@/lib/get-llm-text';
 import { notFound } from 'next/navigation';
 
@@ -28,6 +28,7 @@ export async function GET(
 
   const page =
     source.getPages().find((p) => p.url === url) ??
+    guidesSource.getPages().find((p) => p.url === url) ??
     blog.getPages().find((p) => p.url === url);
   if (!page) notFound();
 
@@ -49,6 +50,7 @@ export function generateStaticParams() {
 
   return [
     ...source.getPages().map((p) => toParams(p.url)),
+    ...guidesSource.getPages().map((p) => toParams(p.url)),
     ...blog.getPages().map((p) => toParams(p.url)),
   ];
 }

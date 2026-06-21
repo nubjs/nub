@@ -19,6 +19,15 @@ export const docs = defineDocs({
   },
 });
 
+export const guides = defineDocs({
+  dir: 'content/guides',
+  docs: {
+    postprocess: {
+      includeProcessedMarkdown: true,
+    },
+  },
+});
+
 export const blog = defineCollections({
   type: 'doc',
   dir: 'content/blog',
