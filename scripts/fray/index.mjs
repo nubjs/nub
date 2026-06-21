@@ -143,7 +143,15 @@ function statesDeferOrBlocker(next) {
 }
 
 // .fray/config.yml globals — parsed by the shared, type-safe loadConfig.
+// loadConfig() honors the FRAY env gate first (see config.mjs).
 const cfg = loadConfig(PROJECT_DIR);
+
+// When fray is disabled via FRAY=0 env, exit cleanly — this session opted out.
+// (The board is rarely run with FRAY=0 in practice; the gate mainly governs hooks.)
+if (!cfg.enabled) {
+  console.log('fray: disabled this session (FRAY=0 in env — or enabled:false in .fray/config.yml)');
+  process.exit(0);
+}
 
 const threads = readdirSync(FRAY_DIR)
   .filter((f) => f.endsWith('.md') && !f.startsWith('_')) // `_`-prefixed = non-thread meta (e.g. a stray _board.md)
