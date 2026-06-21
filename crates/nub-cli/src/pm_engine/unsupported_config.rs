@@ -243,10 +243,11 @@ pub(crate) enum ScanResult {
 ///
 /// The FATAL set is deliberately SHORT — only fields whose silent omission
 /// produces a correctness-divergent install AND which nub cannot honor:
-/// npm `legacy-peer-deps` (different peer graph), npm `install-strategy=nested`
-/// (different resolution/layout), and yarn `supportedArchitectures` (changes
-/// which platform deps land — the arch-filter resolver isn't built). PnP stays
-/// a WARN+downgrade (handled separately in `warn_if_pnp_requested`), not
+/// npm `legacy-peer-deps` (different peer graph) and npm
+/// `install-strategy=nested` (different resolution/layout). yarn
+/// `supportedArchitectures` is NOT here — the engine honors it via the
+/// arch-filter resolver. PnP stays a WARN+downgrade (handled separately in
+/// `warn_if_pnp_requested`), not
 /// promoted. `checksumBehavior`/`enableHardenedMode` are NOT here: aube verifies
 /// every tarball's SHA-512 by default (`verifyStoreIntegrity=true`), satisfying
 /// the `throw` posture.
@@ -298,20 +299,11 @@ fn scan_fatal(role: Role, root: &Path) -> Option<FatalField> {
             }
             None
         }
-        Role::Yarn => {
-            if yarn_supported_architectures(root) {
-                return Some(FatalField {
-                    code: "ERR_NUB_UNSUPPORTED_CONFIG",
-                    field: "`supportedArchitectures`",
-                    detail: "nub installs only the current platform's optional/platform deps; \
-                             this setting changes which packages land on disk",
-                    remedy: "remove `supportedArchitectures` from .yarnrc.yml, or run the install \
-                             on each target platform",
-                });
-            }
-            None
-        }
-        Role::Pnpm | Role::Bun | Role::Nub => None,
+        // yarn `supportedArchitectures` is HONORED, not fatal: the engine
+        // reads `.yarnrc.yml`'s `supportedArchitectures` and feeds it to
+        // the same arch-filter resolver the pnpm path uses (translated to
+        // the `supportedArchitectures` object setting in the yarnrc reader).
+        Role::Yarn | Role::Pnpm | Role::Bun | Role::Nub => None,
     }
 }
 
@@ -376,12 +368,6 @@ fn manifest_has_pnpm_overrides(root: &Path) -> bool {
         .and_then(|p| p.get("overrides"))
         .and_then(|v| v.as_object())
         .is_some_and(|o| !o.is_empty())
-}
-
-fn yarn_supported_architectures(root: &Path) -> bool {
-    std::fs::read_to_string(root.join(".yarnrc.yml"))
-        .ok()
-        .is_some_and(|c| yarnrc_has_top_level_key(&c, "supportedArchitectures"))
 }
 
 fn yarnrc_top_level_bool_str(root: &Path, key: &str) -> Option<bool> {
@@ -575,13 +561,6 @@ fn yarnrc_top_level_bool(content: &str, key: &str) -> Option<bool> {
         }
     }
     None
-}
-
-/// Whether a top-level `key:` exists at all in `.yarnrc.yml` (scalar or block).
-fn yarnrc_has_top_level_key(content: &str, key: &str) -> bool {
-    content.lines().any(|line| {
-        !line.starts_with(char::is_whitespace) && line.trim().starts_with(&format!("{key}:"))
-    })
 }
 
 /// Whether a top-level `key:` introduces a non-empty indented block (a YAML
@@ -845,17 +824,22 @@ mod tests {
     }
 
     #[test]
-    fn scan_fatal_on_supported_architectures() {
+    fn supported_architectures_is_honored_not_fatal() {
+        // The arch-filter resolver honors yarn `supportedArchitectures`
+        // (the yarnrc reader translates it to the `supportedArchitectures`
+        // object setting), so it must no longer abort the install.
         let d = tmp();
         fs::write(
             d.path().join(".yarnrc.yml"),
             "supportedArchitectures:\n  os:\n    - linux\n",
         )
         .unwrap();
-        assert!(matches!(
-            scan_unsupported_config(Role::Yarn, None, None, d.path()),
-            ScanResult::Fatal(_)
-        ));
+        match scan_unsupported_config(Role::Yarn, None, None, d.path()) {
+            ScanResult::Warn(_) => {}
+            ScanResult::Fatal(e) => {
+                panic!("supportedArchitectures is honored and must not be fatal: {e}")
+            }
+        }
     }
 
     #[test]
