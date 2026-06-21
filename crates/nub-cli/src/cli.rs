@@ -1008,41 +1008,38 @@ const PM_VERBS: &[&str] = &[
     "migrate",
 ];
 
-/// The verbs a leading flag-run may precede. pnpm accepts `pnpm -r <verb>` for
-/// every workspace-aware verb, not just `run`/`exec` — so a leading `-r`/`-F`/…
-/// before an install-family verb (`install`/`ci`/`add`/…) must reorder the same
-/// way, or it falls through to the Node-passthrough path and Node fails on
-/// `--require install` (`Cannot find module 'install'`).
-const NORMALIZABLE_LEADING_FLAG_VERBS: &[&str] = &[
-    "run",
-    "exec", // the original run/exec set
-    "install",
-    "i",
-    "ci", // native install-family verbs
-    "add",
-    "remove",
-    "rm",
-    "uninstall",
-    "un", // engine add/remove family
-    "update",
-    "up",
-    "dedupe",
-    "prune",
-    "rebuild",
-    "fetch",
-    "link",
-    "unlink",
-    "import",
-];
+/// Whether a leading flag-run may be reordered to sit *after* `verb`. pnpm
+/// accepts `pnpm -r <verb>` / `pnpm --filter <x> <verb>` for every workspace-
+/// aware verb — not just `run`/`exec`, but the install family (`install`/`ci`/
+/// `add`/…) AND the read-only info family (`list`/`ls`/`why`/`outdated`/
+/// `licenses`/`audit`/…). A leading run-flag before one of these must reorder
+/// into canonical subcommand-first order; otherwise the verb token falls
+/// through to the Node-passthrough/file-runner path and Node fails on, e.g.,
+/// `--require list` (`Cannot find module 'list'`) or `node: bad option:
+/// --filter`, falsely reporting success.
+///
+/// The recognized set is exactly the PM verbs nub can dispatch — the same
+/// authority the bareword arm consults (`SUBCOMMANDS` + the engine verb
+/// registry). Tying the two together is what keeps them from drifting: a verb
+/// nub dispatches in first position must also be reorderable behind a leading
+/// workspace flag, or the two surfaces disagree (the install family worked only
+/// because it was hand-listed here; the info family crashed purely because it
+/// was absent). Verbs that don't actually accept `-r`/`--filter` are still safe
+/// to reorder — clap (or the engine) rejects the unsupported flag downstream
+/// with a proper non-zero error, exactly as pnpm does.
+fn is_normalizable_leading_flag_verb(verb: &str) -> bool {
+    SUBCOMMANDS.contains(&verb) || crate::pm_engine::lookup_verb(verb).is_some()
+}
 
 /// Accept pnpm's flag-before-subcommand order. pnpm takes `pnpm -r run build` AND
 /// `pnpm run -r build`; nub's pre-parse otherwise only recognizes a subcommand in
 /// first position, so a leading run-flag (`-r`, `--filter`, …) falls through to
 /// the Node-passthrough path and Node fails on `--require run` (`Cannot find
 /// module 'run'`). If the args begin with a run of the `run`/`exec` flags
-/// (consuming the value of value-taking ones) immediately followed by one of
-/// [`NORMALIZABLE_LEADING_FLAG_VERBS`], reorder into canonical subcommand-first
-/// order (`run -r build`, `install -r`). Anything else — a Node flag, a file,
+/// (consuming the value of value-taking ones) immediately followed by a verb
+/// [`is_normalizable_leading_flag_verb`] recognizes, reorder into canonical
+/// subcommand-first order (`run -r build`, `install -r`, `list -r`). Anything
+/// else — a Node flag, a file,
 /// `nub <file>`, eval — leaves the args untouched, so file/passthrough/eval
 /// dispatch is unaffected. Returns `None` when no normalization applies. Keep the
 /// flag lists in sync with the `Run` subcommand's `#[arg]` set.
@@ -1096,7 +1093,7 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
     if !leading.is_empty()
         && args
             .get(i)
-            .is_some_and(|v| NORMALIZABLE_LEADING_FLAG_VERBS.contains(&v.as_str()))
+            .is_some_and(|v| is_normalizable_leading_flag_verb(v))
     {
         let mut out = Vec::with_capacity(args.len());
         out.push(args[i].clone()); // subcommand first

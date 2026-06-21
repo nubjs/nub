@@ -211,6 +211,94 @@ fn leading_global_flags_before_install_family() {
     );
 }
 
+// Leading global flags before a READ-ONLY/info verb (`-r list`, `--filter x
+// why`). pnpm runs `pnpm -r <info-verb>` / `pnpm --filter <x> <info-verb>` as
+// the canonical recursive/filtered query; nub must reorder the leading flags so
+// the verb dispatches to the PM engine. The grammar table above can't guard
+// this: appending `--help` short-circuits to the help page BEFORE dispatch, so
+// it never exercises the routing. Here we dispatch for real (no `--help`) and
+// assert the verb reached the engine — i.e. the file-runner crash markers
+// (`Cannot find module 'list'`, `node: bad option: --filter`) are ABSENT. (Bug:
+// the info family was omitted from the leading-flag reorder set, so these fell
+// through to the Node file-runner.)
+#[test]
+fn leading_global_flags_before_info_verb_reach_engine() {
+    // Run `nub <args>` in an isolated, manifest-bearing workspace (no `--help`)
+    // and return whether the verb fell through to the Node file-runner — keyed
+    // on the crash markers that path emits. Engine dispatch (even when it then
+    // bails on a missing lockfile) never emits these.
+    fn fell_through_to_file_runner(args: &[&str]) -> (bool, String) {
+        let tmp = std::env::temp_dir().join(format!(
+            "nub-route-{}-{}",
+            std::process::id(),
+            args.join("_").replace(['/', ' ', '='], "-")
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = std::fs::write(
+            tmp.join("package.json"),
+            r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#,
+        );
+        let _ = std::fs::create_dir_all(tmp.join("packages/a"));
+        let _ = std::fs::write(
+            tmp.join("packages/a/package.json"),
+            r#"{"name":"a","version":"1.0.0"}"#,
+        );
+
+        let out = Command::new(nub_binary())
+            .args(args)
+            .current_dir(&tmp)
+            .env("HOME", &tmp)
+            .env("XDG_CACHE_HOME", tmp.join("cache"))
+            .env("XDG_DATA_HOME", tmp.join("data"))
+            .env("PNPM_HOME", tmp.join("pnpm"))
+            .output()
+            .expect("spawn nub");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+        // The file-runner is Node: a verb misrouted to it as a module/flag dies
+        // in the CJS loader or with a Node bad-option error.
+        let crashed = combined.contains("Cannot find module")
+            || combined.contains("node: bad option")
+            || combined.contains("internal/modules/cjs/loader");
+        (crashed, combined)
+    }
+
+    let rows: &[(&[&str], &str)] = &[
+        (&["-r", "list"], "pnpm -r list"),
+        (&["--recursive", "list"], "pnpm --recursive list"),
+        (&["-r", "ls"], "pnpm -r ls (alias)"),
+        (&["--filter", "a", "list"], "pnpm --filter <x> list"),
+        (&["-F", "a", "why", "a"], "pnpm -F <x> why <pkg>"),
+        (&["-r", "why", "a"], "pnpm -r why <pkg>"),
+        (&["-r", "outdated"], "pnpm -r outdated"),
+        (&["-r", "licenses"], "pnpm -r licenses"),
+        (&["-r", "audit"], "pnpm -r audit"),
+    ];
+
+    let mut failures = Vec::new();
+    for (form, note) in rows {
+        let (crashed, output) = fell_through_to_file_runner(form);
+        if crashed {
+            failures.push(format!(
+                "  nub {} → fell through to the file-runner (pnpm: {note})\n    output: {}",
+                form.join(" "),
+                output.lines().next().unwrap_or("").trim()
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "leading-flag-before-info-verb: {} of {} forms misrouted to the Node file-runner:\n{}",
+        failures.len(),
+        rows.len(),
+        failures.join("\n")
+    );
+}
+
 // `nub ci` — pnpm `ci` (clean-install). pnpm's `ci` documents NO production
 // control (it is exactly `clean` + `install --frozen-lockfile`), so the
 // pnpm-only surface is bare `ci` plus nub's workspace/script knobs.
