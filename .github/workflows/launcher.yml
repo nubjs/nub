@@ -22,6 +22,12 @@ on:
     paths:
       - npm/nub/**
       - tests/launcher/**
+  schedule:
+    # Nightly at 06:45 UTC. The macOS self-heal leg is gated off pull_request
+    # (the macOS-5 concurrency bottleneck); the nightly schedule keeps that
+    # coverage running on a cadence. Scheduled runs ignore the path filters and
+    # run the full OS matrix.
+    - cron: "45 6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -36,8 +42,12 @@ jobs:
     name: heal · ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # On pull_request: ubuntu only (the dash leg) — macOS is dropped from PRs
+      # to stay off the macOS-5 concurrency bottleneck. On push / nightly
+      # schedule / dispatch: ubuntu + macOS (the bash leg). The non-owner job
+      # below (Linux container) gates every event including PRs.
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5

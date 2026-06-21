@@ -13,6 +13,8 @@ const config = {
       { source: '/docs/files', destination: '/docs/runtime', permanent: true },
       { source: '/docs/running-scripts', destination: '/docs/run', permanent: true },
       { source: '/docs/managing-node', destination: '/docs/node', permanent: true },
+      // Guides moved from /docs/guides/* to the top-level /guides/* route.
+      { source: '/docs/guides/:path*', destination: '/guides/:path*', permanent: true },
     ];
   },
   // Advertise the llms.txt index on every page so crawlers/agents can

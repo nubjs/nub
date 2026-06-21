@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Nightly full cross-OS matrix at 06:00 UTC (offset from the lockfile-roundtrip
+    # nightly at 07:00 and pnpm-conformance at 08:00). PR pushes run a Linux-gated
+    # matrix (plus one Windows representative) to avoid saturating the macOS-5
+    # concurrent-runner cap during busy PR waves; the full os × node cross-product
+    # runs here and on push:main, so cross-platform regressions are still caught —
+    # just on trunk/nightly rather than per-PR. See the `test`/`pnp` jobs for the
+    # exact PR-vs-trunk split (driven by the `matrix-plan` job below).
+    - cron: "0 6 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,6 +23,47 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Emit the os × node matrices for the `test` and `pnp` jobs, varying by event:
+  #   pull_request → Linux legs (full Node-version tier matrix) + ONE windows-latest
+  #                  representative (the only place cfg(windows) PM-shim / PnP-path
+  #                  code compiles + runs). macOS is dropped from PRs entirely — it
+  #                  is the macOS-5-concurrent bottleneck.
+  #   push:main / schedule (nightly) / any other event → the FULL matrix: ubuntu +
+  #                  windows-latest + macos-14 on the current Node line, plus the
+  #                  Linux-only tier representatives. This is where cross-OS (incl.
+  #                  macOS) coverage is proven.
+  # One job emitting JSON consumed via fromJSON keeps the split in a single place
+  # instead of duplicating workflow files or hand-maintaining parallel matrices.
+  matrix-plan:
+    name: Plan matrices
+    runs-on: ubuntu-latest
+    outputs:
+      test: ${{ steps.plan.outputs.test }}
+      pnp: ${{ steps.plan.outputs.pnp }}
+    steps:
+      - id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The Linux Node-version tier legs are common to PR and trunk (compat
+          # divergences are runtime-version-specific, not OS-specific). The
+          # current-line cross-OS legs differ: PR keeps ubuntu + ONE windows;
+          # trunk/nightly adds macos-14.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            test_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"}]'
+            pnp_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"}]'
+          else
+            test_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"},{"os":"macos-14","node":"24"}]'
+            pnp_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"},{"os":"macos-14","node":"24"}]'
+          fi
+          # Linux-only Node-version tier representatives (same on PR and trunk).
+          test_tiers='[{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"22.13"},{"os":"ubuntu-latest","node":"20.11"},{"os":"ubuntu-latest","node":"18.19"}]'
+          pnp_tiers='[{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"18.19"}]'
+          test=$(jq -cn --argjson a "$test_os" --argjson b "$test_tiers" '{include: ($a + $b)}')
+          pnp=$(jq -cn --argjson a "$pnp_os" --argjson b "$pnp_tiers" '{include: ($a + $b)}')
+          echo "test=$test" >> "$GITHUB_OUTPUT"
+          echo "pnp=$pnp" >> "$GITHUB_OUTPUT"
+
   check:
     name: Check
     runs-on: ubuntu-latest
@@ -52,59 +102,57 @@ jobs:
 
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})
+    needs: matrix-plan
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        # macos-14 is Apple Silicon (arm64) — the primary dev platform and the
-        # darwin-arm64 release target (A24). darwin-x64 is built in release.yml
-        # but not yet exercised here; add macos-13 (Intel) if x64 coverage is
-        # wanted later.
-        #
-        # The windows-latest leg is the ONLY place the PM-shim's cfg(windows)
-        # code executes (Docker on the dev box is Linux-only): `cargo test`
-        # picks up nub-cli's tests/pm_shim_windows.rs, which covers
-        # install_shims_into's `.exe` entry naming, argv0 dispatch through a
-        # pnpm.exe/npm.exe link, the `.exe`/`.cmd` PATH probing of the
-        # fall-through scan, the pinned-PM cached run under the project Node,
-        # the strict refusal, and exit-code fidelity through the spawn+wait
-        # exec replacement. (The portable pm::shim unit tests — decision
-        # matrix, profile-block edits, lockfile/redirect logic — already ran
-        # here; the #[cfg(unix)] ones — inode/hardlink, exec-bit, symlink
-        # tests and all of tests/pm_shim.rs — still don't.) Not covered
-        # anywhere yet: replacing a RUNNING shim .exe (image lock), and a
-        # `nub pm shim`/`unshim` round trip (dirs_next ignores env HOME on
-        # Windows, so an end-to-end run would write the runner's real
-        # profile — kept out deliberately).
-        #
-        # This leg also compiles + runs the cfg(windows) arm of the
-        # `nub upgrade` npm channel: the npm_upgrade_invocation_is_os_correct
-        # unit test pins the Windows argv (`cmd /C npm install -g …`), which is
-        # what fixes npm-channel upgrade on a plain Windows box (no `sh` there).
-        # A real end-to-end `npm install -g` is left CI-dark on purpose — it
-        # mutates global state and needs a published release.
-        os: [ubuntu-latest, windows-latest, macos-14]
-        # Node matrix spans the support range so the integration suite (which
-        # nub runs against whatever `node` is first on PATH) exercises every
-        # tier + capability boundary. 24 = current line; 22.15 = fast-path floor
-        # (sync registerHooks); 22.13 = compat-tier top (async module.register,
-        # has require(esm)+detect-module+webstorage); 20.11 = compat mid (NO
-        # require(esm) — exercises the dynamic-import oxc-parser path — and NO
-        # detect-module/webstorage, so it catches the version-gated flag
-        # injection); 18.19 = the hard floor (no require(esm), no native `using`,
-        # async tier). Compat divergences are runtime-version-specific, not
-        # OS-specific, so the floor/compat legs run on Linux only — a full
-        # os×node cross-product would multiply cost for no extra signal.
-        node: ['24']
-        include:
-          - os: ubuntu-latest
-            node: '22.15'
-          - os: ubuntu-latest
-            node: '22.13'
-          - os: ubuntu-latest
-            node: '20.11'
-          - os: ubuntu-latest
-            node: '18.19'
+      matrix: ${{ fromJSON(needs.matrix-plan.outputs.test) }}
+      # The matrix is computed by the matrix-plan job. On pull_request: ubuntu
+      # (full Node-version tier matrix) + ONE windows-latest representative;
+      # macOS is dropped from PRs (the macOS-5 concurrency bottleneck). On
+      # push:main / nightly schedule: the FULL matrix adds macos-14.
+      #
+      # macos-14 is Apple Silicon (arm64) — the primary dev platform and the
+      # darwin-arm64 release target (A24). It runs on trunk/nightly only.
+      # darwin-x64 is built in release.yml but not yet exercised here; add
+      # macos-13 (Intel) if x64 coverage is wanted later.
+      #
+      # The windows-latest leg is the ONLY place the PM-shim's cfg(windows)
+      # code executes (Docker on the dev box is Linux-only): `cargo test`
+      # picks up nub-cli's tests/pm_shim_windows.rs, which covers
+      # install_shims_into's `.exe` entry naming, argv0 dispatch through a
+      # pnpm.exe/npm.exe link, the `.exe`/`.cmd` PATH probing of the
+      # fall-through scan, the pinned-PM cached run under the project Node,
+      # the strict refusal, and exit-code fidelity through the spawn+wait
+      # exec replacement. (The portable pm::shim unit tests — decision
+      # matrix, profile-block edits, lockfile/redirect logic — already ran
+      # here; the #[cfg(unix)] ones — inode/hardlink, exec-bit, symlink
+      # tests and all of tests/pm_shim.rs — still don't.) Not covered
+      # anywhere yet: replacing a RUNNING shim .exe (image lock), and a
+      # `nub pm shim`/`unshim` round trip (dirs_next ignores env HOME on
+      # Windows, so an end-to-end run would write the runner's real
+      # profile — kept out deliberately). That genuinely-Windows-only code is
+      # why one Windows leg is KEPT on PR rather than moved to trunk-only.
+      #
+      # This leg also compiles + runs the cfg(windows) arm of the
+      # `nub upgrade` npm channel: the npm_upgrade_invocation_is_os_correct
+      # unit test pins the Windows argv (`cmd /C npm install -g …`), which is
+      # what fixes npm-channel upgrade on a plain Windows box (no `sh` there).
+      # A real end-to-end `npm install -g` is left CI-dark on purpose — it
+      # mutates global state and needs a published release.
+      #
+      # Node matrix spans the support range so the integration suite (which
+      # nub runs against whatever `node` is first on PATH) exercises every
+      # tier + capability boundary. 24 = current line; 22.15 = fast-path floor
+      # (sync registerHooks); 22.13 = compat-tier top (async module.register,
+      # has require(esm)+detect-module+webstorage); 20.11 = compat mid (NO
+      # require(esm) — exercises the dynamic-import oxc-parser path — and NO
+      # detect-module/webstorage, so it catches the version-gated flag
+      # injection); 18.19 = the hard floor (no require(esm), no native `using`,
+      # async tier). Compat divergences are runtime-version-specific, not
+      # OS-specific, so the floor/compat legs run on Linux only (PR and trunk
+      # alike) — a full os×node cross-product would multiply cost for no extra
+      # signal.
     steps:
       # No node-suite submodule here: the fast unit + integration suite reads
       # only tests/fixtures, never tests/node-suite. The heavyweight Node-suite
@@ -206,23 +254,21 @@ jobs:
 
   pnp:
     name: Yarn PnP (${{ matrix.os }}, node ${{ matrix.node }})
+    needs: matrix-plan
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        # Cross-OS coverage on the current Node line — PnP's zipfs fs patch, path
-        # handling, and `findPnpApi` differ by OS (Windows backslashes especially),
-        # which the host (macOS) + Docker (Linux) legs can't fully cover. Plus two
-        # Linux tier representatives: 22.15 = fast-tier floor (sync registerHooks),
-        # 18.19 = compat-tier floor (async loader worker). Tiers are runtime-version
-        # specific, not OS-specific, so they run on Linux only.
-        os: [ubuntu-latest, windows-latest, macos-14]
-        node: ['24']
-        include:
-          - os: ubuntu-latest
-            node: '22.15'
-          - os: ubuntu-latest
-            node: '18.19'
+      matrix: ${{ fromJSON(needs.matrix-plan.outputs.pnp) }}
+      # Matrix computed by the matrix-plan job. Cross-OS coverage on the current
+      # Node line matters here because PnP's zipfs fs patch, path handling, and
+      # `findPnpApi` differ by OS (Windows backslashes especially), which the host
+      # (macOS) + Docker (Linux) legs can't fully cover. On pull_request: ubuntu +
+      # ONE windows-latest representative (the Windows-path divergence is the real
+      # cross-OS risk); macos-14 runs on push:main / nightly schedule only.
+      # Plus two Linux tier representatives on PR and trunk alike: 22.15 = fast-tier
+      # floor (sync registerHooks), 18.19 = compat-tier floor (async loader worker).
+      # Tiers are runtime-version specific, not OS-specific, so they run on Linux
+      # only.
     steps:
       - uses: actions/checkout@v5
       # vendor/aube path dep — see the `check` job for the rationale.

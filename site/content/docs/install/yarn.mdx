@@ -42,7 +42,7 @@ Both formats are read:
     { feature: <>workspace selectors</>, status: 'partial', note: 'No git-since ([ref]) selector.' },
     // ── Config files ──────────────────────────────────────────────────
     { feature: <code>.npmrc</code>, status: 'yes' },
-    { feature: <code>.yarnrc.yml</code>, status: 'partial', note: 'Not read: supportedArchitectures, npmAlwaysAuth, file-path TLS cert/key, per-host proxies, PnP.' },
+    { feature: <code>.yarnrc.yml</code>, status: 'partial', note: 'Not read: per-host proxies, PnP.' },
     { feature: <code>.yarnrc</code>, status: 'partial', note: 'Registry and auth keys only.' },
     // ── Environment variables ─────────────────────────────────────────
     { feature: <><code>npm_config_*</code></>, status: 'yes' },
@@ -51,7 +51,9 @@ Both formats are read:
     { feature: <><code>yarn.lock</code></>, status: 'partial', note: 'Read-only; writes refused.' },
     // ── Linking / install behavior ────────────────────────────────────
     { feature: <code>nodeLinker</code>, status: 'partial', note: 'No PnP.' },
-    { feature: <code>supportedArchitectures</code>, status: 'no', note: 'Not read.' },
+    { feature: <code>supportedArchitectures</code>, status: 'yes', note: 'Filters optional/platform deps for the declared os/cpu/libc.' },
+    { feature: <>mTLS client cert/key</>, status: 'yes', note: 'File-path (httpsCertFilePath / httpsKeyFilePath) and per-host networkSettings forms.' },
+    { feature: <code>npmAlwaysAuth</code>, status: 'yes', note: 'Attaches credentials to cross-origin tarball requests too.' },
   ]}
 />
 
@@ -120,7 +122,7 @@ npmRegistries:
 nodeLinker: node-modules
 ```
 
-Nub reads the global `~/.yarnrc.yml` plus any project `.yarnrc.yml` files from the workspace root down to the current project directory; nearer project files win. The support is intentionally narrow. Still ignored: `supportedArchitectures`, `npmAlwaysAuth`, file-path TLS client cert and key (`httpsKeyFilePath` / `httpsCertFilePath` — Nub takes inline PEM only), per-host `networkSettings` proxies (the proxy Nub applies is process-wide), constraints, plugins, patch-folder config, and Yarn cache layout.
+Nub reads the global `~/.yarnrc.yml` plus any project `.yarnrc.yml` files from the workspace root down to the current project directory; nearer project files win. The support is intentionally narrow. Still ignored: per-host `networkSettings` proxies (the proxy Nub applies is process-wide), constraints, plugins, patch-folder config, and Yarn cache layout.
 
 Classic `.yarnrc` (Yarn 1) gets the same basic treatment for its core registry and auth fields. Its keys are already npmrc-shaped, so Nub reads them directly:
 
@@ -159,8 +161,5 @@ nub 0.1.1 · ✓ Already up to date
 
 Several Yarn `package.json` and `.yarnrc.yml` fields still have no effect under Nub:
 
-- `supportedArchitectures` — Yarn's platform/arch download controls are not read.
-- `npmAlwaysAuth` — no Nub equivalent.
-- `httpsKeyFilePath` / `httpsCertFilePath` — file-path TLS client cert and key; Nub takes inline PEM only.
 - Per-host `networkSettings` proxies — the proxy Nub applies is process-wide, not per registry host.
 - `nodeLinker: pnp` — PnP install generation is out of scope; Nub warns and links `node_modules` instead. Install with Yarn, run with Nub.

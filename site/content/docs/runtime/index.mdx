@@ -96,11 +96,11 @@ The **minimum version** column is the lowest Node where the API works under Nub.
 | [`reportError`](https://developer.mozilla.org/en-US/docs/Web/API/Window/reportError) | — | polyfill |
 | [`vm.Module`](https://nodejs.org/api/vm.html#class-vmmodule) | — | flag-injected |
 | [`ShadowRealm`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ShadowRealm) | — | flag-injected |
-| [Wasm module imports](https://nodejs.org/api/esm.html#wasm-modules) | — | flag-injected below Node 24.5 (22.19 on the 22.x line), native above |
+| [`Wasm module imports`](https://nodejs.org/api/esm.html#wasm-modules) | — | flag-injected below Node 24.5 (22.19 on the 22.x line), native above |
 | [`WebSocket`](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) | Node 20.10 | flag-injected below Node 22, native above |
 | [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) | Node 20.18 | flag-injected below the native line, native above |
 | [`node:sqlite`](https://nodejs.org/api/sqlite.html) | Node 22.5 | flag-injected below Node 22.13, native above |
-| [addon imports](https://nodejs.org/api/esm.html#node-addons) | Node 22.20 | flag-injected, never native |
+| [`addon imports`](https://nodejs.org/api/esm.html#node-addons) | Node 22.20 | flag-injected, never native |
 
 A dash means the API works across the full supported range, 18.19 and up. The floored rows have a real cutoff, because the underlying Node mechanism doesn't exist below it:
 
