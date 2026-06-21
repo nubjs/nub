@@ -2,9 +2,10 @@
 //! through the embedded aube engine: `store` (add/path/prune/status),
 //! `cache` (list/view/delete/prune/list-registries), `cat-file`,
 //! `cat-index`, `find-hash`, `config` (+`c`) with the hidden top-level
-//! `get`/`set` shorthands, and the npm-fallback verbs `pkg`, `set-script`.
+//! `get`/`set` shorthands, and the native package.json editors `pkg`,
+//! `set-script` (engine-implemented, not an npm shell-out).
 //!
-//! The wiring helpers (`parse_verb`, `run_async`, `run_npm_fallback`) are
+//! The wiring helpers (`parse_verb`, `run_async`) are
 //! shared with [`super::publish_family`] — see its module doc for the
 //! common shape (brand-rewritten help/usage, engine session preflight,
 //! failures through [`present::emit_report`]).

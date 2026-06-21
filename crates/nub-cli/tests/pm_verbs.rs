@@ -735,3 +735,54 @@ fn warm_exact_re_pin_skips_the_network_while_a_range_still_resolves() {
         range.stdout, range.stderr
     );
 }
+
+/// Brand boundary on the not-a-command front door. pnpm 10.15 delegates its
+/// own "not implemented" set (`access`/`edit`/`issues`/`profile`/`team`/…) to
+/// the npm CLI, so `pnpm access` prints `npm error code EUSAGE`. nub must NOT
+/// inherit that leak: a command nub does not implement is refused with a
+/// nub-branded message, never an `npm error` (or `aube`) line, on every output
+/// stream. This locks the brand contract regardless of how the refusal message
+/// is later worded or which exit code it carries.
+///
+/// `set-script` and `token` are deliberately excluded — nub ships native verbs
+/// for both (a superset of pnpm's not-implemented list, v0.1.9), verified
+/// clean elsewhere; they are not refused.
+#[test]
+fn unimplemented_pm_commands_never_leak_npm() {
+    let dir = pm_tmpdir("noleak");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"x","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    // pnpm's npm-delegated "not implemented" set, plus a wholly unsupported
+    // word. None of these is a nub command; each must be refused brand-clean.
+    for cmd in [
+        "access",
+        "edit",
+        "issues",
+        "prefix",
+        "profile",
+        "team",
+        "xmas",
+        "totallyfakecommand",
+    ] {
+        let out = run_nub(&dir, &[cmd]);
+        assert_ne!(out.code, 0, "`nub {cmd}` is not a command — must fail");
+        out.assert_brand_clean();
+        let lower = out.combined().to_lowercase();
+        assert!(
+            !lower.contains("npm error"),
+            "`nub {cmd}` must not leak an npm error (pnpm delegates these to npm; nub does not):\nstdout: {}\nstderr: {}",
+            out.stdout,
+            out.stderr
+        );
+        assert!(
+            out.combined().contains("nub"),
+            "the refusal must be nub-branded:\nstdout: {}\nstderr: {}",
+            out.stdout,
+            out.stderr
+        );
+    }
+}
