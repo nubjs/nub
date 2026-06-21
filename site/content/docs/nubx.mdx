@@ -114,7 +114,7 @@ ERR_NUB_NO_MATURE_MATCHING_VERSION
   help: blocked by age gate: 1.6.0
 ```
 
-The window is resolved from the same `.npmrc` scopes that `npx` reads: the built-in default, your user-scope `~/.npmrc` (and `NPM_CONFIG_MINIMUM_RELEASE_AGE`), and a **project-local `.npmrc`** in the directory you run `nubx` from. So a per-project override applies to a `nubx` fetch even though the tool installs into a throwaway scratch project — alongside the project's registry, scoped registries, and auth, matching `npx`. By default the resolver falls back to the next-oldest satisfying version; `minimumReleaseAgeStrict=true` fails instead. See [Security](/docs/install#security) for the full posture.
+The window is resolved from the same `.npmrc` scopes that `npx` reads: the built-in default, your user-scope `~/.npmrc` (and `NPM_CONFIG_MINIMUM_RELEASE_AGE`), and a **project-local `.npmrc`** in the directory you run `nubx` from. So a per-project override applies to a `nubx` fetch even though the tool installs into a throwaway scratch project — alongside the project's registry, scoped registries, and auth, matching `npx`. By default the resolver falls back to the next-oldest satisfying version; `minimumReleaseAgeStrict=true` fails instead. See [the default-trust floor](/docs/install#default-trust-floor) for the full posture.
 
 ## Yarn Plug'n'Play
 
