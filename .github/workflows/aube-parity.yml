@@ -42,6 +42,10 @@ on:
       - "tests/aube-bats/**"
       - "tests/aube-conformance/**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 

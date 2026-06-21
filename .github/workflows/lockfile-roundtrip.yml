@@ -55,6 +55,10 @@ on:
     - cron: "0 7 * * *"
   workflow_dispatch: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Pinned package-manager versions. Keep in sync with the harness READMEs and

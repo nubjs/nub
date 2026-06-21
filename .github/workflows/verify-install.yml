@@ -34,6 +34,10 @@ on:
       - site/public/install.ps1
       - .github/workflows/verify-install.yml
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
