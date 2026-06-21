@@ -13,6 +13,24 @@ Each incumbent gets its own page covering lockfile fidelity, config surfaces, an
 
 Nub never asks which package manager you use — it [infers the incumbent](#package-manager-inference) from the `packageManager` field or the lockfile on disk and mirrors it. The CLI itself is pnpm-shaped. The engine is the vendored [aube](https://github.com/jdx/aube) engine, embedded as a library and driven by Nub's own CLI.
 
+## In an existing project
+
+Run Nub in a repo that already uses npm, pnpm, Yarn, or Bun and it behaves *as that package manager* — no migration, no new files. Three rules govern the behavior; the rest of this page is the detail behind them.
+
+**1. Nub infers the incumbent and mirrors it.** The owning package manager is decided by the `packageManager` field, then `devEngines.packageManager`, then the lockfile on disk — declaration always outranks a stray lockfile. That one decision drives which lockfile Nub reads and writes, which config files it honors, and which manifest fields it respects. Full precedence in [Package manager inference](#package-manager-inference).
+
+**2. Nub reads the incumbent's config — only the incumbent's.** Under a pnpm project Nub reads `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `package.json#pnpm` namespace, and `pnpm_config_*`; under Bun it reads `bunfig.toml` and `BUN_CONFIG_*`; under Yarn it reads `.yarnrc.yml` (Berry) or classic `.yarnrc` (v1). It never reads another tool's branded config: a pnpm project's `bunfig.toml` is ignored, a Yarn project's `pnpm-workspace.yaml` is ignored. The neutral `.npmrc` cascade and `npm_config_*` are read under every incumbent. The per-incumbent matrix is in [Compat mode](#compat-mode).
+
+**3. Nub writes back in the incumbent's lockfile format.** An npm project keeps a `package-lock.json`, a pnpm project a `pnpm-lock.yaml`, a Bun project a `bun.lock` — round-tripped, not converted. Yarn's `yarn.lock` is read-only. Nub never drops its own lockfile into a project it doesn't own, and a no-churn guard leaves a graph-equal lockfile untouched so it doesn't fight your other tool over byte-level formatting.
+
+This is the brand boundary working in both directions: Nub never emits its own brand into your config, and it never consumes another tool's branded config unless that tool is the incumbent. A project that is explicitly Nub's own ([Nub identity](#nub-identity)) reads *only* neutral, cross-tool config (`.npmrc`, `overrides`, `resolutions`, `catalog`, `workspaces`) — never `pnpm-workspace.yaml` or any other PM's branded files:
+
+```console
+# captured: a Nub-identity project (lock.yaml present) with a stray pnpm-workspace.yaml
+$ nub install
+nub: pnpm-workspace.yaml is not read under nub identity — migrate it (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`).
+```
+
 <Callout title="You don't need to use Nub's package manager">
 The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly as you do today, and reach for Nub for everything else — running files, scripts, and binaries.
 </Callout>
