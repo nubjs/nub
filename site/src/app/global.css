@@ -95,8 +95,13 @@
   --nub-code-muted: #9f988c;
   --nub-code-border: #2a2620;
   --nub-code-hairline: color-mix(in srgb, var(--nub-code-foreground) 16%, transparent);
-  --nub-code-track: color-mix(in srgb, var(--nub-code-foreground) 62%, transparent);
-  --nub-code-bar-muted: color-mix(in srgb, var(--nub-code-foreground) 30%, transparent);
+  /* The bench bars render on the always-dark code panel. The filled (muted) bar
+     must read clearly BRIGHTER than the empty track behind it; an earlier tuning
+     had the fill (30%) darker than the track (62%), so the filled portion was
+     nearly indistinguishable from the empty one. Pull the track down and the
+     fill up so each bar's length is obvious. */
+  --nub-code-track: color-mix(in srgb, var(--nub-code-foreground) 14%, transparent);
+  --nub-code-bar-muted: color-mix(in srgb, var(--nub-code-foreground) 68%, transparent);
 }
 
 .nub-code-panel {

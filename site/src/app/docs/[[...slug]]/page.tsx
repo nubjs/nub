@@ -5,10 +5,10 @@ import {
   DocsBody,
   DocsDescription,
   DocsTitle,
-  EditOnGitHub,
 } from 'fumadocs-ui/page';
 import { notFound } from 'next/navigation';
 import { AIActions } from '@/components/ai-actions';
+import { GitHubStarButton } from '@/components/github-star-button';
 import { getMDXComponents } from '../../../../mdx-components';
 
 /* GitHub mark SVG (official GitHub Invertocat, simplified mono path). */
@@ -25,37 +25,33 @@ function GitHubIcon({ className }: { className?: string }) {
   );
 }
 
-/* Footer node injected into the docs TOC panel — an HR then a GitHub repo link. */
-function TocGitHubLink() {
+/* Footer node injected into the docs TOC panel — the "Edit on GitHub" link,
+   styled to read as the last entry in the table of contents (matching the TOC
+   items' `text-sm text-fd-muted-foreground` and their `ps-3` left inset) rather
+   than as a foreign button. Replaces the former repo link that lived here. */
+function TocEditLink({ href }: { href: string }) {
   return (
     <>
-      <hr className="my-3 border-fd-border" />
+      <hr className="mt-2 mb-1 border-fd-foreground/10" />
       <a
-        href="https://github.com/nubjs/nub"
+        href={href}
         target="_blank"
         rel="noopener noreferrer"
-        className="flex items-center gap-1.5 text-xs text-fd-muted-foreground transition-colors hover:text-fd-foreground"
+        className="flex items-center gap-1.5 py-1.5 ps-3 text-sm text-fd-muted-foreground transition-colors hover:text-fd-accent-foreground"
       >
-        <GitHubIcon className="h-3.5 w-3.5 shrink-0" />
-        <span>nubjs/nub</span>
+        <GitHubIcon className="size-3.5 shrink-0" />
+        <span>Edit on GitHub</span>
       </a>
     </>
   );
 }
 
-/* Small footer rendered below the prev/next pager: GitHub star link. */
+/* Footer rendered below the prev/next pager: a GitHub-style Star button with a
+   live stargazer count, with generous vertical breathing room above + below. */
 function PageStarFooter() {
   return (
-    <div className="mt-6 flex items-center justify-center">
-      <a
-        href="https://github.com/nubjs/nub"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex items-center gap-1.5 text-xs text-fd-muted-foreground transition-colors hover:text-fd-foreground"
-      >
-        <GitHubIcon className="h-3 w-3 shrink-0" />
-        <span>Star Nub on GitHub</span>
-      </a>
+    <div className="my-10 flex items-center justify-center">
+      <GitHubStarButton repo="nubjs/nub" />
     </div>
   );
 }
@@ -79,7 +75,7 @@ export default async function Page(props: {
     <DocsPage
       toc={page.data.toc}
       full={page.data.full}
-      tableOfContent={{ footer: <TocGitHubLink /> }}
+      tableOfContent={{ footer: <TocEditLink href={editHref} /> }}
       footer={{ children: <PageStarFooter /> }}
     >
       <DocsTitle>{page.data.title}</DocsTitle>
@@ -94,7 +90,6 @@ export default async function Page(props: {
       <DocsBody role="main">
         <MDXContent components={getMDXComponents()} />
       </DocsBody>
-      <EditOnGitHub href={editHref} />
     </DocsPage>
   );
 }
