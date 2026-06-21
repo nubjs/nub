@@ -68,12 +68,12 @@ These exercise the bug-prone pnpm lockfile fields. Each is scoped to pnpm via `s
 | --- | --- | --- |
 | `catalog` | a pnpm catalog (`ms: catalog:` resolved through the default catalog in `pnpm-workspace.yaml`); the `catalogs:` lockfile section | PASS A+B |
 | `overrides-nested` | a scoped nested override (`debug>ms: 2.1.3` in `pnpm-workspace.yaml`); the `overrides:` lockfile block | PASS A+B |
-| `patched-deps` | `patchedDependencies` (a real `is-odd@3.0.1` patch declared in `pnpm-workspace.yaml`); the hash/path patch map | A: PASS; B: known-red (#23) |
+| `patched-deps` | `patchedDependencies` (a real `is-odd@3.0.1` patch declared in `pnpm-workspace.yaml`); the hash/path patch map | PASS A+B |
 | `patched-deps-no-newline` | issue #25: a `patchedDependencies` patch (a real `pnpm patch` of `is-odd@3.0.1`) whose final hunk context line is the patched file's last line with no trailing newline, where pnpm omits the `\ No newline at end of file` marker. `is-odd`'s `README.md` ships without a trailing newline. pnpm + GNU `patch` apply this; `git apply` and a strict byte-exact applier reject it (`error applying hunk #1`). Guards that nub applies it with pnpm's tolerance. | A: PASS |
 | `overrides-ref` | a `pnpm.overrides` `$`-ref (`ms: $ms`) recorded resolved in the lockfile but literal in `package.json` | A: PASS (was #16); B: skip-by-design |
 | `injected-deps` | a workspace consuming a sibling via `workspace:*` + `dependenciesMeta.injected`; guards that nub frozen-reads pnpm's injected-workspace lockfile and materializes the dep. The hard-copy-vs-symlink layout is config/version-sensitive and outside the lockfile, so it is not asserted. | A: PASS; B: skip-by-design |
 
-`patched-deps` Direction B is gated in `expected-failures.txt` as #23: nub writes the patchedDependencies entry as a bare-scalar hash, but pnpm 10.x writes/requires the `hash:`/`path:` map form, so `pnpm install --frozen-lockfile` rejects nub's lockfile. Direction A (nub reads a real pnpm map-form lockfile) passes.
+`patched-deps` Direction A and B both pass. The write-side fix (#23) — nub now emits the `{hash, path}` map form pnpm 10.x requires — shipped in v0.1.9 (aube pin `855e113`). No gate remains in `expected-failures.txt`.
 
 `overrides-ref` Direction A now passes — the `$`-ref read-as-drift bug (#16) was fixed by the vendor/aube pin bump `c948a38`; the fixture is now its regression guard. Direction B is an intended brand-boundary divergence, not a bug: this fixture carries a `pnpm.overrides` block in `package.json`, and a nub-identity project consumes only neutral cross-tool fields (`overrides`/`resolutions`), never another PM's branded config — so nub writes an override-free lockfile that real pnpm rejects with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`. (The `overrides-nested` fixture sidesteps this by declaring the override in `pnpm-workspace.yaml`, where nub mirrors pnpm faithfully.)
 
