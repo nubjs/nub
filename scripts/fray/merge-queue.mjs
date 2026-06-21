@@ -34,14 +34,14 @@ const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const QUEUE_PATH = join(PROJECT_DIR, '.fray', 'merge-queue.jsonl');
 
 /**
- * Flip a thread's frontmatter to `status: done` + append a brief `statusText` noting the
+ * Flip a thread's frontmatter to `status: done` + append a brief `status_text` noting the
  * merge. Called ONLY on a CONFIRMED merge (never on close/error), so the loop closes fully:
  * agent push+exit → enqueue → drain merges → drain marks the thread done — the orchestrator
  * never hand-edits thread status after a merge again.
  *
  * In-place frontmatter edit, fail-open (read-modify-write; any error → return false, no throw).
  * Re-reads immediately before writing to tolerate a concurrent body edit; only the `status:`
- * and `statusText:` lines are rewritten, never the body.
+ * and `status_text:` lines are rewritten, never the body.
  * @param {string} thread  slug (no `.fray/` prefix, no `.md`)
  * @param {number|string} pr
  * @returns {boolean} true if the file was updated
@@ -62,7 +62,7 @@ export function markThreadDone(thread, pr) {
   // status: → done (only within the frontmatter block; the first status: line).
   if (/^status:\s*\S+/m.test(out)) {
     if (/^status:\s*done\s*$/m.test(out)) {
-      // already done — still refresh statusText below, but no status change needed
+      // already done — still refresh status_text below, but no status change needed
     } else {
       out = out.replace(/^status:\s*\S.*$/m, 'status: done');
     }
@@ -72,11 +72,11 @@ export function markThreadDone(thread, pr) {
   }
 
   const note = `Merged PR #${pr} — shipped. (auto-set by merge-queue drain on confirmed merge.)`;
-  if (/^statusText:\s*/m.test(out)) {
-    out = out.replace(/^statusText:.*$/m, `statusText: "${note}"`);
+  if (/^status_text:\s*/m.test(out)) {
+    out = out.replace(/^status_text:.*$/m, `status_text: "${note}"`);
   } else {
-    // insert statusText right after the status line
-    out = out.replace(/^status:\s*done\s*$/m, `status: done\nstatusText: "${note}"`);
+    // insert status_text right after the status line
+    out = out.replace(/^status:\s*done\s*$/m, `status: done\nstatus_text: "${note}"`);
   }
 
   if (out === src) return false;

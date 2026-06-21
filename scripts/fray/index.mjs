@@ -175,7 +175,7 @@ const threads = readdirSync(FRAY_DIR)
       id,
       title: fm?.title ?? '',
       status: fm?.status ?? '?',
-      statusText: fm?.statusText ?? '',
+      statusText: fm?.status_text ?? '',
       next,
       dependsOn,
       agents,
@@ -230,10 +230,15 @@ for (const t of threads) {
     t.warnings.push('decided but not queued (active/enqueued?) — drop risk: `planned` + has Decisions, no depends_on, and Next step names no defer-reason/blocker');
   }
 
-  // statusText is a 1-2 sentence English status note (frontmatter); flag overlong ones —
+  // status_text is a 1-2 sentence English status note (frontmatter); flag overlong ones —
   // anything past ~2 sentences belongs in the body, not the at-a-glance board field.
   if (t.statusText && t.statusText.length > 280) {
-    t.warnings.push(`statusText is ${t.statusText.length} chars — keep it to 1-2 sentences; move detail into the body`);
+    t.warnings.push(`status_text is ${t.statusText.length} chars — keep it to 1-2 sentences; move detail into the body`);
+  }
+
+  // Soft warning: non-terminal threads without a status_text have no at-a-glance board note.
+  if (!t.statusText && t.id !== 'backlog') {
+    t.warnings.push('no status_text — add a 1-2 sentence gloss of the current state (shown on the board as the » line)');
   }
 
   // (2) An EMPTY `## Next step` on a non-terminal thread — the board's "→" cell goes

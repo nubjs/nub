@@ -82,7 +82,7 @@ function extractAgentId(result) {
  * Append `{id, label}` to the thread file's single-line `agents:` array, deduping by id. The
  * board/hook parser (`parseAgents`) expects a single-line `agents: [ {id: X, label: "Y"}, … ]`,
  * so we keep it single-line. If no `agents:` line exists, insert one inside the frontmatter
- * (right after the `status:`/`statusText:` block, before the closing `---`). Returns true if a
+ * (right after the `status:`/`status_text:` block, before the closing `---`). Returns true if a
  * write happened.
  * @param {string} path
  * @param {string} id
