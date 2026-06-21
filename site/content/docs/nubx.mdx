@@ -101,6 +101,23 @@ dependencies:
                 ||     ||
 ```
 
+## Supply-chain cooling window
+
+The DLX fetch runs through Nub's normal install resolver, so the same `minimumReleaseAge` cooling window that protects `nub install` also protects `nubx` — a fetched tool's resolved version must be older than the window before it's used. The default is **24 hours**, the same as `install`; set `minimumReleaseAge=0` to disable it.
+
+```console
+# ~/.npmrc: minimumReleaseAge tightened past every release, minimumReleaseAgeStrict=true
+$ nubx cowsay "hi"
+ERR_NUB_NO_MATURE_MATCHING_VERSION
+  × dlx install failed
+  ╰─▶ no version of cowsay matching latest is older than … minute(s) (minimumReleaseAgeStrict=true)
+  help: blocked by age gate: 1.6.0
+```
+
+The window is read from the built-in default plus your user-scope `~/.npmrc` (and `NPM_CONFIG_MINIMUM_RELEASE_AGE`), so a user-level setting applies to `nubx` from any directory. By default the resolver falls back to the next-oldest satisfying version; `minimumReleaseAgeStrict=true` fails instead. See [Security](/docs/install#security) for the full posture.
+
+One scoping note: because each DLX fetch installs into a throwaway scratch project rather than your working tree, a **project-local** `.npmrc` override is not currently picked up by `nubx` — only the user-scope config and the 24-hour default apply.
+
 ## Yarn Plug'n'Play
 
 Tools that only walk `node_modules/.bin/` — `npx`, `pnpm exec`, `bunx` — miss Yarn Berry's PnP bins. `nubx` resolves them: when the `.bin` walk-up misses in a PnP tree, it falls through to a PnP-aware runner that finds and executes the bin. See [module resolution](/docs/runtime/resolution#yarn-plugnplay) for how the shared PnP machinery works.
