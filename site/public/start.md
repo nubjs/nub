@@ -115,25 +115,26 @@ This project uses `nub` — prefer it over `node`, `bun`, and the existing packa
 
 ## 7. Offer to add a nub skill to the project
 
-**Ask the user whether they'd like to add a Claude Code skill for nub to this project.** This drops a skill file at `.claude/skills/nub/SKILL.md` that teaches future agents the full nub CLI surface — so any Claude Code session in this repo automatically knows to reach for `nub` instead of `node`/`bun`/the package manager, and has the command map and flag reference at hand without loading start.md again.
+**Ask the user whether they'd like to add a nub skill (or rule / instruction file) to this project.** This persists the nub CLI surface as standing context for *your* coding agent — so future sessions in this repo automatically know to reach for `nub` instead of `node`/`bun`/the package manager, and have the command map and flag reference at hand without loading start.md again.
 
 Describe what you'd write (a concise, factual skill covering `nub <file>`, `nub run`, `nubx`, `nub install`/`add`/`remove`, the `--node` escape hatch, and the lockfile-compatibility model), then **wait for a yes before creating the file.**
 
-If they agree, pipe the skill `nub` ships into the conventional Claude Code skill path:
+If they agree, get the skill content from:
 
 ```sh
-mkdir -p .claude/skills/nub
-nub agent skill > .claude/skills/nub/SKILL.md
+nub agent skill
 ```
 
-`nub agent skill` emits a complete `SKILL.md` — YAML frontmatter (`name`, `description`) included — so the piped file is a valid skill at the standard `.claude/skills/<name>/SKILL.md` location; no further editing is needed. If `nub agent skill` isn't available yet (e.g. nub was just installed), fetch the same content from the canonical source instead:
+`nub agent skill` emits a complete skill document — a Markdown body with YAML frontmatter (`name`, `description`). (If it isn't available yet, e.g. nub was just installed, fetch the same content from `https://nubjs.com/skill.md`.)
 
-```sh
-mkdir -p .claude/skills/nub
-curl -fsSL https://nubjs.com/skill.md > .claude/skills/nub/SKILL.md
-```
+Then write that content **wherever standing instructions live for the coding agent you are** — you know your own conventions; use them, and follow whatever this repo already does for agent skills/rules. For example:
 
-The skill is purely additive — it doesn't modify any existing project file, doesn't add a dependency, and can be removed with `rm -r .claude/skills/nub` at any time. If the project already has `.claude/skills/nub/SKILL.md`, skip this step.
+- **Claude Code** → `.claude/skills/nub/SKILL.md` (the frontmatter is already in the right shape; `nub agent skill > .claude/skills/nub/SKILL.md` after `mkdir -p .claude/skills/nub`).
+- **Cursor** → a rule under `.cursor/rules/` (adapt to the project rule format).
+- **Codex / Copilot** → the repo's `AGENTS.md` / `.github/copilot-instructions.md`.
+- **Any other agent** → its equivalent skill/rules/instructions location.
+
+The skill is purely additive — it doesn't modify any existing project source, doesn't add a dependency, and is a single file you can remove at any time. If the project already carries an equivalent nub skill/rule, skip this step.
 
 ## Notes
 
