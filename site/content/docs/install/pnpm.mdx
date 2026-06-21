@@ -139,7 +139,7 @@ $ nub install
   │ `hoisted`
 ```
 
-Lifecycle scripts for dependencies are skipped by default, exactly as pnpm 10 does. A package runs install scripts only when allowlisted via `pnpm.onlyBuiltDependencies` (or `pnpm.allowBuilds`), or when Nub's gated default-trust floor vouches for it (see [Security](/docs/install#security)); `nub approve-builds` adds an entry interactively. `pnpm.neverBuiltDependencies` is a denylist that wins over any allow and over the floor.
+Lifecycle scripts for dependencies are skipped by default, exactly as pnpm 10 does. A package runs install scripts only when allowlisted via `pnpm.onlyBuiltDependencies` (or `pnpm.allowBuilds`), or when Nub's gated default-trust floor vouches for it (see [the default-trust floor](/docs/install#default-trust-floor)); `nub approve-builds` adds an entry interactively. `pnpm.neverBuiltDependencies` is a denylist that wins over any allow and over the floor.
 
 ## Unsupported
 

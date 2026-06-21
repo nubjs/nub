@@ -9,13 +9,15 @@ This page is a cookbook. For how `nub` runs files in the first place, see [Runni
 
 ## Watch and restart a file
 
-Point `nub watch` at an entry file. It runs the file, then restarts the process on any change to the file or anything in its resolved import graph.
+The watcher takes a file, not a script name. Point `nub watch` at an entry file — the one your `dev` script runs, for example. It runs the file, then restarts the process on any change to the file or anything in its resolved import graph.
 
 ```bash
 nub watch src/server.ts
 ```
 
 TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath.
+
+A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/run#forward-arguments).
 
 ## `--watch`
 
@@ -24,16 +26,6 @@ Flag and subcommand are aliases: `nub --watch <file>` dispatches to the exact sa
 ```bash
 nub --watch src/server.ts
 ```
-
-## Watching a script
-
-The watcher takes a file, not a script: point `nub watch` at the entry your `dev` script runs.
-
-```bash
-nub watch src/server.ts
-```
-
-A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/run#forward-arguments).
 
 ## Preserve output
 

@@ -242,13 +242,13 @@ nub run --silent build
 
 ## `--node`
 
-By default, the `nub` executable is aliased as `node` for the duration of a `nub run` call, so any subprocess that spawns `node` (a script shebang, `child_process.spawn("node", …)`) gets Nub's TypeScript transpilation, `.env` loading, and polyfills too. Pass `--node` to turn that augmentation off for one invocation.
+By default, the `nub` executable is aliased as `node` for the duration of a `nub run` call, so any subprocess that spawns `node` (a script shebang, `child_process.spawn("node", …)`) gets Nub's augmentation too. Pass `--node` to turn that off for one invocation — see [the runtime overview](/docs/runtime#--node) for the full contract.
 
 ```bash
 nub run --node test
 ```
 
-With `--node`, the PATH shim, the transpile/preload hook, and experimental-flag injection are all skipped — child `node` calls resolve to your real Node binary. What still happens: script lookup, workspace walk-up, `--filter` evaluation, `npm_*` env injection, `node_modules/.bin` on `PATH`, and the `pre` / `post` lifecycle hooks. Reach for it when a script's `#!/usr/bin/env node` shebang chain expects plain Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's workspace selection.
+What still happens under `--node`: script lookup, workspace walk-up, `--filter` evaluation, `npm_*` env injection, `node_modules/.bin` on `PATH`, and the `pre` / `post` lifecycle hooks. Reach for it when a script's `#!/usr/bin/env node` shebang chain expects plain Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's workspace selection.
 
 ## Drop-in for `pnpm run`
 

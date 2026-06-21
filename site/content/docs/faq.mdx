@@ -40,7 +40,7 @@ Running `nub <file>` is flag-for-flag compatible with `node <file>` — same arg
 - **Automatic polyfills** — `Temporal`, `URLPattern`, browser-shape `Worker`, WinterTC gap globals, version-detected and feature-gated
 - **Unflagged experimentals** — `EventSource`, `WebSocket`, `localStorage` / `sessionStorage`, `vm.Module`, `node:sqlite` — flags Node already ships but keeps gated, auto-injected in exact per-version bands where each is still behind `--experimental-*`
 
-All of that comes for free when you type `nub` instead of `node`. For plain Node behavior, type `node` — the PATH shim is per-invocation, so shell `node` is always the user's real Node. For orchestration without runtime augmentation, `nub run --node` and `nubx --node` strip the hook/preload/flag-injection while keeping Nub's CLI work.
+All of that comes for free when you type `nub` instead of `node`. For plain Node behavior, type `node` — the PATH shim is per-invocation, so shell `node` is always the user's real Node. For orchestration without runtime augmentation, the [`--node` flag](#whats-the---node-flag) on `nub run` and `nubx` strips the hook/preload/flag-injection while keeping Nub's CLI work.
 
 ## What's the elevator pitch?
 
@@ -78,7 +78,7 @@ Yes. Every `node:` core module — `node:fs`, `node:http`, `node:test`, `node:wo
 ## What Node versions does it support?
 
 - **Augmented modes** require Node 18.19+ (Node 18 LTS) — the floor for the loader-hook API Nub uses for the transpile-on-import path.
-- **Compat mode** (`nub run --node` / `nubx --node`) is best-effort on any Node version. Here Nub is a pure orchestrator (script resolution, workspace bin PATH, env var injection) and spawns plain Node without registering augmentation. For ad-hoc plain-Node behavior on a file, type `node` directly.
+- **Compat mode** (the [`--node` flag](#whats-the---node-flag)) is best-effort on any Node version. Here Nub is a pure orchestrator (script resolution, workspace bin PATH, env var injection) and spawns plain Node without runtime augmentation. For ad-hoc plain-Node behavior on a file, type `node` directly.
 
 <Callout title="Below the floor">
 On Node older than 18.19, augmented commands emit a tagged error telling you to upgrade Node or use compat mode.
@@ -189,7 +189,7 @@ Nub is a Rust CLI. When you type `nub script.ts`, the Rust binary:
 4. The preload bundle calls `module.registerHooks()` to install Nub's load hook (TS / JSX / YAML / TOML / JSON5 / JSONC transpile-and-parse path, backed by an N-API binding to `oxc`), installs polyfills (`Temporal`, `URLPattern`, `WebSocket`, `Worker`, WinterTC gap globals) where Node is behind, and hands control to your script.
 5. Subprocesses inherit the same augmentation recursively — `node hello.js` from inside a script, the Node process Vite or Next.js spawns for a dev server, the worker pool your test runner spins up, `child_process.spawn("node", …)` from your own code, all augmented.
 
-No patched Node, no vendored `libnode`, no separate runtime to discover.
+Every step rides on a public Node extension surface — see [What Node features does it rely on?](#what-node-features-does-it-rely-on) for the full inventory.
 
 ## What Node features does it rely on?
 
@@ -206,15 +206,7 @@ That's the entire kit. There is no patched Node binary, no vendored `libnode`, n
 
 ## Why hasn't anyone else done this?
 
-Because the extension surface that makes it possible is new. Everything Nub does rides on five public Node mechanisms:
-
-- **`module.registerHooks()`** (Node 22.15, April 2025) — synchronous loader hooks. The entire TS / JSX / YAML / TOML path is one registered hook.
-- **`module.register()`** (Node 20.6, 2023) — programmatic loader registration, used on the legacy lines.
-- **`--import` / `--require` preloads** — code that runs before your `main`, used to install the polyfills.
-- **`NODE_OPTIONS` / V8 flag injection** — unflags the `--experimental-*` features Node already implements.
-- **N-API addons** (ABI-stable since 2017) — the oxc transpiler, called from inside the load hook.
-
-No patched Node binary, no vendored `libnode`, no separate runtime to discover. Deno and Bun predate most of this surface — back then, shipping integrated TypeScript meant writing a runtime around it; today the same layer composes on top of Node, with the entire compatibility surface preserved for free.
+Because the extension surface that makes it possible is new — the [public Node mechanisms](#what-node-features-does-it-rely-on) Nub composes only landed over the last three years (`module.registerHooks()` in April 2025, `module.register()` in 2023). Deno and Bun predate most of that surface — back then, shipping integrated TypeScript meant writing a runtime around it; today the same layer composes on top of Node, with the entire compatibility surface preserved for free.
 
 ## Why doesn't Node ship these defaults natively?
 
@@ -318,14 +310,7 @@ The `nub run` command is just as fast in the [script-runner benchmark](https://g
 
 ## What if I want to stop using Nub?
 
-Your codebase keeps working on plain Node, unchanged. Nub adds no APIs to your code:
-
-```text
-no globalThis.nub
-no nub:* module namespace
-no @nub/* npm scope
-no "nub" field in package.json
-```
+Your codebase keeps working on plain Node, unchanged. Nub adds no APIs to your code — no `nub` global, no `nub:*` import namespace, no `@nub/*` scope, no `"nub"` field in your `package.json`.
 
 If Nub disappeared tomorrow, the worst case is going back to whatever toolchain you had before:
 
@@ -345,15 +330,7 @@ nub run --node test           # Nub's CLI orchestration, runtime augmentation of
 nubx --node prisma generate   # Nub's bin resolution, runtime augmentation off
 ```
 
-It disables every runtime augmentation for the spawned process:
-
-```text
-no transpile hook
-no .env loading
-no polyfills
-no experimental-flag injection
-no PATH shim
-```
+It strips every runtime augmentation for the spawned process — the transpile hook, `.env` loading, polyfills, experimental-flag injection, and the PATH shim — leaving byte-exact Node runtime behavior; full contract at [the runtime overview](/docs/runtime#--node).
 
 Useful when a script's `#!/usr/bin/env node` shebang chain expects real Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's `--filter` / workspace selection. For ad-hoc plain-Node runs, type `node`.
 
