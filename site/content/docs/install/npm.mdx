@@ -125,7 +125,7 @@ npm ignores the Yarn-style top-level `resolutions`, so Nub drops it with a warni
 
 The default `node_modules` layout is **hoisted** — the flat npm-style scheme.
 
-Lifecycle scripts run under Nub's deny-by-default trust posture plus a gated default-trust floor (see [Security](/docs/install#security)), not npm's run-everything default. Curated, age-vetted packages build automatically; everything else is skipped with `WARN_NUB_IGNORED_BUILD_SCRIPTS` until `nub approve-builds`. Platform-gated optionals (e.g. `fsevents`) resolve and round-trip into the lock.
+Lifecycle scripts run under Nub's deny-by-default trust posture plus a gated default-trust floor (see [the default-trust floor](/docs/install#default-trust-floor)), not npm's run-everything default. Curated, age-vetted packages build automatically; everything else is skipped with `WARN_NUB_IGNORED_BUILD_SCRIPTS` until `nub approve-builds`. Platform-gated optionals (e.g. `fsevents`) resolve and round-trip into the lock.
 
 ## Gaps
 

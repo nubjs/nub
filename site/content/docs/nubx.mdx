@@ -52,14 +52,14 @@ nubx vitest run --coverage
 
 ## --node
 
-By default `nubx` runs the tool under Nub's augmentation — the PATH shim makes any `node` the tool spawns resolve back to Nub, with TypeScript transpilation and polyfills active. Pass `--node` to turn that off for the invocation: the bin's `#!/usr/bin/env node` shebang resolves to your real Node binary, no `--import` preload is added, and no experimental flags are injected. Reach for it when a tool's shebang chain needs byte-exact plain Node, when you're bisecting a Nub-vs-Node issue, or when CI wants exact Node runtime behavior with `nubx`'s resolution.
+Pass `--node` to run the tool with runtime augmentation disabled — see [the runtime overview](/docs/runtime#--node) for the full contract.
 
 ```bash
 nubx --node prisma generate
 nub exec --node tsc --noEmit
 ```
 
-What still happens under `--node`: the workspace-aware `node_modules/.bin` walk-up, the registry DLX fallback below, and `nubx`'s own CLI machinery. Only the runtime augmentation is disabled.
+What still happens under `--node`: the workspace-aware `node_modules/.bin` walk-up, the registry DLX fallback, and `nubx`'s own CLI machinery. Only the runtime augmentation is disabled. Reach for it when a tool's shebang chain needs byte-exact plain Node, when bisecting a Nub-vs-Node issue, or when CI wants exact Node runtime behavior with `nubx`'s resolution.
 
 ## Download and execute
 
@@ -103,7 +103,7 @@ dependencies:
 
 ## Yarn Plug'n'Play
 
-Yarn Berry's Plug'n'Play mode replaces `node_modules/.bin/` with a runtime resolution table managed by Yarn's own loader. Tools that only walk the `.bin/` tree — `npx`, `pnpm exec`, `bunx` — don't see it. `nubx` does: when the `.bin` walk-up misses in a PnP tree, it hands off to a PnP-aware runner that resolves the bin through `pnpapi` and loads it with `require()` — the way `yarn exec` does, reading zip-stored bins on every supported tier. A Yarn Berry project's bins run with no setup. The same machinery that lets Nub *run* a PnP project backs this; see [module resolution](/docs/runtime/resolution#yarn-plugnplay).
+Tools that only walk `node_modules/.bin/` — `npx`, `pnpm exec`, `bunx` — miss Yarn Berry's PnP bins. `nubx` resolves them: when the `.bin` walk-up misses in a PnP tree, it falls through to a PnP-aware runner that finds and executes the bin. See [module resolution](/docs/runtime/resolution#yarn-plugnplay) for how the shared PnP machinery works.
 
 ## Flag differences
 
