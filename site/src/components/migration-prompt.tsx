@@ -2,24 +2,29 @@
 
 import { useState } from 'react';
 
-/* The prompt copied to the clipboard. It is deliberately thin: the full,
-   permission-gated adoption flow (install → learn the surface → everyday use →
-   opt-in migration investigation → record the convention, plus per-agent skill
-   placement) lives in https://nubjs.com/start.md, which is the single source of
-   truth. Re-stating those steps here only let them drift, so we point at
-   start.md rather than inline it. */
-const PROMPT = [
-  'Adopt Nub (https://nubjs.com) in this Node.js project: read https://nubjs.com/start.md and follow the steps there. The full docs are at https://nubjs.com/llms.txt.',
-  '',
-  'There’s no need to switch off the existing package manager: Nub respects its lockfile bidirectionally, so Nub and the current package manager work interchangeably.',
-].join('\n');
+/* Minimal fallback used only if the start.md read fails at build time, so the
+   button still copies something actionable rather than an empty string. The
+   real payload is start.md's full text, sourced from the file and passed in via
+   the `prompt` prop (see the home page) — start.md is the single source of
+   truth and the button reproduces it verbatim. */
+const FALLBACK_PROMPT =
+  'Adopt Nub (https://nubjs.com) in this Node.js project: read https://nubjs.com/start.md and follow the steps there. The full docs are at https://nubjs.com/llms.txt.';
 
-export function MigrationPrompt({ className = '' }: { className?: string }) {
+export function MigrationPrompt({
+  prompt,
+  className = '',
+}: {
+  /* The exact text the button copies — start.md's content, read at build time.
+     Omitted/empty falls back to the pointer above. */
+  prompt?: string;
+  className?: string;
+}) {
   const [copied, setCopied] = useState(false);
+  const payload = prompt && prompt.length > 0 ? prompt : FALLBACK_PROMPT;
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(PROMPT);
+      await navigator.clipboard.writeText(payload);
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch {

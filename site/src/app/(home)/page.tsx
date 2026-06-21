@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { InstallTabs } from '@/components/install-tabs';
@@ -5,6 +7,22 @@ import { MigrationPrompt, ViewRepoLink } from '@/components/migration-prompt';
 import { Terminal, Source, BenchBars } from '@/components/code';
 import { ToolkitTabs } from '@/components/toolkit-tabs';
 import { getLatestNode } from '@/lib/node-version';
+
+/* The "Copy agent prompt" button copies start.md VERBATIM — start.md is the
+   single source of truth for the adoption flow, so the button reproduces it
+   byte-for-byte rather than paraphrasing or linking. Read the raw file at build
+   time; on any read failure return undefined so the component falls back to a
+   short pointer instead of breaking the build. */
+async function getStartPrompt(): Promise<string | undefined> {
+  try {
+    return await readFile(
+      path.join(process.cwd(), 'public', 'start.md'),
+      'utf8',
+    );
+  } catch {
+    return undefined;
+  }
+}
 
 export default function HomePage() {
   return (
@@ -192,6 +210,7 @@ function HeroSub({ className = '' }: { className?: string }) {
 
 async function Hero() {
   const node = await getLatestNode();
+  const startPrompt = await getStartPrompt();
   return (
     <section className="relative border-b border-fd-border">
       <div
@@ -214,7 +233,7 @@ async function Hero() {
               <InstallTabs />
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2">
-              <MigrationPrompt />
+              <MigrationPrompt prompt={startPrompt} />
               <ViewRepoLink />
             </div>
           </div>
@@ -1197,7 +1216,8 @@ function HypermanagerBand() {
   );
 }
 
-function FinalCta() {
+async function FinalCta() {
+  const startPrompt = await getStartPrompt();
   return (
     <section className="relative border-b border-fd-border">
       <div
@@ -1222,7 +1242,7 @@ function FinalCta() {
         <div className="mt-10 flex flex-col items-center gap-4">
           <InstallTabs className="mx-auto" />
           <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
-            <MigrationPrompt />
+            <MigrationPrompt prompt={startPrompt} />
             <ViewRepoLink />
           </div>
         </div>
