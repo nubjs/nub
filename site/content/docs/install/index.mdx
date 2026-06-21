@@ -9,29 +9,27 @@ Nub never asks which package manager you use — it [infers the incumbent](#comp
 
 ## Compatibility
 
-Run Nub in a repo that already uses npm, pnpm, Yarn, or Bun and it behaves *as that package manager* — no migration, no new files. Nub infers the incumbent, then mirrors it: the same lockfile format, the same config files, the same manifest fields. The incumbent is decided by one precedence chain:
+Run Nub in a repo that already uses npm, pnpm, Yarn, or Bun and it behaves *as that package manager* — no migration, no new files. Nub infers the incumbent, then mirrors it: same lockfile format, same config files, same manifest fields. Inference walks one precedence chain:
 
-- **`packageManager`** field — the Corepack standard, outranks any lockfile
-- **`devEngines.packageManager`** field — fallback declaration, object or array form
-- **lockfile on disk** — consulted only when no declaration names a manager
+- **`packageManager`** — Corepack standard
+- **`devEngines.packageManager`** — object or array form
+- **lockfile on disk**
 
-A declaration always beats a stray lockfile, so a pnpm project that picked up a `package-lock.json` still resolves as pnpm. Two lockfiles for different managers, with no declaration, is a hard error rather than a guess. The same chain runs in a workspace from any member: Nub walks up to the root, which carries the declaration and lockfile.
+In a workspace, the chain runs from any member: Nub walks up to the root, which carries the declaration and lockfile. Two lockfiles for different managers, with no declaration, is a hard error.
 
-That one decision drives the whole table below — which lockfile round-trips, which config Nub reads, and which manifest fields it honors:
+| Incumbent | Lockfile | Round-trip |
+|---|---|---|
+| **npm** — [docs →](/docs/install/npm) | `package-lock.json`, `npm-shrinkwrap.json` | read + write |
+| **pnpm** — [docs →](/docs/install/pnpm) | `pnpm-lock.yaml` (v9) | read + write |
+| **Yarn** — [docs →](/docs/install/yarn) | `yarn.lock` | **read-only** |
+| **Bun** — [docs →](/docs/install/bun) | `bun.lock` | read + write |
+| **Nub** — [docs →](/docs/pm) | `lock.yaml` (pnpm v9 bytes) | read + write |
 
-| Incumbent | Lockfile | Round-trip | Full page |
-|---|---|---|---|
-| **npm** | `package-lock.json`, `npm-shrinkwrap.json` | read + write | [npm](/docs/install/npm) |
-| **pnpm** | `pnpm-lock.yaml` (v9) | read + write | [pnpm](/docs/install/pnpm) |
-| **Yarn** | `yarn.lock` | **read-only** | [Yarn](/docs/install/yarn) |
-| **Bun** | `bun.lock` | read + write | [Bun](/docs/install/bun) |
-| **Nub** | `lock.yaml` (pnpm v9 bytes) | read + write | [pm](/docs/pm) |
-
-A no-churn guard leaves a graph-equal lockfile untouched, so Nub never fights your other tool over byte-level formatting, and it never drops its own lockfile into a project it doesn't own. The `bun.lockb` binary format is rejected — convert to text `bun.lock` first.
+A no-churn guard leaves a graph-equal lockfile untouched, and Nub never drops its own lockfile into a project it doesn't own. The `bun.lockb` binary format is rejected — convert to text `bun.lock` first.
 
 ### Config it reads
 
-Config reads are symmetric with the lockfile: under each incumbent Nub reads that tool's branded config and no other's. The neutral `.npmrc` cascade and `npm_config_*` are read under every incumbent; a pnpm project's `bunfig.toml` is ignored, a Yarn project's `pnpm-workspace.yaml` is ignored. Each chip below is grounded in the detailed table on that incumbent's page — hover a partial chip for the breakdown.
+Config reads are symmetric with the lockfile: under each incumbent Nub reads that tool's branded config and no other's. The neutral `.npmrc` cascade and `npm_config_*` are read under every incumbent. Hover a partial chip for the breakdown; each chip is grounded in the detailed table on that incumbent's page.
 
 <PmSupport
   rows={[
@@ -139,6 +137,13 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
         { code: 'engines / os / cpu', ok: true },
       ],
     },
+  ]}
+/>
+
+Under its own identity, Nub reads only neutral, cross-tool config — never another manager's branded fields:
+
+<PmSupport
+  rows={[
     {
       pm: 'nub',
       href: '/docs/pm',
@@ -165,14 +170,14 @@ The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly 
 
 ### Nub identity
 
-A project is Nub's own when it declares Nub through `nub pm use nub`, or when `lock.yaml` is the only lockfile signal, or when a fresh project has no declaration and no lockfile at all. That switch aligns the manifest and lockfile, migrates pnpm workspace config into neutral `package.json` fields, and moves the project onto a deliberately neutral surface:
+A project is Nub's own in three cases: it declares Nub through `nub pm use nub`, `lock.yaml` is the only lockfile signal, or a fresh project has no declaration and no lockfile. The switch aligns the manifest and lockfile, migrates pnpm workspace config into neutral `package.json` fields, and moves the project onto a neutral surface:
 
 - **Lockfile:** `lock.yaml` — the pnpm v9 schema byte-for-byte, under Nub's own basename
 - **Package fields:** `workspaces`, `overrides`, `resolutions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
 - **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
 - **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own directories
 
-This is the brand boundary in both directions: Nub never emits its own brand into your config, and under its own identity it reads *only* neutral, cross-tool config — never `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `pnpm.*` namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, or aube's `AUBE_*` knobs. Injected dependencies are also unsupported under Nub identity; `nub pm use nub` refuses a project that relies on `dependenciesMeta.injected`. To keep pnpm hooks or workspace config active, keep the project pnpm-owned or run `nub pm use pnpm`.
+This is the brand boundary in both directions: Nub never emits its own brand into your config, and under its own identity reads *only* neutral, cross-tool config — never `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `pnpm.*` namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, or aube's `AUBE_*` knobs. Injected dependencies are unsupported under Nub identity — `nub pm use nub` refuses a project that relies on `dependenciesMeta.injected`. To keep pnpm hooks or workspace config active, stay pnpm-owned or run `nub pm use pnpm`.
 
 ```console
 # captured: a Nub-identity project (lock.yaml present) with a stray pnpm-workspace.yaml
@@ -181,7 +186,7 @@ nub: pnpm-workspace.yaml is not read under nub identity — migrate it (`nub pm 
 ```
 
 <Callout title="Contradictions are loud">
-When signals disagree, Nub stops and reports it. Two lockfiles, no declaration:
+When signals disagree, Nub stops rather than guess. Two lockfiles, no declaration:
 
 ```console
 $ nub install
@@ -212,7 +217,7 @@ This inference picks the *install engine's* incumbent — the format Nub reads a
 
 ### Compat mode
 
-The augmentation Nub applies to your runtime is reversible. Passing `--node`, or setting a truthy `NODE_COMPAT` for a whole tree, disables every Nub runtime augmentation and runs the project's pinned Node vanilla — version provisioning stays on, the augmentation comes off. See [the runtime overview](/docs/runtime#--node) for the full contract.
+Runtime augmentation is reversible. Passing `--node`, or setting a truthy `NODE_COMPAT` for a whole tree, runs the project's pinned Node vanilla — version provisioning stays on, augmentation comes off. See [the runtime overview](/docs/runtime#--node) for the full contract.
 
 ## CLI
 
@@ -340,7 +345,7 @@ The two compose: `nub pm shim` routes bare `npm` / `pnpm` / `yarn` through the p
 
 ## Lifecycle scripts
 
-Some dependencies run build steps on install — `preinstall`, `install`, and `postinstall` scripts declared in their own `package.json`. This applies across pnpm, npm, and Bun, so it lives here once. Nub does **not** run them indiscriminately the way npm does; you control which packages are allowed to build.
+Some dependencies run build steps on install — `preinstall`, `install`, and `postinstall` scripts declared in their own `package.json` (across pnpm, npm, and Bun). Nub ships a **deny-by-default** posture: it does not run them indiscriminately the way npm does. You control which packages build.
 
 ```bash
 nub approve-builds                 # interactively approve packages to build
@@ -349,13 +354,11 @@ nub rebuild                        # re-run build scripts for already-approved p
 nub install --ignore-scripts       # skip every dependency build script this install
 ```
 
-Which manifest field grants permission tracks the inferred incumbent: pnpm projects use `pnpm.onlyBuiltDependencies` / `pnpm.allowBuilds`, Bun projects use `trustedDependencies`, and the neutral `allowBuilds` field plus `nub approve-builds` apply in any project. An explicit denial (`allowBuilds: { pkg: false }`, `neverBuiltDependencies`) always wins. When a package wants to build but isn't allowed, Nub skips it and prints `WARN_NUB_IGNORED_BUILD_SCRIPTS` naming the package, with `nub approve-builds` as the remedy.
+Which manifest field grants permission tracks the inferred incumbent: pnpm projects use `pnpm.onlyBuiltDependencies` / `pnpm.allowBuilds`, Bun projects use `trustedDependencies`, and the neutral `allowBuilds` field plus `nub approve-builds` apply in any project. An explicit denial (`allowBuilds: { pkg: false }`, `neverBuiltDependencies`) always wins. A package that wants to build but isn't allowed is skipped, with `WARN_NUB_IGNORED_BUILD_SCRIPTS` naming it and `nub approve-builds` as the remedy.
 
-On top of explicit approval, a curated set of well-known packages builds automatically through a gated trust floor — see [Security](#security) for the posture and the gates.
+### Default-trust floor
 
-## Security
-
-Nub ships a **deny-by-default** install posture. Beyond the packages you approve explicitly, a curated set of well-known packages may build without approval — but only when **all three** gates hold at once:
+Beyond the packages you approve explicitly, a curated set of well-known packages may build without approval — but only when **all three** gates hold at once:
 
 | Gate | Requirement | On failure |
 |---|---|---|
