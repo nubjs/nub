@@ -119,15 +119,21 @@ This project uses `nub` — prefer it over `node`, `bun`, and the existing packa
 
 Describe what you'd write (a concise, factual skill covering `nub <file>`, `nub run`, `nubx`, `nub install`/`add`/`remove`, the `--node` escape hatch, and the lockfile-compatibility model), then **wait for a yes before creating the file.**
 
-If they agree, create `.claude/skills/nub/SKILL.md` with the content produced by:
+If they agree, pipe the skill `nub` ships into the conventional Claude Code skill path:
 
 ```sh
-nub agent skill
+mkdir -p .claude/skills/nub
+nub agent skill > .claude/skills/nub/SKILL.md
 ```
 
-If that command isn't available yet (e.g. nub was just installed and the skill subcommand isn't wired), write the skill content from the canonical source at https://nubjs.com/skill.md.
+`nub agent skill` emits a complete `SKILL.md` — YAML frontmatter (`name`, `description`) included — so the piped file is a valid skill at the standard `.claude/skills/<name>/SKILL.md` location; no further editing is needed. If `nub agent skill` isn't available yet (e.g. nub was just installed), fetch the same content from the canonical source instead:
 
-The skill is purely additive — it doesn't modify any existing project file, doesn't add a dependency, and can be removed with `rm .claude/skills/nub/SKILL.md` at any time. If the project already has `.claude/skills/nub/SKILL.md`, skip this step.
+```sh
+mkdir -p .claude/skills/nub
+curl -fsSL https://nubjs.com/skill.md > .claude/skills/nub/SKILL.md
+```
+
+The skill is purely additive — it doesn't modify any existing project file, doesn't add a dependency, and can be removed with `rm -r .claude/skills/nub` at any time. If the project already has `.claude/skills/nub/SKILL.md`, skip this step.
 
 ## Notes
 
