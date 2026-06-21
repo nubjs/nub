@@ -77,6 +77,19 @@ fn reporter_hide_prefix() -> bool {
     HIDE_STREAM_PREFIX.load(Ordering::Relaxed)
 }
 
+/// pnpm honors `npm_config_reporter=silent` (and the `-s` / `--reporter=silent`
+/// flags) to suppress the `> name@ <script>` run preamble. nub already routes
+/// `npm_config_*` knobs (registry/cache) through the embedder bridge but the run
+/// preamble (`$ <cmd>`) keyed only on the explicit `-s`/`--reporter` flag — so an
+/// env-set `npm_config_reporter=silent` was ignored. Read it here when no
+/// explicit `--reporter` flag was given. Matches pnpm: only `reporter=silent`
+/// (not `loglevel`) suppresses the run preamble.
+fn npm_config_reporter_is_silent() -> bool {
+    std::env::var("npm_config_reporter")
+        .map(|v| v.trim().eq_ignore_ascii_case("silent"))
+        .unwrap_or(false)
+}
+
 /// `--shell-emulator`: run script bodies through a detected POSIX `sh` instead of
 /// the platform default. The default is already `sh` on Unix (so the flag is a
 /// no-op there); on Windows the default is `cmd`, which can't run POSIX-isms
@@ -1692,7 +1705,13 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             match reporter {
                 Some(ReporterMode::Silent) => SILENT.store(true, Ordering::Relaxed),
                 Some(ReporterMode::Ndjson) => REPORTER_NDJSON.store(true, Ordering::Relaxed),
-                Some(ReporterMode::Default) | None => {}
+                // No explicit `--reporter` flag: honor `npm_config_reporter=silent`
+                // from the environment (pnpm parity — suppresses the run preamble).
+                Some(ReporterMode::Default) | None => {
+                    if npm_config_reporter_is_silent() {
+                        SILENT.store(true, Ordering::Relaxed);
+                    }
+                }
             }
             if reporter_hide_prefix {
                 HIDE_STREAM_PREFIX.store(true, Ordering::Relaxed);
@@ -2214,21 +2233,161 @@ fn run_script(
         return run_single_script(script, &cmd, &root_project, compat_mode, args, &exec);
     }
 
-    // Single-package execution.
-    let cmd = nub_core::workspace::scripts::resolve_script(&project.manifest, script).ok_or_else(
-        || {
-            anyhow::anyhow!(
-                "missing script: \"{script}\"\n\nAvailable scripts:\n{}",
+    // Single-package execution. The selector may be an exact script name (one
+    // script) or a `/regexp/` literal (every matching script, in package.json
+    // order) — pnpm parity (`exec/commands/src/run.ts` getSpecifiedScripts).
+    run_selected_scripts(script, &project, compat_mode, args, ws)
+}
+
+/// Run a `nub run <selector>` in a single package: resolve the selector to one or
+/// more scripts (exact name, or every script matching a `/regexp/` literal) and
+/// run them. One match → the inherit-stdio single-script path (unchanged). More
+/// than one → each script in package.json order with a `<dir> <script>:` prefix,
+/// bailing on the first failure unless `--no-bail`. Mirrors pnpm's
+/// regex-selector run; nub runs the matched set sequentially (pnpm's
+/// `--sequential` discipline) so output ordering is deterministic — `--parallel`
+/// opts into concurrent execution.
+fn run_selected_scripts(
+    selector: &str,
+    project: &nub_core::workspace::detect::Project,
+    compat_mode: bool,
+    args: &[String],
+    ws: &WorkspaceOpts,
+) -> Result<i32> {
+    use nub_core::workspace::scripts::ScriptSelection;
+
+    let scripts = match nub_core::workspace::scripts::select_scripts(&project.manifest, selector) {
+        ScriptSelection::Matched(s) => s,
+        ScriptSelection::UnsupportedRegexFlags => {
+            bail!("RegExp flags are not supported in script command selector");
+        }
+        ScriptSelection::None => {
+            if ws.if_present {
+                return Ok(0);
+            }
+            bail!(
+                "missing script: \"{selector}\"\n\nAvailable scripts:\n{}",
                 list_scripts(&project.manifest)
-            )
-        },
-    )?;
+            );
+        }
+    };
 
     let exec = ScriptExecOpts {
         ignore_scripts: ws.ignore_scripts,
         script_shell: ws.script_shell.as_deref(),
     };
-    run_single_script(script, &cmd, &project, compat_mode, args, &exec)
+
+    // Exact single match: the existing inherit-stdio path, byte-for-byte
+    // unchanged (preserves the `$ <cmd>` echo + pre/post lifecycle).
+    if scripts.len() == 1 {
+        let name = &scripts[0];
+        let cmd = nub_core::workspace::scripts::resolve_script(&project.manifest, name)
+            .expect("selected script is present in the manifest");
+        return run_single_script(name, &cmd, project, compat_mode, args, &exec);
+    }
+
+    // Multiple matched scripts (a `/regexp/` selector). Run each through the
+    // prefixed path so every line is labeled with its script — the same
+    // presentation nub's workspace runs use. Each matched script gets its own
+    // pre/post lifecycle and the forwarded user args, matching pnpm.
+    //
+    // pnpm runs the matched set concurrently by default (workspace-concurrency,
+    // default min(4, cpus)); `--sequential` (or `--workspace-concurrency 1`)
+    // serializes. nub mirrors that: concurrent by default with the same cap,
+    // sequential (in package.json order) when the concurrency resolves to 1.
+    let aggregate = false;
+    let concurrency = resolve_run_concurrency(ws);
+
+    if concurrency <= 1 || scripts.len() <= 1 {
+        // Sequential, package.json order. Bail (default) stops after the first
+        // failure; `--no-bail` runs the whole set and returns the last failure.
+        let mut overall = 0;
+        for (idx, name) in scripts.iter().enumerate() {
+            let cmd = nub_core::workspace::scripts::resolve_script(&project.manifest, name)
+                .expect("selected script is present in the manifest");
+            let code = run_single_script_prefixed(
+                name,
+                &cmd,
+                project,
+                compat_mode,
+                args,
+                ".",
+                idx,
+                &exec,
+                aggregate,
+            )?;
+            if code != 0 {
+                overall = code;
+                if ws.bail {
+                    break;
+                }
+            }
+        }
+        return Ok(overall);
+    }
+
+    // Concurrent: a bounded worker pool over the matched scripts, each prefixed.
+    // `std::thread::scope` lets the workers borrow `project`/`args` without a
+    // `'static` clone. A non-zero exit from any script is the overall exit.
+    use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
+    let failed = AtomicI32::new(0);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let exec_ref = &exec;
+    std::thread::scope(|scope| {
+        let num_workers = concurrency.min(scripts.len());
+        let scripts_ref = &scripts;
+        let next_ref = &next;
+        let failed_ref = &failed;
+        let handles: Vec<_> = (0..num_workers)
+            .map(|_| {
+                scope.spawn(move || {
+                    loop {
+                        let idx = next_ref.fetch_add(1, AtomicOrdering::Relaxed);
+                        if idx >= scripts_ref.len() {
+                            break;
+                        }
+                        let name = &scripts_ref[idx];
+                        if let Some(cmd) =
+                            nub_core::workspace::scripts::resolve_script(&project.manifest, name)
+                        {
+                            let code = run_single_script_prefixed(
+                                name,
+                                &cmd,
+                                project,
+                                compat_mode,
+                                args,
+                                ".",
+                                idx,
+                                exec_ref,
+                                aggregate,
+                            )
+                            .unwrap_or(1);
+                            if code != 0 {
+                                failed_ref.store(code, AtomicOrdering::Relaxed);
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            let _ = h.join();
+        }
+    });
+    Ok(failed.load(AtomicOrdering::Relaxed))
+}
+
+/// Effective concurrency for a single-package multi-script (regex) run. Mirrors
+/// pnpm: `--sequential` → 1; an explicit `--workspace-concurrency N` → N (clamped
+/// to ≥1); otherwise the default `min(4, available_parallelism)`.
+fn resolve_run_concurrency(ws: &WorkspaceOpts) -> usize {
+    if let Some(n) = ws.workspace_concurrency {
+        return (n.max(1)) as usize;
+    }
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    cpus.min(4)
 }
 
 /// What a workspace run executes in each selected member: either a package.json

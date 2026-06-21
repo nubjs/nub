@@ -16,6 +16,11 @@ flate2.workspace = true
 glob-match = "0.2"
 liblzma.workspace = true
 reqwest.workspace = true
+# Regex-literal script selectors (`nub run "/^build:/"`) — pnpm's `run /regexp/`
+# parity. Already in the dependency tree transitively; declared direct here for
+# the one use site (`select_scripts`). `default-features` (unicode) keeps `\w`
+# etc. matching pnpm's JS RegExp closely enough for script-name selection.
+regex = "1"
 rustc-hash.workspace = true
 semver = "1"
 serde.workspace = true

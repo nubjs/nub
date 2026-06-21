@@ -1032,6 +1032,135 @@ fn workspace_root_flag_runs_root_script_from_member() {
     );
 }
 
+/// `npm_config_reporter=silent` must suppress the `$ <cmd>` run preamble, matching
+/// pnpm (which honors `npm_config_reporter=silent` for the same banner). Only
+/// `reporter` keys it — `npm_config_loglevel=silent` does NOT suppress in pnpm,
+/// so nub must not honor it either.
+#[test]
+fn npm_config_reporter_silent_suppresses_run_preamble() {
+    let dir = std::env::temp_dir().join(format!("nub-rep-silent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"p","scripts":{"a":"echo RAN_A"}}"#,
+    )
+    .unwrap();
+
+    let silent = Command::new(nub_binary())
+        .args(["run", "a"])
+        .env("npm_config_reporter", "silent")
+        .current_dir(&dir)
+        .output()
+        .expect("spawn nub");
+    let loud = Command::new(nub_binary())
+        .args(["run", "a"])
+        .current_dir(&dir)
+        .output()
+        .expect("spawn nub");
+    let loglevel = Command::new(nub_binary())
+        .args(["run", "a"])
+        .env("npm_config_loglevel", "silent")
+        .current_dir(&dir)
+        .output()
+        .expect("spawn nub");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let silent_err = String::from_utf8_lossy(&silent.stderr);
+    let loud_err = String::from_utf8_lossy(&loud.stderr);
+    let loglevel_err = String::from_utf8_lossy(&loglevel.stderr);
+
+    // The script still runs in every case (the var only gates the preamble).
+    assert!(String::from_utf8_lossy(&silent.stdout).contains("RAN_A"));
+    // reporter=silent drops the `$ echo RAN_A` preamble; the default keeps it.
+    assert!(
+        !silent_err.contains("$ echo"),
+        "npm_config_reporter=silent must suppress the `$ <cmd>` preamble; stderr: {silent_err:?}"
+    );
+    assert!(
+        loud_err.contains("$ echo"),
+        "the default run must echo the `$ <cmd>` preamble; stderr: {loud_err:?}"
+    );
+    assert!(
+        loglevel_err.contains("$ echo"),
+        "npm_config_loglevel=silent must NOT suppress the preamble (pnpm parity); stderr: {loglevel_err:?}"
+    );
+}
+
+/// `nub run "/regexp/"` runs every script whose name matches the pattern, in
+/// package.json order — pnpm's regex script selector. An exact name still runs
+/// just that one; a regex matching nothing is a missing-script error.
+#[test]
+fn run_regex_selector_runs_all_matching_scripts() {
+    let dir = std::env::temp_dir().join(format!("nub-run-regex-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"p","scripts":{"build:x":"echo DID_X","lint":"echo DID_LINT","build:y":"echo DID_Y"}}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["run", "/^build:/"])
+        .current_dir(&dir)
+        .output()
+        .expect("spawn nub");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "regex run output:\n{combined}");
+    assert!(combined.contains("DID_X"), "build:x must run:\n{combined}");
+    assert!(combined.contains("DID_Y"), "build:y must run:\n{combined}");
+    assert!(
+        !combined.contains("DID_LINT"),
+        "the non-matching `lint` script must NOT run:\n{combined}"
+    );
+
+    // A regex that matches nothing is a missing-script failure (exit 1).
+    let none = Command::new(nub_binary())
+        .args(["run", "/^nope:/"])
+        .current_dir(&dir)
+        .output()
+        .expect("spawn nub");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        none.status.code(),
+        Some(1),
+        "a regex selector matching no script must exit 1"
+    );
+}
+
+/// A regex multi-script run propagates a failing script's exit code (default
+/// bail), matching pnpm — `pnpm run "/^build:/"` exits 3 when a matched script
+/// exits 3.
+#[test]
+fn run_regex_selector_propagates_failure_exit_code() {
+    let dir = std::env::temp_dir().join(format!("nub-run-regex-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"p","scripts":{"build:x":"echo X","build:y":"exit 3","build:z":"echo Z"}}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["run", "/^build:/"])
+        .current_dir(&dir)
+        .output()
+        .expect("spawn nub");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a failing matched script's exit code (3) must be the overall exit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Top-level `--node` runs with zero augmentation: nub's automatic `.env`
 /// loading is off (vanilla Node doesn't read `.env`), while the default run
 /// loads it. Differential proof that the compat flag drops the augmentation

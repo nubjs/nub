@@ -14,6 +14,115 @@ pub fn resolve_script(manifest: &serde_json::Value, name: &str) -> Option<String
         .map(|s| s.to_string())
 }
 
+/// Outcome of resolving a `nub run <selector>` into the concrete script(s) to
+/// run. Mirrors pnpm's `getSpecifiedScripts` (`exec/commands/src/runRecursive.ts`):
+/// an exact name resolves to that one script; a `/regexp/` literal resolves to
+/// every script whose name matches, in package.json (insertion) order.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScriptSelection {
+    /// The selector matched one or more scripts (in package.json order).
+    Matched(Vec<String>),
+    /// The selector found nothing — neither an exact-named script nor (for a
+    /// regex literal) any matching name. Callers raise the missing-script error.
+    None,
+    /// The selector was a `/.../flags` regex literal carrying flags, which pnpm
+    /// rejects with `ERR_PNPM_UNSUPPORTED_SCRIPT_COMMAND_FORMAT`. Held distinct so
+    /// the caller can emit the matching error rather than a generic missing-script.
+    UnsupportedRegexFlags,
+}
+
+/// Resolve a `nub run <selector>` into the script names to execute, matching
+/// pnpm exactly:
+///
+/// - An exact script name → just that script (even if it also looks regex-y; the
+///   exact match always wins, like pnpm's `if (scripts[scriptName])` short-circuit).
+/// - A `/regexp/` literal → every script name matching the pattern, in
+///   package.json order. A literal carrying RegExp flags is rejected
+///   ([`ScriptSelection::UnsupportedRegexFlags`]), as pnpm does.
+/// - Anything else with no exact match → [`ScriptSelection::None`].
+///
+/// Note: pnpm uses JS `RegExp`; nub uses the Rust `regex` crate. The two share
+/// the common subset script-name selectors use (`^`, `$`, `:`, char classes,
+/// alternation), so `/^build:/`, `/test|lint/`, etc. behave identically; exotic
+/// JS-only constructs (lookbehind) are not supported by either in this context.
+pub fn select_scripts(manifest: &serde_json::Value, selector: &str) -> ScriptSelection {
+    let scripts = match manifest.get("scripts").and_then(|s| s.as_object()) {
+        Some(map) => map,
+        None => return ScriptSelection::None,
+    };
+
+    // Exact name wins, mirroring pnpm's short-circuit (a script literally named
+    // `/foo/` would still be run by name).
+    if scripts.contains_key(selector) {
+        return ScriptSelection::Matched(vec![selector.to_string()]);
+    }
+
+    match build_regex_from_selector(selector) {
+        Ok(Some(re)) => {
+            let matched: Vec<String> = scripts.keys().filter(|k| re.is_match(k)).cloned().collect();
+            if matched.is_empty() {
+                ScriptSelection::None
+            } else {
+                ScriptSelection::Matched(matched)
+            }
+        }
+        Ok(None) => ScriptSelection::None,
+        Err(()) => ScriptSelection::UnsupportedRegexFlags,
+    }
+}
+
+/// Parse a `/pattern/[flags]` script selector into a compiled regex, mirroring
+/// pnpm's `tryBuildRegExpFromCommand` (`exec/commands/src/regexpCommand.ts`):
+///
+/// - Not a `/.../`-delimited literal → `Ok(None)` (treat as a plain name).
+/// - A literal carrying any flags (`/x/i`) → `Err(())` (pnpm errors:
+///   "RegExp flags are not supported in script command selector").
+/// - A literal with an invalid pattern → `Ok(None)` (pnpm's `catch` → null,
+///   i.e. fall back to treating it as a plain — and thus missing — script name).
+fn build_regex_from_selector(command: &str) -> Result<Option<regex::Regex>, ()> {
+    // Mirror pnpm's detector: /^\/((?:\\\/|[^/])+)\/([dgimuvys]*)$/
+    if !command.starts_with('/') {
+        return Ok(None);
+    }
+    // Find the final unescaped `/`, splitting body from flags.
+    let inner = &command[1..];
+    let Some(close_rel) = find_closing_slash(inner) else {
+        return Ok(None);
+    };
+    let body = &inner[..close_rel];
+    let flags = &inner[close_rel + 1..];
+    if body.is_empty() {
+        return Ok(None);
+    }
+    // pnpm: any flag is rejected (flags are not useful for a name selector).
+    if !flags.is_empty() {
+        if flags.chars().all(|c| "dgimuvys".contains(c)) {
+            return Err(());
+        }
+        // Trailing chars that aren't valid flags mean this wasn't a clean
+        // `/.../flags` literal — treat as a plain name (pnpm's regex wouldn't match).
+        return Ok(None);
+    }
+    // Unescape `\/` → `/` for the actual pattern, like the JS `match[1]` capture.
+    let pattern = body.replace("\\/", "/");
+    Ok(regex::Regex::new(&pattern).ok())
+}
+
+/// Index of the closing `/` in a regex literal body (the slice after the opening
+/// `/`), respecting `\/` escapes. Returns `None` if there is no closing slash.
+fn find_closing_slash(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2, // skip the escaped char
+            b'/' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Build the npm_* environment variables from package.json.
 ///
 /// `user_agent_product` is the role-aware UA *product tokens* (everything
@@ -282,8 +391,58 @@ pub fn script_shell(project_root: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_bin, npm_env, npmrc_value, script_shell};
+    use super::{ScriptSelection, find_bin, npm_env, npmrc_value, script_shell, select_scripts};
     use std::fs;
+
+    #[test]
+    fn select_scripts_exact_name_wins() {
+        // An exact script name resolves to just that one script — even when the
+        // name itself looks regex-y — mirroring pnpm's `if (scripts[name])`
+        // short-circuit before the regex path.
+        let m = serde_json::json!({ "scripts": { "build": "tsc", "build:x": "x" } });
+        assert_eq!(
+            select_scripts(&m, "build"),
+            ScriptSelection::Matched(vec!["build".into()])
+        );
+    }
+
+    #[test]
+    fn select_scripts_regex_matches_all_in_manifest_order() {
+        // A `/regexp/` literal selects every matching script, in package.json
+        // (insertion) order — pnpm's regex-selector run.
+        let m = serde_json::json!({
+            "scripts": { "build:x": "x", "lint": "l", "build:y": "y", "build:z": "z" }
+        });
+        assert_eq!(
+            select_scripts(&m, "/^build:/"),
+            ScriptSelection::Matched(vec!["build:x".into(), "build:y".into(), "build:z".into()])
+        );
+    }
+
+    #[test]
+    fn select_scripts_regex_no_match_is_none() {
+        let m = serde_json::json!({ "scripts": { "build": "tsc" } });
+        assert_eq!(select_scripts(&m, "/^nope:/"), ScriptSelection::None);
+    }
+
+    #[test]
+    fn select_scripts_plain_name_no_match_is_none() {
+        // A non-regex selector with no exact match is a plain missing script.
+        let m = serde_json::json!({ "scripts": { "build": "tsc" } });
+        assert_eq!(select_scripts(&m, "deploy"), ScriptSelection::None);
+    }
+
+    #[test]
+    fn select_scripts_regex_flags_are_rejected() {
+        // pnpm rejects a regex literal carrying flags
+        // (ERR_PNPM_UNSUPPORTED_SCRIPT_COMMAND_FORMAT) — flags are not useful for
+        // a name selector. nub surfaces the same rejection.
+        let m = serde_json::json!({ "scripts": { "build": "tsc" } });
+        assert_eq!(
+            select_scripts(&m, "/build/i"),
+            ScriptSelection::UnsupportedRegexFlags
+        );
+    }
 
     #[test]
     fn npm_env_flattens_engines_config_and_bin() {
