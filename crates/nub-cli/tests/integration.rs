@@ -631,25 +631,34 @@ fn node_which_prints_path_to_stdout() {
 
 #[test]
 fn bare_node_prints_status_then_help() {
-    // Bare `nub node` is a command group: it prints the resolved-Node status
-    // block, then the verb listing. `nub node -h` prints only the listing.
+    // Bare `nub node` is a command group: it ALWAYS prints the verb listing, and
+    // PREPENDS the resolved-Node status block WHEN a Node resolves. The status
+    // block is environment-dependent — on a clean machine whose only Node is
+    // below the project's `engines.node` floor (the CI compat-tier legs), nothing
+    // resolves and bare `nub node` degrades to help-only. So this test asserts
+    // the stable contract (verb listing always present; exit 0) plus the
+    // status-THEN-help ordering invariant only when the status block appears.
     let bare = Command::new(nub_binary())
         .arg("node")
         .output()
         .expect("failed to spawn nub node");
     let bare_stdout = String::from_utf8_lossy(&bare.stdout);
     assert_eq!(bare.status.code(), Some(0), "bare `nub node` exits cleanly");
-    // The status block leads with `node <version>` and a `  path  ` line — the
-    // verb listing's `resolved` substring appears in a command description, so
-    // key the assertion on the block-specific `  path  ` prefix instead.
-    assert!(
-        bare_stdout.contains("\n  path  ") || bare_stdout.starts_with("node "),
-        "bare `nub node` should print the resolved-Node status block: {bare_stdout}"
-    );
+    // The verb listing is the environment-independent part — always present.
     assert!(
         bare_stdout.contains("Commands:") && bare_stdout.contains("which"),
-        "bare `nub node` should also print the verb listing: {bare_stdout}"
+        "bare `nub node` always prints the verb listing: {bare_stdout}"
     );
+    // The status block is keyed on the block-specific `  path  ` prefix (the
+    // verb listing's `resolved` substring appears in a command description). When
+    // present, it must come BEFORE the help — status THEN help.
+    if let Some(path_idx) = bare_stdout.find("\n  path  ") {
+        let help_idx = bare_stdout.find("Commands:").expect("verb listing present");
+        assert!(
+            path_idx < help_idx,
+            "status block must precede the help text: {bare_stdout}"
+        );
+    }
 
     let help = Command::new(nub_binary())
         .args(["node", "-h"])
