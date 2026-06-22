@@ -127,14 +127,25 @@ nub agent skill
 
 `nub agent skill` emits a complete skill document — a Markdown body with YAML frontmatter (`name`, `description`). (If it isn't available yet, e.g. nub was just installed, fetch the same content from `https://nubjs.com/skill.md`.)
 
-Then write that content **wherever standing instructions live for the coding agent you are** — you know your own conventions; use them, and follow whatever this repo already does for agent skills/rules. For example:
+Write it to the **cross-harness skills home**, which most coding agents read:
 
-- **Claude Code** → `.claude/skills/nub/SKILL.md` (the frontmatter is already in the right shape; `nub agent skill > .claude/skills/nub/SKILL.md` after `mkdir -p .claude/skills/nub`).
-- **Cursor** → a rule under `.cursor/rules/` (adapt to the project rule format).
-- **Codex / Copilot** → the repo's `AGENTS.md` / `.github/copilot-instructions.md`.
-- **Any other agent** → its equivalent skill/rules/instructions location.
+```sh
+mkdir -p .agents/skills/nub
+nub agent skill > .agents/skills/nub/SKILL.md
+```
 
-The skill is purely additive — it doesn't modify any existing project source, doesn't add a dependency, and is a single file you can remove at any time. If the project already carries an equivalent nub skill/rule, skip this step.
+If this repo uses **Claude Code**, also add a thin `.claude/skills/nub/SKILL.md` that imports the cross-harness file rather than duplicating it (Claude Code resolves `@path` [markdown imports](https://code.claude.com/docs/en/memory#import-additional-files)):
+
+```sh
+mkdir -p .claude/skills/nub
+printf '@../../../.agents/skills/nub/SKILL.md\n' > .claude/skills/nub/SKILL.md
+```
+
+Otherwise, follow whatever convention this repo already uses for agent skills/rules — the `.agents/skills/` path is the agnostic default, and the rest is a matter of pointing your own agent's standing-instructions mechanism at it.
+
+The skill is purely additive — it doesn't modify any existing project source, doesn't add a dependency, and is a file (or two) you can remove at any time. If the project already carries an equivalent nub skill/rule, skip this step.
+
+> A skills manager is a future alternative once a `nubjs/skills` repo exists — e.g. `nubx skills add nubjs/skills` (skills.sh) or the [withastro/rosie](https://github.com/withastro/rosie) approach — but for now write the file directly as above.
 
 ## Notes
 
