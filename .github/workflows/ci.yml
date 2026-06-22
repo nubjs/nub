@@ -52,14 +52,13 @@ jobs:
       run_site: ${{ steps.paths.outputs.run_site }}
       run_types: ${{ steps.paths.outputs.run_types }}
     steps:
-      - uses: actions/checkout@v5
-      # Detect which path groups changed. On a pull_request dorny/paths-filter
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       # diffs against the PR base; on push it diffs against the before-SHA. Only
       # docs/site-only changes flip a group OFF — everything else (including the
       # vendor/aube submodule gitlink, so a pin bump triggers the full suite) is
       # Rust-relevant. .github/workflows/** is Rust-relevant so a CI change still
       # exercises the matrix it edits.
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
         id: filter
         with:
           # On push events with no diff base, dorny treats everything as changed
@@ -133,8 +132,7 @@ jobs:
     if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      # nub-cli has a path dependency into the vendored aube workspace
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       # (vendor/aube, a submodule), so every job that resolves the cargo
       # dependency graph needs this one submodule present. Explicit
       # single-path init on purpose — `submodules: true` on the checkout
@@ -143,8 +141,8 @@ jobs:
       # tolerates a missing path dep (verified — it never resolves deps).
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: cargo check --all-targets
       # Real Windows compile + test coverage is the windows-latest leg of the
       # `test` job. The previous fast `x86_64-pc-windows-gnu` cross-check needed
@@ -157,14 +155,13 @@ jobs:
     if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      # vendor/aube path dep — see the `check` job for the rationale.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -229,15 +226,15 @@ jobs:
       # floor where the using/ErrorEvent fallback paths are exercised by the
       # integration tests. vendor/aube is the one submodule that IS required
       # (path dep — see the `check` job).
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: ${{ matrix.node }}
           cache: 'pnpm'
@@ -339,13 +336,12 @@ jobs:
       # Tiers are runtime-version specific, not OS-specific, so they run on Linux
       # only.
     steps:
-      - uses: actions/checkout@v5
-      # vendor/aube path dep — see the `check` job for the rationale.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: ${{ matrix.node }}
       # nub itself + the nub-native addon (the TS-under-PnP scenario transpiles, so
@@ -388,8 +384,8 @@ jobs:
     if: needs.matrix-plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           components: rustfmt
       - run: cargo fmt --check
@@ -409,8 +405,8 @@ jobs:
     # `Worker` collision (TS2403/TS2430) fails here. Pure Node + tsc — no Rust toolchain,
     # no submodules, no native addon. Pinned tsc + @types/node in npm/nub-types/test.
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
       - name: Install fixture deps (pinned tsc + @types/node + file:.. @nubjs/types)
@@ -429,11 +425,11 @@ jobs:
     if: needs.matrix-plan.outputs.run_site == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
           cache: "pnpm"

@@ -36,8 +36,8 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
       # Internal consistency: all npm packages + Cargo.toml + preload.mjs agree.
@@ -97,12 +97,11 @@ jobs:
       AUBE_PRIMER_TOP: "2000"
       AUBE_PRIMER_VERSION_CAP: "100"
     steps:
-      - uses: actions/checkout@v5
-      # The generate script + build.rs (for the schema constant) live in the
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       # vendored aube submodule. Single-path init keeps tests/node-suite out.
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
       # === produce-the-blob: source decision (ISOLATED on purpose) ================
@@ -243,7 +242,7 @@ jobs:
       # file here (both sources failed) fails the release loud rather than shipping
       # an empty primer.
       - name: Upload metadata primer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: metadata-primer
           path: vendor/aube/crates/aube-resolver/data/primer-*-s*.rkyv.*
@@ -263,7 +262,7 @@ jobs:
       # fan-out (regressed during the 2026-06 repo move; tracked separately). It
       # still runs in ci.yml as its own must-pass signal, just not in the publish
       # critical path.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - name: Init node-suite submodule (shallow)
         run: git submodule update --init --depth 1 tests/node-suite
         shell: bash
@@ -273,12 +272,12 @@ jobs:
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
         shell: bash
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
           cache: "pnpm"
@@ -320,17 +319,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
-      # nub-cli has a path dependency into the vendored aube workspace, so the
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       # cargo build can't resolve without this submodule (same as the test gate).
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           # Keep in sync with BUN_PIN in tests/aube-conformance/run.sh.
           bun-version: "1.3.14"
@@ -362,9 +360,7 @@ jobs:
       matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v5
-
-      # vendor/aube path dep (nub-cli) — without it the build can't resolve
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       # the workspace. Single-path init on purpose: tests/node-suite (the full
       # nodejs/node clone) stays excluded from the build runners.
       - name: Init vendor/aube submodule
@@ -379,24 +375,24 @@ jobs:
       # (workflow env), a missing artifact here fails the build loud rather than
       # silently shipping an empty primer (the 0.0.37 bug).
       - name: Download metadata primer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: metadata-primer
           path: vendor/aube/crates/aube-resolver/data
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           key: ${{ matrix.platform }}
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
           cache: "pnpm"
@@ -565,7 +561,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
       - name: Upload platform package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: nub-${{ matrix.platform }}
           path: npm/nub-${{ matrix.platform }}
@@ -586,7 +582,7 @@ jobs:
     container: node:22-slim
     steps:
       - name: Download linux-x64 platform package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: nub-linux-x64
           path: nub-linux-x64
@@ -663,7 +659,7 @@ jobs:
         if: ${{ matrix.container != '' }}
         run: apk add --no-cache bash
       - name: Download ${{ matrix.platform }} platform package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: nub-${{ matrix.platform }}
           path: nub-pkg
@@ -725,15 +721,14 @@ jobs:
     needs: [build, test, conformance, glibc-floor-guard, pre-publish-gate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Download all platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           path: artifacts
 
@@ -826,10 +821,9 @@ jobs:
     needs: publish-npm
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - name: Download all platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           path: artifacts
 
@@ -873,7 +867,7 @@ jobs:
           ls -la release-archives
 
       - name: Create GitHub Release (with asset-upload retry)
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           generate_release_notes: true
           # Re-running this job overwrites the release + re-uploads assets.
@@ -975,8 +969,8 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
       - name: Install from npm and smoke (with propagation-race retry)
@@ -1021,7 +1015,7 @@ jobs:
     steps:
       - name: Toolchain (bash + git for checkout/smoke)
         run: apk add --no-cache bash git
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - name: Install from npm and smoke (with propagation-race retry)
         # Same retry logic as the runner-OS legs above — musl hit the 0.0.38
         # propagation race. Wrapped identically: both install + smoke per attempt.

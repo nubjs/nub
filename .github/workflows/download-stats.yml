@@ -15,8 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
-
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - name: Set snapshot timestamp
         id: ts
         run: echo "value=$(date -u +"%Y%m%dT%H%M%SZ")" >> "$GITHUB_OUTPUT"

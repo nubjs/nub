@@ -1,0 +1,60 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "dependencyDashboard": true,
+  "suppressNotifications": ["prEditedNotification"],
+  "labels": ["dependencies"],
+  "schedule": ["before 4am on Monday"],
+  "semanticCommits": "disabled",
+  "separateMajorMinor": true,
+  "enabledManagers": ["github-actions", "cargo", "npm"],
+  "cargo": {
+    "rangeStrategy": "update-lockfile",
+    "managerFilePatterns": ["/^Cargo\\.toml$/", "/^crates/[^/]+/Cargo\\.toml$/", "/^vendor/"]
+  },
+  "npm": {
+    "managerFilePatterns": [
+      "/^npm/[^/]+/package\\.json$/",
+      "/^site/package\\.json$/"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Pin GitHub Actions to immutable commit SHAs",
+      "matchDepTypes": ["action"],
+      "pinDigests": true
+    },
+    {
+      "description": "Annotate pinned GitHub Actions SHAs with a version comment",
+      "extends": ["helpers:pinGitHubActionDigests"],
+      "extractVersion": "^(?<version>v?\\d+\\.\\d+\\.\\d+)$",
+      "versioning": "regex:^v?(?<major>\\d+)(\\.(?<minor>\\d+)\\.(?<patch>\\d+))?$"
+    },
+    {
+      "description": "Group upload/download artifact updates (versions are dependent)",
+      "groupName": "artifact GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["actions/upload-artifact", "actions/download-artifact"]
+    },
+    {
+      "description": "Disable PRs updating GitHub-hosted runner versions (runs-on: ubuntu-latest, etc.)",
+      "matchManagers": ["github-actions"],
+      "matchDatasources": ["github-runners"],
+      "enabled": false
+    },
+    {
+      "description": "Group Cargo minor+patch updates into one PR; majors get individual PRs",
+      "groupName": "Cargo dependencies (minor+patch)",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch", "digest"]
+    },
+    {
+      "description": "Group npm minor+patch updates; majors get individual PRs",
+      "groupName": "npm dependencies (minor+patch)",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch"]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["security", "dependencies"]
+  }
+}
