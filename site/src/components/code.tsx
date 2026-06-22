@@ -28,7 +28,14 @@ export function Terminal({
   className = '',
   size = 'sm',
 }: {
-  lines: { cmd?: string; comment?: string; out?: string; bright?: boolean }[];
+  lines: {
+    cmd?: string;
+    comment?: string;
+    out?: string;
+    bright?: boolean;
+    /* tone for an `out` line: an error/refusal line reads ember-red */
+    tone?: 'error';
+  }[];
   className?: string;
   size?: 'sm' | 'lg';
 }) {
@@ -43,7 +50,15 @@ export function Terminal({
         {lines.map((line, i) => (
           <div key={i} className="whitespace-pre">
             {line.out !== undefined ? (
-              <span className={line.bright ? 'nub-code-fg' : 'nub-code-muted'}>
+              <span
+                className={
+                  line.tone === 'error'
+                    ? 'text-ember'
+                    : line.bright
+                      ? 'nub-code-fg'
+                      : 'nub-code-muted'
+                }
+              >
                 {line.out}
               </span>
             ) : (

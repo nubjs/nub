@@ -151,8 +151,11 @@ npm    4163 ms   (3.7×)
 - 🗄️ Dedupes through a global content-addressed store and materializes by reflink/hardlink.
 - 🐍 Accepts pnpm's flags with the same spelling and semantics, down to the workspace catalog.
 - 🛡️ Treats dependency build scripts as deny-by-default — a script runs only on an explicit allow or a vetted default-trust floor.
+- 🦠 Queries OSV for malicious-package (`MAL-*`) advisories on every fresh resolve and hard-blocks a confirmed hit (`ERR_NUB_MALICIOUS_PACKAGE`).
+- 🔻 Refuses a version whose publish trust evidence weakened against an earlier release (`trustPolicy=no-downgrade`, `ERR_NUB_TRUST_DOWNGRADE`).
+- ⏳ Holds back releases younger than `minimumReleaseAge` (24h by default, matching pnpm), so a freshly-compromised version isn't pulled in.
 
-Dependency build scripts run only on an explicit allow (`pnpm.onlyBuiltDependencies`, `trustedDependencies`, `nub approve-builds`) or when a curated default-trust floor vouches for the package under registry-provenance, advisory-vetting, and cooling-window gates. See [Package manager](https://nubjs.com/docs/install).
+These supply-chain defenses are on by default, no config required. Dependency build scripts run only on an explicit allow (`pnpm.onlyBuiltDependencies`, `trustedDependencies`, `nub approve-builds`) or when a curated default-trust floor vouches for the package under registry-provenance, advisory-vetting, and cooling-window gates; a skipped package is named with `WARN_NUB_IGNORED_BUILD_SCRIPTS`. An OSV malicious-package hit aborts the install, a weakened-provenance downgrade is refused, and too-new versions wait out the cooling window. See [Package manager](https://nubjs.com/docs/install).
 
 ### Package meta-manager — `nub pm`
 

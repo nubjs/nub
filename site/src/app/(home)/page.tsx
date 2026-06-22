@@ -68,7 +68,7 @@ function DocLink({ href, children }: { href: string; children: ReactNode }) {
    serif around it, with a faint tinted pill so a command reads as a command. */
 function HeadingCode({ children }: { children: ReactNode }) {
   return (
-    <code className="rounded-md border border-fd-border/70 bg-fd-muted/40 px-2 py-0.5 align-[-0.09em] font-mono text-[0.66em] font-normal tracking-tight text-fd-foreground">
+    <code className="rounded-md border border-fd-border/70 bg-fd-muted/40 px-2 py-0.5 align-[-0.035em] font-mono text-[0.66em] font-normal tracking-tight text-fd-foreground">
       {children}
     </code>
   );
@@ -1092,8 +1092,8 @@ function HypermanagerBand() {
             <>
               A pnpm-compatible package manager, built in. It reads the lockfile your project
               already has — <Mono>pnpm</Mono>, <Mono>npm</Mono>, or <Mono>bun</Mono> — writes the
-              same format back, and configures itself from your <Mono>.npmrc</Mono>{' '}and{' '}
-              <Mono>workspaces</Mono>. Powered by the{' '}
+              same format back, and is hardened against supply-chain attacks out of the box.
+              Powered by the{' '}
               <a
                 href="https://github.com/jdx/aube"
                 target="_blank"
@@ -1109,6 +1109,89 @@ function HypermanagerBand() {
         />
 
         <div className="mt-10 divide-y divide-fd-border/60">
+          <Feature
+            accent="pink"
+            eyebrow="Supply-chain safe by default"
+            title="Hardened against supply-chain attacks"
+            body={
+              <>
+                The defenses are on out of the box, no config required. Nub treats dependency
+                build scripts as <Mono>deny-by-default</Mono>, queries OSV for malicious-package
+                advisories on every fresh resolve, refuses a version whose publish trust evidence
+                weakened against an earlier release, and holds back releases younger than{' '}
+                <Mono>minimumReleaseAge</Mono> (24h, matching pnpm) so a freshly-compromised
+                version isn&rsquo;t pulled in.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub add @ledgerhq/connect-kit' },
+                  {
+                    out: 'Error: refusing to add malicious package(s):',
+                    tone: 'error',
+                  },
+                  {
+                    out: '  - @ledgerhq/connect-kit (MAL-2023-8697:',
+                    tone: 'error',
+                  },
+                  {
+                    out: '      https://osv.dev/vulnerability/MAL-2023-8697)',
+                    tone: 'error',
+                  },
+                  { out: '  ❌ code=ERR_NUB_MALICIOUS_PACKAGE', tone: 'error' },
+                  { out: '' },
+                  { cmd: 'nub install', comment: 'a version that lost its provenance' },
+                  {
+                    out: 'Error: trust downgrade for nanoid@3.3.14 (trustPolicy=',
+                    tone: 'error',
+                  },
+                  {
+                    out: '  no-downgrade): earlier published version 3.3.7 had',
+                    tone: 'error',
+                  },
+                  {
+                    out: '  provenance attestation but this version has no trust evidence',
+                    tone: 'error',
+                  },
+                  { out: '  ❌ code=ERR_NUB_TRUST_DOWNGRADE', tone: 'error' },
+                ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            reverse
+            eyebrow="Deny-by-default build scripts"
+            title={<>Build scripts don&rsquo;t run until you allow them</>}
+            body={
+              <>
+                Install-time <Mono>postinstall</Mono> scripts are where most supply-chain payloads
+                land. Nub skips them by default, names what it skipped, and waits for{' '}
+                <Mono>nub approve-builds</Mono>. A curated default-trust floor can vouch for a
+                package only after it clears provenance, advisory, and cooling gates.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub install' },
+                  {
+                    out: 'WARN ignored build scripts for 1 package(s): esbuild@0.21.5.',
+                    tone: 'error',
+                  },
+                  {
+                    out: '     Run `nub approve-builds` to review and enable them.',
+                  },
+                  { out: '     code=WARN_NUB_IGNORED_BUILD_SCRIPTS' },
+                  { out: '' },
+                  { cmd: 'nub approve-builds', comment: 'review + allow, once' },
+                ]}
+              />
+            }
+          />
+
           <Feature
             accent="pink"
             eyebrow="Meta package manager"
