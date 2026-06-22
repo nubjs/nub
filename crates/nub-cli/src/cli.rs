@@ -5030,28 +5030,35 @@ fn run_node(args: &[String]) -> Result<i32> {
         anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")
     })?;
 
+    // The verb listing — shared by `--help`/`-h`/`help` and the bare form, so the
+    // two never drift. Bare `nub node` prepends the resolved-Node status block.
+    const NODE_HELP: &str = "nub node — manage Node versions\n\n\
+         Usage: nub node <command>\n\n\
+         Commands:\n\
+         \x20 which                    print the resolved Node binary path (why → stderr)\n\
+         \x20 install [<version>...]   provision version(s) into nub's cache (bare: the project pin)\n\
+         \x20 ls                       list versions in nub's cache\n\
+         \x20 uninstall <version>      remove a version from nub's cache\n\
+         \x20 pin <version>            write the project's Node pin";
+
     // `nub node --help`/`-h`/`help`: short usage listing the verbs.
     let verb = args.first().map(String::as_str);
     if matches!(verb, Some("--help") | Some("-h") | Some("help")) {
-        println!(
-            "nub node — manage Node versions\n\n\
-             Usage: nub node <command>\n\n\
-             Commands:\n\
-             \x20 which                    print the resolved Node binary path (why → stderr)\n\
-             \x20 install [<version>...]   provision version(s) into nub's cache (bare: the project pin)\n\
-             \x20 ls                       list versions in nub's cache\n\
-             \x20 uninstall <version>      remove a version from nub's cache\n\
-             \x20 pin <version>            write the project's Node pin"
-        );
+        println!("{NODE_HELP}");
         return Ok(0);
     }
 
-    // Bare `nub node`: status — the resolved version, its path, and why.
+    // Bare `nub node`: the idiomatic command-group behavior — print the resolved
+    // Node status block first, then the verb listing. Discovery is best-effort:
+    // if no Node resolves, still print the help rather than erroring out.
     if verb.is_none() {
-        let node = discover_node_for_status(&cwd)?;
-        println!("node {}", node.version);
-        println!("  path      {}", node.path);
-        println!("  resolved  {}", resolution_source(&cwd));
+        if let Ok(node) = discover_node_for_status(&cwd) {
+            println!("node {}", node.version);
+            println!("  path      {}", node.path);
+            println!("  resolved  {}", resolution_source(&cwd));
+            println!();
+        }
+        println!("{NODE_HELP}");
         return Ok(0);
     }
 

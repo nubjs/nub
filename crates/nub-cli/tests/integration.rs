@@ -630,6 +630,44 @@ fn node_which_prints_path_to_stdout() {
 }
 
 #[test]
+fn bare_node_prints_status_then_help() {
+    // Bare `nub node` is a command group: it prints the resolved-Node status
+    // block, then the verb listing. `nub node -h` prints only the listing.
+    let bare = Command::new(nub_binary())
+        .arg("node")
+        .output()
+        .expect("failed to spawn nub node");
+    let bare_stdout = String::from_utf8_lossy(&bare.stdout);
+    assert_eq!(bare.status.code(), Some(0), "bare `nub node` exits cleanly");
+    // The status block leads with `node <version>` and a `  path  ` line — the
+    // verb listing's `resolved` substring appears in a command description, so
+    // key the assertion on the block-specific `  path  ` prefix instead.
+    assert!(
+        bare_stdout.contains("\n  path  ") || bare_stdout.starts_with("node "),
+        "bare `nub node` should print the resolved-Node status block: {bare_stdout}"
+    );
+    assert!(
+        bare_stdout.contains("Commands:") && bare_stdout.contains("which"),
+        "bare `nub node` should also print the verb listing: {bare_stdout}"
+    );
+
+    let help = Command::new(nub_binary())
+        .args(["node", "-h"])
+        .output()
+        .expect("failed to spawn nub node -h");
+    let help_stdout = String::from_utf8_lossy(&help.stdout);
+    assert_eq!(help.status.code(), Some(0), "`nub node -h` exits cleanly");
+    assert!(
+        help_stdout.contains("Commands:") && help_stdout.contains("which"),
+        "`nub node -h` prints the verb listing: {help_stdout}"
+    );
+    assert!(
+        !help_stdout.contains("\n  path  ") && !help_stdout.starts_with("node "),
+        "`nub node -h` prints help only, no status block: {help_stdout}"
+    );
+}
+
+#[test]
 fn top_level_short_and_long_help_are_distinct() {
     let short = Command::new(nub_binary())
         .arg("-h")
