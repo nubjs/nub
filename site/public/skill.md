@@ -54,7 +54,7 @@ Restart-on-change driven by the actual resolved dependency graph plus `.env*`, `
 
 ## Package manager — `nub install` / `nub add`
 
-A full package manager (embedded aube engine), **pnpm-shaped CLI** regardless of the project's incumbent. It is **lockfile-compatible with whatever the project already uses** — it infers the incumbent PM (from `packageManager`/`devEngines`/lockfile) and reads+writes that PM's native lockfile, never imposing its own:
+A full package manager, **pnpm-shaped CLI** regardless of the project's incumbent. It is **lockfile-compatible with whatever the project already uses** — it infers the incumbent PM (from `packageManager`/`devEngines`/lockfile) and reads+writes that PM's native lockfile, never imposing its own:
 
 - **pnpm / npm / Bun** round-trip in place (`pnpm-lock.yaml`, `package-lock.json` v2/v3, `bun.lock`).
 - **Yarn** is **read-only** — nub installs/runs a Yarn project but refuses any command that would rewrite `yarn.lock` (use `yarn` for those).

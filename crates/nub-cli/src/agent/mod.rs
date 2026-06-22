@@ -254,6 +254,14 @@ mod tests {
                 "evergreen skill must point the agent at `{pointer}`"
             );
         }
+        // Brand boundary: the agent-facing skill is PUBLIC copy a user's coding
+        // agent reads. The embedded PM engine's brand ("aube") is internal
+        // mechanism and must never surface here (the engine is an invisible
+        // implementation detail under nub).
+        assert!(
+            !body.to_lowercase().contains("aube"),
+            "agent skill copy must not leak the embedded engine brand 'aube'"
+        );
     }
 
     #[test]
