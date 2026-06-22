@@ -1,0 +1,40 @@
+# Known-NON-ZERO / expected-red list for the command×flag conformance harness.
+#
+# Format:  <id>  <reason...>
+#
+# A cell listed here is EXPECTED to exit non-zero (or be a known leak) — the
+# harness reports it RED(expected) and stays green overall. The moment a listed
+# cell starts passing (exit 0, no leak), it's flagged XPASS-STALE and the run
+# FAILS, so a behavior change can't land silently. Delete the entry when the
+# cell's expected outcome changes.
+#
+# Two categories live here:
+#  (A) CORRECT non-zero — the command did its job; non-zero is the right answer
+#      (e.g. `audit` found vulnerabilities → exit 1, matching pnpm/npm). These
+#      are NOT bugs; the entry documents that the harness's bare "exit 0 = pass"
+#      rule doesn't apply to this cell. (Future: an `expect` column on the
+#      inventory will encode this directly; for phase 1 it lives here.)
+#  (B) REAL nub bugs found by the sweep — kept red until fixed, each referencing
+#      its tracking thread. When fixed, the cell goes green and the entry is
+#      deleted (XPASS-STALE forces that).
+#
+# ── (A) correct non-zero on the zod fixture (NOT bugs) ───────────────────────
+audit            vulnerabilities present in the tree → exit 1 (matches pnpm/npm)
+audit-json       same, --json
+audit-dev        same, --dev
+audit-level      same, --audit-level high
+outdated         outdated deps present → exit 1 (conventional)
+run-missing-script  missing script → exit 1 (correct; pnpm also errors WITHOUT --if-present)
+add-dep          monorepo root refuses bare add (needs -W) → exit 1 (correct guard)
+add-dev          same, -D
+remove-dep       removing an absent dep → non-zero (correct)
+update           trust-policy blocked a provenance-downgrade beta → exit 23 (protective refusal)
+import           pnpm-lock.yaml already present → exit 1 (correct; needs --force)
+install-prod     fixture `prepare` script needs husky (not installed) → exit 127-from-script (env, not nub)
+rebuild          same husky prepare-script env failure
+fetch            network-touching (net): linux-only optional dep tarball decode can flake over the network
+peers-check      exit 1 on UNPARSEABLE-ONLY peers (0 unmet/0 missing, 5 unparseable workspace link: peers). No reference-PM equivalent (peers is a nub/aube-native verb). DESIGN-DECISION item for triage: is "couldn't verify" → non-zero the right posture?
+#
+# ── (B) REAL nub findings on the zod sweep (recommend-only; own fix threads) ──
+run-ifpresent    BUG: `run <missing> --if-present` exits 1; pnpm/npm exit 0. parity divergence.
+agent-skill      BUG: `nub agent skill` output contains literal "aube" (brand leak in public agent copy).

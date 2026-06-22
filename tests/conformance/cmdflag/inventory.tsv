@@ -1,0 +1,100 @@
+# Canonical command×flag conformance inventory for nub's full CLI surface.
+#
+# One row = one command×flagset CELL the harness runs against a repo fixture.
+# Columns (TAB-separated):
+#
+#   id        unique slug for the cell (used in results + expectations.txt)
+#   kind      ro | mut | net | meta
+#               ro   = read-only / idempotent — runs in the fixture in place
+#               mut  = mutates the project (writes lockfile/node_modules/manifest)
+#                      — the runner copies the fixture to a throwaway dir first
+#               net  = needs the network / a registry account / a TTY — run only
+#                      when NET=1; otherwise skipped (recorded as SKIP-net)
+#               meta = global/version/help surface, no project needed
+#   parity    reference PM verb to diff against (pnpm verb), or "-" for none.
+#               When set + REF=1, the runner also runs `<refpm> <parity>` on the
+#               same input and records an exit-code agreement check.
+#   args      the argv passed to nub (after the binary). May be empty.
+#
+# The surface is enumerated authoritatively from crates/nub-cli/src/cli.rs
+# (the clap Command enum + NodeCommand) and crates/nub-cli/src/pm_engine/mod.rs
+# (ENGINE_VERBS, restricted to the WIRED match arms in each *_family.rs).
+# Stubbed/unwired verbs are NOT listed — they intentionally error.
+#
+# ── meta: version / help (no project) ───────────────────────────────────────
+version	meta	-	--version
+version-short	meta	-	-v
+help	meta	-	--help
+help-run	meta	-	help run
+help-cmd-install	meta	-	install --help
+help-cmd-add	meta	-	add --help
+help-cmd-audit	meta	-	audit --help
+help-cmd-run	meta	-	run --help
+help-cmd-list	meta	-	list --help
+
+# ── info family (read-only queries) ─────────────────────────────────────────
+list	ro	list	list
+list-recursive	ro	list	list -r
+ls-alias	ro	list	ls
+list-depth	ro	list	list --depth 0
+list-prod	ro	list	list --prod
+list-json	ro	list	list --json
+why-self	ro	-	why typescript
+outdated	net	outdated	outdated
+audit	net	audit	audit
+audit-json	net	audit	audit --json
+audit-dev	net	audit	audit --dev
+audit-level	net	audit	audit --audit-level high
+licenses	ro	-	licenses
+peers-check	ro	-	peers check
+check	ro	-	check
+bin	ro	-	bin
+root	ro	-	root
+query-all	ro	-	query "*"
+view-self	net	-	view typescript
+search	net	-	search left-pad
+deprecations	net	-	deprecations
+
+# ── store/config family ─────────────────────────────────────────────────────
+config-list	ro	-	config list
+config-get-registry	ro	-	config get registry
+store-status	ro	-	store status
+store-path	ro	-	store path
+cache-list-registries	ro	-	cache list-registries
+pkg-get-name	ro	-	pkg get name
+pkg-get-version	ro	-	pkg get version
+
+# ── run / exec / scripts ────────────────────────────────────────────────────
+run-bare	ro	-	run
+run-missing-script	ro	-	run __nub_conformance_no_such_script__
+run-ifpresent	ro	-	run __nub_conformance_no_such_script__ --if-present
+
+# ── pm subcommands ──────────────────────────────────────────────────────────
+pm-which	ro	-	pm which
+pm-cache	ro	-	pm cache
+
+# ── node version management ─────────────────────────────────────────────────
+node-ls	ro	-	node ls
+
+# ── agent onboarding (print-only) ───────────────────────────────────────────
+agent-skill	meta	-	agent skill
+agent-docs	meta	-	agent docs
+
+# ── install family (MUTATING — runner copies the fixture first) ──────────────
+install	mut	install	install
+install-frozen	mut	install	install --frozen-lockfile
+install-prod	mut	install	install --prod
+install-offline	mut	-	install --offline
+install-lockfile-only	mut	-	install --lockfile-only
+ci	mut	-	ci
+dedupe	mut	dedupe	dedupe
+fetch	net	-	fetch
+rebuild	mut	-	rebuild
+prune	mut	prune	prune
+
+# ── mutating add/remove (MUTATING + network) ────────────────────────────────
+add-dep	net	add	add left-pad
+add-dev	net	add	add -D left-pad
+remove-dep	net	remove	remove left-pad
+update	net	update	update
+import	mut	-	import
