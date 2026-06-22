@@ -90,3 +90,6 @@ libc.workspace = true
 # (pm_engine/mod.rs::with_fd_captured). Without it the substitution silently
 # breaks and the default registry is never surfaced on Windows.
 libc.workspace = true
+
+[lints]
+workspace = true

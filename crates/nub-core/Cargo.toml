@@ -57,3 +57,6 @@ harness = false
 [[bench]]
 name = "cache_hash"
 harness = false
+
+[lints]
+workspace = true

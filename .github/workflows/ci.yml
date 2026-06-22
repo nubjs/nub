@@ -166,6 +166,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
+      # source (the embedded engine's brand is never nub's config surface). Cheap
+      # grep, no build — runs alongside clippy on the same run_rust gate.
+      - name: Brand lint (no AUBE_* env reads)
+        run: tests/brand-lint/check-env-reads.sh
 
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})

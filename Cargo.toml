@@ -120,3 +120,17 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Workspace restriction lints, promoted to warn and inherited by every nub crate
+# (each opts in with `[lints] workspace = true`). CI runs clippy under
+# `-D warnings`, so each is a hard gate. Scope is deliberately MINIMAL: only the
+# zero-violation, high-signal markers that flag unfinished/debug code shipping
+# to users. Deliberately OMITTED (measured 2026-06-21, would need a large
+# refactor, not a review-miss guard): `print_stdout`/`print_stderr` (a CLI
+# legitimately prints and there is no output wrapper — 239 sites); `unwrap_used`/
+# `expect_used`/`panic`/`exit` (1300+ sites, mostly tests). Revisit those behind
+# an output wrapper / `allow-in-tests` later.
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
