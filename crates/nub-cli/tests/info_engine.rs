@@ -180,6 +180,43 @@ fn missing_lockfile_reports_the_nub_install_hint_and_exits_zero() {
     assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
+/// The `--filter requires a workspace root (…)` error names the workspace
+/// markers the engine looks for. The engine's own phrasing lists
+/// `aube-workspace.yaml` — a brand leak in nub's public output (the
+/// conformance sweep hit it on `nub list -r` across 5/6 fixtures). nub's
+/// embedder has no branded workspace yaml, so the error must name only
+/// `pnpm-workspace.yaml`, with zero `aube` on either stream. Exercised across
+/// the verbs that share the workspace-root resolver (list/why).
+#[test]
+fn filter_workspace_root_error_is_brand_clean() {
+    let dir = pm_tmpdir("filter-nonws");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    // A lockfile so the no-lockfile pre-flight doesn't short-circuit before the
+    // --filter workspace-root check fires.
+    std::fs::write(
+        dir.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies: {}\n",
+    )
+    .unwrap();
+
+    for verb in [
+        vec!["list", "--filter", "foo"],
+        vec!["list", "-r", "--filter", "foo"],
+        vec!["why", "react", "--filter", "foo"],
+    ] {
+        let (stdout, stderr, _code) = run_nub(&dir, &verb);
+        assert!(
+            stderr.contains("pnpm-workspace.yaml"),
+            "{verb:?} must name pnpm-workspace.yaml as the workspace marker: {stderr}"
+        );
+        assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+    }
+}
+
 /// `--json` must ALWAYS emit parseable JSON on stdout — never empty-stdout +
 /// a prose stderr note — in the never-installed (no-lockfile) state, so
 /// `nub list --json | jq` / `nub outdated --json | jq` behave like pnpm's,
