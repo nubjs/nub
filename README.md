@@ -36,7 +36,7 @@ nubx prisma generate     # 19× faster npx
 nub install              # 2.5× faster pnpm install
 nub watch src/server.ts  # native watch mode
 nub pm shim              # built-in Corepack-style shims
-nub node install 22      # Node version manager
+nub node install 26      # Node version manager
 nub upgrade              # self update
 ```
 

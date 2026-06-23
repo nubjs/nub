@@ -5129,7 +5129,7 @@ fn run_node(args: &[String]) -> Result<i32> {
         "pin" => {
             use nub_core::version_management::manage;
             let Some(version) = args.get(1) else {
-                bail!("nub node pin requires a version (e.g. nub node pin 22)");
+                bail!("nub node pin requires a version (e.g. nub node pin 26)");
             };
             let result = manage::pin(version, &cwd)?;
             println!("pinned Node {} → {}", result.spec, result.path.display());
