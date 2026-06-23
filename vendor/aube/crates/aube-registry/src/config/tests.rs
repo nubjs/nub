@@ -22,6 +22,33 @@ impl Drop for ScopedEnvVars {
     }
 }
 
+/// Env pairs that pin the user- and global-level `.npmrc` to empty files
+/// inside `dir`, so the host machine's real `~/.npmrc` (and any
+/// `$PREFIX/etc/npmrc`) cannot leak into a `load_with_env` assertion. The
+/// `NPM_CONFIG_USERCONFIG` override beats `$HOME/.npmrc` (see
+/// `load_npmrc_entries_tagged_with_globals`), and `NPM_CONFIG_GLOBALCONFIG`
+/// pins the global scope — together they make a `load_with_env` call
+/// hermetic regardless of what the developer/CI host has configured. Files
+/// are created empty so the result is identical to a fresh user machine.
+/// Returned via the env slice (not process-wide `set_var`) so it stays
+/// thread-safe under the parallel test harness.
+fn isolated_npmrc_env(dir: &Path) -> Vec<(String, String)> {
+    let user_rc = dir.join("user.npmrc");
+    let global_rc = dir.join("global.npmrc");
+    std::fs::write(&user_rc, "").unwrap();
+    std::fs::write(&global_rc, "").unwrap();
+    vec![
+        (
+            "NPM_CONFIG_USERCONFIG".to_string(),
+            user_rc.to_string_lossy().into_owned(),
+        ),
+        (
+            "NPM_CONFIG_GLOBALCONFIG".to_string(),
+            global_rc.to_string_lossy().into_owned(),
+        ),
+    ]
+}
+
 #[test]
 fn parse_npmrc_strips_utf8_bom() {
     let dir = tempfile::tempdir().unwrap();
@@ -573,8 +600,9 @@ npmScopes:
     )
     .unwrap();
 
+    let env = isolated_npmrc_env(project.path());
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = false);
-    let disabled = NpmConfig::load_with_env(project.path(), &[]);
+    let disabled = NpmConfig::load_with_env(project.path(), &env);
     assert_eq!(disabled.registry, "https://registry.npmjs.org/");
     assert_eq!(
         disabled.registry_for("@myorg/pkg"),
@@ -583,7 +611,7 @@ npmScopes:
     assert_eq!(disabled.auth_token_for("https://npm.myorg.example/"), None);
 
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = true);
-    let enabled = NpmConfig::load_with_env(project.path(), &[]);
+    let enabled = NpmConfig::load_with_env(project.path(), &env);
     aube_util::update_engine_context(|ctx| ctx.read_yarn_config = false);
 
     assert_eq!(enabled.registry, "https://yarn-only.example/");
@@ -668,12 +696,14 @@ fn classic_yarnrc_load_is_incumbent_and_classic_gated() {
     )
     .unwrap();
 
+    let env = isolated_npmrc_env(project.path());
+
     // No Yarn incumbent → not read.
     aube_util::update_engine_context(|ctx| {
         ctx.read_yarn_config = false;
         ctx.yarn_is_classic = false;
     });
-    let disabled = NpmConfig::load_with_env(project.path(), &[]);
+    let disabled = NpmConfig::load_with_env(project.path(), &env);
     assert_eq!(disabled.registry, "https://registry.npmjs.org/");
 
     // Yarn incumbent but BERRY (classic gate off) → `.yarnrc` is NOT read. A
@@ -683,7 +713,7 @@ fn classic_yarnrc_load_is_incumbent_and_classic_gated() {
         ctx.read_yarn_config = true;
         ctx.yarn_is_classic = false;
     });
-    let berry = NpmConfig::load_with_env(project.path(), &[]);
+    let berry = NpmConfig::load_with_env(project.path(), &env);
     assert_eq!(berry.registry, "https://registry.npmjs.org/");
 
     // Classic (v1) Yarn incumbent → `.yarnrc` IS read.
@@ -691,7 +721,7 @@ fn classic_yarnrc_load_is_incumbent_and_classic_gated() {
         ctx.read_yarn_config = true;
         ctx.yarn_is_classic = true;
     });
-    let enabled = NpmConfig::load_with_env(project.path(), &[]);
+    let enabled = NpmConfig::load_with_env(project.path(), &env);
     aube_util::update_engine_context(|ctx| {
         ctx.read_yarn_config = false;
         ctx.yarn_is_classic = false;
