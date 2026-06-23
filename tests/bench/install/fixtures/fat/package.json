@@ -1,0 +1,11 @@
+{
+  "name": "bench-fat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fat-package fixture for the cold-CAS OPP-5 case: a small dep set dominated by packages whose tarballs unpack to thousands of files (next, typescript, @swc/core), exercising the CAS rayon chunk-size path on large per-package file counts.",
+  "dependencies": {
+    "next": "^14.2.0",
+    "typescript": "^5.4.0",
+    "@swc/core": "^1.4.0"
+  }
+}
