@@ -1,0 +1,11 @@
+{
+  "name": "frontdoor-nub",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "hello": "node -e \"console.log('RAN:hello')\"",
+    "build:app": "node -e \"console.log('RAN:build:app')\"",
+    "build:lib": "node -e \"console.log('RAN:build:lib')\"",
+    "show-env": "node -e \"console.log('ENV:FRONTDOOR_SECRET=' + (process.env.FRONTDOOR_SECRET || ''))\""
+  }
+}
