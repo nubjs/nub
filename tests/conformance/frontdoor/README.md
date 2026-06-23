@@ -93,7 +93,15 @@ Building the slice surfaced/confirmed several exact behaviors — each is now a 
 - **Space-separated `run a b` runs only `a`** and forwards `b` as an arg (NOT a multi-script feature — matches pnpm).
 - **Regex selection `run /^build:/` runs all matching scripts** (`build:app`+`build:lib`).
 - **`config set` normalizes kebab→camel in the pnpm-11 yaml home** (`store-dir` → `storeDir:`), but keeps kebab in `.npmrc`. Cells grep the distinctive VALUE, not the key.
-- **The `npm_config_*` bridge is a RESOLVER knob, not a config-display value** — `config get registry` does NOT reflect `npm_config_registry` (it reads config FILES). The bridge is observed at install time (`REF=1`), with a hermetic negative cell pinning that `config get` stays file-only.
+- **The `npm_config_*` bridge is a RESOLVER knob, not a config-display value** — `config get registry` does NOT reflect `npm_config_registry` (it reads config FILES). The bridge is observed at install time (`REF=1`) by pointing it at an unreachable host and asserting the resolver ATTEMPTS that host (the host string must co-occur with a fetch/resolve/DNS-failure token — keying on a startup log mention would be a false green), with a hermetic negative cell pinning that `config get` stays file-only.
+- **`AUBE_*` env vars are suppressed under the nub embedder profile** — the gate cell targets `store-dir`/`AUBE_STORE_DIR` specifically: aube reads that env in standalone mode AND surfaces it via `config get store-dir`, so the cell can actually OBSERVE the gate (it verifies `config get store-dir` surfaces a value first, then that the `AUBE_STORE_DIR` env does not change it). A setting with no `AUBE_*` env source — e.g. `registry` — would make the cell vacuous (it'd pass even if the gate were broken), so it must not be used here.
+
+### Anti-vacuousness discipline (the guard guarding itself)
+
+This suite exists to catch false greens, so its OWN cells must not be vacuous. Two rules a new cell must satisfy:
+
+- **Negative cells need a positive control.** "nub did NOT read the forbidden thing" is only meaningful if nub demonstrably reads the RIGHT thing on the same probe. The pnpm-named-file ignore cell seeds both a leak (pnpm yaml) and a control (`.npmrc`) and asserts nub returns the control — proving the reader is live, not merely returning a default because it read nothing.
+- **Brand-gate cells must target an observable gate.** The setting must be one the unbranded engine actually reads from the branded env AND surfaces through the assertion's read path — otherwise the assertion passes regardless of the gate.
 
 ## Deferred / covered elsewhere
 

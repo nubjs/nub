@@ -42,8 +42,11 @@ bun-config-read-npmrc	bun	config-read	doc	config-reads	registry=https://bun.exam
 #
 # ── config READ symmetric boundary — a FOREIGN branded file is NOT read ───────
 # Under a non-pnpm incumbent nub must ignore a pnpm-NAMED file (the gate is on
-# the NAME). npm fixture + a pnpm-workspace.yaml carrying a registry → ignored.
-npm-config-ignores-pnpm-yaml	npm	config-read	doc	config-ignores-pnpm-yaml	registry=https://pnpm-leak.example/
+# the NAME). npm fixture + a pnpm-workspace.yaml carrying a leak registry → must
+# be ignored. POSITIVE CONTROL (3rd operand): also seed the project .npmrc with a
+# distinct registry; nub must return THAT (proves the reader is live and picked
+# the right file — not vacuously returning the default because nothing was read).
+npm-config-ignores-pnpm-yaml	npm	config-read	doc	config-ignores-pnpm-yaml	https://pnpm-leak.example/	https://npmrc-control.example/
 #
 # ── config WRITE home — set a non-shared scalar, assert where it lands ─────────
 # pnpm-11 routes non-shared scalars to pnpm-workspace.yaml; everyone else to the
@@ -73,7 +76,16 @@ nub-env-bridge-registry	envbridge	env-bridge	ref	env-bridge-resolver	https://fro
 nub-env-bridge-not-in-config-get	nub	env-bridge	doc	env-not-in-config-get	registry	https://frontdoor-envbridge-shadow.example/
 #
 # ── env: branded gating (AUBE_* never read under nub — brand boundary) ────────
-nub-env-gate-no-aube	nub	env-gate	doc	env-gate-aube-ignored	AUBE_REGISTRY=https://aube-leak.example/
+# Must target a setting aube DOES read from an AUBE_* env in standalone mode AND
+# surfaces via `config get` — else the cell is vacuous. The original AUBE_REGISTRY
+# cell proved NOTHING: aube's `registry` has sources.env=[] (settings.toml:633),
+# so no env is read at all — it'd pass even against an aube that fully honored
+# AUBE_*. `storeDir` is the right target: sources.env=[…,"AUBE_STORE_DIR"],
+# sources.npmrc=["store-dir","storeDir"] (settings.toml:1102-1103), so under
+# STANDALONE aube the env WOULD win — the nub embedder profile (env_prefix=None)
+# must suppress it. Verified vs the binary: `config get store-dir` surfaces a
+# value and AUBE_STORE_DIR is ignored under nub.
+nub-env-gate-no-aube	nub	env-gate	doc	env-gate-aube-ignored	store-dir	AUBE_STORE_DIR	/aube-leak/store
 #
 # ── DEFERRED / scaffolded (add a row when the gap surfaces or the audit lands) ─
 # config-read: pnpm.* fields honored under pnpm only; bunfig honored under bun;

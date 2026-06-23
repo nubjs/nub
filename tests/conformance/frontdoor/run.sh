@@ -61,9 +61,10 @@ stage() {
   echo "$proj"
 }
 
-RESULTS=(); FAILS=0
+RESULTS=(); FAILS=0; SKIPS=0
 pass() { RESULTS+=("$1|PASS|$2"); echo "    PASS  $2"; }
 fail() { RESULTS+=("$1|FAIL|$2"); echo "    FAIL  $2"; FAILS=$((FAILS+1)); }
+skip() { RESULTS+=("$1|SKIP|$2"); echo "    SKIP  $2"; SKIPS=$((SKIPS+1)); }
 
 # ─ assertion verbs ───────────────────────────────────────────────────────────
 # Each takes: id, log, proj, then verb-specific operands. They emit pass/fail.
@@ -130,18 +131,28 @@ run_cell() {
       printf '%s=%s\n' "$key" "$val" >"$proj/.npmrc"
       local out; out="$( cd "$proj" && "$NUB" config get "$key" 2>>"$log" )"
       [ "$out" = "$val" ] && pass "$id" "honored $key=$val" || fail "$id" "config get $key => '$out' (want '$val')" ;;
-    config-ignores-pnpm-yaml)  # key=val seeded into a pnpm-NAMED file under a non-pnpm incumbent
-      local key="${1%%=*}" val="${1#*=}"
-      printf 'packages:\n  - "."\n%s: %s\n' "$key" "$val" >"$proj/pnpm-workspace.yaml"
-      local out; out="$( cd "$proj" && "$NUB" config get "$key" 2>>"$log" )"
-      [ "$out" != "$val" ] && pass "$id" "ignored pnpm-named file (got '$out', not the leaked '$val')" \
-        || fail "$id" "READ a pnpm-named file under a non-pnpm incumbent (brand-boundary breach): $key=$val" ;;
+    config-ignores-pnpm-yaml)  # leak-value  control-npmrc-value
+      # Seed a pnpm-NAMED file with a LEAK registry (must be ignored under npm)
+      # AND the project .npmrc with a distinct CONTROL registry. nub must return
+      # the control value: proves the reader is LIVE and chose the right file —
+      # not vacuously returning the default because nothing was read at all.
+      local leak="$1" control="$2"
+      printf 'packages:\n  - "."\nregistry: %s\n' "$leak" >"$proj/pnpm-workspace.yaml"
+      printf 'registry=%s\n' "$control" >"$proj/.npmrc"
+      local out; out="$( cd "$proj" && "$NUB" config get registry 2>>"$log" )"
+      if [ "$out" = "$control" ]; then
+        pass "$id" "read .npmrc ($control), ignored pnpm-named file ($leak)"
+      elif [ "$out" = "$leak" ]; then
+        fail "$id" "READ a pnpm-named file under a non-pnpm incumbent (brand-boundary breach): $leak"
+      else
+        fail "$id" "reader inert/wrong: got '$out' (want control '$control'; leak was '$leak')"
+      fi ;;
     config-writes-to)  # relpath  key  val   (grep the distinctive VALUE — the key
       local relpath="$1" key="$2" val="$3"   # is kebab→camel-normalized in yaml)
       ( cd "$proj" && "$NUB" config set "$key" "$val" ) >>"$log" 2>&1
       local in_target=0 leaked=""
       [ -f "$proj/$relpath" ] && grep -qF "$val" "$proj/$relpath" && in_target=1
-      for other in .npmrc pnpm-workspace.yaml; do
+      for other in .npmrc pnpm-workspace.yaml package.json; do
         [ "$other" = "$relpath" ] && continue
         [ -f "$proj/$other" ] && grep -qF "$val" "$proj/$other" && leaked="$other"
       done
@@ -150,23 +161,41 @@ run_cell() {
       else fail "$id" "$key also leaked into $leaked (wrong home)"; fi ;;
     env-bridge-resolver)   # unreachable-registry-url  (ref-mode: observes the install resolver)
       local url="$1"
-      if [ "$REF" != 1 ]; then pass "$id" "SKIP (REF=1 to run the resolver probe)"; return; fi
+      if [ "$REF" != 1 ]; then skip "$id" "REF=1 to run the resolver probe"; return; fi
       ( cd "$proj" && env "npm_config_registry=$url" "$NUB" install --no-frozen-lockfile ) >>"$log" 2>&1
-      # the bridge took effect iff the resolver tried the env-supplied host
-      grep -qiF "frontdoor-envbridge.invalid" "$log" \
-        && pass "$id" "resolver honored npm_config_registry ($url)" \
-        || { fail "$id" "npm_config_registry did NOT reach the resolver"; sed 's/^/      | /' "$log"; } ;;
+      # The bridge took effect iff the resolver ATTEMPTED the env-supplied host —
+      # not merely logged the registry at startup. Require the host string on a
+      # line that also carries a fetch/resolve/DNS-failure token, so the cell keys
+      # on a real network attempt against that host (an unreachable .invalid host
+      # forces a resolve error naming it). Match is case-insensitive.
+      if grep -iE "frontdoor-envbridge\.invalid" "$log" \
+           | grep -qiE "fetch|resolv|resolu|request|ENOTFOUND|EAI_AGAIN|getaddrinfo|dns|connect|GET |https?://"; then
+        pass "$id" "resolver ATTEMPTED npm_config_registry host ($url)"
+      else
+        fail "$id" "npm_config_registry host not reached by a resolve/fetch attempt"; sed 's/^/      | /' "$log"
+      fi ;;
     env-not-in-config-get) # key  shadow-value  (assert env does NOT surface in config get)
       local key="$1" shadow="$2"
       local out; out="$( cd "$proj" && env "npm_config_${key}=$shadow" "$NUB" config get "$key" 2>>"$log" )"
       [ "$out" != "$shadow" ] && pass "$id" "config get $key does NOT reflect env ($out)" \
         || fail "$id" "config get $key now reflects npm_config_$key — config-display semantics changed" ;;
-    env-gate-aube-ignored) # KEY=val (an AUBE_* env that must be IGNORED under nub)
-      local kv="$1" var="${1%%=*}" val="${1#*=}"
-      # config get registry must NOT reflect the AUBE_-branded value under nub
-      local out; out="$( cd "$proj" && env "$kv" "$NUB" config get registry 2>>"$log" )"
-      [ "$out" != "$val" ] && pass "$id" "$var ignored under nub (brand boundary held)" \
-        || fail "$id" "$var was READ under nub (AUBE_* brand leak into config surface)" ;;
+    env-gate-aube-ignored) # key  AUBE_ENV_VAR  leak-value
+      # The setting MUST be one aube reads from this AUBE_* env in standalone mode
+      # and surfaces via `config get` (store-dir / AUBE_STORE_DIR) — otherwise the
+      # cell is vacuous. Two witnesses: (1) `config get <key>` surfaces a value at
+      # all (the reader is live); (2) setting the AUBE_* env does NOT change it
+      # under the nub embedder profile (env_prefix=None suppresses the branded env
+      # that WOULD win in standalone aube).
+      local key="$1" envvar="$2" leak="$3"
+      local base; base="$( cd "$proj" && "$NUB" config get "$key" 2>>"$log" )"
+      local out;  out="$(  cd "$proj" && env "$envvar=$leak" "$NUB" config get "$key" 2>>"$log" )"
+      if [ -z "$base" ] || [ "$base" = "undefined" ]; then
+        fail "$id" "config get $key surfaced no value — cell can't observe the gate (vacuous)"
+      elif [ "$out" = "$leak" ]; then
+        fail "$id" "$envvar was READ under nub (AUBE_* brand leak into config surface): $key=$leak"
+      else
+        pass "$id" "$envvar ignored under nub ($key stayed '$out', not the leak '$leak')"
+      fi ;;
     *) fail "$id" "unknown assert verb '$verb'" ;;
   esac
 }
@@ -194,9 +223,10 @@ echo
 echo "== results =="
 printf '%-34s %-6s %s\n' "id" "status" "detail"
 for row in "${RESULTS[@]}"; do IFS='|' read -r i s d <<<"$row"; printf '%-34s %-6s %s\n' "$i" "$s" "$d"; done
+PASSES=$(( ${#RESULTS[@]} - FAILS - SKIPS ))
 echo
 if [ "$FAILS" -gt 0 ]; then
-  echo "RESULT: FAIL ($FAILS cell(s))"; echo "sandbox kept: $SANDBOX"; exit 1
+  echo "RESULT: FAIL ($FAILS fail, $PASSES pass, $SKIPS skip)"; echo "sandbox kept: $SANDBOX"; exit 1
 fi
-echo "RESULT: OK"
+echo "RESULT: OK ($PASSES pass, $SKIPS skip)"
 [ "${KEEP:-0}" = 1 ] && echo "sandbox kept: $SANDBOX" || rm -rf "$SANDBOX"
