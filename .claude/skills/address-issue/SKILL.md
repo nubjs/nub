@@ -37,13 +37,13 @@ gh issue view <n> --repo nubjs/nub --comments
 
 ## Step 2 — Acknowledge an external report immediately
 
-If the issue is from an EXTERNAL reporter (not a maintainer / not self-filed), post a brief acknowledgement the moment you start work, so they know it's seen:
+If the issue is from an EXTERNAL reporter (not a maintainer / not self-filed), post the acknowledgement the moment you start work, so they know it's seen. The ack is EXACTLY one word — nothing else:
 
 ```bash
-gh issue comment <n> --repo nubjs/nub --body "Investigating — thanks for the report. Will follow up here."
+gh issue comment <n> --repo nubjs/nub --body "Investigating."
 ```
 
-Keep it short and sincere; state that you're looking into it, not when it'll be fixed. (Internal / self-filed issues don't need this.)
+**Just "Investigating." — full stop.** No "thanks for the report," no "will follow up," no preview of your hypothesis, no diagnosis, no timeline. A longer ack leaks half-formed theories (which are often wrong) and reads as noise. Say nothing but that it's being looked at. (Internal / self-filed issues don't need this.)
 
 If triage shows it's NOT a bug (working as intended, a usage question, a duplicate, won't-fix), say so factually with the reason and close it per Step 6 — don't leave it hanging or sink time into a non-fix.
 
