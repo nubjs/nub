@@ -11,10 +11,11 @@ Check installed packages against the registry advisory DB
 
 Only print advisories at or above this severity.
 
-One of: `low`, `moderate`, `high`, `critical`. Default: `low`.
+One of: `info`, `low`, `moderate`, `high`, `critical`. Default: `low`.
 
 **Choices:**
 
+- `info`
 - `low`
 - `moderate`
 - `high`

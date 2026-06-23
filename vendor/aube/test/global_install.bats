@@ -83,6 +83,76 @@ teardown() {
 	refute_output --partial "is-positive 1.0.0"
 }
 
+@test "aube outdated -g reports stale global packages outside a project" {
+	run aube add -g is-odd@0.1.2
+	assert_success
+
+	mkdir -p "$TEST_TEMP_DIR/no-project"
+	cd "$TEST_TEMP_DIR/no-project"
+	assert_file_not_exists package.json
+
+	run aube outdated -g
+	assert_failure 1
+	assert_output --partial "Package"
+	assert_output --partial "is-odd"
+	assert_output --partial "0.1.2"
+	assert_output --partial "3.0.1"
+
+	run aube outdated -g is-odd
+	assert_failure 1
+	assert_output --partial "is-odd"
+
+	run aube outdated -g definitely-not-global
+	assert_success
+	assert_output --partial "(no matching dependencies)"
+	refute_output --partial "is-odd"
+
+	run aube outdated -g is-odd -D
+	assert_success
+	assert_output --partial "(no matching dependencies)"
+	refute_output --partial "(no checkable global dependencies)"
+}
+
+@test "aube outdated -g filters multi-package installs by alias" {
+	run aube add -g is-odd@0.1.2 is-even@0.1.2
+	assert_success
+
+	mkdir -p "$TEST_TEMP_DIR/no-project"
+	cd "$TEST_TEMP_DIR/no-project"
+	assert_file_not_exists package.json
+
+	run aube outdated -g is-odd
+	assert_failure 1
+	assert_output --partial "is-odd"
+	refute_output --partial "is-even"
+}
+
+@test "aube outdated -g reports uncheckable globals without lockfiles" {
+	run aube add -g is-odd@0.1.2
+	assert_success
+
+	pkg_dir="$AUBE_HOME/global-aube"
+	install_dir="$(find "$pkg_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+	rm "$install_dir/aube-lock.yaml"
+
+	run aube outdated -g
+	assert_success
+	assert_output --partial "(no checkable global dependencies)"
+	refute_output --partial "(no matching dependencies)"
+
+	run aube outdated -g --json
+	assert_success
+	assert_output --partial '"checked": false'
+	assert_output --partial '"code": "WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE"'
+	refute_output --partial '{}'
+}
+
+@test "aube outdated -g rejects workspace selectors" {
+	run aube --filter foo outdated -g
+	assert_failure
+	assert_output --partial "--global cannot be used with --recursive or --filter"
+}
+
 @test "aube update -g fails when any named package is missing" {
 	run aube add -g is-positive@1.0.0
 	assert_success

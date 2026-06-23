@@ -18,7 +18,7 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.package]
-version = "1.22.0"
+version = "1.23.0"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"
@@ -148,19 +148,19 @@ diffy = "0.5"
 # Internal crates — `version` is required so `cargo publish` can resolve
 # transitive crate dependencies via crates.io. release-plz keeps these
 # versions in sync with [workspace.package].version during release PRs.
-aube = { path = "crates/aube", version = "1.22.0" }
-aube-codes = { path = "crates/aube-codes", version = "1.22.0" }
-aube-settings = { path = "crates/aube-settings", version = "1.22.0" }
-aube-resolver = { path = "crates/aube-resolver", version = "1.22.0" }
-aube-registry = { path = "crates/aube-registry", version = "1.22.0" }
-aube-store = { path = "crates/aube-store", version = "1.22.0" }
-aube-linker = { path = "crates/aube-linker", version = "1.22.0" }
-aube-lockfile = { path = "crates/aube-lockfile", version = "1.22.0" }
-aube-manifest = { path = "crates/aube-manifest", version = "1.22.0" }
-aube-runtime = { path = "crates/aube-runtime", version = "1.22.0" }
-aube-scripts = { path = "crates/aube-scripts", version = "1.22.0" }
-aube-workspace = { path = "crates/aube-workspace", version = "1.22.0" }
-aube-util = { path = "crates/aube-util", version = "1.22.0" }
+aube = { path = "crates/aube", version = "1.23.0" }
+aube-codes = { path = "crates/aube-codes", version = "1.23.0" }
+aube-settings = { path = "crates/aube-settings", version = "1.23.0" }
+aube-resolver = { path = "crates/aube-resolver", version = "1.23.0" }
+aube-registry = { path = "crates/aube-registry", version = "1.23.0" }
+aube-store = { path = "crates/aube-store", version = "1.23.0" }
+aube-linker = { path = "crates/aube-linker", version = "1.23.0" }
+aube-lockfile = { path = "crates/aube-lockfile", version = "1.23.0" }
+aube-manifest = { path = "crates/aube-manifest", version = "1.23.0" }
+aube-runtime = { path = "crates/aube-runtime", version = "1.23.0" }
+aube-scripts = { path = "crates/aube-scripts", version = "1.23.0" }
+aube-workspace = { path = "crates/aube-workspace", version = "1.23.0" }
+aube-util = { path = "crates/aube-util", version = "1.23.0" }
 
 [profile.dev]
 debug = 1

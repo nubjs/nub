@@ -1,4 +1,6 @@
-use super::{RegistryClient, build_http_client, build_http_tarball_client};
+use super::{
+    RegistryClient, build_http_client, build_http_tarball_client, load_node_extra_ca_certs,
+};
 use crate::NetworkMode;
 use crate::config::{FetchPolicy, NpmConfig};
 use std::collections::BTreeMap;
@@ -23,7 +25,7 @@ impl RegistryClient {
     }
 
     /// Build a client with the default [`FetchPolicy`]. Callers that
-    /// have already resolved a [`ResolveCtx`] should prefer
+    /// have already resolved a `ResolveCtx` should prefer
     /// [`Self::from_config_with_policy`] so env / workspace-yaml /
     /// `.npmrc` overrides to the `fetch*` settings take effect.
     pub fn from_config(config: NpmConfig) -> Self {
@@ -35,8 +37,12 @@ impl RegistryClient {
     /// which resolves the policy from the full settings precedence
     /// chain before calling in.
     pub fn from_config_with_policy(config: NpmConfig, fetch_policy: FetchPolicy) -> Self {
-        let http = build_http_client(&config, None, &fetch_policy);
-        let http_tarball = build_http_tarball_client(&config, None, &fetch_policy);
+        // Read + parse `NODE_EXTRA_CA_CERTS` once here, then share the
+        // certs across the default, tarball, and every per-registry /
+        // scoped client — building each one re-parses nothing.
+        let extra_ca_certs = load_node_extra_ca_certs();
+        let http = build_http_client(&config, None, &fetch_policy, &extra_ca_certs);
+        let http_tarball = build_http_tarball_client(&config, None, &fetch_policy, &extra_ca_certs);
         let mut http_by_uri = BTreeMap::new();
         for (uri, registry) in &config.auth_by_uri {
             if !registry.has_tls_material() {
@@ -44,7 +50,7 @@ impl RegistryClient {
             }
             http_by_uri.insert(
                 uri.clone(),
-                build_http_client(&config, Some(registry), &fetch_policy),
+                build_http_client(&config, Some(registry), &fetch_policy, &extra_ca_certs),
             );
         }
         let mut http_by_uri_scope = BTreeMap::new();
@@ -58,7 +64,7 @@ impl RegistryClient {
                     .or_insert_with(BTreeMap::new)
                     .insert(
                         scope.clone(),
-                        build_http_client(&config, Some(registry), &fetch_policy),
+                        build_http_client(&config, Some(registry), &fetch_policy, &extra_ca_certs),
                     );
             }
         }

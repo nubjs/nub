@@ -1,7 +1,7 @@
 /// Resolved values for the five `fetch*` settings declared in
-/// `settings.toml`. Kept separate from [`NpmConfig`] because these are
+/// `settings.toml`. Kept separate from `NpmConfig` because these are
 /// generic pnpm settings (sourced by the settings resolver, not the
-/// registry-client-specific `.npmrc` parser in [`NpmConfig::apply`]) and
+/// registry-client-specific `.npmrc` parser in `NpmConfig::apply`) and
 /// because wiring them through a single struct keeps the retry helper
 /// on [`crate::client::RegistryClient`] from growing five parameters.
 ///
@@ -68,7 +68,7 @@ impl Default for FetchPolicy {
 }
 
 impl FetchPolicy {
-    /// Resolve every field from a settings [`ResolveCtx`]. Walks the
+    /// Resolve every field from a settings `ResolveCtx`. Walks the
     /// full cli > env > {project,user} aubeConfig/npmrc > workspaceYaml
     /// precedence chain via the generated accessors, so env-var
     /// overrides like `NPM_CONFIG_FETCH_TIMEOUT` Just Work without

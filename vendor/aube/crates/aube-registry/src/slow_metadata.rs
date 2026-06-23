@@ -84,7 +84,7 @@ fn state() -> &'static Mutex<State> {
 /// fetch path in place of a per-event `tracing::warn!`.
 ///
 /// The first event in a window arms a background tokio timer that
-/// drains the group after [`FLUSH_WINDOW`]. Subsequent events inside
+/// drains the group after `FLUSH_WINDOW`. Subsequent events inside
 /// that window simply accumulate. If no tokio runtime is current
 /// (early-process paths, unit tests outside `#[tokio::test]`), no
 /// timer is armed and the group only drains via [`flush_summary`].
@@ -106,7 +106,7 @@ pub fn record(label: &str, elapsed_ms: u64, threshold_ms: u64) {
 }
 
 /// Best-effort: spawn a tokio task that drains the current window
-/// after [`FLUSH_WINDOW`]. Returns immediately on a runtime miss
+/// after `FLUSH_WINDOW`. Returns immediately on a runtime miss
 /// (early-process and unit-test paths) leaving `timer_armed = false`
 /// so the next `record` call retries the spawn. Production call
 /// sites all run inside a tokio runtime (install drives the registry

@@ -1,4 +1,4 @@
-//! JSR (https://jsr.io) serves its packages through an npm-compatible
+//! JSR (<https://jsr.io>) serves its packages through an npm-compatible
 //! endpoint at <https://npm.jsr.io>. Packages are namespaced under the
 //! `@jsr` scope with the JSR scope folded into the package name via a
 //! `__` separator — so `jsr:@std/collections` is fetched as

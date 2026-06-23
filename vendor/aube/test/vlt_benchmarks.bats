@@ -13,7 +13,7 @@ teardown() {
 _setup_vlt_fixture() {
 	local fixture="$1"
 	cp -R "$PROJECT_ROOT/fixtures/vlt-benchmarks/$fixture/." .
-	printf 'registry=https://registry.npmjs.org/\n' >>.npmrc
+	printf 'registry=https://registry.npmjs.org/\ntrustPolicy=off\n' >>.npmrc
 }
 
 _clean_aube_cache() {

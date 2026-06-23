@@ -53,7 +53,7 @@ const INDEX_FILENAME: &str = "index.json";
 /// slow link.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Default mirror max-age before [`refresh_if_stale`] re-checks
+/// Default mirror max-age before `refresh_if_stale` re-checks
 /// with the upstream. 24h matches OSV's own publish cadence: the
 /// `MAL-*` advisories are populated by Open Source Insights and
 /// other scanners with sub-hour latency but the bulk zip is
@@ -245,7 +245,7 @@ impl OsvMirror {
         }
     }
 
-    /// Same as [`refresh_if_stale`] with [`DEFAULT_MAX_AGE`].
+    /// Same as `refresh_if_stale` with [`DEFAULT_MAX_AGE`].
     pub async fn refresh_if_stale_default(
         &self,
         client: &reqwest::Client,
@@ -261,7 +261,7 @@ impl OsvMirror {
     /// `ansi-regex@6.2.1` worm) doesn't collapse into a name-level
     /// block of every published release.
     ///
-    /// Requires a successful [`refresh_if_stale`] earlier in the
+    /// Requires a successful `refresh_if_stale` earlier in the
     /// process; otherwise returns [`MirrorError::NotInitialized`].
     /// The caller's `advisoryCheckOnInstall = required` policy
     /// upgrades that into `ERR_AUBE_ADVISORY_CHECK_FAILED`.
@@ -297,7 +297,7 @@ impl OsvMirror {
     /// unparseable OSV schema doesn't silently skip a malicious
     /// package.
     ///
-    /// Requires a successful [`refresh_if_stale`] earlier in the
+    /// Requires a successful `refresh_if_stale` earlier in the
     /// process; otherwise returns [`MirrorError::NotInitialized`].
     pub fn lookup_advisories_versioned(
         &self,

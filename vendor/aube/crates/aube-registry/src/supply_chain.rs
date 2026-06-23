@@ -6,7 +6,7 @@
 //! - [`fetch_malicious_advisories`] batch-queries `api.osv.dev` for
 //!   `MAL-*` advisories. A hit is a confirmed-malicious package — the
 //!   caller refuses the add with `ERR_AUBE_MALICIOUS_PACKAGE`.
-//! - [`fetch_weekly_downloads`] looks up a package's `last-week`
+//! - `fetch_weekly_downloads` looks up a package's `last-week`
 //!   download count via `api.npmjs.org`. Typosquats and impersonations
 //!   have near-zero downloads on day one regardless of how cleverly
 //!   they're named, so a download floor catches the long tail of

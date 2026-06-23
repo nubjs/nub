@@ -91,6 +91,7 @@ pub const WARN_AUBE_LOCKFILE_CONFLICT_MARKERS: &str = "WARN_AUBE_LOCKFILE_CONFLI
 pub const WARN_AUBE_YARN_BERRY_UNSUPPORTED: &str = "WARN_AUBE_YARN_BERRY_UNSUPPORTED";
 pub const WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX: &str =
     "WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX";
+pub const WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE: &str = "WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE";
 
 // ── progress UI ─────────────────────────────────────────────────────
 pub const WARN_AUBE_PROGRESS_OVERFLOW: &str = "WARN_AUBE_PROGRESS_OVERFLOW";
@@ -503,6 +504,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX,
         category: category::LOCKFILE,
         description: "A pnpm dep_path peer suffix had unbalanced parentheses (a truncated or hand-corrupted lockfile entry). The key is preserved verbatim instead of silently dropping everything after the `(`, so a later install surfaces the bad entry rather than mis-resolving it.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE,
+        category: category::LOCKFILE,
+        description: "`aube outdated -g` found a global install without a lockfile and skipped that install.",
         exit_code: None,
     },
     // Progress UI

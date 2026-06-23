@@ -106,7 +106,7 @@ pub fn normalize_registry_url_pub(url: &str) -> String {
     normalize_registry_url(url)
 }
 
-/// Public wrapper for [`registry_uri_key`], so callers outside the
+/// Public wrapper for `registry_uri_key`, so callers outside the
 /// crate can convert a full registry URL into the `//host[:port]/path/`
 /// key `.npmrc` uses for per-registry auth entries without reimplementing
 /// the scheme-stripping logic.

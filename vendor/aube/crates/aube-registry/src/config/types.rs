@@ -71,14 +71,14 @@ impl NpmrcSource {
 /// Only holds the *registry-client specific* fields — registry URL, auth,
 /// scoped overrides. Generic pnpm settings (`auto-install-peers`,
 /// `node-linker`, etc) are resolved by `aube_cli::settings_values` against
-/// the raw `.npmrc` entries returned by [`load_npmrc_entries`], so that
+/// the raw `.npmrc` entries returned by `load_npmrc_entries`, so that
 /// the canonical list of source keys lives in `settings.toml` and adding
 /// a new setting is a one-place change.
 #[derive(Debug, Clone)]
 pub struct NpmConfig {
-    /// Default registry URL (e.g., "https://registry.npmjs.org/")
+    /// Default registry URL (e.g., "<https://registry.npmjs.org/>")
     pub registry: String,
-    /// Scoped registry overrides: "@scope" -> "https://registry.example.com/"
+    /// Scoped registry overrides: "@scope" -> "<https://registry.example.com/>"
     pub scoped_registries: BTreeMap<String, String>,
     /// Auth config keyed by registry URL prefix (e.g., "//registry.example.com/")
     pub auth_by_uri: BTreeMap<String, AuthConfig>,

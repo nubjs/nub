@@ -7,7 +7,7 @@ pub(super) async fn run_cli_name_gates(
     packages: &[String],
     allow_low_downloads: bool,
 ) -> miette::Result<()> {
-    let registry_names = registry_bound_names_for_supply_chain(cwd, packages);
+    let registry_inputs = registry_bound_inputs_for_supply_chain(cwd, packages);
     let (advisory_check, low_download_threshold, allowed_unpopular) =
         crate::commands::with_settings_ctx(cwd, |ctx| {
             let policy = if aube_settings::resolved::paranoid(ctx) {
@@ -22,7 +22,9 @@ pub(super) async fn run_cli_name_gates(
             )
         });
     crate::commands::add_supply_chain::run_gates(
-        &registry_names,
+        &registry_inputs.name_only_advisory_names,
+        &registry_inputs.exact_advisory_pairs,
+        &registry_inputs.download_names,
         advisory_check,
         low_download_threshold,
         allow_low_downloads,
@@ -31,8 +33,22 @@ pub(super) async fn run_cli_name_gates(
     .await
 }
 
-fn registry_bound_names_for_supply_chain(cwd: &Path, packages: &[String]) -> Vec<String> {
-    let mut names = Vec::with_capacity(packages.len());
+#[derive(Default)]
+struct RegistryBoundSupplyChainInputs {
+    name_only_advisory_names: Vec<String>,
+    exact_advisory_pairs: Vec<(String, String)>,
+    download_names: Vec<String>,
+}
+
+fn registry_bound_inputs_for_supply_chain(
+    cwd: &Path,
+    packages: &[String],
+) -> RegistryBoundSupplyChainInputs {
+    let mut inputs = RegistryBoundSupplyChainInputs {
+        name_only_advisory_names: Vec::with_capacity(packages.len()),
+        exact_advisory_pairs: Vec::with_capacity(packages.len()),
+        download_names: Vec::with_capacity(packages.len()),
+    };
     let workspace_versions = collect_workspace_versions(cwd);
     // Scope→registry overrides + the default registry tell us which
     // names route through public npmjs. Anything else (a swapped-out
@@ -82,9 +98,119 @@ fn registry_bound_names_for_supply_chain(cwd: &Path, packages: &[String]) -> Vec
         // packages into `DownloadCount::Unknown` (npm's downloads
         // API doesn't index them), so the prompt naturally skips
         // them — no per-name special case needed in the gate.
-        names.push(spec.name);
+        inputs.download_names.push(spec.name.clone());
+        if spec.has_explicit_range && is_full_exact_version(&spec.range) {
+            inputs.exact_advisory_pairs.push((spec.name, spec.range));
+        } else {
+            inputs.name_only_advisory_names.push(spec.name);
+        }
     }
-    names.sort();
-    names.dedup();
-    names
+    inputs.name_only_advisory_names.sort();
+    inputs.name_only_advisory_names.dedup();
+    inputs.exact_advisory_pairs.sort();
+    inputs.exact_advisory_pairs.dedup();
+    inputs.download_names.sort();
+    inputs.download_names.dedup();
+    inputs
+}
+
+fn is_full_exact_version(range: &str) -> bool {
+    let suffix_start = range.find(['-', '+']).unwrap_or(range.len());
+    let core = &range[..suffix_start];
+    let mut parts = core.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
+    let Some(patch) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    [major, minor, patch]
+        .into_iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        && node_semver::Version::parse(range).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_bound_inputs_use_versioned_osv_for_exact_versions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let inputs = registry_bound_inputs_for_supply_chain(tmp.path(), &["nx@23.0.0".into()]);
+
+        assert_eq!(
+            inputs.exact_advisory_pairs,
+            vec![("nx".to_string(), "23.0.0".to_string())],
+        );
+        assert!(inputs.name_only_advisory_names.is_empty());
+        assert_eq!(inputs.download_names, vec!["nx".to_string()]);
+    }
+
+    #[test]
+    fn registry_bound_inputs_keep_ranges_and_tags_name_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let inputs = registry_bound_inputs_for_supply_chain(
+            tmp.path(),
+            &[
+                "nx@^23".into(),
+                "pkg-major@4".into(),
+                "pkg-minor@1.2".into(),
+                "react".into(),
+                "vite@latest".into(),
+            ],
+        );
+
+        assert_eq!(
+            inputs.name_only_advisory_names,
+            vec![
+                "nx".to_string(),
+                "pkg-major".to_string(),
+                "pkg-minor".to_string(),
+                "react".to_string(),
+                "vite".to_string(),
+            ],
+        );
+        assert!(inputs.exact_advisory_pairs.is_empty());
+        assert_eq!(
+            inputs.download_names,
+            vec![
+                "nx".to_string(),
+                "pkg-major".to_string(),
+                "pkg-minor".to_string(),
+                "react".to_string(),
+                "vite".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn full_exact_version_requires_major_minor_patch() {
+        assert!(is_full_exact_version("1.2.3"));
+        assert!(is_full_exact_version("1.2.3-beta.1"));
+        assert!(is_full_exact_version("1.2.3+build.7"));
+        assert!(!is_full_exact_version("1"));
+        assert!(!is_full_exact_version("1.2"));
+        assert!(!is_full_exact_version("^1.2.3"));
+        assert!(!is_full_exact_version("latest"));
+    }
+
+    #[test]
+    fn registry_bound_inputs_version_alias_checks_real_package() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let inputs =
+            registry_bound_inputs_for_supply_chain(tmp.path(), &["nx-stable@npm:nx@23.0.0".into()]);
+
+        assert_eq!(
+            inputs.exact_advisory_pairs,
+            vec![("nx".to_string(), "23.0.0".to_string())],
+        );
+        assert_eq!(inputs.download_names, vec!["nx".to_string()]);
+    }
 }

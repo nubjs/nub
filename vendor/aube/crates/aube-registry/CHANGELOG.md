@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.0](https://github.com/jdx/aube/compare/aube-registry-v1.22.0...aube-registry-v1.23.0) - 2026-06-21
+
+### Added
+
+- *(registry)* honor NODE_EXTRA_CA_CERTS for custom CA trust ([#911](https://github.com/jdx/aube/pull/911))
+
+### Other
+
+- refresh benchmarks for v1.22.0 ([#907](https://github.com/jdx/aube/pull/907))
+
 ## [1.22.0](https://github.com/jdx/aube/compare/aube-registry-v1.21.0...aube-registry-v1.22.0) - 2026-06-17
 
 ### Added

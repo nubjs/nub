@@ -550,7 +550,7 @@
             "name": "audit-level",
             "usage": "--audit-level <AUDIT_LEVEL>",
             "help": "Only print advisories at or above this severity",
-            "help_long": "Only print advisories at or above this severity.\n\nOne of: `low`, `moderate`, `high`, `critical`. Default: `low`.",
+            "help_long": "Only print advisories at or above this severity.\n\nOne of: `info`, `low`, `moderate`, `high`, `critical`. Default: `low`.",
             "help_first_line": "Only print advisories at or above this severity",
             "short": [],
             "long": [
@@ -566,6 +566,7 @@
               "hide": false,
               "choices": {
                 "choices": [
+                  "info",
                   "low",
                   "moderate",
                   "high",
@@ -6720,6 +6721,20 @@
             "global": false
           },
           {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Check globally-installed packages instead of the current project",
+            "help_first_line": "Check globally-installed packages instead of the current project",
+            "short": [
+              "g"
+            ],
+            "long": [
+              "global"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "json",
             "usage": "--json",
             "help": "Emit a JSON object keyed by package name instead of the default table",
@@ -12509,7 +12524,7 @@
   "config": {
     "props": {}
   },
-  "version": "1.22.0",
+  "version": "1.23.0",
   "usage": "Usage: aube [OPTIONS] [COMMAND]",
   "complete": {},
   "about": "A fast Node.js package manager"

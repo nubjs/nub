@@ -17,6 +17,10 @@ Optional package name (prefix match) to filter the report
 
 Show only devDependencies
 
+### `-g --global`
+
+Check globally-installed packages instead of the current project
+
 ### `--json`
 
 Emit a JSON object keyed by package name instead of the default table

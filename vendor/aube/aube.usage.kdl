@@ -1,6 +1,6 @@
 name aube
 bin aube
-version "1.22.0"
+version "1.23.0"
 about "A fast Node.js package manager"
 usage "Usage: aube [OPTIONS] [COMMAND]"
 flag "-C --dir --cd --prefix" help="Change to directory before running (like `make -C` or `mise --cd`)" global=#true {
@@ -166,9 +166,9 @@ cmd approve-builds help="Approve ignored dependency build scripts" {
 cmd audit help="Check installed packages against the registry advisory DB" {
     after_long_help "Examples:\n\n  $ aube audit\n  Severity  Package    Vulnerable  Title\n  moderate  minimatch  <3.0.5      Regular Expression Denial of Service\n                                   https://github.com/advisories/GHSA-f8q6-p94x\n\n  1 vulnerability found\n\n  # Only fail on high and above\n  $ aube audit --audit-level high\n\n  # Skip optional deps and dev deps\n  $ aube audit --prod --no-optional\n\n  # Pipe into jq\n  $ aube audit --json | jq '.advisories | length'\n\n  # Clean\n  $ aube audit\n  No known vulnerabilities found\n"
     flag --audit-level help="Only print advisories at or above this severity" default=low {
-        long_help "Only print advisories at or above this severity.\n\nOne of: `low`, `moderate`, `high`, `critical`. Default: `low`."
+        long_help "Only print advisories at or above this severity.\n\nOne of: `info`, `low`, `moderate`, `high`, `critical`. Default: `low`."
         arg <AUDIT_LEVEL> {
-            choices low moderate high critical
+            choices info low moderate high critical
         }
     }
     flag "-D --dev" help="Only audit `devDependencies`"
@@ -1195,6 +1195,7 @@ cmd logout help="Remove a registry auth token from the user's ~/.npmrc" {
 cmd outdated help="Report dependencies whose installed version lags behind the registry" {
     after_long_help "Examples:\n\n  $ aube outdated\n  Package     Current  Wanted   Latest\n  lodash      4.17.20  4.17.21  4.17.21\n  typescript  5.3.3    5.3.3    5.4.5\n  zod         3.22.4   3.22.4   3.23.8\n\n  # Also print the package.json specifier and dep type\n  $ aube outdated --long\n  Package     Current  Wanted   Latest\n  lodash      4.17.20  4.17.21  4.17.21\n  typescript  5.3.3    5.3.3    5.4.5\n\n    lodash (dependencies): ^4.17.20\n    typescript (devDependencies): ^5.3.0\n\n  # Filter by prefix\n  $ aube outdated '@babel/*'\n\n  # Machine-readable (pnpm-compatible shape)\n  $ aube outdated --json\n  {\n    \"lodash\": {\n      \"current\": \"4.17.20\",\n      \"wanted\": \"4.17.21\",\n      \"latest\": \"4.17.21\"\n    }\n  }\n\n  # Nothing to report exits 0\n  $ aube outdated\n  All dependencies up to date.\n"
     flag "-D --dev" help="Show only devDependencies"
+    flag "-g --global" help="Check globally-installed packages instead of the current project"
     flag --json help="Emit a JSON object keyed by package name instead of the default table"
     flag --long help="Also show deps whose `wanted` version matches the installed version"
     flag "-P --prod --production" help="Show only production dependencies (skip devDependencies)"

@@ -62,6 +62,10 @@ pub struct OutdatedArgs {
     #[arg(short = 'D', long, conflicts_with = "prod")]
     pub dev: bool,
 
+    /// Check globally-installed packages instead of the current project.
+    #[arg(short = 'g', long, conflicts_with = "workspace_root")]
+    pub global: bool,
+
     /// Emit a JSON object keyed by package name instead of the default table
     #[arg(long)]
     pub json: bool,
@@ -124,6 +128,16 @@ pub async fn run(
     mut filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
     args.network.install_overrides();
+    if args.global {
+        if !filter.is_empty() {
+            return Err(miette::miette!(
+                "{}: --global cannot be used with --recursive or --filter",
+                aube_util::cmd("outdated")
+            ));
+        }
+        return run_global(args).await;
+    }
+
     let mut cwd = crate::dirs::project_root()?;
     if !filter.is_empty() {
         // Discussion #602: include the workspace root in `outdated -r`
@@ -214,6 +228,102 @@ async fn run_filtered(
     Ok(None)
 }
 
+async fn run_global(args: OutdatedArgs) -> miette::Result<Option<i32>> {
+    let layout = super::global::GlobalLayout::resolve()?;
+    let mut packages = super::global::scan_packages(&layout.pkg_dir);
+    packages.sort_by(|a, b| a.aliases.first().cmp(&b.aliases.first()));
+
+    if packages.is_empty() {
+        if args.json {
+            println!("{{}}");
+        } else {
+            println!("(no global packages installed)");
+        }
+        return Ok(None);
+    }
+
+    let mut rows = Vec::new();
+    let mut matched_any = false;
+    let mut matched_install = false;
+    let mut parsed_install = false;
+    let mut skipped_lockfile = false;
+    for info in packages {
+        let matched_aliases: Option<Vec<&str>> = args.pattern.as_deref().map(|pattern| {
+            info.aliases
+                .iter()
+                .filter_map(|alias| alias.starts_with(pattern).then_some(alias.as_str()))
+                .collect()
+        });
+        if matched_aliases.as_ref().is_some_and(Vec::is_empty) {
+            continue;
+        }
+        matched_install = true;
+
+        let manifest = super::load_manifest(&info.install_dir.join("package.json"))?;
+        let graph = match aube_lockfile::parse_lockfile(&info.install_dir, &manifest) {
+            Ok(g) => g,
+            Err(aube_lockfile::Error::NotFound(_)) => {
+                skipped_lockfile = true;
+                tracing::warn!(
+                    code = aube_codes::warnings::WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE,
+                    "global install at {} has no lockfile; skipping outdated check",
+                    info.install_dir.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                return Err(miette::Report::new(e)).wrap_err_with(|| {
+                    format!(
+                        "failed to parse global lockfile in {}",
+                        info.install_dir.display()
+                    )
+                });
+            }
+        };
+        parsed_install = true;
+        let mut collect_args = args.clone_for_fanout();
+        collect_args.pattern = None;
+        let selected_roots;
+        let roots = if let Some(aliases) = matched_aliases {
+            selected_roots = graph
+                .root_deps()
+                .iter()
+                .filter(|dep| aliases.iter().any(|alias| dep.name == *alias))
+                .cloned()
+                .collect::<Vec<_>>();
+            selected_roots.as_slice()
+        } else {
+            graph.root_deps()
+        };
+        let (mut package_rows, matched) =
+            collect_rows(&info.install_dir, collect_args, &graph, roots).await?;
+        if matched {
+            matched_any = true;
+        }
+        rows.append(&mut package_rows);
+    }
+
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    let has_drift = has_drift(&rows);
+    let no_checkable_global_dependencies =
+        rows.is_empty() && matched_install && !parsed_install && skipped_lockfile;
+    if args.json {
+        if no_checkable_global_dependencies {
+            render_no_checkable_global_json()?;
+        } else {
+            render_json(&rows)?;
+        }
+    } else if no_checkable_global_dependencies {
+        println!("(no checkable global dependencies)");
+    } else if rows.is_empty() && !matched_any {
+        println!("(no matching dependencies)");
+    } else {
+        render_table(&rows, args.long);
+    }
+
+    if has_drift { Ok(Some(1)) } else { Ok(None) }
+}
+
 async fn run_one(cwd: &Path, args: OutdatedArgs, importer: Option<String>) -> miette::Result<bool> {
     let manifest = super::load_manifest(&cwd.join("package.json"))?;
 
@@ -239,6 +349,35 @@ async fn run_graph(
     roots: &[DirectDep],
     importer: Option<String>,
 ) -> miette::Result<bool> {
+    let (mut rows, matched_any) = collect_rows(cwd, args.clone_for_fanout(), graph, roots).await?;
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    let has_drift = has_drift(&rows);
+    for row in &mut rows {
+        row.importer.clone_from(&importer);
+    }
+
+    if args.json {
+        render_json(&rows)?;
+    } else if rows.is_empty() && !matched_any {
+        println!("(no matching dependencies)");
+    } else {
+        render_table(&rows, args.long);
+    }
+
+    // Return the drift flag to the caller. The single-project caller (`run`)
+    // maps `true` to exit code 1 (pnpm parity: `aube outdated || exit 1`),
+    // and the recursive caller (`run_filtered`) aggregates drift across
+    // importers — the exit decision lives at the top so the command layer
+    // stays embed-safe (no in-place `std::process::exit`).
+    Ok(has_drift)
+}
+
+async fn collect_rows(
+    cwd: &Path,
+    args: OutdatedArgs,
+    graph: &aube_lockfile::LockfileGraph,
+    roots: &[DirectDep],
+) -> miette::Result<(Vec<Row>, bool)> {
     let filter = DepFilter::from_flags(args.prod, args.dev);
     let roots: Vec<&DirectDep> = roots
         .iter()
@@ -250,12 +389,7 @@ async fn run_graph(
         .collect();
 
     if roots.is_empty() {
-        if !args.json {
-            println!("(no matching dependencies)");
-        } else {
-            println!("{{}}");
-        }
-        return Ok(false);
+        return Ok((Vec::new(), false));
     }
     let roots: Vec<&DirectDep> = roots
         .into_iter()
@@ -266,12 +400,7 @@ async fn run_graph(
         })
         .collect();
     if roots.is_empty() {
-        if args.json {
-            println!("{{}}");
-        } else {
-            println!("(no matching dependencies)");
-        }
-        return Ok(false);
+        return Ok((Vec::new(), false));
     }
 
     let client = std::sync::Arc::new(make_client(cwd));
@@ -339,34 +468,22 @@ async fn run_graph(
                 dep_type: dep.dep_type,
                 latest_known,
                 specifier: dep.specifier.clone(),
-                importer: importer.clone(),
+                importer: None,
             });
         }
     }
 
-    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok((rows, true))
+}
 
+fn has_drift(rows: &[Row]) -> bool {
     // Hide "up-to-date but only because --long" rows from the non-empty check
     // so `--long` alone doesn't cause a pnpm CI pipeline to flip to exit 1.
     // A row only counts as drift when its latest is known AND differs from
     // current, or its wanted version diverges from current — a missing
     // `latest` dist-tag must never flip the exit code.
-    let has_drift = rows
-        .iter()
-        .any(|r| (r.latest_known && r.current != r.latest) || r.current != r.wanted);
-
-    if args.json {
-        render_json(&rows)?;
-    } else {
-        render_table(&rows, args.long);
-    }
-
-    // Return the drift flag to the caller. The single-project caller (`run`)
-    // maps `true` to exit code 1 (pnpm parity: `aube outdated || exit 1`),
-    // and the recursive caller (`run_filtered`) aggregates drift across
-    // importers — the exit decision lives at the top so the command layer
-    // stays embed-safe (no in-place `std::process::exit`).
-    Ok(has_drift)
+    rows.iter()
+        .any(|r| (r.latest_known && r.current != r.latest) || r.current != r.wanted)
 }
 
 impl OutdatedArgs {
@@ -374,6 +491,7 @@ impl OutdatedArgs {
         Self {
             pattern: self.pattern.clone(),
             dev: self.dev,
+            global: self.global,
             json: self.json,
             long: self.long,
             prod: self.prod,
@@ -560,20 +678,45 @@ fn render_table(rows: &[Row], long: bool) {
 
 fn render_json(rows: &[Row]) -> miette::Result<()> {
     // Emit a pnpm-compatible shape: `{ "<name>": { current, wanted, latest } }`.
+    // If malformed global state presents duplicate root names, keep every
+    // row by promoting that one key to an array instead of overwriting.
     use serde_json::{Map, Value};
     let mut map: Map<String, Value> = Map::new();
     for row in rows {
         let v = serde_json::to_value(row).into_diagnostic()?;
-        map.insert(row.name.clone(), v);
+        match map.remove(&row.name) {
+            None => {
+                map.insert(row.name.clone(), v);
+            }
+            Some(Value::Array(mut values)) => {
+                values.push(v);
+                map.insert(row.name.clone(), Value::Array(values));
+            }
+            Some(existing) => {
+                map.insert(row.name.clone(), Value::Array(vec![existing, v]));
+            }
+        }
     }
     let out = serde_json::to_string_pretty(&Value::Object(map)).into_diagnostic()?;
     println!("{out}");
     Ok(())
 }
 
+fn render_no_checkable_global_json() -> miette::Result<()> {
+    let out = serde_json::to_string_pretty(&serde_json::json!({
+        "checked": false,
+        "code": aube_codes::warnings::WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE,
+        "message": "no checkable global dependencies"
+    }))
+    .into_diagnostic()?;
+    println!("{out}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod colorize_tests {
-    use super::colorize_diff;
+    use super::{Row, colorize_diff};
+    use aube_lockfile::DepType;
 
     fn strip_ansi(s: &str) -> String {
         // Strip CSI sequences for assertion purposes — the renderer
@@ -641,5 +784,49 @@ mod colorize_tests {
         // skip colorization rather than panic. Width still applies.
         let painted = colorize_diff("1.2.3", "latest", 8);
         assert_eq!(painted, "latest  ");
+    }
+
+    #[test]
+    fn json_duplicate_names_promote_to_array() {
+        let rows = vec![
+            Row {
+                name: "same".to_string(),
+                current: "1.0.0".to_string(),
+                wanted: "1.0.1".to_string(),
+                latest: "1.0.1".to_string(),
+                dep_type: DepType::Production,
+                latest_known: true,
+                specifier: Some("^1.0.0".to_string()),
+                importer: None,
+            },
+            Row {
+                name: "same".to_string(),
+                current: "2.0.0".to_string(),
+                wanted: "2.0.1".to_string(),
+                latest: "2.0.1".to_string(),
+                dep_type: DepType::Production,
+                latest_known: true,
+                specifier: Some("^2.0.0".to_string()),
+                importer: None,
+            },
+        ];
+        let mut map = serde_json::Map::new();
+        for row in rows {
+            let value = serde_json::to_value(&row).unwrap();
+            match map.remove(&row.name) {
+                None => {
+                    map.insert(row.name, value);
+                }
+                Some(serde_json::Value::Array(mut values)) => {
+                    values.push(value);
+                    map.insert(row.name, serde_json::Value::Array(values));
+                }
+                Some(existing) => {
+                    map.insert(row.name, serde_json::Value::Array(vec![existing, value]));
+                }
+            }
+        }
+
+        assert_eq!(map["same"].as_array().unwrap().len(), 2);
     }
 }

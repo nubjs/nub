@@ -205,7 +205,7 @@ pub struct Packument {
 
 /// Metadata for a specific version of a package.
 ///
-/// Deserializes via [`VersionMetadataRaw`] (`#[serde(from = ...)]`) so
+/// Deserializes via `VersionMetadataRaw` (`#[serde(from = ...)]`) so
 /// that publishes carrying *both* `bundledDependencies` (canonical) and
 /// `bundleDependencies` (deprecated alias) parse cleanly. serde's plain
 /// `#[serde(alias = ...)]` rejects that as a duplicate field, which
@@ -232,7 +232,7 @@ pub struct VersionMetadata {
     /// the resolver must not recurse into them. npm serializes this
     /// under both `bundledDependencies` and `bundleDependencies`; on
     /// deserialize we accept either, and prefer the canonical when both
-    /// are present (handled in [`VersionMetadataRaw`]).
+    /// are present (handled in `VersionMetadataRaw`).
     pub bundled_dependencies: Option<BundledDependencies>,
     pub dist: Option<Dist>,
     #[serde(default, deserialize_with = "aube_util::string_or_seq")]
