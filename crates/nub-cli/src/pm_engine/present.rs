@@ -173,10 +173,33 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
     rewrite(&text)
 }
 
-/// The brand rewrite. Order matters: codes first (so the `AUBE` inside
-/// `ERR_AUBE_*` never reaches the word pass), then per-line URL stripping,
-/// then the word-boundary `aube` → `nub` pass.
+/// Runtime hint-context corrections nub applies on top of the brand rewrite.
+/// These are NOT brand leaks (the branded workspace/lockfile-name leaks are
+/// fixed at the engine source via the embedder seam — `aube_util::
+/// workspace_markers()` / `lockfile_basename()` — so they never reach this
+/// layer, and would be split mid-token by miette's line-wrapping anyway).
+/// They are messages that are brand-clean but factually misleading for nub:
+///
+/// - The frozen-install / `nub ci` missing-lockfile hint names a single
+///   lockfile to commit (`pnpm-lock.yaml`), but which file a fresh
+///   `nub install` writes is context-dependent (`lock.yaml` for a truly-fresh
+///   project, `pnpm-lock.yaml` otherwise), so naming one is misleading.
+///   Neutralized to "a lockfile" — a nub-only correction (standalone aube's
+///   `pnpm-lock.yaml` hint is correct for it, so this stays out of the fork).
+const RUNTIME_HINT_VOCAB: &[(&str, &str)] = &[(
+    "commit pnpm-lock.yaml to your repository",
+    "commit a lockfile to your repository",
+)];
+
+/// The brand rewrite. Order matters: the runtime-hint corrections first (a
+/// plain phrase substitution before any brand pass touches the text), then
+/// codes (so the `AUBE` inside `ERR_AUBE_*` never reaches the word pass), then
+/// per-line URL stripping, then the word-boundary `aube` → `nub` pass.
 pub(crate) fn rewrite(text: &str) -> String {
+    let mut text = text.to_string();
+    for (from, to) in RUNTIME_HINT_VOCAB {
+        text = text.replace(from, to);
+    }
     let text = text
         .replace("ERR_AUBE_", "ERR_NUB_")
         .replace("WARN_AUBE_", "WARN_NUB_")
@@ -406,6 +429,29 @@ mod tests {
             !out.contains("  "),
             "no double-space gap left behind: {out}"
         );
+    }
+
+    #[test]
+    fn neutralizes_misleading_frozen_lockfile_name() {
+        // The `nub ci` / `--frozen-lockfile` missing-lockfile hint names a
+        // single lockfile to commit, but a fresh `nub install` may write
+        // `lock.yaml` (truly-fresh) rather than `pnpm-lock.yaml` — so the
+        // specific name is misleading. The corrected hint names no specific
+        // file.
+        let msg = "no lockfile found and --frozen-lockfile is set\n\
+                   help: commit pnpm-lock.yaml to your repository, or run \
+                   `aube install --no-frozen-lockfile` to generate one";
+        let out = rewrite(msg);
+        assert!(
+            out.contains("commit a lockfile to your repository"),
+            "the misleading specific lockfile name must be neutralized: {out}"
+        );
+        assert!(
+            !out.contains("commit pnpm-lock.yaml"),
+            "the specific (misleading) lockfile name must not survive: {out}"
+        );
+        // The actionable verb spelling still rebrands and survives.
+        assert!(out.contains("`nub install --no-frozen-lockfile`"), "{out}");
     }
 
     #[test]

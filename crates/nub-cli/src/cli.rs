@@ -5324,6 +5324,34 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 eprintln!("» this project uses nub (resolved from packageManager)");
                 return Ok(0);
             }
+            // A project may DECLARE a manager nub doesn't provision (bun — and
+            // any name outside nub's provisioning scope). The install path
+            // honors the declared identity (`declared_pm_raw`); `which` must
+            // agree rather than mislabel a genuinely-pinned project as
+            // "unpinned". `resolve_target_with_source` returns None for such a
+            // pin (it only resolves provisionable targets), so consult the
+            // name-level identity probe before falling through to the
+            // no-pin diagnosis. Berry (committed yarnPath / pinned yarn) and
+            // every provisionable PM still resolve below — this branch fires
+            // only for a declared-but-unprovisionable identity.
+            if let Some(id) = resolve::project_pm_identity(&cwd) {
+                if resolve::resolve_target_with_source(&cwd).is_none() && !id.berry {
+                    let (_, version) =
+                        resolve::declared_pm_raw(&cwd).unwrap_or_else(|| (id.name.clone(), None));
+                    println!("{}", id.name);
+                    std::io::stdout().flush().ok();
+                    let pin = match &version {
+                        Some(v) => format!("{}@{v}", id.name),
+                        None => id.name.clone(),
+                    };
+                    eprintln!(
+                        "» this project is pinned to {pin} (resolved from packageManager) — \
+                         nub doesn't provision {}, run it with its own installer",
+                        id.name
+                    );
+                    return Ok(0);
+                }
+            }
             let res = resolve::resolve_target_with_source(&cwd)
                 .context("no package manager is pinned (no .yarnrc.yml yarnPath, packageManager, or devEngines.packageManager) — declare one with `nub pm use <pm>`")?;
             // Drain the structured advisories first (disagreement / range /
@@ -7995,6 +8023,35 @@ mod tests {
         std::fs::remove_dir_all(&pm).unwrap();
         assert!(!pm.exists(), "the pm cache dir is gone after clear");
         assert!(node.exists(), "the sibling node/ store must be untouched");
+    }
+
+    #[test]
+    fn which_honors_a_declared_unprovisionable_pm() {
+        // A `packageManager: "bun@x"` pin is a genuine identity nub doesn't
+        // provision — `resolve_target_with_source` returns None for it, so the
+        // old `which` path mislabeled the project "no PM pinned". The install
+        // path already honors the declared identity; `which` must agree. It
+        // reports bun (exit 0), not the no-pin error.
+        let dir = pm_tmpdir("which-bun");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"app","packageManager":"bun@1.2.20"}"#,
+        )
+        .unwrap();
+        // The identity probe sees bun; the provisioning resolver does not — the
+        // exact gap the `which` branch bridges.
+        let id = nub_core::pm::resolve::project_pm_identity(&dir).expect("bun identity");
+        assert_eq!(id.name, "bun");
+        assert!(!id.berry);
+        assert!(
+            nub_core::pm::resolve::resolve_target_with_source(&dir).is_none(),
+            "bun is unprovisionable, so the target resolver yields None"
+        );
+        let code = with_cwd(&dir, || run_pm(&["which".into()])).expect("which must not error");
+        assert_eq!(
+            code, 0,
+            "a declared bun pin reports bun (exit 0), not an error"
+        );
     }
 
     #[test]
