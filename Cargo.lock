@@ -3042,8 +3042,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nub-cache-key"
+version = "0.1.12"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "nub-cli"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "aube",
@@ -3079,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "nub-core"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3108,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "nub-native"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "blake3",
  "json5",
@@ -3116,6 +3123,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "nub-cache-key",
  "oxc",
  "oxc_napi",
  "oxc_sourcemap",

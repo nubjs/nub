@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nub-cli", "crates/nub-core", "crates/nub-native"]
+members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-native"]
 # vendor/aube is its own Cargo workspace (the vendored aube package manager,
 # plain in-tree files vendored from nubjs/aube). The exclude is load-bearing: nub crates
 # take `path` dependencies into vendor/aube/crates/*, and cargo auto-adopts
