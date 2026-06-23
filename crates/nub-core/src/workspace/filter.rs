@@ -95,11 +95,40 @@ impl Filter {
 }
 
 /// Resolve changed packages from a git ref.
+///
+/// Mirrors pnpm's `getChangedProjects`: a two-dot `git diff --name-only <ref>`
+/// scoped to the workspace subtree (`-- .` from `workspace_root`), then maps each
+/// changed file to the workspace member whose directory contains it.
+///
+/// Two non-obvious invariants, both learned from divergences against real pnpm:
+/// - `git diff --name-only` ALWAYS prints paths relative to the git repository
+///   ROOT, never relative to the cwd. When the workspace root is a subdirectory
+///   of the repo (a monorepo nested under the repo root), joining those paths
+///   onto `workspace_root` doubles the intermediate segment and matches nothing —
+///   the silent-no-op this function used to produce. Resolve the repo root via
+///   `rev-parse --show-toplevel` and join changed paths onto THAT, exactly as
+///   pnpm joins onto its `repoRoot`.
+/// - TWO-dot (`<ref>`), not three-dot (`<ref>...HEAD`): pnpm diffs the working
+///   tree against the ref directly, so a branch that diverged from `<ref>` still
+///   selects members touched on EITHER side. Three-dot (merge-base..HEAD) would
+///   drop the diverged side and `fatal: no merge base` on unrelated histories.
 pub fn packages_changed_since(
     workspace_root: &Path,
     members: &[WorkspacePackage],
     git_ref: &str,
 ) -> HashSet<usize> {
+    // A revspec starting with `-` would be parsed by git as an option (the
+    // CVE-2017-1000117 argv-injection class); a NUL never appears in a real ref.
+    if git_ref.starts_with('-') || git_ref.contains('\0') {
+        return HashSet::new();
+    }
+
+    let repo_root = match git_repo_root(workspace_root) {
+        Some(root) => root,
+        // Not a git repo (or git unavailable): no ref to diff against.
+        None => return HashSet::new(),
+    };
+
     let output = std::process::Command::new("git")
         .args(["diff", "--name-only", git_ref, "--", "."])
         .current_dir(workspace_root)
@@ -108,24 +137,57 @@ pub fn packages_changed_since(
     let Ok(output) = output else {
         return HashSet::new();
     };
+    if !output.status.success() {
+        return HashSet::new();
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let changed_files: Vec<PathBuf> = stdout
         .lines()
         .filter(|l| !l.is_empty())
-        .map(|l| workspace_root.join(l))
+        .map(|l| repo_root.join(l))
+        .collect();
+
+    // `git rev-parse --show-toplevel` returns a symlink-RESOLVED path, while
+    // `pkg.dir` carries whatever (possibly symlinked) form the workspace was
+    // discovered through (e.g. macOS `/tmp` → `/private/tmp`, `/var` →
+    // `/private/var`). Canonicalize member dirs to the same realpath basis so
+    // the `starts_with` prefix test holds. Changed files don't exist when
+    // deleted, so canonicalize the members (which do) and resolve the changed
+    // path lazily, falling back to the lexical form for deletions.
+    let canon_dirs: Vec<PathBuf> = members
+        .iter()
+        .map(|p| p.dir.canonicalize().unwrap_or_else(|_| p.dir.clone()))
         .collect();
 
     let mut matched = HashSet::new();
-    for (i, pkg) in members.iter().enumerate() {
-        for file in &changed_files {
-            if file.starts_with(&pkg.dir) {
+    for file in &changed_files {
+        let canon_file = file.canonicalize().unwrap_or_else(|_| file.clone());
+        for (i, dir) in canon_dirs.iter().enumerate() {
+            if canon_file.starts_with(dir) {
                 matched.insert(i);
-                break;
             }
         }
     }
     matched
+}
+
+/// The git repository root (`git rev-parse --show-toplevel`) for `cwd`, or
+/// `None` when `cwd` is not inside a git work tree (or git isn't available).
+fn git_repo_root(cwd: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(root))
 }
 
 /// A workspace package with its manifest and location.
@@ -1338,5 +1400,97 @@ mod tests {
             "pnpm-workspace.yaml member must be discovered when pnpm-lock.yaml is present; got {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Run `git` in `cwd`, asserting success — test-only helper for the
+    /// `packages_changed_since` fixtures below.
+    fn git(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git available");
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    /// `packages_changed_since` resolves members of the workspace, so build the
+    /// member list the way the runtime does and select by git ref. Returns the
+    /// set of matched member names.
+    fn changed_names(workspace_root: &Path, git_ref: &str) -> HashSet<String> {
+        let members = discover_members(workspace_root);
+        packages_changed_since(workspace_root, &members, git_ref)
+            .into_iter()
+            .map(|i| members[i].name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn changed_since_selects_member_touched_after_ref() {
+        // Workspace root == git root: a member changed since `base` is selected,
+        // an unchanged member is not, and an unchanged HEAD selects nothing.
+        let root = scaffold_workspace("since-eq", &["packages/*"], &["packages/a", "packages/b"]);
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "init"]);
+        git(&root, &["branch", "base"]);
+        fs::write(root.join("packages/a/index.js"), "// changed\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "change a"]);
+
+        assert_eq!(
+            changed_names(&root, "base"),
+            HashSet::from(["a".to_string()]),
+            "only the member changed since `base` is selected"
+        );
+        assert!(
+            changed_names(&root, "HEAD").is_empty(),
+            "an unchanged tree (vs HEAD) selects nothing — the legit empty case"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn changed_since_when_workspace_root_is_a_subdir_of_the_git_root() {
+        // Regression: when the workspace root is nested below the git root,
+        // `git diff --name-only` prints REPO-root-relative paths. Joining them
+        // onto the workspace root doubled the intermediate segment and matched
+        // nothing — the silent no-op this guards against. The git repo is the
+        // parent; the workspace lives in `app/`.
+        let repo = std::env::temp_dir().join(format!("nub-since-sub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&repo);
+        let ws = repo.join("app");
+        fs::create_dir_all(ws.join("packages/a")).unwrap();
+        fs::create_dir_all(ws.join("packages/b")).unwrap();
+        fs::write(
+            ws.join("package.json"),
+            r#"{"name":"root","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(ws.join("packages/a/package.json"), r#"{"name":"a"}"#).unwrap();
+        fs::write(ws.join("packages/b/package.json"), r#"{"name":"b"}"#).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        git(&repo, &["branch", "base"]);
+        fs::write(ws.join("packages/a/index.js"), "// changed\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "change a"]);
+
+        assert_eq!(
+            changed_names(&ws, "base"),
+            HashSet::from(["a".to_string()]),
+            "nested workspace: the changed member must still be selected"
+        );
+        let _ = fs::remove_dir_all(&repo);
     }
 }
