@@ -89,6 +89,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Empty npmrc so a host ~/.npmrc (custom registry=, https-proxy=, etc.) can't
+# route tarball fetches away from the hermetic Verdaccio and break the run.
+EMPTY_NPMRC="$SCRATCH/empty.npmrc"
+touch "$EMPTY_NPMRC"
+export NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC"
+export NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC"
+
 # ── Preflight ────────────────────────────────────────────────────────────────
 if [[ ! -x "$NUB" ]]; then
   echo "ERROR: $NUB not found or not executable. Run 'cargo build --release' first." >&2
@@ -198,6 +205,7 @@ populate_registry() {
   mkdir -p "$pwd_data" "$pwd_cache"
   setup_workdir "$fixture" "$pwd_wd"
   if ! CI=1 XDG_DATA_HOME="$pwd_data" XDG_CACHE_HOME="$pwd_cache" \
+      NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC" NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC" \
       "$NUB" install --frozen-lockfile --dir "$pwd_wd" --registry "$BENCH_REGISTRY_URL" -s \
       >"$SCRATCH/populate-$fixture.log" 2>&1; then
     echo "  WARN: populate install for $fixture had errors (see $SCRATCH/populate-$fixture.log)" >&2
@@ -212,6 +220,8 @@ populate_registry() {
 # materialized fetch+decode+unpack+link path the CAS work lives on (GVS-on would
 # relink from the warm GVS and hide the unpack cost we want cold). --frozen-lockfile
 # installs strictly from the committed lockfile (deterministic resolution).
+# NPM_CONFIG_USERCONFIG/GLOBALCONFIG are inherited from the exported env (set
+# above), so no need to re-specify here; listed explicitly for documentation.
 nub_install() {
   local data="$1" cache="$2" wd="$3"; shift 3
   CI=1 XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" \
@@ -257,7 +267,7 @@ run_cold() {
   local prepare="rm -rf '$wd/node_modules' '$data' '$cache'; mkdir -p '$data' '$cache'"
   local reg_flag=""
   [[ ${#REGISTRY_ARGS[@]} -gt 0 ]] && reg_flag="${REGISTRY_ARGS[*]}"
-  local cmd="CI=1 XDG_DATA_HOME='$data' XDG_CACHE_HOME='$cache' '$NUB' install --frozen-lockfile --dir '$wd' $reg_flag -s"
+  local cmd="CI=1 XDG_DATA_HOME='$data' XDG_CACHE_HOME='$cache' NPM_CONFIG_USERCONFIG='$EMPTY_NPMRC' NPM_CONFIG_GLOBALCONFIG='$EMPTY_NPMRC' '$NUB' install --frozen-lockfile --dir '$wd' $reg_flag -s"
 
   local outfile="$RESULTS_DIR/coldcas-${fixture}-${TIMESTAMP}.json"
   hyperfine \
@@ -315,7 +325,7 @@ run_warm() {
   local prepare="rm -rf '$wd/node_modules'"
   local reg_flag=""
   [[ ${#REGISTRY_ARGS[@]} -gt 0 ]] && reg_flag="${REGISTRY_ARGS[*]}"
-  local cmd="CI=1 XDG_DATA_HOME='$data' XDG_CACHE_HOME='$cache' '$NUB' install --frozen-lockfile --dir '$wd' $reg_flag -s"
+  local cmd="CI=1 XDG_DATA_HOME='$data' XDG_CACHE_HOME='$cache' NPM_CONFIG_USERCONFIG='$EMPTY_NPMRC' NPM_CONFIG_GLOBALCONFIG='$EMPTY_NPMRC' '$NUB' install --frozen-lockfile --dir '$wd' $reg_flag -s"
 
   local outfile="$RESULTS_DIR/warmcas-${fixture}-${TIMESTAMP}.json"
   hyperfine \

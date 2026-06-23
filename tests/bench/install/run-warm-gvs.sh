@@ -41,6 +41,12 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 TRASH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bench-warm-gvs-trash-$$-XXXXXX")"
 trap 'rm -rf "$TRASH_DIR" 2>/dev/null || true' EXIT
 
+# Empty npmrc so a host ~/.npmrc can't route fetches away from the bench target.
+EMPTY_NPMRC="$TRASH_DIR/empty.npmrc"
+touch "$EMPTY_NPMRC"
+export NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC"
+export NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC"
+
 WARMUP=3
 RUNS=12
 FIXTURE_FILTER=""
@@ -136,7 +142,7 @@ run_warm() {
   fi
 
   local outfile="$RESULTS_DIR/warm-gvs-${fixture}-${TIMESTAMP}.json"
-  local nub_cmd="env -u CI '$NUB' install --frozen-lockfile --cwd '$WD_NUB' -s"
+  local nub_cmd="env -u CI NPM_CONFIG_USERCONFIG='$EMPTY_NPMRC' NPM_CONFIG_GLOBALCONFIG='$EMPTY_NPMRC' '$NUB' install --frozen-lockfile --cwd '$WD_NUB' -s"
 
   local HF_ARGS=(
     --warmup "$WARMUP" --runs "$RUNS"

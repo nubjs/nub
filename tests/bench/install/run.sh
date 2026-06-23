@@ -34,6 +34,12 @@ TRASH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bench-trash-$$-XXXXXX")"
 cleanup_trash() { rm -rf "$TRASH_DIR" 2>/dev/null || true; }
 trap cleanup_trash EXIT
 
+# Empty npmrc so a host ~/.npmrc can't redirect fetches (e.g. custom registry=).
+EMPTY_NPMRC="$TRASH_DIR/empty.npmrc"
+touch "$EMPTY_NPMRC"
+export NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC"
+export NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC"
+
 RUN_WARM=1
 RUN_COLD=1
 MATERIALIZED=0
@@ -377,12 +383,16 @@ run_cold() {
     setup_workdir "$fixture" "$wd" nub
     mkdir -p "$data" "$cache"
     local t0; t0=$(ms_now)
-    XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" "$NUB" install \
+    XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" \
+      NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC" NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC" \
+      "$NUB" install \
       --frozen-lockfile \
       --cwd "$wd" \
       -s \
       2>/dev/null \
-      || XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" "$NUB" install \
+      || XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" \
+           NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC" NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC" \
+           "$NUB" install \
            --frozen-lockfile \
            --cwd "$wd" \
            2>&1 | tail -2
