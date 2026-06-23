@@ -3665,6 +3665,58 @@ fn env_file_flag_reaches_child_and_shell_wins() {
 }
 
 #[test]
+fn env_file_if_exists_skips_absent_file_and_loads_present_one() {
+    // Node v22 parity: `--env-file-if-exists` loads the file when present but is a
+    // SILENT no-op when absent (vs `--env-file`, which errors on a missing file).
+    // Otherwise identical to `--env-file` — same merge into the spawned child.
+    let fixture = fixtures_dir().join("env-file-flag");
+
+    // (a) absent file → no error, run succeeds, the var stays unset.
+    let missing =
+        std::env::temp_dir().join(format!("nub-ifexists-missing-{}.env", std::process::id()));
+    let _ = std::fs::remove_file(&missing); // ensure it does not exist
+    let out = Command::new(nub_binary())
+        .arg(format!("--env-file-if-exists={}", missing.display()))
+        .arg(fixture.join("print.ts"))
+        .current_dir(&fixture)
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "absent --env-file-if-exists must be a no-op, not an error; stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("VAR=unset"),
+        "absent if-exists file injects nothing: {stdout}"
+    );
+    assert!(
+        !stderr.contains("cannot read env file"),
+        "absent if-exists file must not warn: {stderr}"
+    );
+
+    // (b) present file → loads and reaches the child, exactly like --env-file.
+    let present =
+        std::env::temp_dir().join(format!("nub-ifexists-present-{}.env", std::process::id()));
+    std::fs::write(&present, "A19=from_ifexists\n").unwrap();
+    let out2 = Command::new(nub_binary())
+        .arg(format!("--env-file-if-exists={}", present.display()))
+        .arg(fixture.join("print.ts"))
+        .current_dir(&fixture)
+        .output()
+        .expect("failed to spawn nub");
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let _ = std::fs::remove_file(&present);
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(
+        stdout2.contains("VAR=from_ifexists"),
+        "present --env-file-if-exists var must reach the child: {stdout2}"
+    );
+}
+
+#[test]
 fn transpile_cache_eviction_evicts_oldest_over_cap() {
     // A16: exercises the eviction logic directly (the fixture imports
     // runtime/cache-evict.mjs and sweeps a temp dir with a small cap), so it

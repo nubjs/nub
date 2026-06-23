@@ -1184,13 +1184,27 @@ fn run_nub() -> Result<i32> {
             s if s == "--color" || s.starts_with("--color=") || s == "--no-color" => {
                 // --color (no value), --color=always, --no-color: all consumed, not forwarded
             }
-            s if s == "--env-file" || s.starts_with("--env-file=") => {
-                // Presence of the flag (even pointing at an empty/unreadable file)
-                // opts the run out of eager `.env*` auto-discovery — only the
-                // explicit file(s) load (the maintainer, 2026-06-15).
+            s if s == "--env-file"
+                || s.starts_with("--env-file=")
+                || s == "--env-file-if-exists"
+                || s.starts_with("--env-file-if-exists=") =>
+            {
+                // `--env-file-if-exists` mirrors Node v22: load the file if present,
+                // skip SILENTLY when it is absent — vs `--env-file`, which errors on
+                // a missing file. Everything else is identical: same first-writer
+                // merge, same `${VAR}` expansion, and the flag's presence opts the
+                // run out of eager `.env*` auto-discovery either way (even when the
+                // if-exists target turns out to be absent — the user named explicit
+                // file(s), so guessing is off).
+                let if_exists = s.starts_with("--env-file-if-exists");
+                let prefix = if if_exists {
+                    "--env-file-if-exists="
+                } else {
+                    "--env-file="
+                };
                 env_file_present = true;
-                let file_path = if s.starts_with("--env-file=") {
-                    s.strip_prefix("--env-file=").unwrap().to_string()
+                let file_path = if let Some(v) = s.strip_prefix(prefix) {
+                    v.to_string()
                 } else {
                     i += 1;
                     if i < raw_args.len() {
@@ -1200,10 +1214,17 @@ fn run_nub() -> Result<i32> {
                     }
                 };
                 if !file_path.is_empty() {
-                    // read_env_file refuses non-regular files (e.g. /dev/zero) and
-                    // oversized files, so a hostile --env-file can't hang or OOM.
-                    if let Some(content) =
-                        nub_core::workspace::env::read_env_file(std::path::Path::new(&file_path))
+                    let path = std::path::Path::new(&file_path);
+                    // `--env-file-if-exists`: a non-existent file is a silent no-op
+                    // (Node's whole reason for the flag). A file that DOES exist but
+                    // can't be read still surfaces the error, matching Node — only
+                    // the missing-file case is suppressed.
+                    if if_exists && !path.exists() {
+                        // silent no-op
+                    } else if let Some(content) =
+                        // read_env_file refuses non-regular files (e.g. /dev/zero) and
+                        // oversized files, so a hostile --env-file can't hang or OOM.
+                        nub_core::workspace::env::read_env_file(path)
                     {
                         // Route through parse_env (not dotenvy directly) so the
                         // explicit --env-file flag strips backtick-quoted values
@@ -4923,6 +4944,7 @@ nub {v} — the all-in-one Node.js toolkit
   --verbose            increase nub's log verbosity (repeatable)
   --color[=<when>]     color mode: auto (default), always, never
   --env-file <file>    load environment variables from <file>
+  --env-file-if-exists <file>  like --env-file, but skip silently if <file> is absent
   --node               run on plain Node, no augmentation (the compat escape hatch)
   -v, --version        print the nub version
   -h, --help           print help (`-h` curated, `--help` this full reference)
@@ -4941,6 +4963,7 @@ nub {v} — the all-in-one Node.js toolkit
   --watch-path <path>            path to watch (repeatable)
   --watch-preserve-output        preserve output across watch restarts
   --env-file <file>              load environment variables from a file
+  --env-file-if-exists <file>    like --env-file, but skip silently if the file is absent
   --enable-source-maps           enable source-map support for stack traces
   --inspect[=[host:]port]        activate the inspector
   --inspect-brk[=[host:]port]    activate the inspector and break at start
