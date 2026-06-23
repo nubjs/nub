@@ -565,14 +565,11 @@ fn test_write_byte_identical_to_native_bun() {
 /// top-level metadata blocks, so a wrong block order slipped through.
 ///
 /// Scope note: this asserts byte-identity for the four blocks bun and
-/// nub render identically. Named `catalogs` (object-of-objects) and an
-/// EMPTY `packages` block are deliberately excluded — nub currently
-/// renders a named catalog's inner object inline (bun renders it
-/// multi-line) and emits `"packages": {\n  }` for empty (bun emits
-/// `{}`). Those two rendering drifts are real but out of this lane's
-/// scope (B-7 is block *order*, not these renderings); they're tracked
-/// as follow-ups. `catalogs` ordering/preservation is still covered
-/// below by a parse round-trip.
+/// nub render identically (block *order* — B-7). The named-`catalogs`
+/// multi-line render and the empty-`packages` collapse are their own
+/// rendering concerns, covered by the two byte-identity tests below
+/// (`test_write_byte_identical_named_catalogs_multiline` and
+/// `test_write_byte_identical_empty_packages_collapses`).
 #[test]
 fn test_write_byte_identical_top_level_block_order() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -650,6 +647,87 @@ fn test_write_byte_identical_top_level_block_order() {
     assert_eq!(
         reparsed.catalogs["evens"]["date-fns"].specifier, "^2.30.0",
         "named catalogs must survive a write→reparse round-trip"
+    );
+}
+
+/// R-1: a named `catalogs` block must render byte-identically to bun's
+/// native writer — the inner per-catalog object is MULTI-LINE (one dep
+/// per indented line, trailing comma on each, including the last), not
+/// nub's earlier inline `{ "k": v }` form. bun's writer
+/// (`bun.lock.zig`) emits the catalog name, then each dep on its own
+/// 6-space-indented line, then a 4-space-dedented `},`, then the outer
+/// 2-space `},`. Any lockfile carrying named catalogs would otherwise
+/// round-trip to a byte sequence bun never produces (a gratuitous diff
+/// against `bun install`'s own output).
+#[test]
+fn test_write_byte_identical_named_catalogs_multiline() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    // Hand-authored in bun 1.3.x's exact JSONC style. Two deps in the
+    // named catalog so the multi-line, one-per-line rendering (and the
+    // trailing comma on the last dep) is exercised.
+    let original = r#"{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "root",
+    },
+  },
+  "catalogs": {
+    "evens": {
+      "date-fns": "^2.30.0",
+      "lodash": "^4.17.21",
+    },
+  },
+  "packages": {}
+}
+"#;
+    std::fs::write(tmp.path(), original).unwrap();
+    let graph = parse(tmp.path()).unwrap();
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        ..Default::default()
+    };
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert_eq!(
+        written, original,
+        "named-catalogs block must render multi-line, byte-identical to bun"
+    );
+}
+
+/// R-2: an EMPTY `packages` block must collapse to `"packages": {}` on
+/// a single line, matching bun's writer (which emits `"packages": {`
+/// then a bare closing `}` via its `first` guard when no entries are
+/// written) — never nub's earlier multi-line `"packages": {\n  }`. A
+/// dependency-free root is the canonical trigger.
+#[test]
+fn test_write_byte_identical_empty_packages_collapses() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let original = r#"{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "root",
+    },
+  },
+  "packages": {}
+}
+"#;
+    std::fs::write(tmp.path(), original).unwrap();
+    let graph = parse(tmp.path()).unwrap();
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        ..Default::default()
+    };
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert_eq!(
+        written, original,
+        "empty packages block must collapse to `{{}}`, byte-identical to bun"
     );
 }
 

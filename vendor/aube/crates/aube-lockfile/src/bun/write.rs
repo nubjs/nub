@@ -756,6 +756,42 @@ fn format_bun_lockfile(
     for (k, v) in top_level_extras {
         let key_str = serde_json::to_string(k).unwrap();
         match v {
+            // `catalogs` is an object-of-objects: each named catalog's
+            // inner map is rendered MULTI-LINE (one dep per line),
+            // matching bun's writer (`bun.lock.zig` emits the catalog
+            // name, then each dep on its own indented line, then a
+            // dedented `},`). The generic object arm below renders inner
+            // objects via `inline_json` (single line), which is correct
+            // for `overrides`/`catalog` but drifts from bun for the
+            // nested `catalogs` block. Special-case the extra level here.
+            serde_json::Value::Object(map) if k == "catalogs" && !map.is_empty() => {
+                out.push_str(&format!("  {key_str}: {{\n"));
+                for (catalog_name, catalog_val) in map {
+                    let name_str = serde_json::to_string(catalog_name).unwrap();
+                    match catalog_val {
+                        serde_json::Value::Object(inner) if !inner.is_empty() => {
+                            out.push_str(&format!("    {name_str}: {{\n"));
+                            for (dk, dv) in inner {
+                                out.push_str(&format!(
+                                    "      {}: {},\n",
+                                    serde_json::to_string(dk).unwrap(),
+                                    inline_json(dv, 0)
+                                ));
+                            }
+                            out.push_str("    },\n");
+                        }
+                        // An empty named catalog collapses inline, mirroring
+                        // bun's empty-object rendering elsewhere.
+                        _ => {
+                            out.push_str(&format!(
+                                "    {name_str}: {},\n",
+                                inline_json(catalog_val, 0)
+                            ));
+                        }
+                    }
+                }
+                out.push_str("  },\n");
+            }
             serde_json::Value::Object(map) if !map.is_empty() => {
                 out.push_str(&format!("  {key_str}: {{\n"));
                 for (dk, dv) in map {
@@ -777,18 +813,28 @@ fn format_bun_lockfile(
     // entries with a blank line (an empty line between every
     // consecutive pair). `packages:` is bun's last top-level field and
     // gets no trailing comma on its closing brace.
-    out.push_str("  \"packages\": {\n");
-    for (i, (key, entry)) in package_entries.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
+    //
+    // An EMPTY packages block collapses to `"packages": {}` on a single
+    // line — bun's writer emits `"packages": {` then closes with a bare
+    // `}` when no entries were written (`bun.lock.zig`'s `first` guard),
+    // never the multi-line `{\n  }` form. A dependency-free root would
+    // otherwise round-trip to a byte sequence bun never produces.
+    if package_entries.is_empty() {
+        out.push_str("  \"packages\": {}\n");
+    } else {
+        out.push_str("  \"packages\": {\n");
+        for (i, (key, entry)) in package_entries.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "    {}: {},\n",
+                serde_json::to_string(key).unwrap(),
+                inline_json(entry, 0)
+            ));
         }
-        out.push_str(&format!(
-            "    {}: {},\n",
-            serde_json::to_string(key).unwrap(),
-            inline_json(entry, 0)
-        ));
+        out.push_str("  }\n");
     }
-    out.push_str("  }\n");
     out.push_str("}\n");
     out
 }
