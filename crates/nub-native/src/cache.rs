@@ -165,23 +165,19 @@ const BUILD_ID: &str = env!("NUB_NATIVE_BUILD_ID");
 /// blake3(NUB_VERSION \0 SCHEMA \0 BUILD_ID \0 source \0 ext \0 tsconfig_hash \0
 /// pkg_type) → 64-hex lowercase. blake3 (SIMD) replaces SHA-256 on the hot path;
 /// the compile-time `BUILD_ID` is folded in so a rebuilt binary auto-invalidates
-/// the cache without any runtime I/O.
+/// the cache without any runtime I/O. The derivation lives in the napi-free
+/// `nub-cache-key` crate so its invalidation contract is unit-testable (this
+/// cdylib has `test = false` — a test harness can't link the napi symbols).
 fn cache_key(source: &str, ext: &str, tsconfig_hash: &str, pkg_type: &str) -> String {
-    let mut h = blake3::Hasher::new();
-    h.update(NUB_VERSION.as_bytes());
-    h.update(b"\0");
-    h.update(CACHE_SCHEMA.as_bytes());
-    h.update(b"\0");
-    h.update(BUILD_ID.as_bytes());
-    h.update(b"\0");
-    h.update(source.as_bytes());
-    h.update(b"\0");
-    h.update(ext.as_bytes());
-    h.update(b"\0");
-    h.update(tsconfig_hash.as_bytes());
-    h.update(b"\0");
-    h.update(pkg_type.as_bytes());
-    h.finalize().to_hex().to_string()
+    nub_cache_key::cache_key(
+        NUB_VERSION,
+        CACHE_SCHEMA,
+        BUILD_ID,
+        source,
+        ext,
+        tsconfig_hash,
+        pkg_type,
+    )
 }
 
 fn integrity(body: &[u8]) -> String {

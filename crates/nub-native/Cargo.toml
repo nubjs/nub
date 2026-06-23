@@ -11,10 +11,12 @@ crate-type = ["cdylib"]
 # nub-native is a Node N-API addon: its `napi_*` symbols are resolved by the Node
 # host at dlopen, never at link time. A cdylib links fine (undefined symbols are
 # allowed), but a `cargo test` harness is a normal executable and CANNOT link those
-# symbols (`undefined symbol: napi_create_object`). The crate has no unit/doc tests
-# anyway — it's exercised by loading the built addon into Node (the nub-cli
-# integration suite). So opt it out of `cargo test` to keep bare `cargo test`
-# (whole-workspace, as CI runs) green. Regressed when oxc_napi pulled napi 3 in.
+# symbols (`undefined symbol: napi_create_object`). So opt it out of `cargo test`
+# to keep bare `cargo test` (whole-workspace, as CI runs) green. Regressed when
+# oxc_napi pulled napi 3 in. Pure logic that warrants a unit test is factored
+# out into the napi-free `nub-cache-key` crate, which IS testable (the transpile
+# cache-key derivation + its invalidation contract live there); the rest of the
+# addon is exercised by loading the built `.node` into Node (the nub-cli suite).
 test = false
 doctest = false
 
@@ -40,10 +42,13 @@ oxc_sourcemap.workspace = true
 rustc-hash.workspace = true
 # tsconfig discovery/parse/extends + the transpile cache (moved in-process from
 # the get-tsconfig npm package and the JS cache). serde drives the RawTsconfig /
-# CompilerOptions deserialization; blake3 computes the cache key + integrity
-# prefix (SIMD content hash, replaced SHA-256 on the warm path).
+# CompilerOptions deserialization; blake3 computes the integrity prefix (SIMD
+# content hash, replaced SHA-256 on the warm path).
 serde.workspace = true
 blake3.workspace = true
+# Transpile cache-key derivation (the blake3 preimage), factored out so its
+# invalidation contract can be unit-tested off the un-testable cdylib.
+nub-cache-key = { path = "../nub-cache-key" }
 
 [build-dependencies]
 napi-build = "2"
