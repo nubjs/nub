@@ -6,7 +6,11 @@
 //!    `ERR_AUBE_MALICIOUS_PACKAGE`. Confirmed malicious advisories
 //!    aren't a judgement call. Default fails open on a fetch error
 //!    (so offline workflows still install); `advisoryCheck=required`
-//!    flips that to fail closed for hardened CI.
+//!    flips that to fail closed for hardened CI. Only FULL exact pins
+//!    (`name@x.y.z`) are version-checked here pre-resolve; bare /
+//!    dist-tag / range specs are left for the post-resolve transitive
+//!    gate so a name-only hit can't reject a patched popular package
+//!    (see `run_gates`).
 //!
 //! 2. **Weekly-downloads floor** — interactive confirm prompt below
 //!    the threshold, hard refusal in non-interactive contexts unless
@@ -32,8 +36,8 @@ use aube_codes::warnings::{
 use aube_registry::osv_bloom_client::OsvBloomClient;
 use aube_registry::osv_mirror::OsvMirror;
 use aube_registry::supply_chain::{
-    DownloadCount, MaliciousAdvisory, advisory_url, fetch_malicious_advisories,
-    fetch_malicious_advisories_versioned, fetch_weekly_downloads_with,
+    DownloadCount, MaliciousAdvisory, advisory_url, fetch_malicious_advisories_versioned,
+    fetch_weekly_downloads_with,
 };
 use aube_settings::resolved::{AdvisoryBloomCheck, AdvisoryCheck, AdvisoryCheckOnInstall};
 use miette::miette;
@@ -42,9 +46,21 @@ use std::io::{BufRead, IsTerminal, Write};
 /// Run both supply-chain gates against the registry-bound specs the
 /// user passed to `aube add`. Inputs should already be filtered to
 /// packages that resolve via the public npm registry — workspace, git,
-/// and local specs are not in scope. Exact pins can use OSV's
-/// version-aware query; ranges and dist-tags stay on the name-only
-/// query until the resolver picks a concrete version.
+/// and local specs are not in scope.
+///
+/// Only FULL exact pins (`name@x.y.z`) get a pre-resolve OSV block here,
+/// via OSV's version-aware query. Bare / dist-tag / partial-range specs
+/// are deliberately NOT name-blocked at this stage: a name-only OSV query
+/// flags a package whenever *some* version is malicious, which wrongly
+/// rejects a popular package whose malicious version has since been
+/// patched (e.g. axios's MAL-2026-2307 covers only 0.30.4 + 1.14.1 while
+/// `aube add axios` resolves to a clean 1.18.1). The resolver hasn't run
+/// yet, so there's no concrete version to check — the authoritative block
+/// for these specs is the post-resolve transitive OSV gate
+/// (`run_transitive_osv_gate`, version-aware over the full resolved
+/// graph), which still catches an all-versions typosquat (it resolves to
+/// a malicious version) and a bare install whose resolved version is
+/// itself malicious.
 ///
 /// `allow_low_downloads` is the per-invocation `--allow-low-downloads`
 /// override; when `true` the download gate is skipped entirely (the
@@ -56,7 +72,6 @@ use std::io::{BufRead, IsTerminal, Write};
 /// every package regardless — exempting confirmed-malicious advisories
 /// is not what this list is for.
 pub async fn run_gates(
-    name_only_advisory_names: &[String],
     exact_advisory_pairs: &[(String, String)],
     download_names: &[String],
     advisory_check: AdvisoryCheck,
@@ -64,10 +79,7 @@ pub async fn run_gates(
     allow_low_downloads: bool,
     allowed_unpopular_globs: &[String],
 ) -> miette::Result<()> {
-    if name_only_advisory_names.is_empty()
-        && exact_advisory_pairs.is_empty()
-        && download_names.is_empty()
-    {
+    if exact_advisory_pairs.is_empty() && download_names.is_empty() {
         return Ok(());
     }
     // One client shared across both gates and every per-package
@@ -103,7 +115,6 @@ pub async fn run_gates(
             return Ok(());
         }
     };
-    osv_gate(&client, name_only_advisory_names, advisory_check).await?;
     osv_gate_versioned(
         &client,
         exact_advisory_pairs,
@@ -583,22 +594,6 @@ fn compile_allowed_unpopular(raw: &[String]) -> Vec<glob::Pattern> {
         .collect()
 }
 
-async fn osv_gate(
-    client: &reqwest::Client,
-    names: &[String],
-    policy: AdvisoryCheck,
-) -> miette::Result<()> {
-    if matches!(policy, AdvisoryCheck::Off) {
-        return Ok(());
-    }
-    handle_osv_result(
-        fetch_malicious_advisories(client, names).await,
-        policy,
-        "refusing to add malicious package(s):",
-        "advisoryCheck",
-    )
-}
-
 async fn osv_gate_versioned(
     client: &reqwest::Client,
     pairs: &[(String, String)],
@@ -797,7 +792,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn osv_gate_off_skips_network() {
+    async fn osv_gate_versioned_off_skips_network() {
         // `Off` short-circuits before any HTTP — important so users
         // who set `advisoryCheck = off` for an air-gapped registry
         // don't see spurious timeouts on add. The dummy client is
@@ -805,8 +800,12 @@ mod tests {
         // construct one to satisfy the type signature.
         let client = aube_registry::supply_chain::build_probe_client()
             .expect("probe client builder shouldn't fail in tests");
-        let names = vec!["lodash".to_string()];
-        assert!(osv_gate(&client, &names, AdvisoryCheck::Off).await.is_ok());
+        let pairs = vec![("lodash".to_string(), "4.17.21".to_string())];
+        assert!(
+            osv_gate_versioned(&client, &pairs, AdvisoryCheck::Off, "refusing to add:")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -815,7 +814,7 @@ mod tests {
         // registry-name list. The function must be a no-op in that
         // case (no network, no error) so those code paths stay free.
         assert!(
-            run_gates(&[], &[], &[], AdvisoryCheck::Required, 1000, false, &[])
+            run_gates(&[], &[], AdvisoryCheck::Required, 1000, false, &[])
                 .await
                 .is_ok()
         );
