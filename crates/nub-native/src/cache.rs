@@ -3,9 +3,10 @@
 //! the old JS cache, so warm caches survive the JS→Rust move (no global miss).
 //!
 //! Cache key preimage (no trailing separator):
-//!   `NUB_VERSION \0 CACHE_SCHEMA \0 exe_hash \0 source \0 ext \0 tsconfig_hash \0 (pkg_type||"")`
-//!   → blake3 → 64-hex lowercase → cache FILENAME. (SCHEMA "4" = blake3 era; the
-//!   old JS / SCHEMA "3" used SHA-256 and a key without the exe-hash component.)
+//!   `NUB_VERSION \0 CACHE_SCHEMA \0 build_id \0 source \0 ext \0 tsconfig_hash \0 (pkg_type||"")`
+//!   → blake3 → 64-hex lowercase → cache FILENAME. (SCHEMA "5" = compile-time
+//!   build-id era; SCHEMA "4" folded a runtime exe-hash here, SCHEMA "3" / the old
+//!   JS path used SHA-256 and a key without that component.)
 //! On-disk entry: `[16-hex integrity = blake3(body)[..16]][body]`, where
 //!   `body = format_byte('c'|'m') + post_processed_code`.
 //! Atomic write via a `*.tmp` sibling + rename (the `*.tmp` suffix is what
@@ -16,7 +17,6 @@
 //! `export {};` marker for CJS, append the inline base64 sourceMap, append the
 //! `//# sourceURL=<absolute path>` magic comment.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use napi::Result;
@@ -25,12 +25,14 @@ use oxc_napi::OxcError;
 
 use crate::transform::{TransformOptions, transform};
 
-/// On-disk entry format version. Bumped to "4" with the blake3 migration: the
-/// cache key + integrity prefix switched from SHA-256 to blake3, so a "3"-era
-/// (SHA-256-named) entry must never be read by a "4" build, and vice versa.
-/// Both regimes hash this constant INTO the key, so the filenames are disjoint
-/// across schemas — old entries are silently ignored (a miss), never mis-read.
-const CACHE_SCHEMA: &str = "4";
+/// On-disk entry format version. Bumped to "5" when the key's per-build
+/// component switched from a runtime exe-hash to the compile-time build-id const
+/// (see `BUILD_ID`): a "4"-era entry was named with a 64-hex exe-hash in the
+/// preimage and must never be read by a "5" build, and vice versa. This constant
+/// is hashed INTO the key, so the filenames are disjoint across schemas — old
+/// entries are silently ignored (a miss), never mis-read. (SCHEMA "4" was the
+/// blake3 + exe-hash era; "3" / the old JS path used SHA-256.)
+const CACHE_SCHEMA: &str = "5";
 const INTEGRITY_LEN: usize = 16;
 /// Lockstep with `runtime/version.mjs` via `make version`; the sole version
 /// component of the key (a new nub release ships any emit change + a rebuilt addon).
@@ -140,40 +142,37 @@ pub fn transform_cached(
     })
 }
 
-/// Hash of the running nub binary, memoized for the process lifetime. Folding
-/// this into the cache key auto-invalidates every entry when nub is rebuilt /
-/// upgraded — a dev rebuild that changes emit no longer serves stale artifacts
-/// (the phantom-stale-cache failure mode). Belt-and-suspenders alongside
-/// NUB_VERSION: NUB_VERSION catches *released* bumps, the exe hash also catches
-/// *unreleased* local rebuilds at the same version (e.g. CI / `cargo build`
-/// during development) where NUB_VERSION is unchanged but the emit differs.
+/// Compile-time build identity, stamped by `build.rs` (the short git SHA, plus a
+/// `-dirty` suffix when the working tree was dirty at build, or "" on any git
+/// failure). Folding this into the cache key auto-invalidates every entry when
+/// nub is rebuilt at a different commit / with uncommitted edits — a dev rebuild
+/// that changes emit no longer serves stale artifacts (the phantom-stale-cache
+/// failure mode). Belt-and-suspenders alongside NUB_VERSION: NUB_VERSION catches
+/// *released* bumps, the build-id also catches *unreleased* local rebuilds at the
+/// same version (CI / `cargo build` during development) where NUB_VERSION is
+/// unchanged but the emit differs.
 ///
-/// On any failure to resolve/read the binary we fall back to "" — the key is
-/// still well-formed and stable for that process; we simply lose the
-/// auto-invalidation benefit rather than poisoning the cache.
-fn exe_hash() -> &'static str {
-    static EXE_HASH: OnceLock<String> = OnceLock::new();
-    EXE_HASH
-        .get_or_init(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| std::fs::read(p).ok())
-                .map(|b| blake3::hash(&b).to_hex().to_string())
-                .unwrap_or_default()
-        })
-        .as_str()
-}
+/// This is a `const` read of a compile-time env — ZERO runtime I/O. It replaces
+/// the old `current_exe()` read+blake3 of the running binary, which, because
+/// nub-native is a cdylib loaded into the host Node process, hashed Node's
+/// ~100MB binary on every process's first transpile (before the cache-hit check)
+/// AND never actually changed when nub was rebuilt. The "" fallback matches the
+/// old behavior: the key stays well-formed and stable, we just lose the
+/// auto-invalidation benefit rather than poisoning the cache. At a fixed clean
+/// commit the value is reproducible, so a release's rebuilds reuse the cache.
+const BUILD_ID: &str = env!("NUB_NATIVE_BUILD_ID");
 
-/// blake3(NUB_VERSION \0 SCHEMA \0 exe_hash \0 source \0 ext \0 tsconfig_hash \0
+/// blake3(NUB_VERSION \0 SCHEMA \0 BUILD_ID \0 source \0 ext \0 tsconfig_hash \0
 /// pkg_type) → 64-hex lowercase. blake3 (SIMD) replaces SHA-256 on the hot path;
-/// `exe_hash` is folded in so a rebuilt binary auto-invalidates the cache.
+/// the compile-time `BUILD_ID` is folded in so a rebuilt binary auto-invalidates
+/// the cache without any runtime I/O.
 fn cache_key(source: &str, ext: &str, tsconfig_hash: &str, pkg_type: &str) -> String {
     let mut h = blake3::Hasher::new();
     h.update(NUB_VERSION.as_bytes());
     h.update(b"\0");
     h.update(CACHE_SCHEMA.as_bytes());
     h.update(b"\0");
-    h.update(exe_hash().as_bytes());
+    h.update(BUILD_ID.as_bytes());
     h.update(b"\0");
     h.update(source.as_bytes());
     h.update(b"\0");
