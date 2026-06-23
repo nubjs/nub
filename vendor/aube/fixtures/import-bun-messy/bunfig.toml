@@ -1,0 +1,7 @@
+[install]
+linker = "isolated"
+
+# Bun-specific age gate settings. These are intentionally present so tests can
+# assert that aube currently ignores bunfig.toml for this feature.
+minimumReleaseAge = 1440
+minimumReleaseAgeExcludes = ["is-number", "@fixture/core"]

@@ -1,0 +1,59 @@
+{
+	"name": "@pnpm.e2e/install-script-example",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/install-script-example",
+			"version": "1.0.0",
+			"description": "A package that creates a file by an install script",
+			"scripts": {
+				"test": "echo \"Error: no test specified\" && exit 1",
+				"install": "node create generated-by-install"
+			},
+			"author": {
+				"name": "Zoltan Kochan",
+				"email": "zoltan.kochan@gmail.com",
+				"url": "http://kochan.io/"
+			},
+			"license": "MIT",
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/pnpm/pnpm.git#master"
+			},
+			"readmeFilename": "README.md",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/install-script-example@1.0.0",
+			"bugs": {
+				"url": "https://github.com/pnpm/pnpm/issues"
+			},
+			"homepage": "https://github.com/pnpm/pnpm/tree/master#readme",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-hIj5A0M8R16UY2uBK328q2XUMuQEeXMMLyUyECjn09T9Blz2PKGgKcAjUIfaYkdoCyVw1+0jR5pzf2zT6GE77g==",
+				"shasum": "8771bdf5d5f5c42e99ae12461dca535adf6a01d6",
+				"tarball": "http://localhost:4873/@pnpm.e2e/install-script-example/-/@pnpm.e2e/install-script-example-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:17.206Z",
+		"created": "2026-04-30T21:29:17.206Z",
+		"1.0.0": "2026-04-30T21:29:17.206Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"install-script-example-1.0.0.tgz": {
+			"shasum": "8771bdf5d5f5c42e99ae12461dca535adf6a01d6",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-1ac2ae6d326535b5",
+	"_id": "@pnpm.e2e/install-script-example",
+	"readme": "# install-script-example\n\nA package that creates a file by an install script\n\n## Installation\n\n```\nnpm i install-script-example\n```\n\n# License\n\nMIT\n"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@fixture/plugin",
+  "version": "2.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@fixture/core": "workspace:^",
+    "is-number": "7.0.0",
+    "kind-of": "catalog:utils",
+    "odd-alias": "npm:is-odd@3.0.1"
+  },
+  "peerDependencies": {
+    "@fixture/core": "^1.0.0"
+  }
+}

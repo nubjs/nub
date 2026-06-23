@@ -1,0 +1,10 @@
+__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"is-number@patch:is-number@npm%3A7.0.0#.yarn/patches/is-number.patch":
+  version: 7.0.0
+  resolution: "is-number@patch:is-number@npm%3A7.0.0#.yarn/patches/is-number.patch"
+  checksum: 10c0/patched
+  languageName: node
+  linkType: hard

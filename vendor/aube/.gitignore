@@ -1,0 +1,10 @@
+/target
+/.cache
+/docs/.aube/
+/docs/node_modules/
+/scratch/
+/sandbox/
+/bench-install.sh
+/.claude/
+/crates/aube-resolver/data/primer-top*.json
+/crates/aube-resolver/data/primer-top*.rkyv.zst

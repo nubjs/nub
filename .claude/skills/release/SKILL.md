@@ -38,7 +38,7 @@ git log "$PREV"..HEAD --oneline               # the full changeset since the las
 - Confirm the targeted fixes (from the release thread's "Fixes targeted for …" list) are **all present** in `$PREV..HEAD` and each is **CI-green on `main`**. If a fix is still converging or its CI is red, STOP — the release is blocked (the thread's `depends_on` gate). Slip it to the next patch rather than cutting early.
 - **Confirm docs are current.** For every user-facing feature or behavior change in the changeset, verify that `site/content/docs/` already reflects it. A shipped feature whose docs lag is a release blocker — land the doc update on `main` before cutting the tag (not after).
 - Pick the next version: patch-bump `$PREV` (drop the leading `v`). `v0.1.2` → `0.1.3`.
-- Keep the `git log "$PREV"..HEAD` output — it is the raw material for both the release notes (Step 4) and the issue/PR loop (Step 5). Note any `vendor/aube` pin bumps in the range (a submodule gitlink change ships fork engine changes; mention the user-facing effect, not the SHA).
+- Keep the `git log "$PREV"..HEAD` output — it is the raw material for both the release notes (Step 4) and the issue/PR loop (Step 5). Note any `vendor/aube/**` changes in the range (vendored PM-engine changes ship fork engine behavior; mention the user-facing effect, not the diff).
 
 ## Step 2 — Version bump
 

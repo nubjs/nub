@@ -1,0 +1,28 @@
+{
+  "scripts": {
+    "settings:gen": "cargo run --manifest-path ../Cargo.toml -p aube-settings --bin generate-settings-docs",
+    "error-codes:gen": "cargo run --manifest-path ../Cargo.toml -p aube-codes --bin generate-error-codes-docs",
+    "data:gen": "npm run settings:gen && npm run error-codes:gen",
+    "docs:dev": "npm run data:gen && vitepress dev",
+    "docs:build": "npm run data:gen && vitepress build",
+    "docs:preview": "vitepress preview",
+    "icons:render": "node scripts/render-icons.mjs"
+  },
+  "pnpm": {
+    "supportedArchitectures": {
+      "os": ["current", "linux"],
+      "cpu": ["current", "x64"],
+      "libc": ["current", "glibc"]
+    }
+  },
+  "aube": {
+    "allowBuilds": {
+      "esbuild": true,
+      "sharp": true
+    }
+  },
+  "devDependencies": {
+    "sharp": "^0.34.5",
+    "vitepress": "^1.5.0"
+  }
+}

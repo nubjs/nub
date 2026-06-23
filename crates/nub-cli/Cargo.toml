@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 nub-core = { path = "../nub-core" }
-# Vendored aube (vendor/aube git submodule, nubjs/aube fork). aube-lockfile
+# Vendored aube (vendor/aube — plain in-tree files, vendored from nubjs/aube). aube-lockfile
 # is a pure library crate (no CLI/tokio surface); `aube` is the command layer
 # as a library (lib target landed in nubjs/aube@b15cdcb) — `nub install` /
 # `nub ci` route through `aube::commands::install::run` in-process instead of

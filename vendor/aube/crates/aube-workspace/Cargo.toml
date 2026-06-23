@@ -1,0 +1,31 @@
+[package]
+name = "aube-workspace"
+description = "pnpm-workspace.yaml discovery and workspace: protocol resolution for Aube"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+include = ["src/**/*.rs"]
+
+[dependencies]
+# `#[diagnostic(code(ERR_AUBE_X))]` below uses code names as macro
+# tokens, not symbol references — cargo-machete correctly sees no
+# usage. Same situation as aube-scripts and aube-store.
+aube-codes = { workspace = true }
+aube-manifest = { workspace = true }
+glob = { workspace = true }
+miette = { workspace = true }
+# Lexical relative-path computation. Used to render parent-relative
+# importer keys (`../package-1`) when `pnpm-workspace.yaml#packages`
+# uses a `../**` glob — the walker resolves the literal anchor
+# absolutely, then `diff_paths` produces the as-written-from-the-yaml
+# importer key the lockfile/linker expects.
+pathdiff = "0.2"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

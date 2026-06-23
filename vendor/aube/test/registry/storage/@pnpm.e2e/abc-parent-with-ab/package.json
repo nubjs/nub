@@ -1,0 +1,89 @@
+{
+	"name": "@pnpm.e2e/abc-parent-with-ab",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/abc-parent-with-ab",
+			"version": "1.0.0",
+			"dependencies": {
+				"@pnpm.e2e/abc": "^1.0.0",
+				"is-positive": "1.0.0",
+				"@pnpm.e2e/peer-a": "^1.0.0",
+				"@pnpm.e2e/peer-b": "^1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc-parent-with-ab@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-U1oAIDAdyWNU4S1+Z6xJsDUFxGstMYedxKnRfh7mG4316Zx3Y4AYCU71Xn60Q0k6F7XPdoDgCJ+MYcZK8P4tlg==",
+				"shasum": "8210982e3482a001882dad72aedfc3d015ba20a4",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc-parent-with-ab/-/@pnpm.e2e/abc-parent-with-ab-1.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"1.0.1": {
+			"name": "@pnpm.e2e/abc-parent-with-ab",
+			"version": "1.0.1",
+			"dependencies": {
+				"@pnpm.e2e/abc": "^1.0.0",
+				"is-positive": "1.0.0",
+				"@pnpm.e2e/peer-a": "^1.0.0",
+				"@pnpm.e2e/peer-b": "^1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc-parent-with-ab@1.0.1",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-d6KkYJkPdHjlj0URdgA8I8y8nXuzVY05O0oLxKaeO9Y1Fd64WUCtVIhrp31WgkJ65mHmLErrRSVd1plxyehIVA==",
+				"shasum": "9a76de0fa49748b35e451668a49d956c234a8138",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc-parent-with-ab/-/@pnpm.e2e/abc-parent-with-ab-1.0.1.tgz"
+			},
+			"contributors": []
+		},
+		"1.1.0": {
+			"name": "@pnpm.e2e/abc-parent-with-ab",
+			"version": "1.1.0",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc-parent-with-ab@1.1.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-ocTWfzxvgwfmEwSwPqkR173t1tOGbalYSSHh5SLzbPS7hdWMn2hY+iYR7Nq24okeF79eUl/kfe0Zr7KaJtaPWg==",
+				"shasum": "1f6a7a920bb5d39bbd710403a517854375159ccd",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc-parent-with-ab/-/@pnpm.e2e/abc-parent-with-ab-1.1.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:12.411Z",
+		"created": "2026-04-30T21:29:11.886Z",
+		"1.0.0": "2026-04-30T21:29:11.886Z",
+		"1.0.1": "2026-04-30T21:29:12.150Z",
+		"1.1.0": "2026-04-30T21:29:12.411Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.1.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"abc-parent-with-ab-1.0.0.tgz": {
+			"shasum": "8210982e3482a001882dad72aedfc3d015ba20a4",
+			"version": "1.0.0"
+		},
+		"abc-parent-with-ab-1.0.1.tgz": {
+			"shasum": "9a76de0fa49748b35e451668a49d956c234a8138",
+			"version": "1.0.1"
+		},
+		"abc-parent-with-ab-1.1.0.tgz": {
+			"shasum": "1f6a7a920bb5d39bbd710403a517854375159ccd",
+			"version": "1.1.0"
+		}
+	},
+	"_rev": "9-3612b0f452d19e1c",
+	"_id": "@pnpm.e2e/abc-parent-with-ab",
+	"readme": "ERROR: No README data found!"
+}

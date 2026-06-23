@@ -1,0 +1,254 @@
+project:
+  name: aube
+  kind: Node.js package manager, Rust workspace
+  binary_surface: drop-in for pnpm CLI
+  language: Rust 2024
+  msrv: 1.93
+  async_runtime: tokio (multi-thread for install, current-thread for nested islands)
+  errors: miette (user-facing, top-level), thiserror (per-library crate)
+  error_codes: every error/warning carries a stable ERR_AUBE_*/WARN_AUBE_* identifier from aube-codes crate; bespoke exit codes for a curated subset; see error_codes section below for conventions
+
+layout:
+  global_store: $XDG_DATA_HOME/aube/store/v1/ (contains files/ for CAS shards + index/ for cached package indexes; falls back to ~/.local/share/aube/store/v1/). `aube store path` prints this v1/ dir, matching `pnpm store path` granularity. The legacy index location at $XDG_CACHE_HOME/aube/index/ is migrated in-place on the first store open after upgrade.
+  store_hashing: BLAKE3 content addressed, 2-char sharding
+  virtual_store: node_modules/.aube/ (isolated symlink layout)
+  cache_packuments: $XDG_CACHE_HOME/aube/packuments-{v1,full-v1}/ (regenerable from registry; not part of `aube store path`)
+  state: node_modules/.aube-state (install freshness hashes)
+  scripts_default: skipped for security, allow-builds allowlist opts in (wired via aube-scripts policy + aube approve-builds)
+  coexistence: never touches .pnpm/ or ~/.pnpm-store/ or foreign node_modules (by construction, not enforced)
+
+lockfile:
+  canonical: aube-lock.yaml
+  preserves_existing: true (detect_existing_lockfile_kind)
+  precedence[6]: aube-lock.yaml, pnpm-lock.yaml, bun.lock, yarn.lock, npm-shrinkwrap.json, package-lock.json
+  frozen_fast_path: install/frozen.rs short-circuits when lockfile + install state match
+
+crates[12]{name,role}:
+  aube,CLI binary, clap dispatch, all command impls, progress UI, state tracking
+  aube-codes,stable ERR_AUBE_*/WARN_AUBE_* code constants + EXIT_TABLE, no runtime deps, every other crate depends on it
+  aube-settings,build.rs codegen from settings.toml, typed accessors, ResolveCtx (cli > env > npmrc > workspace > default)
+  aube-resolver,BFS semver resolver, packument cache (5-min TTL + ETag revalidation), peer-context pass, overrides, catalog protocol
+  aube-registry,HTTP client for npm abbreviated packuments + tarballs, JSR registry support
+  aube-store,CAS at store root (BLAKE3 content), SHA-512 tarball integrity (registry format)
+  aube-linker,isolated mode under .aube/<dep_path>/node_modules/<name>, hoisted mode via hoisted.rs, rayon-parallel symlink pass
+  aube-lockfile,parse/write for all 6 formats, peer-context aware, format-preserving merge
+  aube-manifest,package.json parser, workspace glob support, extra: BTreeMap for upstream forward-compat
+  aube-scripts,root lifecycle runner, BuildPolicy allowlist for dep scripts (default deny), side-effects cache
+  aube-workspace,pnpm-workspace.yaml discovery, workspace: protocol resolution
+  aube-runtime,Node version resolution/discovery/install (devEngines.runtime + .nvmrc/.node-version, mise delegation, nodejs.org downloads to $XDG_DATA_HOME/aube/nodejs/, AUBE_RUNTIME_DIR test override)
+
+pipeline:
+  install: cli -> resolver (+ lockfile read) -> registry (fetch tarballs) -> store (CAS import) -> linker (virtual store + symlinks) -> scripts (root only by default)
+  tarball_integrity: SHA-512 (registry format, keep as-is)
+  cas_hash: BLAKE3 (blake3::hash / blake3::Hasher)
+  file_materialize: reflink (APFS/btrfs) -> hardlink (ext4) -> copy (fallback, probed via LinkStrategy::detect_strategy)
+  auto_install_detection: BLAKE3 hash of lockfile + package.json + resolved install-shape settings, stored in node_modules/.aube-state
+
+subsystems:
+  catalogs: catalog: protocol, root pnpm-workspace.yaml catalog + named catalogs (evens, etc.), resolver rewrites to resolved spec
+  workspace_protocol: workspace:*, workspace:^, workspace:~ resolve to local workspace package via aube-workspace
+  peer_context: aube-resolver/src/peer_context.rs, fixed-point loop (max 16 iterations) computes nested peer suffixes for dep_path hashes
+  overrides: aube-resolver/src/override_rule.rs, pnpm.overrides / overrides map rewrites versions during resolve
+  patches: aube patch / patch-commit / patch-remove, diffs applied at materialize time, sidecar .aube-patches.json
+  frozen_fast_path: install/frozen.rs, short-circuits install when state + lockfile + install-shape settings match
+  hoisted_mode: aube-linker/src/hoisted.rs, alternative layout (node-linker=hoisted) for pnpm-compat
+  side_effects_cache: aube/src/commands/install/side_effects_cache.rs, caches allowlisted build output (node-gyp rebuild etc.)
+  jsr_registry: aube-registry/src/jsr.rs, JSR package registry alongside npm
+  progress_ui: clx::progress wrapper in aube/src/progress/, load-bearing for all install output
+
+support:
+  issues_disabled: true
+  channel: https://github.com/jdx/aube/discussions
+  doc_phrasing: link Discussions, never "file an issue" or "open an issue"
+
+github_interactions:
+  comments: when posting comments on GitHub PRs or Discussions, include a note naming the AI coding assistant that generated the comment
+  examples[2]:
+    - "*This comment was generated by Codex.*"
+    - "*This comment was generated by Claude.*"
+
+error_codes:
+  intent: every error/warning aube emits carries a stable ERR_AUBE_*/WARN_AUBE_* identifier so CI scripts and ndjson reporters can branch on the code instead of substring-matching the human message
+  prefixes:
+    errors: ERR_AUBE_* (process exits non-zero)
+    warnings: WARN_AUBE_* (non-fatal, install continues)
+  no_pnpm_aliases: aube does not emit ERR_PNPM_* codes. where a code maps onto a pnpm concept the suffix matches pnpm's naming so the meaning is obvious, but the published code is always ERR_AUBE_*
+  stability: once published, a code's identifier and meaning don't change. adding new codes is fine; removing or repurposing one is a breaking change
+  registry: every code is declared as `pub const X: &str = "X"` in crates/aube-codes/src/{errors,warnings}.rs and listed in the local `ALL` array. self-tests (every_const_value_matches_its_name, no_duplicate_codes) reject typos and collisions
+  exit_codes: bespoke Unix exit codes for a curated subset live in crates/aube-codes/src/exit.rs::EXIT_TABLE. ranges: 1=generic, 2=cli usage, 10s=lockfile, 20s=resolver, 30s=tarball/store, 40s=registry/network, 50s=scripts, 60s=linker, 70s=manifest/workspace, 80s=engine/cli, 90s=misc/safety. tests enforce uniqueness and the [10, 125] range so we don't collide with POSIX shell signal codes (126-165)
+  emission:
+    warnings: tracing::warn!(code = aube_codes::warnings::WARN_AUBE_X, ...)
+    thiserror_variants: #[diagnostic(code(ERR_AUBE_X))] (requires miette as a dep on the crate)
+    miette_inline: miette::miette!(code = aube_codes::errors::ERR_AUBE_X, ...) or `Err(miette!(...))` for free-standing sites
+    skipped: variants that wrap std types (Io, Http, Xx) — too generic to carry actionable codes; the miette diagnostic chain still surfaces the source
+    skipped: per-attempt retry-loop warnings get template-level codes (4 codes total in aube-registry/src/client.rs), not per-call-site codes — operational noise
+  exit_wiring: crates/aube/src/main.rs wraps inner_main and looks up the failing diagnostic's code() against EXIT_TABLE on the failure path; missing entries fall back to EXIT_GENERIC (1)
+  dep_chain: crates/aube/src/dep_chain.rs builds an (alias, version) -> ancestors index from the resolved LockfileGraph (BFS, first-write-wins = shortest chain), mirrors entries under (alias_of, version) so both display_name and registry_name lookups resolve, and stashes the index in a process-global OnceLock<Mutex<...>>. set_active(&graph) is called after resolution; format_chain_for(name, version) at error sites returns "\nchain: a@1 > b@2 > leaf@3" or "" when no chain is active
+  adding_a_code:
+    1: add a `pub const` to crates/aube-codes/src/{errors,warnings}.rs plus an entry in the local ALL array
+    2: optional for errors — add an EXIT_TABLE entry in exit.rs picking from the right category range (self-tests gate duplicates and out-of-range)
+    3: reference the constant from the call site via tracing::warn!(code = ...) / #[diagnostic(code(...))] / miette!(code = ...)
+    4: document the code in docs/error-codes.md with its description and exit code (when non-default)
+
+commands:
+  build: cargo build
+  build_pgo: mise run build:pgo (instrument -> train on hermetic registry -> optimize; outputs target/release-pgo/aube; holds /tmp/aube-bench.lock; needs `rustup component add llvm-tools-preview`)
+  test_unit: cargo test
+  clippy: cargo clippy --all-targets -- -D warnings
+  fmt_check: cargo fmt --check
+  bats: mise run test:bats (needs Node.js 22 + GNU parallel)
+  bats_single: mise run test:bats test/install.bats
+
+release_profile:
+  lto: thin
+  codegen_units: 1
+  strip: debuginfo
+  panic: abort
+
+when_to_use_release:
+  default: debug. `cargo build` / `cargo clippy` already produce the `target/debug/aube` binary that bats and local smoke tests exercise
+  bats_binary: test/test_helper/common_setup.bash prepends `target/debug` to PATH. never `cargo build --release` to debug a bats failure — rebuild debug, which is already warm from clippy
+  allowed_release_uses[4]:
+    - profiling (samply, flamegraph, hyperfine) — optimizer-off numbers are meaningless
+    - reproducing a perf bug only observable in release
+    - benchmarks (mise run bench* always builds release via its own manifest)
+    - PGO build (mise run build:pgo uses release-pgo profile + hermetic-registry training; portable binary, no -Ctarget-cpu=native, see benchmarks/pgo.bash)
+  forbidden[3]:
+    - rebuilding release "just to be safe" during iterative debug (1+ min cost vs 5s incremental debug)
+    - shipping release-only asserts that don't exist in debug — keep invariants consistent across profiles
+    - `cargo test --release` — measured: release compile ~150s vs debug ~53s (+97s), test run ~7s vs ~12s (-5s). break-even is ~20 full-suite reruns with no rebuild, which is not a real workflow. use plain `cargo test`
+
+commits:
+  format: <type>(<scope>): <description>
+  style: conventional commits — lowercase after colon, imperative mood, concise, subject typically <=80 chars (p95 in history is 73), usually no body
+  why: PR titles drive release-plz version bumps (feat→minor, fix→patch, BREAKING CHANGE/`!` →major, others→no bump). enforced by .github/workflows/semantic-pr-lint.yml on PR title via amannn/action-semantic-pull-request
+  types[12]: fix, feat, refactor, chore, docs, style, test, perf, build, ci, revert, security
+  scope_optional: true (omit for repo-wide changes like `chore: release v1.2.0`)
+  scope_enforcement: advisory — the lint workflow only validates `type`, not `scope`. lists below are the conventional set, but new crates/features can introduce new scopes without a workflow change. release-plz keys off `type` only
+  scopes_crates[9]: resolver, registry, lockfile, store, linker, manifest, scripts, workspace, settings
+  scopes_features[12]: install, add, publish, dlx, audit, login, logout, deprecate, unpublish, fetch, import, catalog
+  scopes_infra[5]: bench, packaging, release, deps, release-plz
+  scope_rule: never use `cli` as a scope. user-visible command behavior belongs to the command/feature scope (`install`, `add`, `dlx`, etc.); cross-command CLI plumbing should use the narrowest affected command scope or omit the scope when truly repo-wide.
+  breaking: append `!` after type/scope (e.g. `feat(resolver)!: drop yarn classic`) or include `BREAKING CHANGE:` footer in body. release-plz will cut a major bump
+  body_rules: reserve body for breaking changes, security fixes, benchmark tables, non-obvious WHY. wrap 72, use - not *
+  pr_numbers: never type (#NN) yourself, GitHub squash-merge appends them automatically
+  pr_titles: must match the same `<type>(<scope>): <desc>` format — the lint workflow blocks merges that don't
+  forbidden[2]:
+    - "[codex]" or tool-branding prefix in subject
+    - emoji in commit subject
+  trailers_accepted: Co-authored-by (agents + bots are normal aube history, 50+ commits use them)
+  examples[7]:
+    - feat(dlx): add aubx multicall shim
+    - fix(resolver): preserve npm-alias as folder name on fresh resolve
+    - refactor(store): swap CAS hash from SHA-512 to BLAKE3
+    - feat(lockfile): add yarn berry (v2+) parse + write support
+    - perf(bench): warm registry with every PM, pin via .npmrc
+    - chore: release v1.0.0-beta.4
+    - feat(resolver)!: drop yarn classic lockfile support
+
+progress_ui:
+  lib: clx::progress
+  entry: crates/aube/src/progress/mod.rs
+  rule: never eprintln!/println!/print!/write!(stderr) while bar active
+  safe_print: crate::progress::println(prog_ref, msg)
+  lifecycle_ordering: preinstall before InstallProgress::try_new; install/postinstall/prepare after finish
+  tracing: always safe, own pipeline
+  phase_header: call InstallProgress::set_phase when adding a new install phase
+
+benchmarks:
+  lock: flock /tmp/aube-bench.lock (shared across worktrees/terminals/agents)
+  canonical: mise run bench (BENCH_HERMETIC=1, BENCH_BANDWIDTH=500mbit, BENCH_LATENCY=50ms wired into the mise task)
+  hermetic:
+    script: benchmarks/hermetic.bash
+    registry: benchmarks/registry/ (Verdaccio port 4874, throttle-proxy port 4875)
+    warm_cache: ~/.cache/aube-bench/registry/ (first run fills from npmjs, rest offline)
+  bump_results: mise run bench:bump (hermetic + throttled — same envs as `mise run bench`, so numbers are reproducible across laptops and CI runners)
+  bump_sync[2]:
+    - benchmarks/results.json (docs + landing pull at VitePress build time)
+    - README.md BENCH_RATIOS block (regenerated by benchmarks/update-readme.mjs, runs as the last step of `bench:bump`)
+  automation: .github/workflows/bench-refresh.yml runs `bench:bump` on a daily cron (05:00 UTC) + workflow_dispatch, gated on workspace aube version drifting past benchmarks/results.json `versions.aube`. When drift is detected it force-pushes to the `bench-refresh` branch and opens/updates a standalone PR for human review. release-plz-pr does NOT run bench anymore — merging the bench PR lets refreshed results.json + README ratios flow into the next release PR naturally on the next push to main.
+
+testing:
+  unit: alongside impl in `#[cfg(test)] mod tests`
+  integration_rust: crates/aube/tests/ (e2e.rs)
+  integration_shell: test/*.bats (BATS vendored at test/bats/)
+  fixtures: test/fixtures/ (basic, medium)
+  isolation: each test gets its own temp dir + HOME
+  offline_registry:
+    tool: Verdaccio
+    path: test/registry/ (config + storage committed, no uplink)
+    add_package: temporarily restore npmjs uplink in config.yaml, run test, remove uplink, commit test/registry/storage/
+  test_names: describe behavior, e.g. resolver_prefers_locked_over_range
+  property_based:
+    crates: proptest over quickcheck (explicit Strategy objects, better shrinking, proven on parser suites)
+    targets: lockfile parser roundtrips (read -> write -> read matches), dep_path_filename, semver range satisfaction. aube parses 6 lockfile formats, high leverage for proptest::string::string_regex strategies
+    rule: new parser code in aube-lockfile or aube-manifest ships with at least one property test alongside unit tests
+  snapshot: insta for golden lockfile output tests if byte-identity vs native pnpm keeps breaking, cheaper than hand-maintained fixtures
+
+rust:
+  critical[5]:
+    - edition 2024, latest stable toolchain, msrv 1.93 (rust 1.90 default-LLD-on-Linux + workspace cargo publish available)
+    - no .unwrap()/.expect() in public library APIs or cross-crate boundaries. local-invariant unwraps where panic is genuinely impossible are ok, annotate with WHY
+    - crates/aube-*/ (libraries) use tracing (info!/warn!/error!/debug!/trace!). crates/aube/src/commands/*.rs CLI command impls may print to stdout via println!/writeln! when the whole point is CLI output (view, list, outdated, why, cat-index, etc.)
+    - cargo clippy -- -D warnings must pass with zero warnings
+    - cargo fmt enforced, never reformat unrelated code
+  style[4]:
+    - &str over String in params, Cow<'_, str> when ownership is conditional
+    - #[serde(skip_serializing_if = "Option::is_none")] on optional request fields
+    - #[serde(flatten)] extra: Map<String, Value> on manifest structs for upstream forward-compat (aube does this on WorkspaceConfig, PackageJson)
+    - let-else for unwrap-or-return, let-chains for compact `if let && cond` blocks
+  performance[5]:
+    - profile before optimizing (samply on Linux for hardware events; never guess from intuition). measure in release mode only
+    - shared reqwest::Client with pool, never one per request (aube-registry/src/client.rs does this right)
+    - DashMap for concurrent maps, OnceLock/LazyLock for init-once globals, rayon par_iter for CPU-bound parallel passes off the tokio runtime (never spawn tokio tasks for pure CPU)
+    - pre-size Vec/HashMap when bounds are known; SmallVec<[T; N]> for hot paths with known-small size; Arc<str>/Box<str> over String when immutable
+    - aube already adopts mimalloc (global allocator), sonic_rs (packument decode), BLAKE3 (non-crypto hashing). these are settled; don't re-propose them
+  async[7]:
+    - tokio multi-thread runtime for install (main.rs:586), nested current_thread islands inside spawn_blocking are fine
+    - never block in async fn, offload via spawn_blocking (IO that can't be async, tarball decode, tar extract)
+    - spawn_blocking tasks cannot be aborted, has configurable upper limit, queues beyond
+    - JoinSet for fan-out (abort-on-drop, strictly more featureful than FuturesUnordered, aube uses it everywhere)
+    - bounded mpsc channels on hot paths, unbounded only for low-volume control channels
+    - never hold std::sync::Mutex across .await, use tokio::sync::Mutex or restructure
+    - Bytes over Vec<u8> for shared network buffers (cheap clone, ref counted)
+  errors[4]:
+    - typed errors per crate via thiserror::Error
+    - #[from] for transparent conversion, #[source] for wrapping
+    - library errors never panic, top-level main prints via miette
+    - propagate with ?, never .unwrap() the Err branch
+  forbidden[5]:
+    - empty catch / empty match arms
+    - .unwrap()/.expect() at public library API boundaries (local-invariant ok, document WHY)
+    - commented-out code
+    - TODO without a tracking link
+    - redundant type annotations the compiler infers
+
+security[5]:
+  - no secrets in code, config, or logs (env vars only)
+  - input validated at system boundaries (HTTP, CLI args, env vars)
+  - registry URLs and auth tokens honored from .npmrc, never hardcoded
+  - lifecycle scripts skipped by default, allow-builds allowlist opts in
+  - no dynamic code execution from user input
+
+deps:
+  policy: minimize, prefer std over external, every added dep must justify >=20 LOC saved
+  tls: rustls (no OpenSSL / native-tls)
+  reqwest_features: minimal (rustls-tls + http2 + json + stream + charset + system-proxy)
+  supply_chain[2]:
+    - cargo audit: CVE database scan (RustSec advisories) before every release, required in CI
+    - cargo deny: license policy, banned crates, duplicate detection, approved sources. deny.toml checked in
+
+git:
+  forbidden[2]:
+    - "[codex]" or tool-branding prefix in subject
+    - manually-typed (#NN) PR numbers (GitHub squash appends them)
+
+forbidden[7]:
+  - empty catch blocks
+  - .unwrap()/.expect() at public library API boundaries
+  - println!/eprintln! in library crates (CLI command impls printing to stdout is fine, use tracing for diagnostics)
+  - commented-out code
+  - TODO without tracking link
+  - single-use wrappers (1-3 lines called once, inline it)
+  - feature flags or backwards-compat shims for one-time ops
+

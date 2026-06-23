@@ -1,0 +1,42 @@
+{
+	"name": "@pnpm.e2e/has-untrusted-optional-dep",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/has-untrusted-optional-dep",
+			"version": "1.0.0",
+			"optionalDependencies": {
+				"@pnpm/e2e.test-provenance": "0.0.5"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/has-untrusted-optional-dep@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-VdE+nYT3SKgi5LxIs4UCWX6R8ZN+4zxZ4n3ovFe0RCxU4hnqPcBzKy22cf0GMHXkkVagzEm5/7T/MG3p3gFWrQ==",
+				"shasum": "4c06125ad722347e9ee05122c71a0796000169d5",
+				"tarball": "http://localhost:4873/@pnpm.e2e/has-untrusted-optional-dep/-/@pnpm.e2e/has-untrusted-optional-dep-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:16.186Z",
+		"created": "2026-04-30T21:29:16.186Z",
+		"1.0.0": "2026-04-30T21:29:16.186Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"has-untrusted-optional-dep-1.0.0.tgz": {
+			"shasum": "4c06125ad722347e9ee05122c71a0796000169d5",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-84c5c65e9f758003",
+	"_id": "@pnpm.e2e/has-untrusted-optional-dep",
+	"readme": "ERROR: No README data found!"
+}

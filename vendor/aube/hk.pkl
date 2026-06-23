@@ -1,0 +1,44 @@
+amends "package://github.com/jdx/hk/releases/download/v1.44.3/hk@1.44.3#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.44.3/hk@1.44.3#/Builtins.pkl"
+
+local vendoredBats = List(
+    "test/bats/**",
+    "test/test_helper/bats-assert/**",
+    "test/test_helper/bats-file/**",
+    "test/test_helper/bats-support/**",
+)
+
+exclude = vendoredBats
+
+local linters = new Mapping<String, Step> {
+    ["actionlint"] = Builtins.actionlint
+    ["cargo-fmt"] = Builtins.cargo_fmt
+    ["cargo-clippy"] = Builtins.cargo_clippy
+    ["shfmt"] = (Builtins.shfmt) {
+        glob = List("**/*.bats", "**/*.sh", "**/*.bash")
+    }
+    ["shellcheck"] = (Builtins.shellcheck) {
+        glob = List("**/*.bats", "**/*.sh", "**/*.bash")
+    }
+    ["pkl"] {
+        glob = "*.pkl"
+        check = "pkl eval {{files}} >/dev/null"
+    }
+}
+
+fail_fast = false
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+    ["check"] {
+        steps = linters
+    }
+}

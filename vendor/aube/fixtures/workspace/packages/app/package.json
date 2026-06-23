@@ -1,0 +1,11 @@
+{
+  "name": "@test/app",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@test/lib": "workspace:*",
+    "is-even": "^1.0.0"
+  }
+}

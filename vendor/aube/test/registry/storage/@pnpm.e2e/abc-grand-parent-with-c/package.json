@@ -1,0 +1,89 @@
+{
+	"name": "@pnpm.e2e/abc-grand-parent-with-c",
+	"versions": {
+		"0.0.0": {
+			"name": "@pnpm.e2e/abc-grand-parent-with-c",
+			"version": "0.0.0",
+			"dependencies": {
+				"@pnpm.e2e/abc-parent-with-ab": "^1.0.0",
+				"@pnpm.e2e/peer-c": "^1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc-grand-parent-with-c@0.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-Jsldcc54JwjoDzcO38ixiw2Z3v8an6bdPRCRyfX5mcIRfE9N6F29O5plGmPzu1jWCuP3WeGugIoDvVVtKvDcew==",
+				"shasum": "d342218a5dcfa5d4fa539dd51849807adf996174",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc-grand-parent-with-c/-/@pnpm.e2e/abc-grand-parent-with-c-0.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"1.0.0": {
+			"name": "@pnpm.e2e/abc-grand-parent-with-c",
+			"version": "1.0.0",
+			"dependencies": {
+				"@pnpm.e2e/abc-parent-with-ab": "^1.0.0",
+				"@pnpm.e2e/peer-c": "^1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc-grand-parent-with-c@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-Et+Z1Z0RQAWQWMPIcTODc/62SjSlRN1NTlqg/kJUCHQoBSFfr6yVDYLJClHNeClgreTJ4B6FV4vXhclv+yQIEQ==",
+				"shasum": "8f902756354d19a4db212099d7f0b7146dfdfcd7",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc-grand-parent-with-c/-/@pnpm.e2e/abc-grand-parent-with-c-1.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"1.0.1": {
+			"name": "@pnpm.e2e/abc-grand-parent-with-c",
+			"version": "1.0.1",
+			"dependencies": {
+				"@pnpm.e2e/abc-parent-with-ab": "^1.0.0",
+				"@pnpm.e2e/peer-c": "^1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc-grand-parent-with-c@1.0.1",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-5iNVhF5ZCyILpQsTUi0+GnftYZNTIijzbhxqq/2X3N4/aLy3wv5+pfQ4nfwq+4yXJq57poKEFUA/aSFoCw5nwQ==",
+				"shasum": "79d5f86bd3d3baa765da53c0b1e41897c4e6a21b",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc-grand-parent-with-c/-/@pnpm.e2e/abc-grand-parent-with-c-1.0.1.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:11.470Z",
+		"created": "2026-04-30T21:29:10.947Z",
+		"0.0.0": "2026-04-30T21:29:10.947Z",
+		"1.0.0": "2026-04-30T21:29:11.211Z",
+		"1.0.1": "2026-04-30T21:29:11.470Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.1"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"abc-grand-parent-with-c-0.0.0.tgz": {
+			"shasum": "d342218a5dcfa5d4fa539dd51849807adf996174",
+			"version": "0.0.0"
+		},
+		"abc-grand-parent-with-c-1.0.0.tgz": {
+			"shasum": "8f902756354d19a4db212099d7f0b7146dfdfcd7",
+			"version": "1.0.0"
+		},
+		"abc-grand-parent-with-c-1.0.1.tgz": {
+			"shasum": "79d5f86bd3d3baa765da53c0b1e41897c4e6a21b",
+			"version": "1.0.1"
+		}
+	},
+	"_rev": "9-4f48ce671011179d",
+	"_id": "@pnpm.e2e/abc-grand-parent-with-c",
+	"readme": "ERROR: No README data found!"
+}

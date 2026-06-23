@@ -1,0 +1,39 @@
+[package]
+name = "aube-store"
+description = "Content-addressable global package store for Aube"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+include = ["src/**/*.rs"]
+
+[dependencies]
+# `#[diagnostic(code(ERR_AUBE_X))]` below uses code names as macro
+# tokens, not symbol references — cargo-machete correctly sees no
+# usage. Same situation as aube-scripts and aube-workspace.
+aube-util = { workspace = true }
+miette = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+flate2 = { workspace = true }
+rayon = { workspace = true }
+tar = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sonic-rs = { workspace = true }
+xx = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

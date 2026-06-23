@@ -1,0 +1,53 @@
+{
+	"name": "@pnpm.e2e/support-different-architectures",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/support-different-architectures",
+			"version": "1.0.0",
+			"index": "index.js",
+			"bin": {
+				"get-optional-dependencies": "bin/get-optional-dependencies.js"
+			},
+			"optionalDependencies": {
+				"@pnpm.e2e/only-darwin-arm64": "1.0.0",
+				"@pnpm.e2e/only-darwin-x64": "1.0.0",
+				"@pnpm.e2e/only-linux-arm64-glibc": "1.0.0",
+				"@pnpm.e2e/only-linux-arm64-musl": "1.0.0",
+				"@pnpm.e2e/only-linux-x64-glibc": "1.0.0",
+				"@pnpm.e2e/only-linux-x64-musl": "1.0.0",
+				"@pnpm.e2e/only-win32-arm64": "1.0.0",
+				"@pnpm.e2e/only-win32-x64": "1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/support-different-architectures@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-lne7tmM7Uo3Zn0VYu7u3Z7UCd6Y/aVKqHqqVUqn2rxrbaqK6MNn4wCY2XS+RfpE4miUvE+j6OBSIRbvY0OEMxQ==",
+				"shasum": "7a2311502223edfb32d331cc89e621f13f3002e1",
+				"tarball": "http://localhost:4873/@pnpm.e2e/support-different-architectures/-/@pnpm.e2e/support-different-architectures-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:23.763Z",
+		"created": "2026-04-30T21:29:23.763Z",
+		"1.0.0": "2026-04-30T21:29:23.763Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"support-different-architectures-1.0.0.tgz": {
+			"shasum": "7a2311502223edfb32d331cc89e621f13f3002e1",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-ccaf89d02a284abb",
+	"_id": "@pnpm.e2e/support-different-architectures",
+	"readme": "ERROR: No README data found!"
+}

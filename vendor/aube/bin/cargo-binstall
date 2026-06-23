@@ -1,0 +1,3 @@
+#!/usr/bin/env -S mise tool-stub
+tool = "cargo-binstall"
+version = "1.17.9"

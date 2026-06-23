@@ -1,0 +1,45 @@
+{
+	"name": "@pnpm.e2e/pkg-with-good-optional",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/pkg-with-good-optional",
+			"version": "1.0.0",
+			"dependencies": {
+				"@pnpm.e2e/dep-of-pkg-with-1-dep": "*"
+			},
+			"optionalDependencies": {
+				"is-positive": "1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/pkg-with-good-optional@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-nHI1OeIwd3u8wEhHBIgbJmK6ryrums0YrxVB3RHkpbXXeI3YFsxiv0T0+MuQc7ajXT5/pwUvkyo2g2n37cWuRA==",
+				"shasum": "77e24483181ed32ed4b069138cf16a7c007bf17a",
+				"tarball": "http://localhost:4873/@pnpm.e2e/pkg-with-good-optional/-/@pnpm.e2e/pkg-with-good-optional-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:20.514Z",
+		"created": "2026-04-30T21:29:20.514Z",
+		"1.0.0": "2026-04-30T21:29:20.514Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"pkg-with-good-optional-1.0.0.tgz": {
+			"shasum": "77e24483181ed32ed4b069138cf16a7c007bf17a",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-8daefd92c98517ba",
+	"_id": "@pnpm.e2e/pkg-with-good-optional",
+	"readme": "ERROR: No README data found!"
+}

@@ -1,0 +1,56 @@
+{
+	"name": "@pnpm.e2e/cli-with-node-engine",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/cli-with-node-engine",
+			"version": "1.0.0",
+			"bin": {
+				"cli-with-node-engine": "cli.js"
+			},
+			"type": "module",
+			"files": [
+				"cli.js"
+			],
+			"scripts": {
+				"postinstall": "node cli.js"
+			},
+			"engines": {
+				"runtime": {
+					"name": "node",
+					"version": "22.19.0",
+					"onFail": "download"
+				}
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/cli-with-node-engine@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-r3kcnkDlz+hjJPR6Y1qe3IrRgeoDoTYcNURA9U2CsPzVRnSNYYSfdOnwKB1ZTNvamx6t5x6PDPebEa7N5GdU6A==",
+				"shasum": "47c82f48fcee7b8b3975f4a6a2d1d62c11d5d177",
+				"tarball": "http://localhost:4873/@pnpm.e2e/cli-with-node-engine/-/@pnpm.e2e/cli-with-node-engine-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:13.854Z",
+		"created": "2026-04-30T21:29:13.854Z",
+		"1.0.0": "2026-04-30T21:29:13.854Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"cli-with-node-engine-1.0.0.tgz": {
+			"shasum": "47c82f48fcee7b8b3975f4a6a2d1d62c11d5d177",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-a2006b71cc030261",
+	"_id": "@pnpm.e2e/cli-with-node-engine",
+	"readme": "ERROR: No README data found!"
+}

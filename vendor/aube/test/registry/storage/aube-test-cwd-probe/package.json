@@ -1,0 +1,31 @@
+{
+  "name": "aube-test-cwd-probe",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-cwd-probe",
+      "version": "1.0.0",
+      "description": "Fixture package whose postinstall records process.cwd() and whether its own package.json is present there, written to ./cwd-probe.txt in the script's cwd. Used by aube's lifecycle-cwd BATS tests.",
+      "license": "MIT",
+      "main": "index.js",
+      "scripts": {
+        "postinstall": "node -e \"const fs=require('fs'),p=require('path');const here=process.cwd();const own=fs.existsSync(p.join(here,'package.json'));fs.writeFileSync('cwd-probe.txt',here+'\\n'+own+'\\n')\""
+      },
+      "hasInstallScript": true,
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-cwd-probe/-/aube-test-cwd-probe-1.0.0.tgz",
+        "integrity": "sha512-jC6yE4+OCpEAD0Jbr1Ucizu3Z3P/dlgAdiWqb+1lbJ19GLYbtKf3CseEntZ2B5bToBneAxgAL+1msNVtlg/ThA==",
+        "shasum": "52df2c0519cd7f630286c9320e7212115e8376bf"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-cwd-probe-1.0.0.tgz": {
+      "shasum": "52df2c0519cd7f630286c9320e7212115e8376bf"
+    }
+  },
+  "_id": "aube-test-cwd-probe",
+  "_rev": "1-aube-fixture"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "aube-test-basic",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node -e \"console.log('is-odd(3):', require('is-odd')(3), 'is-even(4):', require('is-even')(4))\"",
+    "hello": "echo 'hello from aube!'"
+  },
+  "dependencies": {
+    "is-odd": "^3.0.1",
+    "is-even": "^1.0.0"
+  }
+}

@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+set -eET
+
+# Variables used in other scripts.
+BATS_ENABLE_TIMING=''
+BATS_EXTENDED_SYNTAX=''
+BATS_TRACE_LEVEL="${BATS_TRACE_LEVEL:-0}"
+BATS_PRINT_OUTPUT_ON_FAILURE="${BATS_PRINT_OUTPUT_ON_FAILURE:-}"
+BATS_SHOW_OUTPUT_OF_SUCCEEDING_TESTS="${BATS_SHOW_OUTPUT_OF_SUCCEEDING_TESTS:-}"
+BATS_VERBOSE_RUN="${BATS_VERBOSE_RUN:-}"
+BATS_GATHER_TEST_OUTPUTS_IN="${BATS_GATHER_TEST_OUTPUTS_IN:-}"
+BATS_TEST_NAME_PREFIX="${BATS_TEST_NAME_PREFIX:-}"
+
+while [[ "$#" -ne 0 ]]; do
+  case "$1" in
+  -T)
+    BATS_ENABLE_TIMING='-T'
+    ;;
+  -x)
+    # shellcheck disable=SC2034
+    BATS_EXTENDED_SYNTAX='-x'
+    ;;
+  --dummy-flag) ;;
+
+  --trace)
+    ((++BATS_TRACE_LEVEL)) # avoid returning 0
+    ;;
+  --print-output-on-failure)
+    BATS_PRINT_OUTPUT_ON_FAILURE=1
+    ;;
+  --show-output-of-passing-tests)
+    BATS_SHOW_OUTPUT_OF_SUCCEEDING_TESTS=1
+    ;;
+  --verbose-run)
+    BATS_VERBOSE_RUN=1
+    ;;
+  --gather-test-outputs-in)
+    shift
+    BATS_GATHER_TEST_OUTPUTS_IN="$1"
+    ;;
+  *)
+    break
+    ;;
+  esac
+  shift
+done
+
+export BATS_TEST_FILENAME="$1"
+export BATS_TEST_NAME="$2"
+export BATS_SUITE_TEST_NUMBER="$3"
+export BATS_TEST_NUMBER="$4"
+BATS_TEST_TRY_NUMBER="$5"
+
+if [[ -z "$BATS_TEST_FILENAME" ]]; then
+  printf 'usage: bats-exec-test <filename>\n' >&2
+  exit 1
+elif [[ ! -f "$BATS_TEST_FILENAME" ]]; then
+  printf 'bats: %s does not exist\n' "$BATS_TEST_FILENAME" >&2
+  exit 1
+fi
+
+bats_create_test_tmpdirs() {
+  local tests_tmpdir="${BATS_RUN_TMPDIR}/test"
+  if ! mkdir -p "$tests_tmpdir"; then
+    printf 'Failed to create: %s\n' "$tests_tmpdir" >&2
+    exit 1
+  fi
+
+  BATS_TEST_TMPDIR="$tests_tmpdir/$BATS_SUITE_TEST_NUMBER"
+  if ! mkdir "$BATS_TEST_TMPDIR"; then
+    printf 'Failed to create BATS_TEST_TMPDIR%d: %s\n' "$BATS_TEST_TRY_NUMBER" "$BATS_TEST_TMPDIR" >&2
+    exit 1
+  fi
+
+  printf "%s\n" "$BATS_TEST_NAME" >> "$BATS_TEST_TMPDIR.name" # append name in case of test retries
+
+  export BATS_TEST_TMPDIR
+}
+
+# load the test helper functions like `load` or `run` that are needed to run a (preprocessed) .bats file without bash errors
+# shellcheck source=lib/bats-core/test_functions.bash disable=SC2153
+source "$BATS_ROOT/$BATS_LIBDIR/bats-core/test_functions.bash"
+_bats_test_functions_setup "$BATS_TEST_NUMBER"
+
+# shellcheck source=lib/bats-core/tracing.bash disable=SC2153
+source "$BATS_ROOT/$BATS_LIBDIR/bats-core/tracing.bash"
+
+bats_teardown_trap() {
+  bats_check_status_from_trap
+  local bats_teardown_trap_status=0
+
+  bats_set_stacktrace_limit
+
+  # mark the start of this function to distinguish where skip is called
+  # parameter 1 will signify the reason why this function was called
+  # this is used to identify when this is called as exit trap function
+  BATS_TEARDOWN_STARTED=${1:-1}
+  teardown >>"$BATS_OUT" 2>&1 || bats_teardown_trap_status="$?"
+
+  if [[ $bats_teardown_trap_status -eq 0 ]]; then
+    BATS_TEARDOWN_COMPLETED=1
+  elif [[ -n "$BATS_TEST_COMPLETED" ]]; then
+    BATS_DEBUG_LAST_STACK_TRACE_IS_VALID=1
+    BATS_ERROR_STATUS="$bats_teardown_trap_status"
+  fi
+
+  bats_exit_trap
+}
+
+# shellcheck source=lib/bats-core/common.bash
+source "$BATS_ROOT/$BATS_LIBDIR/bats-core/common.bash"
+
+bats_exit_trap() {
+  local status
+  local exit_metadata=''
+  trap - ERR EXIT
+  if [[ -n "${BATS_TEST_TIMEOUT:-}" ]]; then
+    # Kill the watchdog in the case of of kernel finished before the timeout
+    bats_abort_timeout_countdown || status=1
+  fi
+
+  if [[ -n "$BATS_TEST_SKIPPED" ]]; then
+    exit_metadata=' # skip'
+    if [[ "$BATS_TEST_SKIPPED" != '1' ]]; then
+      exit_metadata+=" $BATS_TEST_SKIPPED"
+    fi
+  elif [[ "${BATS_TIMED_OUT-NOTSET}" != NOTSET ]]; then
+    exit_metadata=" # timeout after ${BATS_TEST_TIMEOUT}s"
+  fi
+
+  BATS_TEST_TIME=''
+  if [[ -n "$BATS_ENABLE_TIMING" ]]; then
+    get_mills_since_epoch BATS_TEST_END_TIME
+    BATS_TEST_TIME=" in "$((BATS_TEST_END_TIME - BATS_TEST_START_TIME))"ms"
+  fi
+
+  local print_bats_out="${BATS_SHOW_OUTPUT_OF_SUCCEEDING_TESTS}"
+
+  local should_retry=''
+  if [[ -z "$BATS_TEST_COMPLETED" || -z "$BATS_TEARDOWN_COMPLETED" || "${BATS_INTERRUPTED-NOTSET}" != NOTSET ]]; then
+    if [[ "$BATS_ERROR_STATUS" -eq 0 ]]; then
+      # For some versions of bash, `$?` may not be set properly for some error
+      # conditions before triggering the EXIT trap directly (see #72 and #81).
+      # Thanks to the `BATS_TEARDOWN_COMPLETED` signal, this will pinpoint such
+      # errors if they happen during `teardown()` when `bats_perform_test` calls
+      # `bats_teardown_trap` directly after the test itself passes.
+      #
+      # If instead the test fails, and the `teardown()` error happens while
+      # `bats_teardown_trap` runs as the EXIT trap, the test will fail with no
+      # output, since there's no way to reach the `bats_exit_trap` call.
+      BATS_ERROR_STATUS=1
+    fi
+    if bats_should_retry_test; then
+      should_retry=1
+      status=126                # signify retry
+      rm -r "$BATS_TEST_TMPDIR" # clean up for retry
+    else
+      printf 'not ok %d %s%s\n' "$BATS_SUITE_TEST_NUMBER" "${BATS_TEST_NAME_PREFIX:-}${BATS_TEST_DESCRIPTION}${BATS_TEST_TIME}" "$exit_metadata" >&3
+      if (( ${#BATS_TEST_TAGS[@]} > 0 )); then
+        printf '# tags:'
+        printf ' %s' "${BATS_TEST_TAGS[@]}"
+        printf '\n'
+      fi >&3
+      local stack_trace
+      bats_get_failure_stack_trace stack_trace
+      bats_print_stack_trace "${stack_trace[@]}" >&3
+      bats_print_failed_command "${stack_trace[@]}" >&3
+
+      if [[ $BATS_PRINT_OUTPUT_ON_FAILURE ]]; then
+        if [[ -n "${output:-}" ]]; then
+          printf "Last output:\n%s\n" "$output"
+        fi
+        if [[ -n "${stderr:-}" ]]; then
+          printf "Last stderr: \n%s\n" "$stderr"
+        fi
+      fi >>"$BATS_OUT"
+
+      print_bats_out=1
+      status=1
+      local state=failed
+    fi
+  else
+    printf 'ok %d %s%s\n' "$BATS_SUITE_TEST_NUMBER" "${BATS_TEST_NAME_PREFIX:-}${BATS_TEST_DESCRIPTION}${BATS_TEST_TIME}" \
+      "$exit_metadata" >&3
+    status=0
+    local state=passed
+  fi
+
+  if [[ -z "$should_retry" ]]; then
+    printf "%s %s\t%s\n" "$state" "$BATS_TEST_FILENAME" "$BATS_TEST_NAME" >>"$BATS_RUNLOG_FILE"
+
+    if [[ $print_bats_out ]]; then
+      bats_prefix_lines_for_tap_output <"$BATS_OUT" | bats_replace_filename >&3
+    fi
+  fi
+  if [[ $BATS_GATHER_TEST_OUTPUTS_IN ]]; then
+    local try_suffix=
+    if [[ -n "$should_retry" ]]; then
+      try_suffix="-try$BATS_TEST_TRY_NUMBER"
+    fi
+    # Only copy if BATS_OUT exists (it may not exist if test produced no output)
+    if [[ -f "$BATS_OUT" ]]; then
+      cp "$BATS_OUT" "$BATS_GATHER_TEST_OUTPUTS_IN/$BATS_SUITE_TEST_NUMBER$try_suffix-${BATS_TEST_DESCRIPTION//\//%2F}.log"
+    fi
+  fi
+  rm -f "$BATS_OUT"
+  exit "$status"
+}
+
+# Marks the test as failed due to timeout.
+# The actual termination of subprocesses is done via pkill in the background
+# process in bats_start_timeout_countdown
+# shellcheck disable=SC2317,SC2329
+bats_timeout_trap() {
+  BATS_TIMED_OUT=1
+  BATS_DEBUG_LAST_STACK_TRACE_IS_VALID=
+  exit 1
+}
+
+# find pids of process and all its descendants
+bats_find_processes_of() { # <parent-pid>
+  local -ri parent_pid=$1
+  child_pids=("$1")
+  {
+    read -ra header
+    local pid_col ppid_col
+    for ((i = 0; i < ${#header[@]}; ++i)); do
+      if [[ ${header[$i]} == "PID" ]]; then
+        pid_col=$i
+      fi
+      if [[ ${header[$i]} == "PPID" ]]; then
+        ppid_col=$i
+      fi
+    done
+    # PID PPID  child_pids
+    # 1   0     (2)
+    # 2   1     (2)
+    # 3   1     (2)
+    # 4   3     (2)
+    # 5   2     (2 5)
+    # 6   5     (2 5 6)
+    # assumes pids are in ascending order and there are no orphans in the chain
+
+    if (( BASH_VERSINFO[0] < 4 )); then
+      # BASHPID is not available before bash 4
+      BASHPID=$(sh -c 'echo $PPID')
+    fi
+    while read -ra row; do
+      local -i ppid=${row[ppid_col]} pid=${row[$pid_col]}
+      if (( ppid == parent_pid)) || bats_linear_reverse_search "$ppid" child_pids; then
+        # exclude `ps` command substitution below
+        if (( pid != BASHPID)); then
+          child_pids+=("$pid")
+        fi
+      fi
+    done
+  # MSYS does not support -o and rows are not sorted by pid
+  } < <(ps -Ao pid,ppid,args 2>/dev/null || { ps -ef | sort -k 2 -h; })
+}
+
+# send signal to process and all its descendants
+bats_kill_processes_of() { # <parent-pid> [<signal>]
+  local -ir parent_pid="${1?}"
+  local -r signal=${2?}
+  bats_find_processes_of "$parent_pid"
+  kill "-$signal" "${child_pids[@]}"
+}
+
+# sets a timeout for this process
+bats_start_timeout_countdown() { # <timeout>
+  local -ri timeout=$1
+  local -ri target_pid=$$
+  # shellcheck disable=SC2064
+  trap "bats_timeout_trap $target_pid" TERM
+  if ! (command -v ps || command -v pkill) >/dev/null; then
+    printf "Error: Cannot execute timeout because neither pkill nor ps are available on this system!\n" >&2
+    exit 1
+  fi
+  # Start another process to kill the children of this process
+  (
+    # with sleep in foreground this shell wouldn't receive signals,
+    # so we use wait below and kill sleep explicitly when signalled to do so
+    # On Windows the TERM signal does not seem to shut down sleep ->
+    # close all fds to avoid blocking IO when sleep does not turn off
+    (eval exec {0..255}">&-"; sleep "$timeout") &
+    # shellcheck disable=SC2064
+    trap "kill $!; exit 0" TERM
+    wait
+    trap '' TERM
+    bats_kill_processes_of $target_pid TERM
+  ) &
+}
+
+bats_abort_timeout_countdown() {
+  # kill the countdown process, don't care if its still there
+  kill "$BATS_killer_pid" &>/dev/null || true
+}
+
+
+if [[ -n "${EPOCHREALTIME-}"  ]]; then
+get_mills_since_epoch() { # <output-variable>
+  local -r output_variable="$1"
+  local int frac
+  # allow for different decimal separators
+  IFS=., read -r int frac <<<"$EPOCHREALTIME"
+  printf -v "$output_variable" "%d" "${int}${frac::3}"
+}
+else
+get_mills_since_epoch() { # <output-variable>
+  local -r output_variable="$1"
+  local ms_since_epoch
+  ms_since_epoch=$(bats_execute date +%s%N)
+  if [[ "$ms_since_epoch" == *N || "${#ms_since_epoch}" -lt 19 ]]; then
+    ms_since_epoch=$(($(bats_execute date +%s) * 1000))
+  else
+    ms_since_epoch=$((ms_since_epoch / 1000000))
+  fi
+  printf -v "$output_variable" "%d" "$ms_since_epoch"
+}
+fi
+
+bats_perform_test() {
+  if ! declare -F "${BATS_TEST_NAME%% *}" &>/dev/null; then
+    local quoted_test_name
+    bats_quote_code quoted_test_name "$BATS_TEST_NAME"
+    printf "bats: unknown test name %s\n" "$quoted_test_name" >&2
+    exit 1
+  fi
+
+  # is this skipped from outside ?
+  if [[ -n "${BATS_TEST_SKIPPED-}" ]]; then
+    # forward skip (with message) by overriding setup
+    # shellcheck disable=SC2317
+    setup() {
+      skip "$BATS_TEST_SKIPPED"
+    }
+  fi
+
+  if [[ -n "${BATS_TEST_TIMEOUT:-}" ]]; then
+    bats_start_timeout_countdown "$BATS_TEST_TIMEOUT"
+    declare -r BATS_killer_pid=$!
+  fi
+  BATS_TEST_COMPLETED=
+  BATS_TEST_SKIPPED=${BATS_TEST_SKIPPED-}
+  BATS_TEARDOWN_COMPLETED=
+  BATS_ERROR_STATUS=
+  bats_setup_tracing
+  # use parameter to mark this call as trap call
+  # shellcheck disable=SC2064
+  trap "bats_teardown_trap as-exit-trap" EXIT
+
+  if [[ -n "$BATS_EXTENDED_SYNTAX" ]]; then
+    printf 'begin %d %s\n' "$BATS_SUITE_TEST_NUMBER" "${BATS_TEST_NAME_PREFIX:-}$BATS_TEST_DESCRIPTION" >&3
+  fi
+
+  get_mills_since_epoch BATS_TEST_START_TIME
+  {
+    bats_set_stacktrace_limit
+    setup "$@"
+    "$@"
+  } >>"$BATS_OUT" 2>&1 4>&1
+
+  BATS_TEST_COMPLETED=1
+  # shellcheck disable=SC2064
+  trap "bats_exit_trap" EXIT
+  bats_teardown_trap "" # pass empty parameter to signify call outside trap
+}
+
+trap bats_interrupt_trap INT
+
+# shellcheck source=lib/bats-core/preprocessing.bash
+source "$BATS_ROOT/$BATS_LIBDIR/bats-core/preprocessing.bash"
+
+exec 3<&1
+BATS_OUT="$BATS_RUN_TMPDIR/test/$BATS_SUITE_TEST_NUMBER.out"
+
+bats_create_test_tmpdirs
+bats_evaluate_preprocessed_source
+
+readonly BATS_TEST_TAGS
+
+# use eval to parse (internally quoted!) test command into parameters
+bats_perform_test "${BATS_TEST_COMMAND[@]}"

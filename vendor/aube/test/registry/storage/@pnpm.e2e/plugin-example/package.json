@@ -1,0 +1,53 @@
+{
+	"name": "@pnpm.e2e/plugin-example",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/plugin-example",
+			"version": "1.0.0",
+			"author": {
+				"name": "Zoltan Kochan",
+				"email": "zoltan.kochan@gmail.com",
+				"url": "http://kochan.io/"
+			},
+			"license": "MIT",
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/pnpm/pnpm.git#master"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/plugin-example@1.0.0",
+			"bugs": {
+				"url": "https://github.com/pnpm/pnpm/issues"
+			},
+			"homepage": "https://github.com/pnpm/pnpm/tree/master#readme",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-FWdveONYHhmyhqIn/vQVnk1mtwgU5y5D84zCXqclwGODQMXFEcq9GiH3fp1eB88imtIAl35nyaQBtRLN84LnAQ==",
+				"shasum": "a038b28fd30cc7e49fb882287bc97566501386b4",
+				"tarball": "http://localhost:4873/@pnpm.e2e/plugin-example/-/@pnpm.e2e/plugin-example-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:20.916Z",
+		"created": "2026-04-30T21:29:20.916Z",
+		"1.0.0": "2026-04-30T21:29:20.916Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"plugin-example-1.0.0.tgz": {
+			"shasum": "a038b28fd30cc7e49fb882287bc97566501386b4",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-c97fe511f035b9b3",
+	"_id": "@pnpm.e2e/plugin-example",
+	"readme": "ERROR: No README data found!"
+}

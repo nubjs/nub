@@ -1,0 +1,53 @@
+{
+  "name": "aube-bun-messy-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "workspaces": {
+    "packages": [
+      "packages/*"
+    ],
+    "catalog": {
+      "is-odd": "3.0.1"
+    },
+    "catalogs": {
+      "colors": {
+        "chalk": "4.1.2"
+      },
+      "evens": {
+        "is-even": "1.0.0"
+      },
+      "utils": {
+        "kind-of": "6.0.3"
+      }
+    }
+  },
+  "dependencies": {
+    "@fixture/core": "workspace:*",
+    "@fixture/plugin": "workspace:^",
+    "aube-test-builds-marker": "1.0.0",
+    "aube-test-builds-marker-2": "1.0.0",
+    "chalk": "catalog:colors",
+    "git-bare": "github:tj/term-canvas",
+    "git-github-long": "github:tj/term-canvas#07215c71ddd8b8643fe0603124618b3205cf3666",
+    "git-long": "git+https://github.com/tj/term-canvas.git#2c16b4319dddf069b5cfe4539e419b39de667c81",
+    "git-short": "github:tj/term-canvas#a6d65f9",
+    "is-even": "catalog:evens",
+    "is-odd": "catalog:",
+    "local-dir": "file:./vendor/local-dir",
+    "local-tar": "file:./vendor/local-tar-1.0.0.tgz",
+    "odd-alias": "npm:is-odd@3.0.1",
+    "remote-odd": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"
+  },
+  "devDependencies": {
+    "kind-of": "catalog:utils"
+  },
+  "overrides": {
+    "is-number@<7.0.0": "7.0.0"
+  },
+  "trustedDependencies": [
+    "aube-test-builds-marker"
+  ],
+  "patchedDependencies": {
+    "is-odd@3.0.1": "patches/is-odd@3.0.1.patch"
+  }
+}

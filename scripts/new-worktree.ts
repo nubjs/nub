@@ -14,13 +14,12 @@
 // What it does, in order:
 //   1. `git fetch origin` so the base ref is current.
 //   2. `git worktree add <path> -b <branch> origin/main` (tracked files only;
-//      the shared tree is untouched).
-//   3. `git submodule update --init vendor/aube` IN the new worktree — required
-//      for any build that touches the PM engine. (Pattern B, the non-submodule
-//      vendoring, will remove this step once it lands; see the inline note.)
-//   4. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries
+//      the shared tree is untouched). vendor/aube is plain in-tree files (Pattern
+//      B, 2026-06-22) — NOT a submodule — so it comes along with the checkout; no
+//      submodule-init step is needed.
+//   3. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries
 //      INTO the worktree (things `git worktree` won't bring, e.g. `.repos/`).
-//   5. Print the stable per-worktree CARGO_TARGET_DIR convention (it does NOT
+//   4. Print the stable per-worktree CARGO_TARGET_DIR convention (it does NOT
 //      seed/copy a target dir — cargo's incremental fingerprints are keyed to
 //      the absolute target path, so a stable dedicated dir is the fast loop).
 
@@ -31,8 +30,8 @@ import { dirname, join, resolve, isAbsolute } from "node:path";
 const HELP = `new-worktree — create an isolated git worktree off origin/main
 
 Usage:
-  node scripts/new-worktree.ts <slug> [--base <ref>] [--path <dir>] [--no-fetch] [--no-submodule]
-  nub  scripts/new-worktree.ts <slug> [--base <ref>] [--path <dir>] [--no-fetch] [--no-submodule]
+  node scripts/new-worktree.ts <slug> [--base <ref>] [--path <dir>] [--no-fetch]
+  nub  scripts/new-worktree.ts <slug> [--base <ref>] [--path <dir>] [--no-fetch]
 
 Arguments:
   <slug>              Branch name and default path suffix (worktree lands at
@@ -42,8 +41,6 @@ Options:
   --base <ref>       Base ref for the new branch (default: origin/main).
   --path <dir>       Explicit worktree path (default: /tmp/nub-wt-<slug>).
   --no-fetch         Skip the initial \`git fetch origin\`.
-  --no-submodule     Skip \`git submodule update --init vendor/aube\` (e.g. a
-                     doc/script-only worktree that never builds).
   -h, --help         Show this help.
 
 After creation:
@@ -60,7 +57,6 @@ type Opts = {
   base: string;
   path: string;
   fetch: boolean;
-  submodule: boolean;
 };
 
 function die(msg: string): never {
@@ -82,7 +78,6 @@ function parseArgs(argv: string[]): Opts {
   let base = "origin/main";
   let path: string | undefined;
   let fetch = true;
-  let submodule = true;
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -95,8 +90,6 @@ function parseArgs(argv: string[]): Opts {
       path = argv[++i] ?? die("--path requires a directory");
     } else if (a === "--no-fetch") {
       fetch = false;
-    } else if (a === "--no-submodule") {
-      submodule = false;
     } else if (a.startsWith("-")) {
       die(`unknown flag: ${a}`);
     } else if (slug === undefined) {
@@ -114,7 +107,6 @@ function parseArgs(argv: string[]): Opts {
     base,
     path: path ?? `/tmp/nub-wt-${slug}`,
     fetch,
-    submodule,
   };
 }
 
@@ -205,12 +197,8 @@ function main(): void {
 
   run("git", ["-C", repoRoot, "worktree", "add", opts.path, "-b", opts.slug, opts.base]);
 
-  if (opts.submodule) {
-    // vendor/aube is a submodule today and is NOT auto-populated in a new
-    // worktree; init it explicitly. Pattern B (non-submodule vendoring) will
-    // drop this step once it lands.
-    run("git", ["-C", opts.path, "submodule", "update", "--init", "vendor/aube"]);
-  }
+  // vendor/aube is plain in-tree files (Pattern B) — checked out by `worktree
+  // add`, no submodule init needed.
 
   applyInclude(mainRoot, opts.path);
 

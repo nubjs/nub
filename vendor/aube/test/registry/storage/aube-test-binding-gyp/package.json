@@ -1,0 +1,28 @@
+{
+  "name": "aube-test-binding-gyp",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-binding-gyp",
+      "version": "1.0.0",
+      "description": "Fixture package with binding.gyp and no install script; used to exercise aube's implicit node-gyp rebuild default.",
+      "license": "MIT",
+      "main": "index.js",
+      "hasInstallScript": true,
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-binding-gyp/-/aube-test-binding-gyp-1.0.0.tgz",
+        "integrity": "sha512-cWIm7jtCarl3+flS4Z1UDEGfcZSTHx+3dx2IVh7ycDXXZB+T6C9+8l0sR4p0jbEqyEvqIRaq1SgVvpIfxln/EQ==",
+        "shasum": "fe275743d0dc4621cc7897af16114edfb60de5d9"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-binding-gyp-1.0.0.tgz": {
+      "shasum": "fe275743d0dc4621cc7897af16114edfb60de5d9"
+    }
+  },
+  "_id": "aube-test-binding-gyp",
+  "_rev": "1-aube-fixture"
+}

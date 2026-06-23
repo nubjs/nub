@@ -1,0 +1,39 @@
+{
+	"name": "@pnpm.e2e/with-same-file-in-different-cases",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/with-same-file-in-different-cases",
+			"version": "1.0.0",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/with-same-file-in-different-cases@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-un20YgwR/wOpFu6xjmE3qoeuS9Ufv45J0+HtcU3wGw+EJxcbmWsrci5KaGvSst9KFKh0SOF6MNj66s+Arrjv+w==",
+				"shasum": "21eb76de1e7e5815fde4f51d01ce42bc78b0de12",
+				"tarball": "http://localhost:4873/@pnpm.e2e/with-same-file-in-different-cases/-/@pnpm.e2e/with-same-file-in-different-cases-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:24.363Z",
+		"created": "2026-04-30T21:29:24.363Z",
+		"1.0.0": "2026-04-30T21:29:24.363Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"with-same-file-in-different-cases-1.0.0.tgz": {
+			"shasum": "21eb76de1e7e5815fde4f51d01ce42bc78b0de12",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-4e6deb027cecdc89",
+	"_id": "@pnpm.e2e/with-same-file-in-different-cases",
+	"readme": "ERROR: No README data found!"
+}

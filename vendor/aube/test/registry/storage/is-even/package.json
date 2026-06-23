@@ -1,0 +1,375 @@
+{
+	"name": "is-even",
+	"versions": {
+		"0.1.0": {
+			"name": "is-even",
+			"description": "Return true if the given number is even.",
+			"version": "0.1.0",
+			"homepage": "https://github.com/jonschlinkert/is-even",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/jonschlinkert/is-even"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-even/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^1.1.0"
+			},
+			"devDependencies": {
+				"mocha": "*",
+				"should": "*"
+			},
+			"keywords": [],
+			"_id": "is-even@0.1.0",
+			"_shasum": "1911d689a23e39f82c79c19f36f63f2bb1e381aa",
+			"_from": ".",
+			"_npmVersion": "2.5.1",
+			"_nodeVersion": "0.12.0",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"maintainers": [
+				{
+					"name": "jonschlinkert",
+					"email": "github@sellside.com"
+				}
+			],
+			"dist": {
+				"shasum": "1911d689a23e39f82c79c19f36f63f2bb1e381aa",
+				"tarball": "https://registry.npmjs.org/is-even/-/is-even-0.1.0.tgz",
+				"integrity": "sha512-Y3b9XTvC19UnlATqPcnx6xhy+JNpeqdfVsBwivMR6cSrgPxLf2tObkIbMvWYCPkv+ZJ85q3HBQZXKVAfA0stKg==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEYCIQCiBIc9Pdb9TqT4olJQ/B8lf2n5wq4eMZ+A9U32ovU9zAIhANLVVLvMUnLMd1LIaxMKYpX2QS0lYcwES3lsKwomJgiZ"
+					}
+				]
+			},
+			"directories": {},
+			"contributors": []
+		},
+		"0.1.1": {
+			"name": "is-even",
+			"description": "Return true if the given number is even.",
+			"version": "0.1.1",
+			"homepage": "https://github.com/jonschlinkert/is-even",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/jonschlinkert/is-even"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-even/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^1.1.0",
+				"is-odd": "^0.1.0"
+			},
+			"devDependencies": {
+				"mocha": "*",
+				"should": "*"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"_id": "is-even@0.1.1",
+			"_shasum": "f10fbfb62d893f755d8dae8fb9a398bbc8cd5f2a",
+			"_from": ".",
+			"_npmVersion": "2.5.1",
+			"_nodeVersion": "0.12.0",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"maintainers": [
+				{
+					"name": "jonschlinkert",
+					"email": "github@sellside.com"
+				}
+			],
+			"dist": {
+				"shasum": "f10fbfb62d893f755d8dae8fb9a398bbc8cd5f2a",
+				"tarball": "https://registry.npmjs.org/is-even/-/is-even-0.1.1.tgz",
+				"integrity": "sha512-J6BpIZToZSLH7ZbsY+/Z1blEsTa7InEwYc2jn0T9KtcPAR6hLdml/7vUyFgVCzH2BtX2K4d9GfSZROQ1N9YlbQ==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCIHd9N03PjE1MtT9E8Nj65+VVrdQBj3Qk129teEdeq7knAiBh+SK+SdGO7o1OHmKsFLRmTK9ky+FJrdrBvHGZJ0smVg=="
+					}
+				]
+			},
+			"directories": {},
+			"contributors": []
+		},
+		"0.1.2": {
+			"name": "is-even",
+			"description": "Return true if the given number is even.",
+			"version": "0.1.2",
+			"homepage": "https://github.com/jonschlinkert/is-even",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/jonschlinkert/is-even.git"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-even/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-odd": "^0.1.2"
+			},
+			"devDependencies": {
+				"mocha": "^3.4.2"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"is",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"gitHead": "51f9991284ab77e4581e5346f1655bf1031ec956",
+			"_id": "is-even@0.1.2",
+			"_shasum": "e0432a7379f2d20b6ebbc2cb11e69beaaf31cd63",
+			"_from": ".",
+			"_npmVersion": "4.6.1",
+			"_nodeVersion": "7.7.3",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"maintainers": [
+				{
+					"name": "jonschlinkert",
+					"email": "github@sellside.com"
+				},
+				{
+					"name": "doowb",
+					"email": "brian.woodward@gmail.com"
+				}
+			],
+			"dist": {
+				"shasum": "e0432a7379f2d20b6ebbc2cb11e69beaaf31cd63",
+				"tarball": "https://registry.npmjs.org/is-even/-/is-even-0.1.2.tgz",
+				"integrity": "sha512-Ft/TASRTCMIR20eeGtXIx7W+TfAbw/LkG7D3Pw5rncxaF1LCei/WVgO2qxsJiOROZb7JABl6Z8N2pEHjNONt9A==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEUCIGBqTtBRc6/6dqmI2lc+kmJRw4bB5kGHp5dM0fQH3V5pAiEA18DczU8X1bgDIkckzUOYpzWgZZJeQnpbgdPp9WtLnwY="
+					}
+				]
+			},
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages",
+				"tmp": "tmp/is-even-0.1.2.tgz_1495890501739_0.017225796822458506"
+			},
+			"directories": {},
+			"contributors": []
+		},
+		"1.0.0": {
+			"name": "is-even",
+			"description": "Return true if the given number is even.",
+			"version": "1.0.0",
+			"homepage": "https://github.com/jonschlinkert/is-even",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/jonschlinkert/is-even.git"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-even/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-odd": "^0.1.2"
+			},
+			"devDependencies": {
+				"gulp-format-md": "^0.1.12",
+				"mocha": "^3.4.2"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"is",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"verb": {
+				"toc": false,
+				"layout": "default",
+				"tasks": [
+					"readme"
+				],
+				"plugins": [
+					"gulp-format-md"
+				],
+				"lint": {
+					"reflinks": true
+				}
+			},
+			"gitHead": "e87c060bb1c3f5353cd49c45afbe98d1a6c22b89",
+			"_id": "is-even@1.0.0",
+			"_shasum": "76b5055fbad8d294a86b6a949015e1c97b717c06",
+			"_from": ".",
+			"_npmVersion": "4.6.1",
+			"_nodeVersion": "7.7.3",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"maintainers": [
+				{
+					"name": "jonschlinkert",
+					"email": "github@sellside.com"
+				},
+				{
+					"name": "doowb",
+					"email": "brian.woodward@gmail.com"
+				}
+			],
+			"dist": {
+				"shasum": "76b5055fbad8d294a86b6a949015e1c97b717c06",
+				"tarball": "https://registry.npmjs.org/is-even/-/is-even-1.0.0.tgz",
+				"integrity": "sha512-LEhnkAdJqic4Dbqn58A0y52IXoHWlsueqQkKfMfdEnIYG8A1sm/GHidKkS6yvXlMoRrkM34csHnXQtOqcb+Jzg==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCIGdFCa72n+vIbeujikn3ExFVcAX2rnuKWBBFWQlQIH1gAiBn5HXb7zzOTEFwAnHX8zrI8+2gPyDaxgy5gAMFq7fzhA=="
+					}
+				]
+			},
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages",
+				"tmp": "tmp/is-even-1.0.0.tgz_1495908818742_0.7474892982281744"
+			},
+			"directories": {},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2022-06-19T02:40:54.045Z",
+		"created": "2015-02-24T05:44:40.864Z",
+		"0.1.0": "2015-02-24T05:44:40.864Z",
+		"0.1.1": "2015-02-24T05:55:33.733Z",
+		"0.1.2": "2017-05-27T13:08:23.221Z",
+		"1.0.0": "2017-05-27T18:13:39.705Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {
+		"npmjs": {
+			"etag": "W/\"5abdfb525eea533cf2fda24c82557715\"",
+			"fetched": 1776003722415
+		}
+	},
+	"_distfiles": {
+		"is-even-0.1.0.tgz": {
+			"url": "https://registry.npmjs.org/is-even/-/is-even-0.1.0.tgz",
+			"sha": "1911d689a23e39f82c79c19f36f63f2bb1e381aa",
+			"registry": "npmjs"
+		},
+		"is-even-0.1.1.tgz": {
+			"url": "https://registry.npmjs.org/is-even/-/is-even-0.1.1.tgz",
+			"sha": "f10fbfb62d893f755d8dae8fb9a398bbc8cd5f2a",
+			"registry": "npmjs"
+		},
+		"is-even-0.1.2.tgz": {
+			"url": "https://registry.npmjs.org/is-even/-/is-even-0.1.2.tgz",
+			"sha": "e0432a7379f2d20b6ebbc2cb11e69beaaf31cd63",
+			"registry": "npmjs"
+		},
+		"is-even-1.0.0.tgz": {
+			"url": "https://registry.npmjs.org/is-even/-/is-even-1.0.0.tgz",
+			"sha": "76b5055fbad8d294a86b6a949015e1c97b717c06",
+			"registry": "npmjs"
+		}
+	},
+	"_attachments": {
+		"is-even-1.0.0.tgz": {
+			"shasum": "76b5055fbad8d294a86b6a949015e1c97b717c06"
+		},
+		"is-even-0.1.0.tgz": {
+			"shasum": "1911d689a23e39f82c79c19f36f63f2bb1e381aa"
+		}
+	},
+	"_rev": "3-557adf9f6d8c1886",
+	"_id": "is-even",
+	"readme": "# is-even [![NPM version](https://img.shields.io/npm/v/is-even.svg?style=flat)](https://www.npmjs.com/package/is-even) [![NPM monthly downloads](https://img.shields.io/npm/dm/is-even.svg?style=flat)](https://npmjs.org/package/is-even) [![NPM total downloads](https://img.shields.io/npm/dt/is-even.svg?style=flat)](https://npmjs.org/package/is-even) [![Linux Build Status](https://img.shields.io/travis/jonschlinkert/is-even.svg?style=flat&label=Travis)](https://travis-ci.org/jonschlinkert/is-even)\n\n> Return true if the given number is even.\n\n## Install\n\nInstall with [npm](https://www.npmjs.com/):\n\n```sh\n$ npm install --save is-even\n```\n\n## Usage\n\n```js\nvar isEven = require('is-even');\n\nisEven(0);\n//=> true\nisEven('1');\n//=> false\nisEven(2);\n//=> true\nisEven('3');\n//=> false\n```\n\n## About\n\n### Contributing\n\nPull requests and stars are always welcome. For bugs and feature requests, [please create an issue](../../issues/new).\n\n### Contributors\n\n| **Commits** | **Contributor** | \n| --- | --- |\n| 6 | [jonschlinkert](https://github.com/jonschlinkert) |\n| 1 | [noformnocontent](https://github.com/noformnocontent) |\n\n### Building docs\n\n_(This project's readme.md is generated by [verb](https://github.com/verbose/verb-generate-readme), please don't edit the readme directly. Any changes to the readme must be made in the [.verb.md](.verb.md) readme template.)_\n\nTo generate the readme, run the following command:\n\n```sh\n$ npm install -g verbose/verb#dev verb-generate-readme && verb\n```\n\n### Running tests\n\nRunning and reviewing unit tests is a great way to get familiarized with a library and its API. You can install dependencies and run tests with the following command:\n\n```sh\n$ npm install && npm test\n```\n\n### Author\n\n**Jon Schlinkert**\n\n* [github/jonschlinkert](https://github.com/jonschlinkert)\n* [twitter/jonschlinkert](https://twitter.com/jonschlinkert)\n\n### License\n\nCopyright © 2017, [Jon Schlinkert](https://github.com/jonschlinkert).\nReleased under the [MIT License](LICENSE).\n\n***\n\n_This file was generated by [verb-generate-readme](https://github.com/verbose/verb-generate-readme), v0.6.0, on May 27, 2017._"
+}

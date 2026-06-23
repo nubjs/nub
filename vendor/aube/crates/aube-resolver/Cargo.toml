@@ -1,0 +1,42 @@
+[package]
+name = "aube-resolver"
+description = "Dependency resolver for Aube"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+include = ["src/**/*.rs", "build.rs"]
+
+[dependencies]
+aube-codes = { workspace = true }
+aube-registry = { workspace = true }
+aube-manifest = { workspace = true }
+aube-lockfile = { workspace = true }
+aube-store = { workspace = true }
+aube-util = { workspace = true }
+node-semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sonic-rs = { workspace = true }
+rkyv = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+sha2 = { workspace = true }
+pathdiff = "0.2"
+thiserror = { workspace = true }
+miette = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tempfile = "3"
+
+[dev-dependencies]
+
+[build-dependencies]
+rkyv = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+zstd = { workspace = true }

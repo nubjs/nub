@@ -1,0 +1,27 @@
+{
+  "name": "@jsr/std__collections",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "@jsr/std__collections",
+      "version": "1.0.0",
+      "description": "Fixture for aube's jsr: BATS test. Mirrors the npm-compat name JSR serves @std/collections under.",
+      "license": "MIT",
+      "main": "index.js",
+      "dist": {
+        "tarball": "http://localhost:4873/@jsr/std__collections/-/jsr-tarball-1.0.0.tgz",
+        "integrity": "sha512-teb9TNj+JPjk94Zc5edwhFnDVkXRW8agx8GehMwlIgEaSgCZ9lFNwNLAEUsUc+OOZ3vS1m7z+eh4lO7PJxIqkw==",
+        "shasum": "7af8c1f356b6674f4e392656eb8a676242ffff30"
+      }
+    }
+  },
+  "_attachments": {
+    "jsr-tarball-1.0.0.tgz": {
+      "shasum": "7af8c1f356b6674f4e392656eb8a676242ffff30"
+    }
+  },
+  "_id": "@jsr/std__collections",
+  "_rev": "1-aube-fixture"
+}

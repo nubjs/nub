@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v nproc >/dev/null; then
+	jobs="$(nproc)"
+else
+	jobs="$(sysctl -n hw.ncpu)"
+fi
+
+shard_index="${AUBE_BATS_SHARD_INDEX:?missing AUBE_BATS_SHARD_INDEX}"
+shard_count="${AUBE_BATS_SHARD_COUNT:?missing AUBE_BATS_SHARD_COUNT}"
+report_dir="${BATS_REPORT_DIR:-.buildkite/test-results}"
+report_name="bats-nonserial-shard-$((shard_index + 1))-of-${shard_count}.xml"
+report_path="$report_dir/$report_name"
+test_files=()
+i=0
+while IFS= read -r file; do
+	if (((i % shard_count) == shard_index)); then
+		test_files+=("$file")
+	fi
+	((i += 1))
+done < <(find test -maxdepth 1 -type f -name "*.bats" | sort)
+
+printf "Running non-serial BATS shard %s/%s with %s files\n" "$((shard_index + 1))" "$shard_count" "${#test_files[@]}"
+printf "  %s\n" "${test_files[@]}"
+mkdir -p "$report_dir"
+status=0
+BATS_REPORT_FILENAME="$report_name" ./test/bats/bin/bats \
+	--report-formatter junit \
+	--output "$report_dir" \
+	--jobs "$jobs" \
+	--parallel-binary-name parallel \
+	--filter-tags "!serial" \
+	"${test_files[@]}" || status=$?
+
+upload_status=0
+mise run ci:test-engine:upload -- "$report_path" || upload_status=$?
+if ((status != 0)); then
+	exit "$status"
+fi
+exit "$upload_status"

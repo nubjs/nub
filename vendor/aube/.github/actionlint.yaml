@@ -1,0 +1,18 @@
+self-hosted-runner:
+  labels:
+    - namespace-profile-endev-linux-amd64
+    - namespace-profile-endev-linux-amd64-large
+    - namespace-profile-endev-linux-arm64
+    - namespace-profile-endev-linux-arm64-large
+    - namespace-profile-endev-macos-arm64
+    - namespace-profile-endev-macos-arm64-large
+    # Namespace lets you append `;overrides.cache-tag=NAME` to a profile
+    # to share a cache volume across multiple profiles. Both the base
+    # and `-large` Linux profiles point at the same `aube-rust-linux`
+    # tag so the rust cache is shared between regular CI and the bench
+    # jobs that run on `-large`. arm64 has its own cache tag — the
+    # rust target dir is arch-specific, so sharing with amd64 would
+    # thrash.
+    - namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    - namespace-profile-endev-linux-amd64-large;overrides.cache-tag=aube-rust-linux
+    - namespace-profile-endev-linux-arm64-large;overrides.cache-tag=aube-rust-linux-arm64

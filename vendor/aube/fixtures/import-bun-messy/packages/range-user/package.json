@@ -1,0 +1,9 @@
+{
+  "name": "@fixture/range-user",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "is-number": "^7.0.0",
+    "kind-of": "^3.2.2"
+  }
+}

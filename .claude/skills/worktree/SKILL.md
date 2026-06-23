@@ -6,8 +6,9 @@ description: >-
   worktree to land a change, when you want to know what `.worktreeinclude` does
   or how to add an entry, or when cleaning up after a merge. Encodes the
   one-command setup (`nub scripts/new-worktree.ts <slug>` or `node …`) that bakes
-  in the proven recipe — worktree off origin/main, vendor/aube submodule init,
-  the stable per-worktree CARGO_TARGET_DIR fast loop, and applying
+  in the proven recipe — worktree off origin/main (vendor/aube is plain in-tree
+  files now, no submodule init), the stable per-worktree CARGO_TARGET_DIR fast
+  loop, and applying
   `.worktreeinclude` — plus the eagerly-pull-the-shared-tree discipline and the
   safe cleanup path. Pairs with the `nub-dev` build skill.
 ---
@@ -16,7 +17,7 @@ description: >-
 
 Substantive nub-repo work lands via a PR opened from an isolated git worktree; the shared working tree always stays on `main` and is never branched, reset, or stashed (see AGENTS.md "Default to a PR flow"). This skill is the fast, correct way to spin up a worktree, what `.worktreeinclude` brings into it, and how to clean up.
 
-The whole setup is one command. Do not hand-roll the `git worktree add` + submodule + target-dir recipe — the script encodes it and is harder to get wrong.
+The whole setup is one command. Do not hand-roll the `git worktree add` + target-dir recipe — the script encodes it and is harder to get wrong. (vendor/aube is plain in-tree files since 2026-06-22 (Pattern B) — no submodule init step.)
 
 ---
 
@@ -32,12 +33,11 @@ node scripts/new-worktree.ts <slug>
 It performs the proven recipe, in order:
 
 1. `git fetch origin` (skip with `--no-fetch`).
-2. `git worktree add /tmp/nub-wt-<slug> -b <slug> origin/main` — tracked files only; the shared tree is untouched.
-3. `git submodule update --init vendor/aube` in the new worktree — required for any build that touches the PM engine (skip with `--no-submodule` for a doc/script-only worktree). Pattern B, the non-submodule vendoring, will drop this step once it lands.
-4. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries in (see below).
-5. Print the stable per-worktree `CARGO_TARGET_DIR` convention to export.
+2. `git worktree add /tmp/nub-wt-<slug> -b <slug> origin/main` — tracked files only; the shared tree is untouched. vendor/aube is plain in-tree files (Pattern B) — checked out by this step, no submodule init needed.
+3. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries in (see below).
+4. Print the stable per-worktree `CARGO_TARGET_DIR` convention to export.
 
-Options: `--base <ref>` (default `origin/main`), `--path <dir>` (default `/tmp/nub-wt-<slug>`), `--no-fetch`, `--no-submodule`, `--help`.
+Options: `--base <ref>` (default `origin/main`), `--path <dir>` (default `/tmp/nub-wt-<slug>`), `--no-fetch`, `--help`.
 
 After it prints the ready line:
 
@@ -79,6 +79,6 @@ Corollary: do NOT commit directly in the shared tree's checkout — even control
 git worktree remove /tmp/nub-wt-<slug> --force && rm -rf /tmp/nub-wt-<slug>-target
 ```
 
-`--force` is needed because the worktree contains the initialized `vendor/aube` submodule. Before discarding, make sure your work is pushed — a `git worktree remove --force` throws away anything uncommitted (and any unpushed `vendor/aube` commit, which lives only in that throwaway clone).
+`--force` is used to discard the worktree even with build artifacts present. Before discarding, make sure your work is pushed — a `git worktree remove --force` throws away anything uncommitted (vendor/aube edits are now plain in-tree files committed to the worktree's branch, so push before removing).
 
 There is also an older bash helper, `scripts/worktree.sh` (worktrees under `.worktrees/`, branched off LOCAL main, with `rm`/`list`/`reap` subcommands and uncommitted/unpushed-work safety checks on removal). `new-worktree.ts` is the preferred entry for landing work (off `origin/main`, `.worktreeinclude` support, nub-dogfooding); reach for `worktree.sh reap` to prune stale dead-session worktrees.

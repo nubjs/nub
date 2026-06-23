@@ -1,0 +1,58 @@
+{
+	"name": "@pnpm.e2e/peer-a",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/peer-a",
+			"version": "1.0.0",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/peer-a@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-HWiRzsHA7LZG3kVf+WEw4p6jAwKbz7EInY2EZr7zZsyUS5CsrPm0pT+d7R/meViooeQxdQoUYsPq7Dgv89EpjQ==",
+				"shasum": "3b7a99f94f1883614b2949577b498c73e644b840",
+				"tarball": "http://localhost:4873/@pnpm.e2e/peer-a/-/@pnpm.e2e/peer-a-1.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"1.0.1": {
+			"name": "@pnpm.e2e/peer-a",
+			"version": "1.0.1",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/peer-a@1.0.1",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-eKxesosmflSp5xnW1gyRhMZ75RLI7SupTZNe1SK6EPDDgNmswNxbwdpyUDFUDWa3yHd5WSQbRDH2IysqMWIs2g==",
+				"shasum": "68c4ebf4fe66fde305f1301e7279b4d582d53891",
+				"tarball": "http://localhost:4873/@pnpm.e2e/peer-a/-/@pnpm.e2e/peer-a-1.0.1.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:17.727Z",
+		"created": "2026-04-30T21:29:00.404Z",
+		"1.0.0": "2026-04-30T21:29:00.404Z",
+		"1.0.1": "2026-04-30T21:29:17.727Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.1"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"peer-a-1.0.0.tgz": {
+			"shasum": "3b7a99f94f1883614b2949577b498c73e644b840",
+			"version": "1.0.0"
+		},
+		"peer-a-1.0.1.tgz": {
+			"shasum": "68c4ebf4fe66fde305f1301e7279b4d582d53891",
+			"version": "1.0.1"
+		}
+	},
+	"_rev": "6-efbabb2e48f0d827",
+	"_id": "@pnpm.e2e/peer-a",
+	"readme": "ERROR: No README data found!"
+}

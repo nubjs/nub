@@ -13,6 +13,12 @@
 !.worktreeinclude
 !.github/
 
+# Vendored aube is plain in-tree files (Pattern B) — track its ENTIRE tree,
+# including dot-prefixed entries the broad `.*` rule above would otherwise hide
+# (.rules, .cargo/, .buildkite/, docs/.vitepress/, fixtures/.yarn/...). Without
+# this, an aube dotfile edit would be silently dropped from `git add vendor/aube`.
+!vendor/aube/**
+
 # Agent tooling: tracked in git. Only nested git worktrees stay out (they're checkouts, not files git can commit).
 !.claude/
 !.agents/

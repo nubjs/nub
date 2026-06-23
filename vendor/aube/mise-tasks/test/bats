@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#MISE description="Run BATS integration tests in parallel"
+#USAGE arg "[files]..." help="Specific .bats files or directories (defaults to test/)"
+set -euo pipefail
+
+if command -v nproc >/dev/null; then
+	jobs="$(nproc)"
+else
+	jobs="$(sysctl -n hw.ncpu)"
+fi
+
+if (($# > 0)); then
+	targets=("$@")
+else
+	targets=(test/)
+fi
+
+# Files tagged `# bats file_tags=serial` mutate shared state (Verdaccio
+# storage, `git checkout` in fixtures) and can't race against each
+# other or against the rest of the suite — mirror the CI split by
+# running non-serial files in parallel first, then serial files
+# sequentially. Both phases are scoped to the same targets, so
+# passing specific files still works.
+status=0
+./test/bats/bin/bats \
+	--jobs "$jobs" \
+	--parallel-binary-name parallel \
+	--no-parallelize-within-files \
+	--filter-tags "!serial" \
+	"${targets[@]}" || status=$?
+
+./test/bats/bin/bats \
+	--filter-tags "serial" \
+	"${targets[@]}" || status=$?
+
+exit "$status"

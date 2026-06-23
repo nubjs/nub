@@ -1,0 +1,294 @@
+{
+	"name": "@types/parse-json",
+	"versions": {
+		"4.0.0": {
+			"name": "@types/parse-json",
+			"version": "4.0.0",
+			"license": "MIT",
+			"_id": "@types/parse-json@4.0.0",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/mrmlnc",
+					"name": "mrmlnc",
+					"githubUsername": "mrmlnc"
+				}
+			],
+			"dist": {
+				"shasum": "2f8bb441434d163b35fb8ffdccd7138927ffb8c0",
+				"tarball": "https://registry.npmjs.org/@types/parse-json/-/parse-json-4.0.0.tgz",
+				"integrity": "sha512-//oorEZjL6sbPcKUaCdIGlIUeH26mgzimjBB77G6XRgnDl/L5wOnpyBGRe/Mmf5CVW3PwEBE1NjiMZ/ssFh4wA==",
+				"signatures": [
+					{
+						"sig": "MEUCIGC35GyU38g9f37HshpyMa31LzToKzAqNhzzosICTJtHAiEA3yFrMiLAR8jax00jYolrjrsStZwTxijh5sP0aJUAQUY=",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				]
+			},
+			"main": "",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://www.github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git"
+			},
+			"description": "TypeScript definitions for parse-json",
+			"directories": {},
+			"dependencies": {},
+			"typeScriptVersion": "2.0",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/parse-json-4.0.0.tgz_1510619472516_0.8941616243682802",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "68b3120a3ffa0ae0c978a90b74a1e50adc0340a9d11f17cc1efb7bf2186e7751"
+		},
+		"4.0.1": {
+			"name": "@types/parse-json",
+			"version": "4.0.1",
+			"license": "MIT",
+			"_id": "@types/parse-json@4.0.1",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/mrmlnc",
+					"name": "mrmlnc",
+					"githubUsername": "mrmlnc"
+				}
+			],
+			"homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/parse-json",
+			"dist": {
+				"shasum": "27f7559836ad796cea31acb63163b203756a5b4e",
+				"tarball": "https://registry.npmjs.org/@types/parse-json/-/parse-json-4.0.1.tgz",
+				"fileCount": 5,
+				"integrity": "sha512-3YmXzzPAdOTVljVMkTMBdBEvlOLg2cDQaDhnnhT3nT9uDbnJzjWhKlzb+desT12Y7tGqaN6d+AbozcKzyL36Ng==",
+				"signatures": [
+					{
+						"sig": "MEUCIHf8rOvJT3bxrtwyQHLaQ/AsrCzU8YFdxx40iS6h+rzdAiEAvB7UP9zds+mbUCNc5hUsC6o9qrPnh4qBcufhMLFfZJQ=",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 2946
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/parse-json"
+			},
+			"description": "TypeScript definitions for parse-json",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "4.5",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/parse-json_4.0.1_1697625415279_0.32718343636189884",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "868f97e8a817289b33ba29ba2235f74531979d6930fb837acb5234d06f3af2a7"
+		},
+		"4.0.2": {
+			"name": "@types/parse-json",
+			"version": "4.0.2",
+			"license": "MIT",
+			"_id": "@types/parse-json@4.0.2",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/mrmlnc",
+					"name": "mrmlnc",
+					"githubUsername": "mrmlnc"
+				}
+			],
+			"homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/parse-json",
+			"dist": {
+				"shasum": "5950e50960793055845e956c427fc2b0d70c5239",
+				"tarball": "https://registry.npmjs.org/@types/parse-json/-/parse-json-4.0.2.tgz",
+				"fileCount": 5,
+				"integrity": "sha512-dISoDXWWQwUquiKsyZ4Ng+HX2KsPL7LyHKHQwgGFEA3IaKac4Obd+h2a/a6waisAoepJlBcx9paWqjA8/HVjCw==",
+				"signatures": [
+					{
+						"sig": "MEUCIGHz749R+5YWDZ5ym64/+M6s+/ZjvxK4JRwgg1qH2UlkAiEAjsfdtpdDuxrUXDtr07d2vknyE3PuvPwXhDEQ5jzUrjY=",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 2946
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/parse-json"
+			},
+			"description": "TypeScript definitions for parse-json",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "4.5",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/parse-json_4.0.2_1699360512991_0.8366418904273136",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "d1152b3b9b47f80db7e38510e7a49a297ca3c102317f67bcacb959271c65e6c1"
+		},
+		"7.0.0": {
+			"name": "@types/parse-json",
+			"version": "7.0.0",
+			"description": "Stub TypeScript definitions entry for parse-json, which provides its own types definitions",
+			"main": "",
+			"scripts": {},
+			"license": "MIT",
+			"dependencies": {
+				"parse-json": "*"
+			},
+			"deprecated": "This is a stub types definition. parse-json provides its own type definitions, so you do not need this installed.",
+			"_id": "@types/parse-json@7.0.0",
+			"dist": {
+				"integrity": "sha512-9+fI0h3lJpUhQCstbug7hnYgEc22rDZV1WIFVpOvp6/zlOWXk0IBfwUvQDoO5zgB6lZxjucjmQcgWT0ehPrEmA==",
+				"shasum": "15fd60633f7598d4145256b7fcf23cf892e4b9e3",
+				"tarball": "https://registry.npmjs.org/@types/parse-json/-/parse-json-7.0.0.tgz",
+				"fileCount": 4,
+				"unpackedSize": 1760,
+				"signatures": [
+					{
+						"keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U",
+						"sig": "MEUCIQDIoB9W7uDybClkugqgSa7j9EQgpkuqGIL/IAnvF4UV/wIgVVbkouRpGQ6zaEFidTT5WIrvnZZcoUfFp+LrBNzBKqs="
+					}
+				]
+			},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"directories": {},
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages-npm-production",
+				"tmp": "tmp/parse-json_7.0.0_1740159191837_0.39425398513933163"
+			},
+			"_hasShrinkwrap": false,
+			"contributors": []
+		}
+	},
+	"time": {
+		"created": "2017-11-14T00:31:12.629Z",
+		"modified": "2025-02-21T17:33:12.163Z",
+		"4.0.0": "2017-11-14T00:31:12.629Z",
+		"4.0.1": "2023-10-18T10:36:55.475Z",
+		"4.0.2": "2023-11-07T12:35:13.182Z",
+		"7.0.0": "2025-02-21T17:33:12.018Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"ts2.0": "4.0.0",
+		"ts2.1": "4.0.0",
+		"ts2.2": "4.0.0",
+		"ts2.3": "4.0.0",
+		"ts2.4": "4.0.0",
+		"ts2.5": "4.0.0",
+		"ts2.6": "4.0.0",
+		"ts2.7": "4.0.0",
+		"ts2.8": "4.0.0",
+		"ts2.9": "4.0.0",
+		"ts3.0": "4.0.0",
+		"ts3.1": "4.0.0",
+		"ts3.2": "4.0.0",
+		"ts3.3": "4.0.0",
+		"ts3.4": "4.0.0",
+		"ts3.5": "4.0.0",
+		"ts3.6": "4.0.0",
+		"ts3.7": "4.0.0",
+		"ts3.8": "4.0.0",
+		"ts3.9": "4.0.0",
+		"ts4.0": "4.0.0",
+		"ts4.1": "4.0.0",
+		"ts4.2": "4.0.0",
+		"ts4.3": "4.0.0",
+		"ts4.4": "4.0.0",
+		"ts5.8": "4.0.2",
+		"ts5.7": "4.0.2",
+		"latest": "7.0.0",
+		"ts4.5": "4.0.2",
+		"ts4.6": "4.0.2",
+		"ts4.7": "4.0.2",
+		"ts4.8": "4.0.2",
+		"ts4.9": "4.0.2",
+		"ts5.0": "4.0.2",
+		"ts5.1": "4.0.2",
+		"ts5.2": "4.0.2",
+		"ts5.3": "4.0.2",
+		"ts5.4": "4.0.2",
+		"ts5.5": "4.0.2",
+		"ts5.6": "4.0.2"
+	},
+	"_uplinks": {
+		"npmjs": {
+			"etag": "W/\"c470772c03ac56147a273145884306d2\"",
+			"fetched": 1776003730079
+		}
+	},
+	"_distfiles": {
+		"parse-json-4.0.0.tgz": {
+			"url": "https://registry.npmjs.org/@types/parse-json/-/parse-json-4.0.0.tgz",
+			"sha": "2f8bb441434d163b35fb8ffdccd7138927ffb8c0",
+			"registry": "npmjs"
+		},
+		"parse-json-4.0.1.tgz": {
+			"url": "https://registry.npmjs.org/@types/parse-json/-/parse-json-4.0.1.tgz",
+			"sha": "27f7559836ad796cea31acb63163b203756a5b4e",
+			"registry": "npmjs"
+		},
+		"parse-json-4.0.2.tgz": {
+			"url": "https://registry.npmjs.org/@types/parse-json/-/parse-json-4.0.2.tgz",
+			"sha": "5950e50960793055845e956c427fc2b0d70c5239",
+			"registry": "npmjs"
+		},
+		"parse-json-7.0.0.tgz": {
+			"url": "https://registry.npmjs.org/@types/parse-json/-/parse-json-7.0.0.tgz",
+			"sha": "15fd60633f7598d4145256b7fcf23cf892e4b9e3",
+			"registry": "npmjs"
+		}
+	},
+	"_attachments": {
+		"parse-json-4.0.0.tgz": {
+			"shasum": "2f8bb441434d163b35fb8ffdccd7138927ffb8c0"
+		}
+	},
+	"_rev": "2-8057b76d1d59184f",
+	"_id": "@types/parse-json",
+	"readme": "[object Object]"
+}

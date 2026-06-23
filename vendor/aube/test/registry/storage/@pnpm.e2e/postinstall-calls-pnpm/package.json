@@ -1,0 +1,43 @@
+{
+	"name": "@pnpm.e2e/postinstall-calls-pnpm",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/postinstall-calls-pnpm",
+			"version": "1.0.0",
+			"scripts": {
+				"postinstall": "$npm_execpath run create-file",
+				"create-file": "node create-file"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/postinstall-calls-pnpm@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-PV0GxTRlvuHK4JePZ2r9D/qHDEkN//LIpuxIuPaNUvYTh/sbBuZjNvotHApG3j8nSuwTZF3jJg9V+5EzrI7+mA==",
+				"shasum": "6d219805f38fd1d33e2e759b4227f624d99ef0ac",
+				"tarball": "http://localhost:4873/@pnpm.e2e/postinstall-calls-pnpm/-/@pnpm.e2e/postinstall-calls-pnpm-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:21.329Z",
+		"created": "2026-04-30T21:29:21.329Z",
+		"1.0.0": "2026-04-30T21:29:21.329Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"postinstall-calls-pnpm-1.0.0.tgz": {
+			"shasum": "6d219805f38fd1d33e2e759b4227f624d99ef0ac",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-440b3a491d74bada",
+	"_id": "@pnpm.e2e/postinstall-calls-pnpm",
+	"readme": "ERROR: No README data found!"
+}

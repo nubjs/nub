@@ -1,0 +1,66 @@
+{
+  "_id": "@pnpm.e2e/has-prerelease",
+  "name": "@pnpm.e2e/has-prerelease",
+  "dist-tags": {
+    "latest": "2.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "@pnpm.e2e/has-prerelease",
+      "version": "1.0.0",
+      "_id": "@pnpm.e2e/has-prerelease@1.0.0",
+      "dist": {
+        "shasum": "3780ddaa8c44404650a7645706081b16c017072d",
+        "integrity": "sha512-3NnFQqIb8VQ1dq3A+k0JEBg1z/8OiSj+YyU176qDypiXecMGpJB5dlnMUZm5Kx/lsYZ+SzL+lLJU10Y6hgiT+A==",
+        "tarball": "http://localhost:4873/@pnpm.e2e/has-prerelease/-/@pnpm.e2e/has-prerelease-1.0.0.tgz"
+      },
+      "contributors": []
+    },
+    "2.0.0": {
+      "name": "@pnpm.e2e/has-prerelease",
+      "version": "2.0.0",
+      "_id": "@pnpm.e2e/has-prerelease@2.0.0",
+      "dist": {
+        "shasum": "361380af6161368f86ba88689cb1715aff186244",
+        "integrity": "sha512-AWgTx5Q3r1lU9cb/6eDrWY18NXFtazJLrVFmbDcFO7lqr2jyXsLirMwjjtcE4kvq0hGj0c/TCn4ylnp8eoiY5w==",
+        "tarball": "http://localhost:4873/@pnpm.e2e/has-prerelease/-/@pnpm.e2e/has-prerelease-2.0.0.tgz"
+      },
+      "contributors": []
+    },
+    "3.0.0-rc.0": {
+      "name": "@pnpm.e2e/has-prerelease",
+      "version": "3.0.0-rc.0",
+      "_id": "@pnpm.e2e/has-prerelease@3.0.0-rc.0",
+      "dist": {
+        "shasum": "7126b81c2b05a90ca4d7cad588d6b31a4cd34ed2",
+        "integrity": "sha512-E79oK+SPi9CgwOrfTBEyPf3LGY6uOi7tS6657F/gwPnC8B95sN4XzsDfOH5R5gIbXq/u00+u/BCe+R6QynUxYw==",
+        "tarball": "http://localhost:4873/@pnpm.e2e/has-prerelease/-/@pnpm.e2e/has-prerelease-3.0.0-rc.0.tgz"
+      },
+      "contributors": []
+    }
+  },
+  "time": {
+    "created": "2023-11-14T22:13:20.000Z",
+    "modified": "2023-11-14T22:13:20.000Z",
+    "1.0.0": "2023-11-14T22:13:20.000Z",
+    "2.0.0": "2023-11-14T22:13:20.000Z",
+    "3.0.0-rc.0": "2023-11-14T22:13:20.000Z"
+  },
+  "_attachments": {
+    "has-prerelease-1.0.0.tgz": {
+      "shasum": "3780ddaa8c44404650a7645706081b16c017072d",
+      "version": "1.0.0"
+    },
+    "has-prerelease-2.0.0.tgz": {
+      "shasum": "361380af6161368f86ba88689cb1715aff186244",
+      "version": "2.0.0"
+    },
+    "has-prerelease-3.0.0-rc.0.tgz": {
+      "shasum": "7126b81c2b05a90ca4d7cad588d6b31a4cd34ed2",
+      "version": "3.0.0-rc.0"
+    }
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "_rev": "1-aube-fixture"
+}

@@ -22,14 +22,14 @@ on:
     branches: [main]
     paths:
       - "crates/**"
-      - "vendor/aube"
+      - "vendor/aube/**"
       - "tests/native-deps/**"
       - ".github/workflows/native-deps.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/**"
-      - "vendor/aube"
+      - "vendor/aube/**"
       - "tests/native-deps/**"
       - ".github/workflows/native-deps.yml"
 
@@ -48,8 +48,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5

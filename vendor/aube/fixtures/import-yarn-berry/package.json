@@ -1,0 +1,11 @@
+{
+  "name": "import-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1",
+    "@sindresorhus/is": "5.6.0"
+  },
+  "devDependencies": {
+    "kind-of": "6.0.3"
+  }
+}

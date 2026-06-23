@@ -1,0 +1,32 @@
+{
+  "name": "aube-test-bin-uses-dep",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-bin-uses-dep",
+      "version": "1.0.0",
+      "description": "Fixture: a package whose bin requires its own (non-top-level) dep. Exercises that a top-level dep's bin can resolve its regular deps via Node's parent-node_modules walk.",
+      "license": "MIT",
+      "bin": {
+        "aube-bin-uses-dep": "./index.js"
+      },
+      "dependencies": {
+        "@pnpm.e2e/dep-of-pkg-with-1-dep": "100.0.0"
+      },
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-bin-uses-dep/-/aube-test-bin-uses-dep-1.0.0.tgz",
+        "integrity": "sha512-2saMeGdR8ryDGFn/pzBjas4NGoPzHON36+27wMsRCY2FJ66TZhnbUdyzfjkqY/P2Pk7jpqiRzsvVS4wUS2w6cA==",
+        "shasum": "6fd259f5f8765240cc306454374c98c67e9d983f"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-bin-uses-dep-1.0.0.tgz": {
+      "shasum": "6fd259f5f8765240cc306454374c98c67e9d983f"
+    }
+  },
+  "_id": "aube-test-bin-uses-dep",
+  "_rev": "1-aube-fixture"
+}

@@ -1,0 +1,56 @@
+{
+	"name": "@pnpm.e2e/pkg-that-uses-plugins",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/pkg-that-uses-plugins",
+			"version": "1.0.0",
+			"author": {
+				"name": "Zoltan Kochan",
+				"email": "zoltan.kochan@gmail.com",
+				"url": "http://kochan.io/"
+			},
+			"license": "MIT",
+			"bin": {
+				"pkg-that-uses-plugins": "index.js"
+			},
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/pnpm/pnpm.git#master"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/pkg-that-uses-plugins@1.0.0",
+			"bugs": {
+				"url": "https://github.com/pnpm/pnpm/issues"
+			},
+			"homepage": "https://github.com/pnpm/pnpm/tree/master#readme",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-RPflyq6+HIzJfBtKblM3GVNW6eTnEOWDubSRpD0N+JTW8+Q9BFy58PGSZfvqFWFGmLvKeuQAPYO7ivRmP2BOsg==",
+				"shasum": "5a156463090fe9ff810f7b596863f912661b341c",
+				"tarball": "http://localhost:4873/@pnpm.e2e/pkg-that-uses-plugins/-/@pnpm.e2e/pkg-that-uses-plugins-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:19.356Z",
+		"created": "2026-04-30T21:29:19.356Z",
+		"1.0.0": "2026-04-30T21:29:19.356Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"pkg-that-uses-plugins-1.0.0.tgz": {
+			"shasum": "5a156463090fe9ff810f7b596863f912661b341c",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-1933cc7475c213b1",
+	"_id": "@pnpm.e2e/pkg-that-uses-plugins",
+	"readme": "ERROR: No README data found!"
+}

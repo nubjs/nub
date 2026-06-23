@@ -1,0 +1,7 @@
+{
+  "name": "import-bun-peer-only-in-packages",
+  "version": "1.0.0",
+  "dependencies": {
+    "fdir": "6.5.0"
+  }
+}

@@ -1,0 +1,166 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+[profile.release-native]
+inherits = "release"
+lto = "fat"
+
+[profile.release-pgo]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace.package]
+version = "1.22.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+repository = "https://github.com/jdx/aube"
+homepage = "https://github.com/jdx/aube"
+readme = "README.md"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+yaml_serde = "0.10.4"
+# Comment- and format-preserving YAML edits. Used by aube-manifest /
+# aube to surgically rewrite user-authored workspace YAML files
+# (catalogs, allowBuilds, patchedDependencies) without stripping
+# comments — yaml_serde's round-trip would otherwise destroy them.
+# yamlpatch uses yaml_serde for patch payloads; serde_yaml remains only
+# for the manual block injector that works around nested Add formatting.
+yamlpatch = "1.25"
+yamlpath = "1.25"
+serde_yaml = "0.9"
+sonic-rs = "0.5"
+toml = "1.1"
+rkyv = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Enum derives (Display/FromStr/etc.)
+strum = { version = "0.28", features = ["derive"] }
+
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2", "charset", "system-proxy", "gzip", "brotli", "zstd", "hickory-dns"] }
+webpki-root-certs = "1"
+
+# Hashing
+sha1 = "0.11"
+sha2 = "0.11"
+blake3 = { version = "1", features = ["rayon", "mmap"] }
+hex = "0.4"
+
+# Filesystem
+xx = { version = "2", features = ["fslock"] }
+reflink-copy = "0.1"
+glob = "0.3"
+# BurntSushi's gitignore matcher (from ripgrep). Used by `aube pack` /
+# `aube publish` to honor `.npmignore` / `.gitignore` with full
+# semantics (negation, anchoring, globs, **). Already in the build via
+# clx → tera → globwalk, so making it a direct dep is essentially free.
+ignore = "0.4"
+landlock = "0.4"
+# NTFS junctions (Windows-only) — used for `node_modules` directory
+# links so installs work without Developer Mode or admin rights.
+# Matches what pnpm does via Node's `fs.symlink(..., 'junction')`.
+junction = "2"
+
+# Parallelism
+rayon = "1"
+
+# Non-cryptographic FxHash for internal maps keyed on already-signed
+# data (package names, dep paths, lockfile keys). Faster than the std
+# SipHash default; DoS resistance is unnecessary because the inputs
+# come from locked/signed manifests.
+rustc-hash = "2"
+# Better avalanche than FxHash on dep_path keys with integer peer
+# suffixes. Resolver hot maps only. Rest of workspace stays on FxHash.
+foldhash = "0.2"
+
+# Stack-allocated small vectors for lockfile fields that are empty
+# or tiny in almost every package. os/cpu/libc arrays, bundled deps.
+# Skips a heap alloc per field per package. Adds up fast across
+# thousands of LockedPackage values.
+smallvec = { version = "1", features = ["serde"] }
+
+# Encoding
+base64 = "0.22"
+
+# Sigstore (provenance attestation on `publish`)
+sigstore-sign = "0.8"
+sigstore-oidc = "0.8"
+sigstore-types = "0.8"
+# Pinned to an exact `0.0.x` because the crate is pre-1.0 and the `0.0`
+# series carries no SemVer compat guarantees — a silent break in OIDC
+# detection would disable provenance on every supported CI.
+ambient-id = "=0.0.11"
+
+# Error handling
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+libc = "0.2"
+seccompiler = "0.5"
+
+# Progress UI
+clx = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+log = "0.4"
+
+# Pattern matching. Used by aube-scripts/src/content_sniff.rs to detect
+# dangerous shapes (curl|sh, eval+atob, secret-env exfil, webhook
+# endpoints, …) in dependency lifecycle script bodies before the user
+# is prompted to allow them. Already a transitive via pluralizer +
+# yamlpatch, so adding as a direct dep here is free at compile time.
+regex = "1"
+
+# Archive extraction
+flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
+tar = "0.4"
+zstd = { version = "0.13", default-features = false }
+# Zip reader for the OSV advisory mirror — the bulk dump at
+# `osv-vulnerabilities.storage.googleapis.com/<eco>/all.zip` is a
+# zip-of-JSONs and the dependency-free std crate ecosystem has no
+# alternative. `deflate` is the only OSV-used compression method, so
+# defeature everything else to keep the build slim.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+# Semver
+node-semver = "2"
+
+# Diff/patch
+diffy = "0.5"
+
+# Internal crates — `version` is required so `cargo publish` can resolve
+# transitive crate dependencies via crates.io. release-plz keeps these
+# versions in sync with [workspace.package].version during release PRs.
+aube = { path = "crates/aube", version = "1.22.0" }
+aube-codes = { path = "crates/aube-codes", version = "1.22.0" }
+aube-settings = { path = "crates/aube-settings", version = "1.22.0" }
+aube-resolver = { path = "crates/aube-resolver", version = "1.22.0" }
+aube-registry = { path = "crates/aube-registry", version = "1.22.0" }
+aube-store = { path = "crates/aube-store", version = "1.22.0" }
+aube-linker = { path = "crates/aube-linker", version = "1.22.0" }
+aube-lockfile = { path = "crates/aube-lockfile", version = "1.22.0" }
+aube-manifest = { path = "crates/aube-manifest", version = "1.22.0" }
+aube-runtime = { path = "crates/aube-runtime", version = "1.22.0" }
+aube-scripts = { path = "crates/aube-scripts", version = "1.22.0" }
+aube-workspace = { path = "crates/aube-workspace", version = "1.22.0" }
+aube-util = { path = "crates/aube-util", version = "1.22.0" }
+
+[profile.dev]
+debug = 1

@@ -1,0 +1,90 @@
+{
+	"name": "@pnpm.e2e/hello-world-js-bin",
+	"versions": {
+		"0.0.0": {
+			"name": "@pnpm.e2e/hello-world-js-bin",
+			"version": "0.0.0",
+			"description": "A package with a hello world js bin",
+			"bin": {
+				"hello-world-js-bin": "index.js"
+			},
+			"scripts": {
+				"test": "echo \"Error: no test specified\" && exit 1"
+			},
+			"license": "MIT",
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/pnpm/pnpm.git#master"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/hello-world-js-bin@0.0.0",
+			"bugs": {
+				"url": "https://github.com/pnpm/pnpm/issues"
+			},
+			"homepage": "https://github.com/pnpm/pnpm/tree/master#readme",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-hCDXZQpo7XFeRv0A4dPjglLzF50iKBqw0JALT+GzxkOu0q3bx31ULzPZYvYmKV+bVGsGD+jJySp9Ip2s9p1BAQ==",
+				"shasum": "17d97f40281ccc89283ddff56bfb0e9e4d41ba1f",
+				"tarball": "http://localhost:4873/@pnpm.e2e/hello-world-js-bin/-/@pnpm.e2e/hello-world-js-bin-0.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"1.0.0": {
+			"name": "@pnpm.e2e/hello-world-js-bin",
+			"version": "1.0.0",
+			"description": "A package with a hello world js bin",
+			"bin": {
+				"hello-world-js-bin": "index.js"
+			},
+			"scripts": {
+				"test": "echo \"Error: no test specified\" && exit 1"
+			},
+			"license": "MIT",
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/pnpm/pnpm.git#master"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/hello-world-js-bin@1.0.0",
+			"bugs": {
+				"url": "https://github.com/pnpm/pnpm/issues"
+			},
+			"homepage": "https://github.com/pnpm/pnpm/tree/master#readme",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-3f6ugQfqFW9GR36OSeTfsSNlup7hIslT23haX3dvT/e5GyU3iInat3+0GI+MqvRcwcNzsBrTJq7yDWp3wk7O/Q==",
+				"shasum": "2d4011edcc8f6ec666fc572124002f4daf941d51",
+				"tarball": "http://localhost:4873/@pnpm.e2e/hello-world-js-bin/-/@pnpm.e2e/hello-world-js-bin-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:16.834Z",
+		"created": "2026-04-30T21:29:16.564Z",
+		"0.0.0": "2026-04-30T21:29:16.564Z",
+		"1.0.0": "2026-04-30T21:29:16.834Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"hello-world-js-bin-0.0.0.tgz": {
+			"shasum": "17d97f40281ccc89283ddff56bfb0e9e4d41ba1f",
+			"version": "0.0.0"
+		},
+		"hello-world-js-bin-1.0.0.tgz": {
+			"shasum": "2d4011edcc8f6ec666fc572124002f4daf941d51",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "6-9ca9eebb28663c7c",
+	"_id": "@pnpm.e2e/hello-world-js-bin",
+	"readme": "ERROR: No README data found!"
+}

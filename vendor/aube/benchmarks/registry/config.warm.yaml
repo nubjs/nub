@@ -1,0 +1,39 @@
+# Verdaccio config used during the one-time warm step that populates
+# the hermetic benchmark registry cache.
+#
+# Unlike test/registry/config.yaml (which intentionally has no uplink
+# so the BATS suite runs offline), this config proxies unknown packages
+# to npmjs and caches them. `benchmarks/hermetic.bash` starts Verdaccio
+# with this config, runs a single `npm install` against
+# benchmarks/fixture.package.json to materialize every tarball into
+# `storage/`, then swaps in config.yaml (no uplink) for the actual
+# benchmark runs.
+#
+# Cache location is not committed — it lives under
+# ~/.cache/aube-bench/registry/storage/ by default. Wipe that directory
+# to force a re-warm from npmjs.
+
+storage: ./storage
+
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+    # Bun and pnpm request the abbreviated packument format via the
+    # `application/vnd.npm.install-v1+json` Accept header. Verdaccio
+    # forwards this verbatim upstream and caches the response, so bun
+    # still sees the fast-path format after uplink is disabled.
+    cache: true
+
+packages:
+  '**':
+    access: $all
+    publish: $all
+    proxy: npmjs
+
+log:
+  type: stdout
+  format: pretty
+  level: warn
+
+web:
+  enable: false

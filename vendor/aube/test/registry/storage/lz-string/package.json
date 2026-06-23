@@ -1,0 +1,640 @@
+{
+	"name": "lz-string",
+	"versions": {
+		"1.3.3": {
+			"name": "lz-string",
+			"version": "1.3.3",
+			"license": "WTFPL",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string-1.3.3",
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "git://github.com/pieroxy/lz-string.git"
+			},
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"_id": "lz-string@1.3.3",
+			"optionalDependencies": {},
+			"engines": {
+				"node": "*"
+			},
+			"_engineSupported": true,
+			"_npmVersion": "1.1.4",
+			"_nodeVersion": "v0.6.19",
+			"_defaultsLoaded": true,
+			"dist": {
+				"shasum": "4b953fbbcf75da979690f755b1a0f35b2b1a5a99",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.3.3.tgz",
+				"integrity": "sha512-LGwrEpMxSH5BJEQPoKBxogK4k/zP8moxrKgxXEdzT8MEvHdFo1u+6Gjh4MQysld81G+VhVdyrVeC47q+Ufi2WQ==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCIFCMzYlERC/q5u2GCh9wX0Y08NHCsmlLtDUb8MCqojrDAiBR+VZ+4lZBwY48KQN66EiU0pvZtpT2pCwepBlLRXvCBg=="
+					}
+				]
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"directories": {},
+			"contributors": []
+		},
+		"1.3.5": {
+			"name": "lz-string",
+			"version": "1.3.5",
+			"license": "WTFPL",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string.js",
+			"bin": {
+				"lz-string": "bin/bin.js"
+			},
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/pieroxy/lz-string.git"
+			},
+			"bugs": {
+				"url": "https://github.com/pieroxy/lz-string/issues"
+			},
+			"directories": {
+				"test": "tests"
+			},
+			"author": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"_id": "lz-string@1.3.5",
+			"dist": {
+				"shasum": "cc38967ed59051cc512933a924a3edb6696ff00c",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.3.5.tgz",
+				"integrity": "sha512-Onk4nSb2aTtuWTIOek0vZHUwAIBvdtVec4SczdT2kcimJz6eXI8vRA5hrz3ZVGkxkE79G17GSKjD5Q2WW4HWCg==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEYCIQDlzFfSFhyJgRVjr7CEIrU94AsNzZzwf7Os69v0bvWpKQIhAMUHFMiwZp3TPadgfHOVxtxskEqcd84qzBgBeBOjwZ0M"
+					}
+				]
+			},
+			"_from": "./",
+			"_npmVersion": "1.3.10",
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"contributors": []
+		},
+		"1.3.6": {
+			"name": "lz-string",
+			"version": "1.3.6",
+			"license": "WTFPL",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string.js",
+			"bin": {
+				"lz-string": "bin/bin.js"
+			},
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/pieroxy/lz-string.git"
+			},
+			"bugs": {
+				"url": "https://github.com/pieroxy/lz-string/issues"
+			},
+			"directories": {
+				"test": "tests"
+			},
+			"author": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"_id": "lz-string@1.3.6",
+			"dist": {
+				"shasum": "cc91b00d3264b15402e428e76dfeb709193bc10f",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.3.6.tgz",
+				"integrity": "sha512-gIHN4Nkmln8SrIRAXJ3qzGH7gJ8WjAORiwD+SB3PYW4n4ri+gP257pXSeyw/VGOV+6ZLIkZmNfK4xT6e2U5QIQ==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCICsj8exNp9xi4L5Kz31ojhaj18oeqnD4vzlhr/RMaAIiAiA/3mY8M6oycukeCebQdfWQtZC640OyMjQO11da2GnGGg=="
+					}
+				]
+			},
+			"_from": "./",
+			"_npmVersion": "1.3.10",
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"contributors": []
+		},
+		"1.4.0": {
+			"name": "lz-string",
+			"version": "1.4.0",
+			"license": "WTFPL",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string.js",
+			"bin": {
+				"lz-string": "bin/bin.js"
+			},
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/pieroxy/lz-string.git"
+			},
+			"bugs": {
+				"url": "https://github.com/pieroxy/lz-string/issues"
+			},
+			"directories": {
+				"test": "tests"
+			},
+			"author": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"_id": "lz-string@1.4.0",
+			"dist": {
+				"shasum": "99a26f900380bb09a6829179660a08fd409365e9",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.0.tgz",
+				"integrity": "sha512-nQGhUWKdL9pStpmNBGMNrmmNthQblpz0PPg9WswfTSsWntHwVYwkCFNifd6+UVEFrzKLilgJUVM7PCrqO6zTEw==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCIHKmIAp12jIEVrP0181VciLgL14Klm0cb54CfL5lWnz9AiAG7LFWDAi+txGTnhnK8vSEUy/W3E5uhyJrfCg8JQMLdg=="
+					}
+				]
+			},
+			"_from": ".",
+			"_npmVersion": "1.3.10",
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"contributors": []
+		},
+		"1.4.1": {
+			"name": "lz-string",
+			"version": "1.4.1",
+			"license": "WTFPL",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string.js",
+			"bin": {
+				"lz-string": "bin/bin.js"
+			},
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/pieroxy/lz-string.git"
+			},
+			"bugs": {
+				"url": "https://github.com/pieroxy/lz-string/issues"
+			},
+			"directories": {
+				"test": "tests"
+			},
+			"author": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"_id": "lz-string@1.4.1",
+			"dist": {
+				"shasum": "48b7c8d63322ba08eea92ea0595e2231ff0823ab",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.1.tgz",
+				"integrity": "sha512-eT0wLieppWv4piSEblMeBHbcLJzLF7JXiiH0IhesIhZvtN9GAaHTly93S3UQL3U5Sw7fd3nHV2XgAIIg0/4Mew==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEYCIQCcoo5jCdCYSunCuwAJ3nVS6gGgh0ojHmzzvbZNKPS+xAIhAN6F9SeBHuH/6rIrnhDDVeTtPpVvGiUirfIO1OAlturx"
+					}
+				]
+			},
+			"_from": ".",
+			"_npmVersion": "1.3.10",
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"contributors": []
+		},
+		"1.4.2": {
+			"name": "lz-string",
+			"version": "1.4.2",
+			"license": "WTFPL",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string.js",
+			"bin": {
+				"lz-string": "bin/bin.js"
+			},
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/pieroxy/lz-string.git"
+			},
+			"bugs": {
+				"url": "https://github.com/pieroxy/lz-string/issues"
+			},
+			"directories": {
+				"test": "tests"
+			},
+			"author": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"gitHead": "b9fff57245db373dffe5cb3ed468b8e16a69ac9f",
+			"_id": "lz-string@1.4.2",
+			"_shasum": "532428aede23468c42378df1cc80571d6f240bf9",
+			"_from": ".",
+			"_npmVersion": "2.7.4",
+			"_nodeVersion": "0.12.2",
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"dist": {
+				"shasum": "532428aede23468c42378df1cc80571d6f240bf9",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.2.tgz",
+				"integrity": "sha512-YyjVnxzyQvTzeVP6eB6A6cAIxImn5J4znIXanH35y3K3CU9aZD/KN2uQezFNpPOpMNXUuP6IIFhSr7vcnEkdwg==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEUCIQC9WM0baAsMopG8B98EraOITKHPSNKYqa9GllTDEGMZVwIgZR/+suM71yIPoRtfVU02daToZ0/vSXbNENrKSFE/4nI="
+					}
+				]
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"contributors": []
+		},
+		"1.4.3": {
+			"name": "lz-string",
+			"version": "1.4.3",
+			"license": "WTFPL",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string.js",
+			"bin": {
+				"lz-string": "bin/bin.js"
+			},
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/pieroxy/lz-string.git"
+			},
+			"bugs": {
+				"url": "https://github.com/pieroxy/lz-string/issues"
+			},
+			"directories": {
+				"test": "tests"
+			},
+			"author": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"gitHead": "fe41a0b00520dba159919cde5e73f1c14ff59d07",
+			"_id": "lz-string@1.4.3",
+			"_shasum": "88d15815ae664c0ef6ea89a5bed31e54550e7434",
+			"_from": ".",
+			"_npmVersion": "2.7.4",
+			"_nodeVersion": "0.12.2",
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"dist": {
+				"shasum": "88d15815ae664c0ef6ea89a5bed31e54550e7434",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.3.tgz",
+				"integrity": "sha512-Kd4go0VBh8ysN/MBj3wSBrDkfQZxAi7EobwGxS0Fr5n2iupi2nyqmVC/ADYD+vBarn2kHtw0n/m345Tcwqxidg==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEUCIG94xyB+HKoKxIQKlbk3SvmdURotC2mTFgu2ct5hmP5aAiEAip7i39W5lqEnErljTcgFl/pKnZfZPvGNZdjVSIGNdOE="
+					}
+				]
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"contributors": []
+		},
+		"1.4.4": {
+			"name": "lz-string",
+			"version": "1.4.4",
+			"license": "WTFPL",
+			"filename": "lz-string.js",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string.js",
+			"bin": {
+				"lz-string": "bin/bin.js"
+			},
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/pieroxy/lz-string.git"
+			},
+			"bugs": {
+				"url": "https://github.com/pieroxy/lz-string/issues"
+			},
+			"directories": {
+				"test": "tests"
+			},
+			"author": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"autoupdate": {
+				"source": "git",
+				"target": "git://github.com/pieroxy/lz-string.git",
+				"basePath": "libs/",
+				"files": [
+					"lz-string.js",
+					"lz-string.min.js",
+					"base64-string.js"
+				]
+			},
+			"gitHead": "cf06e9a0e61daa8b120a474bbc80666f959ff7d4",
+			"_id": "lz-string@1.4.4",
+			"_shasum": "c0d8eaf36059f705796e1e344811cf4c498d3a26",
+			"_from": ".",
+			"_npmVersion": "2.7.4",
+			"_nodeVersion": "0.12.2",
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"dist": {
+				"shasum": "c0d8eaf36059f705796e1e344811cf4c498d3a26",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.4.tgz",
+				"integrity": "sha512-0ckx7ZHRPqb0oUm8zNr+90mtf9DQB60H1wMCjBtfi62Kl3a7JbHob6gA2bC+xRvZoOL+1hzUK8jeuEIQE8svEQ==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCIEYWQLn3l67c+/gzOqWUru3u/wZG/Uijq1y3poab6/SFAiBAxde48Rlmgsi4lkodaBAMgvkvOY7gssoZExDacTjICw=="
+					}
+				]
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"contributors": []
+		},
+		"1.5.0": {
+			"name": "lz-string",
+			"version": "1.5.0",
+			"license": "MIT",
+			"filename": "lz-string.js",
+			"description": "LZ-based compression algorithm",
+			"homepage": "http://pieroxy.net/blog/pages/lz-string/index.html",
+			"keywords": [
+				"lz",
+				"compression",
+				"string"
+			],
+			"main": "libs/lz-string.js",
+			"typings": "typings/lz-string.d.ts",
+			"bin": {
+				"lz-string": "bin/bin.js"
+			},
+			"scripts": {},
+			"dependencies": {},
+			"devDependencies": {},
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/pieroxy/lz-string.git"
+			},
+			"bugs": {
+				"url": "https://github.com/pieroxy/lz-string/issues"
+			},
+			"directories": {
+				"test": "tests"
+			},
+			"author": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"autoupdate": {
+				"source": "git",
+				"target": "git://github.com/pieroxy/lz-string.git",
+				"basePath": "libs/",
+				"files": [
+					"lz-string.js",
+					"lz-string.min.js",
+					"base64-string.js"
+				]
+			},
+			"gitHead": "4a94308c1e684fb98866f7ba1288f3db6d9f8801",
+			"_id": "lz-string@1.5.0",
+			"_nodeVersion": "16.19.1",
+			"_npmVersion": "8.19.3",
+			"dist": {
+				"integrity": "sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ==",
+				"shasum": "c1ab50f77887b712621201ba9fd4e3a6ed099941",
+				"tarball": "https://registry.npmjs.org/lz-string/-/lz-string-1.5.0.tgz",
+				"fileCount": 16,
+				"unpackedSize": 175825,
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCIDFXe2mJhe/c2RygpDTZFwYF+ZLzmWmrobWbcX05nZzgAiB2NY0LGdJ8X/8K5Y24goCdb/HvaDnCxn4BdQm7jfU/Jw=="
+					}
+				],
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v4.10.10\r\nComment: https://openpgpjs.org\r\n\r\nwsFzBAEBCAAGBQJkAwBbACEJED1NWxICdlZqFiEECWMYAoorWMhJKdjhPU1b\r\nEgJ2VmrCaw/+L77yb5aRlRo8abeR0BMuhftlzyMGzGh+asUdX+afBEOGYTyJ\r\n2XM9fqdpZrtJv3+q9D+gqnLg7MoRQQkmvC+U0HTHEWtEJNaIH1at/IMhi+xB\r\n5/3Jho9VOtLhPto1/ld1CVu0JTxdUTDiTjpE26a4wdd7qMDhjaSJkypjtutn\r\nfwZXUs2YzKZQ1h6RlLSpB2b19KwiVjFsqnV+tIgs1WmjcrC7RxqEtA2yDdt5\r\nfWDM3lLgSGjFkedydnOskMNqLaL9COVzQ8iuFXGeS/NJvhi64gKDcGFl2ztx\r\nQS30dC/ud+EkF3omjN/cFhAnBCcXLvK52MxglR4+Ph4QAa4f3NhbUZbc1i4G\r\nf3Qa8GxOPHAAfR4X7z4E2fKlpybz7it3Sl5SJ8RQo3X24TGR69rM4Flc7G7S\r\ncNUtFXu/zJLmxYlc3u0Qcbx8sbdkg65V9y0n1aFXpwlofPbSqjOp/M4F5Yu4\r\nqQjGV6n8fz7CUb5ZpcEWFgztd+pi+7G0hhbKWrznOPxss9LWjr1j5PbIsY/9\r\nfZNeHynSv7Bkx2X7Cr7UPVZr9zNWLXdT7bxcI3ielAUVAeQRtRB9ostiCGvL\r\nChEZ3dZmIbYAeeSgL/175rpseCxPotDpLJ9xMBcyozfC1bbedA2LFbIkDzwA\r\nDKmVP8Nl733GahX08ZwxYSsoIU6oh9hYTeQ=\r\n=6NYt\r\n-----END PGP SIGNATURE-----\r\n"
+			},
+			"_npmUser": {
+				"name": "pieroxy",
+				"email": "pieroxy@pieroxy.net"
+			},
+			"maintainers": [
+				{
+					"name": "pieroxy",
+					"email": "pieroxy@pieroxy.net"
+				}
+			],
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages",
+				"tmp": "tmp/lz-string_1.5.0_1677918299665_0.8929158378621742"
+			},
+			"_hasShrinkwrap": false,
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2023-03-07T03:59:54.555Z",
+		"created": "2013-10-27T23:24:29.694Z",
+		"1.3.3": "2013-10-27T23:24:31.651Z",
+		"1.3.5": "2014-12-15T14:04:16.694Z",
+		"1.3.6": "2014-12-18T10:42:10.443Z",
+		"1.4.0": "2015-03-23T08:36:59.425Z",
+		"1.4.1": "2015-03-23T10:12:12.637Z",
+		"1.4.2": "2015-04-26T18:36:23.053Z",
+		"1.4.3": "2015-04-26T18:36:57.659Z",
+		"1.4.4": "2015-05-25T21:13:19.583Z",
+		"1.5.0": "2023-03-04T08:24:59.879Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.5.0"
+	},
+	"_uplinks": {
+		"npmjs": {
+			"etag": "W/\"6c5871ef54c17b3a34d5cac9b87a3b95\"",
+			"fetched": 1776009932355
+		}
+	},
+	"_distfiles": {
+		"lz-string-1.3.3.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.3.3.tgz",
+			"sha": "4b953fbbcf75da979690f755b1a0f35b2b1a5a99",
+			"registry": "npmjs"
+		},
+		"lz-string-1.3.5.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.3.5.tgz",
+			"sha": "cc38967ed59051cc512933a924a3edb6696ff00c",
+			"registry": "npmjs"
+		},
+		"lz-string-1.3.6.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.3.6.tgz",
+			"sha": "cc91b00d3264b15402e428e76dfeb709193bc10f",
+			"registry": "npmjs"
+		},
+		"lz-string-1.4.0.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.0.tgz",
+			"sha": "99a26f900380bb09a6829179660a08fd409365e9",
+			"registry": "npmjs"
+		},
+		"lz-string-1.4.1.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.1.tgz",
+			"sha": "48b7c8d63322ba08eea92ea0595e2231ff0823ab",
+			"registry": "npmjs"
+		},
+		"lz-string-1.4.2.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.2.tgz",
+			"sha": "532428aede23468c42378df1cc80571d6f240bf9",
+			"registry": "npmjs"
+		},
+		"lz-string-1.4.3.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.3.tgz",
+			"sha": "88d15815ae664c0ef6ea89a5bed31e54550e7434",
+			"registry": "npmjs"
+		},
+		"lz-string-1.4.4.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.4.4.tgz",
+			"sha": "c0d8eaf36059f705796e1e344811cf4c498d3a26",
+			"registry": "npmjs"
+		},
+		"lz-string-1.5.0.tgz": {
+			"url": "https://registry.npmjs.org/lz-string/-/lz-string-1.5.0.tgz",
+			"sha": "c1ab50f77887b712621201ba9fd4e3a6ed099941",
+			"registry": "npmjs"
+		}
+	},
+	"_attachments": {
+		"lz-string-1.5.0.tgz": {
+			"shasum": "c1ab50f77887b712621201ba9fd4e3a6ed099941"
+		}
+	},
+	"_rev": "2-8ec12e6530df05a3",
+	"_id": "lz-string",
+	"readme": "lz-string\n=========\nLZ-based compression algorithm for JavaScript\n\n## Warning (migrating from version 1.3.4 - nov 2014)\nFiles have changed locations and name since a recent release. The new release file is in `libs/lz-string.min.js` (or in `libs/lz-string.js` if you don't care for the minified version)\n\nSorry about the mess in other repos. This will not happen again.\n\n## Note on server side\n\nIf you are using one of the ports of lz-string to decode on the server what was encoded in the browser, you might want to use version 1.3.7 as the version 1.3.8 introduced a slight change in the encoding. While the JS versions are completely cross-compatible, the PHP, Go, ... versions might not be as forgiving.\n\n## Install via [npm](https://npmjs.org/)\n\n```shell\n$ npm install -g lz-string\n$ lz-string input.js > output.txt\n```\n\n## Home page\nHome page for this program with examples, documentation and a live demo: http://pieroxy.net/blog/pages/lz-string/index.html\n\n## Other languages\nThis lib has numerous ports to other languages, for server side processing, mostly. Here they are:\n\n\n* **Java:** [by Diogo Duailibe](https://github.com/diogoduailibe/lzstring4j)\n* **Java:** [by rufushuang, with base64 support and better performances](https://github.com/rufushuang/lz-string4java)\n* **C#:** [by Jawa-the-Hutt](https://github.com/jawa-the-hutt/lz-string-csharp)\n* **C#:** [by kreudom, another implementation in C#, more up to date](https://github.com/kreudom/lz-string-csharp)\n* **PHP:** [by nullpunkt](https://github.com/nullpunkt/lz-string-php)\n* **Python3:** [by eduardtomasek](https://github.com/eduardtomasek/lz-string-python)\n* **Another Python:** [by marcel-dancak](https://github.com/marcel-dancak/lz-string-python)\n* **Go** [I helped a friend to write a Go implementation of the decompression algorithm](https://github.com/pieroxy/lz-string-go)\n* **Go** [Austin wrote the decompression part as well](https://github.com/Lazarus/lz-string-go)\n* **Elixir** [by Michael Shapiro](https://github.com/koudelka/elixir-lz-string)\n* **C++/QT** [by AmiArt](https://github.com/AmiArt/qt-lzstring)\n* **C++** [by Andrey Krasnov, another implementation in C++11](https://github.com/andykras/lz-string-cpp)\n* **VB.NET** [by gsemac](https://github.com/gsemac/lz-string-vb)\n* **Salesforce Apex** (Java like language): [bilal did the port](https://github.com/bilalfastian/LZ4String)\n* **Kotlin:** [from Zen Liu](https://github.com/ZenLiuCN/lz-string4k)\n* **Dart:** [from skipness](https://github.com/skipness/lzstring-dart)\n* **Haxe:** [from markknol](https://github.com/markknol/hx-lzstring)\n* **Rust:** [from adumbidiot](https://github.com/adumbidiot/lz-str-rs)"
+}

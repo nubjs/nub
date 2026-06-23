@@ -1,0 +1,159 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "aube-bun-messy-fixture",
+      "dependencies": {
+        "@fixture/core": "workspace:*",
+        "@fixture/plugin": "workspace:^",
+        "aube-test-builds-marker": "1.0.0",
+        "aube-test-builds-marker-2": "1.0.0",
+        "chalk": "catalog:colors",
+        "git-bare": "github:tj/term-canvas",
+        "git-github-long": "github:tj/term-canvas#07215c71ddd8b8643fe0603124618b3205cf3666",
+        "git-long": "git+https://github.com/tj/term-canvas.git#2c16b4319dddf069b5cfe4539e419b39de667c81",
+        "git-short": "github:tj/term-canvas#a6d65f9",
+        "is-even": "catalog:evens",
+        "is-odd": "catalog:",
+        "local-dir": "file:./vendor/local-dir",
+        "local-tar": "file:./vendor/local-tar-1.0.0.tgz",
+        "odd-alias": "npm:is-odd@3.0.1",
+        "remote-odd": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz",
+      },
+      "devDependencies": {
+        "kind-of": "catalog:utils",
+      },
+    },
+    "packages/core": {
+      "name": "@fixture/core",
+      "version": "1.0.0",
+      "dependencies": {
+        "is-number": "^6.0.0",
+        "is-odd": "catalog:",
+        "local-dir": "file:../../vendor/local-dir",
+      },
+    },
+    "packages/legacy": {
+      "name": "@fixture/legacy",
+      "version": "1.0.0",
+      "dependencies": {
+        "@fixture/core": "workspace:*",
+        "is-even": "catalog:evens",
+        "is-number": "6.0.0",
+        "local-tar": "file:../../vendor/local-tar-1.0.0.tgz",
+      },
+    },
+    "packages/plugin": {
+      "name": "@fixture/plugin",
+      "version": "2.0.0",
+      "dependencies": {
+        "@fixture/core": "workspace:^",
+        "is-number": "7.0.0",
+        "kind-of": "catalog:utils",
+        "odd-alias": "npm:is-odd@3.0.1",
+      },
+      "peerDependencies": {
+        "@fixture/core": "^1.0.0",
+      },
+    },
+    "packages/range-user": {
+      "name": "@fixture/range-user",
+      "version": "1.0.0",
+      "dependencies": {
+        "is-number": "^7.0.0",
+        "kind-of": "^3.2.2",
+      },
+    },
+  },
+  "trustedDependencies": [
+    "aube-test-builds-marker",
+  ],
+  "patchedDependencies": {
+    "is-odd@3.0.1": "patches/is-odd@3.0.1.patch",
+  },
+  "overrides": {
+    "is-number@<7.0.0": "7.0.0",
+  },
+  "catalog": {
+    "is-odd": "3.0.1",
+  },
+  "catalogs": {
+    "colors": {
+      "chalk": "4.1.2",
+    },
+    "evens": {
+      "is-even": "1.0.0",
+    },
+    "utils": {
+      "kind-of": "6.0.3",
+    },
+  },
+  "packages": {
+    "@fixture/core": ["@fixture/core@workspace:packages/core"],
+
+    "@fixture/legacy": ["@fixture/legacy@workspace:packages/legacy"],
+
+    "@fixture/plugin": ["@fixture/plugin@workspace:packages/plugin"],
+
+    "@fixture/range-user": ["@fixture/range-user@workspace:packages/range-user"],
+
+    "ansi-styles": ["ansi-styles@4.3.0", "http://localhost:4873/ansi-styles/-/ansi-styles-4.3.0.tgz", { "dependencies": { "color-convert": "^2.0.1" } }, "sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg=="],
+
+    "aube-test-builds-marker": ["aube-test-builds-marker@1.0.0", "http://localhost:4873/aube-test-builds-marker/-/aube-test-builds-marker-1.0.0.tgz", {}, "sha512-wVe7jGLKQqnUA/XsbZ0V6r080ikeGv/T3cROdbyjhs63GiMW6DVi0tQEcEYOWMKmJfuPo2LYsvJ5eC/FujHNtg=="],
+
+    "aube-test-builds-marker-2": ["aube-test-builds-marker-2@1.0.0", "http://localhost:4873/aube-test-builds-marker-2/-/aube-test-builds-marker-2-1.0.0.tgz", {}, "sha512-SsJXsN2ySYaZ7QDCgOA/os4guoqmvds+bRlO2Db4fdNCn+sHOgIu/vWHXuVCkGOGK1Wp8j80ykDONp/N7z5Byg=="],
+
+    "chalk": ["chalk@4.1.2", "http://localhost:4873/chalk/-/chalk-4.1.2.tgz", { "dependencies": { "ansi-styles": "^4.1.0", "supports-color": "^7.1.0" } }, "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA=="],
+
+    "color-convert": ["color-convert@2.0.1", "http://localhost:4873/color-convert/-/color-convert-2.0.1.tgz", { "dependencies": { "color-name": "~1.1.4" } }, "sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ=="],
+
+    "color-name": ["color-name@1.1.4", "http://localhost:4873/color-name/-/color-name-1.1.4.tgz", {}, "sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA=="],
+
+    "git-bare": ["term-canvas@github:tj/term-canvas#be390fe", {}, "tj-term-canvas-be390fe", "sha512-gYcsiLbmfiYIooMZ0fuhJs399S/7wd2i1sUzjFSdW2ZMqmC03miZlzG/B84LZkBABfdr5pHffN7JILwJMv/lQQ=="],
+
+    "git-github-long": ["term-canvas@github:tj/term-canvas#07215c7", {}, "tj-term-canvas-07215c7", "sha512-zekl76mGHj0+7OBuRcXeiXzmCRytlJLgB6gfNSo2jKTek2In+nSupnee6A47BZQ4ln7BbzrsoD0KlSUZAan8dQ=="],
+
+    "git-long": ["term-canvas@github:tj/term-canvas#2c16b43", {}, "tj-term-canvas-2c16b43", "sha512-cGdjsaKOSDLKx4jC674vvSWymvrqz0KEootddOSIxh8d6jYpYtGEF5txwG/b/qs815dI9gZlcjcV2F2IlOwkdA=="],
+
+    "git-short": ["term-canvas@github:tj/term-canvas#a6d65f9", {}, "tj-term-canvas-a6d65f9", "sha512-NAkIBdNS/kggIPKXTXuCX3w65wxMpiV0JKp/VaZlxQqVxZo3MJqwsRE43QOt+pXIDNmprTyWvyj2cERwYgRO1g=="],
+
+    "has-flag": ["has-flag@4.0.0", "http://localhost:4873/has-flag/-/has-flag-4.0.0.tgz", {}, "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ=="],
+
+    "is-buffer": ["is-buffer@1.1.6", "http://localhost:4873/is-buffer/-/is-buffer-1.1.6.tgz", {}, "sha512-NcdALwpXkTm5Zvvbk7owOUSvVvBKDgKP5/ewfXEznmQFfs4ZRmanOeKBTjRVjka3QFoN6XJ+9F3USqfHqTaU5w=="],
+
+    "is-even": ["is-even@1.0.0", "http://localhost:4873/is-even/-/is-even-1.0.0.tgz", { "dependencies": { "is-odd": "^0.1.2" } }, "sha512-LEhnkAdJqic4Dbqn58A0y52IXoHWlsueqQkKfMfdEnIYG8A1sm/GHidKkS6yvXlMoRrkM34csHnXQtOqcb+Jzg=="],
+
+    "is-number": ["is-number@6.0.0", "http://localhost:4873/is-number/-/is-number-6.0.0.tgz", {}, "sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUu21KncEkYGPqob2oSZ5mUT73vLGrHQjKw3KMPwfDzg=="],
+
+    "is-odd": ["is-odd@3.0.1", "http://localhost:4873/is-odd/-/is-odd-3.0.1.tgz", { "dependencies": { "is-number": "^6.0.0" } }, "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA=="],
+
+    "kind-of": ["kind-of@6.0.3", "http://localhost:4873/kind-of/-/kind-of-6.0.3.tgz", {}, "sha512-dcS1ul+9tmeD95T+x28/ehLgd9mENa3LsvDTtzm3vyBEO7RPptvAD+t44WVXaUjTBRcrpFeFlC8WCruUR456hw=="],
+
+    "local-dir": ["local-dir@file:vendor/local-dir", { "dependencies": { "is-number": "^6.0.0" } }],
+
+    "local-tar": ["local-tar@./vendor/local-tar-1.0.0.tgz", {}, "sha512-7eXhSZO6r6oLXcGqIBNeOkTc4cjoaf4+j22ejHsQQZub79ViB3EQIhRz2MSOlT1m8lo3syV5Q9LGeab1n4LU/Q=="],
+
+    "odd-alias": ["is-odd@3.0.1", "http://localhost:4873/is-odd/-/is-odd-3.0.1.tgz", { "dependencies": { "is-number": "^6.0.0" } }, "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA=="],
+
+    "remote-odd": ["is-odd@https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz", { "dependencies": { "is-number": "^6.0.0" } }, "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA=="],
+
+    "supports-color": ["supports-color@7.2.0", "http://localhost:4873/supports-color/-/supports-color-7.2.0.tgz", { "dependencies": { "has-flag": "^4.0.0" } }, "sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw=="],
+
+    "@fixture/core/local-dir": ["local-dir@file:vendor/local-dir", { "dependencies": { "is-number": "^6.0.0" } }],
+
+    "@fixture/legacy/local-tar": ["local-tar@../../vendor/local-tar-1.0.0.tgz", {}, "sha512-7eXhSZO6r6oLXcGqIBNeOkTc4cjoaf4+j22ejHsQQZub79ViB3EQIhRz2MSOlT1m8lo3syV5Q9LGeab1n4LU/Q=="],
+
+    "@fixture/plugin/is-number": ["is-number@7.0.0", "http://localhost:4873/is-number/-/is-number-7.0.0.tgz", {}, "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="],
+
+    "@fixture/range-user/is-number": ["is-number@7.0.0", "http://localhost:4873/is-number/-/is-number-7.0.0.tgz", {}, "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="],
+
+    "@fixture/range-user/kind-of": ["kind-of@3.2.2", "http://localhost:4873/kind-of/-/kind-of-3.2.2.tgz", { "dependencies": { "is-buffer": "^1.1.5" } }, "sha512-NOW9QQXMoZGg/oqnVNoNTTIFEIid1627WCffUBJEdMxYApq7mNE7CpzucIPc+ZQg25Phej7IJSmX3hO+oblOtQ=="],
+
+    "is-even/is-odd": ["is-odd@0.1.2", "http://localhost:4873/is-odd/-/is-odd-0.1.2.tgz", { "dependencies": { "is-number": "^3.0.0" } }, "sha512-Ri7C2K7o5IrUU9UEI8losXJCCD/UtsaIrkR5sxIcFg4xQ9cRJXlWA5DQvTE0yDc0krvSNLsRGXN11UPS6KyfBw=="],
+
+    "is-even/is-odd/is-number": ["is-number@3.0.0", "http://localhost:4873/is-number/-/is-number-3.0.0.tgz", { "dependencies": { "kind-of": "^3.0.2" } }, "sha512-4cboCqIpliH+mAvFNegjZQ4kgKc3ZUhQVr3HvWbSh5q3WH2v82ct+T2Y1hdU5Gdtorx/cLifQjqCbL7bpznLTg=="],
+
+    "is-even/is-odd/is-number/kind-of": ["kind-of@3.2.2", "http://localhost:4873/kind-of/-/kind-of-3.2.2.tgz", { "dependencies": { "is-buffer": "^1.1.5" } }, "sha512-NOW9QQXMoZGg/oqnVNoNTTIFEIid1627WCffUBJEdMxYApq7mNE7CpzucIPc+ZQg25Phej7IJSmX3hO+oblOtQ=="],
+  }
+}

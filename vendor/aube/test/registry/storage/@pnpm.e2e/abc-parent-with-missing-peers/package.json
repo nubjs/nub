@@ -1,0 +1,42 @@
+{
+	"name": "@pnpm.e2e/abc-parent-with-missing-peers",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/abc-parent-with-missing-peers",
+			"version": "1.0.0",
+			"dependencies": {
+				"@pnpm.e2e/abc": "1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc-parent-with-missing-peers@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-Qkasr8Ni7JKKgMOy8dOo62lyjf6WHEMaEgqWzhTuHvk0hY5rvoEaffQSIBaFEovr3Sb4qvzqqQh+1cxLEKa0KA==",
+				"shasum": "ad8f5541d78c7590d022c5d794e9030a44683513",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc-parent-with-missing-peers/-/@pnpm.e2e/abc-parent-with-missing-peers-1.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:12.838Z",
+		"created": "2026-04-30T21:29:12.838Z",
+		"1.0.0": "2026-04-30T21:29:12.838Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"abc-parent-with-missing-peers-1.0.0.tgz": {
+			"shasum": "ad8f5541d78c7590d022c5d794e9030a44683513",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "3-1cab7c193826c41b",
+	"_id": "@pnpm.e2e/abc-parent-with-missing-peers",
+	"readme": "ERROR: No README data found!"
+}

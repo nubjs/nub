@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+    # hickory-proto 0.25.2 via reqwest's hickory-dns feature. Keep DNS
+    # caching until reqwest can move to hickory-resolver/proto 0.26.x.
+    "RUSTSEC-2026-0118",
+    "RUSTSEC-2026-0119",
+]

@@ -54,8 +54,7 @@ For anything beyond a one-line fix, drive the work with the **fray methodology**
 Work in an isolated worktree off `origin/main` (AGENTS.md "Default to a PR flow"):
 
 ```bash
-git worktree add /tmp/nub-fix-<n> -b fix-issue-<n> origin/main
-git -C /tmp/nub-fix-<n> submodule update --init vendor/aube   # only if the fix touches the PM engine
+git worktree add /tmp/nub-fix-<n> -b fix-issue-<n> origin/main   # vendor/aube comes along (plain in-tree files)
 cd /tmp/nub-fix-<n> && export CARGO_TARGET_DIR=/tmp/nub-fix-<n>-target
 ```
 

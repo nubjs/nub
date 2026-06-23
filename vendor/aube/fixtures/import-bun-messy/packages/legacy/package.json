@@ -1,0 +1,11 @@
+{
+  "name": "@fixture/legacy",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@fixture/core": "workspace:*",
+    "is-even": "catalog:evens",
+    "is-number": "6.0.0",
+    "local-tar": "file:../../vendor/local-tar-1.0.0.tgz"
+  }
+}

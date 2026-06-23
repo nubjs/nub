@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // merge-cascade — drive the orchestrator's merge-queue: for each enqueued PR,
-// wait for CI to go green, squash-merge, fast-forward the shared tree, and sync
-// the vendor/aube submodule if the PR bumped its pin. Automates the manual
-// watch → merge → pull → next-PR loop.
+// wait for CI to go green, squash-merge, and fast-forward the shared tree.
+// Automates the manual watch → merge → pull → next-PR loop. (vendor/aube is plain
+// in-tree files now (Pattern B) — its edits ride the normal pull, no submodule
+// sync.)
 //
 // Runs under BOTH plain Node (type-stripping) and nub:
 //   node scripts/merge-cascade.ts [--dry-run] [--queue <path>] [--shared-tree <dir>]
@@ -27,8 +28,7 @@
 //      cancelled, a CONFLICTING PR, blocks. State is re-read immediately before
 //      the merge to close the poll→merge staleness window.
 //   5. `gh pr merge <pr> --squash --admin`.
-//   6. `git -C <shared-tree> pull --ff-only`; if the PR touched vendor/aube,
-//      `git -C <shared-tree> submodule update --init vendor/aube`.
+//   6. `git -C <shared-tree> pull --ff-only`.
 //
 // --dry-run reports the decision for every entry (held / would-merge / blocked)
 // and merges nothing. Default is --dry-run-safe: it WILL merge on green unless
@@ -254,16 +254,6 @@ function mergeDecision(st: {
   return { verdict: "merge", reason: "all green + gate passed + mergeable" };
 }
 
-// Whether the PR touched the vendor/aube submodule gitlink (a pin bump).
-function touchesAube(pr: number): boolean {
-  try {
-    const files = gh(["pr", "view", String(pr), "--repo", REPO, "--json", "files", "--jq", ".files[].path"]);
-    return files.split("\n").some((p) => p.trim() === "vendor/aube");
-  } catch {
-    return false;
-  }
-}
-
 // ---- thread flip ------------------------------------------------------------
 
 // A status the board treats as already-closed — flipping one of these would
@@ -414,8 +404,7 @@ async function main() {
       continue;
     }
 
-    const aube = touchesAube(e.pr);
-    console.log(`  ${tag}: green — squash-merging${aube ? " (bumps vendor/aube)" : ""}…`);
+    console.log(`  ${tag}: green — squash-merging…`);
     gh(["pr", "merge", String(e.pr), "--repo", REPO, "--squash", "--admin"]);
     merged++;
 
@@ -431,11 +420,10 @@ async function main() {
       }
     }
 
-    // Fast-forward the shared tree; sync the submodule on a pin bump.
+    // Fast-forward the shared tree (vendor/aube edits ride the normal pull).
     try {
       git(["-C", sharedTree, "pull", "--ff-only"]);
-      if (aube) git(["-C", sharedTree, "submodule", "update", "--init", "vendor/aube"]);
-      console.log(`  ${tag}: merged + shared tree fast-forwarded${aube ? " + aube synced" : ""}.`);
+      console.log(`  ${tag}: merged + shared tree fast-forwarded.`);
     } catch (err) {
       console.log(`  ${tag}: merged, but shared-tree update failed: ${(err as Error).message.split("\n")[0]}`);
     }

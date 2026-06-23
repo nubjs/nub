@@ -1,0 +1,7 @@
+{
+  "name": "yarn-patch-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-number": "patch:is-number@npm%3A7.0.0#.yarn/patches/is-number.patch"
+  }
+}

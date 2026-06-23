@@ -1,0 +1,672 @@
+{
+	"name": "@types/aria-query",
+	"versions": {
+		"3.0.0": {
+			"name": "@types/aria-query",
+			"version": "3.0.0",
+			"license": "MIT",
+			"_id": "@types/aria-query@3.0.0",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/me",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "me"
+				}
+			],
+			"dist": {
+				"shasum": "04df67a26ebab3c287aa9ef810d2ab16badbef13",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-3.0.0.tgz",
+				"fileCount": 4,
+				"integrity": "sha512-Db5isgV6VH6zTjQ5MTKW/jjS3YegqNlFi8xfM0F0YTBAjWPp7SHe12JWkbZ+xAuGK0yzh/5Bu59N4eV2sTYhsQ==",
+				"signatures": [
+					{
+						"sig": "MEQCIDCMYHOBnI+fxtdoBk9fH52YDdMKZROm1+ttCM+SoBwlAiAmTVqRiWO8z/V868FexQlhPmXPgXYAI/b3NLnd21Gghg==",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 10206,
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.4\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJdiThICRA9TVsSAnZWagAApKIP/RQVVhF4Zdx2dLC727GU\nwc8qgRH8/5q45oSva/kwJKUVz58RetzvZ9ccFMucvgYjLuNU2X15SXjMyzDk\nNaGZLKjePpwBlHzFUnP0SW87oLM1k6nAC3NCSMWWtIJ+w7oAOlcXTvlmQ3rb\nLpQRxsZc/18WEhRT91dNx/gkCHfTPE8SNeSpSpVBnLzL0A8al+xy/xm8gnSy\nrrM0TeZdon8ZE7zBZYtcTr2Cz7eSOnMKPvJuLiq8qXh+QCfYcd8bs7uKazaH\nLsulNLVSSsMjgHZtC1HjzRyY1Pa/6UIj5F6YXSMqPwB45bXWhX9995M0zRo4\nu9ntxkieusBMX2qc5slNyNNsKnVfcj9FjbnPRtNmVApb1fe3lxqlGk4gccSm\nRid4nXeBxJyLEpn4XOx60RyLquZSBpENMBj/mUbzTwg5GWbEoP50FfhjI8+Z\natAhyw2FAZclle4Q3o+07bUAzEUJjkO1MyJfM0k1Z7tFh5T0ASle9K/9Mmaq\nyvzASHwLDK1E2k5QAQVa5FIMZjnVCcvU/baJPpovIg86uTahzm2IhBTd2o5G\nXAyuY/Sy/V8P2IT9MNqkLhY3pJkuHVrAHhqvitIGa6FIiXmtrd9Bf5cOFKxD\nv6yZQNIc6KaDyqTVB6ndWtM1FflCj18Ue9254hbcXSN2liYzPTFQQKvZcbbW\n/8Vj\r\n=vh0w\r\n-----END PGP SIGNATURE-----\r\n"
+			},
+			"main": "",
+			"types": "index",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "3.0",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_3.0.0_1569273928306_0.2786247647580662",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "16444a08a61f36f1b1866f138a1de6e08d9752cda55160ff38fbea00ce57c1e5"
+		},
+		"3.0.1": {
+			"name": "@types/aria-query",
+			"version": "3.0.1",
+			"license": "MIT",
+			"_id": "@types/aria-query@3.0.1",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"dist": {
+				"shasum": "5f793d526dade034131025238cab3cd159a5eb27",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-3.0.1.tgz",
+				"fileCount": 4,
+				"integrity": "sha512-JCCOLFia0g+baz+k5i4QaaymVbHumis0uhbGn3DCalmd2MjdbWgAOFSr6uP2Xmpwg99K8Me326qsOwbqieCNwQ==",
+				"signatures": [
+					{
+						"sig": "MEUCIGWwEfy7GPhAW4ptkHAahgmBUpOlRjcEUUz2XxYCCuO3AiEAnklB80VtDFhYaRp7eF9yNHdGtceHd05A9HMyQRb9+Ag=",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 10195,
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.4\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJetDkMCRA9TVsSAnZWagAAr2MP/AnluOMBJoPFLj8PS7jJ\nPS8+gUQP2Tz7XJY4DmIbhE5IQvg7XubIhRotEada06aQgcZmnhkbDsWiV0fM\nonhqXXp84cNp0sWcrZirrfgjOlqkpBjj7P0HnMu13vL37ZORi01fPjBcPzo3\na/Ws+M7yMCVzt7GAnllSfR4HWJCzCK//4feu0xzQfkpvuZfAgr+QduxKzniN\nupSBG/rQ/uKVkZpXwRmtoNtlhjaYQ36i4mTU9RinsBF+Dges3gZoWIbqikSv\nt3YBRSg5rB+0+VjrpGEQctekPzOuwkLThvtKfuzuIFRoaPEOvXKRW9iXFZkV\nniZc1FI3SrSOJpNs9L82IMu9vPLdeUkeKp/LxH3Af4IuyY5tGpbe3W1iTdC9\n4yY41lashfpgZcr1wMX4iiFiTk7CiHxVQ77YC+x3uC/OkiPb6DrZjY8ny4lX\ndtSkBoRbvrQuwT+HmKG938Ya32UW6dyGwy7O+naE8NpFBoyuSFBN2LlnRnbx\n+rVn7TwLl5yqGnhsG7XtVDttoMCpd3GZSAAhgF1l+enWoFyzsZ6s8oLCSWFt\nxI1ET4/Kd3+Clw63phcnHDLlA5j16m22wLzyZjNCHdhzKYi4cTJ1BwW/HZtz\n7cpVKVpuePW8EmL4R5//zK0qt4Xh21cot5mXbPwDGdtbsg1EbVaIjjwEU567\nfi1p\r\n=OsVm\r\n-----END PGP SIGNATURE-----\r\n"
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "3.0",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_3.0.1_1588869388362_0.3036955506020269",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "a92adabd4592b0935b2e029af44229f4262b7057bc645bf67fa4fa30d1e56cb8"
+		},
+		"4.2.0": {
+			"name": "@types/aria-query",
+			"version": "4.2.0",
+			"license": "MIT",
+			"_id": "@types/aria-query@4.2.0",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"dist": {
+				"shasum": "14264692a9d6e2fa4db3df5e56e94b5e25647ac0",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-4.2.0.tgz",
+				"fileCount": 4,
+				"integrity": "sha512-iIgQNzCm0v7QMhhe4Jjn9uRh+I6GoPmt03CbEtwx3ao8/EfoQcmgtqH4vQ5Db/lxiIGaWDv6nwvunuh0RyX0+A==",
+				"signatures": [
+					{
+						"sig": "MEYCIQDPI6LxQk23tibX8I/PtLpRBls7ovb/uacKIAkuoVOBOAIhALlX28Wugyhz+Ish9arsOd5ZLdSkcsAlwnUNZx3tR33V",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 11182,
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.4\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJe+FCDCRA9TVsSAnZWagAALk4QAJXuYhZ7KG1o5nip4XhG\ny102W4Nq5ggWGZrw6bDxd/IETjKDuNkfaMtWZw57DoufEgr7dPQi+wM3UslO\nPyGNe/RmtFGnbWGqErrOLAGn57tohP1qyuPwQyKtyc0woUhCbHfvoKATUPFo\nROpQcDBIAeVUmZW2SbIGNoOkY1CI7S9IyRoFjvp5rzKkY1cRZ2KXaqgorMSF\nXhnt51izY+Y1wfaIIN+kWhI5udmn+Njq90mreBpgMf5oH3cT3wFshWA9KGt7\npqhyVVPChMjBqVKS3mdwa8TVbZ4OAnNO9kpzFi057nYr5jAPymRYAuPnbTmf\nma73jNNSUqaiJm3p4HgKnF8Vp6dyYmbvsVS2MYguV7eTiCvIC9PUOzTOzuSj\n5GkD4e0yz57svllX8rPKWkWYfXzp6YPosJjqoehno91Fenku1r/P0bFP0ISb\nC1ammEIBv8l26CGqHMR2XfvxPXAshzqXmpnQKBbJrftDfsGMUlqpAvkyGg48\nttv3rf9e6irySgSqd1Si+UOnj6KIYLi2w/+vh2Q/8ykFxz6Pn9Wys6hWQcue\nFuwrxCeamM4aN83yqc3I+qlWdzCTflLHjLuGUFby9cMfQ+yG6p95E5jRX6ZG\nK5Jft/BYKBuA9kaG3ZrpXiyHK/+aAtNgFzuyJKPuygTXmPE8GqrTqpsStnbV\nSoaJ\r\n=8x8h\r\n-----END PGP SIGNATURE-----\r\n"
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "3.0",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_4.2.0_1593331843565_0.48405909709162964",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "2d5c971ff5d0ed998d70336527f967a5354899ba6b814cdb27cdeccb98a83492"
+		},
+		"4.2.1": {
+			"name": "@types/aria-query",
+			"version": "4.2.1",
+			"license": "MIT",
+			"_id": "@types/aria-query@4.2.1",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"dist": {
+				"shasum": "78b5433344e2f92e8b306c06a5622c50c245bf6b",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-4.2.1.tgz",
+				"fileCount": 4,
+				"integrity": "sha512-S6oPal772qJZHoRZLFc/XoZW2gFvwXusYUmXPXkgxJLuEk2vOt7jc4Yo6z/vtI0EBkbPBVrJJ0B+prLIKiWqHg==",
+				"signatures": [
+					{
+						"sig": "MEQCICEvST9qHJhYjGEYf9lCLBbH9PuhdhWSpL8dHSixYlZkAiAwhazBGCCdWplqJ5KCUXAx/s72XI9jV8/Y/DA/50XnLQ==",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 11183,
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.13\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJf/M2yCRA9TVsSAnZWagAAPmcP/jKPLvfDIeeRRDapFuTZ\naFE3+mxwP/0U6j3g5I1p1M33k/E9X3a4JD3NpEUppCsveEmorCOPAQdwQRt5\nPES1J0N7DvSM7jTvZNFZmZ/TXEVXL7z62MI5RucH1hgPUhFZiJ/hpSJLAOgG\ndHKcG1nZQvxrz+axDG4EOSpa+A4/liCAdr3R2GClGE8ncOVsv9F9LsSaMWom\nWTe6mUEzt7j8801woEm0PwRF86a/N8eI5qbVB/yF9jyq7q1bhEuQ4+XsxGfW\nYhPyc9vbDWOregTGLqMT69tAp4rVyP6QPdWqz+JW0ikQYgHBN83IF7jWvQwR\ntE+xROp3uVZgvihNxOvlDyGukJXy5XjxCBDqsijZsiQ2wPoftHCp5pcLkbuK\noSAjHnQYhy4Zdb5I4sY0KbcVAn1Vd3miynj6EGm6CZtQkez4sh7OVoheLA5u\nKx4F6xEs0w2a9i3aMzvvf1FcbfYUoyO9B0MdlOb949uyKWN1D5/+D6HvfmQI\n3itlAGVbkkXRwObJVjqTzZCpT3J6SBEBSwdCX7FW7X2Te+6cNZWWsKO/Kf04\n9u0RKI21OzR1gyNIzQa9AKz28yltj/9UErr6SXfcHR27e9DM5xDGdiYbL36U\n89c5obflBxFChjWDCjAhT0jDKEM8Yyr2GPghKp9iXWoYht+vOofuJeLQtOH9\nV0wA\r\n=/O5g\r\n-----END PGP SIGNATURE-----\r\n"
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "3.3",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_4.2.1_1610403250323_0.6532761711949979",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "a40d6aad1395d8f097affee64334e7d5024cecca666d750c203f31b7c4eb7991"
+		},
+		"4.2.2": {
+			"name": "@types/aria-query",
+			"version": "4.2.2",
+			"license": "MIT",
+			"_id": "@types/aria-query@4.2.2",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/aria-query",
+			"dist": {
+				"shasum": "ed4e0ad92306a704f9fb132a0cfcf77486dbe2bc",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-4.2.2.tgz",
+				"fileCount": 4,
+				"integrity": "sha512-HnYpAE1Y6kRyKM/XkEuiRQhTHvkzMBurTHnpFLYLBGPIylZNPs9jJcuOOYWxPLJCSEtmZT0Y8rHDokKN7rRTig==",
+				"signatures": [
+					{
+						"sig": "MEQCIHp2CTUXqzKnLsvmealiAnz9mll8Xios4zAfKoPPDCNHAiA7T7q6ZngiwA+4xhk4GjJ6a7BNzDn5jxOYpGO1UAQu5g==",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 11990,
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.13\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJg5JztCRA9TVsSAnZWagAAH+8P/3jPkbnRdTfXjBIchH9q\nUWz5dGpFftWtm3/oqqhdDJfxVyvXYHo8aVwC94/zdwLuub9w2o/D6XcUz5+n\n11J8221UFeXVLsuzwtDP5hK8M+3nd/FsWeSQQ12pZGYKVG6ofVsffQKsU5Q5\nqLZJqTryyhxON6IcYDlSBum28dRwze62cQ7nyDCgpxUZJqq1BGtPiH6YVbdS\nybH+16Yd8x6eUk8j/+1czhFPJe/n++Sz+U9SE8NdvzEY0V2RLRAtH1j3+pzd\nuoq27zxCUc7pJXxYzYy88aYPG5/lubHEng6fUPpZN7M+MQq1rwFjPYIN+hqY\nXXPlJlkRbb6QPGQCc5OGH/kwekDQ10exD4KNo4Jd1I5Ljm1JqVo1RX7CJ63+\nBnQDIinhxxu8Agf6ahKPin25c5cF+NucIZo7tK8nuUIrLd4dCotHwZT8Nlxa\n2BJqLzE7PQ9EdMdiH9CYqfVRHAor5aExZpqhtcwAW7n1AvZdppqwHmXYEQGJ\nc2GY4qQhNe/7R39GKPQ7EdL4vgYpw1jrTQKuorle4MemNrv6CbLB7Bm+LrYW\nj1wVIB7k9CD0NB2/L+bC+m7G2TnU9udOjYgd2LRmkgjBDnxNcevbaglBu085\n/toJMkAoKR1NeCWLxCkAjYOX2pWk2Ai2Y3bjSgRnkc1dcnQcPoKnm2qEDdWX\nNmJD\r\n=ZG6A\r\n-----END PGP SIGNATURE-----\r\n"
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "3.6",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_4.2.2_1625595117287_0.9788934061403294",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "4094e62823ffb018c2ec51d16482a29e2ccca6c2a001af679e6621715f58c651"
+		},
+		"5.0.0": {
+			"name": "@types/aria-query",
+			"version": "5.0.0",
+			"license": "MIT",
+			"_id": "@types/aria-query@5.0.0",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/aria-query",
+			"dist": {
+				"shasum": "df2d64b5cc73cca0d75e2a7793d6b5c199c2f7b2",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.0.tgz",
+				"fileCount": 4,
+				"integrity": "sha512-P+dkdFu0n08PDIvw+9nT9ByQnd+Udc8DaWPb9HKfaPwCvWvQpC5XaMRx2xLWECm9x1VKNps6vEAlirjA6+uNrQ==",
+				"signatures": [
+					{
+						"sig": "MEUCIAPHfunQj9H4El+c9yMCAQK7q35pSAfd3903f0lEcAJGAiEArBQ9KLEUm36k9snYbw+XMoHoa5hTbeKHwLSBLyQjIbI=",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 12274
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "3.7",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_5.0.0_1634592711122_0.8507990600223343",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "59cd1a99d754755bb733fb2ea7236ec6eadf56e32b17b14e490c8ce25e5c9634"
+		},
+		"5.0.1": {
+			"name": "@types/aria-query",
+			"version": "5.0.1",
+			"license": "MIT",
+			"_id": "@types/aria-query@5.0.1",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/aria-query",
+			"dist": {
+				"shasum": "3286741fb8f1e1580ac28784add4c7a1d49bdfbc",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.1.tgz",
+				"fileCount": 5,
+				"integrity": "sha512-XTIieEY+gvJ39ChLcB4If5zHtPxt3Syj5rgZR+e1ctpmK8NjPf0zFqsz4JpLJT0xla9GFDKjy8Cpu331nrmE1Q==",
+				"signatures": [
+					{
+						"sig": "MEQCICLmeLwFTjUpH0TLZoyBAhx6c/H6wXZmfxaEC+e3zU+1AiBeOobUwfVJKch5mad/HnfnZEP5+OK3yqDQGyxh9W1soQ==",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 12278,
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v4.10.10\r\nComment: https://openpgpjs.org\r\n\r\nwsFzBAEBCAAGBQJjWmVUACEJED1NWxICdlZqFiEECWMYAoorWMhJKdjhPU1b\r\nEgJ2VmrZ6Q//RPV8kFKxYen8WZpsDwHDXe6qrhAAdrGm6Wh3v0m9DTrkXBUf\r\n4uVbYnIUCU7iPrYpFe6ZjFNAegZ7YqcA9vzfy7aZ1bNKnCKtlSpMvQRN4fH+\r\nUe7S8YF5l5YR5a4gAdtdc8wIFtKZXkxZlG1rdVdchjQynx01w/rglYTzX6/w\r\nxamANjxM1QCLjbTS3efTAisT0NQU1M6MoEj1+riYB9u7ugtULJOd1WECgLHL\r\nyspes3t9iwUus7VbLmcJPoi9Ap4UHDk48atNV5FqJ+whAq90qtMzMiAixyrs\r\nJk6xfwLKzXvdKSHbLnXJHfViwI/QhVobCPonLDHUspQAx4aX2M0EF2xvNqCq\r\nZ8G+RCNbr6JjCw0ApMb2OuB9PNzqyfSN2m5r8e0+Uwxqm/uDlzn1S86PEYgu\r\nqawAMFEco4A+4ewnmBV076DcIvyPBCVd7HhZeWBBG3dAOmTsdFVFrPFf/2ye\r\nXiq5lnnrxN29MVbchjtILjtWxz0loLaULNeLx3WORYDD+nOqEsNIyAFxICK5\r\nbgAxNS6HPMSbxOFWEa1qS56ELldEmCsY3iDn25yzUAxqIqeYc2YATnfj9usB\r\nKv+A4QN1TuckRBtmyMXfjoHh3Dp9Ttx3CCSfPt0dFl0ImI6qV1uxYOcSdi8E\r\naXiLDceOPCrsUS82Qj8Km8bV+WDPjiKou8s=\r\n=DtNo\r\n-----END PGP SIGNATURE-----\r\n"
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "4.1",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_5.0.1_1666868564677_0.9950944658394993",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "809247235df7a38d4bc11bb4e982118253a6b5fef3c2db2797c62895ef603756"
+		},
+		"5.0.2": {
+			"name": "@types/aria-query",
+			"version": "5.0.2",
+			"license": "MIT",
+			"_id": "@types/aria-query@5.0.2",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/aria-query",
+			"dist": {
+				"shasum": "6f1225829d89794fd9f891989c9ce667422d7f64",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.2.tgz",
+				"fileCount": 5,
+				"integrity": "sha512-PHKZuMN+K5qgKIWhBodXzQslTo5P+K/6LqeKXS6O/4liIDdZqaX5RXrCK++LAw+y/nptN48YmUMFiQHRSWYwtQ==",
+				"signatures": [
+					{
+						"sig": "MEUCIQDEXAOrZ1UZqBnegQLpRWBZJuRt4XD5I0ETnDM3QMRrLQIgWpOWtyXUafqk7BqZypst1j31WMGOdjFMRNiiY2TKQHw=",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 12268
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "4.5",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_5.0.2_1695412941829_0.009155088839760461",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "fc26e948200e4dc941c5c904ab76a543cb4cff59bb51c35709d4385b2060b8d0"
+		},
+		"5.0.3": {
+			"name": "@types/aria-query",
+			"version": "5.0.3",
+			"license": "MIT",
+			"_id": "@types/aria-query@5.0.3",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/aria-query",
+			"dist": {
+				"shasum": "07570ebd25f9b516c910a91f7244052c9b58eabc",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.3.tgz",
+				"fileCount": 5,
+				"integrity": "sha512-0Z6Tr7wjKJIk4OUEjVUQMtyunLDy339vcMaj38Kpj6jM2OE1p3S4kXExKZ7a3uXQAPCoy3sbrP1wibDKaf39oA==",
+				"signatures": [
+					{
+						"sig": "MEUCICraDd09rx1SITCBXSsDrisU9+AREngg2pQomJphw9sfAiEAkXYtM7VKm+w/8q6643OD6SznEXzeH2+0Z6w04Ul6Yu0=",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 11983
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "4.5",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_5.0.3_1697582299766_0.8694870871418654",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "01af46af58af2dc79a41bff0d00bbde467779afa3ef4d55705894449edc395de"
+		},
+		"5.0.4": {
+			"name": "@types/aria-query",
+			"version": "5.0.4",
+			"license": "MIT",
+			"_id": "@types/aria-query@5.0.4",
+			"maintainers": [
+				{
+					"name": "types",
+					"email": "ts-npm-types@microsoft.com"
+				}
+			],
+			"contributors": [
+				{
+					"url": "https://github.com/eps1lon",
+					"name": "Sebastian Silbermann",
+					"githubUsername": "eps1lon"
+				}
+			],
+			"homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/aria-query",
+			"dist": {
+				"shasum": "1a31c3d378850d2778dabb6374d036dcba4ba708",
+				"tarball": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.4.tgz",
+				"fileCount": 5,
+				"integrity": "sha512-rfT93uj5s0PRL7EzccGMs3brplhcrghnDoV26NqKhCAS1hVo+WdNsPvE/yb6ilfr5hi2MEk6d5EWJTKdxg8jVw==",
+				"signatures": [
+					{
+						"sig": "MEUCIQCs3z8DQR591YfUBLanAsC7CDnOjkZq7oV5vjYhWdWerAIgKPP/eRf1Ahf7V+MZVDToduR3R7+2xQDVaOpLfItGv9s=",
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+					}
+				],
+				"unpackedSize": 11983
+			},
+			"main": "",
+			"types": "index.d.ts",
+			"scripts": {},
+			"_npmUser": {
+				"name": "types",
+				"email": "ts-npm-types@microsoft.com"
+			},
+			"repository": {
+				"url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+				"type": "git",
+				"directory": "types/aria-query"
+			},
+			"description": "TypeScript definitions for aria-query",
+			"directories": {},
+			"dependencies": {},
+			"_hasShrinkwrap": false,
+			"typeScriptVersion": "4.5",
+			"_npmOperationalInternal": {
+				"tmp": "tmp/aria-query_5.0.4_1699312887565_0.3556357291664469",
+				"host": "s3://npm-registry-packages"
+			},
+			"typesPublisherContentHash": "df81e762ea003d46edaa1ce65e6e72487611400664e3105baa1610186c630902"
+		}
+	},
+	"time": {
+		"created": "2019-09-23T21:25:28.069Z",
+		"modified": "2025-08-03T06:24:05.980Z",
+		"3.0.0": "2019-09-23T21:25:28.435Z",
+		"3.0.1": "2020-05-07T16:36:28.526Z",
+		"4.2.0": "2020-06-28T08:10:43.679Z",
+		"4.2.1": "2021-01-11T22:14:10.458Z",
+		"4.2.2": "2021-07-06T18:11:57.415Z",
+		"5.0.0": "2021-10-18T21:31:51.230Z",
+		"5.0.1": "2022-10-27T11:02:44.907Z",
+		"5.0.2": "2023-09-22T20:02:22.103Z",
+		"5.0.3": "2023-10-17T22:38:20.058Z",
+		"5.0.4": "2023-11-06T23:21:27.739Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"ts3.0": "4.2.0",
+		"ts3.1": "4.2.0",
+		"ts3.2": "4.2.0",
+		"ts3.3": "4.2.1",
+		"ts3.4": "4.2.1",
+		"ts3.5": "4.2.1",
+		"ts3.6": "4.2.2",
+		"ts3.7": "5.0.0",
+		"ts3.8": "5.0.0",
+		"ts3.9": "5.0.0",
+		"ts4.0": "5.0.0",
+		"ts4.1": "5.0.1",
+		"ts4.2": "5.0.1",
+		"ts4.3": "5.0.1",
+		"ts4.4": "5.0.1",
+		"ts5.8": "5.0.4",
+		"ts5.7": "5.0.4",
+		"latest": "5.0.4",
+		"ts4.5": "5.0.4",
+		"ts4.6": "5.0.4",
+		"ts4.7": "5.0.4",
+		"ts4.8": "5.0.4",
+		"ts4.9": "5.0.4",
+		"ts5.0": "5.0.4",
+		"ts5.1": "5.0.4",
+		"ts5.2": "5.0.4",
+		"ts5.3": "5.0.4",
+		"ts5.4": "5.0.4",
+		"ts5.5": "5.0.4",
+		"ts5.9": "5.0.4",
+		"ts5.6": "5.0.4",
+		"ts6.0": "5.0.4"
+	},
+	"_uplinks": {
+		"npmjs": {
+			"etag": "W/\"ba993b8a5c1bbef819e7a45a987b2b7d\"",
+			"fetched": 1776009932364
+		}
+	},
+	"_distfiles": {
+		"aria-query-3.0.0.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-3.0.0.tgz",
+			"sha": "04df67a26ebab3c287aa9ef810d2ab16badbef13",
+			"registry": "npmjs"
+		},
+		"aria-query-3.0.1.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-3.0.1.tgz",
+			"sha": "5f793d526dade034131025238cab3cd159a5eb27",
+			"registry": "npmjs"
+		},
+		"aria-query-4.2.0.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-4.2.0.tgz",
+			"sha": "14264692a9d6e2fa4db3df5e56e94b5e25647ac0",
+			"registry": "npmjs"
+		},
+		"aria-query-4.2.1.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-4.2.1.tgz",
+			"sha": "78b5433344e2f92e8b306c06a5622c50c245bf6b",
+			"registry": "npmjs"
+		},
+		"aria-query-4.2.2.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-4.2.2.tgz",
+			"sha": "ed4e0ad92306a704f9fb132a0cfcf77486dbe2bc",
+			"registry": "npmjs"
+		},
+		"aria-query-5.0.0.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.0.tgz",
+			"sha": "df2d64b5cc73cca0d75e2a7793d6b5c199c2f7b2",
+			"registry": "npmjs"
+		},
+		"aria-query-5.0.1.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.1.tgz",
+			"sha": "3286741fb8f1e1580ac28784add4c7a1d49bdfbc",
+			"registry": "npmjs"
+		},
+		"aria-query-5.0.2.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.2.tgz",
+			"sha": "6f1225829d89794fd9f891989c9ce667422d7f64",
+			"registry": "npmjs"
+		},
+		"aria-query-5.0.3.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.3.tgz",
+			"sha": "07570ebd25f9b516c910a91f7244052c9b58eabc",
+			"registry": "npmjs"
+		},
+		"aria-query-5.0.4.tgz": {
+			"url": "https://registry.npmjs.org/@types/aria-query/-/aria-query-5.0.4.tgz",
+			"sha": "1a31c3d378850d2778dabb6374d036dcba4ba708",
+			"registry": "npmjs"
+		}
+	},
+	"_attachments": {
+		"aria-query-5.0.4.tgz": {
+			"shasum": "1a31c3d378850d2778dabb6374d036dcba4ba708"
+		}
+	},
+	"_rev": "2-c996c6e2b5ef4038",
+	"_id": "@types/aria-query",
+	"readme": "[object Object]"
+}

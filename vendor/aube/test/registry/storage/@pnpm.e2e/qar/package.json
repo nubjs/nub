@@ -1,0 +1,50 @@
+{
+  "_id": "@pnpm.e2e/qar",
+  "name": "@pnpm.e2e/qar",
+  "dist-tags": {
+    "latest": "100.1.0"
+  },
+  "versions": {
+    "100.0.0": {
+      "name": "@pnpm.e2e/qar",
+      "version": "100.0.0",
+      "_id": "@pnpm.e2e/qar@100.0.0",
+      "dist": {
+        "shasum": "3189636a646b6b6746675f48e5167d01088256c1",
+        "integrity": "sha512-j49iDqtVhFYqRsBVKHchxP2ZRQnC+nuOekOUpMBFcMvglgkJhsPMzljBB1WGG7KYMlsCNgJlxZ14rhGV5qvLJg==",
+        "tarball": "http://localhost:4873/@pnpm.e2e/qar/-/@pnpm.e2e/qar-100.0.0.tgz"
+      },
+      "contributors": []
+    },
+    "100.1.0": {
+      "name": "@pnpm.e2e/qar",
+      "version": "100.1.0",
+      "_id": "@pnpm.e2e/qar@100.1.0",
+      "dist": {
+        "shasum": "a3ca3fb5055f0ecca99e5120536e5d95ebb53f70",
+        "integrity": "sha512-rfyStp5wMveLyDIusFoZcF45CZT4wFhJJQVQ/+dCuzK8HTCSyNwVWfBTGM4SkNfD19r/W8/ljAY6jZ0QPIvSkg==",
+        "tarball": "http://localhost:4873/@pnpm.e2e/qar/-/@pnpm.e2e/qar-100.1.0.tgz"
+      },
+      "contributors": []
+    }
+  },
+  "time": {
+    "created": "2023-11-14T22:13:20.000Z",
+    "modified": "2023-11-14T22:13:20.000Z",
+    "100.0.0": "2023-11-14T22:13:20.000Z",
+    "100.1.0": "2023-11-14T22:13:20.000Z"
+  },
+  "_attachments": {
+    "qar-100.0.0.tgz": {
+      "shasum": "3189636a646b6b6746675f48e5167d01088256c1",
+      "version": "100.0.0"
+    },
+    "qar-100.1.0.tgz": {
+      "shasum": "a3ca3fb5055f0ecca99e5120536e5d95ebb53f70",
+      "version": "100.1.0"
+    }
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "_rev": "1-aube-fixture"
+}

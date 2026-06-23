@@ -14,13 +14,12 @@
 #   scripts/worktree.sh list              # list worktrees
 #   scripts/worktree.sh reap              # prune dead-session worktrees (metadata + empty dirs)
 #
-# THE LOAD-BEARING DETAIL — submodules. `git worktree add` does NOT populate
-# submodules. nub has two: vendor/aube (build-critical, a path-dep of every nub
-# crate) and tests/node-suite (the ENTIRE nodejs/node repo — huge, compat-corpus
-# only). A blanket `--recurse-submodules` would clone Node into every worktree.
-# So post-create initializes vendor/aube ONLY. Without this the worktree's
-# `cargo build` fails instantly (empty vendor/aube). tests/node-suite is left
-# empty on purpose; init it by hand in a worktree if you actually need the corpus.
+# SUBMODULES. `git worktree add` does NOT populate submodules. vendor/aube is
+# NO LONGER a submodule (plain in-tree files since Pattern B, 2026-06-22) — it
+# comes along with the checkout, build-critical and already present. The only
+# remaining submodule is tests/node-suite (the ENTIRE nodejs/node repo — huge,
+# compat-corpus only), left empty on purpose; init it by hand in a worktree if
+# you actually need the corpus.
 #
 # Base is LOCAL main (not origin/main) — no push required, and the worktree pins
 # to main's current HEAD as a stable base. nub works on main; merge a worktree
@@ -45,9 +44,9 @@ validate_name() {
 branch_exists() { git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/$1" >/dev/null 2>&1; }
 
 post_create() {
-  # The fatal fix: selectively populate vendor/aube (NOT tests/node-suite).
+  # vendor/aube is plain in-tree files now (Pattern B) — checked out by
+  # `git worktree add`, no submodule init needed.
   local wt="$1"
-  run git -C "$wt" submodule update --init vendor/aube
   echo "" >&2
   echo "worktree ready: $wt" >&2
   echo "  cd .worktrees/$(basename "$wt")   # has its own target/ — builds in isolation" >&2
@@ -72,28 +71,13 @@ remove() {
   validate_name "$name"
   local wt="${WORKTREE_BASE}/${name}"
   if [ -e "$wt" ]; then
-    # git refuses to `worktree remove` a tree containing an initialized submodule
-    # (vendor/aube) without --force. So we ALWAYS pass --force to git — but first
-    # we enforce the real safety checks ourselves. NEVER lose work: refuse unless
-    # --force if EITHER repo has unsaved work.
+    # We ALWAYS pass --force to git (to discard build artifacts), but first enforce
+    # the real safety check ourselves: NEVER lose work. vendor/aube is plain in-tree
+    # files now (Pattern B), so its edits are ordinary tracked changes caught by the
+    # single `git status` check below — no separate submodule-clone check needed.
     if [ "$force" != "--force" ]; then
-      # (1) main tree uncommitted.
       if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
         die "worktree '$name' has uncommitted changes; commit them first, or 'rm $name --force' to discard"
-      fi
-      # (2) vendor/aube — the submodule is an INDEPENDENT clone in this worktree.
-      # Two ways its work would vanish on remove, both checked:
-      local aube="$wt/vendor/aube"
-      if [ -d "$aube" ]; then
-        #  (a) uncommitted aube changes.
-        if [ -n "$(git -C "$aube" status --porcelain 2>/dev/null)" ]; then
-          die "vendor/aube in worktree '$name' has UNCOMMITTED changes — commit + push to nubjs/aube first, or 'rm $name --force' to discard them"
-        fi
-        #  (b) committed-but-UNPUSHED aube commits: HEAD not reachable from any
-        #  remote branch → the commit lives only in this throwaway clone.
-        if [ -z "$(git -C "$aube" branch -r --contains HEAD 2>/dev/null)" ]; then
-          die "vendor/aube in worktree '$name' has a LOCAL-ONLY commit ($(git -C "$aube" rev-parse --short HEAD)) not pushed to nubjs/aube — push it (and bump the pin) first, or 'rm $name --force' to discard it"
-        fi
       fi
     fi
     run git -C "$REPO_ROOT" worktree remove --force "$wt"

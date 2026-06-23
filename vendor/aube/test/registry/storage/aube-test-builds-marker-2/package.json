@@ -1,0 +1,31 @@
+{
+  "name": "aube-test-builds-marker-2",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-builds-marker-2",
+      "version": "1.0.0",
+      "description": "Second fixture package with a postinstall marker for messy Bun lockfile tests.",
+      "license": "MIT",
+      "main": "index.js",
+      "scripts": {
+        "postinstall": "node -e \"const fs=require('fs'),p=require('path');const dir=process.env.INIT_CWD||'.';fs.writeFileSync(p.join(dir,'aube-builds-marker-2.txt'),'ran:'+process.env.npm_package_name+'@'+process.env.npm_package_version+'\\n')\""
+      },
+      "hasInstallScript": true,
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-builds-marker-2/-/aube-test-builds-marker-2-1.0.0.tgz",
+        "integrity": "sha512-SsJXsN2ySYaZ7QDCgOA/os4guoqmvds+bRlO2Db4fdNCn+sHOgIu/vWHXuVCkGOGK1Wp8j80ykDONp/N7z5Byg==",
+        "shasum": "395cd82df21d6ab4b4be4f77642fe753ecac1df1"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-builds-marker-2-1.0.0.tgz": {
+      "shasum": "395cd82df21d6ab4b4be4f77642fe753ecac1df1"
+    }
+  },
+  "_id": "aube-test-builds-marker-2",
+  "_rev": "1-aube-fixture"
+}

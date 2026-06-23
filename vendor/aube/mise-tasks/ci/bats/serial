@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Running serial BATS files"
+report_dir="${BATS_REPORT_DIR:-.buildkite/test-results}"
+report_name="bats-serial.xml"
+report_path="$report_dir/$report_name"
+mkdir -p "$report_dir"
+
+status=0
+BATS_REPORT_FILENAME="$report_name" ./test/bats/bin/bats \
+	--report-formatter junit \
+	--output "$report_dir" \
+	--filter-tags "serial" \
+	test/ || status=$?
+
+upload_status=0
+mise run ci:test-engine:upload -- "$report_path" || upload_status=$?
+if ((status != 0)); then
+	exit "$status"
+fi
+exit "$upload_status"

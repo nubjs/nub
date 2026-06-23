@@ -1,0 +1,434 @@
+{
+  "name": "is-negative",
+  "versions": {
+    "1.0.0": {
+      "name": "is-negative",
+      "version": "1.0.0",
+      "description": "Test if a number is negative",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/kevva/is-negative.git"
+      },
+      "author": {
+        "name": "Kevin Martensson",
+        "email": "kevinmartensson@gmail.com",
+        "url": "github.com/kevva"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "node test.js"
+      },
+      "files": [
+        "index.js"
+      ],
+      "keywords": [
+        "negative",
+        "number",
+        "test"
+      ],
+      "devDependencies": {
+        "ava": "^0.0.4"
+      },
+      "gitHead": "163360a8d3ae6bee9524541043197ff356f8ed99",
+      "bugs": {
+        "url": "https://github.com/kevva/is-negative/issues"
+      },
+      "homepage": "https://github.com/kevva/is-negative#readme",
+      "_id": "is-negative@1.0.0",
+      "_shasum": "7259877a83c800ac3191dd7b9d9fbcd0f752d4fe",
+      "_from": ".",
+      "_npmVersion": "2.11.1",
+      "_nodeVersion": "2.0.1",
+      "_npmUser": {
+        "name": "kevva",
+        "email": "kevinmartensson@gmail.com"
+      },
+      "maintainers": [
+        {
+          "name": "kevva",
+          "email": "kevinmartensson@gmail.com"
+        }
+      ],
+      "dist": {
+        "shasum": "7259877a83c800ac3191dd7b9d9fbcd0f752d4fe",
+        "tarball": "http://localhost:4873/is-negative/-/is-negative-1.0.0.tgz",
+        "integrity": "sha512-1aKMsFUc7vYQGzt//8zhkjRWPoYkajY/I5MJEvrc0pDoHXrW7n5ri8DYxhy3rR+Dk0QFl7GjHHsZU1sppQrWtw==",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEQCIBzMD2unDmha6E5KtxdURLvRbSYlHuWaC69ZVRnbr3fLAiBpCu8ORol+XhZGCMCPbbDOgJtNh9HNuw1eeNbz4I4B9A=="
+          }
+        ]
+      },
+      "contributors": []
+    },
+    "1.0.1": {
+      "name": "is-negative",
+      "version": "1.0.1",
+      "description": "Test if a number is negative",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/kevva/is-negative.git"
+      },
+      "author": {
+        "name": "Kevin Martensson",
+        "email": "kevinmartensson@gmail.com",
+        "url": "github.com/kevva"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "node test.js"
+      },
+      "files": [
+        "index.js"
+      ],
+      "keywords": [
+        "negative",
+        "number",
+        "test"
+      ],
+      "devDependencies": {
+        "ava": "^0.0.4"
+      },
+      "gitHead": "f7dec4d66a5a56719e49b9f94a24d73f924ddeb3",
+      "bugs": {
+        "url": "https://github.com/kevva/is-negative/issues"
+      },
+      "homepage": "https://github.com/kevva/is-negative#readme",
+      "_id": "is-negative@1.0.1",
+      "_shasum": "dc6b8728eebd03c75bf876087edcd50e9cb56994",
+      "_from": ".",
+      "_npmVersion": "2.11.1",
+      "_nodeVersion": "2.0.1",
+      "_npmUser": {
+        "name": "kevva",
+        "email": "kevinmartensson@gmail.com"
+      },
+      "maintainers": [
+        {
+          "name": "kevva",
+          "email": "kevinmartensson@gmail.com"
+        }
+      ],
+      "dist": {
+        "shasum": "dc6b8728eebd03c75bf876087edcd50e9cb56994",
+        "tarball": "http://localhost:4873/is-negative/-/is-negative-1.0.1.tgz",
+        "integrity": "sha512-gmv+xZIqPGWfqTf195S+I8tw4h/VswI30Eu21e1r8qUVNHIiVdAVtpzoZBGQqrTNC+YjSwCNl33SXU7kuNwMzA==",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEYCIQCqAhUcJYO/4FEGrAM/ONdlJX0yt4Gahj6bMmFJ5kGrXwIhALDQLFMh4SknI4n3WejKmwZMFgfehbnBEHnv+nMQRdaC"
+          }
+        ]
+      },
+      "contributors": []
+    },
+    "2.0.0": {
+      "name": "is-negative",
+      "version": "2.0.0",
+      "description": "Test if a number is negative",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/kevva/is-negative.git"
+      },
+      "author": {
+        "name": "Kevin Martensson",
+        "email": "kevinmartensson@gmail.com",
+        "url": "github.com/kevva"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "node test.js"
+      },
+      "files": [
+        "index.js"
+      ],
+      "keywords": [
+        "negative",
+        "number",
+        "test"
+      ],
+      "devDependencies": {
+        "ava": "^0.0.4"
+      },
+      "dependencies": {
+        "is-positive": "^3.0.0"
+      },
+      "gitHead": "219c424611ff4a2af15f7deeff4f93c62558c43d",
+      "bugs": {
+        "url": "https://github.com/kevva/is-negative/issues"
+      },
+      "homepage": "https://github.com/kevva/is-negative#readme",
+      "_id": "is-negative@2.0.0",
+      "_shasum": "09f4cb20dd1bddff37cb6630c618a9bc57915fd6",
+      "_from": ".",
+      "_npmVersion": "3.1.0",
+      "_nodeVersion": "2.3.0",
+      "_npmUser": {
+        "name": "kevva",
+        "email": "kevinmartensson@gmail.com"
+      },
+      "maintainers": [
+        {
+          "name": "kevva",
+          "email": "kevinmartensson@gmail.com"
+        }
+      ],
+      "dist": {
+        "shasum": "09f4cb20dd1bddff37cb6630c618a9bc57915fd6",
+        "tarball": "http://localhost:4873/is-negative/-/is-negative-2.0.0.tgz",
+        "integrity": "sha512-eqkP7UFhpupOHF4UR+rgMNNPfkSFSL571xUngS5QFTYhKburnIsQQYJBXomDdZpf2ysFZaIc2LCC0mHvjXNCRA==",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEQCIGgn3erHm74VgQCiVqAlnUOHSSEXIPy4Hka654f6b2zWAiB+WDOpYq++TL6t7Jr06hk2E6WI3cU1Rhe5ipnhB0PfmQ=="
+          }
+        ]
+      },
+      "contributors": []
+    },
+    "2.0.1": {
+      "name": "is-negative",
+      "version": "2.0.1",
+      "description": "Test if a number is negative",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/kevva/is-negative.git"
+      },
+      "author": {
+        "name": "Kevin Martensson",
+        "email": "kevinmartensson@gmail.com",
+        "url": "github.com/kevva"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "node test.js"
+      },
+      "files": [
+        "index.js"
+      ],
+      "keywords": [
+        "negative",
+        "number",
+        "test"
+      ],
+      "devDependencies": {
+        "ava": "^0.0.4"
+      },
+      "gitHead": "32f894f9f160c9e9e9c44a1385b0537b69723a8a",
+      "bugs": {
+        "url": "https://github.com/kevva/is-negative/issues"
+      },
+      "homepage": "https://github.com/kevva/is-negative#readme",
+      "_id": "is-negative@2.0.1",
+      "_shasum": "020361d3c8433ab34c9f2b413d79835412a9b9c6",
+      "_from": ".",
+      "_npmVersion": "3.1.0",
+      "_nodeVersion": "2.3.0",
+      "_npmUser": {
+        "name": "kevva",
+        "email": "kevinmartensson@gmail.com"
+      },
+      "maintainers": [
+        {
+          "name": "kevva",
+          "email": "kevinmartensson@gmail.com"
+        }
+      ],
+      "dist": {
+        "shasum": "020361d3c8433ab34c9f2b413d79835412a9b9c6",
+        "tarball": "http://localhost:4873/is-negative/-/is-negative-2.0.1.tgz",
+        "integrity": "sha512-lFgLTeijlQMWwuHHsJWx2yF4uotI564EAji540J7YYT1OfaMmNARAAU/QlWkaNhUZoMu0u4ZKuBtXJU9OK0eng==",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEQCIA/6O2+c0HpHGvrr1BNQfddT2FFPRzT+ZCEXsAmAYbkeAiBcfAis2+2Zjl4WCN91Z92QCCsUN29d/rnsLuWG4sszDw=="
+          }
+        ]
+      },
+      "contributors": []
+    },
+    "2.0.2": {
+      "name": "is-negative",
+      "version": "2.0.2",
+      "description": "Check if something is a positive number",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/kevva/is-negative.git"
+      },
+      "author": {
+        "name": "Kevin Martensson",
+        "email": "kevinmartensson@gmail.com",
+        "url": "github.com/kevva"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "node test.js"
+      },
+      "files": [
+        "index.js"
+      ],
+      "keywords": [
+        "negative",
+        "number",
+        "test",
+        "check"
+      ],
+      "devDependencies": {
+        "ava": "^0.0.4"
+      },
+      "gitHead": "2a6169d91678bdf435503a35742ca12a1af85396",
+      "bugs": {
+        "url": "https://github.com/kevva/is-negative/issues"
+      },
+      "homepage": "https://github.com/kevva/is-negative#readme",
+      "_id": "is-negative@2.0.2",
+      "_shasum": "f5c315f718d93746b8766d625dbfeb96c5eaad94",
+      "_from": ".",
+      "_npmVersion": "3.1.0",
+      "_nodeVersion": "2.3.0",
+      "_npmUser": {
+        "name": "kevva",
+        "email": "kevinmartensson@gmail.com"
+      },
+      "maintainers": [
+        {
+          "name": "kevva",
+          "email": "kevinmartensson@gmail.com"
+        }
+      ],
+      "dist": {
+        "shasum": "f5c315f718d93746b8766d625dbfeb96c5eaad94",
+        "tarball": "http://localhost:4873/is-negative/-/is-negative-2.0.2.tgz",
+        "integrity": "sha512-mwZAQFgAaxDbVEnjNHUGx18CYeVC2y7Me1gBP91P5gXVy1YGPFnOAmOyKUWi55LBAzLNefdOdv7zTvrCiWa3bQ==",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIBRQmbLjC78SHcGto5SMdptWu3Y4B215glxZe3dpoG/uAiEAya/JE8jCMCrYSFqJmrunWY+5cSUR02wi7vQTy7a8Itw="
+          }
+        ]
+      },
+      "contributors": []
+    },
+    "2.1.0": {
+      "name": "is-negative",
+      "version": "2.1.0",
+      "description": "Check if something is a negative number",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/kevva/is-negative.git"
+      },
+      "author": {
+        "name": "Kevin Martensson",
+        "email": "kevinmartensson@gmail.com",
+        "url": "github.com/kevva"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "xo && ava"
+      },
+      "files": [
+        "index.js"
+      ],
+      "keywords": [
+        "negative",
+        "number",
+        "test",
+        "check"
+      ],
+      "devDependencies": {
+        "ava": "*",
+        "xo": "*"
+      },
+      "gitHead": "a6c51a38c6c1753e8ea1b51dfb4e6f2f8fb55557",
+      "bugs": {
+        "url": "https://github.com/kevva/is-negative/issues"
+      },
+      "homepage": "https://github.com/kevva/is-negative#readme",
+      "_id": "is-negative@2.1.0",
+      "_shasum": "f0d86377aa15a64c34961f38ac2a9be2b40a1187",
+      "_from": ".",
+      "_npmVersion": "3.3.10",
+      "_nodeVersion": "5.4.0",
+      "_npmUser": {
+        "name": "kevva",
+        "email": "kevinmartensson@gmail.com"
+      },
+      "dist": {
+        "shasum": "f0d86377aa15a64c34961f38ac2a9be2b40a1187",
+        "tarball": "http://localhost:4873/is-negative/-/is-negative-2.1.0.tgz",
+        "integrity": "sha512-+iCKT4ZcvjRnjkHnQjZ8/qfciLLGD8BFKS0GNR5VjDU6jEiwh899R0GSMkaYcuTNd7fEKXb3Qib0webe6HczNw==",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIFGq5yUsbhC61OCcGjDpyI1aNTBAshuqs3J2MWDoxvu+AiEA3WB4x7OOYvOxWriJIolDbfTqBWqHf7DDqxB8JN03KAg="
+          }
+        ]
+      },
+      "maintainers": [
+        {
+          "name": "kevva",
+          "email": "kevinmartensson@gmail.com"
+        }
+      ],
+      "contributors": []
+    }
+  },
+  "time": {
+    "modified": "2022-06-19T02:46:05.243Z",
+    "created": "2015-06-02T12:07:34.331Z",
+    "1.0.0": "2015-06-02T12:07:34.331Z",
+    "1.0.1": "2015-06-02T13:24:08.883Z",
+    "2.0.0": "2015-07-10T12:48:40.225Z",
+    "2.0.1": "2015-07-11T11:43:45.550Z",
+    "2.0.2": "2015-07-11T12:15:27.354Z",
+    "2.1.0": "2016-01-11T15:24:33.768Z"
+  },
+  "users": {},
+  "dist-tags": {
+    "latest": "2.1.0"
+  },
+  "_uplinks": {},
+  "_distfiles": {},
+  "_attachments": {
+    "is-negative-1.0.0.tgz": {
+      "shasum": "7259877a83c800ac3191dd7b9d9fbcd0f752d4fe"
+    },
+    "is-negative-1.0.1.tgz": {
+      "shasum": "dc6b8728eebd03c75bf876087edcd50e9cb56994"
+    },
+    "is-negative-2.0.0.tgz": {
+      "shasum": "09f4cb20dd1bddff37cb6630c618a9bc57915fd6"
+    },
+    "is-negative-2.0.1.tgz": {
+      "shasum": "020361d3c8433ab34c9f2b413d79835412a9b9c6"
+    },
+    "is-negative-2.0.2.tgz": {
+      "shasum": "f5c315f718d93746b8766d625dbfeb96c5eaad94"
+    },
+    "is-negative-2.1.0.tgz": {
+      "shasum": "f0d86377aa15a64c34961f38ac2a9be2b40a1187"
+    }
+  },
+  "_rev": "7-1a9fc3aec589e494",
+  "_id": "is-negative",
+  "readme": "# is-negative [![Build Status](https://travis-ci.org/kevva/is-negative.svg?branch=master)](https://travis-ci.org/kevva/is-negative)\n\n> Check if something is a negative number\n\n\n## Install\n\n```\n$ npm install --save is-negative\n```\n\n\n## Usage\n\n```js\nconst isNegative = require('is-negative');\n\nisNegative(-1);\n//=> true\n\nisNegative(1);\n//=> false\n\nisNegative(0);\n//=> false\n\nisNegative('-1');\n//=> false\n\nisNegative(Number(-1))\n//=> true\n```\n\n_Note: This module doesn't consider `-0` to be a negative number. If you want to detect `-0`, use the [`negative-zero`](https://github.com/sindresorhus/negative-zero) module._\n\n\n## Related\n\n- [is-positive](https://github.com/kevva/is-positive) - Check if something is a positive number\n\n\n## License\n\nMIT © [Kevin Martensson](http://github.com/kevva)"
+}

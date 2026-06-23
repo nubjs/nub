@@ -1,0 +1,3 @@
+[daemons.docs]
+run = "sh -lc 'cd docs && ../target/debug/aube run docs:dev'"
+ready_port = 5173

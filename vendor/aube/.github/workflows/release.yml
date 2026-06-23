@@ -1,0 +1,513 @@
+name: release
+
+# Reusable workflow: builds + (on macOS) codesigns the `aube` binary
+# for every target, then uploads a single archive per target onto the
+# draft GitHub release that `release-plz` already created for the tag.
+# `aubr`/`aubx` are multicall shims that share `src/main.rs` with
+# `aube`; see `crates/aube-cli/Cargo.toml`. In tar.gz archives they
+# ship as symlinks to `aube` (Linux + macOS); in Windows .zip
+# archives, where zip can't reliably represent symlinks, they ship as
+# full duplicate binaries.
+# Driven by `.github/workflows/release-plz.yml` — not triggered
+# directly on tag push, since release-plz owns the tag/release
+# lifecycle and dispatching on both would race.
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      AUBE_GH_TOKEN:
+        required: true
+      CERTIFICATES_P12:
+        required: true
+      CERTIFICATES_P12_PASS:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag (or archive-name label, for dry runs) — e.g. v1.0.0 or dryrun"
+        required: true
+        type: string
+      ref:
+        description: "Branch or sha to build. Empty = use refs/tags/<tag>. Only honored in dry-run."
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Build everything but skip the GitHub release upload. Uses ref instead of refs/tags/<tag> when set."
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  AUBE_PRIMER_TOP: "2000"
+  # See `DEFAULT_VERSION_CAP` in crates/aube-resolver/build.rs for the
+  # rationale — 100 covers ≥97% of resolved versions across the benchmark
+  # fixtures while shrinking the embedded primer by ~54% (9.04 MB vs ~19.6 MB).
+  AUBE_PRIMER_VERSION_CAP: "100"
+  AUBE_REQUIRE_PRIMER: "1"
+
+jobs:
+  validate-inputs:
+    # inputs.ref is dry-run-only by contract: it lets us rebuild a branch
+    # without an associated release tag. Honoring it for real uploads
+    # would let a dispatcher build arbitrary code under the release tag's
+    # name with contents/id-token/attestations write — fail fast.
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Reject ref override on real release
+        env:
+          REF: ${{ inputs.ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ -n "$REF" ] && [ "$DRY_RUN" != "true" ]; then
+            echo "::error::inputs.ref override is only allowed when inputs.dry_run is true"
+            exit 1
+          fi
+
+  generate-primer:
+    needs: validate-inputs
+    runs-on: namespace-profile-endev-linux-amd64
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+      - name: Generate metadata primer
+        id: primer
+        shell: bash
+        # File name has to include the `-sK` schema suffix so `build.rs`
+        # picks the artifact up directly (`source.with_extension("json")`
+        # branch); otherwise it falls back to spawning `node` to regenerate
+        # in-tree, which fails inside `cross` Docker containers where node
+        # isn't on PATH. Schema is parsed out of build.rs so a bump there
+        # (and the matching `.gitignore` entry) propagates automatically.
+        run: |
+          schema=$(grep -E '^const PRIMER_DATA_SCHEMA: u32 = [0-9]+;' \
+            crates/aube-resolver/build.rs | awk -F'= ' '{print $2}' | tr -d ';')
+          if [ -z "$schema" ]; then
+            echo "::error::failed to parse PRIMER_DATA_SCHEMA from crates/aube-resolver/build.rs"
+            exit 1
+          fi
+          out="crates/aube-resolver/data/primer-top${AUBE_PRIMER_TOP}-v${AUBE_PRIMER_VERSION_CAP}-s${schema}.rkyv.json"
+          node scripts/generate-primer.mjs \
+            --top "$AUBE_PRIMER_TOP" \
+            --versions "$AUBE_PRIMER_VERSION_CAP" \
+            --out "$out"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: metadata-primer
+          path: ${{ steps.primer.outputs.path }}
+
+  # Non-PGO Windows targets (untested PGO toolchain). Built via taiki-e
+  # straight from the release profile. `aarch64-unknown-linux-musl` lives
+  # in its own job (`upload-assets-musl-arm64`) so it can ship
+  # `aubr`/`aubx` as symlinks the same way the PGO tarballs do.
+  upload-assets:
+    needs: generate-primer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            runner: windows-latest
+            build-tool: cargo
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            runner: windows-latest
+            build-tool: cargo
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: metadata-primer
+          path: crates/aube-resolver/data
+      - name: Import codesign certs
+        if: startsWith(matrix.os, 'macos')
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASS }}
+      # taiki-e/upload-rust-binary-action builds via cargo/cross, packages
+      # the named bins into a single `<archive>.{tar.gz,zip}`, and uploads
+      # it onto the existing release for `tag`. Multi-bin mode requires an
+      # explicit `archive` name (the `$bin` placeholder isn't usable), so
+      # we keep the historical `aube-<tag>-<target>` pattern that installers
+      # already expect. On macOS we ask it to codesign with the Developer
+      # ID cert we just imported; the prefix applies to all three bins.
+      - name: Upload binary (macOS signed)
+        id: upload-macos
+        if: startsWith(matrix.os, 'macos')
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
+        with:
+          bin: aube,aubr,aubx
+          archive: aube-$tag-$target
+          target: ${{ matrix.target }}
+          build-tool: ${{ matrix.build-tool }}
+          ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
+          token: ${{ secrets.AUBE_GH_TOKEN }}
+          codesign: "Developer ID Application: Jeffrey Dickey (4993Y37DX6)"
+          codesign_prefix: dev.jdx.
+          dry-run: ${{ fromJSON(inputs.dry_run || 'false') }}
+      - name: Upload binary (non-macOS)
+        id: upload-non-macos
+        if: ${{ !startsWith(matrix.os, 'macos') }}
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
+        with:
+          bin: aube,aubr,aubx
+          archive: aube-$tag-$target
+          target: ${{ matrix.target }}
+          build-tool: ${{ matrix.build-tool }}
+          ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
+          token: ${{ secrets.AUBE_GH_TOKEN }}
+          dry-run: ${{ fromJSON(inputs.dry_run || 'false') }}
+      - name: Resolve uploaded archive
+        id: archive
+        shell: bash
+        env:
+          MACOS_TAR: ${{ steps.upload-macos.outputs.tar }}
+          UNIX_TAR: ${{ steps.upload-non-macos.outputs.tar }}
+          WINDOWS_ZIP: ${{ steps.upload-non-macos.outputs.zip }}
+        run: |
+          archive="${MACOS_TAR}${UNIX_TAR}${WINDOWS_ZIP}"
+          if [ -z "$archive" ]; then
+            echo "::error::upload-rust-binary-action did not report an archive"
+            exit 1
+          fi
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+      - name: Upload archive as workflow artifact (dry run)
+        if: ${{ fromJSON(inputs.dry_run || 'false') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aube-${{ inputs.tag }}-${{ matrix.target }}
+          path: ${{ steps.archive.outputs.path }}
+      - name: Attest release archive
+        if: ${{ !fromJSON(inputs.dry_run || 'false') }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ steps.archive.outputs.path }}
+
+  # aarch64-unknown-linux-musl: split out from upload-assets so we can
+  # ship `aubr`/`aubx` as symlinks to `aube` in the tarball, matching
+  # the PGO targets. `taiki-e/upload-rust-binary-action` bundles
+  # build + archive in one step with no hook to mutate the staged bins,
+  # so we run cross + symlink + tar by hand here. No PGO/BOLT — same
+  # musl-libc constraint as x86_64-unknown-linux-musl in
+  # upload-assets-pgo (BOLT's instrumentation runtime SIGSEGVs against
+  # musl).
+  upload-assets-musl-arm64:
+    needs: generate-primer
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      TARGET: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: metadata-primer
+          path: crates/aube-resolver/data
+      - name: Install cross
+        shell: bash
+        run: cargo install cross --locked
+      - name: Build aube (release)
+        shell: bash
+        # Only build `aube` — `aubr`/`aubx` become symlinks in the
+        # archive step, so the multicall stub bins would just be thrown
+        # away. Saves ~2 minutes of cross compile time.
+        run: cross build --release --locked --target "$TARGET" --bin aube
+      - name: Archive release binary
+        id: archive
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          archive="aube-${TAG}-${TARGET}.tar.gz"
+          # Replace aubr/aubx with symlinks to aube before tar-ing.
+          # See the matching archive step in upload-assets-pgo for the
+          # multicall / argv[0] rationale.
+          BIN_DIR="target/${TARGET}/release"
+          ln -sf aube "$BIN_DIR/aubr"
+          ln -sf aube "$BIN_DIR/aubx"
+          tar -czf "$archive" -C "$BIN_DIR" aube aubr aubx
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+      - name: Upload archive to release
+        if: ${{ !fromJSON(inputs.dry_run || 'false') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          ARCHIVE: ${{ steps.archive.outputs.path }}
+        run: gh release upload "$TAG" "$ARCHIVE" --clobber
+      - name: Upload archive as workflow artifact (dry run)
+        if: ${{ fromJSON(inputs.dry_run || 'false') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aube-${{ inputs.tag }}-aarch64-unknown-linux-musl
+          path: ${{ steps.archive.outputs.path }}
+      - name: Attest release archive
+        if: ${{ !fromJSON(inputs.dry_run || 'false') }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ steps.archive.outputs.path }}
+
+  # PGO-optimized targets: x86_64 Linux GNU/musl (cross-built on amd64)
+  # plus native aarch64 Linux GNU and native macOS arm64. Each builds
+  # via benchmarks/pgo.bash — instrument under release-pgo, train against
+  # the hermetic Verdaccio registry, rebuild with -Cprofile-use. The
+  # x86_64 Linux targets use build-tool=cross so the resulting binary
+  # preserves the current glibc baseline; the cross-built instrumented
+  # binary runs on the host for training (cross's older glibc is
+  # forward-compatible with the runner's). Cross.toml passes RUSTFLAGS
+  # through to the container so phase 1 / 3b RUSTFLAGS reach cargo
+  # inside cross. The aarch64 Linux row runs natively on
+  # `namespace-profile-endev-linux-arm64-large` (32 GB) so the same
+  # fat-LTO + profile-generate headroom argument from
+  # acdf415 applies, and we don't need QEMU to train. macOS arm64 is
+  # on the `-large` (12×28) variant because the previous instrumented
+  # binary segfaulted during training on the 6×14 base profile — fork
+  # pressure from `aube install` may have been racing under resource
+  # contention. Revisit moving back to base if `-large` proves stable
+  # across a few release cycles.
+  upload-assets-pgo:
+    needs: generate-primer
+    runs-on: ${{ matrix.runner }}
+    # 180 to cover macos-latest (3 vCPU) which needs ~80 min for two
+    # fat-LTO compiles. Linux PGO on -large runners completes in well
+    # under 75, so the extra headroom is dead slack for them.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # BOLT runs against the glibc Linux PGO targets. Local bench
+          # on Zen 4 (x86_64) shows -2.7% wall / -18% L1-icache misses
+          # / -4.4% branch misses on the user-mode "frozen lockfile"
+          # fast path (z=-6.45 on wall, n=20). The canonical install
+          # benchmarks don't move statistically because system-call
+          # time dominates real installs — codegen wins exist but get
+          # buried under syscall jitter.
+          #
+          # musl is skipped because BOLT's instrumentation runtime
+          # (libbolt_rt_instr.a) assumes glibc semantics for _exit /
+          # TLS and SIGSEGVs at startup against musl libc. Confirmed
+          # empirically in dry-run 25688552218. macOS BOLT support is
+          # not in tree.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            runner: namespace-profile-endev-linux-amd64-large;overrides.cache-tag=aube-rust-linux
+            build-tool: cross
+            bolt: true
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            runner: namespace-profile-endev-linux-amd64-large;overrides.cache-tag=aube-rust-linux
+            build-tool: cross
+            bolt: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            runner: namespace-profile-endev-linux-arm64-large;overrides.cache-tag=aube-rust-linux-arm64
+            build-tool: cargo
+            bolt: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            # Trying GitHub's standard Apple Silicon runner — the
+            # namespace `macos-arm64-large` image segfaulted the
+            # PGO-instrumented binary on both rustc 1.94 and 1.95
+            # (#589's rustup bump fired but training still SIGSEGV'd,
+            # so the toolchain isn't the variable). Switch to GH's
+            # hosted runner to test whether the crash is image- or
+            # hardware-specific to the namespace fleet (older Apple
+            # silicon, custom kernel/Xcode bundle, sandbox quirks)
+            # before dropping macOS arm64 from the PGO matrix entirely.
+            runner: macos-latest
+            build-tool: cargo
+            bolt: false
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: metadata-primer
+          path: crates/aube-resolver/data
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+      # rustc 1.94.0 on aarch64-apple-darwin miscompiles the
+      # PGO-instrumented binary — the resulting `aube install` SIGSEGVs
+      # on its first invocation during phase 2 training. Verified
+      # locally on rustc 1.95.0 against the same source tree: full PGO
+      # pipeline completes clean. Bump to latest stable only when the
+      # runner's default rustc is older than 1.95 so we don't pay the
+      # toolchain download on runners that have already moved on.
+      # TODO: drop this step once the GH macos-arm64 runner image
+      # ships rustc 1.95+ as the default. Track via this PR.
+      - name: Ensure rustc >= 1.95 on macOS arm64
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          current=$(rustc --version | awk '{print $2}')
+          # Parse "1.94.0" into major / minor. `sort -V` would be the
+          # obvious idiom but isn't portable: GH macOS runners ship
+          # BSD `sort` (no `-V` flag), and under `set -eo pipefail`
+          # the failing pipeline either aborts the step or returns
+          # empty, both of which mis-trigger the upgrade path.
+          IFS=. read -r maj min _ <<<"$current"
+          if [ "$maj" -lt 1 ] || { [ "$maj" -eq 1 ] && [ "$min" -lt 95 ]; }; then
+            echo "rustc $current is below 1.95.0; upgrading to latest stable"
+            rustup update stable
+            rustup default stable
+            rustc --version
+          else
+            echo "rustc $current already >= 1.95.0; no upgrade needed"
+          fi
+          # GH macos-latest-large defaults to an x86_64-apple-darwin
+          # host rustc (Rosetta) — `--target=aarch64-apple-darwin`
+          # from pgo.bash then triggers a cross-compile that needs the
+          # arm64 std lib explicitly installed. Idempotent on namespace
+          # runners where the target is already present.
+          rustup target add aarch64-apple-darwin
+          rustup show
+      - name: Install rustup llvm-tools-preview
+        shell: bash
+        run: rustup component add llvm-tools-preview
+      - name: Install cross
+        if: ${{ matrix.build-tool == 'cross' }}
+        shell: bash
+        run: cargo install cross --locked
+      # BOLT (post-link layout optimizer) runs after PGO phase 3b on
+      # the Linux PGO rows. We pull it from apt.llvm.org rather than
+      # Ubuntu's archive because the noble `llvm-bolt`/`bolt-18`
+      # packages are amd64-only; apt.llvm.org publishes the same
+      # source for both amd64 and arm64. pgo.bash phase 4 uses BOLT's
+      # instrumentation mode, so no `perf` install or
+      # `kernel.perf_event_paranoid` tweaks are needed.
+      - name: Install BOLT toolchain
+        if: ${{ matrix.bolt }}
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wget gnupg ca-certificates
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-18 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-toolchain-18.list
+          sudo apt-get update
+          sudo apt-get install -y bolt-18
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          /usr/lib/llvm-18/bin/llvm-bolt --version | head -2
+          /usr/lib/llvm-18/bin/merge-fdata --help | head -2 || true
+      # verdaccio is installed lazily by hermetic.bash's
+      # _hermetic_ensure_verdaccio (called from pgo.bash via hermetic_start),
+      # so no explicit install step is needed here.
+      - name: Import codesign certs
+        if: startsWith(matrix.os, 'macos')
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASS }}
+      - name: PGO build (instrument + train + optimize)
+        shell: bash
+        env:
+          AUBE_PGO_NO_LOCK: "1"
+          AUBE_PGO_BUILD_TOOL: ${{ matrix.build-tool }}
+          AUBE_PGO_TARGET: ${{ matrix.target }}
+          AUBE_PGO_BOLT: ${{ matrix.bolt && '1' || '' }}
+        run: bash benchmarks/pgo.bash
+      - name: Codesign macOS binaries
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        env:
+          IDENTITY: "Developer ID Application: Jeffrey Dickey (4993Y37DX6)"
+          BIN_DIR: target/${{ matrix.target }}/release-pgo
+        run: |
+          # Sign aube only — aubr/aubx become symlinks to aube in the
+          # archive step below and share its signature. Gatekeeper
+          # validates the underlying file's signature; the invocation
+          # name only matters for argv[0] dispatch inside the binary.
+          codesign --sign "$IDENTITY" --options runtime --timestamp \
+            --prefix dev.jdx. "$BIN_DIR/aube"
+      - name: Archive PGO binaries
+        id: archive
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive="aube-${TAG}-${TARGET}.tar.gz"
+          # Replace aubr/aubx with symlinks to aube before tar-ing.
+          # They're multicall shims (Cargo just had to compile them
+          # separately because it doesn't natively support multicall);
+          # at runtime `rewrite_multicall_argv` keys off argv[0], so a
+          # symlink invoked as `aubr` runs `aube run` correctly. tar
+          # stores symlinks as ~zero-byte entries pointing at "aube",
+          # cutting the archive from three full binaries to one.
+          # Symlinks match the existing convention in packaging/copr/
+          # and .github/workflows/ppa-publish.yml.
+          BIN_DIR="target/${TARGET}/release-pgo"
+          ln -sf aube "$BIN_DIR/aubr"
+          ln -sf aube "$BIN_DIR/aubx"
+          tar -czf "$archive" -C "$BIN_DIR" aube aubr aubx
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+      - name: Upload archive to release
+        if: ${{ !fromJSON(inputs.dry_run || 'false') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          ARCHIVE: ${{ steps.archive.outputs.path }}
+        run: gh release upload "$TAG" "$ARCHIVE" --clobber
+      - name: Upload archive as workflow artifact (dry run)
+        if: ${{ fromJSON(inputs.dry_run || 'false') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aube-${{ inputs.tag }}-${{ matrix.target }}
+          path: ${{ steps.archive.outputs.path }}
+      - name: Attest release archive
+        if: ${{ !fromJSON(inputs.dry_run || 'false') }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ steps.archive.outputs.path }}

@@ -1,0 +1,195 @@
+name: publish-smoke
+
+# Manual npm publish smoke tests for aube itself. These publish tiny,
+# disposable packages so we can verify real registry behavior before
+# release packages or downstream users depend on aube publish.
+#
+# npm setup required:
+# - @jdx/aube-publish-oidc-smoke must have this workflow configured
+#   as a Trusted Publisher on npmjs.com:
+#   jdx/aube / .github/workflows/publish-smoke.yml
+# - @jdx/aube-publish-otp-smoke must be owned by the same npm account
+#   as the NPM_TOKEN repository secret. If that account requires 2FA for
+#   writes, provide the current one-time password with the otp dispatch input.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Which publish path to exercise"
+        required: true
+        default: "oidc"
+        type: choice
+        options:
+          - oidc
+          - otp
+      otp:
+        description: "Current npm OTP for the token-backed publish path"
+        required: false
+        type: string
+
+concurrency:
+  group: publish-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Publish smoke packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DIST_TAG: smoke
+      MODE: ${{ inputs.mode }}
+      OIDC_PACKAGE: "@jdx/aube-publish-oidc-smoke"
+      OTP_PACKAGE: "@jdx/aube-publish-otp-smoke"
+    steps:
+      - name: Validate mode
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            oidc|otp) ;;
+            *)
+              echo "::error::Unsupported mode: $MODE"
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build aube
+        run: cargo build -p aube
+
+      - name: Prepare smoke package
+        id: pkg
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          VERSION="0.0.0-smoke.${RUN_ID}.${RUN_ATTEMPT}"
+          STAGE="$RUNNER_TEMP/aube-publish-smoke"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp -R npm/smoke-package/. "$STAGE/"
+          node - "$STAGE/package.json" "$VERSION" <<'NODE'
+          const fs = require('node:fs');
+          const [path, version] = process.argv.slice(2);
+          const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+          pkg.version = version;
+          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Publish with npm Trusted Publishing
+        if: ${{ env.MODE == 'oidc' }}
+        env:
+          STAGE: ${{ steps.pkg.outputs.stage }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set -euo pipefail
+          cp -R "$STAGE" "$RUNNER_TEMP/aube-publish-oidc"
+          cd "$RUNNER_TEMP/aube-publish-oidc"
+          node - "$OIDC_PACKAGE" "$VERSION" <<'NODE'
+          const fs = require('node:fs');
+          const [name, version] = process.argv.slice(2);
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.name = name;
+          pkg.version = version;
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+          set +e
+          "$GITHUB_WORKSPACE/target/debug/aube" publish \
+            --no-git-checks \
+            --access public \
+            --tag "$DIST_TAG" \
+            --provenance \
+            --registry https://registry.npmjs.org/
+          rc=$?
+          set -e
+          echo "OIDC_STATUS=$rc" >> "$GITHUB_ENV"
+          if [ "$rc" -eq 0 ]; then
+            npm view "$OIDC_PACKAGE@$VERSION" version || \
+              echo "::warning::OIDC package published, but npm view did not find it yet"
+          else
+            echo "::error::OIDC publish failed with exit code $rc"
+          fi
+          exit 0
+
+      - name: Publish with token and OTP
+        if: ${{ env.MODE == 'otp' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_OTP: ${{ inputs.otp }}
+          STAGE: ${{ steps.pkg.outputs.stage }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is required for the token+OTP smoke path"
+            exit 1
+          fi
+          if [ -z "${NPM_OTP:-}" ]; then
+            echo "::error::otp workflow_dispatch input is required for the token+OTP smoke path"
+            exit 1
+          fi
+          echo "::add-mask::$NPM_OTP"
+          cp -R "$STAGE" "$RUNNER_TEMP/aube-publish-otp"
+          cd "$RUNNER_TEMP/aube-publish-otp"
+          node - "$OTP_PACKAGE" "$VERSION" <<'NODE'
+          const fs = require('node:fs');
+          const [name, version] = process.argv.slice(2);
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.name = name;
+          pkg.version = version;
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+          args=(
+            publish
+            --no-git-checks
+            --access public
+            --tag "$DIST_TAG"
+            --provenance
+            --registry https://registry.npmjs.org/
+          )
+          args+=(--otp "$NPM_OTP")
+          set +e
+          "$GITHUB_WORKSPACE/target/debug/aube" "${args[@]}"
+          rc=$?
+          set -e
+          echo "OTP_STATUS=$rc" >> "$GITHUB_ENV"
+          if [ "$rc" -eq 0 ]; then
+            npm view "$OTP_PACKAGE@$VERSION" version || \
+              echo "::warning::OTP package published, but npm view did not find it yet"
+          else
+            echo "::error::OTP publish failed with exit code $rc"
+          fi
+          exit 0
+
+      - name: Check smoke results
+        if: always()
+        run: |
+          set -euo pipefail
+          failed=0
+          if [ "$MODE" = "oidc" ]; then
+            if [ "${OIDC_STATUS:-missing}" != "0" ]; then
+              echo "::error::OIDC smoke failed: ${OIDC_STATUS:-missing}"
+              failed=1
+            fi
+          fi
+          if [ "$MODE" = "otp" ]; then
+            if [ "${OTP_STATUS:-missing}" != "0" ]; then
+              echo "::error::OTP smoke failed: ${OTP_STATUS:-missing}"
+              failed=1
+            fi
+          fi
+          exit "$failed"

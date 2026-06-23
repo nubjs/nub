@@ -1,0 +1,45 @@
+{
+	"name": "@pnpm.e2e/foobar",
+	"versions": {
+		"100.0.0": {
+			"name": "@pnpm.e2e/foobar",
+			"version": "100.0.0",
+			"dependencies": {
+				"@pnpm.e2e/foo": "^100.0.0"
+			},
+			"optionalDependencies": {
+				"@pnpm.e2e/bar": "^100.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/foobar@100.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-hkxFLvDxlTInR4k87MdZwj8pMCAQAUg/gHzVRy9Jfl3gVF+r0yvcXwET6xJOAvlI1IPZuAKUk1olct+ecIzWmA==",
+				"shasum": "af19914007f62e82936754cc0d06450e0fc02608",
+				"tarball": "http://localhost:4873/@pnpm.e2e/foobar/-/@pnpm.e2e/foobar-100.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:15.816Z",
+		"created": "2026-04-30T21:29:15.816Z",
+		"100.0.0": "2026-04-30T21:29:15.816Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "100.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"foobar-100.0.0.tgz": {
+			"shasum": "af19914007f62e82936754cc0d06450e0fc02608",
+			"version": "100.0.0"
+		}
+	},
+	"_rev": "3-c1769ecbccc97348",
+	"_id": "@pnpm.e2e/foobar",
+	"readme": "ERROR: No README data found!"
+}

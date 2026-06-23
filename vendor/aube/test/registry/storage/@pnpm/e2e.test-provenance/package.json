@@ -1,0 +1,99 @@
+{
+    "name": "@pnpm/e2e.test-provenance",
+    "versions": {
+        "0.0.0": {
+            "name": "@pnpm/e2e.test-provenance",
+            "version": "0.0.0",
+            "_id": "@pnpm/e2e.test-provenance@0.0.0",
+            "_nodeVersion": "25.9.0",
+            "_npmVersion": "11.12.1",
+            "gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+            "contributors": [],
+            "dist": {
+                "integrity": "sha512-/Lq/osM53MYVeenLPGLDhviAp8rHTu1L1/yzsFNzjDk4YZ7TVzwfkLgfgPGoZ22+MEdJjeJIWYRGOvHCXEqXkQ==",
+                "shasum": "1bcc93c092d95792c5afc7ac33b1d06d521c86d7",
+                "tarball": "http://localhost:4873/@pnpm/e2e.test-provenance/-/@pnpm/e2e.test-provenance-0.0.0.tgz"
+            },
+            "_npmUser": {
+                "name": "zkochan",
+                "email": "z@kochan.io"
+            }
+        },
+        "0.0.4": {
+            "name": "@pnpm/e2e.test-provenance",
+            "version": "0.0.4",
+            "_id": "@pnpm/e2e.test-provenance@0.0.4",
+            "_nodeVersion": "25.9.0",
+            "_npmVersion": "11.12.1",
+            "gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+            "contributors": [],
+            "dist": {
+                "integrity": "sha512-4JtDvT1lSvsRpH/EaXog4MMHs+oorT9Br/aTvXLi4KyZxgHT2fr9P0apQsOzcMhQPBuyViCR6Nbr2O7zIxA//A==",
+                "shasum": "b81467058eee7ce8fdae68f11458cab0098d3375",
+                "tarball": "http://localhost:4873/@pnpm/e2e.test-provenance/-/@pnpm/e2e.test-provenance-0.0.4.tgz",
+                "attestations": {
+                    "url": "https://registry.npmjs.org/-/npm/v1/attestations/@pnpm%2fe2e.test-provenance@0.0.4",
+                    "provenance": {
+                        "predicateType": "https://slsa.dev/provenance/v1"
+                    }
+                }
+            },
+            "_npmUser": {
+                "name": "GitHub Actions",
+                "email": "npm-oidc-no-reply@github.com",
+                "trustedPublisher": {
+                    "id": "github",
+                    "oidcConfigId": "oidc:08f7117a-76fc-4516-b43f-6c0a1220b855"
+                }
+            }
+        },
+        "0.0.5": {
+            "name": "@pnpm/e2e.test-provenance",
+            "version": "0.0.5",
+            "_id": "@pnpm/e2e.test-provenance@0.0.5",
+            "_nodeVersion": "25.9.0",
+            "_npmVersion": "11.12.1",
+            "gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+            "contributors": [],
+            "dist": {
+                "integrity": "sha512-xSF4X5xm/ddnLDoC1d9V53LkdJNiOuCcoQDjxLAu7a1pz2BrQc9LbgE+i5TUpx+cyZXVjg9q0RQOIqL1TEhnrw==",
+                "shasum": "5ebf1b115b7b33b816796b3e74e3a7e83eabf17a",
+                "tarball": "http://localhost:4873/@pnpm/e2e.test-provenance/-/@pnpm/e2e.test-provenance-0.0.5.tgz"
+            },
+            "_npmUser": {
+                "name": "zkochan",
+                "email": "z@kochan.io"
+            }
+        }
+    },
+    "time": {
+        "modified": "2025-11-09T17:16:19.742Z",
+        "created": "2025-11-09T17:03:54.413Z",
+        "0.0.0": "2025-11-09T17:03:54.722Z",
+        "0.0.4": "2025-11-09T17:15:39.578Z",
+        "0.0.5": "2025-11-09T17:16:19.470Z"
+    },
+    "users": {},
+    "dist-tags": {
+        "latest": "0.0.5"
+    },
+    "_uplinks": {},
+    "_distfiles": {},
+    "_attachments": {
+        "e2e.test-provenance-0.0.0.tgz": {
+            "shasum": "1bcc93c092d95792c5afc7ac33b1d06d521c86d7",
+            "version": "0.0.0"
+        },
+        "e2e.test-provenance-0.0.4.tgz": {
+            "shasum": "b81467058eee7ce8fdae68f11458cab0098d3375",
+            "version": "0.0.4"
+        },
+        "e2e.test-provenance-0.0.5.tgz": {
+            "shasum": "5ebf1b115b7b33b816796b3e74e3a7e83eabf17a",
+            "version": "0.0.5"
+        }
+    },
+    "_rev": "4-1234567890abcdef",
+    "_id": "@pnpm/e2e.test-provenance",
+    "readme": "ERROR: No README data found!"
+}

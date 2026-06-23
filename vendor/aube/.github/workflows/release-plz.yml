@@ -1,0 +1,527 @@
+name: release-plz
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # On every push to main: run `release-plz release`. If the current
+  # workspace version has no tag yet (because the release PR was just
+  # merged), this tags `aube` as `v<version>`, opens a draft GitHub
+  # release, and publishes every workspace crate to crates.io using
+  # crates.io trusted publishing in dependency order. Otherwise it's a
+  # no-op.
+  release-plz-release:
+    name: release-plz release
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    # Two commits landing on main in quick succession must not double-publish.
+    concurrency:
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AUBE_GH_TOKEN }}
+          submodules: recursive
+          persist-credentials: false
+      - name: Run release-plz
+        id: release-plz
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+      # The `releases` output is an array of every crate that was
+      # published, in dependency order. Since aube depends on all
+      # 9 other internal crates, it is the LAST entry — and only it
+      # has `git_tag_enable = true` in release-plz.toml, so only its
+      # `.tag` is meaningful for downstream jobs. Pull that tag out by
+      # package name rather than by position.
+      - name: Extract aube tag
+        id: tag
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          RELEASES_JSON: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          TAG=$(echo "$RELEASES_JSON" | jq -r '.[] | select(.package_name == "aube") | .tag')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::aube was not in the releases output"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Fetch new tags
+        if: steps.release-plz.outputs.releases_created == 'true'
+        run: git fetch --tags
+      # release-plz creates the draft release before pushing the tag,
+      # so the release API briefly has `tag_name: "untagged-<sha>"`.
+      # Patch the single aube draft back to its real tag once it
+      # lands. (The other 9 crates have `git_release_enable = false`
+      # and don't create drafts.)
+      - name: Fix draft release tag
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          REPO: ${{ github.repository }}
+          # jq reads `env.TAG` so a tag containing `"` or `\` can't
+          # break out of the jq query string.
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          echo "Looking for untagged draft release for tag: $TAG"
+          release_id=""
+          for attempt in $(seq 1 10); do
+            # Exact-match `.name == env.TAG` — `contains` would pick up
+            # stale drafts whose name is a superstring (e.g. a leftover
+            # `v1.0.0-beta.1` draft when TAG is `v1.0.0`). The draft
+            # name is set to "v{{ version }}" in release-plz.toml, so
+            # equality is the correct check.
+            release_id=$(gh api "repos/$REPO/releases" \
+              --jq '.[] | select(.draft and (.tag_name | startswith("untagged-"))) | select(.name == env.TAG) | .id' \
+              | head -1) || true
+            if [ -n "$release_id" ]; then
+              break
+            fi
+            echo "  Attempt $attempt/10: untagged draft not yet listed, retrying in 5s..."
+            sleep 5
+          done
+          if [ -n "$release_id" ]; then
+            echo "Patching draft release $release_id tag_name -> $TAG"
+            gh api "repos/$REPO/releases/$release_id" --method PATCH --field tag_name="$TAG"
+          else
+            echo "::warning::No untagged draft release found for $TAG after 10 attempts"
+          fi
+
+  # Build + codesign + upload release binaries for every target. Runs
+  # only when `release-plz-release` actually cut a release. The upload
+  # workflow is a reusable `workflow_call` so the matrix lives in one
+  # place.
+  upload-assets:
+    name: Upload assets
+    needs: release-plz-release
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-plz-release.outputs.tag }}
+    secrets:
+      AUBE_GH_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+      CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
+      CERTIFICATES_P12_PASS: ${{ secrets.CERTIFICATES_P12_PASS }}
+
+  # Flip the draft release to non-draft once *every* asset uploaded
+  # cleanly. With immutable GitHub releases enabled, a published
+  # release can't have its assets replaced — so if any matrix target
+  # failed, we leave the draft in place rather than ship a release
+  # with missing platform binaries (downstream npm / COPR / PPA jobs
+  # would also fail trying to fetch the holes). To recover: manually
+  # re-run `release.yml` via workflow_dispatch with the tag input,
+  # which fills in the missing assets, then either flip the draft by
+  # hand (`gh release edit $TAG --draft=false`) or workflow_dispatch
+  # the whole release-plz workflow again so this job runs.
+  publish-release:
+    name: Publish release
+    needs: [release-plz-release, upload-assets]
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    runs-on: namespace-profile-endev-linux-amd64
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+        run: |
+          gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
+
+  # Replace the raw git-cliff-style body with a communique-generated
+  # narrative release note. If communique fails, fail the workflow so
+  # the broken release-note generation is visible and actionable.
+  enhance-release:
+    name: Enhance release notes
+    needs: [release-plz-release, publish-release]
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    runs-on: namespace-profile-endev-linux-amd64
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/${{ needs.release-plz-release.outputs.tag }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        with:
+          install_args: communique
+      - name: Enhance GitHub release with communique
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+        run: |
+          communique generate "$TAG" --github-release
+      - name: Append jdx.dev sponsor blurb
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+        run: |
+          body="$(gh release view "$TAG" --json body --jq .body)"
+          # Strip any pre-existing sponsor section (the canonical heading,
+          # the no-emoji variant communique sometimes emits, or a leftover
+          # from a prior workflow run) plus trailing blank lines, then
+          # append the canonical block. Idempotent regardless of input.
+          trimmed="$(printf '%s\n' "$body" | awk '
+            /^## .*Sponsor aube[[:space:]]*$/ { exit }
+            /^[[:space:]]*$/ { blanks++; next }
+            { while (blanks-- > 0) print ""; blanks = 0; print }
+          ')"
+
+          {
+            printf '%s\n' "$trimmed"
+            cat <<'EOF'
+
+          ## 💚 Sponsor aube
+
+          aube is part of [**jdx.dev**](https://jdx.dev) — an independent developer-tooling studio run by [@jdx](https://github.com/jdx), also behind [mise](https://mise.jdx.dev/). Work on aube is funded entirely by sponsors.
+
+          If aube is saving your team install time or CI minutes, please consider [sponsoring at jdx.dev](https://jdx.dev). Individual and company sponsorships are what keep the project fast, free, and independent.
+          EOF
+          } > /tmp/release-notes.md
+          gh release edit "$TAG" --notes-file /tmp/release-notes.md
+
+  # On every push to main: keep a running "chore: release" PR open with
+  # the next version bump + regenerated CHANGELOG. Merging the PR is
+  # what triggers the `release-plz-release` branch above on the next
+  # push.
+  #
+  # We drive the `release-plz` CLI directly (rather than using
+  # `release-plz/action`) so the bump + docs regeneration + PR open
+  # happen in a single push: `release-plz update` writes the Cargo.toml
+  # / Cargo.lock / CHANGELOG.md bumps locally, we then regenerate
+  # `aube.usage.kdl` and the CLI docs against the new version, and only
+  # then do we commit and push the whole thing. One push means CI
+  # (Buildkite, windows, autofix) never sees an intermediate tree with
+  # an out-of-date `aube.usage.kdl`.
+  release-plz-pr:
+    name: release-plz PR
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AUBE_GH_TOKEN }}
+          submodules: recursive
+          persist-credentials: false
+      # MISE_LOCKED=1 makes `mise install` fail if the committed
+      # mise.lock doesn't already pin the current platform's URL, instead
+      # of silently re-resolving `"latest"` pins and rewriting mise.lock.
+      # release-plz refuses to run against a dirty tree, and intentional
+      # lockfile bumps should land via their own PR.
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        env:
+          MISE_LOCKED: "1"
+      - uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154 # v2.81.8
+        with:
+          tool: release-plz
+      - name: Configure git identity
+        run: |
+          git config user.name "release-plz[bot]"
+          git config user.email "release-plz+bot@users.noreply.github.com"
+          git fetch --tags origin
+
+      # Step 1: let release-plz compute the next workspace version and
+      # write Cargo.toml / Cargo.lock / CHANGELOG.md bumps into the
+      # working tree.
+      # `bump=true` iff release-plz actually produced a version-bump diff.
+      - name: Apply version bumps
+        id: update
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+        run: |
+          release-plz update
+          # `git status --porcelain` catches both modified tracked files
+          # and untracked ones. `git diff --quiet` alone would miss a
+          # brand-new CHANGELOG.md that release-plz created for a crate
+          # whose changelog didn't exist before.
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No version bumps needed; regen steps will still run."
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # release-plz only bumps when a packaged Cargo file changed. aube's
+      # shipped npm package, release workflows, docs, and automation are
+      # also release-critical, so force a patch release for any non-release
+      # commit that release-plz considered package-invisible.
+      - name: Force patch bump for repo-only changes
+        id: force
+        if: steps.update.outputs.bump == 'false'
+        run: |
+          head_subject=$(git log -1 --format=%s)
+          if [[ "$head_subject" =~ ^chore:\ release\ v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Head is a release commit; not opening another release PR."
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! latest_tag=$(git describe --tags --match 'v[0-9]*' --abbrev=0); then
+            echo "::error::could not find latest v* tag for forced release bump"
+            exit 1
+          fi
+          if [ -z "$(git log --format=%H "${latest_tag}..HEAD")" ]; then
+            echo "No commits since ${latest_tag}; nothing to force-release."
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          metadata=$(cargo metadata --format-version=1 --no-deps)
+          old_version=$(jq -r '.packages[] | select(.name == "aube") | .version' <<<"$metadata")
+          IFS=. read -r major minor patch <<<"$old_version"
+          new_version="${major}.${minor}.$((patch + 1))"
+          packages=$(jq -r '[.packages[] | select(.source == null) | .name] | @json' <<<"$metadata")
+
+          node - "$old_version" "$new_version" "$packages" "$latest_tag" <<'NODE'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+
+          const [oldVersion, newVersion, packagesJson, latestTag] = process.argv.slice(2);
+          const packages = new Set(JSON.parse(packagesJson));
+          const today = new Date().toISOString().slice(0, 10);
+
+          let cargoToml = fs.readFileSync('Cargo.toml', 'utf8');
+          cargoToml = cargoToml.replace(
+            /(\[workspace\.package\][\s\S]*?version = ")\d+\.\d+\.\d+(")/,
+            `$1${newVersion}$2`,
+          );
+          for (const name of packages) {
+            let found = false;
+            cargoToml = cargoToml
+              .split('\n')
+              .map((line) => {
+                if (!line.startsWith(`${name} = {`) || !line.includes('path = ')) return line;
+                found = true;
+                const updated = line.replace(`version = "${oldVersion}"`, `version = "${newVersion}"`);
+                if (updated === line) {
+                  throw new Error(`path dependency ${name} did not contain version ${oldVersion}`);
+                }
+                return updated;
+              })
+              .join('\n');
+            if (!found) throw new Error(`path dependency ${name} not found in Cargo.toml`);
+          }
+          fs.writeFileSync('Cargo.toml', cargoToml);
+
+          const subjects = execFileSync('git', ['log', '--format=%s', `${latestTag}..HEAD`], { encoding: 'utf8' })
+            .trim()
+            .split('\n')
+            .filter(Boolean)
+            .filter((subject) => !/^chore: release v\d+\.\d+\.\d+/.test(subject));
+          const sections = new Map([
+            ['feat', ['Added', []]],
+            ['fix', ['Fixed', []]],
+            ['perf', ['Changed', []]],
+            ['default', ['Other', []]],
+          ]);
+          for (const subject of subjects.reverse()) {
+            const match = subject.match(/^([a-z]+)(?:\(([^)]+)\))?!?: (.*?)(?: \(#(\d+)\))?$/);
+            const type = match?.[1] || 'default';
+            const scope = match?.[2];
+            const desc = match?.[3] || subject;
+            const pr = match?.[4];
+            const [, items] = sections.get(type) || sections.get('default');
+            const scoped = scope ? `*(${scope})* ${desc}` : desc;
+            const linked = pr ? `${scoped} ([#${pr}](https://github.com/jdx/aube/pull/${pr}))` : scoped;
+            items.push(`- ${linked}`);
+          }
+
+          const body = [];
+          for (const [, [heading, items]] of sections) {
+            if (!items.length) continue;
+            body.push(`### ${heading}`, '', ...items, '');
+          }
+          const changelogEntry = [
+            `## [${newVersion}](https://github.com/jdx/aube/compare/${latestTag}...v${newVersion}) - ${today}`,
+            '',
+            ...body,
+          ].join('\n').trimEnd();
+          const changelog = fs.readFileSync('crates/aube/CHANGELOG.md', 'utf8');
+          const anchor = '## [Unreleased]\n\n';
+          const anchorIndex = changelog.indexOf(anchor);
+          if (anchorIndex === -1) {
+            throw new Error('crates/aube/CHANGELOG.md is missing the expected Unreleased heading');
+          }
+          fs.writeFileSync(
+            'crates/aube/CHANGELOG.md',
+            changelog.slice(0, anchorIndex + anchor.length)
+              + changelogEntry
+              + '\n\n'
+              + changelog.slice(anchorIndex + anchor.length),
+          );
+          NODE
+
+          echo "Forced patch bump ${old_version} -> ${new_version}"
+          echo "bump=true" >> "$GITHUB_OUTPUT"
+
+      - name: Capture release version
+        id: version
+        run: |
+          VERSION=$(cargo metadata --format-version=1 --no-deps \
+            | jq -r '.packages[] | select(.name == "aube") | .version')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # Step 2: regenerate `aube.usage.kdl` + docs against the current
+      # workspace version. `render` depends on `build`, so cargo builds
+      # here.
+      #
+      # Benchmarks are NOT refreshed here — `bench:bump` is a 10-minute
+      # build+run that used to dominate this job. It now lives in its
+      # own `bench-refresh` workflow (daily cron, version-gated, opens
+      # its own reviewable PR). See `.github/workflows/bench-refresh.yml`.
+      - name: Regenerate CLI docs
+        run: "mise run render ::: lint-fix"
+
+      # Bump release.json so the docs homepage's "Released at" line
+      # tracks the new version. Only runs on real version bumps — on a
+      # no-bump refresh the version is unchanged, and rewriting the
+      # file just to reset `releasedAt` would create spurious diffs on
+      # every push.
+      - name: Bump release.json
+        if: steps.update.outputs.bump == 'true' || steps.force.outputs.bump == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          RELEASED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          jq --arg v "$VERSION" --arg d "$RELEASED_AT" \
+            '.version = $v | .releasedAt = $d' release.json > release.json.tmp
+          mv release.json.tmp release.json
+
+      # Step 3: only proceed if at least one of the regen steps (or
+      # release-plz update itself) actually changed the tree. A clean
+      # tree means nothing is worth PR-ing.
+      - name: Check for regen diff
+        id: dirty
+        run: |
+          if git diff --quiet && [ -z "$(git status --porcelain)" ]; then
+            echo "Nothing regenerated, skipping PR update."
+            echo "dirty=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "dirty=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Step 4: reuse an existing open release-plz PR's branch name (so
+      # the PR number is preserved across runs), or mint a fresh
+      # timestamped branch. Matches release-plz's own default branch
+      # prefix of `release-plz-`.
+      - name: Find existing release-plz PR
+        if: steps.dirty.outputs.dirty == 'true'
+        id: find_pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --state open \
+            --json number,headRefName \
+            --jq '[.[] | select(.headRefName | startswith("release-plz-"))][0] // empty')
+          if [ -n "$EXISTING" ]; then
+            BRANCH=$(echo "$EXISTING" | jq -r .headRefName)
+            PR_NUMBER=$(echo "$EXISTING" | jq -r .number)
+          else
+            BRANCH="release-plz-$(date -u +'%Y-%m-%dT%H-%M-%SZ')"
+            PR_NUMBER=""
+          fi
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      # Step 5: one commit, one push. Commit subject tracks whether
+      # this PR carries a version bump or is a pure regen refresh.
+      - name: Commit and push
+        if: steps.dirty.outputs.dirty == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ steps.find_pr.outputs.branch }}
+          BUMP: ${{ steps.update.outputs.bump == 'true' || steps.force.outputs.bump == 'true' }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if [ "$BUMP" = "true" ]; then
+            MSG="chore: release ${TAG}"
+          else
+            MSG="chore: refresh generated artifacts"
+          fi
+          git checkout -B "$BRANCH"
+          git add -A
+          git commit -m "$MSG"
+          # persist-credentials: false on checkout means we need to auth
+          # the push explicitly. Re-point origin (rather than pushing to
+          # a one-shot URL) so --force-with-lease has a remote-tracking
+          # ref to compare against; pushing to an unnamed URL leaves no
+          # tracking ref and git rejects every push with "stale info".
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
+          git fetch origin "$BRANCH" || true
+          git push --force-with-lease -u origin "HEAD:refs/heads/${BRANCH}"
+
+      # Step 6: open the PR if it's new, or refresh its title if an
+      # existing one is being reused. We keep the body minimal — the
+      # diff tab and CHANGELOG.md show the full picture, and
+      # communique-generated narrative notes run on the actual release
+      # in `enhance-release` above, not here.
+      - name: Create or update PR
+        if: steps.dirty.outputs.dirty == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          BRANCH: ${{ steps.find_pr.outputs.branch }}
+          PR_NUMBER: ${{ steps.find_pr.outputs.pr_number }}
+          BUMP: ${{ steps.update.outputs.bump == 'true' || steps.force.outputs.bump == 'true' }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if [ "$BUMP" = "true" ]; then
+            TITLE="chore: release ${TAG}"
+            cat > /tmp/pr_body.md <<EOF
+          ## 🤖 New release: \`${TAG}\`
+
+          This PR bumps the workspace to \`${TAG}\` and regenerates CHANGELOG entries, \`aube.usage.kdl\`, the CLI docs, and the benchmark results.
+
+          See the diff for the full set of changes, or the per-crate \`CHANGELOG.md\` files for the release notes that will ship.
+
+          ---
+          Generated by the \`release-plz-pr\` workflow.
+          EOF
+          else
+            TITLE="chore: refresh generated artifacts"
+            cat > /tmp/pr_body.md <<EOF
+          ## 🤖 Refreshed generated artifacts
+
+          No version bump pending, but one or more regenerated files drifted against main (CLI docs, benchmark results, README ratios). This PR keeps them in sync.
+
+          ---
+          Generated by the \`release-plz-pr\` workflow.
+          EOF
+          fi
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr edit "$PR_NUMBER" --title "$TITLE" --body-file /tmp/pr_body.md
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "$TITLE" --body-file /tmp/pr_body.md
+          fi

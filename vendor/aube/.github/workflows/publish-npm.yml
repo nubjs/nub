@@ -1,0 +1,95 @@
+name: publish-npm
+
+# Fires on every published GitHub release (i.e. the moment the
+# release-plz flow flips the draft to non-draft and all prebuilt
+# binaries are already attached to the release). Downloads the
+# per-target archives that `release.yml` produced, then publishes
+# each `@endevco/aube-<os>-<arch>` followed by the root
+# `@endevco/aube`.
+#
+# Decoupled from `release-plz.yml` on purpose: a failed npm publish
+# doesn't block crates.io or the GitHub release, and re-runs can be
+# kicked off from the Actions UI for any existing tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish to npm (e.g. v1.0.0-beta.1)"
+        required: true
+        type: string
+
+concurrency:
+  # Serialize by tag so an accidental double-trigger (release event +
+  # manual re-run of the same tag) can't race two publish flights.
+  group: publish-npm-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    # github-hosted runner: npm Trusted Publishing (--provenance) rejects
+    # self-hosted runner identities ("Unsupported GitHub Actions runner
+    # environment: self-hosted"). The publish job is light enough that
+    # the namespace runner saves nothing.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm Trusted Publishing (OIDC). GitHub mints a
+      # short-lived OIDC token that npm exchanges for a one-shot
+      # publish token — no NPM_TOKEN secret to rotate or leak.
+      # Each @endevco/aube* package must have this repo + workflow
+      # configured as a Trusted Publisher on npmjs.com (org level
+      # default covers new packages under the scope).
+      id-token: write
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          if [ -z "$TAG" ]; then
+            echo "::error::no tag from release event or workflow_dispatch input"
+            exit 1
+          fi
+          # Strict format check before the tag controls the checkout ref.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]]; then
+            echo "::error::Refusing to publish: tag '$TAG' does not match vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          # Manual dispatch path: id-token: write on this workflow means npm
+          # Trusted Publishing will accept whatever the checked-out tag's
+          # publish.mjs does. Require the tag to be reachable from main so
+          # an unreviewed ref can't push an @endevco/aube* package.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${TAG}" --jq '.status' 2>/dev/null || echo "missing")
+            if [ "$STATUS" != "identical" ] && [ "$STATUS" != "behind" ]; then
+              echo "::error::Tag '$TAG' is not reachable from main (compare status: $STATUS)"
+              exit 1
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      # Trusted Publishing requires npm >= 11.5.1. Node 24 ships npm
+      # 11, but the exact minor varies — upgrade explicitly so the
+      # workflow doesn't break if Node's bundled npm drifts behind.
+      - name: Ensure npm supports Trusted Publishing
+        run: npm install -g npm@latest
+      - name: Publish @endevco/aube and platform packages
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: node npm/scripts/publish.mjs

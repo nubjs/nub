@@ -55,9 +55,9 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       # diffs against the PR base; on push it diffs against the before-SHA. Only
       # docs/site-only changes flip a group OFF — everything else (including the
-      # vendor/aube submodule gitlink, so a pin bump triggers the full suite) is
-      # Rust-relevant. .github/workflows/** is Rust-relevant so a CI change still
-      # exercises the matrix it edits.
+      # vendored aube tree under vendor/aube/**, so any aube edit triggers the
+      # full suite) is Rust-relevant. .github/workflows/** is Rust-relevant so a
+      # CI change still exercises the matrix it edits.
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
         id: filter
         with:
@@ -66,7 +66,7 @@ jobs:
           filters: |
             rust:
               - 'crates/**'
-              - 'vendor/aube'
+              - 'vendor/aube/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'Makefile'
@@ -133,14 +133,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      # (vendor/aube, a submodule), so every job that resolves the cargo
-      # dependency graph needs this one submodule present. Explicit
-      # single-path init on purpose — `submodules: true` on the checkout
-      # would also pull tests/node-suite (the full nodejs/node clone),
-      # which these jobs deliberately exclude. `fmt` is exempt: cargo fmt
-      # tolerates a missing path dep (verified — it never resolves deps).
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: cargo check --all-targets
@@ -156,8 +148,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           components: clippy
@@ -229,11 +219,9 @@ jobs:
       # compat corpus is #[ignore]'d (a CI-scale gate, not a unit test) — so
       # this job stays fast across the full os×node matrix, including the 22.15
       # floor where the using/ErrorEvent fallback paths are exercised by the
-      # integration tests. vendor/aube is the one submodule that IS required
-      # (path dep — see the `check` job).
+      # integration tests. vendor/aube (the cargo path dep) is plain in-tree
+      # files — checked out by the normal checkout, no submodule init needed.
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
@@ -342,8 +330,6 @@ jobs:
       # only.
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5

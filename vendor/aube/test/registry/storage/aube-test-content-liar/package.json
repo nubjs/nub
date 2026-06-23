@@ -1,0 +1,25 @@
+{
+  "name": "aube-test-content-liar",
+  "dist-tags": { "latest": "1.0.0" },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-content-liar",
+      "version": "1.0.0",
+      "description": "Fixture whose tarball package.json declares a different name; exercises strictStorePkgContentCheck.",
+      "license": "MIT",
+      "main": "index.js",
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-content-liar/-/aube-test-content-liar-1.0.0.tgz",
+        "integrity": "sha512-VR+YM9KE/S8jYQYpy1wXp01hh88MzRivoPeacpNV+Q1nMfgJciqBld/zfHbmUmjf5n1Xlt9DbwJbkDtmjFMiVw==",
+        "shasum": "bd680fc80647c47f1072d64465989b64f4a15c8c"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-content-liar-1.0.0.tgz": {
+      "shasum": "bd680fc80647c47f1072d64465989b64f4a15c8c"
+    }
+  },
+  "_id": "aube-test-content-liar",
+  "_rev": "1-aube-fixture"
+}

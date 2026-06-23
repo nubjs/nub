@@ -1,0 +1,83 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "aube.usage.kdl"
+      - "crates/**"
+      - "Cargo.lock"
+      - "benchmarks/results.json"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: namespacelabs/nscloud-cache-action@15799a6b54e5765f85b2aac25b3f0df43ed571c0 # v1
+        with:
+          cache: rust
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+      - name: Build aube
+        run: cargo build
+      - name: Setup Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Render CLI docs from usage spec
+        run: |
+          ./target/debug/aube usage > aube.usage.kdl
+          rm -rf docs/cli && mkdir -p docs/cli
+          usage g markdown -mf aube.usage.kdl --out-dir docs/cli --url-prefix /cli
+          usage g json     -f aube.usage.kdl > docs/cli/commands.json
+      - name: Install docs dependencies with aube
+        run: |
+          cd docs
+          ../target/debug/aube install
+      - name: Build docs site with aube
+        env:
+          AUBE_UPDATE_STARS: "1"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cd docs
+          ../target/debug/aube run docs:build
+          touch .vitepress/dist/.nojekyll
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: docs/.vitepress/dist
+          # v5 excludes dotfiles by default; .nojekyll is created above
+          # to disable GitHub Pages' Jekyll processing for the VitePress
+          # build, so it must ship inside the artifact.
+          include-hidden-files: true
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: namespace-profile-endev-linux-amd64
+    name: Deploy
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

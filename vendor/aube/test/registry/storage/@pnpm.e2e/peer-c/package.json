@@ -1,0 +1,77 @@
+{
+	"name": "@pnpm.e2e/peer-c",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/peer-c",
+			"version": "1.0.0",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/peer-c@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-SQ3TfmnPopiVIqzC/PVV8WlfJjVWFdszQhfZG6e9stDFD9i9dZ5VQImKYhvJsME4nb45rHGsc/4CmroEjO7aCA==",
+				"shasum": "b0f56fa8a75285d1ede09ef7ea09644aea421020",
+				"tarball": "http://localhost:4873/@pnpm.e2e/peer-c/-/@pnpm.e2e/peer-c-1.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"1.0.1": {
+			"name": "@pnpm.e2e/peer-c",
+			"version": "1.0.1",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/peer-c@1.0.1",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-6ag+AQOLJgsioiG8aInnOJGautKz7lNf3zKQ8FJHOb4b3yIclmUofTaDwth9ydp9W56qzwbHWXjkdrqfW5JViQ==",
+				"shasum": "eab661204c9fe0c8330113e4c03b2218a84cea5c",
+				"tarball": "http://localhost:4873/@pnpm.e2e/peer-c/-/@pnpm.e2e/peer-c-1.0.1.tgz"
+			},
+			"contributors": []
+		},
+		"2.0.0": {
+			"name": "@pnpm.e2e/peer-c",
+			"version": "2.0.0",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/peer-c@2.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-s0TPtcya7A2r7vSzmq1dNAdxUNY0TQXeyARH8YMe/d7wb3/I4gryxBP3VVGPuKf6LUO+AALCBr0Jha8wwG7isg==",
+				"shasum": "bb5ce03f3ffc7ac421fa3df70f086a8d85fbe448",
+				"tarball": "http://localhost:4873/@pnpm.e2e/peer-c/-/@pnpm.e2e/peer-c-2.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:18.975Z",
+		"created": "2026-04-30T21:29:18.412Z",
+		"1.0.0": "2026-04-30T21:29:18.412Z",
+		"1.0.1": "2026-04-30T21:29:18.704Z",
+		"2.0.0": "2026-04-30T21:29:18.975Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "2.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"peer-c-1.0.0.tgz": {
+			"shasum": "b0f56fa8a75285d1ede09ef7ea09644aea421020",
+			"version": "1.0.0"
+		},
+		"peer-c-1.0.1.tgz": {
+			"shasum": "eab661204c9fe0c8330113e4c03b2218a84cea5c",
+			"version": "1.0.1"
+		},
+		"peer-c-2.0.0.tgz": {
+			"shasum": "bb5ce03f3ffc7ac421fa3df70f086a8d85fbe448",
+			"version": "2.0.0"
+		}
+	},
+	"_rev": "9-5bd5445419fd318e",
+	"_id": "@pnpm.e2e/peer-c",
+	"readme": "ERROR: No README data found!"
+}

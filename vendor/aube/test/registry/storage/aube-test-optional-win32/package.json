@@ -1,0 +1,28 @@
+{
+  "name": "aube-test-optional-win32",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-optional-win32",
+      "version": "1.0.0",
+      "description": "Fixture: an optional dep that only installs on win32.",
+      "license": "MIT",
+      "main": "index.js",
+      "os": ["win32"],
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-optional-win32/-/aube-test-optional-win32-1.0.0.tgz",
+        "integrity": "sha512-6PLB/io92+bRHrHgdaxK7JmT6Rafh1FbFgw/jj3Rr2NgbK+trD87LZEt3sCwU/nv4MUP5lslP9KLEerWeF2RdQ==",
+        "shasum": "b9cbd31455fe85096e8de0adf6d007e1c6a7503e"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-optional-win32-1.0.0.tgz": {
+      "shasum": "b9cbd31455fe85096e8de0adf6d007e1c6a7503e"
+    }
+  },
+  "_id": "aube-test-optional-win32",
+  "_rev": "1-aube-fixture"
+}

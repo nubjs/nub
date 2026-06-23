@@ -1,0 +1,42 @@
+[package]
+name = "aube-linker"
+description = "Isolated symlink layout linker for Aube"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+include = ["src/**/*.rs"]
+
+[dependencies]
+aube-codes = { workspace = true }
+aube-store = { workspace = true }
+aube-lockfile = { workspace = true }
+aube-util = { workspace = true }
+miette = { workspace = true }
+xx = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+reflink-copy = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+strum = { workspace = true }
+pathdiff = "0.2"
+glob = { workspace = true }
+diffy = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tempfile = "3"
+
+# clonefile(2) for the macOS whole-dir materialization fast path.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+junction = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

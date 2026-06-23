@@ -1,0 +1,28 @@
+# Verdaccio config used for hermetic benchmark runs.
+#
+# No uplinks, no proxy — all packages are served from the local storage
+# dir that was populated earlier by a warm run using config.warm.yaml.
+# This makes the "cold cache" benchmark scenario deterministic: every
+# tarball fetch hits the local disk (or a throttling proxy in front,
+# see benchmarks/throttle-proxy.mjs) rather than npmjs, so the numbers
+# measure aube's code path rather than CDN jitter.
+#
+# Storage lives at ~/.cache/aube-bench/registry/storage/ by default
+# (override via BENCH_HERMETIC_CACHE). If the warm step hasn't been
+# run yet, benchmarks/hermetic.bash takes care of it automatically on
+# first invocation.
+
+storage: ./storage
+
+packages:
+  '**':
+    access: $all
+    publish: $all
+
+log:
+  type: stdout
+  format: pretty
+  level: error
+
+web:
+  enable: false

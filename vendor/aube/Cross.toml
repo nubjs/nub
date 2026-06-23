@@ -1,0 +1,12 @@
+[build.env]
+passthrough = [
+    "AUBE_PRIMER_TOP",
+    "AUBE_PRIMER_VERSION_CAP",
+    "AUBE_REQUIRE_PRIMER",
+    # PGO: pgo.bash sets RUSTFLAGS for -Cprofile-generate (phase 1) and
+    # -Cprofile-use (phase 3b). CARGO_PROFILE_RELEASE_LTO=fat is set when
+    # the final build is delegated to a downstream step that uses the
+    # `release` profile; we override LTO to match `release-pgo`.
+    "RUSTFLAGS",
+    "CARGO_PROFILE_RELEASE_LTO",
+]

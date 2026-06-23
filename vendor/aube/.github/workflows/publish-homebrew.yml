@@ -1,0 +1,106 @@
+name: publish-homebrew
+
+# Releases are published to the jdx tap until aube is submitted to and
+# accepted by homebrew-core.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish to Homebrew (e.g. v1.0.0-beta.4)"
+        required: true
+        type: string
+
+concurrency:
+  group: publish-homebrew
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish Homebrew formula
+    runs-on: namespace-profile-endev-linux-amd64
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      TAP_REPO: jdx/homebrew-tap
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          if [ -z "$TAG" ]; then
+            echo "::error::no tag from release event or workflow_dispatch input"
+            exit 1
+          fi
+          # Strict format check before the tag reaches any privileged step.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]]; then
+            echo "::error::Refusing to publish: tag '$TAG' does not match vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          # Manual dispatch: require the tag to point at a commit reachable
+          # from main so an attacker with tag-create + dispatch can't push
+          # an unreviewed formula to the tap under AUBE_GH_TOKEN.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${TAG}" --jq '.status' 2>/dev/null || echo "missing")
+            if [ "$STATUS" != "identical" ] && [ "$STATUS" != "behind" ]; then
+              echo "::error::Tag '$TAG' is not reachable from main (compare status: $STATUS)"
+              exit 1
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      - name: Compute source archive checksum
+        id: source
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          curl -fsSL "https://github.com/jdx/aube/archive/refs/tags/${TAG}.tar.gz" -o source.tar.gz
+          echo "sha256=$(sha256sum source.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Render formula
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          SOURCE_SHA256: ${{ steps.source.outputs.sha256 }}
+        run: |
+          mkdir -p dist
+          ./packaging/homebrew/render-formula.sh > dist/aube.rb
+
+      - name: Publish to tap
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error::AUBE_GH_TOKEN is required to push ${TAP_REPO}"
+            exit 1
+          fi
+
+          git clone --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/${TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          cp dist/aube.rb tap/Formula/aube.rb
+
+          cd tap
+          if [ -z "$(git status --porcelain -- Formula/aube.rb)" ]; then
+            echo "Formula/aube.rb already matches aube ${VERSION}"
+            exit 0
+          fi
+
+          git config user.name "aube Release Bot"
+          git config user.email "noreply@aube.jdx.dev"
+          git add Formula/aube.rb
+          git commit -m "aube: update to ${VERSION}"
+          git push

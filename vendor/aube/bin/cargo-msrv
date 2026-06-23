@@ -1,0 +1,3 @@
+#!/usr/bin/env -S mise tool-stub
+tool = "cargo:cargo-msrv"
+version = "0.19.3"

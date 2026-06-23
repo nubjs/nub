@@ -1,0 +1,29 @@
+{
+  "name": "aube-test-transitive-bin",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-transitive-bin",
+      "version": "1.0.0",
+      "description": "Fixture package that ships a bin. Used by aube BATS tests exercising transitive-bin PATH lookup in dep lifecycle scripts.",
+      "license": "MIT",
+      "bin": {
+        "aube-transitive-bin-probe": "./probe.js"
+      },
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-transitive-bin/-/aube-test-transitive-bin-1.0.0.tgz",
+        "integrity": "sha512-Evwe7A9F64UetY/MmwrMAAFaIO6xWBgcQwIZtPDrG8BZVJ3dwBWKxdVnyoc3nwxNjuBvnoOg67wT/b/6oOlqOQ==",
+        "shasum": "93e2d34a650d46d87f4ec35b797ea3fe5942069c"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-transitive-bin-1.0.0.tgz": {
+      "shasum": "93e2d34a650d46d87f4ec35b797ea3fe5942069c"
+    }
+  },
+  "_id": "aube-test-transitive-bin",
+  "_rev": "1-aube-fixture"
+}

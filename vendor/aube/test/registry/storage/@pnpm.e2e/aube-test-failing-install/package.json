@@ -1,0 +1,39 @@
+{
+	"name": "@pnpm.e2e/aube-test-failing-install",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/aube-test-failing-install",
+			"version": "1.0.0",
+			"description": "Always-failing install script for testing aube rollback semantics",
+			"scripts": {
+				"install": "exit 1"
+			},
+			"license": "MIT",
+			"_id": "@pnpm.e2e/aube-test-failing-install@1.0.0",
+			"dist": {
+				"integrity": "sha512-Mz093psO7X6pcpqGKXG3kazFwUj81/CdsAcgqenBzYmXM/3mNEOXxphNTJHHUFsox6eOqbJNvr8sMXFI3HlMWQ==",
+				"shasum": "7e70a22e235a1d95dba73719f38fc8c5903f7eb1",
+				"tarball": "http://localhost:4873/@pnpm.e2e/aube-test-failing-install/-/@pnpm.e2e/aube-test-failing-install-1.0.0.tgz"
+			}
+		}
+	},
+	"time": {
+		"modified": "2026-05-02T00:00:00.000Z",
+		"created": "2026-05-02T00:00:00.000Z",
+		"1.0.0": "2026-05-02T00:00:00.000Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "1.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"aube-test-failing-install-1.0.0.tgz": {
+			"shasum": "7e70a22e235a1d95dba73719f38fc8c5903f7eb1",
+			"version": "1.0.0"
+		}
+	},
+	"_rev": "1-aube-test-failing-install",
+	"_id": "@pnpm.e2e/aube-test-failing-install"
+}

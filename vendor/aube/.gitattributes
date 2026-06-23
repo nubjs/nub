@@ -1,0 +1,35 @@
+# Verdaccio cache state — hand-populated via the uplink-enabled config
+# documented in `test/registry/config.yaml` and committed for hermetic
+# offline BATS runs. Mark as generated so GitHub excludes it from the
+# language stats bar and collapses these files in PR diffs by default
+# (the individual packuments are hundreds of thousands of lines of
+# proxy JSON and would otherwise drown out every source diff). `-diff`
+# also suppresses text diffs in `git diff` / `gh pr diff` output;
+# inspect changes with `git diff --text` when actually needed (uplink
+# refreshes, new package seeding).
+test/registry/storage/** linguist-generated=true -diff
+
+# Golden file consumed by `crates/aube/src/main.rs`'s
+# `usage_kdl_matches_committed_golden_file` test via `include_str!`.
+# Force LF regardless of the checkout platform's `core.autocrlf`
+# setting — Windows runners default to `autocrlf=true`, which would
+# otherwise embed CRLF into the binary and break the string-equality
+# check against `clap_usage::generate`'s LF output.
+aube.usage.kdl text eol=lf
+
+# Golden fixtures consumed by the byte-parity tests in
+# `crates/aube-lockfile/src/{pnpm,bun}.rs`. Windows' autocrlf would
+# otherwise rewrite these to CRLF on checkout, so `parse → write`
+# compares LF (what the writer emits) against CRLF (what's on disk)
+# and the test fails.
+crates/aube-lockfile/tests/fixtures/* text eol=lf
+
+# AGENTS.md / CLAUDE.md / GEMINI.md are git symlinks (mode 120000) to
+# `.rules`. On Windows git needs `core.symlinks=true` AND the checkout
+# user needs Developer Mode (Settings > For Developers) or admin. Without
+# both, git writes the link target as plain text ("./rules"), and an
+# agent reading AGENTS.md gets the string ".rules" instead of the rules.
+# Fix on a Windows clone:
+#   git config --global core.symlinks true
+#   # enable Developer Mode, then:
+#   git checkout -- AGENTS.md CLAUDE.md GEMINI.md

@@ -1,0 +1,120 @@
+[package]
+name = "aube"
+description = "Aube — a fast Node.js package manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+include = ["src/**/*.rs", "src/**/*.mjs", "build.rs"]
+
+# The command layer is a library so it can be embedded (construct
+# `commands::install::InstallOptions`, call `commands::install::run`)
+# without shelling out. The three bins below are thin wrappers over
+# `aube::cli_main`.
+[lib]
+name = "aube"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aube"
+path = "src/main.rs"
+
+# Multicall shims for `aube run` / `aube dlx`. Each stub `include!`s
+# `src/main.rs` so Cargo treats them as distinct targets (avoiding the
+# "same source in multiple bin targets" warning) while keeping a single
+# source of truth. Dispatch happens at runtime via `rewrite_multicall_argv`,
+# which keys off `argv[0]`. `test = false` prevents `cargo test` from
+# re-running the shared test suite three times.
+[[bin]]
+name = "aubr"
+path = "src/bin/aubr.rs"
+test = false
+
+[[bin]]
+name = "aubx"
+path = "src/bin/aubx.rs"
+test = false
+
+[dependencies]
+aube-codes = { workspace = true }
+aube-lockfile = { workspace = true }
+aube-runtime = { workspace = true }
+aube-manifest = { workspace = true }
+aube-registry = { workspace = true }
+aube-util = { workspace = true }
+aube-resolver = { workspace = true }
+aube-settings = { workspace = true }
+aube-store = { workspace = true }
+aube-linker = { workspace = true }
+aube-scripts = { workspace = true }
+aube-workspace = { workspace = true }
+bytes = "1"
+xx = { workspace = true }
+clap = { workspace = true }
+# Only the aube binary (src/main.rs) uses this, for the aube-specific `usage`
+# (usage.jdx.dev KDL) command; the embeddable lib no longer carries it. Cargo
+# can't scope a dependency to bin-only within a crate that also has a lib, so
+# it stays here.
+clap_usage = "2"
+strum = { workspace = true }
+clx = { workspace = true }
+console = "0.16"
+demand = "2"
+reqwest = { workspace = true }
+tokio = { workspace = true }
+miette = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+yaml_serde = { workspace = true }
+base64 = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+sigstore-sign = { workspace = true }
+sigstore-oidc = { workspace = true }
+sigstore-types = { workspace = true }
+ambient-id = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+flate2 = { workspace = true }
+glob = { workspace = true }
+ignore = { workspace = true }
+node-semver = { workspace = true }
+rayon = { workspace = true }
+tar = { workspace = true }
+tempfile = "3"
+diffy = { workspace = true }
+libc = { workspace = true }
+pathdiff = "0.2"
+is_ci = "1"
+ci_info = "0.14"
+pluralizer = "0.5.0"
+toml = { workspace = true }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+ratatui = { version = "0.30.0", default-features = false, features = ["crossterm", "std"], optional = true }
+crossterm = { version = "0.29.0", optional = true }
+
+[features]
+default = ["mimalloc", "config-tui"]
+# Include the interactive `aube config tui` browser. Builds that want the
+# smallest dependency graph can disable default features and omit this.
+config-tui = ["dep:crossterm", "dep:ratatui"]
+# Swap the global allocator to mimalloc on release builds. See
+# crates/aube/src/main.rs for the gate. `--no-default-features`
+# falls back to the system allocator. Needed for Valgrind, ASAN,
+# Miri, and distros that require libc malloc.
+mimalloc = ["dep:mimalloc"]
+
+[dev-dependencies]
+clap-sort = "1"
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"

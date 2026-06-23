@@ -1,0 +1,17 @@
+# Run cargo test serially across the workspace.
+#
+# A handful of tests in `aube-util` (`concurrency`, `http::ticket_cache`)
+# legitimately need to mutate the process environment to exercise
+# settings-resolution and killswitch paths. setenv/getenv aren't
+# thread-safe under libc, so a parallel test runner can interleave a
+# mid-`setenv` window with another test's `getenv` and flake — the
+# `max_per_host_evicts_oldest` Windows failure documented in #595 was
+# exactly that. Workspace-wide `--test-threads=1` is cheaper than the
+# per-test mutex machinery the alternative would require, and it
+# closes the door on future env-mutating tests having to rediscover
+# the same trap.
+#
+# Cost measured at ~2.5 s extra on a warm-cache `cargo test --workspace`
+# (7.07 s → 9.57 s) — acceptable given the safety guarantee.
+[env]
+RUST_TEST_THREADS = "1"

@@ -1,0 +1,33 @@
+[package]
+name = "aube-runtime"
+description = "Node.js runtime version resolution, discovery, and installation for Aube"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+include = ["src/**/*.rs"]
+
+[dependencies]
+aube-codes = { workspace = true }
+aube-manifest = { workspace = true }
+aube-util = { workspace = true }
+base64 = { workspace = true }
+flate2 = { workspace = true }
+hex = { workspace = true }
+node-semver = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+xx = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

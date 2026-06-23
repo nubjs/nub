@@ -15,7 +15,7 @@ description: >-
 
 # Building & testing nub
 
-nub is a Rust workspace — three crates (`nub-cli`, `nub-core`, `nub-native`) plus the vendored aube PM engine (`vendor/aube`, a git submodule, its own Cargo workspace, linked in-process as a library). This skill is the fast, measured way to build and test it in a worktree, plus a crate map so you know where things live.
+nub is a Rust workspace — three crates (`nub-cli`, `nub-core`, `nub-native`) plus the vendored aube PM engine (`vendor/aube`, plain in-tree files since Pattern B, its own Cargo workspace, linked in-process as a library). This skill is the fast, measured way to build and test it in a worktree, plus a crate map so you know where things live.
 
 **The one rule that makes iteration fast:** build with the `--profile fast` profile (NEVER `release`), and keep ONE stable target dir per worktree for the whole session. Cold ≈ 3 min, every rebuild after ≈ 5s. Don't clean/move/re-seed the target dir between iterations — that throws away cargo's incremental cache and forces a full rebuild.
 
@@ -26,15 +26,14 @@ nub is a Rust workspace — three crates (`nub-cli`, `nub-core`, `nub-native`) p
 Substantive work lands via a PR from an isolated worktree (see AGENTS.md "Default to a PR flow"). Set one up with its own target dir:
 
 ```bash
-git worktree add /tmp/nub-wt-<slug> -b <slug> origin/main
-git -C /tmp/nub-wt-<slug> submodule update --init vendor/aube   # required for any build (the PM engine)
+git worktree add /tmp/nub-wt-<slug> -b <slug> origin/main      # vendor/aube comes along (plain in-tree files)
 cd /tmp/nub-wt-<slug>
 export CARGO_TARGET_DIR=/tmp/nub-wt-<slug>-target               # per-worktree isolation; keep it stable
 ```
 
 The per-worktree target dir keeps a sibling's build from contaminating yours. Keep the SAME dir for the whole session — cargo's incremental fingerprints are keyed to its absolute path, so changing/moving/re-seeding it forces a cold rebuild.
 
-> Forward note: `vendor/aube` is a submodule today. When the non-submodule vendoring (Pattern B) lands, the `submodule update --init` step goes away — until then it is required in every fresh worktree.
+> `vendor/aube` is plain in-tree files (Pattern B, 2026-06-22), NOT a submodule — `git worktree add` checks it out directly, no submodule-init step.
 
 ## Step 2 — Build the dev binary (the `fast` profile)
 
@@ -117,16 +116,15 @@ Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENT
 
 **`crates/nub-native`** — the N-API addon (a cdylib loaded into the user's Node process). The oxc-based transpiler + resolver: `transform.rs` (TS/JSX transform), `resolve.rs` (module resolution), `tsconfig.rs`, `cache.rs` (transpile cache), `detect.rs`.
 
-**`vendor/aube`** — the vendored aube package-manager engine (git submodule → `nubjs/aube` branch `nub-fork`). Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process. NEVER a subprocess. Changes to it follow the `nub-fork` workflow (commits on `nub-fork`, push before bumping the pin) — see AGENTS.md.
+**`vendor/aube`** — the vendored aube package-manager engine (plain in-tree files since Pattern B, vendored from `nubjs/aube`). Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process. NEVER a subprocess. Changes to it are normal nub edits/PRs touching `vendor/aube/*` — no pin, no `nub-fork` workflow; upstream to `jdx/aube` via `subtree split` / `format-patch --relative`. See AGENTS.md.
 
 ---
 
 ## Quick reference
 
 ```bash
-# fresh worktree
+# fresh worktree (vendor/aube comes along — plain in-tree files)
 git worktree add /tmp/nub-wt-<slug> -b <slug> origin/main
-git -C /tmp/nub-wt-<slug> submodule update --init vendor/aube
 cd /tmp/nub-wt-<slug> && export CARGO_TARGET_DIR=/tmp/nub-wt-<slug>-target
 
 # build (fast profile)

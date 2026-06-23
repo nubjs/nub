@@ -1,0 +1,100 @@
+{
+	"name": "@pnpm.e2e/pre-and-postinstall-scripts-example",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/pre-and-postinstall-scripts-example",
+			"version": "1.0.0",
+			"description": "A package that creates files by pre- and postinstall scripts",
+			"scripts": {
+				"test": "echo \"Error: no test specified\" && exit 1",
+				"prepare": "node create generated-by-prepare",
+				"preinstall": "hello-world-js-bin && node create generated-by-preinstall",
+				"install": "echo Hi",
+				"postinstall": "hello-world-js-bin && node create generated-by-postinstall"
+			},
+			"license": "MIT",
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/pnpm/pnpm.git#master"
+			},
+			"dependencies": {
+				"@pnpm.e2e/hello-world-js-bin": "1.0.0"
+			},
+			"readmeFilename": "README.md",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/pre-and-postinstall-scripts-example@1.0.0",
+			"bugs": {
+				"url": "https://github.com/pnpm/pnpm/issues"
+			},
+			"homepage": "https://github.com/pnpm/pnpm/tree/master#readme",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-p2L5hqNZFiWX/4tQiuawjhh4xVy2QObs21HzZa6DdGZfWlgzdKiMN5MLuwh5ehI0GxuNWSrq0+/T+DEEr7kWVw==",
+				"shasum": "8d97a1e7c2ffd8b404fbecd1461df29913093270",
+				"tarball": "http://localhost:4873/@pnpm.e2e/pre-and-postinstall-scripts-example/-/@pnpm.e2e/pre-and-postinstall-scripts-example-1.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"2.0.0": {
+			"name": "@pnpm.e2e/pre-and-postinstall-scripts-example",
+			"version": "2.0.0",
+			"description": "A package that creates files by pre- and postinstall scripts",
+			"scripts": {
+				"test": "echo \"Error: no test specified\" && exit 1",
+				"prepare": "node create generated-by-prepare",
+				"preinstall": "hello-world-js-bin && node create generated-by-preinstall",
+				"install": "echo Hi",
+				"postinstall": "hello-world-js-bin && node create generated-by-postinstall"
+			},
+			"license": "MIT",
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/pnpm/pnpm.git#master"
+			},
+			"dependencies": {
+				"@pnpm.e2e/hello-world-js-bin": "1.0.0"
+			},
+			"readmeFilename": "README.md",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/pre-and-postinstall-scripts-example@2.0.0",
+			"bugs": {
+				"url": "https://github.com/pnpm/pnpm/issues"
+			},
+			"homepage": "https://github.com/pnpm/pnpm/tree/master#readme",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-Z12KE+Mq9uQeB4rDplzPwoBNx6GxKxy1ji5bhTVGtcDTISsIAiAnTbuGn8HJ6Cn69Mw7+tH3YlVkeAKyjCpo5w==",
+				"shasum": "ebecf69ef3c0b763efcf0c43fa2aaa3fc4e22c7f",
+				"tarball": "http://localhost:4873/@pnpm.e2e/pre-and-postinstall-scripts-example/-/@pnpm.e2e/pre-and-postinstall-scripts-example-2.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:22.521Z",
+		"created": "2026-04-30T21:29:22.029Z",
+		"1.0.0": "2026-04-30T21:29:22.029Z",
+		"2.0.0": "2026-04-30T21:29:22.521Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "2.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"pre-and-postinstall-scripts-example-1.0.0.tgz": {
+			"shasum": "8d97a1e7c2ffd8b404fbecd1461df29913093270",
+			"version": "1.0.0"
+		},
+		"pre-and-postinstall-scripts-example-2.0.0.tgz": {
+			"shasum": "ebecf69ef3c0b763efcf0c43fa2aaa3fc4e22c7f",
+			"version": "2.0.0"
+		}
+	},
+	"_rev": "7-3d44ed9c7b40ad5f",
+	"_id": "@pnpm.e2e/pre-and-postinstall-scripts-example",
+	"readme": "# pre-and-postinstall-scripts-example\n\nA package that creates files by pre- and postinstall scripts\n\n## Installation\n\n```\nnpm i pre-and-postinstall-scripts-example\n```\n\n# License\n\nMIT\n"
+}

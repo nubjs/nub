@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -e
+
+bats_encode_test_name() {
+  local name="$1"
+  local result='test_'
+  local hex_code
+
+  if [[ ! "$name" =~ [^[:alnum:]\ _-] ]]; then
+    name="${name//_/-5f}"
+    name="${name//-/-2d}"
+    name="${name// /_}"
+    result+="$name"
+  else
+    local length="${#name}"
+    local char i
+
+    for ((i = 0; i < length; i++)); do
+      char="${name:$i:1}"
+      if [[ "$char" == ' ' ]]; then
+        result+='_'
+      elif [[ "$char" =~ [[:alnum:]] ]]; then
+        result+="$char"
+      else
+        printf -v 'hex_code' -- '-%02x' \'"$char"
+        result+="$hex_code"
+      fi
+    done
+  fi
+
+  printf -v "$2" '%s' "$result"
+}
+
+BATS_TEST_PATTERN="^[[:blank:]]*@test[[:blank:]]+(.*[^[:blank:]])[[:blank:]]+\{(.*)\$"
+BATS_TEST_PATTERN_COMMENT="[[:blank:]]*([^[:blank:]()]+)[[:blank:]]*\(?\)?[[:blank:]]+\{[[:blank:]]+#[[:blank:]]*@test[[:blank:]]*\$"
+BATS_COMMENT_COMMAND_PATTERN="^[[:blank:]]*#[[:blank:]]*bats[[:blank:]]+(.*)$"
+BATS_VALID_TAG_PATTERN="[-_:[:alnum:]]+"
+BATS_VALID_TAGS_PATTERN="^ *($BATS_VALID_TAG_PATTERN)?( *, *$BATS_VALID_TAG_PATTERN)* *$"
+
+# shellcheck source=lib/bats-core/common.bash
+source "$BATS_ROOT/$BATS_LIBDIR/bats-core/common.bash"
+
+extract_tags() { # <tag_type/return_var> <tags-string>
+  local -r tag_type=$1 tags_string=$2
+  local -a tags=()
+
+  if [[ $tags_string =~ $BATS_VALID_TAGS_PATTERN ]]; then
+    IFS=, read -ra tags <<<"$tags_string"
+    local -ri length=${#tags[@]}
+    for ((i = 0; i < length; ++i)); do
+      local element="tags[$i]"
+      bats_trim "$element" "${!element}" 2>/dev/null # printf on bash 3 will complain but work anyways
+      if [[ -z "${!element}" && -n "${CHECK_BATS_COMMENT_COMMANDS:-}" ]]; then
+        printf "%s:%d: Error: Invalid %s: '%s'. " "$test_file" "$line_number" "$tag_type" "$tags_string"
+        printf "Tags must not be empty. Please remove redundant commas!\n"
+        exit_code=1
+      fi
+    done
+  elif [[ -n "${CHECK_BATS_COMMENT_COMMANDS:-}" ]]; then
+    printf "%s:%d: Error: Invalid %s: '%s'. " "$test_file" "$line_number" "$tag_type" "$tags_string"
+    printf "Valid tags must match %s and be separated with comma (and optional spaces)\n" "$BATS_VALID_TAG_PATTERN"
+    exit_code=1
+  fi >&2
+  if ((${#tags[@]} > 0)); then
+    eval "$tag_type=(\"\${tags[@]}\")"
+  else
+    eval "$tag_type=()"
+  fi
+}
+
+test_file="$1"
+test_tags=()
+file_tags=()
+line_number=0
+exit_code=0
+EMPTY_BODY_REGEX='[[:space:]]*\}'
+IFS=,
+{
+  while IFS= read -r line; do
+    ((++line_number))
+    line="${line//$'\r'/}"
+    if [[ "$line" =~ $BATS_TEST_PATTERN ]] || [[ "$line" =~ $BATS_TEST_PATTERN_COMMENT ]]; then
+      name="${BASH_REMATCH[1]#[\'\"]}"
+      name="${name%[\'\"]}"
+      body="${BASH_REMATCH[2]:-}"
+      bats_encode_test_name "$name" 'encoded_name'
+
+      if [[ "$body" =~ $EMPTY_BODY_REGEX ]]; then
+        # ":;" is needed for empty {} after test
+        lead=':; '
+      else
+        # avoid injecting non user code into tests
+        lead=''
+      fi
+
+      # shellcheck disable=SC2154 # encoded_name is declare via bats_encode_test_name
+      printf 'bats_test_function --description %q  --tags "%s" --tags "%s" -- %s;' "$name" "${test_tags[*]-}" "${file_tags[*]-}" "$encoded_name"
+      printf '%s() { %s%s\n' "${encoded_name:?}" "$lead" "$body" || :
+
+      test_tags=() # reset test tags for next test
+    else
+      if [[ "$line" =~ $BATS_COMMENT_COMMAND_PATTERN ]]; then
+        command=${BASH_REMATCH[1]}
+        case $command in
+        'test_tags='*)
+          extract_tags test_tags "${command#test_tags=}"
+          ;;
+        'file_tags='*)
+          extract_tags file_tags "${command#file_tags=}"
+          ;;
+        esac
+      fi
+      printf '%s\n' "$line"
+    fi
+  done
+} <<<"$(<"$test_file")"$'\n'
+
+exit $exit_code

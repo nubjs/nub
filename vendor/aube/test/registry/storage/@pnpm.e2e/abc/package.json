@@ -1,0 +1,74 @@
+{
+	"name": "@pnpm.e2e/abc",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/abc",
+			"version": "1.0.0",
+			"dependencies": {
+				"@pnpm.e2e/dep-of-pkg-with-1-dep": "100.0.0"
+			},
+			"peerDependencies": {
+				"@pnpm.e2e/peer-a": "^1.0.0",
+				"@pnpm.e2e/peer-b": "^1.0.0",
+				"@pnpm.e2e/peer-c": "^1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-/BCMmCRQ58DLWtF5iU97Lbf0s+llpWHvvZvQfFnCYFBpa1pfYnlJW1k6+Z4UzcUdYrUvyDmYPwxGVvPStAUw1w==",
+				"shasum": "bd753f57ba96387399b92a70ab7b55c7d75d6153",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc/-/@pnpm.e2e/abc-1.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"2.0.0": {
+			"name": "@pnpm.e2e/abc",
+			"version": "2.0.0",
+			"dependencies": {
+				"@pnpm.e2e/dep-of-pkg-with-1-dep": "100.0.0"
+			},
+			"peerDependencies": {
+				"@pnpm.e2e/peer-a": "^1.0.0",
+				"@pnpm.e2e/peer-b": "^1.0.0",
+				"@pnpm.e2e/peer-c": "^1.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/abc@2.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-onYBKKFXu35rogZgw3eIkAxSprtq/K4Gv02U7LANtIWxDW0ZsV0XcmQOt/F7K+PzDb/LkPRBO1QFvJAqz6ZjKA==",
+				"shasum": "30e976feb59622bfcd2da0cc134c6787ef7f2c8a",
+				"tarball": "http://localhost:4873/@pnpm.e2e/abc/-/@pnpm.e2e/abc-2.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:10.565Z",
+		"created": "2026-04-30T21:21:53.905Z",
+		"1.0.0": "2026-04-30T21:21:53.905Z",
+		"2.0.0": "2026-04-30T21:29:10.565Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "2.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"abc-1.0.0.tgz": {
+			"shasum": "bd753f57ba96387399b92a70ab7b55c7d75d6153",
+			"version": "1.0.0"
+		},
+		"abc-2.0.0.tgz": {
+			"shasum": "30e976feb59622bfcd2da0cc134c6787ef7f2c8a",
+			"version": "2.0.0"
+		}
+	},
+	"_rev": "6-ea51143326ed0c77",
+	"_id": "@pnpm.e2e/abc",
+	"readme": "ERROR: No README data found!"
+}

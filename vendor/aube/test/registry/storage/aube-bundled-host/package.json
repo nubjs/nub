@@ -1,0 +1,31 @@
+{
+  "name": "aube-bundled-host",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-bundled-host",
+      "version": "1.0.0",
+      "description": "Fixture: parent package that ships a bundled dependency inside its tarball. Used by aube's bundledDependencies BATS test.",
+      "license": "MIT",
+      "main": "index.js",
+      "dependencies": {
+        "aube-bundled-child": "1.0.0"
+      },
+      "bundledDependencies": ["aube-bundled-child"],
+      "dist": {
+        "tarball": "http://localhost:4873/aube-bundled-host/-/aube-bundled-host-1.0.0.tgz",
+        "integrity": "sha512-MsZ4A/GZIPtbnay5RpCQkPtrJGxaI19ElBWLAutUE89vzCvqKxmVm7n97mJHDyvGNx2TddHqDqo1qZizO75xnA==",
+        "shasum": "ecef7fc707f07b5ac4b99365c294ffb143be56ae"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-bundled-host-1.0.0.tgz": {
+      "shasum": "ecef7fc707f07b5ac4b99365c294ffb143be56ae"
+    }
+  },
+  "_id": "aube-bundled-host",
+  "_rev": "1-aube-fixture"
+}

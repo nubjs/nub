@@ -1,0 +1,355 @@
+name: ppa-publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build from (e.g. v1.0.0-beta.1)"
+        required: true
+        type: string
+      distributions:
+        description: "Ubuntu distributions to target (space-separated)"
+        required: false
+        default: "resolute"
+        type: string
+      build_revision:
+        description: "Build revision number (increment for packaging fixes of same version)"
+        required: false
+        default: "1"
+        type: string
+      version_suffix:
+        description: "Version suffix for orig tarball (e.g., +ppa1) - use when tarball contents change"
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  publish-ppa:
+    # github-hosted runner: namespace runners block outbound FTP (port 21)
+    # to ppa.launchpad.net, which is what dput needs to upload the source
+    # package. Ubuntu-hosted runners allow it.
+    runs-on: ubuntu-latest
+    environment: ppa-publishing
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate workflow inputs
+        # The dispatch path eventually signs packages with AUBE_GPG_KEY and
+        # uploads them to Launchpad; gate every attacker-controllable input
+        # on a strict regex before it reaches the shell, and require the
+        # tag to be reachable from main so unreviewed history can't ship.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DISTRIBUTIONS: ${{ inputs.distributions }}
+          INPUT_BUILD_REVISION: ${{ inputs.build_revision }}
+          INPUT_VERSION_SUFFIX: ${{ inputs.version_suffix }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG="$RELEASE_TAG"
+          else
+            TAG="$INPUT_TAG"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]]; then
+            echo "::error::Refusing to build: tag '$TAG' does not match vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [[ -n "$INPUT_DISTRIBUTIONS" && ! "$INPUT_DISTRIBUTIONS" =~ ^[a-z][a-z0-9\ \-]*$ ]]; then
+              echo "::error::Refusing to build: distributions '$INPUT_DISTRIBUTIONS' contains unexpected characters"
+              exit 1
+            fi
+            if [[ -n "$INPUT_BUILD_REVISION" && ! "$INPUT_BUILD_REVISION" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::Refusing to build: build_revision '$INPUT_BUILD_REVISION' is not a positive integer"
+              exit 1
+            fi
+            if [[ -n "$INPUT_VERSION_SUFFIX" && ! "$INPUT_VERSION_SUFFIX" =~ ^[A-Za-z0-9.+-]+$ ]]; then
+              echo "::error::Refusing to build: version_suffix '$INPUT_VERSION_SUFFIX' contains unexpected characters"
+              exit 1
+            fi
+            STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${TAG}" --jq '.status' 2>/dev/null || echo "missing")
+            if [ "$STATUS" != "identical" ] && [ "$STATUS" != "behind" ]; then
+              echo "::error::Tag '$TAG' is not reachable from main (compare status: $STATUS)"
+              exit 1
+            fi
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up environment variables
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DISTRIBUTIONS: ${{ inputs.distributions }}
+          INPUT_BUILD_REVISION: ${{ inputs.build_revision }}
+          INPUT_VERSION_SUFFIX: ${{ inputs.version_suffix }}
+          MAINTAINER_NAME_VAR: ${{ vars.PPA_MAINTAINER_NAME }}
+          MAINTAINER_EMAIL_VAR: ${{ vars.PPA_MAINTAINER_EMAIL }}
+          PPA_NAME_VAR: ${{ vars.PPA_NAME }}
+        run: |
+          VERSION="${TAG#v}"
+
+          if [ "$EVENT_NAME" = "release" ]; then
+            DISTRIBUTIONS="resolute"
+            BUILD_REVISION="1"
+            VERSION_SUFFIX=""
+          else
+            DISTRIBUTIONS="$INPUT_DISTRIBUTIONS"
+            BUILD_REVISION="${INPUT_BUILD_REVISION:-1}"
+            VERSION_SUFFIX="$INPUT_VERSION_SUFFIX"
+          fi
+
+          # Deb version: SemVer `-` prerelease separators collate as
+          # newer than release in dpkg; `~` collates as older, which is
+          # what we want. `1.0.0-beta.1` -> `1.0.0~beta.1`.
+          # Backslash-escape the tilde: bash performs tilde expansion on
+          # the replacement string in ${var//pat/rep}, even inside "...".
+          DEB_VERSION="${VERSION//-/\~}${VERSION_SUFFIX}"
+
+          {
+            echo "VERSION=${VERSION}"
+            echo "DEB_VERSION=${DEB_VERSION}"
+            echo "DISTRIBUTIONS=${DISTRIBUTIONS}"
+            echo "BUILD_REVISION=${BUILD_REVISION}"
+            echo "PACKAGE_NAME=aube"
+            echo "MAINTAINER_NAME=${MAINTAINER_NAME_VAR:-aube Release Bot}"
+            echo "MAINTAINER_EMAIL=${MAINTAINER_EMAIL_VAR:-noreply@aube.jdx.dev}"
+            echo "PPA_NAME=${PPA_NAME_VAR:-ppa:jdxcode/aube}"
+            echo "BUILD_PROFILE=release"
+          } >> "$GITHUB_ENV"
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            devscripts \
+            debhelper \
+            dh-make \
+            build-essential \
+            git-buildpackage \
+            dput \
+            lintian \
+            quilt \
+            fakeroot \
+            debian-keyring \
+            gpg \
+            libssl-dev \
+            pkg-config \
+            jq
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Vendor Rust dependencies
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [source.crates-io]
+          replace-with = "vendored-sources"
+
+          [source.vendored-sources]
+          directory = "vendor"
+          EOF
+          cargo vendor vendor/
+
+          # dpkg-source strips .o/.a/.git*/*.orig and other files that
+          # cargo's vendor checksums cover, which breaks verification.
+          # Clearing the file list keeps --frozen's lockfile enforcement
+          # while avoiding the per-file integrity check.
+          for checksum in vendor/*/.cargo-checksum.json; do
+            jq '.files = {}' "$checksum" > "$checksum.tmp" && mv "$checksum.tmp" "$checksum"
+          done
+
+      - name: Configure Git
+        # `MAINTAINER_NAME`/`MAINTAINER_EMAIL` were already exported via
+        # $GITHUB_ENV; read them from the process env rather than letting
+        # GitHub Actions splice the literal value into the shell source,
+        # so a tampered `vars.PPA_MAINTAINER_*` can't reach `bash -c`.
+        run: |
+          git config --global user.name "$MAINTAINER_NAME"
+          git config --global user.email "$MAINTAINER_EMAIL"
+
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        with:
+          gpg_private_key: ${{ secrets.AUBE_GPG_KEY }}
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+          trust_level: 5
+
+      - name: Configure GPG for package signing
+        run: |
+          KEY_ID=$(gpg --list-secret-keys --with-colons | grep '^sec:' | cut -d: -f5 | head -1)
+          if [ -z "$KEY_ID" ]; then
+            echo "Error: No GPG key found"
+            exit 1
+          fi
+          echo "Using GPG key: $KEY_ID"
+          echo "DEBSIGN_KEYID=$KEY_ID" >> "$GITHUB_ENV"
+
+          cat > ~/.devscripts << EOF
+          DEBSIGN_KEYID=$KEY_ID
+          DEBUILD_DPKG_BUILDPACKAGE_OPTS="-i -I -S -sa"
+          DEBUILD_LINTIAN_OPTS="-i -I --show-overrides --profile ubuntu"
+          DEBSIGN_PROGRAM=gpg
+          EOF
+
+      - name: Create source package for each distribution
+        run: |
+          mkdir -p debian/source
+          echo "3.0 (native)" > debian/source/format
+
+          cat > debian/control << EOF
+          Source: ${PACKAGE_NAME}
+          Section: utils
+          Priority: optional
+          Maintainer: ${MAINTAINER_NAME} <${MAINTAINER_EMAIL}>
+          Build-Depends: debhelper-compat (= 13), rustc (>= 1.93), cargo, libssl-dev, pkgconf, cmake
+          Standards-Version: 4.6.2
+          Homepage: https://aube.jdx.dev
+          Vcs-Git: https://github.com/jdx/aube.git
+          Vcs-Browser: https://github.com/jdx/aube
+
+          Package: ${PACKAGE_NAME}
+          Architecture: any
+          Depends: \${shlibs:Depends}, \${misc:Depends}
+          Description: A fast Node.js package manager
+           Aube is a fast Node.js package manager written in Rust. It mirrors
+           pnpm's CLI surface and isolated symlink layout so users can swap it
+           in, with its own aube-owned on-disk state. Aube reads and writes
+           pnpm-lock.yaml, package-lock.json, npm-shrinkwrap.json, yarn.lock,
+           and bun.lock in addition to its native aube-lock.yaml.
+          EOF
+
+          # Cargo's profile→directory mapping isn't identity: the
+          # built-in `dev` profile (and anything inheriting from it,
+          # like `test`) lands in `target/debug/`, while `release`,
+          # `bench`, and any custom profile land in `target/<name>/`.
+          case "${BUILD_PROFILE}" in
+            dev|test) TARGET_DIR="target/debug" ;;
+            *)        TARGET_DIR="target/${BUILD_PROFILE}" ;;
+          esac
+
+          # aubr/aubx are multicall shims that dispatch on argv[0]; ship
+          # them as symlinks to keep the package small.
+          cat > debian/rules << EOF
+          #!/usr/bin/make -f
+
+          %:
+          	dh \$@
+
+          override_dh_auto_build:
+          	cargo build --profile ${BUILD_PROFILE} --frozen --bin aube --bin aubr --bin aubx
+
+          override_dh_auto_install:
+          	mkdir -p debian/aube/usr/bin
+          	cp ${TARGET_DIR}/aube debian/aube/usr/bin/aube
+          	ln -sf aube debian/aube/usr/bin/aubr
+          	ln -sf aube debian/aube/usr/bin/aubx
+          	mkdir -p debian/aube/usr/lib/aube
+          	echo 'message = "To update, run:\\n\\n  sudo apt update && sudo apt install --only-upgrade aube\\n"' > debian/aube/usr/lib/aube/aube-self-update-instructions.toml
+
+          override_dh_auto_clean:
+          	cargo clean || true
+          EOF
+
+          chmod +x debian/rules
+
+          cat > debian/copyright << EOF
+          Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+          Upstream-Name: ${PACKAGE_NAME}
+          Source: https://github.com/jdx/aube
+
+          Files: *
+          Copyright: 2025-2026 Jeff Dickey
+          License: MIT
+
+          License: MIT
+           Permission is hereby granted, free of charge, to any person obtaining a
+           copy of this software and associated documentation files (the "Software"),
+           to deal in the Software without restriction, including without limitation
+           the rights to use, copy, modify, merge, publish, distribute, sublicense,
+           and/or sell copies of the Software, and to permit persons to whom the
+           Software is furnished to do so, subject to the following conditions:
+           .
+           The above copyright notice and this permission notice shall be included
+           in all copies or substantial portions of the Software.
+           .
+           THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+           OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+           MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+           IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+           CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+           TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+           SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+          EOF
+
+          for DIST in ${DISTRIBUTIONS}; do
+            echo "Building source package for $DIST"
+
+            DIST_VERSION="${DEB_VERSION}~${DIST}${BUILD_REVISION}"
+
+            cat > debian/changelog << EOF
+          ${PACKAGE_NAME} (${DIST_VERSION}) ${DIST}; urgency=medium
+
+            * New upstream release ${VERSION}
+
+           -- ${MAINTAINER_NAME} <${MAINTAINER_EMAIL}>  $(date -R)
+          EOF
+
+            # -d skips build-dep checks since we only need the source package.
+            # TODO: drop -d once the runner's default Rust toolchain >= 1.93.
+            debuild -d
+
+            mkdir -p "/tmp/packages"
+            mv ../*"${DIST_VERSION}"*.dsc "/tmp/packages/"
+            mv ../*"${DIST_VERSION}"*.tar.* "/tmp/packages/"
+            mv ../*"${DIST_VERSION}"*.changes "/tmp/packages/"
+            mv ../*"${DIST_VERSION}"*.buildinfo "/tmp/packages/" 2>/dev/null || true
+
+            rm -f ../aube_"${DIST_VERSION}"*
+          done
+
+      - name: Upload source packages to PPA
+        run: |
+          cd /tmp/packages
+
+          # Launchpad's FTP path is ~<owner>/ubuntu/<ppa_name>/ — the
+          # distro component sits between owner and PPA name. Split
+          # PPA_NAME (e.g. "ppa:jdxcode/aube") into its two halves
+          # rather than dropping `/ubuntu/` at the end.
+          PPA_ID="${PPA_NAME#ppa:}"
+          PPA_OWNER="${PPA_ID%%/*}"
+          PPA_SHORT="${PPA_ID#*/}"
+
+          cat > ~/.dput.cf << EOF
+          [aube-ppa]
+          fqdn = ppa.launchpad.net
+          method = ftp
+          incoming = ~${PPA_OWNER}/ubuntu/${PPA_SHORT}/
+          login = anonymous
+          allow_unsigned_uploads = 0
+          EOF
+
+          for changes_file in *.changes; do
+            echo "Uploading $changes_file to PPA..."
+            dput aube-ppa "$changes_file"
+          done

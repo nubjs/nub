@@ -1,0 +1,1375 @@
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+/* Aube docs palette */
+:root {
+  --aube-bg: oklch(0.16 0.012 35);
+  --aube-bg-alt: oklch(0.19 0.012 35);
+  --aube-bg-soft: oklch(0.21 0.012 35);
+  --aube-line: oklch(0.3 0.014 40 / 0.65);
+  --aube-line-soft: oklch(0.3 0.014 40 / 0.35);
+  --aube-text: oklch(0.96 0.008 80);
+  --aube-muted: oklch(0.78 0.012 60);
+  --aube-faint: oklch(0.58 0.018 50);
+  --aube-teal: #5ee0ba;
+  --aube-yellow: #e2b046;
+  --aube-coral: oklch(0.75 0.16 45);
+  --aube-coral-soft: oklch(0.88 0.09 65);
+  --aube-coral-dark: oklch(0.52 0.12 30);
+  --aube-coral-ink: oklch(0.18 0.02 45);
+  --aube-accent: var(--aube-coral);
+  --aube-accent-2: var(--aube-coral-soft);
+  --aube-accent-3: var(--aube-coral-dark);
+  --aube-accent-ink: var(--aube-coral-ink);
+  --aube-good: oklch(0.76 0.14 155);
+  --aube-serif: "Instrument Serif", "EB Garamond", Georgia, serif;
+  --aube-sans: "Inter Tight", "Inter", system-ui, -apple-system, sans-serif;
+  --aube-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --aube-teal-dark: #1d8f79;
+
+  --vp-c-bg: var(--aube-bg);
+  --vp-c-bg-alt: var(--aube-bg-alt);
+  --vp-c-bg-soft: var(--aube-bg-soft);
+  --vp-c-bg-elv: #171c1a;
+
+  --vp-c-brand-1: var(--aube-coral);
+  --vp-c-brand-2: var(--aube-coral-soft);
+  --vp-c-brand-3: var(--aube-coral-dark);
+  --vp-c-brand-soft: oklch(0.28 0.04 45 / 0.3);
+
+  --vp-c-tip-1: var(--aube-teal);
+  --vp-c-tip-2: #74e8c7;
+  --vp-c-tip-3: var(--aube-teal-dark);
+  --vp-c-tip-soft: rgba(94, 224, 186, 0.14);
+
+  --vp-c-warning-1: var(--aube-yellow);
+  --vp-c-warning-2: #ffc93d;
+  --vp-c-warning-3: #d99b10;
+  --vp-c-warning-soft: rgba(245, 203, 92, 0.16);
+
+  /* Home hero: name gradient + image glow */
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(
+    120deg,
+    var(--aube-teal) 0%,
+    var(--aube-yellow) 55%,
+    var(--aube-coral) 100%
+  );
+  --vp-home-hero-image-background-image: radial-gradient(
+    circle at 50% 45%,
+    rgba(94, 224, 186, 0.8) 0%,
+    rgba(245, 203, 92, 0.55) 45%,
+    rgba(255, 107, 88, 0) 75%
+  );
+  --vp-home-hero-image-filter: blur(64px);
+
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-text: var(--aube-coral-ink);
+  --vp-button-brand-bg: var(--aube-coral);
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-hover-text: var(--aube-coral-ink);
+  --vp-button-brand-hover-bg: var(--aube-coral-soft);
+  --vp-button-brand-active-border: transparent;
+  --vp-button-brand-active-text: var(--aube-coral-ink);
+  --vp-button-brand-active-bg: var(--aube-coral-dark);
+}
+
+body {
+  font-family: var(--aube-sans);
+}
+
+/* Navbar logo */
+.VPNavBarTitle .VPImage.logo {
+  display: none;
+}
+
+.VPNavBarTitle .title {
+  font-family: var(--aube-serif);
+  font-size: 22px;
+  font-weight: 400;
+}
+
+.VPNavBarTitle .title::before {
+  background-image: url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3 15H21' stroke='%23f4f0e8' stroke-width='1.6' stroke-linecap='round'/%3E%3Cpath d='M7 15A5 5 0 0 1 17 15' stroke='%23f4f0e8' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 24px 24px;
+  content: "";
+  display: inline-block;
+  height: 24px;
+  margin-right: 10px;
+  vertical-align: -6px;
+  width: 24px;
+}
+
+.AubeSocialLinks {
+  align-items: center;
+  border-left: 1px solid var(--vp-c-divider);
+  display: flex;
+  gap: 4px;
+  margin-left: 16px;
+  padding-left: 12px;
+}
+
+.AubeSocialLink {
+  align-items: center;
+  color: var(--vp-c-text-2);
+  display: inline-flex;
+  height: 36px;
+  justify-content: center;
+  position: relative;
+  text-decoration: none;
+  transition: color 0.18s ease;
+  width: 32px;
+}
+
+.AubeSocialLink:hover {
+  color: var(--vp-c-text-1);
+}
+
+.AubeSocialLink svg {
+  height: 20px;
+  width: 20px;
+}
+
+.AubeSocialLinkGitHub {
+  margin-bottom: -12px;
+  padding-bottom: 12px;
+}
+
+.AubeStarCount {
+  bottom: 0;
+  color: var(--vp-c-text-3);
+  font-family: var(--aube-mono);
+  font-size: 10px;
+  font-weight: 600;
+  left: 50%;
+  letter-spacing: 0;
+  line-height: 1;
+  position: absolute;
+  transform: translateX(-50%);
+  transition: color 0.18s ease;
+  white-space: nowrap;
+}
+
+.AubeStarGlyph {
+  font-family: -apple-system, "Segoe UI Symbol", sans-serif;
+  line-height: 1;
+  margin-right: 0.2em;
+}
+
+.AubeSocialLinkGitHub:hover .AubeStarCount {
+  color: var(--vp-c-brand-1);
+}
+
+@media (max-width: 640px) {
+  .AubeSocialLinks {
+    display: none;
+  }
+}
+
+.VPNavScreen .AubeSocialLinks {
+  border-left: 0;
+  border-top: 1px solid var(--vp-c-divider);
+  display: flex;
+  margin: 16px 0 0;
+  padding: 16px 0 0;
+}
+
+.AubeEndevFooter {
+  align-items: center;
+  border-top: 1px solid var(--vp-c-divider);
+  color: var(--vp-c-text-2);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 14px;
+  gap: 8px;
+  justify-content: center;
+  line-height: 28px;
+  margin-top: auto;
+  padding: 22px 24px 26px;
+  text-align: center;
+}
+
+.AubeEndevFooterLink {
+  align-items: center;
+  color: inherit;
+  display: inline-flex;
+  gap: 8px;
+  line-height: 28px;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.AubeEndevFooterLink:hover {
+  color: var(--vp-c-brand-1);
+}
+
+.AubeEndevFooterLogo {
+  border-radius: 8px;
+  display: inline-block;
+  height: 28px;
+  vertical-align: middle;
+  width: 28px;
+}
+
+/* Hero image glow */
+.VPHero .VPImage {
+  filter: drop-shadow(0 12px 40px rgba(94, 224, 186, 0.35));
+}
+
+.VPHome {
+  overflow: clip;
+}
+
+.VPHome .VPHomeContent {
+  padding: 0;
+}
+
+.aube-home {
+  box-sizing: border-box;
+  color: var(--aube-text);
+  margin: 0 auto;
+  max-width: 1200px;
+  padding: 80px 32px 100px;
+  position: relative;
+  width: 100%;
+}
+
+.aube-hero-glow {
+  background: radial-gradient(
+    ellipse 50% 40% at 50% 45%,
+    oklch(0.58 0.18 45 / 0.28) 0%,
+    oklch(0.52 0.14 25 / 0.18) 35%,
+    transparent 65%
+  );
+  content: "";
+  filter: blur(2px);
+  height: 900px;
+  left: 50%;
+  pointer-events: none;
+  position: absolute;
+  top: -100px;
+  transform: translateX(-50%);
+  width: 1400px;
+  z-index: -1;
+}
+
+.aube-hero {
+  align-items: center;
+  display: grid;
+  gap: 64px;
+  grid-template-columns: minmax(0, 1fr) minmax(500px, 1.08fr);
+  min-height: 560px;
+  position: relative;
+}
+
+.aube-hero-copy {
+  max-width: 590px;
+  min-width: 0;
+}
+
+.aube-release {
+  align-items: center;
+  background: var(--aube-bg-soft);
+  border: 1px solid var(--aube-line);
+  border-radius: 999px;
+  color: var(--aube-muted);
+  display: inline-flex;
+  font-family: var(--aube-mono);
+  font-size: 12px;
+  gap: 10px;
+  letter-spacing: 0;
+  padding: 7px 12px;
+  position: absolute;
+  right: 32px;
+  top: 32px;
+  z-index: 1;
+}
+
+.aube-release span:first-child {
+  background: var(--aube-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 12px var(--aube-accent);
+  height: 6px;
+  width: 6px;
+}
+
+.aube-release .aube-release-version {
+  color: inherit;
+  font-weight: inherit;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.aube-release .aube-release-version:hover,
+.aube-release .aube-release-version:focus-visible {
+  color: var(--aube-accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.aube-pronunciation {
+  color: var(--aube-faint);
+  font-family: var(--aube-mono);
+  font-size: 12px;
+  letter-spacing: 0;
+  margin: -12px 0 20px;
+}
+
+.aube-hero h1 {
+  color: var(--aube-text);
+  font-family: var(--aube-serif);
+  font-size: clamp(56px, 9vw, 112px);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 0.96;
+  margin: 0 0 24px;
+}
+
+.aube-hero h1 em {
+  color: var(--aube-accent);
+  display: block;
+  font-style: italic;
+}
+
+.aube-lede {
+  color: var(--aube-muted);
+  font-size: 19px;
+  line-height: 1.5;
+  margin: 0 0 18px;
+  max-width: 520px;
+}
+
+.custom-block {
+  --aube-block-accent: var(--aube-muted);
+  --aube-block-bg: oklch(0.24 0.018 45 / 0.55);
+  --aube-block-border: oklch(0.46 0.025 55 / 0.45);
+  --aube-block-ink: var(--aube-accent-ink);
+
+  background: var(--aube-block-bg);
+  border: 1px solid var(--aube-block-border);
+  border-radius: 8px;
+  box-sizing: border-box;
+  color: var(--aube-muted);
+  margin: 24px 0;
+  padding: 16px 18px 16px 56px;
+  position: relative;
+}
+
+.custom-block.info,
+.custom-block.note {
+  --aube-block-accent: var(--aube-teal);
+  --aube-block-bg: oklch(0.22 0.038 180 / 0.42);
+  --aube-block-border: oklch(0.67 0.11 175 / 0.45);
+  --aube-block-mark: "i";
+}
+
+.custom-block.tip,
+.custom-block.important {
+  --aube-block-accent: var(--aube-good);
+  --aube-block-bg: oklch(0.22 0.042 150 / 0.4);
+  --aube-block-border: oklch(0.7 0.13 150 / 0.45);
+  --aube-block-mark: "+";
+}
+
+.custom-block.warning {
+  --aube-block-accent: var(--aube-accent);
+  --aube-block-bg: oklch(0.24 0.04 45 / 0.55);
+  --aube-block-border: oklch(0.58 0.12 55 / 0.5);
+  --aube-block-mark: "!";
+}
+
+.custom-block.danger,
+.custom-block.caution,
+.custom-block.error {
+  --aube-block-accent: oklch(0.72 0.18 25);
+  --aube-block-bg: oklch(0.23 0.045 25 / 0.5);
+  --aube-block-border: oklch(0.58 0.15 25 / 0.5);
+  --aube-block-mark: "x";
+}
+
+.custom-block.details {
+  --aube-block-accent: var(--aube-yellow);
+  --aube-block-bg: oklch(0.23 0.028 70 / 0.44);
+  --aube-block-border: oklch(0.6 0.1 75 / 0.45);
+  --aube-block-mark: "?";
+}
+
+.custom-block::before {
+  align-items: center;
+  background: var(--aube-block-accent);
+  border-radius: 6px;
+  color: var(--aube-accent-ink);
+  content: var(--aube-block-mark, "i");
+  display: inline-flex;
+  font-family: var(--aube-mono);
+  font-size: 14px;
+  font-weight: 700;
+  height: 28px;
+  justify-content: center;
+  left: 16px;
+  position: absolute;
+  top: 16px;
+  width: 28px;
+}
+
+.custom-block p,
+.custom-block summary {
+  color: var(--aube-muted);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.custom-block p:first-child {
+  margin-top: 0;
+}
+
+.custom-block p:last-child {
+  margin-bottom: 0;
+}
+
+.custom-block .custom-block-title,
+.custom-block summary {
+  color: var(--aube-block-accent);
+  font-weight: 600;
+  line-height: 1.4;
+  margin-bottom: 4px;
+}
+
+.custom-block.details summary {
+  cursor: pointer;
+}
+
+.aube-actions {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 56px;
+  margin-top: 0;
+}
+
+.aube-button {
+  align-items: center;
+  background: var(--aube-bg-soft);
+  border: 1px solid var(--aube-line);
+  border-radius: 10px;
+  box-sizing: border-box;
+  color: var(--aube-text);
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 500;
+  gap: 10px;
+  justify-content: center;
+  min-height: 50px;
+  padding: 0 20px;
+  text-decoration: none !important;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.aube-button:hover {
+  border-color: var(--aube-faint);
+  color: var(--aube-text);
+  transform: translateY(-1px);
+}
+
+.aube-button-primary,
+.aube-button-primary:visited {
+  background: var(--aube-accent);
+  border-color: var(--aube-accent);
+  color: var(--aube-accent-ink) !important;
+  -webkit-text-fill-color: var(--aube-accent-ink) !important;
+}
+
+.aube-button-primary:hover {
+  filter: brightness(1.06);
+  color: var(--aube-accent-ink) !important;
+  -webkit-text-fill-color: var(--aube-accent-ink) !important;
+}
+
+.aube-install-stack {
+  align-items: flex-start;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aube-install-command {
+  align-items: center;
+  background: var(--aube-bg-soft);
+  border: 1px solid var(--aube-line);
+  border-radius: 10px;
+  box-sizing: border-box;
+  display: inline-flex;
+  color: var(--aube-muted);
+  font-family: var(--aube-mono);
+  font-size: 13px;
+  gap: 9px;
+  min-height: 50px;
+  padding: 0 10px 0 18px;
+}
+
+.aube-button-prompt {
+  color: var(--aube-accent);
+}
+
+.vp-doc .aube-install-command code,
+.aube-install-code {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0;
+  color: var(--aube-muted);
+  font-family: inherit;
+  font-size: inherit;
+  min-width: 0;
+  line-height: inherit;
+  padding: 0 !important;
+}
+
+.aube-install-command button {
+  background: oklch(0.3 0.02 40 / 0.6);
+  border: 0;
+  border-radius: 4px;
+  color: var(--aube-muted);
+  cursor: pointer;
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  min-height: 28px;
+  padding: 0 9px;
+}
+
+.aube-install-command button:hover {
+  color: var(--aube-text);
+}
+
+.aube-install-link {
+  color: var(--aube-muted);
+  font-size: 14px;
+  text-decoration: none !important;
+}
+
+.aube-install-link:hover {
+  color: var(--aube-text);
+}
+
+.aube-stats {
+  border-top: 1px solid var(--aube-line-soft);
+  display: grid;
+  gap: 40px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding-top: 32px;
+}
+
+.aube-stats div {
+  min-width: 0;
+}
+
+.aube-stat-with-tip {
+  position: relative;
+}
+
+.aube-stats dt {
+  color: var(--aube-text);
+  font-family: var(--aube-serif);
+  font-size: 34px;
+  line-height: 1;
+  position: relative;
+}
+
+.aube-stats dd {
+  color: var(--aube-faint);
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 4px 0 0;
+}
+
+.aube-stat-linked {
+  position: relative;
+}
+
+.aube-stats .aube-stat-link {
+  border-radius: 8px;
+  inset: -8px;
+  position: absolute;
+  z-index: 1;
+}
+
+.aube-stats .aube-stat-link:focus-visible {
+  outline: 2px solid var(--aube-accent);
+  outline-offset: 0;
+}
+
+.aube-stats dt,
+.aube-stats dd {
+  transition: color 120ms ease;
+}
+
+.aube-stat-linked:has(.aube-stat-link:hover) dt,
+.aube-stat-linked:has(.aube-stat-link:focus-visible) dt {
+  color: var(--aube-accent);
+}
+
+.aube-stat-linked:has(.aube-stat-link:hover) dd,
+.aube-stat-linked:has(.aube-stat-link:focus-visible) dd {
+  color: var(--aube-muted);
+}
+
+.aube-stat-tip {
+  display: inline-flex;
+  font-family: var(--aube-mono);
+  margin-left: 8px;
+  position: relative;
+  vertical-align: 8px;
+}
+
+.aube-stat-tip button {
+  background: transparent;
+  border: 1px solid var(--aube-line);
+  border-radius: 50%;
+  color: var(--aube-muted);
+  cursor: help;
+  font-family: var(--aube-mono);
+  font-size: 10px;
+  height: 20px;
+  line-height: 1;
+  padding: 0;
+  width: 20px;
+}
+
+.aube-stat-tip button:hover,
+.aube-stat-tip button:focus-visible {
+  border-color: var(--aube-accent);
+  color: var(--aube-text);
+  outline: none;
+}
+
+.aube-stat-tip [role="tooltip"] {
+  background: var(--aube-bg-soft);
+  border: 1px solid var(--aube-line);
+  border-radius: 8px;
+  bottom: calc(100% + 10px);
+  box-shadow: 0 20px 50px oklch(0 0 0 / 0.35);
+  color: var(--aube-muted);
+  font-size: 12px;
+  left: 50%;
+  line-height: 1.45;
+  max-width: min(280px, calc(100vw - 40px));
+  opacity: 0;
+  padding: 12px 14px;
+  pointer-events: none;
+  position: absolute;
+  transform: translateX(-50%) translateY(4px);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+  visibility: hidden;
+  width: max-content;
+  z-index: 5;
+}
+
+.aube-stat-tip:hover [role="tooltip"],
+.aube-stat-tip:focus-within [role="tooltip"] {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  visibility: visible;
+}
+
+.aube-stage {
+  min-width: 0;
+  position: relative;
+}
+
+.aube-terminal {
+  background: linear-gradient(180deg, oklch(0.22 0.012 35) 0%, oklch(0.17 0.012 35) 100%);
+  border: 1px solid var(--aube-line);
+  border-radius: 14px;
+  box-shadow:
+    0 1px 0 oklch(0.35 0.012 40 / 0.4) inset,
+    0 40px 80px -30px oklch(0 0 0 / 0.6),
+    0 0 0 1px oklch(0.28 0.012 40 / 0.4);
+  overflow: hidden;
+  position: relative;
+  z-index: 2;
+}
+
+@media (min-width: 961px) {
+  .aube-terminal {
+    margin-right: -28px;
+  }
+}
+
+.aube-terminal::after {
+  background: radial-gradient(ellipse at top, oklch(0.4 0.05 45 / 0.12) 0%, transparent 55%);
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.aube-terminal-bar {
+  align-items: center;
+  background: oklch(0.22 0.012 35 / 0.5);
+  border-bottom: 1px solid oklch(0.28 0.012 40 / 0.5);
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px;
+  position: relative;
+  z-index: 1;
+}
+
+.aube-terminal-bar span {
+  background: var(--aube-muted);
+  border-radius: 50%;
+  height: 9px;
+  width: 9px;
+}
+
+.aube-terminal-bar span:nth-child(1) {
+  background: var(--aube-coral);
+}
+
+.aube-terminal-bar span:nth-child(2) {
+  background: var(--aube-yellow);
+}
+
+.aube-terminal-bar span:nth-child(3) {
+  background: var(--aube-teal);
+}
+
+.aube-terminal-bar strong {
+  color: oklch(0.65 0.012 60);
+  font-family: var(--aube-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  margin-left: 12px;
+}
+
+.aube-clx {
+  color: oklch(0.9 0.008 70);
+  font-family: var(--aube-mono);
+  font-size: 13.5px;
+  line-height: 1.7;
+  min-height: 260px;
+  overflow: hidden;
+  padding: 16px 24px 26px;
+  position: relative;
+  z-index: 1;
+}
+
+.aube-command {
+  color: oklch(0.92 0.008 70);
+  margin-bottom: 2px;
+}
+
+.aube-mise-output {
+  color: oklch(0.55 0.012 50);
+  margin-bottom: 2px;
+  white-space: nowrap;
+}
+
+.aube-progress-root {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto auto auto auto minmax(0, 1fr) auto;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+.aube-name {
+  color: var(--aube-accent-2);
+  font-weight: 500;
+}
+
+.aube-version,
+.aube-byline {
+  color: oklch(0.55 0.012 50);
+}
+
+.aube-phase {
+  color: var(--aube-accent-2);
+}
+
+.aube-progress-bar {
+  color: var(--aube-accent);
+  letter-spacing: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: clip;
+}
+
+.aube-progress-count {
+  color: var(--aube-text);
+}
+
+.aube-fetch-row {
+  align-items: center;
+  color: oklch(0.78 0.012 60);
+  display: flex;
+  gap: 10px;
+  padding-left: 0;
+  transition: opacity 0.3s;
+}
+
+.aube-spinner {
+  color: var(--aube-accent);
+  display: inline-block;
+  width: 16px;
+}
+
+.aube-done-row {
+  color: var(--aube-good);
+}
+
+.aube-install-summary {
+  align-items: center;
+  color: var(--aube-good);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.aube-done-check {
+  color: var(--aube-good);
+}
+
+.aube-caret {
+  animation: aube-blink 1s steps(1) infinite;
+  color: var(--aube-accent);
+}
+
+@keyframes aube-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.aube-proof {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin-top: 44px;
+  min-width: 0;
+}
+
+.vp-doc a.aube-proof-item {
+  background: var(--aube-bg);
+  border: 1px solid var(--aube-line-soft);
+  border-radius: 8px;
+  color: var(--aube-text);
+  box-sizing: border-box;
+  display: grid;
+  grid-column: span 2;
+  grid-template-rows: auto auto auto 1fr auto;
+  min-height: 410px;
+  min-width: 0;
+  padding: 34px 24px 30px;
+  position: relative;
+  text-decoration: none !important;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.vp-doc a.aube-proof-item:nth-child(4),
+.vp-doc a.aube-proof-item:nth-child(5) {
+  grid-column: span 3;
+}
+
+.vp-doc a.aube-proof-item:hover {
+  background: var(--aube-bg-alt);
+  border-color: var(--aube-line);
+  transform: translateY(-2px);
+}
+
+.aube-proof-number {
+  color: var(--aube-faint);
+  display: inline-block;
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  margin-bottom: 24px;
+}
+
+.aube-proof-tag {
+  background: oklch(0.28 0.04 45 / 0.3);
+  border-radius: 4px;
+  color: var(--aube-accent);
+  display: inline-block;
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  padding: 4px 9px;
+  position: absolute;
+  right: 24px;
+  top: 34px;
+}
+
+.aube-proof-visual {
+  align-self: stretch;
+  display: block;
+  height: 132px;
+  margin-bottom: 30px;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.aube-proof-chart {
+  display: grid;
+  gap: 8px;
+}
+
+.aube-chart-row {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 56px minmax(0, 1fr);
+  line-height: 1;
+}
+
+.aube-chart-row > span:first-child {
+  color: var(--aube-faint);
+  font-family: var(--aube-mono);
+  font-size: 11px;
+}
+
+.aube-chart-row > span:last-child {
+  background: oklch(0.24 0.012 35);
+  border-radius: 3px;
+  display: block;
+  height: 12px;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.aube-chart-row i {
+  background: linear-gradient(90deg, oklch(0.5 0.012 50), oklch(0.68 0.012 60));
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+  width: var(--bar-width);
+}
+
+.aube-chart-row-aube > span:first-child {
+  color: var(--aube-accent-2);
+}
+
+.aube-chart-row-aube i {
+  background: oklch(0.72 0.13 48);
+}
+
+.aube-proof-lockfiles {
+  display: grid;
+  gap: 5px;
+  grid-template-rows: auto 1fr auto;
+}
+
+.aube-lockfile-formats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  min-width: 0;
+}
+
+.aube-lockfile-formats code {
+  background: transparent !important;
+  border: 1px solid var(--aube-line-soft) !important;
+  border-left: 2px solid var(--aube-accent) !important;
+  border-radius: 4px;
+  color: var(--aube-muted) !important;
+  flex: 0 0 auto;
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  line-height: 1.2;
+  max-width: 100%;
+  padding: 7px 8px !important;
+  white-space: nowrap;
+}
+
+.aube-lockfile-loop {
+  align-items: center;
+  display: flex;
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  gap: 9px;
+  justify-content: center;
+  min-width: 0;
+}
+
+.aube-lockfile-loop span {
+  color: var(--aube-faint);
+}
+
+.aube-lockfile-loop i {
+  background: linear-gradient(90deg, oklch(0.55 0.012 55), var(--aube-accent));
+  display: block;
+  flex: 1;
+  height: 1px;
+  min-width: 18px;
+}
+
+.aube-lockfile-loop b {
+  background: oklch(0.26 0.06 45 / 0.78);
+  border: 1px solid oklch(0.58 0.12 55 / 0.5);
+  border-radius: 8px;
+  color: var(--aube-accent);
+  font-weight: 500;
+  padding: 10px 14px;
+}
+
+.aube-lockfile-caption {
+  color: var(--aube-accent);
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  justify-self: center;
+  min-width: 0;
+}
+
+.aube-proof-run {
+  background: oklch(0.2 0.012 45 / 0.82);
+  border: 1px solid var(--aube-line-soft);
+  border-radius: 7px;
+  color: var(--aube-muted);
+  display: grid;
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  gap: 7px;
+  line-height: 1.2;
+  padding: 14px;
+}
+
+.aube-proof-run span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aube-proof-run b,
+.aube-run-install {
+  color: var(--aube-accent);
+}
+
+.aube-run-ok {
+  color: var(--aube-good);
+}
+
+.aube-proof-disk {
+  align-items: center;
+  display: grid;
+  gap: 7px;
+  font-family: var(--aube-mono);
+  grid-template-rows: auto 28px auto auto;
+  justify-items: center;
+}
+
+.aube-disk-packages {
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+  width: 100%;
+}
+
+.aube-disk-packages i {
+  background: oklch(0.34 0.01 45 / 0.72);
+  border: 1px solid oklch(0.52 0.012 45 / 0.6);
+  border-radius: 5px;
+  color: var(--aube-muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1;
+  overflow: hidden;
+  padding: 6px 0;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aube-disk-funnel {
+  background:
+    linear-gradient(90deg, transparent, oklch(0.58 0.12 55 / 0.45), transparent)
+      center bottom / 58% 1px no-repeat,
+    linear-gradient(
+      180deg,
+      oklch(0.46 0.018 45 / 0.48),
+      oklch(0.56 0.11 55 / 0.5)
+    );
+  clip-path: polygon(5% 0, 95% 0, 63% 100%, 37% 100%);
+  display: block;
+  height: 28px;
+  width: 74%;
+}
+
+.aube-disk-store {
+  background:
+    linear-gradient(90deg, transparent, oklch(0.68 0.15 60 / 0.18), transparent)
+      center / 92% 100% no-repeat,
+    linear-gradient(135deg, oklch(0.31 0.08 45), oklch(0.24 0.05 45));
+  border: 1px solid oklch(0.58 0.12 55 / 0.65);
+  border-radius: 7px;
+  color: var(--aube-accent);
+  font-size: 11px;
+  padding: 10px 13px;
+  position: relative;
+  text-align: center;
+  width: 66%;
+}
+
+.aube-disk-store::after {
+  background: linear-gradient(90deg, transparent, oklch(0.56 0.08 55 / 0.65), transparent);
+  bottom: -8px;
+  content: "";
+  height: 1px;
+  left: -28px;
+  position: absolute;
+  right: -28px;
+}
+
+.aube-disk-projects {
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(3, 1fr);
+  width: 82%;
+}
+
+.aube-disk-projects b {
+  border: 1px solid var(--aube-line-soft);
+  border-radius: 5px;
+  color: var(--aube-muted);
+  font-size: 10px;
+  font-weight: 500;
+  padding: 5px 0;
+  text-align: center;
+}
+
+.aube-proof-scripts {
+  display: grid;
+  gap: 10px;
+}
+
+.aube-script-row {
+  align-items: center;
+  border: 1px solid var(--aube-line-soft);
+  border-radius: 6px;
+  display: flex;
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 12px 12px;
+}
+
+.aube-script-row b {
+  color: var(--aube-muted);
+  font-weight: 400;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aube-script-row i {
+  border: 1px solid oklch(0.5 0.02 55);
+  border-radius: 4px;
+  color: var(--aube-faint);
+  flex: 0 0 auto;
+  font-style: normal;
+  padding: 4px 6px;
+}
+
+.aube-script-row-root {
+  border-color: oklch(0.58 0.12 55 / 0.5);
+}
+
+.aube-script-row-root b,
+.aube-script-row-root i {
+  color: var(--aube-accent);
+}
+
+.aube-proof-item strong {
+  color: var(--aube-text);
+  display: block;
+  font-family: var(--aube-serif);
+  font-size: 23px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.08;
+}
+
+.aube-proof-item > strong + span {
+  color: var(--aube-muted);
+  display: block;
+  line-height: 1.5;
+  margin-top: 22px;
+  overflow-wrap: anywhere;
+}
+
+.aube-proof-item code {
+  background: transparent;
+  color: var(--aube-text);
+  font-size: 0.95em;
+  padding: 0;
+}
+
+.aube-proof-item .aube-proof-link {
+  color: var(--aube-accent);
+  font-family: var(--aube-mono);
+  font-size: 13px;
+  margin-top: 28px;
+}
+
+.vp-doc a.aube-proof-item:hover,
+.vp-doc a.aube-proof-item:visited {
+  text-decoration: none !important;
+}
+
+@media (max-width: 960px) {
+  .aube-home {
+    padding: 54px 20px 80px;
+  }
+
+  .aube-release {
+    margin-bottom: 28px;
+    position: static;
+  }
+
+  .aube-hero {
+    gap: 44px;
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .aube-hero-copy {
+    max-width: 720px;
+  }
+
+  .aube-hero h1 {
+    font-size: 70px;
+  }
+
+  .aube-proof {
+    grid-template-columns: 1fr;
+  }
+
+  .vp-doc a.aube-proof-item,
+  .vp-doc a.aube-proof-item:first-child,
+  .vp-doc a.aube-proof-item:last-child,
+  .vp-doc a.aube-proof-item:nth-child(4),
+  .vp-doc a.aube-proof-item:nth-child(5) {
+    border-radius: 8px;
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .aube-home {
+    padding: 42px 16px 64px;
+  }
+
+  .aube-hero {
+    gap: 36px;
+  }
+
+  .aube-hero h1 {
+    font-size: 54px;
+  }
+
+  .aube-lede {
+    font-size: 17px;
+  }
+
+  .aube-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .aube-button {
+    width: 100%;
+  }
+
+  .aube-install-stack {
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .aube-install-command {
+    width: 100%;
+  }
+
+  .vp-doc .aube-install-command code,
+  .aube-install-code {
+    flex: 1;
+  }
+
+  .aube-install-link {
+    align-self: center;
+    text-align: center;
+  }
+
+  .aube-stats {
+    gap: 18px;
+    grid-template-columns: 1fr;
+  }
+
+  .aube-stat-tip [role="tooltip"] {
+    left: 0;
+    transform: translateY(4px);
+  }
+
+  .aube-stat-tip:hover [role="tooltip"],
+  .aube-stat-tip:focus-within [role="tooltip"] {
+    transform: translateY(0);
+  }
+
+  .aube-clx {
+    font-size: 13px;
+    padding: 14px;
+  }
+
+  .aube-progress-root {
+    gap: 5px;
+    grid-template-columns: auto auto auto;
+  }
+
+  .aube-byline,
+  .aube-phase {
+    display: none;
+  }
+
+  .aube-progress-bar {
+    grid-column: 1 / -1;
+  }
+
+  .aube-progress-count {
+    grid-column: 1 / -1;
+  }
+
+  .aube-fetch-row {
+    padding-left: 8px;
+  }
+
+  .vp-doc a.aube-proof-item {
+    min-height: 0;
+    padding: 30px 24px;
+  }
+
+  .aube-proof-visual {
+    height: 124px;
+    margin-bottom: 26px;
+  }
+
+  .aube-proof-tag {
+    right: 24px;
+    top: 28px;
+  }
+}

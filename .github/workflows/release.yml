@@ -98,9 +98,6 @@ jobs:
       AUBE_PRIMER_VERSION_CAP: "100"
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      # vendored aube submodule. Single-path init keeps tests/node-suite out.
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
@@ -267,10 +264,6 @@ jobs:
         run: git submodule update --init --depth 1 tests/node-suite
         shell: bash
       # nub-cli has a path dependency into the vendored aube workspace, so the
-      # cargo build can't resolve without this submodule. Explicit single-path
-      # init (not `submodules: true`) keeps the init list deliberate.
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
         shell: bash
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
@@ -320,9 +313,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      # cargo build can't resolve without this submodule (same as the test gate).
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
@@ -361,10 +351,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      # the workspace. Single-path init on purpose: tests/node-suite (the full
-      # nodejs/node clone) stays excluded from the build runners.
-      - name: Init vendor/aube submodule
-        run: git submodule update --init vendor/aube
 
       # Pull the metadata primer generated ONCE by the `primer` job into the dir
       # vendor/aube/crates/aube-resolver/build.rs reads. It lands as the

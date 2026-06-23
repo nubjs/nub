@@ -1,0 +1,10 @@
+{
+  "name": "@fixture/core",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "is-number": "^6.0.0",
+    "is-odd": "catalog:",
+    "local-dir": "file:../../vendor/local-dir"
+  }
+}

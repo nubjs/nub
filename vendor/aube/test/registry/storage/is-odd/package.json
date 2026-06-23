@@ -1,0 +1,848 @@
+{
+	"name": "is-odd",
+	"versions": {
+		"0.1.0": {
+			"name": "is-odd",
+			"description": "Returns true if the given number is odd.",
+			"version": "0.1.0",
+			"homepage": "https://github.com/jonschlinkert/is-odd",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"repository": {
+				"type": "git",
+				"url": "https://github.com/jonschlinkert/is-odd"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-odd/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^1.1.0"
+			},
+			"devDependencies": {
+				"mocha": "*",
+				"should": "*"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"_id": "is-odd@0.1.0",
+			"_shasum": "1031f78cac2710cba44820e73c898571bb83d3c3",
+			"_from": ".",
+			"_npmVersion": "2.5.1",
+			"_nodeVersion": "0.12.0",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"maintainers": [
+				{
+					"name": "jonschlinkert",
+					"email": "github@sellside.com"
+				}
+			],
+			"dist": {
+				"shasum": "1031f78cac2710cba44820e73c898571bb83d3c3",
+				"tarball": "https://registry.npmjs.org/is-odd/-/is-odd-0.1.0.tgz",
+				"integrity": "sha512-3RKAybrJxq3zCUC+TJ5Ao0sBsbacAT3OBeNVcCbsQsHUC70qWK2R4JsIvax4OTjeGWnB8FumAWATUtS1jd+KYw==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEYCIQC0Up0F8WXEWA3Vfjh5n6qWp+kO61ftwLMfBD580D9pZAIhAOn4/7a6erENjhSjCOD6RSLDpFph8MqA2a1bbi8ZSnoP"
+					}
+				]
+			},
+			"directories": {},
+			"contributors": []
+		},
+		"0.1.1": {
+			"name": "is-odd",
+			"description": "Returns true if the given number is odd.",
+			"version": "0.1.1",
+			"homepage": "https://github.com/jonschlinkert/is-odd",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/jonschlinkert/is-odd.git"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-odd/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^1.1.0"
+			},
+			"devDependencies": {
+				"gulp-format-md": "^0.1.11",
+				"mocha": "^3.2.0"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"is",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"verb": {
+				"toc": false,
+				"layout": "default",
+				"tasks": [
+					"readme"
+				],
+				"plugins": [
+					"gulp-format-md"
+				],
+				"lint": {
+					"reflinks": true
+				},
+				"related": {
+					"list": []
+				},
+				"reflinks": [
+					"verb",
+					"verb-generate-readme"
+				]
+			},
+			"gitHead": "b8fc75839e341f23e2d7cb2d4b6a173ccbc1e364",
+			"_id": "is-odd@0.1.1",
+			"_shasum": "51508f7d39eafb0282fbb98957b2d1d28e72a3e7",
+			"_from": ".",
+			"_npmVersion": "3.10.3",
+			"_nodeVersion": "6.7.0",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"maintainers": [
+				{
+					"name": "jonschlinkert",
+					"email": "github@sellside.com"
+				},
+				{
+					"name": "doowb",
+					"email": "brian.woodward@gmail.com"
+				}
+			],
+			"dist": {
+				"shasum": "51508f7d39eafb0282fbb98957b2d1d28e72a3e7",
+				"tarball": "https://registry.npmjs.org/is-odd/-/is-odd-0.1.1.tgz",
+				"integrity": "sha512-MryzYFJV3tn8l7PJdvCLVJvwjB3zdS+qKdopFQyo9uOlJ4AHeLoaIDElZTwDvcwk/vmcNqoIob2bBN4pFEsYCg==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEYCIQDu3TG2/++wuCRCLdBQI1g7vkjzEy2jQbBabe6RFL2/UAIhAKiOVQECOwXs/cb59+dX7fsl+FfPKKMJS1oegklcYuqz"
+					}
+				]
+			},
+			"_npmOperationalInternal": {
+				"host": "packages-12-west.internal.npmjs.com",
+				"tmp": "tmp/is-odd-0.1.1.tgz_1481095079315_0.8302227731328458"
+			},
+			"directories": {},
+			"contributors": []
+		},
+		"0.1.2": {
+			"name": "is-odd",
+			"description": "Returns true if the given number is odd.",
+			"version": "0.1.2",
+			"homepage": "https://github.com/jonschlinkert/is-odd",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"contributors": [
+				{
+					"name": "Dmitry Semigradsky",
+					"url": "http://brainstorage.me/semigradsky"
+				},
+				{
+					"name": "Jon Schlinkert",
+					"url": "http://twitter.com/jonschlinkert"
+				}
+			],
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/jonschlinkert/is-odd.git"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-odd/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^3.0.0"
+			},
+			"devDependencies": {
+				"gulp-format-md": "^0.1.11",
+				"mocha": "^3.2.0"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"is",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"verb": {
+				"toc": false,
+				"layout": "default",
+				"tasks": [
+					"readme"
+				],
+				"plugins": [
+					"gulp-format-md"
+				],
+				"lint": {
+					"reflinks": true
+				},
+				"related": {
+					"list": []
+				},
+				"reflinks": [
+					"verb",
+					"verb-generate-readme"
+				]
+			},
+			"gitHead": "59270f5a05b03bdeb0b06c95d922deb59ae31923",
+			"_id": "is-odd@0.1.2",
+			"_shasum": "bc573b5ce371ef2aad6e6f49799b72bef13978a7",
+			"_from": ".",
+			"_npmVersion": "4.6.1",
+			"_nodeVersion": "7.7.3",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"maintainers": [
+				{
+					"name": "jonschlinkert",
+					"email": "github@sellside.com"
+				},
+				{
+					"name": "doowb",
+					"email": "brian.woodward@gmail.com"
+				}
+			],
+			"dist": {
+				"shasum": "bc573b5ce371ef2aad6e6f49799b72bef13978a7",
+				"tarball": "https://registry.npmjs.org/is-odd/-/is-odd-0.1.2.tgz",
+				"integrity": "sha512-Ri7C2K7o5IrUU9UEI8losXJCCD/UtsaIrkR5sxIcFg4xQ9cRJXlWA5DQvTE0yDc0krvSNLsRGXN11UPS6KyfBw==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCIHI63jfRjPRbhpolQPjSEwwTdVf8yV/im1aqm5QrLDrbAiBPeyyXzmbqFY+l6K7EFNmlKaVmC8rMF7inILRu3jT9NQ=="
+					}
+				]
+			},
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages",
+				"tmp": "tmp/is-odd-0.1.2.tgz_1495890277574_0.012756465701386333"
+			},
+			"directories": {}
+		},
+		"1.0.0": {
+			"name": "is-odd",
+			"description": "Returns true if the given number is odd.",
+			"version": "1.0.0",
+			"homepage": "https://github.com/jonschlinkert/is-odd",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"contributors": [
+				{
+					"name": "Dmitry Semigradsky",
+					"url": "http://brainstorage.me/semigradsky"
+				},
+				{
+					"name": "DYM",
+					"url": "http://dym.sh"
+				},
+				{
+					"name": "Jon Schlinkert",
+					"url": "http://twitter.com/jonschlinkert"
+				}
+			],
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/jonschlinkert/is-odd.git"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-odd/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^3.0.0"
+			},
+			"devDependencies": {
+				"gulp-format-md": "^0.1.11",
+				"mocha": "^3.2.0"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"is",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"verb": {
+				"toc": false,
+				"layout": "default",
+				"tasks": [
+					"readme"
+				],
+				"plugins": [
+					"gulp-format-md"
+				],
+				"related": {
+					"list": [
+						"exponential-moving-average",
+						"is-even",
+						"sma"
+					]
+				},
+				"lint": {
+					"reflinks": true
+				}
+			},
+			"gitHead": "71747ca9a8324f9201205ad46a09fd3e60250edb",
+			"_id": "is-odd@1.0.0",
+			"_shasum": "3b8a932eb028b3775c39bb09e91767accdb69088",
+			"_from": ".",
+			"_npmVersion": "4.6.1",
+			"_nodeVersion": "7.7.3",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"maintainers": [
+				{
+					"name": "jonschlinkert",
+					"email": "github@sellside.com"
+				},
+				{
+					"name": "doowb",
+					"email": "brian.woodward@gmail.com"
+				}
+			],
+			"dist": {
+				"shasum": "3b8a932eb028b3775c39bb09e91767accdb69088",
+				"tarball": "https://registry.npmjs.org/is-odd/-/is-odd-1.0.0.tgz",
+				"integrity": "sha512-yIhxkKCK7pZnj48WBvaTQ36Or7PymGYqmZrSNqkrhmU3pakkp2TWhuN7hH25bqJgH+Xq4IZ3QNd3+QVshldEHA==",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEQCIHPczqNcas1Hy0uIrewgEkKs4DS2N2r3E8VjhvFqaM3yAiAO2TKhXzzkA+HS3GlWWNzPmwbf5MqYzxVFkJP/8wFY6w=="
+					}
+				]
+			},
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages",
+				"tmp": "tmp/is-odd-1.0.0.tgz_1495909096816_0.9196002101525664"
+			},
+			"directories": {}
+		},
+		"2.0.0": {
+			"name": "is-odd",
+			"description": "Returns true if the given number is odd.",
+			"version": "2.0.0",
+			"homepage": "https://github.com/jonschlinkert/is-odd",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"contributors": [
+				{
+					"name": "Dmitry Semigradsky",
+					"url": "http://brainstorage.me/semigradsky"
+				},
+				{
+					"name": "DYM",
+					"url": "https://dym.sh"
+				},
+				{
+					"name": "Jon Schlinkert",
+					"url": "http://twitter.com/jonschlinkert"
+				},
+				{
+					"name": "Rouven Weßling",
+					"url": "www.rouvenwessling.de"
+				}
+			],
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/jonschlinkert/is-odd.git"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-odd/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=0.10.0"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^4.0.0"
+			},
+			"devDependencies": {
+				"gulp-format-md": "^1.0.0",
+				"mocha": "^4.0.1"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"is",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"verb": {
+				"toc": false,
+				"layout": "default",
+				"tasks": [
+					"readme"
+				],
+				"plugins": [
+					"gulp-format-md"
+				],
+				"related": {
+					"list": [
+						"exponential-moving-average",
+						"is-even",
+						"sma"
+					]
+				},
+				"lint": {
+					"reflinks": true
+				}
+			},
+			"gitHead": "b29f7e82fc879ad23e925fd669f624c131e3e307",
+			"_id": "is-odd@2.0.0",
+			"_npmVersion": "5.5.1",
+			"_nodeVersion": "8.7.0",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"dist": {
+				"integrity": "sha512-OTiixgpZAT1M4NHgS5IguFp/Vz2VI3U7Goh4/HA1adtwyLtSBrxYlcSYkhpAE07s4fKEcjrFxyvtQBND4vFQyQ==",
+				"shasum": "7646624671fd7ea558ccd9a2795182f2958f1b24",
+				"tarball": "https://registry.npmjs.org/is-odd/-/is-odd-2.0.0.tgz",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEUCICBh5NPa7ZKJMYqhDcFMHzEdMpgvxa2rhLt5k4pUCA8TAiEAmWfGhzoPInC5t0pFQ+5pkPrqlulGkX1QwauXh3tpoXY="
+					}
+				]
+			},
+			"maintainers": [
+				{
+					"email": "brian.woodward@gmail.com",
+					"name": "doowb"
+				},
+				{
+					"email": "github@sellside.com",
+					"name": "jonschlinkert"
+				}
+			],
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages",
+				"tmp": "tmp/is-odd-2.0.0.tgz_1509514503241_0.6080242525786161"
+			},
+			"directories": {}
+		},
+		"3.0.0": {
+			"name": "is-odd",
+			"description": "Returns true if the given number is odd, and is an integer that does not exceed the JavaScript MAXIMUM_SAFE_INTEGER.",
+			"version": "3.0.0",
+			"homepage": "https://github.com/jonschlinkert/is-odd",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"contributors": [
+				{
+					"name": "Dmitry Semigradsky",
+					"url": "http://brainstorage.me/semigradsky"
+				},
+				{
+					"name": "DYM",
+					"url": "https://dym.sh"
+				},
+				{
+					"name": "Jon Schlinkert",
+					"url": "http://twitter.com/jonschlinkert"
+				},
+				{
+					"name": "Rouven Weßling",
+					"url": "www.rouvenwessling.de"
+				}
+			],
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/jonschlinkert/is-odd.git"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-odd/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=4"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^6.0.0"
+			},
+			"devDependencies": {
+				"gulp-format-md": "^1.0.0",
+				"mocha": "^3.5.3"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"is",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"verb": {
+				"toc": false,
+				"layout": "default",
+				"tasks": [
+					"readme"
+				],
+				"plugins": [
+					"gulp-format-md"
+				],
+				"related": {
+					"list": [
+						"exponential-moving-average",
+						"is-even",
+						"sma"
+					]
+				},
+				"lint": {
+					"reflinks": true
+				}
+			},
+			"gitHead": "75e749a7926a3ae2dfd5b2eaab6d15956f73381a",
+			"_id": "is-odd@3.0.0",
+			"_npmVersion": "6.0.1",
+			"_nodeVersion": "10.0.0",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"dist": {
+				"integrity": "sha512-204vE5IJ0Cd6pA6x1dMyLooGk6/xeKuq90imFuJN/ndMDBP4Sk9tJpBlTedHPvt6KDbtTDTsjVzzgctFqNV7FQ==",
+				"shasum": "299227de776cc212813d674ffae0dcde1d9618af",
+				"tarball": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.0.tgz",
+				"fileCount": 4,
+				"unpackedSize": 6689,
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.4\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJbDubYCRA9TVsSAnZWagAAFfoQAJP21QulOJ/tXdogFRAC\nUwdJeiRI4ON79/QvaTPDsZyRZ3zre7crTqAAHMXEMMHuFvAlZhIeoSAw6UEU\nudoPZvgRPhUOfFK9ACJ74bVOVGLp5K+GcdprvZUZAPn54H8WWrpZaTF4lFyr\nsUva33wOx/PgnDYBcn65i7CZ3PC/u88FilZhyag2gX7Ffu8PyajHyOi98TUG\nhVkzb7wF0DhcezGHIDUXe3M7hetCY3gIkwGQsQWhWCV8CNuqG7UUOCG4LoNt\nDfvzhzWoBYHImBay0oFNax1a/UwWK2oDKb+3hlQzHi4jXAS02V+xkc3SC9vK\nhJqA1v4fNS73bTrE3Gk8pvAEiDbW39R4ZMfQbI9yfihI6Jcg4MY9EjaJW5g6\nwda0/Fx3NSWnJkAdbWl5Jyz+x6oN42kZ2+yFqqED1g0FiKt9AbGH4n31RH4M\nX5dNcGuLB+WrEOZ8SvTu8BKDz2lw91Otey0Wu5Y+j+ppHmuKwbzrDyqE0OZf\nz0kLwfN+EhYScGlN0b3eq5ssB6mifcE/wksLE+MWoYfCzB4rQYH/+BqxNd2C\nQ5HMewQKOT/w3QXkQUyvRKufhiCCC0lyIFLh/9lHwhuegY+FaE777AvBzsGy\nSAoTpGTb7edqEOorwdd1FL5/0jJ8suLSQXSfv051ZyzbG/gJdm17xPKfS1fJ\nMz9h\r\n=mJrU\r\n-----END PGP SIGNATURE-----\r\n",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEYCIQCOx0OcsEhJhYUaIn9rWNS6n7L4dWX0crWKiC3r/6f+kAIhAJjl8jRUWpUuB59QXK3R9jCL1H36M8GmqiFsNJxjc94p"
+					}
+				]
+			},
+			"maintainers": [
+				{
+					"email": "brian.woodward@gmail.com",
+					"name": "doowb"
+				},
+				{
+					"email": "github@sellside.com",
+					"name": "jonschlinkert"
+				}
+			],
+			"directories": {},
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages",
+				"tmp": "tmp/is-odd_3.0.0_1527703255498_0.6094765546992205"
+			},
+			"_hasShrinkwrap": false
+		},
+		"3.0.1": {
+			"name": "is-odd",
+			"description": "Returns true if the given number is odd, and is an integer that does not exceed the JavaScript MAXIMUM_SAFE_INTEGER.",
+			"version": "3.0.1",
+			"homepage": "https://github.com/jonschlinkert/is-odd",
+			"author": {
+				"name": "Jon Schlinkert",
+				"url": "https://github.com/jonschlinkert"
+			},
+			"contributors": [
+				{
+					"name": "Dmitry Semigradsky",
+					"url": "http://brainstorage.me/semigradsky"
+				},
+				{
+					"name": "DYM",
+					"url": "https://dym.sh"
+				},
+				{
+					"name": "Jon Schlinkert",
+					"url": "http://twitter.com/jonschlinkert"
+				},
+				{
+					"name": "Rouven Weßling",
+					"url": "www.rouvenwessling.de"
+				}
+			],
+			"repository": {
+				"type": "git",
+				"url": "git+https://github.com/jonschlinkert/is-odd.git"
+			},
+			"bugs": {
+				"url": "https://github.com/jonschlinkert/is-odd/issues"
+			},
+			"license": "MIT",
+			"files": [
+				"index.js"
+			],
+			"main": "index.js",
+			"engines": {
+				"node": ">=4"
+			},
+			"scripts": {
+				"test": "mocha"
+			},
+			"dependencies": {
+				"is-number": "^6.0.0"
+			},
+			"devDependencies": {
+				"gulp-format-md": "^1.0.0",
+				"mocha": "^3.5.3"
+			},
+			"keywords": [
+				"array",
+				"count",
+				"even",
+				"filter",
+				"integer",
+				"is",
+				"math",
+				"numeric",
+				"odd",
+				"string"
+			],
+			"verb": {
+				"toc": false,
+				"layout": "default",
+				"tasks": [
+					"readme"
+				],
+				"plugins": [
+					"gulp-format-md"
+				],
+				"related": {
+					"list": [
+						"exponential-moving-average",
+						"is-even",
+						"sma"
+					]
+				},
+				"lint": {
+					"reflinks": true
+				}
+			},
+			"gitHead": "a80ee0d831a8ee69f1fad5b4673491847975eb26",
+			"_id": "is-odd@3.0.1",
+			"_npmVersion": "6.0.1",
+			"_nodeVersion": "10.0.0",
+			"_npmUser": {
+				"name": "jonschlinkert",
+				"email": "github@sellside.com"
+			},
+			"dist": {
+				"integrity": "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==",
+				"shasum": "65101baf3727d728b66fa62f50cda7f2d3989601",
+				"tarball": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz",
+				"fileCount": 4,
+				"unpackedSize": 6510,
+				"npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.4\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJbEFVmCRA9TVsSAnZWagAA4OoP/1JqMTJChn+EZEZUOQxh\nqrdWNeXXjMn2I8SknESo/qEjMJx+hSsovfEm3sDbh8sT0S1gHJMJ3/AML/uT\n6dd4tFSJUF9hD5zGjo95hEKSunnBnKIS39Vui26XKf86axjq4AzCvUWmtkMd\ntwQ2iiAX+sAFtfcNv7phJkjr90OYLQsL9fEAiSbVG25fnobZEX7eD1UuHfHI\nFY/RHDgQ357r4smwLAvEy90Szr5L0sw+qs3NPn7D1jlMKeQ8uwzwEmQuNw2K\nP0VSo69jQNa/8+usCCX+Y6IrORx5cNSjQSgUrHQYrf9O2VHLXKm37PaHlGbN\nWmC7e67OK+zqyVlIwmpOTmS5ZlT85b7R9AyyZv/BHnyfkLZ8z0nqCqO6zlY/\nawfBwIq0eWTZp4SS3q0y/jg1W2+KL/Kk3ST70VFl+gJmy4I9BSTnyU0Cb1YH\nXq8qXpAbkznlpY23awbhDx+v3OZ9Tc3pSpxM3vbNFr288H8B9TzIFbmeDwnx\nhx5wNb/6UwyqQv0iussW4ZtVZyiWJ1F1rZOzNQa3jSz3pMiNeOMdXR9mlH35\n/BviGk8txvQtyQiXsTjl1CREM3CyE+kqimMwQ7x0cEFKHuJMxaTd//6TvrLk\nu1BiYYznJnPyMF8Nzw//vw93r9UUY9a7WrpW36GjnYk6hhHBIbf+D7iVZZIO\nj+a+\r\n=Dd8F\r\n-----END PGP SIGNATURE-----\r\n",
+				"signatures": [
+					{
+						"keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+						"sig": "MEUCIQCMOGfdVwpDV0N3zGD53ALBsYE5kZQYLWIB3+N7azYZVQIgAvuHQ8A7YhfAH29wbfqe1ZCmHbaByq1ns9ovSgbw+4I="
+					}
+				]
+			},
+			"maintainers": [
+				{
+					"email": "brian.woodward@gmail.com",
+					"name": "doowb"
+				},
+				{
+					"email": "github@sellside.com",
+					"name": "jonschlinkert"
+				}
+			],
+			"directories": {},
+			"_npmOperationalInternal": {
+				"host": "s3://npm-registry-packages",
+				"tmp": "tmp/is-odd_3.0.1_1527797093116_0.1399721569178909"
+			},
+			"_hasShrinkwrap": false,
+			"deprecated": "please use is-even"
+		}
+	},
+	"time": {
+		"modified": "2026-04-12T20:16:54.973Z",
+		"created": "2015-02-24T05:53:13.392Z",
+		"0.1.0": "2015-02-24T05:53:13.392Z",
+		"0.1.1": "2016-12-07T07:18:01.205Z",
+		"0.1.2": "2017-05-27T13:04:38.481Z",
+		"1.0.0": "2017-05-27T18:18:17.696Z",
+		"2.0.0": "2017-11-01T05:35:04.104Z",
+		"3.0.0": "2018-05-30T18:00:55.554Z",
+		"3.0.1": "2018-05-31T20:04:53.306Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "3.0.1"
+	},
+	"_uplinks": {
+		"npmjs": {
+			"etag": "W/\"84bb1d31bfb33037e1906d9ebd05e74d\"",
+			"fetched": 1776003721821
+		}
+	},
+	"_distfiles": {
+		"is-odd-0.1.0.tgz": {
+			"url": "https://registry.npmjs.org/is-odd/-/is-odd-0.1.0.tgz",
+			"sha": "1031f78cac2710cba44820e73c898571bb83d3c3",
+			"registry": "npmjs"
+		},
+		"is-odd-0.1.1.tgz": {
+			"url": "https://registry.npmjs.org/is-odd/-/is-odd-0.1.1.tgz",
+			"sha": "51508f7d39eafb0282fbb98957b2d1d28e72a3e7",
+			"registry": "npmjs"
+		},
+		"is-odd-0.1.2.tgz": {
+			"url": "https://registry.npmjs.org/is-odd/-/is-odd-0.1.2.tgz",
+			"sha": "bc573b5ce371ef2aad6e6f49799b72bef13978a7",
+			"registry": "npmjs"
+		},
+		"is-odd-1.0.0.tgz": {
+			"url": "https://registry.npmjs.org/is-odd/-/is-odd-1.0.0.tgz",
+			"sha": "3b8a932eb028b3775c39bb09e91767accdb69088",
+			"registry": "npmjs"
+		},
+		"is-odd-2.0.0.tgz": {
+			"url": "https://registry.npmjs.org/is-odd/-/is-odd-2.0.0.tgz",
+			"sha": "7646624671fd7ea558ccd9a2795182f2958f1b24",
+			"registry": "npmjs"
+		},
+		"is-odd-3.0.0.tgz": {
+			"url": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.0.tgz",
+			"sha": "299227de776cc212813d674ffae0dcde1d9618af",
+			"registry": "npmjs"
+		},
+		"is-odd-3.0.1.tgz": {
+			"url": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz",
+			"sha": "65101baf3727d728b66fa62f50cda7f2d3989601",
+			"registry": "npmjs"
+		}
+	},
+	"_attachments": {
+		"is-odd-3.0.1.tgz": {
+			"shasum": "65101baf3727d728b66fa62f50cda7f2d3989601"
+		},
+		"is-odd-0.1.2.tgz": {
+			"shasum": "bc573b5ce371ef2aad6e6f49799b72bef13978a7"
+		}
+	},
+	"_rev": "6-ba98e207ca44e726",
+	"_id": "is-odd",
+	"readme": "# is-odd [![NPM version](https://img.shields.io/npm/v/is-odd.svg?style=flat)](https://www.npmjs.com/package/is-odd) [![NPM monthly downloads](https://img.shields.io/npm/dm/is-odd.svg?style=flat)](https://npmjs.org/package/is-odd) [![NPM total downloads](https://img.shields.io/npm/dt/is-odd.svg?style=flat)](https://npmjs.org/package/is-odd) [![Linux Build Status](https://img.shields.io/travis/jonschlinkert/is-odd.svg?style=flat&label=Travis)](https://travis-ci.org/jonschlinkert/is-odd)\n\n> Returns true if the given number is odd, and is an integer that does not exceed the JavaScript MAXIMUM_SAFE_INTEGER.\n\nPlease consider following this project's author, [Jon Schlinkert](https://github.com/jonschlinkert), and consider starring the project to show your :heart: and support.\n\n## Install\n\nInstall with [npm](https://www.npmjs.com/):\n\n```sh\n$ npm install --save is-odd\n```\n\n## Usage\n\nWorks with strings or numbers.\n\n```js\nconst isOdd = require('is-odd');\n\nconsole.log(isOdd('1')); //=> true\nconsole.log(isOdd('3')); //=> true\n\nconsole.log(isOdd(0)); //=> false\nconsole.log(isOdd(2)); //=> false\n```\n\n## About\n\n<details>\n<summary><strong>Contributing</strong></summary>\n\nPull requests and stars are always welcome. For bugs and feature requests, [please create an issue](../../issues/new).\n\n</details>\n\n<details>\n<summary><strong>Running Tests</strong></summary>\n\nRunning and reviewing unit tests is a great way to get familiarized with a library and its API. You can install dependencies and run tests with the following command:\n\n```sh\n$ npm install && npm test\n```\n\n</details>\n\n<details>\n<summary><strong>Building docs</strong></summary>\n\n_(This project's readme.md is generated by [verb](https://github.com/verbose/verb-generate-readme), please don't edit the readme directly. Any changes to the readme must be made in the [.verb.md](.verb.md) readme template.)_\n\nTo generate the readme, run the following command:\n\n```sh\n$ npm install -g verbose/verb#dev verb-generate-readme && verb\n```\n\n</details>\n\n### Related projects\n\nYou might also be interested in these projects:\n\n* [exponential-moving-average](https://www.npmjs.com/package/exponential-moving-average): Calculate an exponential moving average from an array of numbers. | [homepage](https://github.com/jonschlinkert/exponential-moving-average \"Calculate an exponential moving average from an array of numbers.\")\n* [is-even](https://www.npmjs.com/package/is-even): Return true if the given number is even. | [homepage](https://github.com/jonschlinkert/is-even \"Return true if the given number is even.\")\n* [sma](https://www.npmjs.com/package/sma): Calculate the simple moving average of an array. | [homepage](https://github.com/doowb/sma \"Calculate the simple moving average of an array.\")\n\n### Contributors\n\n| **Commits** | **Contributor** | \n| --- | --- |\n| 20 | [jonschlinkert](https://github.com/jonschlinkert) |\n| 2 | [dym-sh](https://github.com/dym-sh) |\n| 1 | [Semigradsky](https://github.com/Semigradsky) |\n| 1 | [realityking](https://github.com/realityking) |\n\n### Author\n\n**Jon Schlinkert**\n\n* [LinkedIn Profile](https://linkedin.com/in/jonschlinkert)\n* [GitHub Profile](https://github.com/jonschlinkert)\n* [Twitter Profile](https://twitter.com/jonschlinkert)\n\n### License\n\nCopyright © 2018, [Jon Schlinkert](https://github.com/jonschlinkert).\nReleased under the [MIT License](LICENSE).\n\n***\n\n_This file was generated by [verb-generate-readme](https://github.com/verbose/verb-generate-readme), v0.6.0, on May 31, 2018._"
+}

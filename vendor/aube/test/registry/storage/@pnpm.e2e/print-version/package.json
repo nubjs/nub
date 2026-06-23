@@ -1,0 +1,64 @@
+{
+	"name": "@pnpm.e2e/print-version",
+	"versions": {
+		"1.0.0": {
+			"name": "@pnpm.e2e/print-version",
+			"version": "1.0.0",
+			"bin": {
+				"print-version": "bin.js"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/print-version@1.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-U4arOo9et00q2r2K2Bv/zV2vqr10FKEj3V6vsWRnLx4qAqUYll4L9zTCyizCbwt+XJ/95Rr9QkTYlvTON0Nz7A==",
+				"shasum": "27aa16a7872eaefbb72d398eb2e4d3c239b89d4c",
+				"tarball": "http://localhost:4873/@pnpm.e2e/print-version/-/@pnpm.e2e/print-version-1.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"2.0.0": {
+			"name": "@pnpm.e2e/print-version",
+			"version": "2.0.0",
+			"bin": {
+				"print-version": "bin.js"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/print-version@2.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-rikxkBODG8tr2LOY3VzKn5aY2J9H8hxqNxm0H6T232afEN8evDfDSnAuC2ihPwqGxVbhFC0bJ6elWw4u9zTssQ==",
+				"shasum": "968da46a349fe45199a419e0ee59b690025d3b87",
+				"tarball": "http://localhost:4873/@pnpm.e2e/print-version/-/@pnpm.e2e/print-version-2.0.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:23.343Z",
+		"created": "2026-04-30T21:29:22.995Z",
+		"1.0.0": "2026-04-30T21:29:22.995Z",
+		"2.0.0": "2026-04-30T21:29:23.343Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "2.0.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"print-version-1.0.0.tgz": {
+			"shasum": "27aa16a7872eaefbb72d398eb2e4d3c239b89d4c",
+			"version": "1.0.0"
+		},
+		"print-version-2.0.0.tgz": {
+			"shasum": "968da46a349fe45199a419e0ee59b690025d3b87",
+			"version": "2.0.0"
+		}
+	},
+	"_rev": "6-2b0a123b3b1683f2",
+	"_id": "@pnpm.e2e/print-version",
+	"readme": "ERROR: No README data found!"
+}

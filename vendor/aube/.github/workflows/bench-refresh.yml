@@ -1,0 +1,172 @@
+name: bench-refresh
+
+on:
+  schedule:
+    # Daily at 05:00 UTC. Off-peak for GH Actions, and early enough that a
+    # refreshed bench PR is waiting for review by start of workday (US/EU).
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rewrite benchmarks even when the aube version has not changed
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never run two bench refreshes in parallel — they'd both target the same
+# `bench-refresh` branch and race the force-push. cancel-in-progress means
+# a manual dispatch supersedes an in-flight cron tick.
+concurrency:
+  group: bench-refresh
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Gate: only run bench if `benchmarks/results.json` is pinned to an older
+  # `aube` version than the workspace. A pure chore/docs push to main
+  # doesn't invalidate bench numbers; we only care when a feat/fix/perf
+  # bump has landed since the last refresh. workflow_dispatch can force
+  # a rewrite when benchmark methodology changes but the version does not.
+  check:
+    name: Check version drift
+    runs-on: namespace-profile-endev-linux-amd64
+    outputs:
+      drift: ${{ steps.drift.outputs.drift }}
+      workspace: ${{ steps.drift.outputs.workspace }}
+      bench: ${{ steps.drift.outputs.bench }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Compare workspace vs bench version
+        id: drift
+        run: |
+          WORKSPACE=$(cargo metadata --format-version=1 --no-deps \
+            | jq -r '.packages[] | select(.name == "aube") | .version')
+          BENCH=$(jq -r '.versions.aube // empty' benchmarks/results.json)
+          echo "Workspace aube: $WORKSPACE"
+          echo "Bench aube:     $BENCH"
+          echo "Force refresh:  $FORCE_REFRESH"
+          if [ -z "$WORKSPACE" ]; then
+            echo "::error::Could not read workspace aube version"
+            exit 1
+          fi
+          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "bench=$BENCH" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE_REFRESH" = "true" ]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          elif [ "$WORKSPACE" = "$BENCH" ]; then
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          FORCE_REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+
+  refresh:
+    name: Refresh benchmarks
+    needs: check
+    if: needs.check.outputs.drift == 'true'
+    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AUBE_GH_TOKEN }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: namespacelabs/nscloud-cache-action@15799a6b54e5765f85b2aac25b3f0df43ed571c0 # v1
+        with:
+          cache: rust
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        env:
+          MISE_LOCKED: "1"
+      - name: Restore hermetic bench registry cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/aube-bench/registry
+          key: aube-bench-registry-${{ runner.os }}-v1
+      - name: Configure git identity
+        run: |
+          git config user.name "release-plz[bot]"
+          git config user.email "release-plz+bot@users.noreply.github.com"
+      - name: Snapshot previous benchmarks
+        run: cp benchmarks/results.json /tmp/bench-results-before.json
+      - name: Refresh benchmarks
+        run: mise run bench:bump
+      - name: Validate benchmark claims
+        run: node benchmarks/validate-results.mjs
+      - name: Summarize benchmark changes
+        run: node benchmarks/summarize-results-change.mjs /tmp/bench-results-before.json benchmarks/results.json > /tmp/bench_summary.md
+
+      # Guard against a bench run that produced no diff — e.g. the version
+      # moved but the numbers are byte-identical. No diff, no PR churn.
+      - name: Check for diff
+        id: dirty
+        run: |
+          if git diff --quiet && [ -z "$(git status --porcelain)" ]; then
+            echo "bench:bump produced no diff; skipping PR update."
+            echo "dirty=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "dirty=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Reuse the single `bench-refresh` branch across runs so the PR
+      # number is preserved. Always force-push — the previous bench commit
+      # is superseded by the new one, never additive.
+      - name: Force-push bench-refresh branch
+        if: steps.dirty.outputs.dirty == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          git checkout -B bench-refresh
+          git add -A
+          git commit -m "chore: refresh benchmarks"
+          # persist-credentials: false on checkout means we need to auth
+          # the push explicitly. Re-point origin (rather than pushing to
+          # a one-shot URL) so --force-with-lease has a remote-tracking
+          # ref to compare against; pushing to an unnamed URL leaves no
+          # tracking ref and git rejects every push with "stale info".
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
+          git fetch origin bench-refresh || true
+          git push --force-with-lease -u origin HEAD:refs/heads/bench-refresh
+
+      - name: Create or update PR
+        if: steps.dirty.outputs.dirty == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          WORKSPACE: ${{ needs.check.outputs.workspace }}
+          BENCH: ${{ needs.check.outputs.bench }}
+        run: |
+          EXISTING=$(gh pr list --state open --head bench-refresh \
+            --json number --jq '.[0].number // empty')
+          TITLE="chore: refresh benchmarks for v${WORKSPACE}"
+          cat > /tmp/bench_body.md <<EOF
+          ## 🤖 Refreshed benchmarks
+
+          \`benchmarks/results.json\` was pinned to aube \`${BENCH:-<unset>}\`; the workspace is now \`${WORKSPACE}\`. Re-ran \`mise run bench:bump\` on the hermetic Verdaccio registry (500mbit / 50ms per the mise task) and regenerated \`benchmarks/results.json\` plus the README \`BENCH_RATIOS\` block. The benchmark matrix pins aube's GVS mode via \`npm_config_enable_global_virtual_store=true|false\` (the auto-synthesized env alias for the \`enableGlobalVirtualStore\` setting), so GitHub Actions' inherited \`CI=true\` environment does not change whether aube runs with GVS enabled or disabled.
+
+          $(cat /tmp/bench_summary.md)
+
+          **Review the numbers** before merging — if anything looks wildly off vs. the previous release, investigate before landing. Hermetic proxy jitter or an npmjs uplink hiccup can occasionally skew results.
+
+          Once merged to main, the updated bench results flow into the next \`release-plz-pr\` run automatically.
+
+          ---
+          Generated by the \`bench-refresh\` workflow.
+          EOF
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file /tmp/bench_body.md
+          else
+            gh pr create --base main --head bench-refresh \
+              --title "$TITLE" --body-file /tmp/bench_body.md
+          fi

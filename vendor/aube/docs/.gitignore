@@ -1,0 +1,5 @@
+node_modules
+.vitepress/dist
+.vitepress/cache
+.pnpm-store
+pnpm-workspace.yaml

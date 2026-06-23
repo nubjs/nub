@@ -1,0 +1,113 @@
+[env]
+_.path = ["./bin"]
+
+[tools]
+actionlint = "latest"
+cargo-binstall = "latest"
+communique = "latest"
+"github:bnjbvr/cargo-machete" = "latest"
+"github:foresterre/cargo-msrv" = "latest"
+hk = "latest"
+node = "24"
+pitchfork = "latest"
+pkl = "latest"
+shellcheck = "latest"
+shfmt = "latest"
+usage = "latest"
+
+[tasks.lint]
+run = "hk check --all --slow"
+
+[tasks.lint-fix]
+run = "hk fix --all --slow"
+
+[tasks.build]
+run = "cargo build"
+
+[tasks.test]
+run = "cargo test"
+
+[tasks."docs:dev"]
+depends = ["build"]
+dir = "docs"
+run = "../target/debug/aube install && exec ../target/debug/aube run docs:dev"
+
+[tasks."docs:build"]
+depends = ["build"]
+dir = "docs"
+run = "../target/debug/aube install && exec ../target/debug/aube run docs:build"
+
+# TODO: switch pnpm back to `aqua:pnpm/pnpm@latest` once aqua's pnpm
+# registry entry stops looking for `pnpm-linux-x64.tar.gz` (pnpm
+# publishes plain binaries, not tarballs). Tracked at
+# https://github.com/aquaproj/aqua-registry/.
+[tasks.bench]
+dir = "{{config_root}}"
+env = {
+  BENCH_HERMETIC = "1",
+  BENCH_BANDWIDTH = "500mbit",
+  BENCH_LATENCY = "50ms",
+  AUBE_FORCE_METADATA_PRIMER = "true",
+}
+run = [
+  "cargo build --release",
+  "mise x aqua:sharkdp/hyperfine@latest github:pnpm/pnpm@latest npm:@yarnpkg/cli-dist@latest bun@latest deno@latest npm:vlt@latest node@24 -- bash benchmarks/bench.sh",
+]
+
+[tasks."bench:pr"]
+dir = "{{config_root}}"
+env = {
+  RUNS = "3",
+  WARMUP = "1",
+  BENCH_HERMETIC = "1",
+  BENCH_BANDWIDTH = "500mbit",
+  BENCH_LATENCY = "50ms",
+  BENCH_TOOLS = "aube,bun,pnpm",
+  BENCH_SCENARIOS = "gvs-warm,gvs-cold",
+  BENCH_PHASES = "0",
+  AUBE_FORCE_METADATA_PRIMER = "true",
+}
+run = [
+  "cargo build --release",
+  "mise x aqua:sharkdp/hyperfine@latest github:pnpm/pnpm@latest bun@latest node@24 -- bash benchmarks/bench.sh",
+]
+
+# Regenerate `benchmarks/results.json` (and the markdown summary) by
+# re-running the full hyperfine scenario matrix with a release build
+# and 10 runs × 3 warmups, then writing the structured output into
+# the repo in-place. Commit the updated JSON and the chart on the
+# VitePress benchmarks page picks it up automatically — the page's
+# data loader at `docs/benchmarks.data.ts` reads it at build time.
+# The final step rewrites the BENCH_RATIOS block in README.md so the
+# landing-page ratios stay in sync with the JSON.
+[tasks."bench:bump"]
+dir = "{{config_root}}"
+env = {
+  RUNS = "10",
+  WARMUP = "3",
+  RESULTS_JSON = "{{config_root}}/benchmarks/results.json",
+  BENCH_HERMETIC = "1",
+  BENCH_BANDWIDTH = "500mbit",
+  BENCH_LATENCY = "50ms",
+  AUBE_FORCE_METADATA_PRIMER = "true",
+}
+run = [
+  "cargo build --release",
+  "mise x aqua:sharkdp/hyperfine@latest github:pnpm/pnpm@latest npm:@yarnpkg/cli-dist@latest bun@latest deno@latest npm:vlt@latest node@24 -- bash benchmarks/bench.sh",
+  "node benchmarks/update-readme.mjs",
+]
+
+[tasks."build:pgo"]
+dir = "{{config_root}}"
+run = "bash benchmarks/pgo.bash"
+
+[tasks.render]
+depends = ["build"]
+run = [
+  "./target/debug/aube usage > aube.usage.kdl",
+  "rm -rf docs/cli && mkdir -p docs/cli",
+  "usage g markdown -mf aube.usage.kdl --out-dir docs/cli --url-prefix /cli",
+  "usage g json -f aube.usage.kdl > docs/cli/commands.json",
+  "cargo run -p aube-settings --bin generate-settings-docs",
+  "cargo run -p aube-codes --bin generate-error-codes-docs",
+]

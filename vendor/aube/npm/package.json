@@ -1,0 +1,27 @@
+{
+  "name": "@endevco/aube",
+  "version": "0.0.0-placeholder",
+  "description": "A fast Node.js package manager that drops into existing projects.",
+  "homepage": "https://aube.jdx.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jdx/aube"
+  },
+  "license": "MIT",
+  "files": [
+    "installArchSpecificPackage.js",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "rm -rf bin",
+    "preinstall": "node installArchSpecificPackage.js"
+  },
+  "bin": {
+    "aube": "./bin/aube",
+    "aubr": "./bin/aubr",
+    "aubx": "./bin/aubx"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}

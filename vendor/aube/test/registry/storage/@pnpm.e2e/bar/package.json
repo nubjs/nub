@@ -1,0 +1,58 @@
+{
+	"name": "@pnpm.e2e/bar",
+	"versions": {
+		"100.0.0": {
+			"name": "@pnpm.e2e/bar",
+			"version": "100.0.0",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/bar@100.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-i/9I1EXI2kb4hk/pghUP+Ox/8MupXRKbP2bNBOZkQLMowVWu12ipv1zkawkCKHAXFG0cYszl4HmH7jywsv8v7A==",
+				"shasum": "ef38288ebe35b55b5c3fea4935d95cd1e0e74ba5",
+				"tarball": "http://localhost:4873/@pnpm.e2e/bar/-/@pnpm.e2e/bar-100.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"100.1.0": {
+			"name": "@pnpm.e2e/bar",
+			"version": "100.1.0",
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/bar@100.1.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-uwwF/KWI9EpRKjEhoCgomqKco8vCTohdpSqJeM0dtDdSA08mkfWfWeoL5t+Kb1HFf+jdxUdOEAXEPE2JwVLWIA==",
+				"shasum": "8b16e573e121e605bd3a89c45255a5d64b608c73",
+				"tarball": "http://localhost:4873/@pnpm.e2e/bar/-/@pnpm.e2e/bar-100.1.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:13.476Z",
+		"created": "2026-04-30T21:29:13.222Z",
+		"100.0.0": "2026-04-30T21:29:13.222Z",
+		"100.1.0": "2026-04-30T21:29:13.476Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "100.1.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"bar-100.0.0.tgz": {
+			"shasum": "ef38288ebe35b55b5c3fea4935d95cd1e0e74ba5",
+			"version": "100.0.0"
+		},
+		"bar-100.1.0.tgz": {
+			"shasum": "8b16e573e121e605bd3a89c45255a5d64b608c73",
+			"version": "100.1.0"
+		}
+	},
+	"_rev": "6-0dde7e032b2c0ace",
+	"_id": "@pnpm.e2e/bar",
+	"readme": "ERROR: No README data found!"
+}

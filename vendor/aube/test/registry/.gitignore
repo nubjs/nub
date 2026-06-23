@@ -1,0 +1,5 @@
+# Verdaccio's internal state db is regenerated on startup from the
+# contents of storage/, so we don't commit it — but the tarballs and
+# packuments under storage/ ARE checked in, since they're the offline
+# fixture set the test suite runs against.
+storage/.verdaccio-db.json

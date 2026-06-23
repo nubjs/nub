@@ -1,0 +1,6 @@
+/bin
+/node_modules
+/.stage
+/*.tgz
+# Copied in from ../README.md by scripts/publish.mjs at publish time.
+/README.md

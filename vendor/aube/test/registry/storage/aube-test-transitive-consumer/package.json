@@ -1,0 +1,34 @@
+{
+  "name": "aube-test-transitive-consumer",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-transitive-consumer",
+      "version": "1.0.0",
+      "description": "Fixture package whose postinstall shells out to a transitive dep's bin by bare name. Exercises the per-dep .bin/ on PATH for lifecycle scripts.",
+      "license": "MIT",
+      "main": "index.js",
+      "scripts": {
+        "postinstall": "aube-transitive-bin-probe"
+      },
+      "dependencies": {
+        "aube-test-transitive-bin": "^1.0.0"
+      },
+      "hasInstallScript": true,
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-transitive-consumer/-/aube-test-transitive-consumer-1.0.0.tgz",
+        "integrity": "sha512-YKA+iDB2nvE7zNbeFpd1eo218AQume4gG4U7IK+VyLk8YpbG9Cd7XJvcn3+iM8XqLO2EcSSoJm0pgDIJuC7XaQ==",
+        "shasum": "39119480d9e146f8f130d5695ce6ea777432ed77"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-transitive-consumer-1.0.0.tgz": {
+      "shasum": "39119480d9e146f8f130d5695ce6ea777432ed77"
+    }
+  },
+  "_id": "aube-test-transitive-consumer",
+  "_rev": "1-aube-fixture"
+}

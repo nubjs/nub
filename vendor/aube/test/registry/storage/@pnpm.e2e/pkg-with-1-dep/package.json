@@ -1,0 +1,64 @@
+{
+	"name": "@pnpm.e2e/pkg-with-1-dep",
+	"versions": {
+		"100.0.0": {
+			"name": "@pnpm.e2e/pkg-with-1-dep",
+			"version": "100.0.0",
+			"dependencies": {
+				"@pnpm.e2e/dep-of-pkg-with-1-dep": "^100.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/pkg-with-1-dep@100.0.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-IGrkh3wu1jOzTFzi/S+XOkuhEwhV03qRaH7tcwPoPJ+AQo2cAuhgOBwczq2y8DPfob+BlzSmZXjEvEqoXKio7A==",
+				"shasum": "b78a05932d20b071b84d42b6964621a197118870",
+				"tarball": "http://localhost:4873/@pnpm.e2e/pkg-with-1-dep/-/@pnpm.e2e/pkg-with-1-dep-100.0.0.tgz"
+			},
+			"contributors": []
+		},
+		"100.1.0": {
+			"name": "@pnpm.e2e/pkg-with-1-dep",
+			"version": "100.1.0",
+			"dependencies": {
+				"@pnpm.e2e/dep-of-pkg-with-1-dep": "^100.0.0"
+			},
+			"gitHead": "c33fd83c7d51e9da90733ecf609c2dc200325ef0",
+			"_id": "@pnpm.e2e/pkg-with-1-dep@100.1.0",
+			"_nodeVersion": "25.9.0",
+			"_npmVersion": "11.12.1",
+			"dist": {
+				"integrity": "sha512-fdlqYHFD2EY3e1Lf2x2V3gVJdNkybtPiQ8DLUZCJjxyMl0oxymB0EQSHqSjvBYoDss7Jj9eGLx9+utpOuXRX7A==",
+				"shasum": "2d2293b5595718890bd322da51359ec25334b85e",
+				"tarball": "http://localhost:4873/@pnpm.e2e/pkg-with-1-dep/-/@pnpm.e2e/pkg-with-1-dep-100.1.0.tgz"
+			},
+			"contributors": []
+		}
+	},
+	"time": {
+		"modified": "2026-04-30T21:29:20.120Z",
+		"created": "2026-04-30T21:29:19.808Z",
+		"100.0.0": "2026-04-30T21:29:19.808Z",
+		"100.1.0": "2026-04-30T21:29:20.120Z"
+	},
+	"users": {},
+	"dist-tags": {
+		"latest": "100.1.0"
+	},
+	"_uplinks": {},
+	"_distfiles": {},
+	"_attachments": {
+		"pkg-with-1-dep-100.0.0.tgz": {
+			"shasum": "b78a05932d20b071b84d42b6964621a197118870",
+			"version": "100.0.0"
+		},
+		"pkg-with-1-dep-100.1.0.tgz": {
+			"shasum": "2d2293b5595718890bd322da51359ec25334b85e",
+			"version": "100.1.0"
+		}
+	},
+	"_rev": "6-ffbbd23d6251016a",
+	"_id": "@pnpm.e2e/pkg-with-1-dep",
+	"readme": "ERROR: No README data found!"
+}

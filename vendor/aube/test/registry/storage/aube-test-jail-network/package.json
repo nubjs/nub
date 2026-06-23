@@ -1,0 +1,31 @@
+{
+  "name": "aube-test-jail-network",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-jail-network",
+      "version": "1.0.0",
+      "description": "Fixture package whose postinstall verifies the build jail denies network sockets.",
+      "license": "MIT",
+      "main": "index.js",
+      "scripts": {
+        "postinstall": "node -e \"const net=require('net'); const s=net.connect({host:'1.1.1.1',port:80}); const t=setTimeout(()=>process.exit(44),1000); s.on('connect',()=>process.exit(45)); s.on('error',e=>{clearTimeout(t); process.exit(e.code==='EPERM'||e.code==='EACCES'?0:46)})\""
+      },
+      "hasInstallScript": true,
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-jail-network/-/aube-test-jail-network-1.0.0.tgz",
+        "integrity": "sha512-UnKkvvpn4wi65Ea48mMh8fvY9eUrxirp7Hh+PqI2dwVcea+qFV5lrFKYThHadgR+JN7K66VqenLN9t/LpuOC5g==",
+        "shasum": "42be4485d38e0d5a01e3f1b507df350b846276b4"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-jail-network-1.0.0.tgz": {
+      "shasum": "42be4485d38e0d5a01e3f1b507df350b846276b4"
+    }
+  },
+  "_id": "aube-test-jail-network",
+  "_rev": "1-aube-fixture"
+}

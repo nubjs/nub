@@ -1,0 +1,31 @@
+{
+  "name": "aube-test-builds-marker",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "aube-test-builds-marker",
+      "version": "1.0.0",
+      "description": "Fixture package with a postinstall that writes a marker file to INIT_CWD. Used by aube's allowBuilds BATS tests.",
+      "license": "MIT",
+      "main": "index.js",
+      "scripts": {
+        "postinstall": "node -e \"const fs=require('fs'),p=require('path');const dir=process.env.INIT_CWD||'.';fs.writeFileSync(p.join(dir,'aube-builds-marker.txt'),'ran:'+process.env.npm_package_name+'@'+process.env.npm_package_version+'\\n')\""
+      },
+      "hasInstallScript": true,
+      "dist": {
+        "tarball": "http://localhost:4873/aube-test-builds-marker/-/aube-test-builds-marker-1.0.0.tgz",
+        "integrity": "sha512-wVe7jGLKQqnUA/XsbZ0V6r080ikeGv/T3cROdbyjhs63GiMW6DVi0tQEcEYOWMKmJfuPo2LYsvJ5eC/FujHNtg==",
+        "shasum": "38fa25e058939a3e46c653f41d7edae6681aaff1"
+      }
+    }
+  },
+  "_attachments": {
+    "aube-test-builds-marker-1.0.0.tgz": {
+      "shasum": "38fa25e058939a3e46c653f41d7edae6681aaff1"
+    }
+  },
+  "_id": "aube-test-builds-marker",
+  "_rev": "1-aube-fixture"
+}
