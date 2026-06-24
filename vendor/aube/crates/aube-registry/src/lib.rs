@@ -725,7 +725,14 @@ impl<'de> Deserialize<'de> for FundingArrayEntry {
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
-    #[error("HTTP error: {0}")]
+    // reqwest's own Display appends ` for url (<url>)` rendered via
+    // `url::Url`'s Display, which serializes embedded `user:pass@`
+    // userinfo and `?token=`/`?_auth=` query auth UNREDACTED. Registry
+    // URLs legitimately carry such auth (npmrc/config), so the raw
+    // Display would leak credentials into surfaced errors and logs.
+    // Render through `redact_http_error` to scrub the URL while keeping
+    // the (redacted) host for debuggability.
+    #[error("HTTP error: {}", redact_http_error(.0))]
     Http(#[from] reqwest::Error),
     #[error("package not found: {0}")]
     #[diagnostic(code(ERR_AUBE_PACKAGE_NOT_FOUND))]
@@ -769,6 +776,30 @@ pub enum Error {
     InvalidName(String),
 }
 
+/// Render a [`reqwest::Error`] for display with any embedded registry
+/// URL credential-scrubbed.
+///
+/// reqwest's `Display` appends ` for url (<url>)` with the full URL —
+/// including `user:pass@` userinfo and `token`/`auth`/`api_key` query
+/// params — verbatim. When the error carries a URL we substitute its
+/// [`redact_url`](aube_util::url::redact_url) form for the raw rendering
+/// so credentials never reach an error message or log; the redacted host
+/// is preserved for debuggability. Errors with no attached URL render
+/// unchanged (reqwest's Display emits no URL in that case).
+fn redact_http_error(e: &reqwest::Error) -> String {
+    match e.url() {
+        Some(url) => {
+            let raw = url.as_str();
+            let safe = aube_util::url::redact_url(raw);
+            // reqwest interpolates the URL via `url::Url`'s Display,
+            // which equals `Url::as_str()`, so a plain substring swap on
+            // the rendered message reliably replaces the leaked form.
+            e.to_string().replace(raw, &safe)
+        }
+        None => e.to_string(),
+    }
+}
+
 impl Error {
     /// True when the error represents an upstream backpressure
     /// signal worth feeding into [`aube_util::adaptive::AdaptiveLimit::record_throttle`].
@@ -800,6 +831,47 @@ mod tests {
 
     fn parse(json: &str) -> VersionMetadata {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// A registry URL carrying both `user:pass@` userinfo and a
+    /// `?token=` query param must never appear UNREDACTED in a surfaced
+    /// HTTP error — reqwest's raw Display leaks both, so `Error::Http`'s
+    /// rendering routes through `redact_http_error`. We build a real
+    /// `reqwest::Error` against an unreachable port (a connect failure
+    /// that reqwest tags with the request URL) and assert the rendered
+    /// message hides every credential while keeping the host.
+    #[tokio::test]
+    async fn http_error_display_redacts_url_credentials() {
+        let url = "https://alice:s3cr3t@127.0.0.1:1/foo?token=abc123";
+        let reqwest_err = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect_err("connect to port 1 must fail");
+        assert!(
+            reqwest_err.url().is_some(),
+            "precondition: reqwest must tag the error with the request URL"
+        );
+
+        let err = Error::Http(reqwest_err);
+        let rendered = err.to_string();
+
+        assert!(
+            !rendered.contains("s3cr3t"),
+            "password leaked in error display: {rendered}"
+        );
+        assert!(
+            !rendered.contains("alice:"),
+            "userinfo leaked in error display: {rendered}"
+        );
+        assert!(
+            !rendered.contains("abc123"),
+            "token query param leaked in error display: {rendered}"
+        );
+        assert!(
+            rendered.contains("127.0.0.1"),
+            "redacted host should remain for debuggability: {rendered}"
+        );
     }
 
     #[test]

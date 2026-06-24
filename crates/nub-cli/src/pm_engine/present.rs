@@ -196,7 +196,8 @@ const RUNTIME_HINT_VOCAB: &[(&str, &str)] = &[(
 /// codes (so the `AUBE` inside `ERR_AUBE_*` never reaches the word pass), then
 /// per-line URL stripping, then the word-boundary `aube` → `nub` pass.
 pub(crate) fn rewrite(text: &str) -> String {
-    let mut text = text.to_string();
+    let text = redact_credentials(text);
+    let mut text = text;
     for (from, to) in RUNTIME_HINT_VOCAB {
         text = text.replace(from, to);
     }
@@ -221,6 +222,71 @@ pub(crate) fn rewrite(text: &str) -> String {
         emitted = true;
     }
     out
+}
+
+/// Defense-in-depth credential scrub over arbitrary engine prose.
+///
+/// The engine redacts URLs at every known source (the tarball path, the
+/// `Error::Http` Display), so in correct operation no credential reaches
+/// here. This backstop guarantees that a FUTURE un-redacted engine path
+/// cannot leak `user:pass@host` userinfo or a `token`/`auth`/`api_key`
+/// query value through nub's output: it finds every whitespace-delimited
+/// URL-like token (`scheme://…` or scheme-relative `//…`) and runs it
+/// through the same [`aube_util::url::redact_url`] the engine uses, so the
+/// two layers can never diverge. Non-URL text is returned untouched.
+fn redact_credentials(text: &str) -> String {
+    // Cheap pre-check: a credential can only ride on a URL token, which
+    // always contains "//". Skip the allocation/scan for the common case.
+    if !text.contains("//") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    // Walk the text token-by-token, preserving every whitespace separator
+    // verbatim so the rendered message's spacing/newlines survive.
+    let mut rest = text;
+    while !rest.is_empty() {
+        let ws_end = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        if ws_end > 0 {
+            out.push_str(&rest[..ws_end]);
+            rest = &rest[ws_end..];
+            continue;
+        }
+        let tok_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..tok_end];
+        if is_url_like(token) {
+            out.push_str(&redact_url_token(token));
+        } else {
+            out.push_str(token);
+        }
+        rest = &rest[tok_end..];
+    }
+    out
+}
+
+/// True when a whitespace-delimited token looks like a URL that could
+/// carry credentials — `scheme://` or scheme-relative `//`, anywhere in
+/// the token (error prose often wraps a URL in `(…)` or trailing punct).
+fn is_url_like(token: &str) -> bool {
+    token.contains("//")
+}
+
+/// Redact a single URL-bearing token. The token may carry surrounding
+/// punctuation (`(https://…)`, `https://…,`), so peel a leading `(`/`[`
+/// run and a trailing run of `)`/`]`/`,`/`.`/`;` before redacting, then
+/// re-attach it — `redact_url` expects a bare URL.
+fn redact_url_token(token: &str) -> String {
+    let lead_end = token
+        .find(|c: char| c != '(' && c != '[' && c != '<')
+        .unwrap_or(token.len());
+    let (lead, after_lead) = token.split_at(lead_end);
+    let trail_start = after_lead
+        .rfind(|c: char| !matches!(c, ')' | ']' | '>' | ',' | '.' | ';' | '"' | '\''))
+        .map(|i| i + after_lead[i..].chars().next().map_or(1, char::len_utf8))
+        .unwrap_or(0);
+    let (core, trail) = after_lead.split_at(trail_start);
+    format!("{lead}{}{trail}", aube_util::url::redact_url(core))
 }
 
 /// Host of the engine's documentation site. Any URL token containing it is
@@ -328,6 +394,30 @@ fn is_word_boundary(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewrite_redacts_credentials_in_registry_urls() {
+        // Backstop: even if an engine path forgets to scrub a URL, no
+        // userinfo or query token may reach nub's output. Covers the
+        // common prose shapes — bare URL, parenthesized (reqwest's
+        // ` for url (…)`), and a trailing-punctuation URL.
+        let msg = "HTTP error: error sending request \
+                   for url (https://alice:s3cr3t@registry.example.com/foo?token=abc123)";
+        let out = rewrite(msg);
+        assert!(!out.contains("s3cr3t"), "password leaked: {out}");
+        assert!(!out.contains("alice:"), "userinfo leaked: {out}");
+        assert!(!out.contains("abc123"), "token leaked: {out}");
+        assert!(
+            out.contains("registry.example.com"),
+            "redacted host must survive: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_leaves_credential_free_urls_intact() {
+        let url = "https://registry.npmjs.org/lodash";
+        assert_eq!(rewrite(url), url, "clean URL must pass through unchanged");
+    }
 
     #[test]
     fn rewrites_diagnostic_codes_from_the_real_constants() {
