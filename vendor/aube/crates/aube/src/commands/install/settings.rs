@@ -84,11 +84,23 @@ fn resolve_minimum_release_age(
     if minutes == 0 {
         return None;
     }
-    let exclude: std::collections::HashSet<String> =
-        aube_settings::resolved::minimum_release_age_exclude(ctx)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+    // Parse `minimumReleaseAgeExclude` with the same grammar as
+    // `trustPolicyExclude` so a version-pinned or `||`-union entry
+    // (`axios@0.18.1 || 0.21.1`) actually exempts those versions, not
+    // just name-only entries. parse_lossy keeps every well-formed rule
+    // and reports malformed ones individually — a strict batch parse
+    // would turn one typo into a silently-empty exclude list, a security
+    // regression. Name-only entries behave exactly as before.
+    let (exclude, exclude_parse_errors) = aube_resolver::TrustExcludeRules::parse_lossy(
+        aube_settings::resolved::minimum_release_age_exclude(ctx).unwrap_or_default(),
+    );
+    for err in exclude_parse_errors {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_INVALID_TRUST_POLICY,
+            error = %err,
+            "ignoring malformed minimumReleaseAgeExclude entry"
+        );
+    }
     // `paranoid=true` forces the gate to be hard, not advisory.
     let strict = aube_settings::resolved::minimum_release_age_strict(ctx)
         || aube_settings::resolved::paranoid(ctx);

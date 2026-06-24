@@ -123,8 +123,7 @@ impl DefaultTrustFloor {
             mra_cli_minutes.unwrap_or_else(|| aube_settings::resolved::minimum_release_age(ctx));
         let age_cutoff = aube_resolver::MinimumReleaseAge {
             minutes,
-            exclude: Default::default(),
-            strict: false,
+            ..Default::default()
         }
         .cutoff();
         Self {
@@ -293,8 +292,7 @@ mod tests {
             lockfile_vetted: false,
             age_cutoff: aube_resolver::MinimumReleaseAge {
                 minutes: 1440,
-                exclude: Default::default(),
-                strict: false,
+                ..Default::default()
             }
             .cutoff(),
         }
@@ -334,8 +332,7 @@ mod tests {
     ) -> BTreeMap<String, String> {
         let published = aube_resolver::MinimumReleaseAge {
             minutes,
-            exclude: Default::default(),
-            strict: false,
+            ..Default::default()
         }
         .cutoff()
         .expect("non-zero minutes always produce a cutoff");

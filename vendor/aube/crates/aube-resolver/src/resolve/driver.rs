@@ -594,17 +594,28 @@ impl<'a> ResolveDriver<'a> {
         let pick_lowest =
             self.resolver.resolution_mode == ResolutionMode::TimeBased && task.is_root;
         // Apply the cutoff unless this package is on the
-        // minimumReleaseAge exclude list. The exclude list only
-        // suppresses the *minimumReleaseAge* leg, not the
-        // time-based-mode leg — but since we collapse both
-        // into the same `published_by` string at this point,
-        // we have to skip the cutoff entirely for excluded
-        // names. Acceptable: time-based mode and exclude
-        // lists aren't expected to coexist in the wild.
-        let cutoff_for_pkg = match self.resolver.minimum_release_age.as_ref() {
-            Some(mra) if mra.exclude.contains(&task.name) => None,
+        // minimumReleaseAge exclude list. A *name-only* exclude entry
+        // (`lodash`) suppresses the cutoff for the whole package — and
+        // because we collapse the minimumReleaseAge and time-based-mode
+        // legs into the same `published_by` string here, that also drops
+        // the time-based leg (acceptable: the two aren't expected to
+        // coexist in the wild). A *version-pinned* entry
+        // (`axios@0.18.1 || 0.21.1`) can't be decided before the version
+        // is picked, so the cutoff stays active and the per-version
+        // exemption is threaded into `pick_version` via `age_exclude`
+        // below, where it bypasses the gate only for the listed versions.
+        let mra = self.resolver.minimum_release_age.as_ref();
+        let cutoff_for_pkg = match mra {
+            Some(m) if m.excludes_all_versions(&task.name) => None,
             _ => self.published_by.as_deref(),
         };
+        // Only pass the rules to the pick when this package actually has
+        // a version-pinned rule, so the common (no-exclude) path skips
+        // the per-candidate parse+match entirely.
+        let age_exclude = mra.and_then(|m| {
+            m.has_versioned_exclude(&task.name)
+                .then_some((&m.exclude, task.name.as_str()))
+        });
         // Strict semantics in two cases:
         //   - `minimumReleaseAgeStrict=true` (the user opted in
         //     to hard failures), or
@@ -630,6 +641,7 @@ impl<'a> ResolveDriver<'a> {
                 pick_lowest,
                 cutoff_for_pkg,
                 strict,
+                age_exclude,
             );
             match pick {
                 // A primer-seeded pick that satisfies the range still

@@ -1,3 +1,4 @@
+use crate::trust::TrustExcludeRules;
 use aube_registry::Packument;
 
 /// Outcome of [`pick_version`]. Distinguishes "nothing in the range
@@ -41,6 +42,15 @@ impl<'a> PickResult<'a> {
 /// cutoff. The lowest-satisfying fallback is pnpm's deliberate choice
 /// — the oldest version in the range is least likely to be the freshly
 /// pushed compromise that triggered the filter in the first place.
+///
+/// `age_exclude` carries the `minimumReleaseAgeExclude` rules plus the
+/// package name. A candidate version matched by a (version-pinned)
+/// exclude rule bypasses the cutoff individually — this is what makes a
+/// `name@v1 || v2` entry exempt only those exact versions. Name-only
+/// rules are handled by the caller (which passes `cutoff = None` for the
+/// whole package), so by the time they reach here `age_exclude` only
+/// ever contributes per-version exemptions; passing it is harmless when
+/// no rule matches.
 #[inline]
 pub(crate) fn pick_version<'a>(
     packument: &'a Packument,
@@ -49,6 +59,7 @@ pub(crate) fn pick_version<'a>(
     pick_lowest: bool,
     cutoff: Option<&str>,
     strict: bool,
+    age_exclude: Option<(&TrustExcludeRules, &str)>,
 ) -> PickResult<'a> {
     // Handle dist-tag references. If the requested range is a tag
     // name and the packument has that tag, use the tagged version
@@ -94,6 +105,17 @@ pub(crate) fn pick_version<'a>(
 
     let passes_cutoff = |ver: &str| -> bool {
         let Some(c) = cutoff else { return true };
+        // A version-pinned `minimumReleaseAgeExclude` rule exempts this
+        // exact version from the gate (`name@v1 || v2`). Parse failures
+        // fall through: a version that can't be parsed can only be
+        // matched by a name-only rule, which the caller already handled
+        // by disabling the cutoff for the whole package.
+        if let Some((rules, name)) = age_exclude
+            && let Ok(v) = node_semver::Version::parse(ver)
+            && rules.matches(name, &v)
+        {
+            return true;
+        }
         match packument.time.get(ver) {
             Some(t) => t.as_str() <= c,
             // Missing time: keep it — we'd rather risk a slightly newer
