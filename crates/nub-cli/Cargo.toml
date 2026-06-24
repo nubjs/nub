@@ -19,7 +19,14 @@ nub-core = { path = "../nub-core" }
 # shelling out. See vendor/aube/AGENTS.md and src/pm_engine/.
 aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
 aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
-aube = { path = "../../vendor/aube/crates/aube" }
+# default-features = false drops aube's default set (`mimalloc`, `config-tui`),
+# neither of which nub uses: aube's `config-tui` (ratatui/crossterm) only feeds
+# `aube config tui`, a tool subcommand nub never dispatches (the engine is
+# embedded as a library; output is rebranded through pm_engine::present), and
+# aube's `mimalloc` feature only swaps the allocator in aube's own dead main.rs
+# — nub sets its own mimalloc global allocator in nub-cli's main.rs. Dropping
+# config-tui removes ratatui + crossterm from the binary's dependency graph.
+aube = { path = "../../vendor/aube/crates/aube", default-features = false }
 # `EffectiveFilter` for the workspace-aware engine verbs (`nub publish
 # --filter/-r`); same type aube's own dispatch passes to publish/list/etc.
 aube-workspace = { path = "../../vendor/aube/crates/aube-workspace" }
