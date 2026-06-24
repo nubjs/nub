@@ -43,7 +43,13 @@ There is no new runtime to adopt and no lock-in: every augmentation rides on Nod
 npm install -g --ignore-scripts=false @nubjs/nub
 ```
 
-Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work equivalently. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`. In CI, swap `actions/setup-node` for the [setup-nub action](/docs/setup-nub):
+Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work equivalently. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`. On macOS and Linux, Homebrew works too:
+
+```bash
+brew install nubjs/tap/nub
+```
+
+In CI, swap `actions/setup-node` for the [setup-nub action](/docs/setup-nub):
 
 ```diff
 - - uses: actions/setup-node@v4

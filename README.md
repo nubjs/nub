@@ -62,6 +62,9 @@ curl -fsSL https://nubjs.com/install.sh | bash
 # Windows (PowerShell)
 irm https://nubjs.com/install.ps1 | iex
 
+# Homebrew (macOS / Linux)
+brew install nubjs/tap/nub
+
 # Or via npm (pnpm / yarn global add work too)
 npm install -g --ignore-scripts=false @nubjs/nub
 ```

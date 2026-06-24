@@ -1030,3 +1030,66 @@ jobs:
             echo "--- attempt $attempt failed; retrying in ${DELAY}s ---"
             sleep "$DELAY"
           done
+
+  bump-homebrew-tap:
+    name: Bump Homebrew tap formula
+    # Update the nubjs/homebrew-tap formula to this release. Runs ONLY on a real
+    # tag-push release (never the debug `workflow_dispatch` build-only path) and
+    # AFTER github-release, because it reads the published `.sha256` sidecar
+    # assets from the release this run created.
+    if: github.event_name == 'push'
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the nub repo for the formula generator script.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      # Push access to nubjs/homebrew-tap is CROSS-REPO, so the default
+      # GITHUB_TOKEN (scoped to nubjs/nub only) cannot push there. A PAT (or
+      # fine-grained token) with contents:write on nubjs/homebrew-tap must be
+      # added as the HOMEBREW_TAP_TOKEN repo secret. If the secret is absent
+      # (empty string), skip the bump rather than fail the release.
+      - name: Check tap token present
+        id: gate
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN secret absent — skipping Homebrew tap bump. Add a PAT with contents:write on nubjs/homebrew-tap to enable it."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the tap
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          repository: nubjs/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Regenerate formula for this release
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          # The generator reads the release's `.sha256` sidecars via `gh`; the
+          # default GITHUB_TOKEN can read nubjs/nub releases.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash .github/scripts/gen-homebrew-formula.sh "$VERSION" homebrew-tap/Formula/nub.rb
+
+      - name: Commit and push the bump
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: homebrew-tap
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Formula/nub.rb; then
+            echo "Formula already at v$VERSION — nothing to commit."
+            exit 0
+          fi
+          git add Formula/nub.rb
+          git commit -m "nub: update formula to v$VERSION"
+          git push
