@@ -74,21 +74,36 @@ function extractBody(cmd) {
     return { body: null, fromFile: true };
   }
 
-  // --body="..." / --body '...' / -b "..."  (quoted)
-  const quoted = cmd.match(
-    /(?:--body|(?<![\w-])-b)(?:\s+|=)(['"])([\s\S]*?)\1/,
-  );
-  if (quoted) return { body: quoted[2], fromFile: false };
+  // Collect EVERY body candidate, not just the first — gh uses the LAST --body
+  // when several are passed, so a short-then-long pair (`--body hi --body <essay>`)
+  // would slip past a first-match-only check. Measure the longest of all forms.
+  const candidates = [];
 
-  // --body=unquoted-token (single shell word)
-  const eq = cmd.match(/(?:--body|(?<![\w-])-b)=(\S+)/);
-  if (eq) return { body: eq[1], fromFile: false };
+  // --body="..." / --body '...' / -b "..."  (quoted) — all occurrences.
+  for (const m of cmd.matchAll(
+    /(?:--body|(?<![\w-])-b)(?:\s+|=)(['"])([\s\S]*?)\1/g,
+  )) {
+    candidates.push(m[2]);
+  }
+
+  // --body=unquoted-token / -b=token  (single shell word) — all occurrences.
+  for (const m of cmd.matchAll(/(?:--body|(?<![\w-])-b)=(\S+)/g)) {
+    candidates.push(m[1]);
+  }
 
   // heredoc: --body "$(cat <<'EOF' ... EOF)" or a bare <<EOF ... EOF block.
-  const here = cmd.match(/<<-?\s*(['"]?)(\w+)\1\s*\n([\s\S]*?)\n\s*\2\b/);
-  if (here) return { body: here[3], fromFile: false };
+  for (const m of cmd.matchAll(
+    /<<-?\s*(['"]?)(\w+)\1\s*\n([\s\S]*?)\n\s*\2\b/g,
+  )) {
+    candidates.push(m[3]);
+  }
 
-  return { body: null, fromFile: false };
+  if (candidates.length === 0) return { body: null, fromFile: false };
+
+  // Return the LONGEST candidate — whichever body would trip the limit.
+  let longest = "";
+  for (const c of candidates) if (c.length > longest.length) longest = c;
+  return { body: longest, fromFile: false };
 }
 
 async function main() {
