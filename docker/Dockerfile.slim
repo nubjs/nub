@@ -21,7 +21,9 @@ ARG NODE_BASE=26-slim
 FROM node:${NODE_BASE}
 
 # The nub version to install. Defaults to the latest published @nubjs/nub; the
-# publish workflow pins this to the release tag so an image is reproducible.
+# publish workflow pins this to the release tag so the nub version is pinned. (The
+# base image still floats on the node:26-slim tag — pin a digest if you need the
+# base fully reproducible too.)
 ARG NUB_VERSION=latest
 
 # Install nub globally as root so postinstall can chmod the binary for every user

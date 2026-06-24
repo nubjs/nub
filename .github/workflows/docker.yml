@@ -40,6 +40,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# packages: write is required for the GHCR push leg — the default GITHUB_TOKEN is
+# read-only for packages without it, so a GHCR `docker push` would 403. Harmless
+# for the Docker Hub path (which authenticates with its own token).
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
     name: Build + smoke (${{ matrix.variant }})
@@ -56,10 +63,10 @@ jobs:
             dockerfile: docker/Dockerfile.alpine
             node_base: 26-alpine
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       # The nub version to bake in. On a release tag, install exactly that version;
       # otherwise install the latest published @nubjs/nub.
@@ -75,7 +82,7 @@ jobs:
       # Build to a local image (load: true) so the smoke step can run it. Push is a
       # separate step gated on release + DOCKER_IMAGE being configured.
       - name: Build ${{ matrix.variant }} image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -98,7 +105,7 @@ jobs:
       # unset, this step no-ops on every event — the workflow stays build+smoke only.
       - name: Log in to registry
         if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
-        uses: docker/login-action@v3
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3
         with:
           # For GHCR: registry: ghcr.io, username: ${{ github.actor }},
           #   password: ${{ secrets.GITHUB_TOKEN }} (no extra secret needed).
@@ -124,7 +131,7 @@ jobs:
 
       - name: Build + push ${{ matrix.variant }}
         if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
