@@ -12,7 +12,7 @@ set -euo pipefail
 # Usage: gen-homebrew-formula.sh <version> <output-path>
 #   <version>     release version without the leading v (e.g. 0.1.14)
 #   <output-path> where to write nub.rb
-# Requires: gh (authed to read nubjs/nub releases), curl.
+# Requires: gh (authed to read nubjs/nub releases).
 
 VERSION="${1:?usage: gen-homebrew-formula.sh <version> <output-path>}"
 OUT="${2:?usage: gen-homebrew-formula.sh <version> <output-path>}"
