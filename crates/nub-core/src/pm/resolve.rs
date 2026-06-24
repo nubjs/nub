@@ -799,7 +799,28 @@ pub fn parse_spec(spec: &str) -> Result<PmPin> {
     let (name, version) = spec.split_once('@').with_context(|| {
         format!("packageManager \"{spec}\" must be in name@version form (e.g. pnpm@9.1.0)")
     })?;
+    // A URL/git reference in place of a version (`pnpm@https://…`, `pnpm@git+…`)
+    // is a Corepack-supported form meaning "fetch this artifact" — there is no
+    // semver to pin. nub can't provision an arbitrary tarball as a PM version,
+    // so it treats the field as NAME-only (no version pin) and falls through to
+    // the user's PM on PATH / a dynamic default — matching pnpm, which does not
+    // version-switch on a URL spec. Without this the URL reached the semver
+    // resolver and aborted the run (`unexpected character 'h'`).
+    if is_url_version_ref(version) {
+        return classify(name, None);
+    }
     classify(name, Some(version))
+}
+
+/// Whether a `packageManager` *version* slot holds a URL / git / file reference
+/// rather than a semver-ish spec — `https://…`, `git+…`, `git://…`, a `git@…`
+/// shorthand, or a `file:…` path Corepack accepts. Such a value carries no
+/// version to pin (see [`parse_spec`]). A bare `host:path` SSH shorthand is left
+/// out deliberately: it is ambiguous against a real version and not worth the
+/// false-positive risk.
+fn is_url_version_ref(version: &str) -> bool {
+    let v = version.trim();
+    v.contains("://") || v.starts_with("git+") || v.starts_with("git@") || v.starts_with("file:")
 }
 
 /// Map a `(name, version)` pair to a [`PmPin`], applying the yarn classic/berry
@@ -1069,6 +1090,40 @@ mod tests {
         assert!(
             err.contains("name@version"),
             "missing-version error must name the form, got: {err}"
+        );
+    }
+
+    #[test]
+    fn url_version_spec_parses_as_name_only_no_version_pin() {
+        // Corepack/pnpm accept a URL/git reference in the version slot
+        // (`pnpm@https://…`) meaning "fetch this artifact" — there is no semver
+        // to pin. nub treats it as name-only so the spec never reaches the
+        // semver resolver (which aborted the run on the leading 'h').
+        for spec in [
+            "pnpm@https://github.com/pnpm/pnpm",
+            "pnpm@git+https://github.com/pnpm/pnpm.git",
+            "yarn@git@github.com:yarnpkg/berry.git",
+            "pnpm@file:../local-pnpm.tgz",
+        ] {
+            let pin = parse_spec(spec).unwrap_or_else(|e| panic!("{spec} should parse: {e}"));
+            assert_eq!(
+                pin.version, None,
+                "{spec} carries no version pin (URL reference)"
+            );
+        }
+
+        // A normal exact pin and the Corepack hash suffix are NOT URLs and keep
+        // their verbatim version — the URL guard must not swallow them.
+        assert_eq!(
+            parse_spec("pnpm@9.1.0").unwrap().version.as_deref(),
+            Some("9.1.0")
+        );
+        assert_eq!(
+            parse_spec("yarn@4.2.2+sha512.abc")
+                .unwrap()
+                .version
+                .as_deref(),
+            Some("4.2.2+sha512.abc")
         );
     }
 
