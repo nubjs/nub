@@ -68,7 +68,14 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
         }
         let pj_path = project_dir.join(importer_path).join("package.json");
         let pj = PackageJson::from_path(&pj_path).unwrap_or_default();
-        if let (Some(name), Some(version)) = (pj.name, pj.version) {
+        // A versionless member resolves to a dep_path of `name@0.0.0`
+        // (the resolver defaults a missing `version` to "0.0.0" in
+        // install::workspace) — mirror that default here so the
+        // `name@version` lookup matches and the importer edge serializes
+        // as `link:<dir>` rather than the bare `0.0.0` version, which
+        // pnpm rejects under `--frozen-lockfile` (no `foo@0.0.0` entry).
+        if let Some(name) = pj.name {
+            let version = pj.version.as_deref().unwrap_or("0.0.0");
             workspace_member_dirs.insert(format!("{name}@{version}"), importer_path.clone());
         }
     }

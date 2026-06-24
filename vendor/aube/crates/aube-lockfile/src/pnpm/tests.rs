@@ -2721,6 +2721,62 @@ fn workspace_deps_write_importer_relative_link_versions() {
     );
 }
 
+// A workspace member whose package.json omits `version` must still
+// serialize the consuming importer's edge as `link:<dir>`, not the bare
+// default version. The resolver defaults a missing version to "0.0.0"
+// (install::workspace), so the dep_path is `name@0.0.0`; the writer must
+// mirror that default when recovering member dirs or the lookup misses
+// and pnpm rejects the lockfile under `--frozen-lockfile`
+// (ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY: no entry for `foo@0.0.0`).
+#[test]
+fn versionless_workspace_member_writes_link_not_bare_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    // `foo` has a name but no version — the regression case.
+    for (rel, body) in [
+        ("apps/app", r#"{"name": "app", "version": "0.0.0"}"#),
+        ("packages/foo", r#"{"name": "foo"}"#),
+    ] {
+        let pkg_dir = dir.path().join(rel);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("package.json"), body).unwrap();
+    }
+
+    let mut importers = BTreeMap::new();
+    importers.insert(".".to_string(), vec![]);
+    importers.insert(
+        "apps/app".to_string(),
+        vec![DirectDep {
+            name: "foo".to_string(),
+            dep_path: "foo@0.0.0".to_string(),
+            dep_type: DepType::Production,
+            specifier: Some("workspace:*".to_string()),
+        }],
+    );
+    importers.insert("packages/foo".to_string(), vec![]);
+    let graph = LockfileGraph {
+        importers,
+        ..Default::default()
+    };
+    let manifest = PackageJson {
+        name: Some("repro-root".to_string()),
+        version: Some("0.0.0".to_string()),
+        ..Default::default()
+    };
+
+    write(&lockfile_path, &graph, &manifest).unwrap();
+    let yaml = std::fs::read_to_string(&lockfile_path).unwrap();
+
+    assert!(
+        yaml.contains("version: link:../../packages/foo"),
+        "versionless workspace member must render as an importer-relative link: {yaml}"
+    );
+    assert!(
+        !yaml.contains("version: 0.0.0"),
+        "versionless member must not record the default 0.0.0 as a registry version: {yaml}"
+    );
+}
+
 // Same property at the whole-file level: a workspace lockfile written
 // by native pnpm 10.15.1 (fixture generated from a real install) must
 // survive parse → write byte-identically — in particular the
