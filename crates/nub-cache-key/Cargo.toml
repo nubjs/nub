@@ -5,16 +5,32 @@
 # key-derivation is pure (blake3 over a fixed preimage) with no napi dependency,
 # so it lives here where it CAN be tested on every platform, and `nub-native`
 # calls into it. Keep this crate napi-free.
+#
+# SELF-CONTAINED MANIFEST (no `*.workspace = true`): nub-cache-key is a member of
+# the ROOT workspace, but it is ALSO a cross-workspace path dependency of
+# `crates/nub-native` (its own panic=unwind workspace). The release `cross` build
+# runs `cd crates/nub-native && cross build`, which mounts ONLY the nub-native
+# workspace into the container — the repo-root manifest is absent there, so any
+# `.workspace = true` field in this crate cannot find a workspace root to inherit
+# from and the manifest parse fails ("failed to find a workspace root", #112
+# fallout that broke the v0.2.0 cross matrix). Inlining the values (identical to
+# the root `[workspace.package]` / `[workspace.lints.clippy]` / blake3 pin) lets
+# this manifest parse standalone in the cross container while staying byte-identical
+# to what it inherited as a root-workspace member. Keep these literals in lockstep
+# with the root `Cargo.toml`'s `[workspace.package]`, `[workspace.lints.clippy]`,
+# and the blake3 pin.
 [package]
 name = "nub-cache-key"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/nubjs/nub"
 
 [dependencies]
-blake3.workspace = true
+blake3 = "1"
 
-[lints]
-workspace = true
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
