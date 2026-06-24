@@ -2,5 +2,18 @@
   "includeCoAuthoredBy": false,
   "worktree": {
     "bgIsolation": "none"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/gh-comment-guard.mjs\""
+          }
+        ]
+      }
+    ]
   }
 }

@@ -45,6 +45,8 @@ gh issue comment <n> --repo nubjs/nub --body "Investigating."
 
 **Just "Investigating." — full stop.** No "thanks for the report," no "will follow up," no preview of your hypothesis, no diagnosis, no timeline. A longer ack leaks half-formed theories (which are often wrong) and reads as noise. Say nothing but that it's being looked at. (Internal / self-filed issues don't need this.)
 
+**Every SUBSTANTIVE comment (Steps 5–6, or any reply) is terse + factual per PROSE.md — never a verbose essay.** State what you found and what you did, in the fewest words that carry the facts. No preamble, no editorializing, no walls of text. NEVER write "previous comments were wrong" or similar meta-commentary — prior comments are often an automated bot's, not a human's. The `gh-comment-guard` PreToolUse hook BLOCKS an over-long `gh issue/pr comment` / `gh pr create` body; trim it, or set `NUB_ALLOW_LONG_COMMENT=1` only for a genuinely-needed longer body (e.g. a detailed release note).
+
 If triage shows it's NOT a bug (working as intended, a usage question, a duplicate, won't-fix), say so factually with the reason and close it per Step 6 — don't leave it hanging or sink time into a non-fix.
 
 ## Step 3 — Fix it (fray + the pre-push loop)
