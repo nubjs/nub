@@ -804,15 +804,17 @@ fn apply_config_scope(
     Ok(())
 }
 
-/// Does the active PM honor `catalog:` specifiers? pnpm@9+ and bun@1.2+
-/// implement catalogs; npm and yarn do not. nub identity honors catalogs
-/// (an un-branded cross-tool field, like `workspaces`). aube resolves both
-/// dialects: pnpm's `pnpm.catalog(s)` / `pnpm-workspace.yaml` AND bun's
-/// `workspaces.catalog(s)` in `package.json` (see aube's `discover_catalogs`),
-/// so honoring bun here resolves the real catalog rather than mis-failing a
-/// project that works under bun.
+/// Does the active PM honor `catalog:` specifiers? pnpm@9+, bun@1.2+, and
+/// yarn-berry (v2+) implement catalogs; npm and yarn-classic (v1) do not. nub
+/// identity honors catalogs (an un-branded cross-tool field, like
+/// `workspaces`). aube resolves every dialect: pnpm's `pnpm.catalog(s)` /
+/// `pnpm-workspace.yaml`, bun's `workspaces.catalog(s)` in `package.json`, and
+/// yarn's `catalog(s)` in `.yarnrc.yml` (see aube's `discover_catalogs`), so
+/// honoring a PM here resolves the real catalog rather than mis-failing a
+/// project that works under that PM.
 fn role_honors_catalog(role: config_scope::Role, major: Option<u64>, minor: Option<u64>) -> bool {
     use config_scope::Role;
+    let _ = minor;
     match role {
         // pnpm gained catalogs in 9.0.
         Role::Pnpm => major.map(|m| m >= 9).unwrap_or(true),
@@ -823,8 +825,18 @@ fn role_honors_catalog(role: config_scope::Role, major: Option<u64>, minor: Opti
             (Some(m), None) => m >= 2,
             _ => true,
         },
+        // yarn shipped catalogs in 4.10.0 (catalog plugin bundled by default).
+        // We honor them on ALL yarn-berry (v2+) rather than gating on a parsed
+        // 4.10: nub's yarn-minor detection isn't granular enough to reliably
+        // distinguish 4.10 from earlier berry, and resolving a `catalog:` on an
+        // older berry costs nothing — a project only carries `catalog:`
+        // specifiers (+ a `.yarnrc.yml` catalog block) if it's actually using
+        // the feature, so there is nothing to mis-resolve. Classic yarn v1 has
+        // no catalogs, so a `1.x` pin correctly refuses. Absent/unparseable
+        // version → assume modern berry and honor (the "assume modern" default).
+        Role::Yarn => major.map(|m| m >= 2).unwrap_or(true),
         Role::Nub => true,
-        Role::Npm | Role::Yarn => false,
+        Role::Npm => false,
     }
 }
 
@@ -901,8 +913,8 @@ fn catalog_unsupported_error(role: config_scope::Role, spec: &str) -> anyhow::Er
     let pm = role.display();
     anyhow::anyhow!(
         "nub: `catalog:` specifier ({spec}) is not supported — this project uses {pm}, \
-         which doesn't implement catalogs (pnpm@9+ and bun@1.2+ do). Inline the version, or switch \
-         the project to a PM that supports catalogs (`nub pm use pnpm`)."
+         which doesn't implement catalogs (pnpm@9+, bun@1.2+, and yarn-berry do). Inline the \
+         version, or switch the project to a PM that supports catalogs (`nub pm use pnpm`)."
     )
 }
 
@@ -3023,8 +3035,53 @@ mod tests {
         // ...but a catalog-honoring bun does not refuse it.
         assert!(role_honors_catalog(Role::Bun, Some(1), Some(2)));
 
-        // npm / yarn never honor catalogs.
+        // npm never honors catalogs; classic yarn v1 doesn't either.
         assert!(!role_honors_catalog(Role::Npm, Some(10), Some(0)));
-        assert!(!role_honors_catalog(Role::Yarn, Some(4), Some(0)));
+        assert!(!role_honors_catalog(Role::Yarn, Some(1), Some(22)));
+    }
+
+    #[test]
+    fn yarn_berry_honors_catalogs_classic_v1_does_not() {
+        // yarn shipped catalogs in 4.10.0, declared in `.yarnrc.yml` with the
+        // same `catalog:`/`catalogs:` shape as pnpm; aube discovers them. We
+        // honor catalogs on ALL yarn-berry (v2+) rather than gating on a parsed
+        // 4.10 — nub's yarn-minor detection isn't reliable enough to split 4.10
+        // from earlier berry, and a `catalog:` only appears if the project uses
+        // the feature, so there's nothing to mis-resolve. Classic yarn v1 has no
+        // catalogs and must still refuse.
+        use config_scope::Role;
+
+        assert!(
+            role_honors_catalog(Role::Yarn, Some(4), Some(10)),
+            "yarn 4.10 (berry) implements catalogs"
+        );
+        assert!(
+            role_honors_catalog(Role::Yarn, Some(4), Some(0)),
+            "yarn 4.x (berry) honors — minor not gated"
+        );
+        assert!(
+            role_honors_catalog(Role::Yarn, Some(2), None),
+            "yarn 2 (berry) honors — all berry honors"
+        );
+        assert!(
+            role_honors_catalog(Role::Yarn, None, None),
+            "an undeclared/unparseable yarn version assumes modern berry and honors"
+        );
+        assert!(
+            !role_honors_catalog(Role::Yarn, Some(1), Some(22)),
+            "classic yarn v1 never had catalogs and must refuse"
+        );
+
+        // A yarn-berry fixture with a real `catalog:` ref: the specifier is
+        // detected, but a berry identity does not refuse it. (The catalog VALUES
+        // live in `.yarnrc.yml`, resolved by aube's `discover_catalogs`; here we
+        // only assert the per-role gate, not the resolution.)
+        let d = workspace(&[(
+            "package.json",
+            r#"{"name":"root","packageManager":"yarn@4.10.0","dependencies":{"is-odd":"catalog:"}}"#,
+        )]);
+        let m = root_manifest(d.path());
+        assert!(first_catalog_specifier(&m, d.path()).is_some());
+        assert!(role_honors_catalog(Role::Yarn, Some(4), Some(10)));
     }
 }
