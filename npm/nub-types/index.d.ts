@@ -784,3 +784,109 @@ declare namespace Temporal {
 // `Temporal` is exposed as an ambient global namespace. It is both a type namespace
 // and a value (its `class` and `const` members make it a runtime value), so no
 // separate `declare var Temporal` is needed — and adding one collides (TS2300).
+
+// ── HTMLRewriter (Cloudflare-Workers-shape global; runtime/html-rewriter.mjs) ──
+// Backed by nub's WASM build of lol-html (Asyncify). Not in any Node version and
+// not in @types/node, so declared here. Surface mirrors the Cloudflare Workers /
+// Bun API so Workers code ports unchanged. Handlers may be SYNCHRONOUS OR ASYNC —
+// a handler returning a Promise is awaited mid-transform (Asyncify unwinds/rewinds
+// the WASM stack), so every handler returns `void | Promise<void>`.
+//
+// The rewritable-unit objects (`HTMLRewriterElement`, etc.) are valid only inside
+// their handler callback; using one after the handler returns throws.
+
+/** Controls how content inserted via before/after/replace/etc. is interpreted. */
+interface ContentOptions {
+  /** When true, content is raw HTML; when false/omitted, content is text-escaped. */
+  html?: boolean;
+}
+
+interface HTMLRewriterElement {
+  /** Tag name, lowercased. Settable. */
+  tagName: string;
+  /** The element's namespace URI per WHATWG. */
+  readonly namespaceURI: string;
+  /** Whether the element has been removed or replaced. */
+  readonly removed: boolean;
+  /** Iterable of `[name, value]` attribute pairs. */
+  readonly attributes: IterableIterator<[string, string]>;
+
+  getAttribute(name: string): string | null;
+  hasAttribute(name: string): boolean;
+  setAttribute(name: string, value: string): HTMLRewriterElement;
+  removeAttribute(name: string): HTMLRewriterElement;
+
+  before(content: string, options?: ContentOptions): HTMLRewriterElement;
+  after(content: string, options?: ContentOptions): HTMLRewriterElement;
+  prepend(content: string, options?: ContentOptions): HTMLRewriterElement;
+  append(content: string, options?: ContentOptions): HTMLRewriterElement;
+  replace(content: string, options?: ContentOptions): HTMLRewriterElement;
+  remove(): HTMLRewriterElement;
+  removeAndKeepContent(): HTMLRewriterElement;
+  setInnerContent(content: string, options?: ContentOptions): HTMLRewriterElement;
+  /** Register a handler for this element's end tag (no-op on void elements). */
+  onEndTag(handler: (endTag: HTMLRewriterEndTag) => void | Promise<void>): void;
+}
+
+interface HTMLRewriterEndTag {
+  /** End-tag name, lowercased. Settable. */
+  name: string;
+  before(content: string, options?: ContentOptions): HTMLRewriterEndTag;
+  after(content: string, options?: ContentOptions): HTMLRewriterEndTag;
+  remove(): HTMLRewriterEndTag;
+}
+
+interface HTMLRewriterText {
+  /** Text of this chunk (may be a fragment of a larger text node). */
+  readonly text: string;
+  /** True if this is the last chunk of the text node. */
+  readonly lastInTextNode: boolean;
+  readonly removed: boolean;
+  before(content: string, options?: ContentOptions): HTMLRewriterText;
+  after(content: string, options?: ContentOptions): HTMLRewriterText;
+  replace(content: string, options?: ContentOptions): HTMLRewriterText;
+  remove(): HTMLRewriterText;
+}
+
+interface HTMLRewriterComment {
+  /** Comment text (between `<!--` and `-->`). Settable; throws on terminators. */
+  text: string;
+  readonly removed: boolean;
+  before(content: string, options?: ContentOptions): HTMLRewriterComment;
+  after(content: string, options?: ContentOptions): HTMLRewriterComment;
+  replace(content: string, options?: ContentOptions): HTMLRewriterComment;
+  remove(): HTMLRewriterComment;
+}
+
+interface HTMLRewriterDoctype {
+  readonly name: string | null;
+  readonly publicId: string | null;
+  readonly systemId: string | null;
+}
+
+interface HTMLRewriterDocumentEnd {
+  append(content: string, options?: ContentOptions): HTMLRewriterDocumentEnd;
+}
+
+interface ElementContentHandlers {
+  element?: (element: HTMLRewriterElement) => void | Promise<void>;
+  comments?: (comment: HTMLRewriterComment) => void | Promise<void>;
+  text?: (text: HTMLRewriterText) => void | Promise<void>;
+}
+
+interface DocumentContentHandlers {
+  doctype?: (doctype: HTMLRewriterDoctype) => void | Promise<void>;
+  comments?: (comment: HTMLRewriterComment) => void | Promise<void>;
+  text?: (text: HTMLRewriterText) => void | Promise<void>;
+  end?: (end: HTMLRewriterDocumentEnd) => void | Promise<void>;
+}
+
+declare class HTMLRewriter {
+  constructor();
+  /** Register handlers for elements matching a CSS selector (throws on invalid selector). */
+  on(selector: string, handlers: ElementContentHandlers): this;
+  /** Register document-level handlers. */
+  onDocument(handlers: DocumentContentHandlers): this;
+  /** Stream a Response body through the registered handlers, returning a new Response. */
+  transform(response: Response): Response;
+}

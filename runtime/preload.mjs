@@ -128,6 +128,16 @@ const __workerPolyfill = await import("./worker-polyfill.mjs");
 __workerPolyfill.setBootstrapCreateRequire(floorCreateRequire);
 __workerPolyfill.installWorkerPolyfill();
 
+// HTMLRewriter (vendored WASM lol-html engine). Same floor contract as worker-
+// polyfill: it fetches node: builtins via getBuiltinModule, so on the floor thread
+// the createRequire must be threaded in before installing. The global ctor is
+// installed eagerly here (cheap — a single defineProperty); the WASM engine is
+// still resolved lazily on the first transform, so this adds nothing to startup
+// for non-HTMLRewriter runs.
+const __htmlRewriter = await import("./html-rewriter.mjs");
+__htmlRewriter.setBootstrapCreateRequire(floorCreateRequire);
+__htmlRewriter.installHTMLRewriter();
+
 // ── Temporal: lazy global (A37) ─────────────────────────────────────
 common.installTemporalLazyGlobal(__require);
 

@@ -1,0 +1,96 @@
+---
+title: HTMLRewriter
+description: A streaming HTML rewriter with the Cloudflare Workers API, as a global on stock Node — port Workers code over unchanged.
+---
+
+<TypesSetup>
+The `HTMLRewriter` global is typed by Nub's own types package — it is not part of `@types/node`.
+</TypesSetup>
+
+Cloudflare Workers exposes an `HTMLRewriter` for streaming HTML transformation; Bun ships the same API. Nub provides it as a global on every supported Node (18.19+), backed by a WebAssembly build of [lol-html](https://github.com/cloudflare/lol-html) — Cloudflare's own streaming rewriter, the same engine behind the Workers API. Code written against Workers' `HTMLRewriter` runs here unchanged.
+
+```ts
+const res = new HTMLRewriter()
+  .on("a[href]", {
+    element(el) {
+      el.setAttribute("rel", "noopener");
+    },
+  })
+  .transform(await fetch("https://example.com"));
+
+console.log(await res.text());
+```
+
+The transform is streaming: the response body is parsed and rewritten chunk by chunk, never buffered whole, so memory stays bounded regardless of document size.
+
+## Handlers
+
+`on(selector, handlers)` registers handlers for elements matching a CSS selector; `onDocument(handlers)` registers document-level handlers. Both return the rewriter for chaining.
+
+```ts
+new HTMLRewriter()
+  .on("img", {
+    element(el) {
+      if (!el.hasAttribute("loading")) el.setAttribute("loading", "lazy");
+    },
+  })
+  .onDocument({
+    doctype(dt) { console.log(dt.name); },        // "html"
+    end(end) { end.append("<!-- rewritten -->", { html: true }); },
+  })
+  .transform(response);
+```
+
+Element handlers receive an `element`, `comments`, and `text` callback; document handlers receive `doctype`, `comments`, `text`, and `end`. Each rewritable unit exposes the Workers API:
+
+- **Element** — `tagName`, `attributes`, `getAttribute` / `hasAttribute` / `setAttribute` / `removeAttribute`, `before` / `after` / `prepend` / `append` / `replace` / `remove` / `removeAndKeepContent` / `setInnerContent`, and `onEndTag`.
+- **Text** — `text`, `lastInTextNode`, `before` / `after` / `replace` / `remove`.
+- **Comment** — `text` (readable and writable), `before` / `after` / `replace` / `remove`.
+- **Doctype** — `name`, `publicId`, `systemId` (read-only).
+- **DocumentEnd** — `append`, for injecting content at the very end of the document.
+
+Inserted content is text-escaped by default; pass `{ html: true }` to insert raw HTML:
+
+```ts
+el.append("<span>raw</span>", { html: true });
+el.append("<span>escaped</span>");              // → &lt;span&gt;escaped&lt;/span&gt;
+```
+
+A rewritable unit is valid only inside its handler. Holding onto an `element` and using it after the handler returns throws.
+
+## Selectors
+
+The selector grammar is lol-html's CSS subset:
+
+- Type, universal, class, and id: `div`, `*`, `.cls`, `#id`
+- Attribute: `[attr]`, `[attr="v"]` (with `i` / `s` case flags), `[attr~="v"]`, `[attr^="v"]`, `[attr$="v"]`, `[attr*="v"]`, `[attr|="v"]`
+- Descendant (`a b`) and child (`a > b`) combinators
+- `:nth-child` / `:first-child` / `:nth-of-type` / `:first-of-type`, `:not(...)` with a simple selector
+- Selector lists with `,`
+
+Sibling combinators (`+`, `~`), `:last-child` / `:only-child` / `:root` / `:scope` / `:is()` / `:where()`, pseudo-elements, and namespaced selectors are not supported and throw at registration. An invalid selector throws synchronously when you call `on`.
+
+## Async handlers
+
+Handlers may be synchronous or `async`. A handler that returns a Promise is awaited mid-transform — fetch data, read a file, or do any async work from inside a handler, exactly as on Workers and Bun:
+
+```ts
+new HTMLRewriter()
+  .on("a[href]", {
+    async element(el) {
+      const ok = await isAllowed(el.getAttribute("href"));
+      if (!ok) el.remove();
+    },
+  })
+  .transform(response);
+```
+
+The transform pauses while the Promise resolves and resumes where it left off, so the streaming output stays correctly ordered.
+
+## Mechanism
+
+Nub preloads the `HTMLRewriter` global (`runtime/html-rewriter.mjs`), feature-detected with `typeof` so it installs only when no native global is already present. The engine is lol-html compiled to WebAssembly with Binaryen's Asyncify pass — one portable `.wasm` for every platform, and the unwind/rewind machinery that lets a handler Promise be awaited mid-transform. The engine and its `.wasm` are loaded lazily on the first `transform`, so programs that never touch `HTMLRewriter` pay nothing at startup.
+
+## TypeScript
+
+`HTMLRewriter`, the rewritable-unit interfaces, and the handler types are declared by `@nubjs/types` (a types-only devDependency). The declarations step aside when a native or DOM `HTMLRewriter` type is already in scope.

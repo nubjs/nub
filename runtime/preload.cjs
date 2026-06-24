@@ -209,12 +209,43 @@ function installLazyEsmPolyfills() {
     }
   };
 
+  // Install a non-enumerable lazy global that loads its backing ESM side-effect
+  // module on first access, then returns the real global the module defined. The
+  // additive contract (invisible to enumeration, user-overridable) and the
+  // self-dropping reentrancy guard mirror the inline Worker accessor above.
+  const installLazyGlobal = (name, specifier, load) => {
+    if (typeof globalThis[name] !== "undefined") return;
+    let installing = false;
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      enumerable: false,
+      get() {
+        if (installing) return undefined;
+        installing = true;
+        delete globalThis[name];
+        load(specifier);
+        return globalThis[name];
+      },
+      set(value) {
+        Object.defineProperty(globalThis, name, {
+          value,
+          configurable: true,
+          enumerable: false,
+          writable: true,
+        });
+      },
+    });
+  };
+
   if (inWorkerThread) {
     // Worker-side scope bootstrap must be present synchronously where possible.
     loadEsmSideEffect("./worker-polyfill.mjs");
     if (typeof globalThis.navigator?.locks === "undefined") {
       loadEsmSideEffect("./navigator-locks.mjs");
     }
+    // HTMLRewriter is just as available inside a worker; install the same lazy
+    // global (no eager side-effect needed — there is no worker-side scope wiring).
+    installLazyGlobal("HTMLRewriter", "./html-rewriter.mjs", loadEsmSideEffect);
     return;
   }
 
@@ -247,6 +278,13 @@ function installLazyEsmPolyfills() {
       },
     });
   }
+
+  // Lazy HTMLRewriter global (Cloudflare-Workers shape, backed by the native
+  // lol-html engine in nub-native). Same lazy-getter discipline as Worker above:
+  // a non-enumerable getter that, on first access, drops itself and loads
+  // html-rewriter.mjs (which defines the real global). Deferring keeps the addon
+  // off the bootstrap path for the common "never touch HTMLRewriter" run.
+  installLazyGlobal("HTMLRewriter", "./html-rewriter.mjs", loadEsmSideEffect);
 
   // Main thread: lazy navigator.locks (native on Node 24.5+, absent on the 22.x
   // floor). VERSION-GATE so we never even READ `globalThis.navigator` where locks
