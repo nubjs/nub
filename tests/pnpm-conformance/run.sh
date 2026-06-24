@@ -40,7 +40,7 @@ shift
 PNPM_TAG="${1:-v${PNPM_PIN:-10.15.1}}"
 # Allow passing a bare jest-arg in $1 (only shift the tag if it looks like a tag).
 case "$PNPM_TAG" in
-  v[0-9]*|[0-9]*) shift; [[ "$PNPM_TAG" == v* ]] || PNPM_TAG="v$PNPM_TAG" ;;
+  v[0-9]*|[0-9]*) [[ $# -gt 0 ]] && shift; [[ "$PNPM_TAG" == v* ]] || PNPM_TAG="v$PNPM_TAG" ;;
   *) PNPM_TAG="v${PNPM_PIN:-10.15.1}" ;;
 esac
 JEST_EXTRA=("$@")
