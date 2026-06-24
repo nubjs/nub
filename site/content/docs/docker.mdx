@@ -14,18 +14,20 @@ RUN nub install
 CMD ["nub", "run", "start"]
 ```
 
-Two variants, both on the current Node release line:
+Two variants, both on the current Node release line, digest-pinned and published for `linux/amd64` and `linux/arm64`:
 
 | Tag | Base | libc |
 |---|---|---|
-| `latest`, `slim` | `node:26-slim` | glibc |
-| `alpine` | `node:26-alpine` | musl |
+| `latest`, `<version>`, `slim`, `<version>-slim` | `node:26-slim` | glibc |
+| `alpine`, `<version>-alpine` | `node:26-alpine` | musl |
 
 Run a TypeScript file directly — the entrypoint passes any non-command argument to `nub`:
 
 ```bash
 docker run --rm -v "$PWD:/app" nubjs/nub script.ts
 ```
+
+The image runs as the non-root `node` user, and signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown.
 
 ## Adding nub to your own image
 
@@ -36,11 +38,11 @@ FROM node:26-slim
 RUN npm install -g @nubjs/nub
 ```
 
-On Alpine, add `libstdc++` for the native addon:
+On Alpine, add `libgcc` and `libstdc++` for the native addon:
 
 ```dockerfile
 FROM node:26-alpine
-RUN apk add --no-cache libstdc++ && npm install -g @nubjs/nub
+RUN apk add --no-cache libgcc libstdc++ && npm install -g @nubjs/nub
 ```
 
 To pin the floor Node version instead of the current line, use a `22` base (`node:22-slim` or `node:22-alpine`) — the lowest version nub's fast tier supports.
