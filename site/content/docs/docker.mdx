@@ -9,10 +9,12 @@ Nub augments the Node already in your image — it is not a separate runtime. Th
 
 ```dockerfile
 FROM nubjs/nub
-COPY . .
+COPY --chown=node:node . .
 RUN nub install
 CMD ["nub", "run", "start"]
 ```
+
+The image runs as the non-root `node` user, so copy your project in with `--chown=node:node` — a bare `COPY . .` lands root-owned files that `nub install` then can't write alongside.
 
 Two variants, both on the current Node release line, digest-pinned and published for `linux/amd64` and `linux/arm64`:
 
@@ -27,7 +29,7 @@ Run a TypeScript file directly — the entrypoint passes any non-command argumen
 docker run --rm -v "$PWD:/app" nubjs/nub script.ts
 ```
 
-The image runs as the non-root `node` user, and signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown.
+Signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown. The container runs as the non-root `node` user (uid 1000); when you bind-mount a directory that `nub install` must write into, run with `--user "$(id -u)"` so the writes land with your host ownership.
 
 ## Adding nub to your own image
 

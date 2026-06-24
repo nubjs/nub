@@ -26,16 +26,6 @@ FROM ${NODE_BASE}
 # publish workflow pins this to the release tag so the nub version is pinned.
 ARG NUB_VERSION=latest
 
-# OCI image labels — passed by the publish workflow so version/revision are accurate.
-ARG NUB_REVISION=""
-LABEL org.opencontainers.image.title="nub" \
-      org.opencontainers.image.description="TypeScript-first developer supertool — a fast script runner and TS runtime that augments Node" \
-      org.opencontainers.image.source="https://github.com/nubjs/nub" \
-      org.opencontainers.image.url="https://nubjs.com" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="${NUB_VERSION}" \
-      org.opencontainers.image.revision="${NUB_REVISION}"
-
 # tini reaps zombies as PID 1. nub already forwards SIGINT/SIGTERM/SIGHUP to its
 # Node child (crates/nub-core/src/node/spawn.rs), so signals are not the gap —
 # zombie reaping of re-parented grandchildren is. tini is the small, idiomatic
@@ -50,6 +40,17 @@ RUN apt-get update \
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/smoke.sh /usr/local/bin/smoke.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/smoke.sh
+
+# OCI labels last: NUB_REVISION changes every commit, so keeping the LABEL after
+# the heavy install RUN preserves that layer's cache across no-op rebuilds.
+ARG NUB_REVISION=""
+LABEL org.opencontainers.image.title="nub" \
+      org.opencontainers.image.description="TypeScript-first developer supertool — a fast script runner and TS runtime that augments Node" \
+      org.opencontainers.image.source="https://github.com/nubjs/nub" \
+      org.opencontainers.image.url="https://nubjs.com" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${NUB_VERSION}" \
+      org.opencontainers.image.revision="${NUB_REVISION}"
 
 # The official node base ships a non-root `node` user (uid/gid 1000). nub was
 # installed as root (so postinstall could chmod the binary for everyone), so the

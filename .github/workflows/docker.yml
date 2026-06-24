@@ -139,6 +139,12 @@ jobs:
       # arm64 leg builds under QEMU emulation (slow but cheap to add). This rebuilds
       # rather than reusing the loaded single-arch image — buildx cannot `load` a
       # multi-arch manifest, so the canonical pattern is build-and-push directly.
+      #
+      # Coverage note: the full smoke (TS run + PM install) above only exercises the
+      # runner-arch (amd64) image. Each arch IS build-time-verified — the Dockerfile's
+      # `RUN ... nub --version` executes per-platform under QEMU, proving the -musl/
+      # arm64 binary loads and reports a version — but the arm64 leg gets no full
+      # smoke. A QEMU arm64 smoke leg is a reasonable future addition.
       - name: Build + push ${{ matrix.variant }} (multi-arch)
         if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
