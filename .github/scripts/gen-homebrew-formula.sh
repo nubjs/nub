@@ -92,10 +92,12 @@ class Nub < Formula
   test do
     assert_match version.to_s, shell_output("#{bin}/nub --version")
 
-    # Prove runtime/ was installed correctly: a bare-binary install passes
-    # --version but cannot transpile TS (it needs runtime/preload).
-    (testpath/"hello.ts").write("const x: string = \"hi nub\";\nconsole.log(x);\n")
-    assert_equal "hi nub", shell_output("#{bin}/nub #{testpath}/hello.ts").strip
+    # Prove the runtime tree (preload + vendored polyfills + native addon) was
+    # installed alongside the binary — a bare-binary install would be missing it.
+    # Do NOT run a transpile here: \`brew test\` runs on a clean machine with no Node
+    # on PATH, and nub augments the user's Node rather than bundling one.
+    assert_path_exists libexec/"runtime/preload.mjs"
+    assert_path_exists libexec/"runtime/addons/nub-native.node"
   end
 end
 EOF
