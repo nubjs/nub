@@ -1,0 +1,38 @@
+# Official nub image — Alpine (musl) variant.
+#
+# Same model as Dockerfile.slim: start from an official `node:*-alpine` base (Node
+# already present) and layer nub via `npm install -g @nubjs/nub`. On musl, npm's
+# os/cpu filters resolve the `-musl` platform package, and nub's launcher detects
+# musl via Node's diagnostic report (`header.glibcVersionRuntime` absent) — so the
+# correct musl binary is both installed and dispatched. (See npm/nub/platform.js.)
+#
+# Base default = node:26-alpine. The 22-alpine floor/compat variant is this same
+# Dockerfile with NODE_BASE=22-alpine.
+#
+# Build:
+#   docker build -f docker/Dockerfile.alpine \
+#     --build-arg NUB_VERSION=0.1.14 -t nub:alpine .
+# Run:
+#   docker run --rm nub:alpine nub --version
+
+ARG NODE_BASE=26-alpine
+FROM node:${NODE_BASE}
+
+ARG NUB_VERSION=latest
+
+# libstdc++ is required by the native N-API addon (the prebuilt .node links it).
+# node:*-alpine ships libgcc but not libstdc++; add it explicitly. --no-cache keeps
+# the apk index out of the layer.
+RUN apk add --no-cache libstdc++ \
+    && npm install -g @nubjs/nub@${NUB_VERSION} \
+    && npm cache clean --force \
+    && nub --version
+
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/smoke.sh /usr/local/bin/smoke.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/smoke.sh
+
+WORKDIR /app
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["nub", "--help"]

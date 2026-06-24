@@ -1,0 +1,41 @@
+# Official nub image — Debian slim (glibc), the default variant.
+#
+# nub AUGMENTS the user's installed Node; it is not a self-contained runtime like
+# bun. So this image starts from an official `node:*` base (Node already present)
+# and layers nub on top via the released npm package `@nubjs/nub`. The per-platform
+# binary is selected by npm's os/cpu filters at install time, and the package's
+# postinstall sets the execute bit on the binary as the INSTALLER (root) — the
+# canonical "install as root, then drop to a non-root user" container pattern.
+#
+# Base default = node:26 (current release line). 22.x is only the fast-tier floor;
+# the floor/compat variant is Dockerfile.slim with NODE_BASE=22-slim, never the
+# default headline.
+#
+# Build:
+#   docker build -f docker/Dockerfile.slim \
+#     --build-arg NUB_VERSION=0.1.14 -t nub:slim .
+# Run:
+#   docker run --rm nub:slim nub --version
+
+ARG NODE_BASE=26-slim
+FROM node:${NODE_BASE}
+
+# The nub version to install. Defaults to the latest published @nubjs/nub; the
+# publish workflow pins this to the release tag so an image is reproducible.
+ARG NUB_VERSION=latest
+
+# Install nub globally as root so postinstall can chmod the binary for every user
+# (see npm/nub/postinstall.js). Clean the npm cache in the same layer to keep the
+# image small. node:*-slim already carries glibc + ca-certificates, so no apt step.
+RUN npm install -g @nubjs/nub@${NUB_VERSION} \
+    && npm cache clean --force \
+    && nub --version
+
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/smoke.sh /usr/local/bin/smoke.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/smoke.sh
+
+WORKDIR /app
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["nub", "--help"]

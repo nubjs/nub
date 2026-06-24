@@ -1,0 +1,46 @@
+---
+title: Docker
+description: Official nub Docker images, and how to add nub to your own image. The images install nub onto an official node base, so Node is present and the runtime is augmented out of the box.
+---
+
+Nub augments the Node already in your image — it is not a separate runtime. The official images start from an official `node` base and layer nub on top, so `node`, `npm`, and `nub` are all present.
+
+## Official images
+
+```dockerfile
+FROM nubjs/nub
+COPY . .
+RUN nub install
+CMD ["nub", "run", "start"]
+```
+
+Two variants, both on the current Node release line:
+
+| Tag | Base | libc |
+|---|---|---|
+| `latest`, `slim` | `node:26-slim` | glibc |
+| `alpine` | `node:26-alpine` | musl |
+
+Run a TypeScript file directly — the entrypoint passes any non-command argument to `nub`:
+
+```bash
+docker run --rm -v "$PWD:/app" nubjs/nub script.ts
+```
+
+## Adding nub to your own image
+
+If you already build on a `node` base, install nub with one line. npm selects the correct per-platform binary at install time — including the musl build on Alpine — and the package's postinstall sets the execute bit, so installing as root and then dropping to a non-root user works.
+
+```dockerfile
+FROM node:26-slim
+RUN npm install -g @nubjs/nub
+```
+
+On Alpine, add `libstdc++` for the native addon:
+
+```dockerfile
+FROM node:26-alpine
+RUN apk add --no-cache libstdc++ && npm install -g @nubjs/nub
+```
+
+To pin the floor Node version instead of the current line, use a `22` base (`node:22-slim` or `node:22-alpine`) — the lowest version nub's fast tier supports.

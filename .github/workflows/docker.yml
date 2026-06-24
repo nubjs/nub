@@ -1,0 +1,136 @@
+name: Docker image
+
+# Builds the official nub Docker images (Debian slim + Alpine), installing the
+# released @nubjs/nub npm package onto an official node:* base.
+#
+#   - On PR / push to main: build BOTH variants and run the in-image smoke test.
+#     Never pushes.
+#   - On a release tag (v*): build, smoke-test, then push to the configured
+#     registry.
+#
+# REGISTRY WIRING IS A MAINTAINER-OWNED TODO — see the `vars`/`secrets` below.
+# The registry choice (Docker Hub `nubjs/nub` vs GHCR `ghcr.io/nubjs/nub` vs both)
+# and the image name are deliberately NOT hardcoded. Set them at merge:
+#
+#   Repo variables (Settings → Secrets and variables → Actions → Variables):
+#     DOCKER_IMAGE   e.g. "nubjs/nub" (Docker Hub) or "ghcr.io/nubjs/nub" (GHCR)
+#     DOCKER_REGISTRY (optional) e.g. "ghcr.io" — omit for Docker Hub
+#   Secrets (only needed for the push leg):
+#     DOCKERHUB_TOKEN  (Docker Hub) — paired with the DOCKERHUB_USERNAME variable
+#     (GHCR uses the built-in GITHUB_TOKEN; no secret needed — see the login step.)
+#
+# Until DOCKER_IMAGE is set, the push leg is skipped (the `if` guards it), so this
+# workflow is safe to merge as build-and-smoke-only.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build + smoke (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: slim
+            dockerfile: docker/Dockerfile.slim
+            node_base: 26-slim
+          - variant: alpine
+            dockerfile: docker/Dockerfile.alpine
+            node_base: 26-alpine
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The nub version to bake in. On a release tag, install exactly that version;
+      # otherwise install the latest published @nubjs/nub.
+      - name: Resolve nub version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Build to a local image (load: true) so the smoke step can run it. Push is a
+      # separate step gated on release + DOCKER_IMAGE being configured.
+      - name: Build ${{ matrix.variant }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: nub-local:${{ matrix.variant }}
+          build-args: |
+            NODE_BASE=${{ matrix.node_base }}
+            NUB_VERSION=${{ steps.ver.outputs.value }}
+          cache-from: type=gha,scope=docker-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.variant }}
+
+      - name: Smoke test ${{ matrix.variant }} image
+        run: docker run --rm nub-local:${{ matrix.variant }} /usr/local/bin/smoke.sh
+
+      - name: Report image size
+        run: docker image inspect nub-local:${{ matrix.variant }} --format '${{ matrix.variant }} size: {{.Size}} bytes'
+
+      # ── PUBLISH (release tags only, and only once a registry is configured) ───
+      # MAINTAINER TODO: set the DOCKER_IMAGE repo variable to enable this. With it
+      # unset, this step no-ops on every event — the workflow stays build+smoke only.
+      - name: Log in to registry
+        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        uses: docker/login-action@v3
+        with:
+          # For GHCR: registry: ghcr.io, username: ${{ github.actor }},
+          #   password: ${{ secrets.GITHUB_TOKEN }} (no extra secret needed).
+          # For Docker Hub: omit registry, set DOCKERHUB_USERNAME var +
+          #   DOCKERHUB_TOKEN secret.
+          registry: ${{ vars.DOCKER_REGISTRY }}
+          username: ${{ vars.DOCKERHUB_USERNAME || github.actor }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # The slim variant carries the unsuffixed tags (`latest`, `<version>`);
+      # alpine is suffixed (`alpine`, `<version>-alpine`). Mirrors oven/bun.
+      - name: Compute push tags
+        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        id: tags
+        run: |
+          IMG="${{ vars.DOCKER_IMAGE }}"
+          VER="${{ steps.ver.outputs.value }}"
+          if [ "${{ matrix.variant }}" = "slim" ]; then
+            echo "list=${IMG}:latest,${IMG}:${VER},${IMG}:slim,${IMG}:${VER}-slim" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${IMG}:alpine,${IMG}:${VER}-alpine" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build + push ${{ matrix.variant }}
+        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          build-args: |
+            NODE_BASE=${{ matrix.node_base }}
+            NUB_VERSION=${{ steps.ver.outputs.value }}
+          cache-from: type=gha,scope=docker-${{ matrix.variant }}
