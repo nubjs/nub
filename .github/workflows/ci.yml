@@ -134,7 +134,15 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # shared-key (stable across runs, NOT per-ref) so PRs restore the warm cache
+      # main saves; save-if gates writes to main only, so PRs/tags are read-only and
+      # don't churn the 10GB/repo budget (the default per-(job,ref) key let every PR
+      # write its own cache). Per job-family because compiled artifacts differ by
+      # build profile (check=--all-targets debug vs test profile vs pnp debug build).
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --all-targets
       # Real Windows compile + test coverage is the windows-latest leg of the
       # `test` job. The previous fast `x86_64-pc-windows-gnu` cross-check needed
@@ -152,6 +160,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            crates/nub-native
       - run: cargo clippy --all-targets --all-features -- -D warnings
       # nub-native is its OWN workspace (split so the CLI uses panic=abort while
       # the cdylib stays panic=unwind), `exclude`d from the root workspace — so the
@@ -229,7 +243,15 @@ jobs:
       # files — checked out by the normal checkout, no submodule init needed.
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # Keyed by OS only (not the node version) so the 4 ubuntu node-tier legs
+      # share ONE cache instead of writing four. save-if:main → read-only on PRs.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-test-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            crates/nub-native
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
@@ -340,7 +362,15 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # Keyed by OS only so the node-tier legs share one cache; save-if:main →
+      # PRs restore main's warm cache read-only.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-pnp-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            crates/nub-native
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: ${{ matrix.node }}
