@@ -131,14 +131,6 @@ impl MinimumReleaseAge {
         self.exclude.matches_name_only(name)
     }
 
-    /// True when the picked `version` of `name` is exempt from the age
-    /// gate by either a name-only rule or a version-pinned rule listing
-    /// this exact version. This is the per-candidate predicate used inside
-    /// the pick so a `name@v1 || v2` entry exempts only those versions.
-    pub fn excludes_version(&self, name: &str, version: &node_semver::Version) -> bool {
-        self.exclude.matches(name, version)
-    }
-
     /// True when `name` has at least one version-pinned exclude rule, so
     /// the cutoff must be evaluated per-candidate rather than skipped for
     /// the whole package. `false` means the package's exclude rules (if
