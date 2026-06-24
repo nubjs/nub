@@ -382,6 +382,55 @@ supportedArchitectures:
 }
 
 #[test]
+fn yarnrc_translates_min_age_gate_to_minimum_release_age() {
+    // Yarn's `npmMinimalAgeGate` is a DURATION declared in MINUTES. A unit
+    // suffix is converted to minutes the way Yarn's parseDuration does
+    // (`7d` = 7 * 1440 = 10080 min); a bare number is already minutes; a
+    // sub-minute value rounds UP so it never collapses to 0 (disabling the
+    // gate). `npmPreapprovedPackages` → `minimumReleaseAgeExclude`.
+    let entries = translate_yarnrc_content(
+        "npmMinimalAgeGate: 7d\nnpmPreapprovedPackages:\n  - \"@acme/internal\"\n  - left-pad\n",
+    );
+    let age = entries
+        .iter()
+        .find(|(k, _)| k == "minimumReleaseAge")
+        .map(|(_, v)| v.as_str())
+        .expect("npmMinimalAgeGate must map to minimumReleaseAge");
+    assert_eq!(age, "10080", "7d must convert to 10080 minutes");
+    let exclude = entries
+        .iter()
+        .find(|(k, _)| k == "minimumReleaseAgeExclude")
+        .map(|(_, v)| v.as_str())
+        .expect("npmPreapprovedPackages must map to minimumReleaseAgeExclude");
+    assert_eq!(exclude, "@acme/internal,left-pad");
+
+    // Bare number = minutes (unitless DURATION path).
+    let bare = translate_yarnrc_content("npmMinimalAgeGate: 1440\n");
+    assert_eq!(
+        bare.iter()
+            .find(|(k, _)| k == "minimumReleaseAge")
+            .map(|(_, v)| v.as_str()),
+        Some("1440")
+    );
+
+    // Sub-minute gate rounds up to 1, never 0.
+    let sub = translate_yarnrc_content("npmMinimalAgeGate: 30s\n");
+    assert_eq!(
+        sub.iter()
+            .find(|(k, _)| k == "minimumReleaseAge")
+            .map(|(_, v)| v.as_str()),
+        Some("1")
+    );
+
+    // Unset gate emits no entry (yarn's `1d` default is yarn's, not nub's).
+    let unset = translate_yarnrc_content("nodeLinker: node-modules\n");
+    assert!(
+        unset.iter().all(|(k, _)| k != "minimumReleaseAge"),
+        "an unset npmMinimalAgeGate must not synthesize a minimumReleaseAge entry"
+    );
+}
+
+#[test]
 fn yarnrc_translates_npm_always_auth_top_level_and_per_registry() {
     // Top-level `npmAlwaysAuth` scopes to the default registry; a
     // per-registry `npmRegistries.<url>.npmAlwaysAuth` scopes to that host.

@@ -773,9 +773,9 @@ fn apply_config_scope(
     let (effective, ignored) = config_scope::scope_overrides(role, major, minor, &tagged);
 
     // Register the scoped source as the engine's sole override source, and
-    // the trusted-deps toggle (only bun, only below the major that dropped
-    // it, honors `trustedDependencies`). Both are idempotent OnceLocks.
-    let trusted = config_scope::honors_trusted_dependencies(role, major);
+    // the trusted-deps toggle (only bun honors `trustedDependencies`). Both
+    // are idempotent OnceLocks.
+    let trusted = config_scope::honors_trusted_dependencies(role);
     aube_util::update_engine_context(|c| {
         c.embedder_overrides = Some(effective);
         c.trusted_dependencies_honored = trusted;
