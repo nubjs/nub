@@ -42,6 +42,8 @@ If that prints a version, go to step 2. If it's not found, tell the user you'd l
 curl -fsSL https://nubjs.com/install.sh | bash
 # Windows (PowerShell)
 irm https://nubjs.com/install.ps1 | iex
+# Homebrew (macOS / Linux)
+brew install nubjs/tap/nub
 # or via any package manager
 npm install -g @nubjs/nub
 ```

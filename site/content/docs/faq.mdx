@@ -366,7 +366,7 @@ That installs the Rust binary (via the usual `@<scope>/<platform-arch>` npm dist
 npm install -g --ignore-scripts=false @nubjs/nub@latest
 ```
 
-Same as installing. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
+Same as installing — match how you installed: `brew upgrade nub` for a Homebrew install, otherwise re-run your installer. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
 
 ## Is there a curl install script?
 
