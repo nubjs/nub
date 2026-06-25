@@ -3082,7 +3082,9 @@ fn single_package_run_echoes_command_to_stderr_unless_silent() {
     // #146: forwarded CLI args appear in the echoed preamble, spliced + escaped
     // exactly as executed, so the displayed command matches the effective one. A
     // metachar arg is shell-quoted in the echo (and reaches the script as one
-    // literal token), proving the echo reflects the real escaped command.
+    // literal token), proving the echo reflects the real escaped command. The
+    // escaping is shell-specific: POSIX `sh` single-quotes, Windows `cmd.exe`
+    // caret-escapes, so the expected preamble and echoed output differ per OS.
     let out_args = Command::new(nub_binary())
         .args(["run", "greet", "--", "brave new world"])
         .current_dir(&fixture)
@@ -3091,12 +3093,20 @@ fn single_package_run_echoes_command_to_stderr_unless_silent() {
     let stderr_args = String::from_utf8_lossy(&out_args.stderr);
     let stdout_args = String::from_utf8_lossy(&out_args.stdout);
     assert_eq!(out_args.status.code(), Some(0), "stderr: {stderr_args}");
+    let (want_preamble, want_output) = if cfg!(windows) {
+        (
+            "$ echo hello ^\"brave^ new^ world^\"",
+            "hello \"brave new world\"",
+        )
+    } else {
+        ("$ echo hello 'brave new world'", "hello brave new world")
+    };
     assert!(
-        stderr_args.contains("$ echo hello 'brave new world'"),
+        stderr_args.contains(want_preamble),
         "the preamble must include the escaped forwarded args: {stderr_args:?}"
     );
     assert!(
-        stdout_args.contains("hello brave new world"),
+        stdout_args.contains(want_output),
         "the forwarded args must still reach the script unchanged: {stdout_args:?}"
     );
 }
