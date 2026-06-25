@@ -28,8 +28,8 @@
 // loader worker, not a user realm, so it installs no browser globals.)
 import "./floor-builtin.mjs";
 import {
-  TRANSPILE_EXTS, DATA_EXTS,
-  extname, resolveSpec, loadTranspile, loadData, isNodeModules,
+  TRANSPILE_EXTS, PLAIN_JS_EXTS, DATA_EXTS,
+  extname, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, isNodeModules,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -96,6 +96,14 @@ export async function load(url, context, nextLoad) {
     // warm-up needed (the old `await ensureParser()` for the ESM-only oxc-parser
     // is gone with the package).
     return loadTranspile(url, ext);
+  }
+  // Project-source plain JS: transpile ONLY when it carries transformable syntax. A
+  // no-op plain-JS file returns null and falls through to `nextLoad` — Node's own
+  // loader handles it byte-identically, preserving every native CJS/ESM behavior.
+  // node_modules excluded (the byte-parity boundary).
+  if (PLAIN_JS_EXTS.has(ext) && !isNodeModules(url)) {
+    const r = maybeTranspilePlainJs(url, ext);
+    if (r) return r;
   }
   if (ext in DATA_EXTS) return loadData(url, ext);
   return nextLoad(url, context);
