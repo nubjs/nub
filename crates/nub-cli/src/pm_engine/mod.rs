@@ -59,6 +59,7 @@ pub mod install_family;
 pub mod log;
 pub mod present;
 pub mod publish_family;
+mod resource_limits;
 pub mod store_config_family;
 pub mod unsupported_config;
 pub mod use_align;
@@ -1886,17 +1887,88 @@ pub(crate) fn env_snapshot() -> Vec<(String, String)> {
 /// (`vendor/aube/crates/aube/src/lib.rs`): workers capped at 8 (the install
 /// semaphore already gates network), blocking pool at 128 (tarball decode +
 /// linker fan-out). The AUBE_TOKIO_* benchmark overrides are not honored here.
+///
+/// CONSTRAINT-AWARE sizing: on a resource-constrained box (a tight cgroup
+/// `pids.max` or low `RLIMIT_NPROC`) the unbounded `128` blocking pool plus the
+/// parallel native postinstalls can drive the total thread+process count past
+/// the kernel ceiling; tokio then PANICS when `clone(2)` returns `EAGAIN` growing
+/// its blocking pool, which under `panic = "abort"` aborts the whole install
+/// (the `nub ci` exit-101). When [`resource_limits::spawn_headroom`] detects a
+/// constraint we shrink BOTH pools to fit the headroom; on an unconstrained box
+/// it returns `None` and we keep the full-speed defaults — so normal-box install
+/// performance is untouched.
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
-    let workers = std::thread::available_parallelism()
+    // Lower the parallel build-script count under a detected constraint BEFORE the
+    // runtime is built (single-threaded here, so the env mutation is race-free).
+    apply_constrained_child_concurrency();
+
+    let cpu = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(4)
-        .min(8);
+        .unwrap_or(4);
+    let mut workers = cpu.min(8);
+    let mut blocking = 128usize;
+
+    if let Some(headroom) = resource_limits::spawn_headroom() {
+        // Split the headroom between worker threads (a small fixed share — the
+        // install is IO-bound, not CPU-bound) and the blocking pool (the larger
+        // share, since tarball decode + CAS writes dominate the OS-thread peak).
+        // Clamp each to a sane floor so the install still makes progress.
+        workers = workers.min(headroom / 4).max(2);
+        blocking = blocking.min(headroom).max(4);
+        tracing::debug!(
+            headroom,
+            workers,
+            blocking,
+            "constrained box detected: capping install runtime pools under the PID/thread ceiling"
+        );
+    }
+
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
-        .max_blocking_threads(128)
+        .max_blocking_threads(blocking)
         .enable_all()
         .build()
         .context("failed to build the install engine's tokio runtime")
+}
+
+/// When the box is resource-constrained, lower the parallel build-script process
+/// count (aube's `child_concurrency`, default 5) so the peak native-postinstall
+/// fan-out — each spawning Go/Rust grandchildren — stays under the PID ceiling.
+/// nub exports this through the engine's env (aube resolves `child_concurrency`
+/// from `npm_config_child_concurrency` / `AUBE_CHILD_CONCURRENCY`), so standalone
+/// aube is UNCHANGED — only nub, on a detected constraint, asks for fewer
+/// parallel builds. A user/CI-set value already in the env is left untouched.
+///
+/// SAFETY: called before the engine runs, single-threaded at that point (the
+/// install runtime is built after this), so the `set_var` is not racing other
+/// threads reading the environment.
+fn apply_constrained_child_concurrency() {
+    // Respect an explicit user/CI choice — never override a value they set.
+    const KEYS: [&str; 3] = [
+        "npm_config_child_concurrency",
+        "NPM_CONFIG_CHILD_CONCURRENCY",
+        "AUBE_CHILD_CONCURRENCY",
+    ];
+    if KEYS.iter().any(|k| std::env::var_os(k).is_some()) {
+        return;
+    }
+    let Some(headroom) = resource_limits::spawn_headroom() else {
+        return; // unconstrained — keep aube's default of 5
+    };
+    // Each parallel build budgets for a handful of grandchild processes/threads;
+    // divide the headroom accordingly and clamp to [1, 5] (never above the
+    // default, never below serial).
+    const PER_BUILD_BUDGET: usize = 8;
+    let capped = (headroom / PER_BUILD_BUDGET).clamp(1, 5);
+    // SAFETY: see the doc comment — single-threaded at call time.
+    unsafe {
+        std::env::set_var("AUBE_CHILD_CONCURRENCY", capped.to_string());
+    }
+    tracing::debug!(
+        headroom,
+        child_concurrency = capped,
+        "constrained box detected: lowering parallel build-script concurrency"
+    );
 }
 
 // ───────────────────────── fd capture ──────────────────────────
@@ -1951,19 +2023,64 @@ pub(crate) fn with_fd_captured<T>(fd: libc::c_int, f: impl FnOnce() -> T) -> (T,
         }
         libc::close(write_end);
         // Drain concurrently so a full pipe buffer can never deadlock `f`.
-        let mut reader = std::fs::File::from_raw_fd(read_end);
-        let drain = std::thread::spawn(move || {
+        // `Builder::spawn` (returns `io::Result`) over `thread::spawn` (which
+        // PANICS — and under `panic = "abort"` aborts the process — on
+        // thread-create EAGAIN under thread/PID pressure). On spawn failure we
+        // fall back to running `f` first and draining inline afterwards: this
+        // capture path is `config get registry`, whose output is a few bytes
+        // (well under the pipe buffer), so the post-`f` drain cannot deadlock.
+        // Probe thread availability with a trivial throwaway thread BEFORE moving
+        // the reader into a doomed spawn (`Builder::spawn` consumes its closure
+        // even on `Err`, so we can't recover the reader after a failed spawn).
+        let can_spawn = std::thread::Builder::new()
+            .name("nub-fd-capture-probe".into())
+            .spawn(|| {})
+            .map(|p| {
+                let _ = p.join();
+            })
+            .is_ok();
+        if can_spawn {
+            let mut reader = std::fs::File::from_raw_fd(read_end);
+            let drain = std::thread::Builder::new()
+                .name("nub-fd-capture".into())
+                .spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = reader.read_to_end(&mut buf);
+                    buf
+                });
+            match drain {
+                Ok(drain) => {
+                    let result = f();
+                    flush(fd); // post-run: push f's buffered tail into the pipe
+                    libc::dup2(saved, fd);
+                    libc::close(saved);
+                    // fd restored + our write end closed ⇒ the drain sees EOF.
+                    let bytes = drain.join().unwrap_or_default();
+                    (result, String::from_utf8_lossy(&bytes).into_owned())
+                }
+                Err(_) => {
+                    // Probe passed but the real spawn raced to failure: `reader`
+                    // is consumed, so close our read end and skip the capture.
+                    let result = f();
+                    flush(fd);
+                    libc::dup2(saved, fd);
+                    libc::close(saved);
+                    (result, String::new())
+                }
+            }
+        } else {
+            // No drain thread available. Run `f`, restore the fd, then drain the
+            // (few-byte `config get registry`) capture inline — too small to fill
+            // the pipe buffer, so a post-`f` drain cannot deadlock.
+            let result = f();
+            flush(fd);
+            libc::dup2(saved, fd);
+            libc::close(saved);
+            let mut reader = std::fs::File::from_raw_fd(read_end);
             let mut buf = Vec::new();
             let _ = reader.read_to_end(&mut buf);
-            buf
-        });
-        let result = f();
-        flush(fd); // post-run: push f's buffered tail into the pipe
-        libc::dup2(saved, fd);
-        libc::close(saved);
-        // fd restored + our write end closed ⇒ the drain thread sees EOF.
-        let bytes = drain.join().unwrap_or_default();
-        (result, String::from_utf8_lossy(&bytes).into_owned())
+            (result, String::from_utf8_lossy(&buf).into_owned())
+        }
     }
 }
 

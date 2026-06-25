@@ -2693,75 +2693,82 @@ fn run_workspace_target(
             let (tx, rx) = mpsc::channel::<usize>();
             let rx = Arc::new(std::sync::Mutex::new(rx));
 
-            let num_workers = concurrency.min(chunk.len());
-            let workers: Vec<_> = (0..num_workers)
-                .map(|_| {
-                    let rx = Arc::clone(&rx);
-                    let failed = Arc::clone(&failed);
-                    let ran = Arc::clone(&ran);
-                    // Clone the selected members so they cross the thread boundary
-                    // (the borrowed `&members` slice can't be `move`d); paired with
-                    // their original index for the prefix color. `WorkspacePackage`
-                    // derives Clone, so this replaces the prior 4-field tuple
-                    // snapshot with one structured clone.
-                    let members_snapshot: Vec<(
-                        usize,
-                        nub_core::workspace::filter::WorkspacePackage,
-                    )> = chunk
+            // The per-worker loop body, factored out so it backs BOTH a spawned
+            // worker thread and the inline fallback (when thread creation fails
+            // under resource pressure). Each invocation pulls indices from the
+            // shared channel until it drains, so any number of live workers — even
+            // one, even the calling thread — completes ALL the work; thread-create
+            // EAGAIN only costs parallelism, never correctness.
+            let run_worker = |rx: Arc<std::sync::Mutex<mpsc::Receiver<usize>>>,
+                              failed: Arc<AtomicUsize>,
+                              ran: Arc<AtomicUsize>| {
+                let members_snapshot: Vec<(usize, nub_core::workspace::filter::WorkspacePackage)> =
+                    chunk
                         .iter()
                         .map(|&idx| (idx, members[idx].clone()))
                         .collect();
-                    let ws_root_buf = ws_root.to_path_buf();
-                    // Owned target + per-script knobs so they cross the thread
-                    // boundary; reconstituted into the borrowed forms inside the
-                    // worker (the borrowed forms can't be `move`d).
-                    let target = OwnedTarget::from(target);
-                    let ignore_scripts = exec.ignore_scripts;
-                    let script_shell = ws.script_shell.clone();
+                let ws_root_buf = ws_root.to_path_buf();
+                let target = OwnedTarget::from(target);
+                let ignore_scripts = exec.ignore_scripts;
+                let script_shell = ws.script_shell.clone();
 
-                    thread::spawn(move || {
-                        let exec = ScriptExecOpts {
-                            ignore_scripts,
-                            script_shell: script_shell.as_deref(),
-                        };
-                        let target = target.borrow();
-                        loop {
-                            let work_idx = match rx.lock() {
-                                Ok(guard) => match guard.recv() {
-                                    Ok(idx) => idx,
-                                    Err(_) => break,
-                                },
+                move || {
+                    let exec = ScriptExecOpts {
+                        ignore_scripts,
+                        script_shell: script_shell.as_deref(),
+                    };
+                    let target = target.borrow();
+                    loop {
+                        let work_idx = match rx.lock() {
+                            Ok(guard) => match guard.recv() {
+                                Ok(idx) => idx,
                                 Err(_) => break,
-                            };
-                            if bail && failed.load(AtomicOrdering::Relaxed) > 0 {
-                                continue;
-                            }
-                            let Some((_, member)) =
-                                members_snapshot.iter().find(|(i, _)| *i == work_idx)
-                            else {
-                                continue;
-                            };
-                            let leaf = MemberLeaf {
-                                compat_mode,
-                                // The concurrent path always streams (prefixed) —
-                                // its whole reason for existing is interleaved output.
-                                stream: true,
-                                color_idx: work_idx,
-                                exec: &exec,
-                                aggregate,
-                            };
-                            match run_one_member(target, member, &ws_root_buf, &leaf) {
-                                MemberOutcome::Ran(0) => {
-                                    ran.fetch_add(1, AtomicOrdering::Relaxed);
-                                }
-                                MemberOutcome::Ran(_) => {
-                                    ran.fetch_add(1, AtomicOrdering::Relaxed);
-                                    failed.fetch_add(1, AtomicOrdering::Relaxed);
-                                }
-                                MemberOutcome::SkippedMissingScript => {}
-                            }
+                            },
+                            Err(_) => break,
+                        };
+                        if bail && failed.load(AtomicOrdering::Relaxed) > 0 {
+                            continue;
                         }
-                    })
+                        let Some((_, member)) =
+                            members_snapshot.iter().find(|(i, _)| *i == work_idx)
+                        else {
+                            continue;
+                        };
+                        let leaf = MemberLeaf {
+                            compat_mode,
+                            // The concurrent path always streams (prefixed) —
+                            // its whole reason for existing is interleaved output.
+                            stream: true,
+                            color_idx: work_idx,
+                            exec: &exec,
+                            aggregate,
+                        };
+                        match run_one_member(target, member, &ws_root_buf, &leaf) {
+                            MemberOutcome::Ran(0) => {
+                                ran.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                            MemberOutcome::Ran(_) => {
+                                ran.fetch_add(1, AtomicOrdering::Relaxed);
+                                failed.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                            MemberOutcome::SkippedMissingScript => {}
+                        }
+                    }
+                }
+            };
+
+            let num_workers = concurrency.min(chunk.len());
+            // `Builder::spawn` (returns `io::Result`) over `thread::spawn` (which
+            // PANICS — and under `panic = "abort"` aborts the install — on
+            // thread-create EAGAIN under PID/thread pressure). A worker that fails
+            // to spawn is simply absent; the survivors drain the whole queue.
+            let workers: Vec<_> = (0..num_workers)
+                .filter_map(|i| {
+                    let body = run_worker(Arc::clone(&rx), Arc::clone(&failed), Arc::clone(&ran));
+                    thread::Builder::new()
+                        .name(format!("nub-run-worker-{i}"))
+                        .spawn(body)
+                        .ok()
                 })
                 .collect();
 
@@ -2769,6 +2776,13 @@ fn run_workspace_target(
                 let _ = tx.send(idx);
             }
             drop(tx);
+
+            // If EVERY worker failed to spawn (total thread exhaustion), drain the
+            // queue inline on the calling thread so the work still completes —
+            // serially, but never lost, and never a panic/abort.
+            if workers.is_empty() {
+                run_worker(Arc::clone(&rx), Arc::clone(&failed), Arc::clone(&ran))();
+            }
 
             for w in workers {
                 let _ = w.join();
@@ -3486,6 +3500,109 @@ fn run_single_script_prefixed(
 /// serialize the script *runs* themselves — only their final output emission.
 static AGGREGATE_FLUSH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Inputs a pipe-drain reader needs, owned so they can cross the thread boundary
+/// OR be consumed inline on the current thread. Bundled into one struct so the
+/// SAME drain logic backs both the spawned-thread and the spawn-failure-inline
+/// fallback paths (`Builder::spawn` consumes its closure and never returns it on
+/// `Err`, so the inline fallback must own the inputs separately — hence this
+/// struct, moved into whichever path runs).
+struct PipeDrain<R: std::io::Read> {
+    stream: Option<R>,
+    ndjson: bool,
+    aggregate: bool,
+    is_stderr: bool,
+    prefix: String,
+    name: String,
+    script: String,
+}
+
+/// The outcome of [`PipeDrain::spawn`]: either a join handle (the drain runs on
+/// its own thread) or the already-collected lines (thread creation failed under
+/// resource pressure, so the drain ran inline as a fallback).
+enum DrainHandle {
+    Thread(std::thread::JoinHandle<Vec<String>>),
+    Inline(Vec<String>),
+}
+
+impl DrainHandle {
+    fn collect(self) -> Vec<String> {
+        match self {
+            DrainHandle::Thread(h) => h.join().unwrap_or_default(),
+            DrainHandle::Inline(lines) => lines,
+        }
+    }
+}
+
+impl<R: std::io::Read + Send + 'static> PipeDrain<R> {
+    /// Put this drain on its own thread, degrading to an INLINE drain when the OS
+    /// can't create a thread (`EAGAIN` under thread/PID exhaustion). The bare
+    /// `thread::spawn` would PANIC there — and under `panic = "abort"` abort the
+    /// whole process — which is the latent install crash this guards. The reader
+    /// is LOAD-BEARING (a missing one deadlocks the child on a full pipe buffer),
+    /// so on resource pressure we must still drain it, just without a thread.
+    ///
+    /// `Builder::spawn` consumes its closure even on `Err`, so we can't try the
+    /// real spawn and recover `self`. Instead we PROBE thread availability with a
+    /// trivial throwaway thread first: if that spawns and joins, real thread
+    /// creation will (near-certainly) succeed and we spawn the drain; if the
+    /// probe fails we drain inline without ever moving `self` into a doomed
+    /// spawn. The probe costs one cheap thread create only on the success path.
+    fn spawn(self, thread_name: &str) -> DrainHandle {
+        let probe = std::thread::Builder::new()
+            .name(format!("{thread_name}-probe"))
+            .spawn(|| {});
+        match probe {
+            Ok(p) => {
+                let _ = p.join();
+                match std::thread::Builder::new()
+                    .name(thread_name.into())
+                    .spawn(move || self.run())
+                {
+                    Ok(h) => DrainHandle::Thread(h),
+                    // Probe succeeded but the real spawn still failed — a genuine
+                    // race right at the resource ceiling. `self` is already
+                    // consumed, so we can't inline-drain; return empty. This loses
+                    // this stream's captured lines in that vanishingly-rare double
+                    // race, which is still strictly better than the panic/abort
+                    // the bare `thread::spawn` would have caused.
+                    Err(_) => DrainHandle::Inline(Vec::new()),
+                }
+            }
+            Err(_) => DrainHandle::Inline(self.run()),
+        }
+    }
+
+    /// Drain the pipe to completion, returning the prefixed lines (and emitting
+    /// them live unless `aggregate`). Consumes `self`; runs identically on a
+    /// drain thread or inline.
+    fn run(self) -> Vec<String> {
+        use std::io::BufRead as _;
+        let mut lines = Vec::new();
+        if let Some(stream) = self.stream {
+            for line in std::io::BufReader::new(stream)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if self.ndjson {
+                    let level = if self.is_stderr { "error" } else { "info" };
+                    emit_ndjson("log", level, &self.name, &self.script, Some(&line), None);
+                    continue;
+                }
+                let prefixed = format!("{}{line}", self.prefix);
+                if !self.aggregate {
+                    if self.is_stderr {
+                        eprintln!("{prefixed}");
+                    } else {
+                        println!("{prefixed}");
+                    }
+                }
+                lines.push(prefixed);
+            }
+        }
+        lines
+    }
+}
+
 /// Spawn a script with piped stdout/stderr, prefixing each output line
 /// with `<prefix> <script>: `. Returns (exit_code, collected_output).
 ///
@@ -3506,7 +3623,7 @@ fn spawn_script_prefixed(
     exec: &ScriptExecOpts,
     aggregate: bool,
 ) -> Result<(i32, String)> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
 
     let mut command = build_script_command(
         cmd,
@@ -3519,7 +3636,7 @@ fn spawn_script_prefixed(
     )?;
 
     nub_core::node::spawn::group_on_spawn(&mut command);
-    let mut child = command.spawn()?;
+    let mut child = nub_core::node::spawn::spawn_with_eagain_retry(&mut command)?;
     // Relay docker stop / Ctrl-C to the streamed child's whole process group too
     // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
     nub_core::node::spawn::track_child_group(child.id());
@@ -3548,48 +3665,40 @@ fn spawn_script_prefixed(
     let (name_out, script_out) = (pkg_name.clone(), script_name.to_string());
     let (name_err, script_err) = (pkg_name.clone(), script_name.to_string());
 
-    // In aggregate mode the reader threads collect prefixed lines instead of
+    // In aggregate mode the reader drains collect prefixed lines instead of
     // emitting them live; the parent flushes the buffered blocks once, below.
-    let out_handle = std::thread::spawn(move || {
-        let mut lines = Vec::new();
-        if let Some(stdout) = stdout {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if ndjson {
-                    emit_ndjson("log", "info", &name_out, &script_out, Some(&line), None);
-                    continue;
-                }
-                let prefixed = format!("{prefix_out}{line}");
-                if !aggregate {
-                    println!("{prefixed}");
-                }
-                lines.push(prefixed);
-            }
-        }
-        lines
-    });
+    let out_drain = PipeDrain {
+        stream: stdout,
+        ndjson,
+        aggregate,
+        is_stderr: false,
+        prefix: prefix_out,
+        name: name_out,
+        script: script_out,
+    };
+    let err_drain = PipeDrain {
+        stream: stderr,
+        ndjson,
+        aggregate,
+        is_stderr: true,
+        prefix: prefix_err,
+        name: name_err,
+        script: script_err,
+    };
 
-    let err_handle = std::thread::spawn(move || {
-        let mut lines = Vec::new();
-        if let Some(stderr) = stderr {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if ndjson {
-                    emit_ndjson("log", "error", &name_err, &script_err, Some(&line), None);
-                    continue;
-                }
-                let prefixed = format!("{prefix_err}{line}");
-                if !aggregate {
-                    eprintln!("{prefixed}");
-                }
-                lines.push(prefixed);
-            }
-        }
-        lines
-    });
+    // The pipe drains are LOAD-BEARING — a missing reader deadlocks the child on a
+    // full pipe buffer. `PipeDrain::spawn` guards against OS thread-create EAGAIN
+    // (the bare `thread::spawn` would PANIC, and under `panic = "abort"` abort the
+    // process) by degrading to an inline drain. The stdout drain goes on its own
+    // thread; the stderr drain runs on THIS thread, concurrently — so under
+    // resource pressure stderr still drains live while stdout's thread (or its
+    // inline fallback) drains too.
+    let out_handle = out_drain.spawn("nub-script-stdout");
+    let err_lines = err_drain.run();
+    let out_lines = out_handle.collect();
 
     let status = child.wait()?;
     nub_core::node::spawn::untrack_child();
-    let out_lines = out_handle.join().unwrap_or_default();
-    let err_lines = err_handle.join().unwrap_or_default();
     let exit_code = nub_core::node::spawn::exit_code_from_status(&status);
     if ndjson {
         emit_ndjson(

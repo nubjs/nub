@@ -206,7 +206,16 @@ impl CiState {
 
     pub(super) fn spawn_heartbeat(state: &Arc<Self>) {
         let thread_state = state.clone();
-        let handle = thread::spawn(move || {
+        // The heartbeat is a cosmetic progress ticker — never load-bearing for the
+        // install. Use `Builder::spawn` (returns `io::Result`) instead of
+        // `thread::spawn` (which PANICS on OS thread-create failure) so that under
+        // peak PID/thread pressure an EAGAIN degrades to "no ticker" rather than
+        // taking the process down. This matters acutely under `panic = "abort"`:
+        // an unguarded panic here would abort the whole install. `stop()` already
+        // tolerates a `None` heartbeat handle, so skipping it is fully safe.
+        let spawned = thread::Builder::new()
+            .name("aube-ci-heartbeat".into())
+            .spawn(move || {
             let state = thread_state;
             loop {
                 let guard = state.wake_lock.lock().unwrap();
@@ -255,7 +264,9 @@ impl CiState {
                 let _ = writeln!(std::io::stderr(), "{line}");
             }
         });
-        *state.heartbeat.lock().unwrap() = Some(handle);
+        // On spawn failure (e.g. EAGAIN under thread/PID exhaustion) leave the
+        // handle `None` — the install proceeds without the cosmetic ticker.
+        *state.heartbeat.lock().unwrap() = spawned.ok();
     }
 
     pub(super) fn set_phase(&self, phase: &str) {
