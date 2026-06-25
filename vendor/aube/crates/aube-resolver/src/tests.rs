@@ -822,6 +822,30 @@ fn classify_regime_unparseable_pick_is_current() {
 }
 
 #[test]
+fn range_resolves_via_dist_tag_detection() {
+    use crate::semver_util::range_resolves_via_dist_tag;
+    let mut packument = make_packument("foo", &["1.0.0", "2.0.0"], "2.0.0");
+    packument
+        .dist_tags
+        .insert("next".to_string(), "2.0.0".to_string());
+
+    // Dist-tags: `latest` (always, even absent the tag) + any tag the
+    // packument carries.
+    assert!(range_resolves_via_dist_tag(&packument, "latest"));
+    assert!(range_resolves_via_dist_tag(&packument, "next"));
+    // Semver ranges are never dist-tags.
+    assert!(!range_resolves_via_dist_tag(&packument, "^1.0.0"));
+    assert!(!range_resolves_via_dist_tag(&packument, "1.2.3"));
+    assert!(!range_resolves_via_dist_tag(&packument, "*"));
+    // An unknown bareword that isn't a published tag is not a dist-tag
+    // (pick_version returns NoMatch for it; it must not force a refetch).
+    assert!(!range_resolves_via_dist_tag(&packument, "beta"));
+    // Protocol-shaped specs are never tags (dependency-confusion guard).
+    assert!(!range_resolves_via_dist_tag(&packument, "workspace:*"));
+    assert!(!range_resolves_via_dist_tag(&packument, "evil:steal"));
+}
+
+#[test]
 fn test_pick_version_locked_out_of_range() {
     let packument = make_packument("foo", &["1.0.0", "2.0.0"], "2.0.0");
     // Locked version doesn't satisfy range, should pick highest match
@@ -1492,6 +1516,128 @@ async fn primer_serves_frozen_pick_offline_even_on_an_aged_binary() {
         aged_hits, 0,
         "evergreen default: aged binary must STILL serve the frozen pick \
          offline (unlimited TTL + always-on pick-gate), but the registry was hit"
+    );
+}
+
+/// Regression for issue #135: a `latest` (dist-tag) spec must be
+/// re-read LIVE when the pick was served from the bundled primer — the
+/// primer bakes the tag's value at build time, and a dist-tag is a
+/// mutable pointer the publisher can repoint afterwards. The reported
+/// symptom: a binary built when `vite@latest` = 8.0.16 kept resolving
+/// `"vite": "latest"` to 8.0.16 long after the registry repointed
+/// `latest` to 8.1.0 (`aube update` served the stale primer pick while
+/// `aube install`'s fresh-resolve refetched — so the two diverged and
+/// `update` silently DOWNGRADED a correctly-installed 8.1.0).
+///
+/// Setup: pick a real primer entry, stand up a registry whose `latest`
+/// points to a version STRICTLY NEWER than the primer's baked latest,
+/// request `"latest"`, and assert the resolver picks the live newer
+/// version. Before the dist-tag arm in `primer_pick_needs_refetch` this
+/// resolved to the primer's stale latest with zero registry hits.
+#[tokio::test]
+async fn primer_dist_tag_pick_refetches_when_registry_repointed_latest() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // A real primer entry whose baked `latest` parses as semver AND
+    // resolves standalone (no runtime/peer/optional deps on the latest
+    // version), so the single-package mock registry is sufficient and the
+    // only failure mode is the version assertion below. Skip honestly on
+    // an empty primer.
+    let Some((name, primer_latest)) = crate::primer::names().find_map(|name| {
+        let pkt = crate::primer::get(name)?.packument();
+        let latest = pkt.dist_tags.get("latest")?.clone();
+        node_semver::Version::parse(&latest).ok()?;
+        let meta = pkt.versions.get(&latest)?;
+        (meta.dependencies.is_empty()
+            && meta.optional_dependencies.is_empty()
+            && meta.peer_dependencies.is_empty())
+        .then(|| (name.to_string(), latest))
+    }) else {
+        return;
+    };
+    let live_latest = {
+        let p = node_semver::Version::parse(&primer_latest).unwrap();
+        // A strictly-higher version the primer's slice does NOT carry, so
+        // the only way to resolve it is reading the live registry.
+        format!("{}.{}.{}", p.major, p.minor, p.patch + 1)
+    };
+
+    // Live registry: serves a full packument whose `latest` = the newer
+    // version. Any request reaching it means the dist-tag was re-read
+    // live (the fix); zero requests means the stale primer pick was
+    // served (the bug).
+    let mut full = make_packument(&name, &[&primer_latest, &live_latest], &live_latest);
+    full.modified = Some("2024-01-01T00:00:00.000Z".to_string());
+    full.time
+        .insert(primer_latest.clone(), "2024-01-01T00:00:00.000Z".to_string());
+    full.time
+        .insert(live_latest.clone(), "2024-01-02T00:00:00.000Z".to_string());
+    let full_body = serde_json::to_vec(&full).unwrap();
+
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let full_body = full_body.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0_u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    full_body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&full_body).await;
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-disttag-refetch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(base.join("packuments")).unwrap();
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    // `force_metadata_primer` routes the mock registry through the primer
+    // seed so the offline `latest` is the baked value; no cutoff, so only
+    // the dist-tag arm can force the refetch.
+    let mut resolver = Resolver::new(client)
+        .with_packument_cache(base.join("packuments"))
+        .with_force_metadata_primer(true);
+    let mut manifest = PackageJson::default();
+    manifest.dependencies.insert(name.clone(), "latest".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .unwrap_or_else(|e| panic!("resolve of {name}@latest failed: {e}"));
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+
+    assert!(
+        graph_has_package(&graph, &name, &live_latest),
+        "`{name}@latest` resolved to the primer's stale baked latest \
+         ({primer_latest}) instead of the registry's repointed latest \
+         ({live_latest}); the dist-tag pick was not re-read live \
+         ({} registry requests seen)",
+        hits.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert!(
+        hits.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "a primer-seeded `latest` pick must touch the registry to \
+         re-validate the dist-tag pointer; zero requests means the stale \
+         primer value was served"
     );
 }
 

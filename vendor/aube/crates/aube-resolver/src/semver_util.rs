@@ -208,6 +208,31 @@ pub(crate) fn pick_version<'a>(
     PickResult::NoMatch
 }
 
+/// True when `range_str` is a dist-tag reference (`latest`, `next`, a
+/// custom tag) rather than a semver range — i.e. `pick_version` would
+/// resolve it through `packument.dist_tags` (or the bare-`latest`
+/// highest-stable fallback) instead of parsing it as a range.
+///
+/// A dist-tag is a *mutable pointer* the publisher can repoint at any
+/// time, so the primer's build-time snapshot of it cannot be trusted the
+/// way an immutable semver-range pick can: `classify_regime` (which keys
+/// freshness on the picked version's position in settled history) is the
+/// right gate for a range, but it has no way to see that a dist-tag's
+/// *target* moved on the registry since the binary was built. The
+/// pick-site freshness gate uses this to force a live refetch for any
+/// primer-seeded dist-tag pick. Mirrors the dist-tag branch in
+/// `pick_version`: a protocol-shaped spec is never a tag.
+#[inline]
+pub(crate) fn range_resolves_via_dist_tag(packument: &Packument, range_str: &str) -> bool {
+    if node_semver::Range::parse(normalize_range(range_str)).is_ok() {
+        return false;
+    }
+    if looks_like_protocol_range(range_str) {
+        return false;
+    }
+    packument.dist_tags.contains_key(range_str) || range_str == "latest"
+}
+
 /// Walk the packument's versions and return the highest non
 /// prerelease version string. Used as the `latest` tag fallback
 /// when the registry response lacks `dist-tags.latest`. Some
