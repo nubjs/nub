@@ -306,6 +306,50 @@ fn legacy_decorators_require_experimental_flag() {
 // design thread.
 
 #[test]
+fn js_transpilation_smoke_guard() {
+    // PERMANENT REGRESSION GUARD — DO NOT DELETE. Guards JS-file transpilation
+    // against being silently disabled (e.g. `.js`/`.mjs`/`.cjs` dropped from
+    // TRANSPILE_EXTS, the skip-gate inverted, or a dispatch site regressed). This is
+    // a BLACK-BOX test: it runs the real `nub` binary on project `.js`/`.mjs`/`.cjs`
+    // files that contain FLOOR-BREAKING syntax and asserts each one transpiles +
+    // executes on EVERY supported Node — including the 18.19 compat-tier floor.
+    //
+    // Why each fixture proves transpilation fired on its extension, even on 18.19:
+    //   * guard.mjs — a `using` declaration (ES2026), a hard SyntaxError on every
+    //     supported Node's V8. An ESM entry resolves the disposal helper on every
+    //     tier (the CJS-entry helper limitation does not apply to ESM), so it both
+    //     lowers AND executes on the 18.19 floor. Prints SMOKE-MJS:body,b,a.
+    //   * guard.js / guard.cjs — a `v`-flag (ES2024 unicode-sets) RegExp literal,
+    //     a hard PARSE error on 18.19's V8 that kills the whole module raw. oxc
+    //     lowers `/…/v` to a `new RegExp(…)` constructor, so a transpiled module
+    //     PARSES and the marker prints; the literal sits in an uncalled function so
+    //     the constructor never runs on 18.19 (where V8 rejects the `v` flag). The
+    //     marker only appears if nub transpiled the `.js`/`.cjs`.
+    // If any extension stops being transpiled, its marker vanishes (raw SyntaxError /
+    // parse error) and this test fails on the floor leg — the canary the maintainer
+    // asked for. Runs on the ambient CI matrix Node (18.19 through the host line).
+    for (file, marker) in [
+        ("guard.mjs", "SMOKE-MJS:body,b,a"),
+        ("guard.js", "SMOKE-JS:ok"),
+        ("guard.cjs", "SMOKE-CJS:ok"),
+    ] {
+        let (stdout, stderr, code) = run_nub("transpile-js-smoke", file);
+        assert_eq!(
+            code,
+            0,
+            "{file} must transpile + run on Node {:?} (transpilation disabled?): {stderr}",
+            target_node_version()
+        );
+        assert!(
+            stdout.contains(marker),
+            "{file} marker missing — nub did not transpile this extension on Node {:?}: \
+             stdout={stdout} stderr={stderr}",
+            target_node_version()
+        );
+    }
+}
+
+#[test]
 fn project_js_using_down_levels() {
     // `using` is a SyntaxError on every supported Node's V8; this project `.js`
     // must be down-leveled (the transformableSyntax verdict flags it) and run, just
