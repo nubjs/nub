@@ -4,6 +4,14 @@ use base64::Engine as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// The registry-client env mapping with the pnpm-v11 bare-key track OFF — the
+/// upstream-neutral path (`npm_config_*` + the `//`-auth `pnpm_config_*`
+/// carve-out). Keeps the long-standing `npm_config_*` mapping tests reading
+/// cleanly; the gated bare-`pnpm_config_*` behavior is exercised separately.
+fn translate_config_env_compat(name: &str, value: &str) -> Option<(String, String)> {
+    super::env::translate_config_env(name, value, false)
+}
+
 /// Serializes the auth.ini tests that touch the process-global
 /// `engine_context().read_branded_pnpm_config` gate, so the toggle test's
 /// disabled-window can't race a concurrent auth.ini read that assumes the
@@ -3019,16 +3027,16 @@ fn translate_npm_config_env_maps_default_registry() {
     // `NPM_CONFIG_REGISTRY aube install` works; this is the hook
     // that makes it true.
     assert_eq!(
-        translate_npm_config_env("NPM_CONFIG_REGISTRY", "https://r.example/"),
+        translate_config_env_compat("NPM_CONFIG_REGISTRY", "https://r.example/"),
         Some(("registry".to_string(), "https://r.example/".to_string()))
     );
     assert_eq!(
-        translate_npm_config_env("npm_config_registry", "https://r.example/"),
+        translate_config_env_compat("npm_config_registry", "https://r.example/"),
         Some(("registry".to_string(), "https://r.example/".to_string()))
     );
     // Non-npm env vars are ignored so the entry list stays tight
     // and `apply` isn't fed noise.
-    assert_eq!(translate_npm_config_env("HOME", "/tmp"), None);
+    assert_eq!(translate_config_env_compat("HOME", "/tmp"), None);
 }
 
 #[test]
@@ -3048,7 +3056,7 @@ fn translate_npm_config_env_maps_proxy_and_tls_knobs() {
     ];
     for (name, value, expected_key) in cases {
         assert_eq!(
-            translate_npm_config_env(name, value),
+            translate_config_env_compat(name, value),
             Some((expected_key.to_string(), value.to_string())),
             "mapping failed for {name}"
         );
@@ -3061,14 +3069,14 @@ fn translate_npm_config_env_maps_scoped_registry() {
     // lowercase canonical `@myorg:registry` key that `apply`
     // matches via `strip_suffix(":registry")`.
     assert_eq!(
-        translate_npm_config_env("NPM_CONFIG_@MYORG:REGISTRY", "https://r.mycorp/"),
+        translate_config_env_compat("NPM_CONFIG_@MYORG:REGISTRY", "https://r.mycorp/"),
         Some((
             "@myorg:registry".to_string(),
             "https://r.mycorp/".to_string()
         ))
     );
     assert_eq!(
-        translate_npm_config_env("npm_config_@myorg:registry", "https://r.mycorp/"),
+        translate_config_env_compat("npm_config_@myorg:registry", "https://r.mycorp/"),
         Some((
             "@myorg:registry".to_string(),
             "https://r.mycorp/".to_string()
@@ -3082,7 +3090,7 @@ fn translate_npm_config_env_passes_uri_auth_through_verbatim() {
     // Passthrough preserves the `_authToken` casing that `apply`
     // matches inside its `starts_with("//")` branch.
     assert_eq!(
-        translate_npm_config_env(
+        translate_config_env_compat(
             "NPM_CONFIG_//registry.example.com/:_authToken",
             "secret-token"
         ),
@@ -3096,7 +3104,7 @@ fn translate_npm_config_env_passes_uri_auth_through_verbatim() {
 #[test]
 fn translate_npm_config_env_passes_pnpm_uri_auth_through_verbatim() {
     assert_eq!(
-        translate_npm_config_env(
+        translate_config_env_compat(
             "PNPM_CONFIG_//registry.example.com/:_authToken",
             "secret-token"
         ),
@@ -3130,12 +3138,149 @@ fn npm_config_env_entries_pnpm_uri_auth_wins_over_npm_uri_auth() {
 #[test]
 fn translate_npm_config_env_ignores_uri_token_helper() {
     assert_eq!(
-        translate_npm_config_env(
+        translate_config_env_compat(
             "pnpm_config_//registry.example.com/:tokenHelper",
             "/tmp/helper"
         ),
         None
     );
+}
+
+/// Serializes the tests that flip the process-global
+/// `engine_context().read_pnpm_config_env_registry` gate so a window can't race
+/// a concurrent load assuming the upstream default (off).
+static PNPM_CONFIG_ENV_GATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn translate_config_env_ignores_bare_pnpm_keys_when_gate_off() {
+    // Upstream / non-pnpm-v11 path: bare `pnpm_config_<key>` registry-client
+    // keys are another tool's convention and are NOT mapped. Only `npm_config_*`
+    // and the `//`-auth `pnpm_config_*` carve-out apply (covered above).
+    for name in [
+        "pnpm_config_registry",
+        "PNPM_CONFIG_REGISTRY",
+        "pnpm_config_strict_ssl",
+        "pnpm_config_https_proxy",
+    ] {
+        assert_eq!(
+            super::env::translate_config_env(name, "x", false),
+            None,
+            "{name} must be ignored when the pnpm-v11 gate is off"
+        );
+    }
+}
+
+#[test]
+fn translate_config_env_maps_bare_pnpm_keys_when_gate_on() {
+    // pnpm v11+ incumbent: bare `pnpm_config_<key>` / `PNPM_CONFIG_<KEY>` land
+    // on the same canonical `.npmrc` keys as their `npm_config_*` twins. The key
+    // set mirrors real pnpm 11.9 (`config/reader/src/env.ts` is generic over the
+    // settings schema; these are the registry-client members probed against it).
+    let cases = [
+        ("pnpm_config_registry", "https://r.ex/", "registry"),
+        ("PNPM_CONFIG_REGISTRY", "https://r.ex/", "registry"),
+        ("pnpm_config_proxy", "http://p:0", "proxy"),
+        ("pnpm_config_https_proxy", "http://p:8", "https-proxy"),
+        ("pnpm_config_http_proxy", "http://p:9", "http-proxy"),
+        ("pnpm_config_noproxy", "a.com,b.com", "noproxy"),
+        // pnpm 11 kebab-cases the suffix, so the underscored `no_proxy` spelling
+        // maps to the same `noproxy` key as the collapsed form.
+        ("pnpm_config_no_proxy", "c.com", "noproxy"),
+        ("pnpm_config_strict_ssl", "false", "strict-ssl"),
+        ("PNPM_CONFIG_STRICT_SSL", "false", "strict-ssl"),
+        ("pnpm_config_local_address", "1.2.3.4", "local-address"),
+        ("pnpm_config_maxsockets", "7", "maxsockets"),
+    ];
+    for (name, value, expected_key) in cases {
+        assert_eq!(
+            super::env::translate_config_env(name, value, true),
+            Some((expected_key.to_string(), value.to_string())),
+            "bare pnpm mapping failed for {name}"
+        );
+    }
+}
+
+#[test]
+fn translate_config_env_rejects_non_snake_pnpm_suffix() {
+    // pnpm 11's env reader requires a strictly snake_case suffix in a SINGLE
+    // case (`getEnvKeySuffix` → `isLowerSnakeCase`/`isUpperSnakeCase`). So a
+    // mixed-case suffix, and the `@scope:registry` / `//`-auth shapes (which
+    // carry `@`/`:`/`/`), are NOT readable via the bare `pnpm_config_` prefix —
+    // matching pnpm 11, which rejects them too. (`//`-auth still flows through
+    // the dedicated url-scoped carve-out, asserted separately above.)
+    for name in [
+        "PNPM_CONFIG_Strict_Ssl",      // mixed case
+        "pnpm_config_STRICT_SSL",      // upper suffix under lower prefix
+        "pnpm_config_@myorg:registry", // scoped registry: not snake
+        "pnpm_config_strict-ssl",      // hyphen, not underscore
+    ] {
+        assert_eq!(
+            super::env::translate_config_env(name, "false", true),
+            None,
+            "{name} must be rejected as non-snake under the pnpm prefix"
+        );
+    }
+}
+
+#[test]
+fn load_with_env_honors_bare_pnpm_config_registry_only_when_gate_on() {
+    let _guard = PNPM_CONFIG_ENV_GATE_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".npmrc"),
+        "registry=https://file.registry.example/\n",
+    )
+    .unwrap();
+    let env = vec![(
+        "pnpm_config_registry".to_string(),
+        "https://pnpm.registry.example/".to_string(),
+    )];
+
+    // Off (pnpm ≤10 / non-pnpm / unknown): `pnpm_config_registry` is ignored,
+    // the project `.npmrc` registry stands — matching real pnpm 10.
+    aube_util::update_engine_context(|c| c.read_pnpm_config_env_registry = false);
+    let disabled = NpmConfig::load_with_env(dir.path(), &env);
+    assert_eq!(disabled.registry, "https://file.registry.example/");
+
+    // On (pnpm v11+ incumbent): `pnpm_config_registry` wins over the project
+    // file (env beats file in pnpm) — matching real pnpm 11.9.
+    aube_util::update_engine_context(|c| c.read_pnpm_config_env_registry = true);
+    let enabled = NpmConfig::load_with_env(dir.path(), &env);
+    aube_util::update_engine_context(|c| c.read_pnpm_config_env_registry = false);
+    assert_eq!(enabled.registry, "https://pnpm.registry.example/");
+}
+
+#[test]
+fn npm_config_env_entries_pnpm_registry_deterministically_beats_npm_when_gate_on() {
+    let _guard = PNPM_CONFIG_ENV_GATE_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    // Both prefixes set the same non-auth key. Real pnpm 11 reads ONLY
+    // `pnpm_config_*` and ignores `npm_config_*`, so the pnpm value must win
+    // deterministically regardless of env iteration order. The entries are
+    // applied last-write-wins, so the pnpm-prefixed entry must come LAST.
+    let env = [
+        (
+            "npm_config_registry".to_string(),
+            "https://npm.example/".to_string(),
+        ),
+        (
+            "pnpm_config_registry".to_string(),
+            "https://pnpm.example/".to_string(),
+        ),
+    ];
+    aube_util::update_engine_context(|c| c.read_pnpm_config_env_registry = true);
+    let entries = super::env::npm_config_env_entries_from(&env);
+    aube_util::update_engine_context(|c| c.read_pnpm_config_env_registry = false);
+    // pnpm-prefixed registry is the last `registry` entry → wins on apply.
+    let last_registry = entries
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "registry")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(last_registry, Some("https://pnpm.example/"));
 }
 
 /// Serializes the tests that flip the process-global
@@ -3291,7 +3436,7 @@ fn env_registry_overrides_project_npmrc() {
     assert_eq!(config.registry, "https://file.registry/");
     // Emulate the `load_npm_config_env_entries` output for
     // `NPM_CONFIG_REGISTRY=https://env.registry/`.
-    let env = translate_npm_config_env("NPM_CONFIG_REGISTRY", "https://env.registry/")
+    let env = translate_config_env_compat("NPM_CONFIG_REGISTRY", "https://env.registry/")
         .map(|e| vec![e])
         .unwrap_or_default();
     config.apply(env);

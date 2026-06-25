@@ -965,6 +965,23 @@ pub(crate) fn parse_major_minor(version: &str) -> (Option<u64>, Option<u64>) {
     (major, minor)
 }
 
+/// Whether the project's incumbent pnpm is provably v11+, the major at which
+/// pnpm switched its env-var convention from `npm_config_*` to `pnpm_config_*`.
+/// Reads the declared `packageManager`/`devEngines` pin (`declared_pm_raw`,
+/// packageManager first) and requires the name to be LITERALLY "pnpm" — a
+/// non-pnpm or unknown declared name (or a fresh project with no declaration)
+/// yields `false`. An undeclared/unparseable version also yields `false`: the
+/// dominant v9/v10 base ignores `pnpm_config_*`, so off is the safe default.
+/// Mirrors `store_config_family::project_scalar_home`'s detection exactly.
+fn pnpm_incumbent_major_is_v11_plus() -> bool {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
+        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+        .and_then(|v| parse_major_minor(&v).0)
+        .is_some_and(|major| major >= 11)
+}
+
 /// Emit one dim warning line per graph-shaping field nub ignored under the
 /// active PM's dialect. Color-gated: dim only when stderr is a terminal (or
 /// `FORCE_COLOR` set) and `NO_COLOR` is unset; otherwise plain. Suppressed
@@ -1335,6 +1352,19 @@ pub(crate) fn engine_brand_preflight() {
         .map(|cwd| resolve_config_surface(&cwd))
         .unwrap_or(ConfigSurface::PnpmOrFresh);
     let read_branded_pnpm_config = matches!(surface, ConfigSurface::PnpmOrFresh);
+    // pnpm REVERSED its env-var convention at v11: pnpm ≤10 reads `npm_config_*`
+    // registry-client env vars and IGNORES `pnpm_config_*`; pnpm 11 reads
+    // `pnpm_config_*` / `PNPM_CONFIG_*` and IGNORES `npm_config_*`. Honor bare
+    // `pnpm_config_<registry-client-key>` (registry, proxies, TLS knobs) only
+    // under a provable pnpm-v11+ incumbent, so nub mirrors the project's actual
+    // pnpm. Detection matches `store_config_family::project_scalar_home`: the
+    // declared `packageManager`/`devEngines` pin, name LITERALLY "pnpm", major
+    // ≥ 11. Unknown/undeclared version → off (the dominant v9/v10 base ignores
+    // `pnpm_config_*`); the installed-PM `--version` probe and lockfile signal
+    // are intentionally not consulted (they'd only move an unknown off its
+    // already-correct default). `npm_config_*` keeps working universally.
+    let read_pnpm_config_env_registry =
+        read_branded_pnpm_config && pnpm_incumbent_major_is_v11_plus();
     let read_yarn_config = read_yarn_config_for_surface(&surface);
     // Classic Yarn (v1) reads `.yarnrc`; Yarn Berry (v2+) abandoned it for
     // `.yarnrc.yml` and ignores a stray legacy `.yarnrc`. Gate the engine's
@@ -1376,6 +1406,7 @@ pub(crate) fn engine_brand_preflight() {
         // enforced in store_config_family: `config set -g` never writes a
         // pnpm-branded global file.)
         c.read_pnpm_global_config = true;
+        c.read_pnpm_config_env_registry = read_pnpm_config_env_registry;
         c.read_yarn_config = read_yarn_config;
         c.yarn_is_classic = yarn_is_classic;
         c.read_bun_config = read_bun_config;

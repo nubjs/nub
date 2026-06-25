@@ -348,6 +348,7 @@ pub fn load_npmrc_entries(project_dir: &Path) -> Vec<(String, String)> {
 struct NpmrcCacheKey {
     project_dir: PathBuf,
     read_branded_pnpm_config: bool,
+    read_pnpm_config_env_registry: bool,
     read_yarn_config: bool,
     synthetic_user_npmrc_entries: Vec<(String, String)>,
     synthetic_project_npmrc_entries: Vec<(String, String)>,
@@ -370,6 +371,7 @@ fn npmrc_cache_key(project_dir: &Path) -> NpmrcCacheKey {
     NpmrcCacheKey {
         project_dir: project_dir.to_path_buf(),
         read_branded_pnpm_config: ctx.read_branded_pnpm_config,
+        read_pnpm_config_env_registry: ctx.read_pnpm_config_env_registry,
         read_yarn_config: ctx.read_yarn_config,
         synthetic_user_npmrc_entries: ctx.synthetic_user_npmrc_entries,
         synthetic_project_npmrc_entries: ctx.synthetic_project_npmrc_entries,
