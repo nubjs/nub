@@ -1905,13 +1905,20 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
     let mut blocking = 128usize;
 
     if let Some(headroom) = resource_limits::spawn_headroom() {
-        // ONE headroom budget split across the three concurrent OS-thread/process
-        // consumers (tokio workers + blocking pool + parallel build-scripts) so
-        // their SUM stays under the ceiling — capping each independently at
-        // `min(headroom, …)` would let the sum blow past it (reviewer MAJOR).
-        let (w, b, child) = resource_limits::split_budget(headroom);
+        // ONE headroom budget split across the four concurrent OS-thread/process
+        // consumers (tokio workers + tokio blocking pool + rayon GLOBAL pool +
+        // parallel build-scripts) so their SUM stays under the ceiling — capping
+        // each independently at `min(headroom, …)` would let the sum blow past it.
+        let (w, b, rayon_threads, child) = resource_limits::split_budget(headroom);
         workers = workers.min(w);
         blocking = blocking.min(b);
+        // Size the rayon GLOBAL pool under the same budget. The embedded engine
+        // fans CAS writes / delta / fetch out over rayon's IMPLICIT global pool,
+        // whose lazy init otherwise spins up `available_parallelism()` threads
+        // (CPU-quota-bound, NOT PID-bound) and PANICS on thread-create EAGAIN —
+        // the SAME exit-101 abort, relocated from tokio to rayon. Capped here,
+        // before any engine `par_iter` touches the pool.
+        cap_rayon_global_pool(rayon_threads);
         // Lower the parallel build-script count to match (single-threaded here, so
         // the env mutation is race-free, and it runs BEFORE the env_snapshot the
         // engine resolves settings from).
@@ -1920,8 +1927,9 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
             headroom,
             workers,
             blocking,
+            rayon = rayon_threads,
             child_concurrency = child,
-            "constrained box detected: capping install runtime pools + build-script concurrency under the PID/thread ceiling"
+            "constrained box detected: capping install runtime pools (tokio + rayon) + build-script concurrency under the PID/thread ceiling"
         );
     }
 
@@ -1958,6 +1966,27 @@ fn apply_constrained_child_concurrency(capped: usize) {
     unsafe {
         std::env::set_var("npm_config_child_concurrency", capped.to_string());
     }
+}
+
+/// Size rayon's IMPLICIT GLOBAL thread pool under a detected PID/thread
+/// constraint, so the engine's `par_iter` CAS/delta/fetch fan-out can't lazily
+/// spin the pool up to `available_parallelism()` (which honors the cgroup CPU
+/// quota, NOT the PID quota) and PANIC on a thread-create EAGAIN — the same
+/// exit-101 abort the tokio cap closes, relocated to rayon.
+///
+/// `build_global` initializes the process-wide pool and ERRORS if it already
+/// exists. We tolerate that: a prior install in the same process (or rayon
+/// already lazily initialized) means the pool is set, and we can't resize it —
+/// the cap is best-effort, applied the first time on a constrained box. Setting
+/// `RAYON_NUM_THREADS` is NOT used (it only takes effect before first use and we
+/// can't guarantee that across an embedder), so the explicit `build_global` is
+/// the reliable lever when we own first-touch (pre-runtime, pre-engine here).
+fn cap_rayon_global_pool(threads: usize) {
+    // `build_global` errors if the global pool is already initialized — tolerate
+    // it (can't resize an existing pool); the cap took effect on first touch.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .build_global();
 }
 
 // ───────────────────────── fd capture ──────────────────────────

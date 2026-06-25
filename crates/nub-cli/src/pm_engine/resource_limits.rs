@@ -74,25 +74,29 @@ fn headroom_from(pids_max: Option<u64>, rlimit: Option<u64>, in_use: u64) -> Opt
     Some(budget.max(2) as usize)
 }
 
-/// Divide a single spawn-headroom budget across the three OS-thread/process
-/// consumers that run CONCURRENTLY during an install — they all draw from the
-/// SAME PID budget, so the shares must SUM to within the budget, not each be
-/// `min(budget, …)` (which would let the sum blow past the ceiling). Returns
-/// `(tokio_workers, tokio_blocking, build_script_concurrency)`. Pure + testable.
+/// One spawn-headroom budget divided across the FOUR concurrent OS-thread/process
+/// consumers of an install — they all draw from the SAME PID budget, so the
+/// shares must SUM within it, not each be `min(budget, …)` (which would let the
+/// sum blow past the ceiling). Returns
+/// `(tokio_workers, tokio_blocking, rayon_global, build_script_concurrency)`.
+/// Pure + testable.
 ///
-/// The blocking pool dominates the OS-thread peak (tarball decode + CAS writes),
-/// so it gets the largest share; workers are few (the install is IO-bound); the
-/// build-script fan-out spawns native grandchildren, budgeted conservatively.
-pub(crate) fn split_budget(headroom: usize) -> (usize, usize, usize) {
-    // Reserve the budget proportionally, each clamped to a working floor. The
-    // floors can sum above a tiny budget — that's acceptable (a 2-PID-headroom
-    // box is already past saving and the EAGAIN guards/retry are the backstop),
-    // but for any realistically-constrained box (headroom in the dozens-hundreds)
-    // the shares sum to ≈ headroom, not 3× it.
+/// The two big thread pools (tokio blocking — tarball decode + CAS writes; rayon
+/// global — the same CAS/delta/fetch fan-out) get the bulk; tokio workers are few
+/// (the install is IO-bound); the build-script fan-out spawns native
+/// grandchildren, budgeted conservatively. The three THREAD-pool shares
+/// (workers + blocking + rayon) are what must fit the PID headroom.
+pub(crate) fn split_budget(headroom: usize) -> (usize, usize, usize, usize) {
+    // Proportional shares, each clamped to a working floor. For a tiny budget the
+    // floors can sum above it — acceptable: a sub-10-PID-headroom box is already
+    // past saving, and the per-spawn EAGAIN guards + retry are the backstop there
+    // (NOT this sum-fitting). For any realistically-constrained box (headroom in
+    // the dozens–hundreds) the thread-pool shares sum to ≤ headroom.
     let workers = (headroom / 8).clamp(2, 8);
-    let blocking = (headroom / 2).max(4);
+    let blocking = (headroom / 3).max(4);
+    let rayon = (headroom / 4).clamp(2, 64);
     let build = (headroom / 8).clamp(1, 5);
-    (workers, blocking, build)
+    (workers, blocking, rayon, build)
 }
 
 /// Non-Linux platforms (macOS, Windows) have no cgroup PID controller, and the
@@ -142,6 +146,10 @@ fn cgroup_v2_pids_max() -> Option<u64> {
 /// cgroup v1: the `pids` controller is named in `/proc/self/cgroup` as a line
 /// `<id>:pids:<relpath>`; the limit lives at
 /// `/sys/fs/cgroup/pids/<relpath>/pids.max`.
+///
+/// Safe no-op on a pure cgroup v2 host: there the only line is `0::<path>`, whose
+/// middle (controller) field is EMPTY, so the `c == "pids"` match never fires and
+/// this returns `None` — the v2 probe already handled that host.
 #[cfg(target_os = "linux")]
 fn cgroup_v1_pids_max() -> Option<u64> {
     let rel = std::fs::read_to_string("/proc/self/cgroup")
@@ -191,7 +199,8 @@ fn rlimit_nproc_soft() -> Option<u64> {
     if lim.rlim_cur == libc::RLIM_INFINITY {
         return None;
     }
-    Some(lim.rlim_cur as u64)
+    // `rlim_t` is `u64` on every Rust Linux target (gnu + musl), so no cast.
+    Some(lim.rlim_cur)
 }
 
 /// Best-effort count of threads currently live in this process, from
@@ -255,20 +264,34 @@ mod tests {
     }
 
     #[test]
-    fn split_budget_shares_sum_within_budget_for_real_constraints() {
-        // For any realistically-constrained box the three shares must not blow
-        // past the budget by more than the small fixed floors permit.
-        for headroom in [40usize, 64, 128, 256, 512, 1000] {
-            let (w, b, build) = split_budget(headroom);
-            assert!(w >= 2 && b >= 4 && build >= 1, "floors hold @ {headroom}");
-            // Workers + blocking (the two thread pools) must fit the budget — the
-            // build-script grandchildren are processes, budgeted separately, but
-            // the thread pools alone must not exceed headroom.
+    fn split_budget_thread_pools_sum_within_budget_for_real_constraints() {
+        // For any realistically-constrained box (headroom ≥ ~24) the THREE
+        // thread-pool shares (tokio workers + tokio blocking + rayon global) must
+        // sum within the PID headroom — they all draw from the same budget.
+        for headroom in [24usize, 40, 64, 128, 256, 512, 1000] {
+            let (w, b, rayon, build) = split_budget(headroom);
             assert!(
-                w + b <= headroom,
-                "thread pools {w}+{b} exceed budget {headroom}"
+                w >= 2 && b >= 4 && rayon >= 2 && build >= 1,
+                "floors hold @ {headroom}"
+            );
+            assert!(
+                w + b + rayon <= headroom,
+                "thread pools {w}+{b}+{rayon} exceed budget {headroom}"
             );
             assert!(build <= 5, "build concurrency never above the default of 5");
+        }
+    }
+
+    #[test]
+    fn split_budget_sub_floor_band_holds_floors_without_panic() {
+        // Honesty test for the documented sub-floor band: at a tiny headroom the
+        // fixed floors (workers≥2, blocking≥4, rayon≥2) intentionally sum ABOVE
+        // the budget. That box is already past sum-fitting — the per-spawn EAGAIN
+        // guards + retry are the backstop there, NOT this function. We only assert
+        // the floors hold and nothing panics/underflows.
+        for headroom in [2usize, 4, 6, 8] {
+            let (w, b, rayon, build) = split_budget(headroom);
+            assert!(w >= 2 && b >= 4 && rayon >= 2 && build >= 1);
         }
     }
 

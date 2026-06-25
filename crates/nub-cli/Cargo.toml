@@ -84,6 +84,13 @@ toml.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber.workspace = true
 url = "2.5"
+# Only to SIZE the rayon GLOBAL pool under a detected PID/thread constraint
+# (pm_engine::build_runtime): the embedded engine fans CAS writes / delta / fetch
+# out over rayon's implicit global pool, whose lazy init spins up
+# available_parallelism() threads (CPU-quota-bound, NOT PID-bound) and PANICS on
+# thread-create EAGAIN — the same exit-101 abort the tokio cap closes. We cap it
+# under the same headroom budget; unconstrained boxes keep rayon's default.
+rayon = "1"
 
 [target.'cfg(unix)'.dependencies]
 # fd-level capture of the engine's raw println/eprintln hint lines so the
