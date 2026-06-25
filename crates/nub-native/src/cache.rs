@@ -193,9 +193,11 @@ fn integrity(body: &[u8]) -> String {
 /// `read_to_string` buffer is REUSED as the returned `code` — after verifying
 /// integrity over the body slice (no copy), the integrity prefix and the leading
 /// format byte are drained off IN PLACE, so the warm-hit path allocates the body
-/// exactly once (the file read) instead of three times (read + `body.to_string()`
-/// + the caller's `body[1..].to_string()`). (The `integrity()` re-hash still
-/// allocates a transient 16-byte hex string — unchanged, and unrelated to the body.)
+/// exactly once (the file read) rather than three times (the old chain was read,
+/// then `body.to_string()`, then the caller's `body[1..].to_string()`).
+///
+/// The `integrity()` re-hash still allocates a transient 16-byte hex string —
+/// unchanged, and unrelated to the body.
 fn cache_get(dir: &str, key: &str) -> Option<(u8, String)> {
     let path = std::path::Path::new(dir).join(key);
     let mut raw = std::fs::read_to_string(&path).ok()?;
