@@ -205,6 +205,14 @@ fn cache_get(dir: &str, key: &str) -> Option<(u8, String)> {
     if raw.len() < INTEGRITY_LEN + 1 {
         return None;
     }
+    // Belt-and-suspenders: a well-formed entry has an ASCII prefix + format byte,
+    // so both `INTEGRITY_LEN` and `INTEGRITY_LEN + 1` are char boundaries. A
+    // corrupted entry with a multi-byte UTF-8 sequence straddling either offset
+    // would panic the slice/drain below — treat it as a cache miss (self-heal)
+    // instead, matching the integrity-mismatch path.
+    if !raw.is_char_boundary(INTEGRITY_LEN) || !raw.is_char_boundary(INTEGRITY_LEN + 1) {
+        return None;
+    }
     let body = &raw[INTEGRITY_LEN..];
     if raw[..INTEGRITY_LEN] != integrity(body.as_bytes()) {
         // Self-heal: any mismatch (truncation, corruption, edits) ⇒ miss.
