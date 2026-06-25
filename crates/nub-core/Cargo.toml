@@ -58,5 +58,9 @@ harness = false
 name = "cache_hash"
 harness = false
 
+[[bench]]
+name = "cache_body_copy"
+harness = false
+
 [lints]
 workspace = true
