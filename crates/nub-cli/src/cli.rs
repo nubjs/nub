@@ -3500,14 +3500,13 @@ fn run_single_script_prefixed(
 /// serialize the script *runs* themselves — only their final output emission.
 static AGGREGATE_FLUSH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Inputs a pipe-drain reader needs, owned so they can cross the thread boundary
-/// OR be consumed inline on the current thread. Bundled into one struct so the
-/// SAME drain logic backs both the spawned-thread and the spawn-failure-inline
-/// fallback paths (`Builder::spawn` consumes its closure and never returns it on
-/// `Err`, so the inline fallback must own the inputs separately — hence this
-/// struct, moved into whichever path runs).
-struct PipeDrain<R: std::io::Read> {
-    stream: Option<R>,
+/// Per-stream formatting + emission policy for a script's stdout/stderr drain.
+/// Owned so it can cross a thread boundary OR drive an inline drain — the same
+/// logic backs both paths. The stream (`R`) is held SEPARATELY (see
+/// [`PipeReaders`]) so a failed thread-spawn never loses the pipe: the policy
+/// can always still drain the stream inline.
+#[derive(Clone)]
+struct DrainPolicy {
     ndjson: bool,
     aggregate: bool,
     is_stderr: bool,
@@ -3516,90 +3515,322 @@ struct PipeDrain<R: std::io::Read> {
     script: String,
 }
 
-/// The outcome of [`PipeDrain::spawn`]: either a join handle (the drain runs on
-/// its own thread) or the already-collected lines (thread creation failed under
-/// resource pressure, so the drain ran inline as a fallback).
-enum DrainHandle {
-    Thread(std::thread::JoinHandle<Vec<String>>),
-    Inline(Vec<String>),
-}
-
-impl DrainHandle {
-    fn collect(self) -> Vec<String> {
-        match self {
-            DrainHandle::Thread(h) => h.join().unwrap_or_default(),
-            DrainHandle::Inline(lines) => lines,
+impl DrainPolicy {
+    /// Emit one raw line per this policy, returning the prefixed form to collect.
+    fn emit(&self, line: &str) -> Option<String> {
+        if self.ndjson {
+            let level = if self.is_stderr { "error" } else { "info" };
+            emit_ndjson("log", level, &self.name, &self.script, Some(line), None);
+            return None;
         }
-    }
-}
-
-impl<R: std::io::Read + Send + 'static> PipeDrain<R> {
-    /// Put this drain on its own thread, degrading to an INLINE drain when the OS
-    /// can't create a thread (`EAGAIN` under thread/PID exhaustion). The bare
-    /// `thread::spawn` would PANIC there — and under `panic = "abort"` abort the
-    /// whole process — which is the latent install crash this guards. The reader
-    /// is LOAD-BEARING (a missing one deadlocks the child on a full pipe buffer),
-    /// so on resource pressure we must still drain it, just without a thread.
-    ///
-    /// `Builder::spawn` consumes its closure even on `Err`, so we can't try the
-    /// real spawn and recover `self`. Instead we PROBE thread availability with a
-    /// trivial throwaway thread first: if that spawns and joins, real thread
-    /// creation will (near-certainly) succeed and we spawn the drain; if the
-    /// probe fails we drain inline without ever moving `self` into a doomed
-    /// spawn. The probe costs one cheap thread create only on the success path.
-    fn spawn(self, thread_name: &str) -> DrainHandle {
-        let probe = std::thread::Builder::new()
-            .name(format!("{thread_name}-probe"))
-            .spawn(|| {});
-        match probe {
-            Ok(p) => {
-                let _ = p.join();
-                match std::thread::Builder::new()
-                    .name(thread_name.into())
-                    .spawn(move || self.run())
-                {
-                    Ok(h) => DrainHandle::Thread(h),
-                    // Probe succeeded but the real spawn still failed — a genuine
-                    // race right at the resource ceiling. `self` is already
-                    // consumed, so we can't inline-drain; return empty. This loses
-                    // this stream's captured lines in that vanishingly-rare double
-                    // race, which is still strictly better than the panic/abort
-                    // the bare `thread::spawn` would have caused.
-                    Err(_) => DrainHandle::Inline(Vec::new()),
-                }
+        let prefixed = format!("{}{line}", self.prefix);
+        if !self.aggregate {
+            if self.is_stderr {
+                eprintln!("{prefixed}");
+            } else {
+                println!("{prefixed}");
             }
-            Err(_) => DrainHandle::Inline(self.run()),
         }
+        Some(prefixed)
     }
 
-    /// Drain the pipe to completion, returning the prefixed lines (and emitting
-    /// them live unless `aggregate`). Consumes `self`; runs identically on a
-    /// drain thread or inline.
-    fn run(self) -> Vec<String> {
+    /// Drain `stream` to EOF on the CURRENT thread, returning the collected lines.
+    fn run<R: std::io::Read>(&self, stream: R) -> Vec<String> {
         use std::io::BufRead as _;
         let mut lines = Vec::new();
-        if let Some(stream) = self.stream {
-            for line in std::io::BufReader::new(stream)
-                .lines()
-                .map_while(Result::ok)
-            {
-                if self.ndjson {
-                    let level = if self.is_stderr { "error" } else { "info" };
-                    emit_ndjson("log", level, &self.name, &self.script, Some(&line), None);
-                    continue;
-                }
-                let prefixed = format!("{}{line}", self.prefix);
-                if !self.aggregate {
-                    if self.is_stderr {
-                        eprintln!("{prefixed}");
-                    } else {
-                        println!("{prefixed}");
-                    }
-                }
+        for line in std::io::BufReader::new(stream)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Some(prefixed) = self.emit(&line) {
                 lines.push(prefixed);
             }
         }
         lines
+    }
+}
+
+/// Both of a script child's output pipes plus their per-stream policies, drained
+/// together so the child can never deadlock on a full pipe buffer.
+///
+/// The two pipes MUST be drained CONCURRENTLY: draining one to EOF before
+/// starting the other lets a child that fills the not-yet-read pipe block on
+/// `write` forever. The happy path drains stdout on its own thread while stderr
+/// drains on the calling thread. Under OS thread-create EAGAIN (the `nub ci`
+/// exit-101 family) — where `thread::spawn` would PANIC, and under
+/// `panic = "abort"` abort the whole process — we fall back to a SINGLE-THREAD
+/// concurrent drain that interleaves both pipes via `poll(2)`, preserving the
+/// no-deadlock guarantee without a second thread.
+struct PipeReaders {
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+    out_policy: DrainPolicy,
+    err_policy: DrainPolicy,
+}
+
+impl PipeReaders {
+    /// Drain both pipes to EOF, returning `(stdout_lines, stderr_lines)`. Never
+    /// deadlocks: stdout on a thread + stderr inline normally; both interleaved
+    /// on one thread via `poll(2)` when a thread can't be created.
+    fn drain(self) -> (Vec<String>, Vec<String>) {
+        let PipeReaders {
+            stdout,
+            stderr,
+            out_policy,
+            err_policy,
+        } = self;
+
+        let Some(out) = stdout else {
+            // No stdout pipe — only stderr to drain (inline, always concurrent
+            // enough since there's nothing to race it against).
+            let err_lines = stderr.map(|e| err_policy.run(e)).unwrap_or_default();
+            return (Vec::new(), err_lines);
+        };
+
+        // Happy path: stdout on its own thread (concurrent with the inline stderr
+        // drain below). On Unix we hand the thread a `dup`ed fd and KEEP the
+        // original `ChildStdout` — so a `Builder::spawn` failure (thread-create
+        // EAGAIN, which a bare `thread::spawn` would panic/abort on) leaves the
+        // original recoverable for the inline fallback. The dup and the original
+        // share the same OS pipe; only one ever reads it (the thread on success,
+        // the original inline on failure), so there's no double-drain.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::{AsRawFd, FromRawFd};
+            // SAFETY: dup an fd we own; wrap the new fd in an owning File. -1 on
+            // failure is handled below (drain inline).
+            let dup_fd = unsafe { libc::dup(out.as_raw_fd()) };
+            let spawn_result = if dup_fd < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                // SAFETY: `dup_fd` is a fresh, owned fd; `File` takes ownership.
+                let dup_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+                let policy = out_policy.clone();
+                std::thread::Builder::new()
+                    .name("nub-script-stdout".into())
+                    .spawn(move || policy.run(dup_file))
+            };
+            match spawn_result {
+                Ok(handle) => {
+                    let err_lines = stderr.map(|e| err_policy.run(e)).unwrap_or_default();
+                    let out_lines = handle.join().unwrap_or_default();
+                    (out_lines, err_lines)
+                }
+                Err(_) => {
+                    // Thread-create (or dup) EAGAIN: drain BOTH pipes concurrently
+                    // on this one thread so neither can deadlock the child.
+                    drain_both_inline(out, out_policy, stderr, err_policy)
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows never exhibited the thread-exhaustion abort, and has no
+            // `poll`-based inline multiplex here — move stdout into the thread as
+            // before. `Builder::spawn` still avoids the unconditional panic of
+            // `thread::spawn`; on the (astronomically rare) failure we drain
+            // stdout inline AFTER stderr, accepting the sequential-drain window.
+            let policy = out_policy.clone();
+            let spawn_result = std::thread::Builder::new()
+                .name("nub-script-stdout".into())
+                .spawn(move || policy.run(out));
+            match spawn_result {
+                Ok(handle) => {
+                    let err_lines = stderr.map(|e| err_policy.run(e)).unwrap_or_default();
+                    let out_lines = handle.join().unwrap_or_default();
+                    (out_lines, err_lines)
+                }
+                Err(_) => {
+                    let err_lines = stderr.map(|e| err_policy.run(e)).unwrap_or_default();
+                    // stdout was moved into the failed closure; it's gone. Lose
+                    // its lines (Windows-only, vanishing-probability path).
+                    (Vec::new(), err_lines)
+                }
+            }
+        }
+    }
+}
+
+/// Concurrently drain stdout + stderr on the CURRENT thread (no second thread),
+/// using `poll(2)` to multiplex the two pipes so a full buffer on either can
+/// never block the other — preserving the no-deadlock guarantee without a thread.
+/// Non-Unix has no `poll` here; it falls back to sequential draining, accepting
+/// the rare large-output deadlock window (the abort this replaces was Linux-only,
+/// and Windows never exhibited the thread-exhaustion bug).
+fn drain_both_inline(
+    out: std::process::ChildStdout,
+    out_policy: DrainPolicy,
+    err: Option<std::process::ChildStderr>,
+    err_policy: DrainPolicy,
+) -> (Vec<String>, Vec<String>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // `out` / `err` stay owned (and so their fds stay valid) until this block
+        // ends. Set both pipes non-blocking so a `read` after a `poll`-ready
+        // signal can never block (and returns `WouldBlock` when momentarily
+        // drained), which is what makes the single-thread multiplex safe.
+        set_nonblocking(out.as_raw_fd());
+        if let Some(e) = err.as_ref() {
+            set_nonblocking(e.as_raw_fd());
+        }
+        let mut out_pipe = LinePipe::new(out.as_raw_fd(), out_policy);
+        let mut err_pipe = err
+            .as_ref()
+            .map(|e| LinePipe::new(e.as_raw_fd(), err_policy));
+
+        loop {
+            let mut fds: Vec<libc::pollfd> = Vec::with_capacity(2);
+            if !out_pipe.done {
+                fds.push(libc::pollfd {
+                    fd: out_pipe.fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+            }
+            if let Some(ep) = err_pipe.as_ref() {
+                if !ep.done {
+                    fds.push(libc::pollfd {
+                        fd: ep.fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
+                }
+            }
+            if fds.is_empty() {
+                break;
+            }
+            // SAFETY: `fds` is a valid, len-sized slice of pollfd; -1 = no timeout.
+            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+            if rc < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break; // unrecoverable poll error — stop draining
+            }
+            for pfd in &fds {
+                if pfd.revents == 0 {
+                    continue;
+                }
+                if pfd.fd == out_pipe.fd {
+                    out_pipe.pump();
+                } else if let Some(ep) = err_pipe.as_mut() {
+                    if pfd.fd == ep.fd {
+                        ep.pump();
+                    }
+                }
+            }
+        }
+        let out_lines = out_pipe.finish();
+        let err_lines = err_pipe.map(LinePipe::finish).unwrap_or_default();
+        (out_lines, err_lines)
+    }
+    #[cfg(not(unix))]
+    {
+        // No `poll` — drain sequentially. Safe for the small-output common case;
+        // the thread-exhaustion abort this guards was never seen off Linux.
+        let out_lines = out_policy.run(out);
+        let err_lines = err.map(|e| err_policy.run(e)).unwrap_or_default();
+        (out_lines, err_lines)
+    }
+}
+
+/// Put a raw fd into non-blocking mode (best-effort — a failure just leaves the
+/// `poll`-then-`read` slightly more cautious; it does not break correctness).
+#[cfg(unix)]
+fn set_nonblocking(fd: std::os::unix::io::RawFd) {
+    // SAFETY: F_GETFL/F_SETFL on an fd we own; flags OR'd with O_NONBLOCK.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+/// A raw-fd pipe drained incrementally under `poll(2)`: reads available bytes,
+/// splits complete lines, emits + collects them per its [`DrainPolicy`], and
+/// buffers any partial trailing line until more arrives or EOF.
+#[cfg(unix)]
+struct LinePipe {
+    fd: std::os::unix::io::RawFd,
+    policy: DrainPolicy,
+    buf: Vec<u8>,
+    lines: Vec<String>,
+    done: bool,
+}
+
+#[cfg(unix)]
+impl LinePipe {
+    fn new(fd: std::os::unix::io::RawFd, policy: DrainPolicy) -> Self {
+        LinePipe {
+            fd,
+            policy,
+            buf: Vec::new(),
+            lines: Vec::new(),
+            done: false,
+        }
+    }
+
+    /// Read whatever is ready and emit any newly-complete lines.
+    fn pump(&mut self) {
+        let mut chunk = [0u8; 8192];
+        loop {
+            // SAFETY: read into a valid local buffer on a raw fd we own.
+            let n = unsafe {
+                libc::read(
+                    self.fd,
+                    chunk.as_mut_ptr() as *mut libc::c_void,
+                    chunk.len(),
+                )
+            };
+            if n > 0 {
+                self.buf.extend_from_slice(&chunk[..n as usize]);
+                self.drain_complete_lines();
+                continue; // keep reading until the pipe is momentarily empty
+            }
+            if n == 0 {
+                self.done = true; // EOF
+                return;
+            }
+            // n < 0
+            let e = std::io::Error::last_os_error();
+            match e.kind() {
+                std::io::ErrorKind::WouldBlock => return, // nothing more right now
+                std::io::ErrorKind::Interrupted => continue,
+                _ => {
+                    self.done = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn drain_complete_lines(&mut self) {
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let mut line = self.buf.drain(..=pos).collect::<Vec<u8>>();
+            line.pop(); // drop '\n'
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            let text = String::from_utf8_lossy(&line);
+            if let Some(prefixed) = self.policy.emit(&text) {
+                self.lines.push(prefixed);
+            }
+        }
+    }
+
+    /// Flush any partial trailing line (no terminating newline) and return all
+    /// collected lines.
+    fn finish(mut self) -> Vec<String> {
+        if !self.buf.is_empty() {
+            let text = String::from_utf8_lossy(&self.buf);
+            if let Some(prefixed) = self.policy.emit(&text) {
+                self.lines.push(prefixed);
+            }
+        }
+        self.lines
     }
 }
 
@@ -3665,37 +3896,33 @@ fn spawn_script_prefixed(
     let (name_out, script_out) = (pkg_name.clone(), script_name.to_string());
     let (name_err, script_err) = (pkg_name.clone(), script_name.to_string());
 
-    // In aggregate mode the reader drains collect prefixed lines instead of
-    // emitting them live; the parent flushes the buffered blocks once, below.
-    let out_drain = PipeDrain {
-        stream: stdout,
-        ndjson,
-        aggregate,
-        is_stderr: false,
-        prefix: prefix_out,
-        name: name_out,
-        script: script_out,
-    };
-    let err_drain = PipeDrain {
-        stream: stderr,
-        ndjson,
-        aggregate,
-        is_stderr: true,
-        prefix: prefix_err,
-        name: name_err,
-        script: script_err,
-    };
-
-    // The pipe drains are LOAD-BEARING — a missing reader deadlocks the child on a
-    // full pipe buffer. `PipeDrain::spawn` guards against OS thread-create EAGAIN
-    // (the bare `thread::spawn` would PANIC, and under `panic = "abort"` abort the
-    // process) by degrading to an inline drain. The stdout drain goes on its own
-    // thread; the stderr drain runs on THIS thread, concurrently — so under
-    // resource pressure stderr still drains live while stdout's thread (or its
-    // inline fallback) drains too.
-    let out_handle = out_drain.spawn("nub-script-stdout");
-    let err_lines = err_drain.run();
-    let out_lines = out_handle.collect();
+    // In aggregate mode the drains collect prefixed lines instead of emitting
+    // them live; the parent flushes the buffered blocks once, below. `PipeReaders`
+    // drains both pipes CONCURRENTLY and never deadlocks — stdout on its own
+    // thread + stderr inline normally, or both interleaved on one thread via
+    // `poll(2)` when OS thread-create EAGAIN forces the inline fallback (the
+    // `nub ci` exit-101 family, where a bare `thread::spawn` would panic/abort).
+    let (out_lines, err_lines) = PipeReaders {
+        stdout,
+        stderr,
+        out_policy: DrainPolicy {
+            ndjson,
+            aggregate,
+            is_stderr: false,
+            prefix: prefix_out,
+            name: name_out,
+            script: script_out,
+        },
+        err_policy: DrainPolicy {
+            ndjson,
+            aggregate,
+            is_stderr: true,
+            prefix: prefix_err,
+            name: name_err,
+            script: script_err,
+        },
+    }
+    .drain();
 
     let status = child.wait()?;
     nub_core::node::spawn::untrack_child();

@@ -1898,10 +1898,6 @@ pub(crate) fn env_snapshot() -> Vec<(String, String)> {
 /// it returns `None` and we keep the full-speed defaults — so normal-box install
 /// performance is untouched.
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
-    // Lower the parallel build-script count under a detected constraint BEFORE the
-    // runtime is built (single-threaded here, so the env mutation is race-free).
-    apply_constrained_child_concurrency();
-
     let cpu = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -1909,17 +1905,23 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
     let mut blocking = 128usize;
 
     if let Some(headroom) = resource_limits::spawn_headroom() {
-        // Split the headroom between worker threads (a small fixed share — the
-        // install is IO-bound, not CPU-bound) and the blocking pool (the larger
-        // share, since tarball decode + CAS writes dominate the OS-thread peak).
-        // Clamp each to a sane floor so the install still makes progress.
-        workers = workers.min(headroom / 4).max(2);
-        blocking = blocking.min(headroom).max(4);
+        // ONE headroom budget split across the three concurrent OS-thread/process
+        // consumers (tokio workers + blocking pool + parallel build-scripts) so
+        // their SUM stays under the ceiling — capping each independently at
+        // `min(headroom, …)` would let the sum blow past it (reviewer MAJOR).
+        let (w, b, child) = resource_limits::split_budget(headroom);
+        workers = workers.min(w);
+        blocking = blocking.min(b);
+        // Lower the parallel build-script count to match (single-threaded here, so
+        // the env mutation is race-free, and it runs BEFORE the env_snapshot the
+        // engine resolves settings from).
+        apply_constrained_child_concurrency(child);
         tracing::debug!(
             headroom,
             workers,
             blocking,
-            "constrained box detected: capping install runtime pools under the PID/thread ceiling"
+            child_concurrency = child,
+            "constrained box detected: capping install runtime pools + build-script concurrency under the PID/thread ceiling"
         );
     }
 
@@ -1931,18 +1933,18 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
         .context("failed to build the install engine's tokio runtime")
 }
 
-/// When the box is resource-constrained, lower the parallel build-script process
-/// count (aube's `child_concurrency`, default 5) so the peak native-postinstall
-/// fan-out — each spawning Go/Rust grandchildren — stays under the PID ceiling.
-/// nub exports this through the engine's env (aube resolves `child_concurrency`
-/// from `npm_config_child_concurrency` / `AUBE_CHILD_CONCURRENCY`), so standalone
-/// aube is UNCHANGED — only nub, on a detected constraint, asks for fewer
-/// parallel builds. A user/CI-set value already in the env is left untouched.
+/// Lower the parallel build-script process count (aube's `child_concurrency`,
+/// default 5) so the native-postinstall fan-out — each spawning Go/Rust
+/// grandchildren — stays under the PID ceiling. nub exports this through the
+/// NEUTRAL `npm_config_child_concurrency` setting (which aube honors, same as
+/// npm/pnpm), so standalone aube is UNCHANGED and no engine-brand var leaks; only
+/// nub, on a detected constraint, asks for fewer parallel builds. A user/CI-set
+/// value (any of the recognized keys) is left untouched.
 ///
-/// SAFETY: called before the engine runs, single-threaded at that point (the
-/// install runtime is built after this), so the `set_var` is not racing other
-/// threads reading the environment.
-fn apply_constrained_child_concurrency() {
+/// SAFETY: called from `build_runtime` BEFORE the runtime is built and before any
+/// engine work — single-threaded at that point, so the `set_var` doesn't race
+/// other threads reading the environment.
+fn apply_constrained_child_concurrency(capped: usize) {
     // Respect an explicit user/CI choice — never override a value they set.
     const KEYS: [&str; 3] = [
         "npm_config_child_concurrency",
@@ -1952,23 +1954,10 @@ fn apply_constrained_child_concurrency() {
     if KEYS.iter().any(|k| std::env::var_os(k).is_some()) {
         return;
     }
-    let Some(headroom) = resource_limits::spawn_headroom() else {
-        return; // unconstrained — keep aube's default of 5
-    };
-    // Each parallel build budgets for a handful of grandchild processes/threads;
-    // divide the headroom accordingly and clamp to [1, 5] (never above the
-    // default, never below serial).
-    const PER_BUILD_BUDGET: usize = 8;
-    let capped = (headroom / PER_BUILD_BUDGET).clamp(1, 5);
     // SAFETY: see the doc comment — single-threaded at call time.
     unsafe {
-        std::env::set_var("AUBE_CHILD_CONCURRENCY", capped.to_string());
+        std::env::set_var("npm_config_child_concurrency", capped.to_string());
     }
-    tracing::debug!(
-        headroom,
-        child_concurrency = capped,
-        "constrained box detected: lowering parallel build-script concurrency"
-    );
 }
 
 // ───────────────────────── fd capture ──────────────────────────

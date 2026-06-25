@@ -30,9 +30,33 @@
 /// "a bit slower," over-counting risks the abort we are preventing.
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn_headroom() -> Option<usize> {
-    let pids_max = cgroup_v2_pids_max();
+    let pids_max = cgroup_pids_max();
     let rlimit = rlimit_nproc_soft();
+    let in_use = current_thread_count().unwrap_or(64) as u64;
+    headroom_from(pids_max, rlimit, in_use)
+}
 
+// `UNCONSTRAINED_FLOOR`, `SAFETY_MARGIN`, `headroom_from`, `parse_pids_max` are
+// exercised on Linux (the only platform that detects a ceiling) and by the
+// cross-platform unit tests; on other targets the detector short-circuits to
+// `None`, so they're dead outside tests there — hence the conditional allow.
+
+/// A very high ceiling is effectively unconstrained — don't tighten. 4096 is
+/// comfortably above what a normal install peaks at (a few hundred), so above it
+/// we keep full-speed defaults.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const UNCONSTRAINED_FLOOR: u64 = 4096;
+/// Slack reserved below the ceiling for threads/processes we can't precount
+/// (tokio bookkeeping, the linker rayon pool, transient grandchildren).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const SAFETY_MARGIN: u64 = 64;
+
+/// Pure budget computation, split out so the clamp logic is unit-testable with
+/// synthetic ceilings (the real detectors read `/proc` + `getrlimit`). Returns
+/// the spawn HEADROOM: room left below the most-restrictive ceiling, discounted
+/// by what's already live and a safety margin. `None` = no meaningful constraint.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn headroom_from(pids_max: Option<u64>, rlimit: Option<u64>, in_use: u64) -> Option<usize> {
     // The hard ceiling is the smaller of the two limits (whichever the kernel
     // enforces first). If neither is set, there is no constraint.
     let ceiling = match (pids_max, rlimit) {
@@ -41,25 +65,34 @@ pub(crate) fn spawn_headroom() -> Option<usize> {
         (None, Some(b)) => b,
         (None, None) => return None,
     };
-
-    // A very high ceiling is effectively unconstrained — don't tighten. 4096 is
-    // comfortably above what a normal install peaks at (a few hundred), so above
-    // it we keep full-speed defaults.
-    const UNCONSTRAINED_FLOOR: u64 = 4096;
     if ceiling >= UNCONSTRAINED_FLOOR {
         return None;
     }
-
-    // Discount the ceiling by what's already live plus a safety margin, so the
-    // budget is the room we actually have left, not the absolute cap.
-    let in_use = current_thread_count().unwrap_or(64) as u64;
-    const SAFETY_MARGIN: u64 = 64;
     let budget = ceiling.saturating_sub(in_use).saturating_sub(SAFETY_MARGIN);
-
-    // Never report zero/one — that would serialize everything; the caller clamps
-    // to its own floor, but a budget under a small floor still means "constrained,
-    // go minimal."
+    // Never report zero/one — that would serialize everything. A budget under a
+    // small floor still means "constrained, go minimal."
     Some(budget.max(2) as usize)
+}
+
+/// Divide a single spawn-headroom budget across the three OS-thread/process
+/// consumers that run CONCURRENTLY during an install — they all draw from the
+/// SAME PID budget, so the shares must SUM to within the budget, not each be
+/// `min(budget, …)` (which would let the sum blow past the ceiling). Returns
+/// `(tokio_workers, tokio_blocking, build_script_concurrency)`. Pure + testable.
+///
+/// The blocking pool dominates the OS-thread peak (tarball decode + CAS writes),
+/// so it gets the largest share; workers are few (the install is IO-bound); the
+/// build-script fan-out spawns native grandchildren, budgeted conservatively.
+pub(crate) fn split_budget(headroom: usize) -> (usize, usize, usize) {
+    // Reserve the budget proportionally, each clamped to a working floor. The
+    // floors can sum above a tiny budget — that's acceptable (a 2-PID-headroom
+    // box is already past saving and the EAGAIN guards/retry are the backstop),
+    // but for any realistically-constrained box (headroom in the dozens-hundreds)
+    // the shares sum to ≈ headroom, not 3× it.
+    let workers = (headroom / 8).clamp(2, 8);
+    let blocking = (headroom / 2).max(4);
+    let build = (headroom / 8).clamp(1, 5);
+    (workers, blocking, build)
 }
 
 /// Non-Linux platforms (macOS, Windows) have no cgroup PID controller, and the
@@ -71,25 +104,70 @@ pub(crate) fn spawn_headroom() -> Option<usize> {
     None
 }
 
-/// Read cgroup v2 `pids.max` for the current process. Returns `None` when the
-/// file is absent (cgroup v1, no cgroup, non-Linux) or set to `max` (no limit).
+/// The cgroup `pids.max` limit for the current process, trying cgroup v2
+/// (unified) first and falling back to cgroup v1 (the `pids` controller). Many
+/// CI/container hosts — including the ones that triggered this bug — are still
+/// v1 or hybrid, so v1 coverage is load-bearing, not optional. `None` = no
+/// cgroup pids limit found (or set to `max`).
+#[cfg(target_os = "linux")]
+fn cgroup_pids_max() -> Option<u64> {
+    cgroup_v2_pids_max().or_else(cgroup_v1_pids_max)
+}
+
+/// cgroup v2 (unified): the current cgroup is named in `/proc/self/cgroup` as
+/// `0::<relpath>`; `pids.max` lives at `/sys/fs/cgroup/<relpath>/pids.max`.
+/// Resolve the relpath so a NESTED cgroup (the common CI case) reads its OWN
+/// limit rather than the (usually-`max`) root.
 #[cfg(target_os = "linux")]
 fn cgroup_v2_pids_max() -> Option<u64> {
-    // The unified hierarchy mounts the current cgroup's controllers under a path
-    // named in /proc/self/cgroup as `0::<relpath>`. The pids controller exposes
-    // `pids.max` there. We resolve the relpath rather than assuming the root, so
-    // a nested cgroup (the common CI case) reads its OWN limit.
     let rel = std::fs::read_to_string("/proc/self/cgroup")
         .ok()?
         .lines()
         .find_map(|l| l.strip_prefix("0::").map(str::to_string))?;
     let rel = rel.trim_start_matches('/');
     let path = format!("/sys/fs/cgroup/{rel}/pids.max");
-    let raw = std::fs::read_to_string(&path)
-        // Fall back to the cgroup root, covering a host that doesn't expose the
-        // nested path or reports an unhelpful relpath.
-        .or_else(|_| std::fs::read_to_string("/sys/fs/cgroup/pids.max"))
-        .ok()?;
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => parse_pids_max(&raw),
+        Err(_) => {
+            // Don't silently fall back to the root cgroup's pids.max — the root is
+            // almost always `max`, so that read would masquerade "constrained" as
+            // "unconstrained" (the unsafe direction). Returning `None` here lets
+            // the v1 probe and `RLIMIT_NPROC` still contribute.
+            tracing::debug!(%path, "cgroup v2 pids.max unreadable at the nested path");
+            None
+        }
+    }
+}
+
+/// cgroup v1: the `pids` controller is named in `/proc/self/cgroup` as a line
+/// `<id>:pids:<relpath>`; the limit lives at
+/// `/sys/fs/cgroup/pids/<relpath>/pids.max`.
+#[cfg(target_os = "linux")]
+fn cgroup_v1_pids_max() -> Option<u64> {
+    let rel = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()?
+        .lines()
+        .find_map(|l| {
+            // Format: `hierarchy-id:controller-list:cgroup-path`. Match the
+            // controller field containing `pids`.
+            let mut parts = l.splitn(3, ':');
+            let _id = parts.next()?;
+            let controllers = parts.next()?;
+            let path = parts.next()?;
+            controllers
+                .split(',')
+                .any(|c| c == "pids")
+                .then(|| path.to_string())
+        })?;
+    let rel = rel.trim_start_matches('/');
+    let raw = std::fs::read_to_string(format!("/sys/fs/cgroup/pids/{rel}/pids.max")).ok()?;
+    parse_pids_max(&raw)
+}
+
+/// Parse a `pids.max` value: a decimal count, or the literal `max` (= no limit
+/// → `None`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_pids_max(raw: &str) -> Option<u64> {
     let raw = raw.trim();
     if raw == "max" {
         return None;
@@ -148,5 +226,58 @@ mod tests {
     fn rlimit_nproc_is_readable_or_infinite() {
         // Either a finite soft limit or `None` (RLIM_INFINITY) — never a panic.
         let _ = rlimit_nproc_soft();
+    }
+
+    #[test]
+    fn headroom_none_when_unconstrained() {
+        // No limits at all, or a ceiling at/above the unconstrained floor → None.
+        assert_eq!(headroom_from(None, None, 50), None);
+        assert_eq!(headroom_from(Some(UNCONSTRAINED_FLOOR), None, 50), None);
+        assert_eq!(headroom_from(Some(100_000), Some(200_000), 50), None);
+    }
+
+    #[test]
+    fn headroom_picks_the_most_restrictive_ceiling() {
+        // The smaller of pids.max and RLIMIT_NPROC wins; budget discounts in_use
+        // and the safety margin.
+        let h = headroom_from(Some(512), Some(1024), 64).unwrap();
+        assert_eq!(h, 512 - 64 - SAFETY_MARGIN as usize);
+        // RLIMIT smaller than pids.max.
+        let h2 = headroom_from(Some(1024), Some(300), 64).unwrap();
+        assert_eq!(h2, 300 - 64 - SAFETY_MARGIN as usize);
+    }
+
+    #[test]
+    fn headroom_floors_at_two_under_extreme_pressure() {
+        // A ceiling barely above in_use + margin must not return 0/1.
+        assert_eq!(headroom_from(Some(70), None, 64), Some(2));
+        assert_eq!(headroom_from(Some(10), None, 64), Some(2));
+    }
+
+    #[test]
+    fn split_budget_shares_sum_within_budget_for_real_constraints() {
+        // For any realistically-constrained box the three shares must not blow
+        // past the budget by more than the small fixed floors permit.
+        for headroom in [40usize, 64, 128, 256, 512, 1000] {
+            let (w, b, build) = split_budget(headroom);
+            assert!(w >= 2 && b >= 4 && build >= 1, "floors hold @ {headroom}");
+            // Workers + blocking (the two thread pools) must fit the budget — the
+            // build-script grandchildren are processes, budgeted separately, but
+            // the thread pools alone must not exceed headroom.
+            assert!(
+                w + b <= headroom,
+                "thread pools {w}+{b} exceed budget {headroom}"
+            );
+            assert!(build <= 5, "build concurrency never above the default of 5");
+        }
+    }
+
+    #[test]
+    fn parse_pids_max_handles_max_and_numbers() {
+        assert_eq!(parse_pids_max("max"), None);
+        assert_eq!(parse_pids_max("max\n"), None);
+        assert_eq!(parse_pids_max("1024"), Some(1024));
+        assert_eq!(parse_pids_max("  256\n"), Some(256));
+        assert_eq!(parse_pids_max("garbage"), None);
     }
 }
