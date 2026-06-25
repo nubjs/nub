@@ -1953,11 +1953,13 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
 /// engine work — single-threaded at that point, so the `set_var` doesn't race
 /// other threads reading the environment.
 fn apply_constrained_child_concurrency(capped: usize) {
-    // Respect an explicit user/CI choice — never override a value they set.
-    const KEYS: [&str; 3] = [
+    // Respect an explicit user/CI choice — never override a value they set. Only
+    // the NEUTRAL keys are honored: nub respects ZERO AUBE_*-branded env vars
+    // (AGENTS.md brand boundary), so `AUBE_CHILD_CONCURRENCY` is deliberately NOT
+    // read here even to defer to it.
+    const KEYS: [&str; 2] = [
         "npm_config_child_concurrency",
         "NPM_CONFIG_CHILD_CONCURRENCY",
-        "AUBE_CHILD_CONCURRENCY",
     ];
     if KEYS.iter().any(|k| std::env::var_os(k).is_some()) {
         return;
