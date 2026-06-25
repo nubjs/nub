@@ -121,13 +121,13 @@ pub(crate) fn spawn_headroom() -> Option<usize> {
 // v2 quota when `sched_getaffinity` is unreadable (sandbox) — `cpu_budget` closes
 // both gaps by reading the cgroup files directly, exactly as the PID detector does.
 // Default-preserving: an unconstrained box returns `None` and pools keep full cores.
-
-/// The dedicated user override for the effective CPU budget — a hard cap on the
-/// auto-detected CPU-count the pools size against. DISTINCT from the existing
-/// `NUB_CONCURRENCY` knob, which is aube's tarball-FETCH concurrency (an IO knob,
-/// clamped `[8, 256]`); this caps the CPU/thread pools (workers, rayon), so it
-/// needs its own name and its own range `[1, cores]`.
-const CPU_BUDGET_ENV: &str = "NUB_CPU_BUDGET";
+//
+// AUTO-DETECT ONLY — no public user override. No neutral existing env var fits
+// (UV_THREADPOOL_SIZE is libuv-pool-specific; RAYON_NUM_THREADS is rayon-only + a
+// brand leak), and per the brand boundary a knob ships only on demonstrated demand.
+// If a manual cap is ever needed it lands as a neutral npmrc field, never an `NUB_*`
+// env var. A `#[cfg(test)]` injection seam (`test_cpu_budget_override`) forces a
+// budget deterministically for the unit tests without any public knob.
 
 /// The effective CPU count the engine's CPU-bound pools (tokio workers, rayon
 /// global) should size against: `min(available_parallelism, cgroup-CFS-quota-cores)`
@@ -143,21 +143,16 @@ const CPU_BUDGET_ENV: &str = "NUB_CPU_BUDGET";
 /// that nub would otherwise inherit (no cgroup-v1 quota; the v2 quota is dropped when
 /// `sched_getaffinity` is unreadable under a sandbox).
 ///
-/// An explicit `NUB_CPU_BUDGET` always wins over auto-detection (the automaxprocs/Go
-/// `GOMAXPROCS`-env precedence model), clamped to `[1, cores]`.
-///
 /// Returns a budget ONLY when it constrains BELOW the logical core count — at/above
 /// the cores it tightens nothing, so we return `None` and the caller keeps its
 /// full-speed default (no needless pool rebuild). Linux-gated: `num_cpus`'s quota
 /// read is a Linux-cgroup concept, and like `spawn_headroom` the over-report trap
-/// was only ever a Linux-container problem; on macOS/Windows only the explicit
-/// override can produce a budget.
+/// was only ever a Linux-container problem; on macOS/Windows nothing constrains, so
+/// the detector returns `None`.
 pub(crate) fn cpu_budget() -> Option<usize> {
-    // The override's ceiling is the quota-IGNORING host logical-CPU count, so an
-    // EXPLICIT value can raise concurrency ABOVE a detected quota (explicit wins) —
-    // not the quota-aware `available_parallelism()`, which would silently clamp the
-    // user's request back down to the quota.
-    if let Some(n) = cpu_budget_override(host_logical_cpus()) {
+    // A `#[cfg(test)]` injection seam forces a deterministic budget for the unit
+    // tests; in a release build this is a no-op (compiles out entirely).
+    if let Some(n) = test_cpu_budget_override() {
         return Some(n);
     }
     #[cfg(target_os = "linux")]
@@ -183,64 +178,29 @@ pub(crate) fn cpu_budget() -> Option<usize> {
 /// blocking the syscall), this collapses to 1, which makes the gate
 /// `cpu_budget_from(1, _)` return `None` — i.e. CPU-budget DETECTION quietly
 /// no-ops there. Harmless: the caller then uses `raw_cpu == 1` and sizes pools
-/// minimally anyway; an explicit `NUB_CPU_BUDGET` still works (it's read before
-/// this gate).
+/// minimally anyway.
 pub(crate) fn available_cores() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
 }
 
-/// The host's online logical-CPU count, IGNORING any cgroup quota — the ceiling an
-/// explicit `NUB_CPU_BUDGET` may request up to. On Linux this is
-/// `sysconf(_SC_NPROCESSORS_ONLN)` (quota-blind by design); elsewhere there's no
-/// quota, so `available_parallelism()` is already the host count.
-fn host_logical_cpus() -> usize {
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: `sysconf` with a valid name has no preconditions and no
-        // out-params; it returns the count or -1 on error.
-        let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-        if n > 0 {
-            return n as usize;
-        }
-    }
-    available_cores()
+/// `#[cfg(test)]`-only injection seam: force `cpu_budget()` to a deterministic value
+/// in unit tests via the INTERNAL `__NUB_TEST_CPU_BUDGET` env var. Double-underscore
+/// = internal test plumbing (brand-EXEMPT per the brand boundary), never a public
+/// knob — it does NOT exist in a release build (this fn compiles to a constant
+/// `None`). Production CPU sizing is auto-detect-only.
+#[cfg(test)]
+fn test_cpu_budget_override() -> Option<usize> {
+    std::env::var("__NUB_TEST_CPU_BUDGET")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
 }
 
-/// Read + clamp the `NUB_CPU_BUDGET` override. `Some(n)` (clamped to `[1, ceiling]`)
-/// when set to a positive integer; `None` when unset/invalid (auto-detect). A value
-/// above the ceiling clamps down rather than erroring — asking for more than the
-/// host has just gets the host.
-///
-/// Note the asymmetry between lowering and raising: the override's primary use is
-/// to LOWER concurrency (pin to 1 on a box where auto-detection missed a v1 quota),
-/// which is fully honored everywhere. Raising ABOVE the auto-detected v2 quota is
-/// honored for the tokio worker count nub sets directly from `cpu_budget()`, but
-/// any pool whose ceiling is `available_parallelism()` — rayon/tokio's own internal
-/// defaults AND aube's linker pool via `effective_cpu_cap()` — is already
-/// quota-clamped by Rust std, so a request above the v2 quota can't lift those past
-/// the quota. A deliberately minor edge: you can't conjure CPU the cgroup won't
-/// grant, and the common case (lowering) is unaffected.
-fn cpu_budget_override(ceiling: usize) -> Option<usize> {
-    let raw = std::env::var(CPU_BUDGET_ENV).ok()?;
-    parse_override(&raw, ceiling)
-}
-
-/// Pure parse+clamp of a `NUB_CPU_BUDGET` value (split out so the clamp/precedence
-/// is unit-testable without mutating the process env). `Some(n)` clamped to
-/// `[1, ceiling]` for a positive integer; `None` (with a warning) otherwise.
-fn parse_override(raw: &str, ceiling: usize) -> Option<usize> {
-    match raw.trim().parse::<usize>() {
-        Ok(n) if n >= 1 => Some(n.min(ceiling.max(1))),
-        _ => {
-            tracing::warn!(
-                value = %raw,
-                "{CPU_BUDGET_ENV} ignored: must be a positive integer; using the auto-detected CPU budget"
-            );
-            None
-        }
-    }
+#[cfg(not(test))]
+fn test_cpu_budget_override() -> Option<usize> {
+    None
 }
 
 /// Pure budget gate (testable with synthetic inputs): given the logical core count
@@ -492,22 +452,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_override_clamps_and_validates() {
-        // Positive integer, within the host ceiling → honored verbatim.
-        assert_eq!(parse_override("4", 10), Some(4));
-        // Above the ceiling clamps DOWN to the host (can't conjure CPU).
-        assert_eq!(parse_override("16", 10), Some(10));
-        // Explicit-wins ABOVE a detected v2 quota: ceiling is the quota-ignoring
-        // host count, so 3 is honored on a 2-quota box (ceiling 10 here).
-        assert_eq!(parse_override("3", 10), Some(3));
-        // Whitespace tolerated.
-        assert_eq!(parse_override("  2\n", 10), Some(2));
-        // 0 / negative / non-numeric / empty → None (auto-detect).
-        assert_eq!(parse_override("0", 10), None);
-        assert_eq!(parse_override("-1", 10), None);
-        assert_eq!(parse_override("garbage", 10), None);
-        assert_eq!(parse_override("", 10), None);
-        // A degenerate ceiling of 0 still floors the honored value at 1.
-        assert_eq!(parse_override("5", 0), Some(1));
+    fn test_seam_forces_a_deterministic_budget() {
+        // The `#[cfg(test)]` injection seam (NOT a public knob — `__NUB_TEST_*`
+        // internal plumbing) lets a test pin `cpu_budget()` regardless of the host.
+        // SAFETY: single-threaded test; no other thread reads the env here.
+        unsafe { std::env::set_var("__NUB_TEST_CPU_BUDGET", "2") };
+        assert_eq!(cpu_budget(), Some(2));
+        unsafe { std::env::set_var("__NUB_TEST_CPU_BUDGET", "garbage") };
+        // Invalid → seam yields None; falls through to real auto-detection, whose
+        // contract is None-or-in-range (asserted by `cpu_budget_is_none_or_in_range`).
+        let auto = cpu_budget();
+        assert!(auto.is_none_or(|n| n >= 1 && n <= available_cores()));
+        unsafe { std::env::remove_var("__NUB_TEST_CPU_BUDGET") };
     }
 }

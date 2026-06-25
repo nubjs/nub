@@ -1903,10 +1903,10 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
     // two must agree on the same `unwrap_or(1)` fallback or the gate could disagree
     // with the pool sizing in the rare `available_parallelism()`-errors case.
     let raw_cpu = resource_limits::available_cores();
-    // The effective CPU budget under a cgroup CFS quota (or the NUB_CPU_BUDGET
-    // override) — `None` on an unconstrained box, where we keep the full core
-    // count. This is the PROACTIVE CPU axis, composed below with the REACTIVE PID
-    // headroom: a CPU-bound pool is bounded by the smaller of the two.
+    // The effective CPU budget auto-detected from a cgroup CFS quota — `None` on an
+    // unconstrained box, where we keep the full core count. This is the PROACTIVE
+    // CPU axis, composed below with the REACTIVE PID headroom: a CPU-bound pool is
+    // bounded by the smaller of the two.
     let cpu_budget = resource_limits::cpu_budget();
     let cpu = cpu_budget.unwrap_or(raw_cpu);
     let mut workers = cpu.min(8);
@@ -1944,8 +1944,8 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
             "constrained box detected: capping install runtime pools (tokio + rayon) + build-script concurrency under the PID/thread + CPU-quota ceilings"
         );
     } else if let Some(budget) = cpu_budget {
-        // CPU-quota constraint with NO PID constraint: the box has a CFS quota (or
-        // a NUB_CPU_BUDGET override) but generous PIDs. Size the CPU-bound pools
+        // CPU-quota constraint with NO PID constraint: the box has a CFS quota but
+        // generous PIDs. Size the CPU-bound pools
         // (workers + rayon, already set above) to the quota; the IO-bound blocking
         // pool and child concurrency keep their full defaults (PID headroom is fine).
         tracing::debug!(
