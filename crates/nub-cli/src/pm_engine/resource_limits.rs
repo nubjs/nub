@@ -129,6 +129,10 @@ pub(crate) fn raise_nofile_limit() {
     // SAFETY: get/setrlimit are sync syscalls reading/writing this process's own
     // resource table. The out-param pointer is valid for the call; failure is a
     // non-zero return, handled below.
+    //
+    // NOTE: aube's original (startup.rs) emits a `tracing::trace!` on each branch;
+    // those are deliberately dropped here — nub has no `tracing` pipeline wired at
+    // this site. Re-add them when syncing from aube only if nub gains one.
     unsafe {
         let mut rlim = std::mem::zeroed::<libc::rlimit>();
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {
