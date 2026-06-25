@@ -54,7 +54,11 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
-          cache: "pnpm"
+          # No `cache: pnpm` here: the smoke installs into a throwaway temp fixture
+          # via the freshly-built `nub`, so no repo-root pnpm install ever populates
+          # the pnpm store. setup-node's post-cleanup cache-save then validates the
+          # (non-existent) store path and fails the job — even though every smoke
+          # scenario passed. The cache offered zero speedup and only this failure mode.
       - name: Build nub + native addon
         shell: bash
         run: |
