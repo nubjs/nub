@@ -29,7 +29,7 @@
 import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, DATA_EXTS,
-  extname, resolveSpec, loadTranspile, loadData,
+  extname, resolveSpec, loadTranspile, loadData, isNodeModules,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -85,7 +85,12 @@ export async function resolve(specifier, context, nextResolve) {
 // ── Load hook ───────────────────────────────────────────────────────
 export async function load(url, context, nextLoad) {
   const ext = extname(url);
-  if (TRANSPILE_EXTS.has(ext)) {
+  // node_modules deps are NEVER transpiled (the byte-parity boundary). This guard is
+  // make-or-break now that TRANSPILE_EXTS includes `.js`/`.mjs`/`.cjs`: without it,
+  // the compat tier would route every dependency `.js` through oxc. (loadTranspile's
+  // own skip-gate handles the project-source no-op case; this keeps deps off the
+  // pipeline entirely.) Mirrors the fast-tier sync hook's `!isNodeModules` gate.
+  if (TRANSPILE_EXTS.has(ext) && !isNodeModules(url)) {
     // Module-format + decorator detection inside loadTranspile is a synchronous
     // native call (nub's addon), available on every supported Node — no parser
     // warm-up needed (the old `await ensureParser()` for the ESM-only oxc-parser

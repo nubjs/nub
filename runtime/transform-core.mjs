@@ -156,7 +156,16 @@ if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 // natively now, and this file no longer needs to read version.mjs.
 
 // ── Constants ───────────────────────────────────────────────────────
-export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
+// Project-source plain JS (.js/.mjs/.cjs) is transpiled through the SAME pipeline
+// as .ts/.tsx so transformable syntax (`using`/`await using`, `v`-flag RegExp,
+// decorators) gets lowered uniformly — identical source must not behave differently
+// by extension. node_modules is EXCLUDED at every dispatch site (the byte-parity
+// boundary); and a plain-JS file with NOTHING to lower returns VERBATIM (the
+// transformableSyntax skip-gate in loadTranspile), so no-op JS is byte-identical.
+export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx", ".js", ".mjs", ".cjs"]);
+// The plain-JS subset: these get the transformableSyntax skip-gate (verbatim return
+// when nothing lowers). The TS/JSX exts always transform (type-stripping is required).
+export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
 export const DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 
@@ -435,13 +444,15 @@ function detectModuleInfo(filePath, source, lang) {
   // Addon missing (should never happen in a real install): default to ESM for
   // format (the common case) and "no decorators" for the guard — the same fallback
   // the old oxc-parser-unavailable branches used.
-  if (!nubNative) return { hasValueEsmSyntax: true, hasDecorators: false };
+  if (!nubNative) return { hasValueEsmSyntax: true, hasDecorators: false, transformableSyntax: false };
   try {
     return nubNative.detectModuleInfo(filePath, source, lang);
   } catch {
     // Unparseable → CJS for format + no decorators (the transpile/V8 surfaces the
-    // real error), matching the old per-call catch blocks.
-    return { hasValueEsmSyntax: false, hasDecorators: false };
+    // real error), matching the old per-call catch blocks. `transformableSyntax:
+    // false` is the SAFE plain-JS default — the verbatim path hands the raw bytes
+    // back, so V8 surfaces the real syntax error exactly where Node would.
+    return { hasValueEsmSyntax: false, hasDecorators: false, transformableSyntax: false };
   }
 }
 
@@ -451,8 +462,8 @@ function detectModuleInfo(filePath, source, lang) {
 // full Node parity (`--experimental-detect-module`), so a CJS-syntax `.ts` with
 // no `type` runs as CJS on nub exactly as on Node. See wiki/runtime/module-format.md.
 export function moduleFormatFor(ext, pkgType, filePath, source) {
-  if (ext === ".mts") return "module";
-  if (ext === ".cts") return "commonjs";
+  if (ext === ".mts" || ext === ".mjs") return "module";
+  if (ext === ".cts" || ext === ".cjs") return "commonjs";
   if (pkgType === "module") return "module";
   if (pkgType === "commonjs") return "commonjs";
   const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
@@ -571,6 +582,26 @@ export function loadTranspile(url, ext) {
   const format = moduleFormatFor(ext, pkgType, filePath, source);
 
   const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+
+  // ── Plain-JS byte-parity skip-gate ──────────────────────────────────
+  // Project `.js`/`.mjs`/`.cjs` is now in TRANSPILE_EXTS, but oxc REFORMATS no-op
+  // source (quotes/semicolons/whitespace) and always appends a sourcemap footer —
+  // a hard regression for every plain-JS file that has nothing to lower. So for
+  // plain JS only, ask the native verdict (computed on the SAME parse moduleFormatFor
+  // already runs for ambiguous `.js`): if the file contains NO target-gated syntax
+  // oxc would lower (`using`/`await using`, `v`-flag RegExp — `transformableSyntax`)
+  // AND no decorators (`hasDecorators` — the decorator path is handled below: legacy
+  // transforms it, Stage-3-off throws the guard), return the RAW source VERBATIM.
+  // No codegen, no footer, no cache write — byte-identical to the input, exactly as
+  // a non-transpiled `.js` is today. TS/JSX exts skip this gate (they always strip).
+  // JSX-in-.js is OUT of scope (lang is "ts", which does not parse JSX); use `.jsx`.
+  if (PLAIN_JS_EXTS.has(ext)) {
+    const info = detectModuleInfo(filePath, source, lang);
+    if (!info.transformableSyntax && !info.hasDecorators) {
+      return { format, source, shortCircuit: true };
+    }
+  }
+
   const opts = {
     lang,
     sourceType: format === "commonjs" ? "commonjs" : "module",

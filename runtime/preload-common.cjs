@@ -673,6 +673,25 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   for (const ext of [".ts", ".cts", ".mts", ".tsx", ".jsx"]) {
     module_._extensions[ext] = transpileExtension;
   }
+
+  // Project-source plain JS (`.js`/`.cjs`/`.mjs`) routes through the SAME pipeline so
+  // `using`/`v`-flag-RegExp/decorators lower uniformly on the classic require tier.
+  // TWO guards keep this safe: (1) node_modules deps MUST stay on Node's native
+  // compiler — routing every dep `.js` require through oxc would be catastrophic — so
+  // bail to the saved original handler for node_modules; (2) loadTranspile's own
+  // skip-gate returns no-op plain JS verbatim, so a project `.js` with nothing to
+  // lower is _compile'd from its raw bytes (byte-identical). `.mjs` is ESM-only;
+  // Node never registers a require.extensions handler for it, so requiring an `.mjs`
+  // throws ERR_REQUIRE_ESM as before — we don't override `.mjs` here.
+  for (const ext of [".js", ".cjs"]) {
+    const origExtension = module_._extensions[ext];
+    module_._extensions[ext] = (mod, filename) => {
+      if (core.isNodeModules(pathToFileURL(filename).href)) {
+        return origExtension.call(module_._extensions, mod, filename);
+      }
+      return transpileExtension(mod, filename);
+    };
+  }
 }
 
 // ── Clobbered-polyfill preloading + Temporal lazy global ────────────
