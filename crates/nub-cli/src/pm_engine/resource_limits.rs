@@ -324,6 +324,14 @@ fn current_thread_count() -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serializes the tests that drive `cpu_budget()` against the process-global
+    // `__NUB_TEST_CPU_BUDGET` seam: the suite runs `#[test]`s on multiple threads,
+    // so a test reading `cpu_budget()` with no seam must not interleave with the
+    // seam test mid-mutation (on a 1-core host an observed `=2` would fail the
+    // range assertion). Both tests below take this lock.
+    static CPU_SEAM_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn headroom_is_none_or_positive() {
@@ -415,7 +423,9 @@ mod tests {
     #[test]
     fn cpu_budget_is_none_or_in_range() {
         // Detector contract: either `None` (unconstrained / undetectable) or a
-        // value in `[1, cores]`. Never 0, never above the host cores.
+        // value in `[1, cores]`. Never 0, never above the host cores. Hold the seam
+        // lock so the seam test isn't mid-mutation when we read `cpu_budget()`.
+        let _guard = CPU_SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(n) = cpu_budget() {
             let cores = available_cores();
             assert!(n >= 1 && n <= cores, "budget {n} out of [1, {cores}]");
@@ -455,7 +465,12 @@ mod tests {
     fn test_seam_forces_a_deterministic_budget() {
         // The `#[cfg(test)]` injection seam (NOT a public knob — `__NUB_TEST_*`
         // internal plumbing) lets a test pin `cpu_budget()` regardless of the host.
-        // SAFETY: single-threaded test; no other thread reads the env here.
+        // The seam env var is process-global and the suite is multi-threaded, so
+        // hold the shared lock to serialize against other `cpu_budget()` readers.
+        let _guard = CPU_SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: `set_var`/`remove_var` mutate the process env; the lock above
+        // serializes against the only other test that reads `cpu_budget()`, so no
+        // concurrent env reader races us here.
         unsafe { std::env::set_var("__NUB_TEST_CPU_BUDGET", "2") };
         assert_eq!(cpu_budget(), Some(2));
         unsafe { std::env::set_var("__NUB_TEST_CPU_BUDGET", "garbage") };
