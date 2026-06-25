@@ -629,6 +629,12 @@ fn engine_session_inner(dir: Option<&Path>, noise: ConfigScopeNoise) -> Result<E
     // `AUBE_DIAG_SUMMARY=1 nub install` works the same as `AUBE_DIAG_SUMMARY=1
     // aube install`. The OnceLock inside diag::init() makes this idempotent.
     aube_util::diag::init();
+    // Raise the open-file-descriptor soft limit toward the hard ceiling. The aube
+    // engine does this in its own startup, but nub dispatches the command impls
+    // directly and never runs that path — without this a large concurrent install
+    // exhausts macOS's stingy default soft limit (256) and dies with
+    // `Too many open files (os error 24)`.
+    resource_limits::raise_nofile_limit();
     apply_dir(dir)?;
     engine_brand_preflight();
     let cwd = std::env::current_dir()?;

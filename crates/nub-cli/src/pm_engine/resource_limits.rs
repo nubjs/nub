@@ -108,6 +108,50 @@ pub(crate) fn spawn_headroom() -> Option<usize> {
     None
 }
 
+/// Raise the soft `RLIMIT_NOFILE` (max open file descriptors) to the hard limit,
+/// best-effort. WHY: a large install fans tarball fetches, CAS imports, and
+/// symlink passes out concurrently, each holding open descriptors. macOS ships a
+/// stingy default soft limit (commonly 256) while the hard limit is far higher,
+/// so a big dependency tree (e.g. the AWS SDK / aws-cdk-lib) exhausts the soft
+/// limit and the install dies with `Too many open files (os error 24)`. The aube
+/// engine raises this in its own `inner_main` startup, but nub dispatches the
+/// command impls directly and never runs that path — so we mirror the raise here,
+/// on the one startup all PM verbs flow through.
+///
+/// DESIGN: only ever RAISES the soft limit toward the hard ceiling, never lowers
+/// it, and silently keeps the existing limit on any failure (an unprivileged
+/// process can always raise its soft limit up to the hard limit). When the hard
+/// limit is `RLIM_INFINITY` (macOS reports this, but the kernel still enforces
+/// `kern.maxfilesperproc`), a direct raise to infinity is rejected, so we fall
+/// back to a generous finite target. No-op on platforms without the syscall.
+#[cfg(unix)]
+pub(crate) fn raise_nofile_limit() {
+    // SAFETY: get/setrlimit are sync syscalls reading/writing this process's own
+    // resource table. The out-param pointer is valid for the call; failure is a
+    // non-zero return, handled below.
+    unsafe {
+        let mut rlim = std::mem::zeroed::<libc::rlimit>();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {
+            return;
+        }
+        let before = rlim.rlim_cur;
+        if before >= rlim.rlim_max {
+            return;
+        }
+        rlim.rlim_cur = rlim.rlim_max;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) == 0 {
+            return;
+        }
+        // The hard limit was `RLIM_INFINITY` (or otherwise un-grantable as-is);
+        // retry with a finite target the kernel will accept.
+        rlim.rlim_cur = before.max(10240).min(rlim.rlim_max);
+        let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn raise_nofile_limit() {}
+
 // ───────────────────────── CPU budget (cgroup CFS quota) ─────────────────────────
 //
 // The CPU analog of `spawn_headroom`. The PID axis (above) is REACTIVE — it sizes
@@ -381,6 +425,22 @@ mod tests {
     fn rlimit_nproc_is_readable_or_infinite() {
         // Either a finite soft limit or `None` (RLIM_INFINITY) — never a panic.
         let _ = rlimit_nproc_soft();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raise_nofile_never_lowers_the_soft_limit() {
+        let read_soft = || unsafe {
+            let mut lim = std::mem::zeroed::<libc::rlimit>();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim), 0);
+            lim.rlim_cur
+        };
+        let before = read_soft();
+        raise_nofile_limit();
+        assert!(
+            read_soft() >= before,
+            "raise_nofile_limit must never lower the soft limit"
+        );
     }
 
     #[test]
