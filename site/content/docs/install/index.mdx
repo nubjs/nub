@@ -177,7 +177,7 @@ A project is Nub's own in three cases: it declares Nub through `nub pm use nub`,
 
 - **Lockfile:** `lock.yaml` — the pnpm v9 schema byte-for-byte, under Nub's own basename
 - **Package fields:** `workspaces`, `overrides`, `resolutions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
-- **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
+- **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_CPU_BUDGET`, `NUB_PRIMER_TTL`
 - **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own directories
 
 This is the brand boundary in both directions: Nub never emits its own brand into your config, and under its own identity reads *only* neutral, cross-tool config — never `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `pnpm.*` namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, or aube's `AUBE_*` knobs. Injected dependencies are unsupported under Nub identity — `nub pm use nub` refuses a project that relies on `dependenciesMeta.injected`. To keep pnpm hooks or workspace config active, stay pnpm-owned or run `nub pm use pnpm`.
