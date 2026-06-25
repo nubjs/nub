@@ -108,6 +108,144 @@ pub(crate) fn spawn_headroom() -> Option<usize> {
     None
 }
 
+// ───────────────────────── CPU budget (cgroup CFS quota) ─────────────────────────
+//
+// The CPU analog of `spawn_headroom`. The PID axis (above) is REACTIVE — it sizes
+// pools below the kernel thread ceiling to dodge the `clone(2)` EAGAIN abort. This
+// axis is PROACTIVE: on a box with a cgroup CPU bandwidth limit (a 0.5-CPU
+// Vercel/Lambda/K8s pod) the host still reports many cores, so the pools over-
+// subscribe the quota → CFS throttles the process (latency cliffs) and the attendant
+// thread growth feeds the SAME PID exhaustion. Sizing CPU-bound pools to the real
+// quota prevents both. Rust's `available_parallelism()` already reads cgroup-v2
+// `cpu.max` + affinity (since 1.61), but NOT cgroup-v1 quota, and silently drops the
+// v2 quota when `sched_getaffinity` is unreadable (sandbox) — `cpu_budget` closes
+// both gaps by reading the cgroup files directly, exactly as the PID detector does.
+// Default-preserving: an unconstrained box returns `None` and pools keep full cores.
+
+/// The dedicated user override for the effective CPU budget — a hard cap on the
+/// auto-detected CPU-count the pools size against. DISTINCT from the existing
+/// `NUB_CONCURRENCY` knob, which is aube's tarball-FETCH concurrency (an IO knob,
+/// clamped `[8, 256]`); this caps the CPU/thread pools (workers, rayon), so it
+/// needs its own name and its own range `[1, cores]`.
+const CPU_BUDGET_ENV: &str = "NUB_CPU_BUDGET";
+
+/// The effective CPU count the engine's CPU-bound pools (tokio workers, rayon
+/// global) should size against: `min(available_parallelism, cgroup-CFS-quota-cores)`
+/// with `max(1, ceil)` rounding. `None` means "no CPU constraint detected — use
+/// full-speed defaults," matching today's `available_parallelism()`.
+///
+/// Auto-detection is `num_cpus::get()`, which reads the cgroup CFS quota for BOTH
+/// cgroup v1 (`cpu.cfs_quota_us`/`cfs_period_us`) and v2 (`cpu.max`) — locating the
+/// controller via `/proc/self/mountinfo` — and returns `min(ceil(quota/period),
+/// logical_cores)`. That is exactly the automaxprocs algorithm and the maintainer-
+/// chosen `max(1, ceil)` rounding (any positive quota ceils to ≥1; the `quota == 0`
+/// degenerate is guarded). It closes the two gaps in std's `available_parallelism()`
+/// that nub would otherwise inherit (no cgroup-v1 quota; the v2 quota is dropped when
+/// `sched_getaffinity` is unreadable under a sandbox).
+///
+/// An explicit `NUB_CPU_BUDGET` always wins over auto-detection (the automaxprocs/Go
+/// `GOMAXPROCS`-env precedence model), clamped to `[1, cores]`.
+///
+/// Returns a budget ONLY when it constrains BELOW the logical core count — at/above
+/// the cores it tightens nothing, so we return `None` and the caller keeps its
+/// full-speed default (no needless pool rebuild). Linux-gated: `num_cpus`'s quota
+/// read is a Linux-cgroup concept, and like `spawn_headroom` the over-report trap
+/// was only ever a Linux-container problem; on macOS/Windows only the explicit
+/// override can produce a budget.
+pub(crate) fn cpu_budget() -> Option<usize> {
+    // The override's ceiling is the quota-IGNORING host logical-CPU count, so an
+    // EXPLICIT value can raise concurrency ABOVE a detected quota (explicit wins) —
+    // not the quota-aware `available_parallelism()`, which would silently clamp the
+    // user's request back down to the quota.
+    if let Some(n) = cpu_budget_override(host_logical_cpus()) {
+        return Some(n);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // `num_cpus::get()` returns min(ceil(quota), logical) reading the cgroup
+        // files directly (v1 AND v2, even when affinity is unreadable). Gate on
+        // "actually below available_parallelism()" so a box std already sized
+        // correctly (v2 + readable affinity) stays `None` — we only ADD the v1 /
+        // sandbox coverage std misses.
+        cpu_budget_from(available_cores(), num_cpus::get())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Quota-aware logical-core count — `available_parallelism()` reads affinity AND
+/// the cgroup-v2 quota (since Rust 1.61), so on a pure-v2 host it already returns
+/// the effective budget. The detected-budget gate clamps to this.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn available_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// The host's online logical-CPU count, IGNORING any cgroup quota — the ceiling an
+/// explicit `NUB_CPU_BUDGET` may request up to. On Linux this is
+/// `sysconf(_SC_NPROCESSORS_ONLN)` (quota-blind by design); elsewhere there's no
+/// quota, so `available_parallelism()` is already the host count.
+fn host_logical_cpus() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `sysconf` with a valid name has no preconditions and no
+        // out-params; it returns the count or -1 on error.
+        let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        if n > 0 {
+            return n as usize;
+        }
+    }
+    available_cores()
+}
+
+/// Read + clamp the `NUB_CPU_BUDGET` override. `Some(n)` (clamped to `[1, ceiling]`)
+/// when set to a positive integer; `None` when unset/invalid (auto-detect). A value
+/// above the ceiling clamps down rather than erroring — asking for more than the
+/// host has just gets the host.
+///
+/// Note the asymmetry between lowering and raising: the override's primary use is
+/// to LOWER concurrency (pin to 1 on a box where auto-detection missed a v1 quota),
+/// which is fully honored. Raising ABOVE the auto-detected v2 quota is honored for
+/// the pools nub sizes explicitly (tokio workers), but rayon/tokio's own internal
+/// defaults are already quota-clamped by Rust std, so a request above the v2 quota
+/// can't lift those past the quota — a deliberately minor edge (you can't conjure
+/// CPU the cgroup won't grant).
+fn cpu_budget_override(ceiling: usize) -> Option<usize> {
+    let raw = std::env::var(CPU_BUDGET_ENV).ok()?;
+    parse_override(&raw, ceiling)
+}
+
+/// Pure parse+clamp of a `NUB_CPU_BUDGET` value (split out so the clamp/precedence
+/// is unit-testable without mutating the process env). `Some(n)` clamped to
+/// `[1, ceiling]` for a positive integer; `None` (with a warning) otherwise.
+fn parse_override(raw: &str, ceiling: usize) -> Option<usize> {
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n >= 1 => Some(n.min(ceiling.max(1))),
+        _ => {
+            tracing::warn!(
+                value = %raw,
+                "{CPU_BUDGET_ENV} ignored: must be a positive integer; using the auto-detected CPU budget"
+            );
+            None
+        }
+    }
+}
+
+/// Pure budget gate (testable with synthetic inputs): given the logical core count
+/// and `num_cpus::get()`'s already-quota-clamped count, return `Some(detected)` ONLY
+/// when it constrains below the cores; otherwise `None` (default-preserving). The
+/// `max(1)` floor mirrors `num_cpus`'s own (it never returns 0 for a live process).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn cpu_budget_from(cores: usize, detected: usize) -> Option<usize> {
+    let cores = cores.max(1);
+    let effective = detected.max(1).min(cores);
+    (effective < cores).then_some(effective)
+}
+
 /// The cgroup `pids.max` limit for the current process, trying cgroup v2
 /// (unified) first and falling back to cgroup v1 (the `pids` controller). Many
 /// CI/container hosts — including the ones that triggered this bug — are still
@@ -302,5 +440,66 @@ mod tests {
         assert_eq!(parse_pids_max("1024"), Some(1024));
         assert_eq!(parse_pids_max("  256\n"), Some(256));
         assert_eq!(parse_pids_max("garbage"), None);
+    }
+
+    // ─────────────────────── CPU budget ───────────────────────
+
+    #[test]
+    fn cpu_budget_is_none_or_in_range() {
+        // Detector contract: either `None` (unconstrained / undetectable) or a
+        // value in `[1, cores]`. Never 0, never above the host cores.
+        if let Some(n) = cpu_budget() {
+            let cores = available_cores();
+            assert!(n >= 1 && n <= cores, "budget {n} out of [1, {cores}]");
+        }
+    }
+
+    #[test]
+    fn cpu_budget_from_reports_only_when_constraining() {
+        // `num_cpus::get()` already returns min(ceil(quota), logical); this gate
+        // only reports a budget when it's strictly below the logical cores.
+        // Quota of 2 on an 8-core box → 2 (constrains).
+        assert_eq!(cpu_budget_from(8, 2), Some(2));
+        // 0.5-CPU quota ceils to 1 inside num_cpus → 1 here (constrains, never 0).
+        assert_eq!(cpu_budget_from(8, 1), Some(1));
+    }
+
+    #[test]
+    fn cpu_budget_from_unconstrained_is_none() {
+        // Detected == cores → no real constraint → None (default-preserving).
+        assert_eq!(cpu_budget_from(8, 8), None);
+        // Detected above cores (shouldn't happen, but be safe) → clamps to cores,
+        // which equals cores → None.
+        assert_eq!(cpu_budget_from(4, 16), None);
+        // A 1-core box can never tighten below itself.
+        assert_eq!(cpu_budget_from(1, 1), None);
+    }
+
+    #[test]
+    fn cpu_budget_from_floors_at_one_and_clamps_to_cores() {
+        // A degenerate 0 from the detector floors to 1 (never serialize to 0).
+        assert_eq!(cpu_budget_from(8, 0), Some(1));
+        // cores=0 (impossible in practice) is treated as 1 → nothing to constrain.
+        assert_eq!(cpu_budget_from(0, 4), None);
+    }
+
+    #[test]
+    fn parse_override_clamps_and_validates() {
+        // Positive integer, within the host ceiling → honored verbatim.
+        assert_eq!(parse_override("4", 10), Some(4));
+        // Above the ceiling clamps DOWN to the host (can't conjure CPU).
+        assert_eq!(parse_override("16", 10), Some(10));
+        // Explicit-wins ABOVE a detected v2 quota: ceiling is the quota-ignoring
+        // host count, so 3 is honored on a 2-quota box (ceiling 10 here).
+        assert_eq!(parse_override("3", 10), Some(3));
+        // Whitespace tolerated.
+        assert_eq!(parse_override("  2\n", 10), Some(2));
+        // 0 / negative / non-numeric / empty → None (auto-detect).
+        assert_eq!(parse_override("0", 10), None);
+        assert_eq!(parse_override("-1", 10), None);
+        assert_eq!(parse_override("garbage", 10), None);
+        assert_eq!(parse_override("", 10), None);
+        // A degenerate ceiling of 0 still floors the honored value at 1.
+        assert_eq!(parse_override("5", 0), Some(1));
     }
 }

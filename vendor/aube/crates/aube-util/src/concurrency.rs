@@ -15,6 +15,26 @@
 //! hostile or typo'd value can't exhaust file descriptors on Windows
 //! (default ulimit 8192).
 
+/// The effective CPU-count cap for the tool's CPU-bound thread pools — the host's
+/// logical core count (`available_parallelism()`), further lowered to the active
+/// embedder's [`cpu_budget`](crate::Embedder::cpu_budget) hook when one is installed
+/// AND it reports a constraint. Returns at least 1.
+///
+/// Standalone aube installs no hook, so this is exactly `available_parallelism()`
+/// (byte-for-byte unchanged). An embedder under a cgroup CPU quota installs a hook
+/// returning the real budget, and the pools (linker rayon pool, tokio worker seed)
+/// size against it instead of over-subscribing the quota. The hook returns `None`
+/// when even it detects no constraint, so an unconstrained box keeps full cores.
+pub fn effective_cpu_cap() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1);
+    match crate::embedder().cpu_budget.and_then(|f| f()) {
+        Some(budget) => budget.clamp(1, cores),
+        None => cores,
+    }
+}
+
 /// Lower bound on the concurrency override. A degenerate slow link still
 /// makes progress with 8 in-flight fetches.
 pub const CONCURRENCY_FLOOR: u32 = 8;
@@ -119,5 +139,18 @@ mod tests {
         with_env(Some("256"), || {
             assert_eq!(parse_concurrency_env(), Some(CONCURRENCY_CEILING));
         });
+    }
+
+    #[test]
+    fn effective_cpu_cap_without_hook_is_available_parallelism() {
+        // Standalone aube installs no `cpu_budget` hook, so the cap is exactly the
+        // host core count — the unchanged pre-existing behavior. (No embedder is
+        // registered in this unit-test process, so `embedder()` yields AUBE, whose
+        // `cpu_budget` is `None`.)
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(1);
+        assert_eq!(effective_cpu_cap(), cores);
+        assert!(effective_cpu_cap() >= 1);
     }
 }

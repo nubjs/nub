@@ -40,6 +40,7 @@ static NUBLIKE: Embedder = Embedder {
     read_branded_settings_env: false,
     no_churn_lockfile_write: true,
     primer_ttl: None,
+    cpu_budget: None,
 };
 
 /// Restore the previous value of an env var around a closure. Integration-test

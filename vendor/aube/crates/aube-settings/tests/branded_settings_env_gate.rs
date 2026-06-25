@@ -45,6 +45,7 @@ static MYTOOL_NO_BRANDED_ENV: Embedder = Embedder {
     read_branded_settings_env: false,
     no_churn_lockfile_write: false,
     primer_ttl: None,
+    cpu_budget: None,
 };
 
 fn ctx<'a>(

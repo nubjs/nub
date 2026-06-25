@@ -10,13 +10,14 @@ pub fn default_linker_parallelism() -> usize {
     // 4-thread cap pinning a 10-core machine at ~3.9 effective
     // concurrency with ~6 idle cores; lifting the cap lets the
     // clonefile pass use them. 16 matches the non-macOS default and is
-    // itself bounded by `available_parallelism` below.
+    // itself bounded by the effective CPU cap below.
     let default_limit = 16;
 
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(default_limit)
+    // `effective_cpu_cap()` is `available_parallelism()` for standalone aube
+    // (byte-for-byte unchanged) and the cgroup-CPU-quota budget under an embedder
+    // that installs the hook — so the symlink fan-out doesn't over-subscribe a
+    // constrained box's quota. Always ≥1.
+    aube_util::concurrency::effective_cpu_cap().min(default_limit)
 }
 
 type LinkPoolCache = std::sync::Mutex<Vec<(usize, std::sync::Arc<rayon::ThreadPool>)>>;

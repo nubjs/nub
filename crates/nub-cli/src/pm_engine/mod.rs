@@ -1898,11 +1898,23 @@ pub(crate) fn env_snapshot() -> Vec<(String, String)> {
 /// it returns `None` and we keep the full-speed defaults — so normal-box install
 /// performance is untouched.
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
-    let cpu = std::thread::available_parallelism()
+    let raw_cpu = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    // The effective CPU budget under a cgroup CFS quota (or the NUB_CPU_BUDGET
+    // override) — `None` on an unconstrained box, where we keep the full core
+    // count. This is the PROACTIVE CPU axis, composed below with the REACTIVE PID
+    // headroom: a CPU-bound pool is bounded by the smaller of the two.
+    let cpu_budget = resource_limits::cpu_budget();
+    let cpu = cpu_budget.unwrap_or(raw_cpu);
     let mut workers = cpu.min(8);
     let mut blocking = 128usize;
+    // The rayon GLOBAL pool is sized off the most restrictive of the two axes and
+    // capped EXACTLY ONCE below: `build_global` errors if the pool already exists,
+    // so the first cap wins — computing the final value first lets the PID share
+    // tighten rayon BELOW the CPU budget (and vice versa) instead of whichever cap
+    // happened to run first sticking. Start from the CPU budget (None → raw cores).
+    let mut rayon_target = cpu;
 
     if let Some(headroom) = resource_limits::spawn_headroom() {
         // ONE headroom budget split across the four concurrent OS-thread/process
@@ -1912,25 +1924,54 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
         let (w, b, rayon_threads, child) = resource_limits::split_budget(headroom);
         workers = workers.min(w);
         blocking = blocking.min(b);
-        // Size the rayon GLOBAL pool under the same budget. The embedded engine
-        // fans CAS writes / delta / fetch out over rayon's IMPLICIT global pool,
-        // whose lazy init otherwise spins up `available_parallelism()` threads
-        // (CPU-quota-bound, NOT PID-bound) and PANICS on thread-create EAGAIN —
-        // the SAME exit-101 abort, relocated from tokio to rayon. Capped here,
-        // before any engine `par_iter` touches the pool.
-        cap_rayon_global_pool(rayon_threads);
+        // Compose with the CPU budget: rayon is bounded by the SMALLER of the
+        // CPU-quota-derived and PID-headroom-derived shares (both feed the same
+        // pool). Capped once after this block.
+        rayon_target = rayon_target.min(rayon_threads);
         // Lower the parallel build-script count to match (single-threaded here, so
         // the env mutation is race-free, and it runs BEFORE the env_snapshot the
         // engine resolves settings from).
         apply_constrained_child_concurrency(child);
         tracing::debug!(
             headroom,
+            cpu_budget = cpu,
             workers,
             blocking,
-            rayon = rayon_threads,
+            rayon = rayon_target,
             child_concurrency = child,
-            "constrained box detected: capping install runtime pools (tokio + rayon) + build-script concurrency under the PID/thread ceiling"
+            "constrained box detected: capping install runtime pools (tokio + rayon) + build-script concurrency under the PID/thread + CPU-quota ceilings"
         );
+    } else if let Some(budget) = cpu_budget {
+        // CPU-quota constraint with NO PID constraint: the box has a CFS quota (or
+        // a NUB_CPU_BUDGET override) but generous PIDs. Size the CPU-bound pools
+        // (workers + rayon, already set above) to the quota; the IO-bound blocking
+        // pool and child concurrency keep their full defaults (PID headroom is fine).
+        tracing::debug!(
+            cpu_budget = budget,
+            workers,
+            rayon = rayon_target,
+            "CPU-quota constraint detected: capping CPU-bound install pools (tokio workers + rayon) to the effective CPU budget"
+        );
+    }
+
+    // Internal diagnostic seam (NOT a public knob — `__NUB_*` per the brand
+    // boundary's internal exemption): when set, print the resolved pool sizing to
+    // real stderr, BEFORE the install's fd-capture can swallow a `tracing` line.
+    // Lets a constrained-box test assert the detected budget deterministically.
+    if std::env::var_os("__NUB_PRINT_CPU_BUDGET").is_some() {
+        eprintln!(
+            "__nub_cpu_budget raw_cpu={raw_cpu} cpu_budget={cpu_budget:?} workers={workers} blocking={blocking} rayon={rayon_target}"
+        );
+    }
+
+    // Size the rayon GLOBAL pool whenever EITHER axis constrains below the raw core
+    // count. The embedded engine fans CAS writes / delta / fetch out over rayon's
+    // IMPLICIT global pool, whose lazy init otherwise spins up
+    // `available_parallelism()` threads (v1-quota-blind, PID-unbounded) and PANICS
+    // on thread-create EAGAIN — the SAME exit-101 abort, relocated to rayon. Done
+    // once here, before any engine `par_iter` touches the pool.
+    if rayon_target < raw_cpu {
+        cap_rayon_global_pool(rayon_target);
     }
 
     tokio::runtime::Builder::new_multi_thread()

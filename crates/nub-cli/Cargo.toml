@@ -91,6 +91,12 @@ url = "2.5"
 # thread-create EAGAIN — the same exit-101 abort the tokio cap closes. We cap it
 # under the same headroom budget; unconstrained boxes keep rayon's default.
 rayon = "1"
+# CPU-budget detection (resource_limits::cpu_budget): num_cpus::get() reads the
+# cgroup CFS quota (cgroup v1 `cpu.cfs_quota_us`/`cfs_period_us` AND v2 `cpu.max`,
+# via /proc/self/mountinfo) and returns min(ceil(quota/period), logical_cores) —
+# exactly the automaxprocs algorithm, maintained, 2-dep. Closes the v1-quota +
+# affinity-blocked gaps in std's `available_parallelism()`.
+num_cpus = "1"
 
 [target.'cfg(unix)'.dependencies]
 # fd-level capture of the engine's raw println/eprintln hint lines so the
