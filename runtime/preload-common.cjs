@@ -678,13 +678,20 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // `using`/`v`-flag-RegExp/decorators lower uniformly on the classic require tier.
   // TWO guards keep this safe: (1) node_modules deps MUST stay on Node's native
   // compiler — routing every dep `.js` require through oxc would be catastrophic — so
-  // bail to the saved original handler for node_modules; (2) loadTranspile's own
-  // skip-gate returns no-op plain JS verbatim, so a project `.js` with nothing to
-  // lower is _compile'd from its raw bytes (byte-identical). `.mjs` is ESM-only;
-  // Node never registers a require.extensions handler for it, so requiring an `.mjs`
-  // throws ERR_REQUIRE_ESM as before — we don't override `.mjs` here.
+  // bail to the native handler for node_modules; (2) loadTranspile's own skip-gate
+  // returns no-op plain JS verbatim, so a project `.js` with nothing to lower is
+  // _compile'd from its raw bytes (byte-identical). `.mjs` is ESM-only; Node never
+  // registers a require.extensions handler for it, so requiring an `.mjs` throws
+  // ERR_REQUIRE_ESM as before — we don't override `.mjs` here.
+  //
+  // Node registers a native `_extensions` handler ONLY for `.js` (plus `.json`/
+  // `.node`) — NOT for `.cjs`, which Node compiles through the SAME CJS `_compile`
+  // path as `.js`. So the node_modules bail falls back to the `.js` handler when the
+  // ext has no own handler (`|| nativeJs`); without it, a node_modules `.cjs` require
+  // would call `undefined` and crash on the compat tier (where this shim is active).
+  const nativeJs = module_._extensions[".js"];
   for (const ext of [".js", ".cjs"]) {
-    const origExtension = module_._extensions[ext];
+    const origExtension = module_._extensions[ext] || nativeJs;
     module_._extensions[ext] = (mod, filename) => {
       if (core.isNodeModules(pathToFileURL(filename).href)) {
         return origExtension.call(module_._extensions, mod, filename);

@@ -411,21 +411,24 @@ fn project_js_mjs_is_module_cjs_is_commonjs() {
 
 #[test]
 fn node_modules_js_is_never_transpiled() {
-    // The make-or-break gate: dependency `.js` (a plain node_modules dep AND a pnpm
-    // `.pnpm`-virtual-store dep) must load RAW on every tier — fast sync hook, the
-    // classic require shim, and the compat async-hooks load. If nub transpiled them,
-    // the reformattable source would be normalized; `using`-as-identifier in the
-    // plain dep would survive only because it's never parsed as a declaration. The
-    // marks prove the dep bodies ran unchanged. (PnP deps live in zip-fs, never a
-    // real `/node_modules/` path — covered by the tests/pnp matrix, not here.)
+    // The make-or-break gate: dependency code must load RAW on every tier — the fast
+    // sync hook, the classic require shim, and the compat async-hooks load. Covered:
+    // a plain node_modules `.js` dep (which itself `require`s a sibling `.cjs` — Node
+    // has no native `_extensions['.cjs']`, so the classic shim's bail must fall back
+    // to the `.js` handler or the require crashes on the compat tier), and a pnpm
+    // `.pnpm`-virtual-store dep. If nub transpiled them, the reformattable source
+    // would be normalized; `using`-as-identifier in the plain dep would survive only
+    // because it's never parsed as a declaration. The marks prove the dep bodies ran
+    // unchanged. (Yarn PnP deps resolve to an in-zip path that still contains
+    // `/node_modules/`, so they gate identically — covered by the tests/pnp matrix.)
     let (stdout, stderr, code) = run_nub("project-js", "main-deps.js");
     assert_eq!(
         code, 0,
         "requiring node_modules deps should work raw: {stderr}"
     );
     assert!(
-        stdout.contains("DEPY:depy:identifier-not-keyword:12"),
-        "plain node_modules dep loaded raw: {stdout}"
+        stdout.contains("DEPY:depy:identifier-not-keyword:depy-cjs:12"),
+        "plain node_modules dep (and its required .cjs helper) loaded raw: {stdout}"
     );
     assert!(
         stdout.contains("DEPZ:depz-store:9"),
