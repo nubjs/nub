@@ -149,6 +149,29 @@ fn caret_escape(s: &str) -> String {
     out
 }
 
+/// Splice the user's forwarded args onto an unescaped script `body`, escaping
+/// each arg for the target `shell` exactly as npm's `@npmcli/promise-spawn`
+/// does. The result is both the string `nub run` executes and the command it
+/// echoes in the `$ <cmd>` preamble, so the displayed command always matches the
+/// effective one (issue #146). With no args the body is returned unchanged.
+pub fn splice_args(body: &str, args: &[String], shell: &str) -> String {
+    if args.is_empty() {
+        return body.to_string();
+    }
+    let use_cmd = is_cmd(shell);
+    let double_escape = use_cmd && body_targets_batch_file(body);
+    let mut full = body.to_string();
+    for arg in args {
+        full.push(' ');
+        if use_cmd {
+            full.push_str(&cmd(arg, double_escape));
+        } else {
+            full.push_str(&sh(arg));
+        }
+    }
+    full
+}
+
 /// Does `shell` invoke `cmd.exe`? Mirrors npm's `/(?:^|\\)cmd(?:\.exe)?$/i`, so a
 /// custom `script-shell` of `bash`/`zsh` selects POSIX escaping while the Windows
 /// default (`cmd`) selects cmd escaping.
@@ -254,5 +277,24 @@ mod tests {
         assert!(body_targets_batch_file("build.bat"));
         assert!(!body_targets_batch_file("eslint .")); // PATHEXT gap (documented)
         assert!(!body_targets_batch_file("node script.js"));
+    }
+
+    // ── splice_args (the body+args display/exec string) ───────────────────
+
+    #[test]
+    fn splice_args_matches_the_executed_command() {
+        // No args → the body is returned verbatim (the common `nub run build` case).
+        assert_eq!(splice_args("jest --ci", &[], "/bin/sh"), "jest --ci");
+        // A plain flag appends unquoted; a metachar arg is sh-quoted as one token,
+        // so the displayed preamble equals what `sh -c` actually runs (#146).
+        assert_eq!(
+            splice_args("jest", &["-u".into(), "two words".into()], "/bin/sh"),
+            "jest -u 'two words'",
+        );
+        // A cmd.exe shell selects caret/quote escaping instead.
+        assert_eq!(
+            splice_args("jest", &["a b".into()], "cmd.exe"),
+            "jest ^\"a^ b^\"",
+        );
     }
 }

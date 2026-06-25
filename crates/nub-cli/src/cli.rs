@@ -3103,7 +3103,7 @@ fn build_script_command(
     lifecycle_event: &str,
     stream: StreamMode,
     script_shell_override: Option<&str>,
-) -> Result<std::process::Command> {
+) -> Result<(std::process::Command, String)> {
     use std::process::Command as StdCommand;
 
     // `.env` is NODE-SCOPED, not process-scoped (security + correctness, decided
@@ -3189,24 +3189,10 @@ fn build_script_command(
     // script body, so multi-word / metachar args reach the script as single
     // literal tokens while the body's own globs/expansions still run. A raw
     // join (the prior behavior) let the shell re-split/expand the args. Compat,
-    // not security — the args are the user's own argv (A42).
-    let full_cmd = if args.is_empty() {
-        cmd.to_string()
-    } else {
-        use nub_core::workspace::shell_escape;
-        let use_cmd = shell_escape::is_cmd(shell);
-        let double_escape = use_cmd && shell_escape::body_targets_batch_file(cmd);
-        let mut full = cmd.to_string();
-        for arg in args {
-            full.push(' ');
-            if use_cmd {
-                full.push_str(&shell_escape::cmd(arg, double_escape));
-            } else {
-                full.push_str(&shell_escape::sh(arg));
-            }
-        }
-        full
-    };
+    // not security — the args are the user's own argv (A42). The returned
+    // `full_cmd` is also what the `$ <cmd>` preamble echoes, so the displayed
+    // command matches the effective one (issue #146).
+    let full_cmd = nub_core::workspace::shell_escape::splice_args(cmd, args, shell);
 
     // Augmentation: NODE_OPTIONS + PATH shim so child `node` processes inside
     // the script inherit transpilation, polyfills, flag injection, and
@@ -3349,7 +3335,7 @@ fn build_script_command(
         command.stderr(std::process::Stdio::piped());
     }
 
-    Ok(command)
+    Ok((command, full_cmd))
 }
 
 fn spawn_script(
@@ -3360,7 +3346,7 @@ fn spawn_script(
     lifecycle_event: &str,
     exec: &ScriptExecOpts,
 ) -> Result<i32> {
-    let mut command = build_script_command(
+    let (mut command, display_cmd) = build_script_command(
         cmd,
         project,
         compat_mode,
@@ -3370,12 +3356,14 @@ fn spawn_script(
         exec.script_shell,
     )?;
     // Echo the command before running it, like npm/pnpm (and like Nub's own
-    // workspace/streaming path). Single-package runs inherit stdio with no
-    // per-package prefix, so just `$ <command>`, to stderr so it never pollutes
-    // the script's stdout. Runs once per lifecycle script (pre/main/post).
-    // Suppressed by `--silent`.
+    // workspace/streaming path). `display_cmd` is the script body with the
+    // forwarded args spliced + escaped exactly as executed, so the preamble
+    // matches the effective command (issue #146). Single-package runs inherit
+    // stdio with no per-package prefix, so just `$ <command>`, to stderr so it
+    // never pollutes the script's stdout. Runs once per lifecycle script
+    // (pre/main/post). Suppressed by `--silent`.
     if !SILENT.load(Ordering::Relaxed) {
-        eprintln!("$ {cmd}");
+        eprintln!("$ {display_cmd}");
     }
     // Forward terminating signals to the `sh -c <script>` child while it runs, so
     // `docker stop` / Ctrl-C / systemd reach the workload — not just Nub's leader.
@@ -3396,9 +3384,10 @@ fn spawn_script(
 /// `node --run`).
 ///
 /// `args` flow only to the main script; pre/post receive `&[]`, like npm.
-/// The `$ <cmd>` echo for each lifecycle step is emitted here (suppressed by
-/// `--silent`) so both stream call sites get identical sequencing + echoing
-/// from one place rather than duplicating it.
+/// The `$ <cmd>` echo for each lifecycle step is emitted inside
+/// [`spawn_script_prefixed`] (suppressed by `--silent`), alongside the ndjson
+/// `start` event, so both stream call sites echo identically — and the main
+/// step's echo carries the forwarded args spliced exactly as executed.
 #[allow(clippy::too_many_arguments)]
 fn run_single_script_prefixed(
     script: &str,
@@ -3411,18 +3400,6 @@ fn run_single_script_prefixed(
     exec: &ScriptExecOpts,
     aggregate: bool,
 ) -> Result<i32> {
-    // Each lifecycle step echoes `$ <cmd>` under its OWN name (prebuild /
-    // build / postbuild), matching pnpm — the output-line prefix below already
-    // uses the lifecycle name, so the echo lines up with it.
-    let echo_cmd = |lifecycle_name: &str, lifecycle_cmd: &str| {
-        // ndjson reports the `$ cmd` step via a JSON `start` event in
-        // spawn_script_prefixed, so suppress the human echo to keep stdout pure JSON.
-        if !SILENT.load(Ordering::Relaxed) && !reporter_is_ndjson() {
-            let cmd_prefix = format_stream_prefix_sep(prefix, lifecycle_name, color_idx, "$ ");
-            eprintln!("{cmd_prefix}{lifecycle_cmd}");
-        }
-    };
-
     // --ignore-scripts skips pre/post for the whole lifecycle; only the main
     // body runs (matching npm's interpretation, which run.md adopts).
     let run_hooks = !exec.ignore_scripts;
@@ -3433,7 +3410,6 @@ fn run_single_script_prefixed(
         if let Some(pre_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &pre_name)
         {
-            echo_cmd(&pre_name, &pre_cmd);
             let (code, _) = spawn_script_prefixed(
                 &pre_cmd,
                 project,
@@ -3451,7 +3427,6 @@ fn run_single_script_prefixed(
         }
     }
 
-    echo_cmd(script, cmd);
     let (code, _) = spawn_script_prefixed(
         cmd,
         project,
@@ -3473,7 +3448,6 @@ fn run_single_script_prefixed(
         if let Some(post_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &post_name)
         {
-            echo_cmd(&post_name, &post_cmd);
             let (post_code, _) = spawn_script_prefixed(
                 &post_cmd,
                 project,
@@ -3856,7 +3830,7 @@ fn spawn_script_prefixed(
 ) -> Result<(i32, String)> {
     use std::io::Write;
 
-    let mut command = build_script_command(
+    let (mut command, display_cmd) = build_script_command(
         cmd,
         project,
         compat_mode,
@@ -3867,17 +3841,6 @@ fn spawn_script_prefixed(
     )?;
 
     nub_core::node::spawn::group_on_spawn(&mut command);
-    let mut child = nub_core::node::spawn::spawn_with_eagain_retry(&mut command)?;
-    // Relay docker stop / Ctrl-C to the streamed child's whole process group too
-    // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
-    nub_core::node::spawn::track_child_group(child.id());
-    let mut output_buf = String::new();
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let prefix_out = format_stream_prefix(prefix, script_name, color_idx);
-    let prefix_err = prefix_out.clone();
 
     // `--reporter=ndjson`: every output site emits a JSON object on stdout instead
     // of the prefixed human line. The package `name` is the manifest name (falling
@@ -3890,9 +3853,31 @@ fn spawn_script_prefixed(
         .and_then(|v| v.as_str())
         .unwrap_or(prefix)
         .to_string();
+    // The `$ <cmd>` preamble / ndjson `start` event is emitted BEFORE the spawn so
+    // it always precedes any of the child's output. `display_cmd` carries the
+    // forwarded args spliced + escaped exactly as executed, so the preamble
+    // matches the effective command (issue #146); pre/post hooks receive no args,
+    // so theirs is just the body. Emitted here (not in the caller) so every step —
+    // and both the sequential and concurrent run paths — echo identically.
     if ndjson {
         emit_ndjson("start", "info", &pkg_name, script_name, None, None);
+    } else if !SILENT.load(Ordering::Relaxed) {
+        let cmd_prefix = format_stream_prefix_sep(prefix, script_name, color_idx, "$ ");
+        eprintln!("{cmd_prefix}{display_cmd}");
     }
+
+    let mut child = nub_core::node::spawn::spawn_with_eagain_retry(&mut command)?;
+    // Relay docker stop / Ctrl-C to the streamed child's whole process group too
+    // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
+    nub_core::node::spawn::track_child_group(child.id());
+    let mut output_buf = String::new();
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let prefix_out = format_stream_prefix(prefix, script_name, color_idx);
+    let prefix_err = prefix_out.clone();
+
     let (name_out, script_out) = (pkg_name.clone(), script_name.to_string());
     let (name_err, script_err) = (pkg_name.clone(), script_name.to_string());
 
