@@ -177,9 +177,15 @@ pub(crate) fn cpu_budget() -> Option<usize> {
 
 /// Quota-aware logical-core count — `available_parallelism()` reads affinity AND
 /// the cgroup-v2 quota (since Rust 1.61), so on a pure-v2 host it already returns
-/// the effective budget. The detected-budget gate clamps to this.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn available_cores() -> usize {
+/// the effective budget. The detected-budget gate clamps to this, and
+/// `build_runtime` uses it as `raw_cpu`, so both agree on the same `unwrap_or(1)`
+/// fallback. NOTE: if `available_parallelism()` ERRORS (a rare seccomp sandbox
+/// blocking the syscall), this collapses to 1, which makes the gate
+/// `cpu_budget_from(1, _)` return `None` — i.e. CPU-budget DETECTION quietly
+/// no-ops there. Harmless: the caller then uses `raw_cpu == 1` and sizes pools
+/// minimally anyway; an explicit `NUB_CPU_BUDGET` still works (it's read before
+/// this gate).
+pub(crate) fn available_cores() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -209,11 +215,13 @@ fn host_logical_cpus() -> usize {
 ///
 /// Note the asymmetry between lowering and raising: the override's primary use is
 /// to LOWER concurrency (pin to 1 on a box where auto-detection missed a v1 quota),
-/// which is fully honored. Raising ABOVE the auto-detected v2 quota is honored for
-/// the pools nub sizes explicitly (tokio workers), but rayon/tokio's own internal
-/// defaults are already quota-clamped by Rust std, so a request above the v2 quota
-/// can't lift those past the quota — a deliberately minor edge (you can't conjure
-/// CPU the cgroup won't grant).
+/// which is fully honored everywhere. Raising ABOVE the auto-detected v2 quota is
+/// honored for the tokio worker count nub sets directly from `cpu_budget()`, but
+/// any pool whose ceiling is `available_parallelism()` — rayon/tokio's own internal
+/// defaults AND aube's linker pool via `effective_cpu_cap()` — is already
+/// quota-clamped by Rust std, so a request above the v2 quota can't lift those past
+/// the quota. A deliberately minor edge: you can't conjure CPU the cgroup won't
+/// grant, and the common case (lowering) is unaffected.
 fn cpu_budget_override(ceiling: usize) -> Option<usize> {
     let raw = std::env::var(CPU_BUDGET_ENV).ok()?;
     parse_override(&raw, ceiling)

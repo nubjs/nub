@@ -1898,9 +1898,11 @@ pub(crate) fn env_snapshot() -> Vec<(String, String)> {
 /// it returns `None` and we keep the full-speed defaults — so normal-box install
 /// performance is untouched.
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
-    let raw_cpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    // Use `resource_limits::available_cores()` (NOT a local `unwrap_or(4)`) so this
+    // `raw_cpu` matches the `cores` the `cpu_budget()` gate compares against — the
+    // two must agree on the same `unwrap_or(1)` fallback or the gate could disagree
+    // with the pool sizing in the rare `available_parallelism()`-errors case.
+    let raw_cpu = resource_limits::available_cores();
     // The effective CPU budget under a cgroup CFS quota (or the NUB_CPU_BUDGET
     // override) — `None` on an unconstrained box, where we keep the full core
     // count. This is the PROACTIVE CPU axis, composed below with the REACTIVE PID
