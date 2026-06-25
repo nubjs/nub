@@ -461,13 +461,18 @@ function detectModuleInfo(filePath, source, lang) {
 // `type` is authoritative; otherwise (ambiguous) we detect from source syntax —
 // full Node parity (`--experimental-detect-module`), so a CJS-syntax `.ts` with
 // no `type` runs as CJS on nub exactly as on Node. See wiki/runtime/module-format.md.
-export function moduleFormatFor(ext, pkgType, filePath, source) {
+// `info` (optional) is a pre-computed `detectModuleInfo` result for this file — the
+// caller passes it to avoid a second parse when it already needed the verdict (the
+// plain-JS skip-gate). When the format is decided by ext/`type` alone, `info` is
+// never consulted, so passing it is harmless on the explicit paths.
+export function moduleFormatFor(ext, pkgType, filePath, source, info) {
   if (ext === ".mts" || ext === ".mjs") return "module";
   if (ext === ".cts" || ext === ".cjs") return "commonjs";
   if (pkgType === "module") return "module";
   if (pkgType === "commonjs") return "commonjs";
   const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
-  return detectModuleInfo(filePath, source, lang).hasValueEsmSyntax ? "module" : "commonjs";
+  const resolved = info ?? detectModuleInfo(filePath, source, lang);
+  return resolved.hasValueEsmSyntax ? "module" : "commonjs";
 }
 
 // The Stage-3-decorator rejection diagnostic. oxc does not lower TC39 Stage 3
@@ -579,27 +584,30 @@ export function loadTranspile(url, ext) {
   // (.ts/.tsx/.jsx); .mts/.cts are explicit so its lookup is skipped. The chosen
   // format is folded into the cache key (and the entry's leading byte) by native.
   const pkgType = ext === ".mts" || ext === ".cts" ? undefined : getPackageType(dir);
-  const format = moduleFormatFor(ext, pkgType, filePath, source);
-
   const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
 
   // ── Plain-JS byte-parity skip-gate ──────────────────────────────────
   // Project `.js`/`.mjs`/`.cjs` is now in TRANSPILE_EXTS, but oxc REFORMATS no-op
   // source (quotes/semicolons/whitespace) and always appends a sourcemap footer —
   // a hard regression for every plain-JS file that has nothing to lower. So for
-  // plain JS only, ask the native verdict (computed on the SAME parse moduleFormatFor
-  // already runs for ambiguous `.js`): if the file contains NO target-gated syntax
-  // oxc would lower (`using`/`await using`, `v`-flag RegExp — `transformableSyntax`)
-  // AND no decorators (`hasDecorators` — the decorator path is handled below: legacy
-  // transforms it, Stage-3-off throws the guard), return the RAW source VERBATIM.
-  // No codegen, no footer, no cache write — byte-identical to the input, exactly as
-  // a non-transpiled `.js` is today. TS/JSX exts skip this gate (they always strip).
-  // JSX-in-.js is OUT of scope (lang is "ts", which does not parse JSX); use `.jsx`.
-  if (PLAIN_JS_EXTS.has(ext)) {
-    const info = detectModuleInfo(filePath, source, lang);
-    if (!info.transformableSyntax && !info.hasDecorators) {
-      return { format, source, shortCircuit: true };
-    }
+  // plain JS only, ask the native verdict: if the file contains NO target-gated
+  // syntax oxc would lower (`using`/`await using`, `v`-flag RegExp —
+  // `transformableSyntax`) AND no decorators (`hasDecorators` — the decorator path
+  // is handled below: legacy transforms it, Stage-3-off throws the guard), return
+  // the RAW source VERBATIM. No codegen, no footer, no cache write — byte-identical
+  // to the input, exactly as a non-transpiled `.js` is today. TS/JSX exts skip this
+  // gate (they always strip). JSX-in-.js is OUT of scope (lang is "ts", which does
+  // not parse JSX); use `.jsx`.
+  //
+  // For plain JS we parse ONCE here and pass the result to `moduleFormatFor` so an
+  // ambiguous-format `.js` (no explicit `type`) doesn't pay a SECOND parse for its
+  // format detection — the verdict and the ESM-syntax signal come off the same parse.
+  const plainJsInfo = PLAIN_JS_EXTS.has(ext)
+    ? detectModuleInfo(filePath, source, lang)
+    : undefined;
+  const format = moduleFormatFor(ext, pkgType, filePath, source, plainJsInfo);
+  if (plainJsInfo && !plainJsInfo.transformableSyntax && !plainJsInfo.hasDecorators) {
+    return { format, source, shortCircuit: true };
   }
 
   const opts = {
