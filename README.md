@@ -65,6 +65,10 @@ irm https://nubjs.com/install.ps1 | iex
 
 # Or via npm (pnpm / yarn global add work too)
 npm install -g --ignore-scripts=false @nubjs/nub
+
+# Or via Nix flakes
+nix run github:nubjs/nub
+nix profile install github:nubjs/nub
 ```
 
 For GitHub Actions, use [`nubjs/setup-nub`](https://github.com/nubjs/setup-nub) in place of `actions/setup-node`. It's one-to-one compatible.
