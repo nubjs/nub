@@ -50,6 +50,7 @@ Register: terse, code-first, no marketing fluff inside docs pages. Show the thin
 
 - **Terminal mockups show real captured output only — never invented lines.** Capture from the actual built binary or ground the exact string in the source; never invent example output, and never show output for a flag or command that doesn't exist.
 - **Never address a concern nobody has — cut defensive editorializing.** Lines that pre-empt an imagined worry ("no minimum version", "this is the correct, conservative behavior", "rather than silently misread") answer a question the reader never asked. If a reader wasn't going to ask it, delete the sentence. State what the feature does; don't defend against objections nobody raised.
+- **Cut "honestly", "frankly", "to be honest" (and kin) — and their close filler relatives.** Honesty hedges imply the rest isn't honest and read as throat-clearing; state the claim directly. The same goes for the filler crutches that add no fact — "actually", "basically", "just"/"simply", "of course" — delete them and let the sentence stand on the fact.
 - **Don't sprinkle a cross-cutting flag's asides across unrelated pages.** A flag that cuts across many features (an escape hatch, a compatibility toggle) gets introduced once, on its own surface — or as a documented flag of the command a page is about. Don't tack a tangential "and `--flag` turns this off" note onto an unrelated feature page that never introduces the flag; it just confuses people.
 
 ### Description fields
