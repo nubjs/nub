@@ -351,10 +351,12 @@ pub(super) async fn import_local_source(
                     local.specifier()
                 )
             })?;
-            let bytes = client
-                .fetch_tarball_bytes(&t.url)
-                .await
-                .map_err(|e| miette!("failed to fetch {}: {e}{chain}", t.url))?;
+            let bytes = client.fetch_tarball_bytes(&t.url).await.map_err(|e| {
+                miette!(
+                    "failed to fetch {}: {e}{chain}",
+                    aube_util::url::redact_url(&t.url)
+                )
+            })?;
             if t.integrity.is_empty() {
                 tracing::warn!(
                     code = aube_codes::warnings::WARN_AUBE_MISSING_INTEGRITY,

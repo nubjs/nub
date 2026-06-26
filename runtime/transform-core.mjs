@@ -156,7 +156,21 @@ if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 // natively now, and this file no longer needs to read version.mjs.
 
 // ── Constants ───────────────────────────────────────────────────────
+// TS/JSX exts ALWAYS transform (type-stripping is required), so they live in
+// TRANSPILE_EXTS — the set every dispatch site checks to route a file to
+// loadTranspile. Plain JS (.js/.mjs/.cjs) is DELIBERATELY NOT here: a plain-JS file
+// is transpiled ONLY when it carries transformable syntax (`using`/`await using`,
+// `v`-flag RegExp, decorators), and a no-op plain-JS file must take Node's OWN load
+// path BYTE-FOR-BYTE — putting it in TRANSPILE_EXTS would route every `.js`/`.cjs`
+// through nub's hook and change native CJS/ESM behavior (the `commonjs-sync` relabel,
+// require.cache, the require-of-ESM-syntax-.cjs error). So plain JS is handled by a
+// SEPARATE narrow path (`maybeTranspilePlainJs`) that fires only for transformable
+// files and is a no-op (returns null) otherwise — see PLAIN_JS_EXTS below.
 export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
+// Project-source plain JS. Routed to the transpiler ONLY when transformable (the
+// `maybeTranspilePlainJs` gate); a no-op plain-JS file falls through to Node's
+// native loader untouched, byte-identical. node_modules is excluded at the gate.
+export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
 export const DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 
@@ -328,7 +342,7 @@ export function resolveSpec(specifier, parentURL) {
   // from a nub-dependency ESM entry) delegated to a strict user loader is exactly
   // the R11 leak. See isNubInternalParent.
   if (isNubInternalParent(parentURL)) {
-    if (specifier.startsWith("node:") || module.builtinModules.includes(specifier)) {
+    if (specifier.startsWith("node:") || module.isBuiltin(specifier)) {
       const url = specifier.startsWith("node:") ? specifier : `node:${specifier}`;
       return { url, shortCircuit: true };
     }
@@ -349,7 +363,7 @@ export function resolveSpec(specifier, parentURL) {
 
   // node: and data: protocols, and bare Node built-ins, are never ours.
   if (specifier.startsWith("node:") || specifier.startsWith("data:")) return null;
-  if (module.builtinModules.includes(specifier)) return null;
+  if (module.isBuiltin(specifier)) return null;
 
   // 1. Built-in modules provided by Nub.
   if (BUILTIN_MODULES.has(specifier)) {
@@ -392,7 +406,7 @@ export function resolveSpec(specifier, parentURL) {
 // file's absolute path (from the CJS parent Module), or null for the entry.
 export function resolveCjsPath(request, parentPath) {
   if (request.startsWith("node:") || request.startsWith("data:") ||
-      module.builtinModules.includes(request)) {
+      module.isBuiltin(request)) {
     return null;
   }
   // The SAME native additive resolver as resolveSpec, returning an absolute path
@@ -435,13 +449,15 @@ function detectModuleInfo(filePath, source, lang) {
   // Addon missing (should never happen in a real install): default to ESM for
   // format (the common case) and "no decorators" for the guard — the same fallback
   // the old oxc-parser-unavailable branches used.
-  if (!nubNative) return { hasValueEsmSyntax: true, hasDecorators: false };
+  if (!nubNative) return { hasValueEsmSyntax: true, hasDecorators: false, transformableSyntax: false };
   try {
     return nubNative.detectModuleInfo(filePath, source, lang);
   } catch {
     // Unparseable → CJS for format + no decorators (the transpile/V8 surfaces the
-    // real error), matching the old per-call catch blocks.
-    return { hasValueEsmSyntax: false, hasDecorators: false };
+    // real error), matching the old per-call catch blocks. `transformableSyntax:
+    // false` is the SAFE plain-JS default — the verbatim path hands the raw bytes
+    // back, so V8 surfaces the real syntax error exactly where Node would.
+    return { hasValueEsmSyntax: false, hasDecorators: false, transformableSyntax: false };
   }
 }
 
@@ -450,13 +466,28 @@ function detectModuleInfo(filePath, source, lang) {
 // `type` is authoritative; otherwise (ambiguous) we detect from source syntax —
 // full Node parity (`--experimental-detect-module`), so a CJS-syntax `.ts` with
 // no `type` runs as CJS on nub exactly as on Node. See wiki/runtime/module-format.md.
+// `.mjs`→module / `.cjs`→commonjs are explicit (mirroring `.mts`/`.cts`), so the
+// plain-JS gate gets the right format without a needless detect.
 export function moduleFormatFor(ext, pkgType, filePath, source) {
-  if (ext === ".mts") return "module";
-  if (ext === ".cts") return "commonjs";
-  if (pkgType === "module") return "module";
-  if (pkgType === "commonjs") return "commonjs";
+  return moduleFormatWithInfo(ext, pkgType, filePath, source).format;
+}
+
+// Same format decision as moduleFormatFor, but ALSO returns the `ModuleInfo`
+// (`detectModuleInfo`) result when a parse was needed — `{ format, info }`, with
+// `info` null on the no-parse short-circuits (`.mts`/`.mjs`/`.cts`/`.cjs`, explicit
+// `type`). loadTranspile uses this so its ONE parse serves BOTH readers — the
+// format decision (`hasValueEsmSyntax`) and the Stage-3 decorator guard
+// (`hasDecorators`) — instead of `moduleFormatFor` + `hasDecoratorSyntax` each
+// parsing the same source. On a short-circuit (`info` null) no parse happened, so
+// the decorator guard runs its own single parse: still ≤1 detect per file.
+function moduleFormatWithInfo(ext, pkgType, filePath, source) {
+  if (ext === ".mts" || ext === ".mjs") return { format: "module", info: null };
+  if (ext === ".cts" || ext === ".cjs") return { format: "commonjs", info: null };
+  if (pkgType === "module") return { format: "module", info: null };
+  if (pkgType === "commonjs") return { format: "commonjs", info: null };
   const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
-  return detectModuleInfo(filePath, source, lang).hasValueEsmSyntax ? "module" : "commonjs";
+  const info = detectModuleInfo(filePath, source, lang);
+  return { format: info.hasValueEsmSyntax ? "module" : "commonjs", info };
 }
 
 // The Stage-3-decorator rejection diagnostic. oxc does not lower TC39 Stage 3
@@ -568,9 +599,13 @@ export function loadTranspile(url, ext) {
   // (.ts/.tsx/.jsx); .mts/.cts are explicit so its lookup is skipped. The chosen
   // format is folded into the cache key (and the entry's leading byte) by native.
   const pkgType = ext === ".mts" || ext === ".cts" ? undefined : getPackageType(dir);
-  const format = moduleFormatFor(ext, pkgType, filePath, source);
+  // ONE detectModuleInfo parse for both the format decision and the decorator
+  // guard below: `moduleInfo` is the parsed ModuleInfo when the format needed a
+  // parse (ambiguous ext, no explicit `type`), else null (a no-parse short-circuit).
+  const { format, info: moduleInfo } = moduleFormatWithInfo(ext, pkgType, filePath, source);
 
   const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+
   const opts = {
     lang,
     sourceType: format === "commonjs" ? "commonjs" : "module",
@@ -604,9 +639,12 @@ export function loadTranspile(url, ext) {
   // SyntaxError. When legacy mode is off and decorator syntax is present, reject
   // with the documented Option-A diagnostic instead. (Cheap `source.includes("@")`
   // pre-filter keeps decorator-free files off the native parser; runs BEFORE the
-  // cache so the diagnostic surfaces even on what would be a warm hit.)
+  // cache so the diagnostic surfaces even on what would be a warm hit.) Reuse the
+  // `hasDecorators` flag from the format parse above when it ran (`moduleInfo`
+  // non-null), so the ambiguous-ext + `@` path detects ONCE; on a no-parse
+  // short-circuit (`.mts`/`.cts`/explicit `type`) it does its own single parse.
   if (co?.experimentalDecorators !== true && source.includes("@") &&
-      hasDecoratorSyntax(filePath, source, lang)) {
+      (moduleInfo ? moduleInfo.hasDecorators : hasDecoratorSyntax(filePath, source, lang))) {
     throw stage3DecoratorError(filePath);
   }
 
@@ -624,6 +662,40 @@ export function loadTranspile(url, ext) {
     throw new Error(`Transpile error in ${filePath}:\n${details}`);
   }
   return { format: result.format, source: result.code, shortCircuit: true };
+}
+
+// Project-source plain JS (`.js`/`.mjs`/`.cjs`) gate. Returns a transpiled load
+// result ONLY when the file carries syntax oxc lowers at nub's es2022 target
+// (`using`/`await using`, a `v`-flag RegExp, or decorators); otherwise returns
+// `null`, meaning "this file needs no transform — handle it with Node's OWN loader,
+// exactly as a non-listed extension." This is why `.js`/`.mjs`/`.cjs` are NOT in
+// TRANSPILE_EXTS: a no-op plain-JS file must take Node's native load path
+// byte-for-byte (preserving the `commonjs-sync` relabel, require.cache, the
+// require-of-ESM-syntax-`.cjs` error — all of which intercepting the file would
+// break), and oxc would reformat it (quotes/semicolons/whitespace + a sourcemap
+// footer) if we ran it through anyway. The verdict rides ONE parse (the same one
+// `detectModuleInfo` does for format detection). node_modules is gated at the call
+// sites (the byte-parity boundary). JSX-in-`.js` is out of scope (lang is "ts",
+// which does not parse JSX); use `.jsx`.
+export function maybeTranspilePlainJs(url, ext) {
+  __ensureBuiltins();
+  const filePath = fileURLToPath(url);
+  let source;
+  try {
+    source = readFileSync(filePath, "utf8");
+  } catch {
+    // Unreadable here → let Node's loader surface its own error.
+    return null;
+  }
+  // lang "ts" parses all JS (a TS superset) but NOT JSX — JSX-in-.js is out of scope.
+  const info = detectModuleInfo(filePath, source, "ts");
+  if (!info.transformableSyntax && !info.hasDecorators) {
+    return null; // no-op: Node's native loader handles it, byte-identical.
+  }
+  // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,
+  // source maps, the Stage-3 decorator guard, format detection, cache). loadTranspile
+  // re-reads + re-parses, but only for the rare file that actually needs lowering.
+  return loadTranspile(url, ext);
 }
 
 // ── Data-format imports ─────────────────────────────────────────────

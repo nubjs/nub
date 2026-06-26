@@ -1,5 +1,5 @@
 ---
-name: nub-dev
+name: dev-loop
 description: >-
   Build and test nub during development. Invoke (via the Skill tool) whenever
   you need to compile the dev `nub` binary, set up a worktree for fast
@@ -23,17 +23,14 @@ nub is a Rust workspace — three crates (`nub-cli`, `nub-core`, `nub-native`) p
 
 ## Step 1 — Set up a worktree to iterate in
 
-Substantive work lands via a PR from an isolated worktree (see AGENTS.md "Default to a PR flow"). Set one up with its own target dir:
+Substantive work lands via a PR from an isolated worktree. Create one with the `worktree` skill (`nub scripts/new-worktree.ts <slug>` — it bakes in the proven `git worktree add … origin/main` recipe). Then, for the build context, give it its OWN target dir and keep that dir stable:
 
 ```bash
-git worktree add /tmp/nub-wt-<slug> -b <slug> origin/main      # vendor/aube comes along (plain in-tree files)
 cd /tmp/nub-wt-<slug>
 export CARGO_TARGET_DIR=/tmp/nub-wt-<slug>-target               # per-worktree isolation; keep it stable
 ```
 
 The per-worktree target dir keeps a sibling's build from contaminating yours. Keep the SAME dir for the whole session — cargo's incremental fingerprints are keyed to its absolute path, so changing/moving/re-seeding it forces a cold rebuild.
-
-> `vendor/aube` is plain in-tree files (Pattern B, 2026-06-22), NOT a submodule — `git worktree add` checks it out directly, no submodule-init step.
 
 ## Step 2 — Build the dev binary (the `fast` profile)
 
@@ -78,7 +75,11 @@ cargo test -p nub-cli -- --exact <full::module::path::to::test>
 
 # A core/native crate's tests:
 cargo test -p nub-core
-cargo test -p nub-native
+# nub-native is its OWN workspace (excluded from the root one), so `-p nub-native`
+# from the repo root fails — run it from inside the crate. (The cdylib sets
+# `test = false`, so this just compiles the addon; its unit-testable logic lives
+# in the napi-free nub-cache-key crate, covered by `cargo test -p nub-cache-key`.)
+(cd crates/nub-native && cargo test)
 
 # Everything (slow):
 cargo test          # or `make test`
@@ -116,15 +117,14 @@ Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENT
 
 **`crates/nub-native`** — the N-API addon (a cdylib loaded into the user's Node process). The oxc-based transpiler + resolver: `transform.rs` (TS/JSX transform), `resolve.rs` (module resolution), `tsconfig.rs`, `cache.rs` (transpile cache), `detect.rs`.
 
-**`vendor/aube`** — the vendored aube package-manager engine (plain in-tree files since Pattern B, vendored from `nubjs/aube`). Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process. NEVER a subprocess. Changes to it are normal nub edits/PRs touching `vendor/aube/*` — no pin, no `nub-fork` workflow; upstream to `jdx/aube` via `subtree split` / `format-patch --relative`. See AGENTS.md.
+**`vendor/aube`** — the vendored aube package-manager engine (plain in-tree files since Pattern B, vendored from `nubjs/aube`). Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process. NEVER a subprocess. From a build standpoint it's just part of the workspace — `cargo build` compiles it as a dependency. Changes to it are normal nub edits/PRs touching `vendor/aube/*` (no pin, no submodule). For pulling FROM / pushing TO upstream `jdx/aube`, see the `aube-sync` skill.
 
 ---
 
 ## Quick reference
 
 ```bash
-# fresh worktree (vendor/aube comes along — plain in-tree files)
-git worktree add /tmp/nub-wt-<slug> -b <slug> origin/main
+# fresh worktree (see the `worktree` skill: nub scripts/new-worktree.ts <slug>)
 cd /tmp/nub-wt-<slug> && export CARGO_TARGET_DIR=/tmp/nub-wt-<slug>-target
 
 # build (fast profile)

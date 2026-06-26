@@ -10,7 +10,7 @@ description: >-
   files now, no submodule init), the stable per-worktree CARGO_TARGET_DIR fast
   loop, and applying
   `.worktreeinclude` — plus the eagerly-pull-the-shared-tree discipline and the
-  safe cleanup path. Pairs with the `nub-dev` build skill.
+  safe cleanup path. Pairs with the `dev-loop` build skill.
 ---
 
 # Worktrees for parallel nub work
@@ -33,21 +33,21 @@ node scripts/new-worktree.ts <slug>
 It performs the proven recipe, in order:
 
 1. `git fetch origin` (skip with `--no-fetch`).
-2. `git worktree add /tmp/nub-wt-<slug> -b <slug> origin/main` — tracked files only; the shared tree is untouched. vendor/aube is plain in-tree files (Pattern B) — checked out by this step, no submodule init needed.
+2. `git worktree add ~/.cache/nub/worktrees/<slug> -b <slug> origin/main` — tracked files only; the shared tree is untouched. vendor/aube is plain in-tree files (Pattern B) — checked out by this step, no submodule init needed. The script creates `~/.cache/nub/worktrees/` if it doesn't exist. (Non-temp location: not auto-swept like `/tmp`; out of the repo dir; same volume as the repo so APFS clonefile stays fast.)
 3. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries in (see below).
 4. Print the stable per-worktree `CARGO_TARGET_DIR` convention to export.
 
-Options: `--base <ref>` (default `origin/main`), `--path <dir>` (default `/tmp/nub-wt-<slug>`), `--no-fetch`, `--help`.
+Options: `--base <ref>` (default `origin/main`), `--path <dir>` (default `~/.cache/nub/worktrees/<slug>`), `--no-fetch`, `--help`.
 
 After it prints the ready line:
 
 ```bash
-cd /tmp/nub-wt-<slug>
-export CARGO_TARGET_DIR=/tmp/nub-wt-<slug>-target   # keep this stable for the whole session
-cargo build -p nub-cli --profile fast               # ~3 min cold, ~5s incremental
+cd ~/.cache/nub/worktrees/<slug>
+export CARGO_TARGET_DIR=~/.cache/nub/worktrees/<slug>-target   # keep this stable for the whole session
+cargo build -p nub-cli --profile fast                          # ~3 min cold, ~5s incremental
 ```
 
-The build loop, profiles, and crate map live in the `nub-dev` skill (`.claude/skills/nub-dev/SKILL.md`). The one rule that makes iteration fast: keep ONE stable target dir per worktree for the whole session — cargo's incremental fingerprints are keyed to the absolute target path, so cleaning, moving, or re-seeding it forces a full cold rebuild. The script never seeds a target dir for exactly this reason; it just prints the dir to export.
+The build loop, profiles, and crate map live in the `dev-loop` skill (`.claude/skills/dev-loop/SKILL.md`). The one rule that makes iteration fast: keep ONE stable target dir per worktree for the whole session — cargo's incremental fingerprints are keyed to the absolute target path, so cleaning, moving, or re-seeding it forces a full cold rebuild. The script never seeds a target dir for exactly this reason; it just prints the dir to export.
 
 ## `.worktreeinclude` — bringing gitignored things in
 
@@ -76,7 +76,7 @@ Corollary: do NOT commit directly in the shared tree's checkout — even control
 ## Clean up after a merge
 
 ```bash
-git worktree remove /tmp/nub-wt-<slug> --force && rm -rf /tmp/nub-wt-<slug>-target
+git worktree remove ~/.cache/nub/worktrees/<slug> --force && rm -rf ~/.cache/nub/worktrees/<slug>-target
 ```
 
 `--force` is used to discard the worktree even with build artifacts present. Before discarding, make sure your work is pushed — a `git worktree remove --force` throws away anything uncommitted (vendor/aube edits are now plain in-tree files committed to the worktree's branch, so push before removing).

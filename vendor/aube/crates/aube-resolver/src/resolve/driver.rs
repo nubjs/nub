@@ -26,7 +26,10 @@ use crate::local_source::{
 use crate::package_ext::{
     apply_package_extensions, apply_package_extensions_to_deps, pick_override_spec,
 };
-use crate::semver_util::{PickResult, Regime, classify_regime, pick_version, version_satisfies};
+use crate::semver_util::{
+    PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
+    version_satisfies,
+};
 use crate::{
     Error, ExoticSubdepDetails, FxHashMap, FxHashSet, ResolutionMode, ResolveTask, ResolvedPackage,
     Resolver, error, is_deprecation_allowed, is_supported,
@@ -396,19 +399,38 @@ impl<'a> ResolveDriver<'a> {
     /// Only consulted when the pick came from the bundled primer (checked
     /// by the caller).
     ///
-    /// Returns `true` (refetch) when the pick is at the live frontier
-    /// (`Current`) and the offline seed is stale for the active cutoff,
-    /// or when a `SoftFrozen` pick coincides with `trustPolicy=NoDowngrade`
-    /// (the sparse-seed fail-open hazard). Returns `false` (accept the
-    /// offline pick) for frozen picks whose history is settled. See the
-    /// big comment on the matching arm in the pick loop for the full
-    /// rationale.
+    /// Returns `true` (refetch) when the resolved spec was a dist-tag
+    /// (the offline seed's tag pointer may be stale — see below), when
+    /// the pick is at the live frontier (`Current`) and the offline seed
+    /// is stale for the active cutoff, or when a `SoftFrozen` pick
+    /// coincides with `trustPolicy=NoDowngrade` (the sparse-seed
+    /// fail-open hazard). Returns `false` (accept the offline pick) for
+    /// frozen picks whose history is settled. See the big comment on the
+    /// matching arm in the pick loop for the full rationale.
     fn primer_pick_needs_refetch(
         &self,
         packument: &aube_registry::Packument,
         picked_version: &str,
         cutoff_for_pkg: Option<&str>,
+        range_is_dist_tag: bool,
     ) -> bool {
+        // A dist-tag (`latest`, `next`, a custom tag) is a MUTABLE pointer
+        // the publisher can repoint between builds. The primer bakes the
+        // tag's value at build time, and `classify_regime` — which keys
+        // freshness on the picked version's position in the version
+        // history — cannot see that the *pointer* moved: the baked
+        // `dist_tags.latest` is itself the frontier of the seed, so a
+        // stale `latest` always classifies as `Current` with nothing
+        // newer beside it, and (absent a cutoff) the `Current` arm below
+        // would accept it. That is issue #135: a binary built when
+        // `vite@latest` = 8.0.16 keeps resolving `"vite": "latest"` to
+        // 8.0.16 long after the registry repointed `latest` to 8.1.0
+        // (`aube update` served the stale primer pick; `aube install`'s
+        // fresh-resolve refetched, so the two diverged and `update`
+        // downgraded). Refetch unconditionally so the tag is re-read live.
+        if range_is_dist_tag {
+            return true;
+        }
         match classify_regime(packument, picked_version) {
             // Live edge: refetch only if the offline seed predates the
             // active cutoff (the staleness the legacy gate keyed on,
@@ -594,17 +616,28 @@ impl<'a> ResolveDriver<'a> {
         let pick_lowest =
             self.resolver.resolution_mode == ResolutionMode::TimeBased && task.is_root;
         // Apply the cutoff unless this package is on the
-        // minimumReleaseAge exclude list. The exclude list only
-        // suppresses the *minimumReleaseAge* leg, not the
-        // time-based-mode leg — but since we collapse both
-        // into the same `published_by` string at this point,
-        // we have to skip the cutoff entirely for excluded
-        // names. Acceptable: time-based mode and exclude
-        // lists aren't expected to coexist in the wild.
-        let cutoff_for_pkg = match self.resolver.minimum_release_age.as_ref() {
-            Some(mra) if mra.exclude.contains(&task.name) => None,
+        // minimumReleaseAge exclude list. A *name-only* exclude entry
+        // (`lodash`) suppresses the cutoff for the whole package — and
+        // because we collapse the minimumReleaseAge and time-based-mode
+        // legs into the same `published_by` string here, that also drops
+        // the time-based leg (acceptable: the two aren't expected to
+        // coexist in the wild). A *version-pinned* entry
+        // (`axios@0.18.1 || 0.21.1`) can't be decided before the version
+        // is picked, so the cutoff stays active and the per-version
+        // exemption is threaded into `pick_version` via `age_exclude`
+        // below, where it bypasses the gate only for the listed versions.
+        let mra = self.resolver.minimum_release_age.as_ref();
+        let cutoff_for_pkg = match mra {
+            Some(m) if m.excludes_all_versions(&task.name) => None,
             _ => self.published_by.as_deref(),
         };
+        // Only pass the rules to the pick when this package actually has
+        // a version-pinned rule, so the common (no-exclude) path skips
+        // the per-candidate parse+match entirely.
+        let age_exclude = mra.and_then(|m| {
+            m.has_versioned_exclude(&task.name)
+                .then_some((&m.exclude, task.name.as_str()))
+        });
         // Strict semantics in two cases:
         //   - `minimumReleaseAgeStrict=true` (the user opted in
         //     to hard failures), or
@@ -630,6 +663,7 @@ impl<'a> ResolveDriver<'a> {
                 pick_lowest,
                 cutoff_for_pkg,
                 strict,
+                age_exclude,
             );
             match pick {
                 // A primer-seeded pick that satisfies the range still
@@ -716,6 +750,7 @@ impl<'a> ResolveDriver<'a> {
                             packument,
                             &meta.version,
                             cutoff_for_pkg,
+                            range_resolves_via_dist_tag(packument, &task.range),
                         ) =>
                 {
                     // Consume the seed flag (one refetch per package,

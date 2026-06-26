@@ -1,0 +1,64 @@
+# Official nub image — Debian slim (glibc), the default variant.
+#
+# nub AUGMENTS the user's installed Node; it is not a self-contained runtime like
+# bun. So this image starts from an official `node:*` base (Node already present)
+# and layers nub on top via the released npm package `@nubjs/nub`. The per-platform
+# binary is selected by npm's os/cpu filters at install time, and the package's
+# postinstall sets the execute bit on the binary as the INSTALLER (root) — the
+# canonical "install as root, then drop to a non-root user" container pattern.
+#
+# Base default = node:26 (current release line), digest-pinned for reproducibility.
+# 22.x is only the fast-tier floor; the floor/compat variant is this Dockerfile with
+# NODE_BASE=node:22-slim (override the whole ref), never the default headline.
+#
+# Build:
+#   docker build -f docker/Dockerfile.slim \
+#     --build-arg NUB_VERSION=0.1.14 -t nub:slim .
+# Run:
+#   docker run --rm nub:slim nub --version
+
+# Full ref incl. digest so the base is reproducible. The publish workflow refreshes
+# the digest; override NODE_BASE to retarget (e.g. node:22-slim for the floor).
+ARG NODE_BASE=node:26-slim@sha256:f9b8bd6c62fcd007c08ce2bb2907485b624b968fd76094445822e0ec14002cf0
+FROM ${NODE_BASE}
+
+# The nub version to install. Defaults to the latest published @nubjs/nub; the
+# publish workflow pins this to the release tag so the nub version is pinned.
+ARG NUB_VERSION=latest
+
+# tini reaps zombies as PID 1. nub already forwards SIGINT/SIGTERM/SIGHUP to its
+# Node child (crates/nub-core/src/node/spawn.rs), so signals are not the gap —
+# zombie reaping of re-parented grandchildren is. tini is the small, idiomatic
+# insurance; --no-install-recommends + cache cleanup keep the layer lean.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @nubjs/nub@${NUB_VERSION} \
+    && npm cache clean --force \
+    && nub --version
+
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/smoke.sh /usr/local/bin/smoke.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/smoke.sh
+
+# OCI labels last: NUB_REVISION changes every commit, so keeping the LABEL after
+# the heavy install RUN preserves that layer's cache across no-op rebuilds.
+ARG NUB_REVISION=""
+LABEL org.opencontainers.image.title="nub" \
+      org.opencontainers.image.description="TypeScript-first developer supertool — a fast script runner and TS runtime that augments Node" \
+      org.opencontainers.image.source="https://github.com/nubjs/nub" \
+      org.opencontainers.image.url="https://nubjs.com" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${NUB_VERSION}" \
+      org.opencontainers.image.revision="${NUB_REVISION}"
+
+# The official node base ships a non-root `node` user (uid/gid 1000). nub was
+# installed as root (so postinstall could chmod the binary for everyone), so the
+# global binary is world-runnable — drop to `node` for the default runtime.
+WORKDIR /app
+RUN chown node:node /app
+USER node
+
+# tini as PID 1; the entrypoint then dispatches args to `nub` (bun-style).
+ENTRYPOINT ["tini", "--", "docker-entrypoint.sh"]
+CMD ["nub", "--help"]

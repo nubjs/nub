@@ -15,7 +15,14 @@ build: addon
 	$(CARGO) build $(CARGO_FLAGS)
 
 addon:
-	$(CARGO) build -p nub-native $(CARGO_FLAGS)
+	@# nub-native is its OWN Cargo workspace (split out so the CLI can use
+	@# `panic = "abort"` while the cdylib keeps `panic = "unwind"` — see the root
+	@# Cargo.toml `exclude` comment). It is not reachable as `-p nub-native` from the
+	@# main workspace, so build it from inside crates/nub-native. Its local
+	@# .cargo/config.toml (honored because cwd is the crate) routes output into the
+	@# shared root target/, so the copy paths below are unchanged; an explicit
+	@# CARGO_TARGET_DIR env var still overrides it (CI cache / fast-iteration loop).
+	cd crates/nub-native && $(CARGO) build $(CARGO_FLAGS)
 	@mkdir -p runtime/addons
 	@# rm before cp: overwriting the .node in place keeps the old inode, and on
 	@# macOS the kernel's cached code-signing validation is keyed to that inode's
@@ -47,7 +54,7 @@ install-dev: addon-fast
 # Native addon built under the `fast` profile (mirrors `addon`, which is release).
 # See `addon` for the rm-before-cp code-signing rationale.
 addon-fast:
-	$(CARGO) build -p nub-native --profile fast
+	cd crates/nub-native && $(CARGO) build --profile fast
 	@mkdir -p runtime/addons
 	@rm -f runtime/addons/nub-native.node
 	@cp target/fast/libnub_native.dylib runtime/addons/nub-native.node 2>/dev/null || \
@@ -102,13 +109,20 @@ version:
 		const cargoNext = cargo.replace(/^version = .*/m, 'version = ' + q + v + q); \
 		if (cargoNext === cargo) { console.error('ERROR: workspace version line not found in Cargo.toml'); process.exit(1); } \
 		fs.writeFileSync('Cargo.toml', cargoNext); \
+		let nativeCargo = fs.readFileSync('crates/nub-native/Cargo.toml', 'utf8'); \
+		const nativeCargoNext = nativeCargo.replace(/^version = .*/m, 'version = ' + q + v + q); \
+		if (nativeCargoNext === nativeCargo) { console.error('ERROR: workspace version line not found in crates/nub-native/Cargo.toml'); process.exit(1); } \
+		fs.writeFileSync('crates/nub-native/Cargo.toml', nativeCargoNext); \
 		let version = fs.readFileSync('runtime/version.mjs', 'utf8'); \
 		const versionNext = version.replace(/export const NUB_VERSION = .*/, 'export const NUB_VERSION = ' + q + v + q + ';'); \
 		if (versionNext === version) { console.error('ERROR: NUB_VERSION not found in runtime/version.mjs'); process.exit(1); } \
 		fs.writeFileSync('runtime/version.mjs', versionNext); \
 		"
-	@cargo update -p nub-cli -p nub-cache-key -p nub-core -p nub-native --precise $(V)
-	@echo "✓ All packages, Cargo.toml, Cargo.lock, and runtime/version.mjs set to $(V)"
+	@cargo update -p nub-cli -p nub-cache-key -p nub-core --precise $(V)
+	@# nub-native is its own workspace (split for panic=abort vs unwind); its
+	@# version + Cargo.lock entry live under crates/nub-native, updated separately.
+	@cd crates/nub-native && cargo update -p nub-native --precise $(V)
+	@echo "✓ All packages, Cargo.toml, both Cargo.lock files, and runtime/version.mjs set to $(V)"
 
 # Verify version consistency across npm packages, Cargo.toml, and version.mjs,
 # AND that @oxc-project/runtime (the emit-helper runtime) is exact-pinned and

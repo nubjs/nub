@@ -237,15 +237,29 @@ pub(crate) fn ensure_registry_auth_for_package(
 /// across versions of aube and never collides with a pnpm store rooted
 /// at the same path.
 pub(crate) fn open_store(cwd: &std::path::Path) -> miette::Result<aube_store::Store> {
-    if let Some(custom) = resolved_store_dir(cwd) {
-        aube_store::Store::with_root(custom.join("v1").join("files"))
-            .into_diagnostic()
-            .wrap_err("failed to open store")
-    } else {
-        aube_store::Store::default_location()
-            .into_diagnostic()
-            .wrap_err("failed to open store")
-    }
+    // The cache dir is resolved through `resolved_cache_dir`, which (a) honors a
+    // configured `cacheDir` (`.npmrc` / `AUBE_CACHE_DIR`) and (b) carries a
+    // `$TMPDIR/aube` fallback when no HOME/XDG is set. The store ctor
+    // (`with_root`/`default_location`) instead used `dirs::cache_dir()`
+    // directly: it ignored a configured `cacheDir` and hard-failed with
+    // `NoHome` when it couldn't locate one, so an install with HOME stripped
+    // from the env (e.g. pnpm's own test harness, or a minimal CI container)
+    // errored out even when a concrete `storeDir` was configured. Two latent
+    // bugs in one: this aligns the store-open with the packument-cache helper
+    // (`packument_cache_dir`, which already honored `cacheDir`) — they were
+    // split-brained — AND removes the spurious `NoHome` abort.
+    let cache_dir = resolved_cache_dir(cwd);
+    let root = match resolved_store_dir(cwd) {
+        Some(custom) => custom.join("v1").join("files"),
+        // No configured `storeDir`: the aube-owned default under XDG/HOME, or a
+        // `$TMPDIR`-rooted store when neither is available (matches the cache
+        // fallback above rather than aborting the install).
+        None => aube_store::dirs::store_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store/v1/files")),
+    };
+    aube_store::Store::with_root_and_cache(root, cache_dir)
+        .into_diagnostic()
+        .wrap_err("failed to open store")
 }
 
 /// Resolve the configured `storeDir` for `cwd`, returning `None` if

@@ -468,3 +468,81 @@ fn prefer_offline_does_not_trip_the_yarn_offline_mirror_fatal() {
     // by the yarn gate / install path, never the mirror preflight.
     let _ = code_prefer;
 }
+
+/// Workspace-member linking under a YARN incumbent. A classic yarn.lock never
+/// records workspace members (they aren't registry packages), so a member that
+/// depends on a SIBLING member has no resolution entry. nub must still symlink
+/// the sibling into the consumer's node_modules so it resolves — matching what
+/// reference yarn does (and what nub already does under pnpm/npm incumbents).
+///
+/// No network: every dep is a local member, the yarn.lock is empty, and the
+/// install is a frozen read (yarn.lock left byte-identical). Before the fix
+/// nub printed "✓ Already up to date" and linked nothing, so `@x/app` could not
+/// resolve `@x/utils`. The differential reference (real yarn 1.x links both)
+/// lives in `.fray/yarn-workspace-member-linking.md`; this guards the nub side.
+#[test]
+fn install_links_yarn_workspace_member_into_consumer() {
+    let dir = pm_tmpdir("yarn-ws-link");
+    // Root: a yarn incumbent (packageManager + an on-disk yarn.lock), workspaces.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{ "name": "root", "private": true, "packageManager": "yarn@1.13.0", "workspaces": ["packages/*"] }"#,
+    )
+    .unwrap();
+    // An empty-but-valid classic yarn.lock — the members are the only deps, so
+    // it genuinely satisfies the manifest (no drift, no write).
+    std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+    for (member, body, index) in [
+        (
+            "utils",
+            r#"{ "name": "@x/utils", "version": "1.0.0", "main": "index.js" }"#,
+            "module.exports = 'utils-ok';",
+        ),
+        (
+            "app",
+            r#"{ "name": "@x/app", "version": "1.0.0", "dependencies": { "@x/utils": "1.0.0" } }"#,
+            "console.log(require('@x/utils'));",
+        ),
+    ] {
+        let mdir = dir.join("packages").join(member);
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::write(mdir.join("package.json"), body).unwrap();
+        std::fs::write(mdir.join("index.js"), index).unwrap();
+    }
+
+    let (stdout, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+
+    // The sibling must be linked where node resolves it from the consumer.
+    // nub's isolated linker hoists into the consumer's own node_modules
+    // (`packages/app/node_modules/@x/utils`), the same shape it produces under a
+    // pnpm incumbent; reference yarn hoists to the top level. Either resolves —
+    // assert the resolution outcome, the contract, not the exact hoist site.
+    let app = dir.join("packages").join("app");
+    let resolved = Command::new("node")
+        .args(["-e", "process.stdout.write(require.resolve('@x/utils'))"])
+        .current_dir(&app)
+        .output()
+        .expect("failed to spawn node");
+    assert!(
+        resolved.status.success(),
+        "`@x/utils` must resolve from `@x/app` after install — it did not.\n\
+         stdout: {}\nstderr: {}\ninstall said: {stdout}{stderr}",
+        String::from_utf8_lossy(&resolved.stdout),
+        String::from_utf8_lossy(&resolved.stderr),
+    );
+    // And it must resolve to the local member, not a stray copy.
+    let resolved_path = String::from_utf8_lossy(&resolved.stdout);
+    assert!(
+        std::fs::canonicalize(resolved_path.trim()).unwrap()
+            == std::fs::canonicalize(dir.join("packages/utils/index.js")).unwrap(),
+        "`@x/utils` must resolve to the local member, got: {resolved_path}"
+    );
+
+    // yarn.lock is read-only — the install must not have rewritten it.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
+        "# yarn lockfile v1\n",
+        "yarn.lock must be byte-identical after a read-only workspace install"
+    );
+}

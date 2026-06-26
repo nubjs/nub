@@ -373,6 +373,13 @@ function makeHooks(core, watchReporting) {
       if (core.TRANSPILE_EXTS.has(ext) && !core.isNodeModules(url)) {
         return core.loadTranspile(url, ext);
       }
+      // Plain JS: transpile only when transformable; else fall through to the raw-
+      // source path below (which hands CJS back as `source:null` → Node's native
+      // CJS loader), byte-identical to a non-intercepted file.
+      if (core.PLAIN_JS_EXTS.has(ext) && !core.isNodeModules(url)) {
+        const r = core.maybeTranspilePlainJs(url, ext);
+        if (r) return r;
+      }
       if (ext in core.DATA_EXTS) return core.loadData(url, ext);
       const { readFileSync } = require("node:fs");
       const source = readFileSync(path);
@@ -431,6 +438,15 @@ function makeHooks(core, watchReporting) {
     // gated.)
     if (core.TRANSPILE_EXTS.has(ext) && !core.isNodeModules(url)) {
       return core.loadTranspile(url, ext);
+    }
+    // Project-source plain JS (`.js`/`.mjs`/`.cjs`): transpile ONLY when it carries
+    // transformable syntax. A no-op plain-JS file returns null here and falls through
+    // to Node's native loader (the `nextLoad`/relabel path below) BYTE-FOR-BYTE — it
+    // is never intercepted, so native CJS/ESM behavior (the relabel, require.cache,
+    // the require-of-ESM-syntax-`.cjs` error) is preserved. node_modules excluded.
+    if (core.PLAIN_JS_EXTS.has(ext) && !core.isNodeModules(url)) {
+      const r = core.maybeTranspilePlainJs(url, ext);
+      if (r) return r;
     }
     if (ext in core.DATA_EXTS) return core.loadData(url, ext);
 
@@ -672,6 +688,39 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   };
   for (const ext of [".ts", ".cts", ".mts", ".tsx", ".jsx"]) {
     module_._extensions[ext] = transpileExtension;
+  }
+
+  // Project-source plain JS (`.js`/`.cjs`) routes through the SAME pipeline so
+  // `using`/`v`-flag-RegExp/decorators lower uniformly on the classic require tier —
+  // but ONLY when the file carries transformable syntax. THREE cases, each preserving
+  // Node's native behavior where it must:
+  //   (1) node_modules dep → native handler (deps are NEVER transpiled). Node has no
+  //       own `_extensions['.cjs']` (only `.js`/`.json`/`.node`), and compiles `.cjs`
+  //       through the same CJS path as `.js`, so the `.cjs` bail falls back to the
+  //       `.js` handler (`|| nativeJs`) — without it a node_modules `.cjs` require
+  //       would call `undefined` and crash.
+  //   (2) project file with transformable syntax → transpile (lower it).
+  //   (3) project file with NOTHING to lower → the ORIGINAL native handler, raw bytes
+  //       compiled exactly as Node would. We never serve our own source for a no-op
+  //       file, so require.cache / the require-of-ESM-syntax-`.cjs` SyntaxError / every
+  //       native CJS behavior is byte-identical.
+  // `.mjs` is ESM-only; Node registers no require.extensions handler for it, so a
+  // `require()` of `.mjs` throws ERR_REQUIRE_ESM as before — we don't override it.
+  const nativeJs = module_._extensions[".js"];
+  for (const ext of [".js", ".cjs"]) {
+    const origExtension = module_._extensions[ext] || nativeJs;
+    module_._extensions[ext] = (mod, filename) => {
+      if (core.isNodeModules(pathToFileURL(filename).href)) {
+        return origExtension.call(module_._extensions, mod, filename); // (1)
+      }
+      const r = core.maybeTranspilePlainJs(pathToFileURL(filename).href, pathExtname(filename));
+      if (r) {
+        if (r.format === "module") throw requireEsmError(filename); // (2)
+        mod._compile(r.source, filename);
+        return;
+      }
+      return origExtension.call(module_._extensions, mod, filename); // (3)
+    };
   }
 }
 

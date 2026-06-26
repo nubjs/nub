@@ -517,18 +517,44 @@ fn raw_pin_name_version(manifest: &serde_json::Value) -> Option<(String, Option<
     Some((name.to_string(), version))
 }
 
+/// Per-process, mtime-validated cache of the root manifest keyed by the
+/// resolved manifest FILE path. `declared_pm_raw` is called several times per PM
+/// command (config-scoping, the lifecycle UA, the install-signals re-read) and
+/// each call walked + read + parsed the same `package.json`; this collapses
+/// those to one read per `(path, mtime)`. mtime validation makes it stale-proof:
+/// any rewrite of the manifest (the in-process engine mid-command) bumps the
+/// mtime, the next lookup misses, and the file is re-read.
+static ROOT_MANIFEST_CACHE: crate::config_cache::MtimeCache<serde_json::Value> =
+    crate::config_cache::MtimeCache::new();
+
 /// The `package.json` value at [`pin_target_dir`] — the workspace root if one is
-/// above `cwd`, else the nearest project root. The detected project already parsed
-/// the nearest manifest; only a distinct workspace root needs a second read.
-fn root_manifest(cwd: &Path) -> Option<serde_json::Value> {
+/// above `cwd`, else the nearest project root.
+///
+/// The path is resolved via [`detect_project`] (a directory walk), then the
+/// chosen manifest is read through [`ROOT_MANIFEST_CACHE`] keyed on that path so
+/// repeated callers within one command share a single read + parse. Returns an
+/// `Arc` so a cache hit is a pointer clone, not a deep manifest copy.
+fn root_manifest(cwd: &Path) -> Option<std::sync::Arc<serde_json::Value>> {
     let project = detect_project(cwd)?;
-    match &project.workspace_root {
-        Some(ws) if *ws != project.root => {
-            let content = std::fs::read_to_string(ws.join("package.json")).ok()?;
-            serde_json::from_str(&content).ok()
+    // The manifest path the value is read from — keys (and mtime-validates) the
+    // cache. A distinct workspace root reads the workspace manifest; otherwise
+    // the project root's own manifest.
+    let manifest_path = match &project.workspace_root {
+        Some(ws) if *ws != project.root => ws.join("package.json"),
+        _ => project.root.join("package.json"),
+    };
+    ROOT_MANIFEST_CACHE.get_or_read(&manifest_path, || {
+        // `detect_project` already parsed the project-root manifest; reuse it on
+        // the common (no distinct workspace root) path to avoid a second parse on
+        // a cache miss. A distinct workspace root needs its own read.
+        match &project.workspace_root {
+            Some(ws) if *ws != project.root => {
+                let content = std::fs::read_to_string(ws.join("package.json")).ok()?;
+                serde_json::from_str(&content).ok()
+            }
+            _ => Some(project.manifest),
         }
-        _ => Some(project.manifest),
-    }
+    })
 }
 
 /// The result of [`write_declared_pm`]: the manifest written, and the
@@ -799,7 +825,28 @@ pub fn parse_spec(spec: &str) -> Result<PmPin> {
     let (name, version) = spec.split_once('@').with_context(|| {
         format!("packageManager \"{spec}\" must be in name@version form (e.g. pnpm@9.1.0)")
     })?;
+    // A URL/git reference in place of a version (`pnpm@https://…`, `pnpm@git+…`)
+    // is a Corepack-supported form meaning "fetch this artifact" — there is no
+    // semver to pin. nub can't provision an arbitrary tarball as a PM version,
+    // so it treats the field as NAME-only (no version pin) and falls through to
+    // the user's PM on PATH / a dynamic default — matching pnpm, which does not
+    // version-switch on a URL spec. Without this the URL reached the semver
+    // resolver and aborted the run (`unexpected character 'h'`).
+    if is_url_version_ref(version) {
+        return classify(name, None);
+    }
     classify(name, Some(version))
+}
+
+/// Whether a `packageManager` *version* slot holds a URL / git / file reference
+/// rather than a semver-ish spec — `https://…`, `git+…`, `git://…`, a `git@…`
+/// shorthand, or a `file:…` path Corepack accepts. Such a value carries no
+/// version to pin (see [`parse_spec`]). A bare `host:path` SSH shorthand is left
+/// out deliberately: it is ambiguous against a real version and not worth the
+/// false-positive risk.
+fn is_url_version_ref(version: &str) -> bool {
+    let v = version.trim();
+    v.contains("://") || v.starts_with("git+") || v.starts_with("git@") || v.starts_with("file:")
 }
 
 /// Map a `(name, version)` pair to a [`PmPin`], applying the yarn classic/berry
@@ -1069,6 +1116,40 @@ mod tests {
         assert!(
             err.contains("name@version"),
             "missing-version error must name the form, got: {err}"
+        );
+    }
+
+    #[test]
+    fn url_version_spec_parses_as_name_only_no_version_pin() {
+        // Corepack/pnpm accept a URL/git reference in the version slot
+        // (`pnpm@https://…`) meaning "fetch this artifact" — there is no semver
+        // to pin. nub treats it as name-only so the spec never reaches the
+        // semver resolver (which aborted the run on the leading 'h').
+        for spec in [
+            "pnpm@https://github.com/pnpm/pnpm",
+            "pnpm@git+https://github.com/pnpm/pnpm.git",
+            "yarn@git@github.com:yarnpkg/berry.git",
+            "pnpm@file:../local-pnpm.tgz",
+        ] {
+            let pin = parse_spec(spec).unwrap_or_else(|e| panic!("{spec} should parse: {e}"));
+            assert_eq!(
+                pin.version, None,
+                "{spec} carries no version pin (URL reference)"
+            );
+        }
+
+        // A normal exact pin and the Corepack hash suffix are NOT URLs and keep
+        // their verbatim version — the URL guard must not swallow them.
+        assert_eq!(
+            parse_spec("pnpm@9.1.0").unwrap().version.as_deref(),
+            Some("9.1.0")
+        );
+        assert_eq!(
+            parse_spec("yarn@4.2.2+sha512.abc")
+                .unwrap()
+                .version
+                .as_deref(),
+            Some("4.2.2+sha512.abc")
         );
     }
 

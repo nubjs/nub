@@ -9,6 +9,7 @@
 // Runs under BOTH plain Node (type-stripping) and nub:
 //   node scripts/ci-watch.ts --run <run-id>  [--repo o/r] [--timeout <min>]
 //   nub  scripts/ci-watch.ts --pr  <number>  [--repo o/r] [--timeout <min>]
+//   nub  scripts/ci-watch.ts --pr  <number>  --chunk[=<min>]   # foreground sub-agent loop
 //
 // Erasable TypeScript only (no enums/namespaces/parameter-properties) so plain
 // modern `node` runs it with no build step — same constraint as the other
@@ -22,7 +23,7 @@
 // Exit codes (the contract the orchestrator gates on):
 //   0  completed AND all green
 //   1  a check/job concluded FAILURE/CANCELLED/TIMED_OUT/STARTUP_FAILURE
-//   2  still pending after --timeout wall-clock
+//   2  still pending after --timeout wall-clock (or --chunk cap)
 //   3  usage / target-unresolvable / unrecoverable error
 //
 // Core fixes over the raw watchers:
@@ -45,6 +46,10 @@ type Opts = {
   target: string;
   repo: string | null;
   timeoutMin: number;
+  // --chunk: per-invocation wall-clock cap for sub-agent foreground loops.
+  // When set and the cap expires, exits 2 with a RERUN message instead of the
+  // generic TIMEOUT message, signalling the agent to re-run the same command.
+  chunkMin: number | null;
 };
 
 const HELP = `ci-watch — block until a CI run / PR check rollup is truly terminal
@@ -60,23 +65,37 @@ Modes (exactly one):
 Flags:
   --repo <owner/repo>  Repository (default: current repo from gh).
   --timeout <minutes>  Max wall-clock before giving up as pending (default 45).
+  --chunk[=<minutes>]  Sub-agent foreground-loop mode (default 9 min). Caps each
+                       invocation under the 10-min Bash tool timeout; exits 2 with
+                       a RERUN message when the cap expires so the agent can loop.
+                       While exit 2 (pending): re-run the SAME command to continue.
   -h, --help           Show this help.
 
-Exit codes: 0 success · 1 a check failed · 2 timed out pending · 3 usage/error.
+Exit codes: 0 success · 1 a check failed · 2 timed out / chunk pending · 3 usage/error.
 
 Designed to run as a detached run_in_background task; the final stdout line is a
-single CI-WATCH summary the orchestrator reads from the tail.`;
+single CI-WATCH summary the orchestrator reads from the tail.
+
+Sub-agent foreground-loop pattern (use when a sub-agent must gate on its own CI):
+  # Bash tool: foreground (NOT run_in_background), timeout: 570000
+  nub scripts/ci-watch.ts --pr <N> --chunk
+  # exit 0 → green   exit 1 → red, fix + re-push   exit 2 → pending, re-run   exit 3 → error
+  # While exit code is 2, call the same command again. Each chunk completes within
+  # the Bash timeout cap so no call is ever killed mid-watch.`;
 
 function die(msg: string): never {
   process.stderr.write(`ci-watch: ${msg}\n`);
   process.exit(3);
 }
 
+const CHUNK_DEFAULT_MIN = 9;
+
 function parseArgs(argv: string[]): Opts {
   let mode: Mode | null = null;
   let target = "";
   let repo: string | null = null;
   let timeoutMin = 45;
+  let chunkMin: number | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h" || a === "--help") {
@@ -95,12 +114,26 @@ function parseArgs(argv: string[]): Opts {
     } else if (a === "--timeout") {
       timeoutMin = Number(argv[++i]);
       if (!Number.isFinite(timeoutMin) || timeoutMin <= 0) die("--timeout must be a positive number of minutes");
+    } else if (a === "--chunk") {
+      // bare --chunk: use the next arg as the value only if it looks like a number
+      const next = argv[i + 1];
+      if (next !== undefined && /^\d+(\.\d+)?$/.test(next)) {
+        chunkMin = Number(next);
+        i++;
+      } else {
+        chunkMin = CHUNK_DEFAULT_MIN;
+      }
+      if (!Number.isFinite(chunkMin) || chunkMin <= 0) die("--chunk requires a positive number of minutes");
+    } else if (a.startsWith("--chunk=")) {
+      // --chunk=<N> form
+      chunkMin = Number(a.slice("--chunk=".length));
+      if (!Number.isFinite(chunkMin) || chunkMin <= 0) die("--chunk= requires a positive number of minutes");
     } else {
       die(`unknown arg: ${a} (try --help)`);
     }
   }
   if (!mode) die("specify --run <run-id> or --pr <number>");
-  return { mode, target, repo, timeoutMin };
+  return { mode, target, repo, timeoutMin, chunkMin };
 }
 
 // ---- gh plumbing ------------------------------------------------------------
@@ -227,6 +260,10 @@ async function watch(opts: Opts): Promise<{ code: number; summary: string }> {
 
   const cap = authed ? 60_000 : 90_000;
   const deadline = Date.now() + opts.timeoutMin * 60_000;
+  // chunk deadline: per-invocation cap for sub-agent foreground loops. When hit,
+  // exits 2 with a RERUN message (distinct from the generic TIMEOUT message) so
+  // the agent knows to call the same command again rather than give up.
+  const chunkDeadline = opts.chunkMin !== null ? Date.now() + opts.chunkMin * 60_000 : null;
   let delay = 10_000;
   let consecutiveErrors = 0;
 
@@ -253,7 +290,12 @@ async function watch(opts: Opts): Promise<{ code: number; summary: string }> {
       process.stderr.write(`    … ${v.reason}\n`);
     }
 
-    if (Date.now() > deadline) return { code: 2, summary: `CI-WATCH ${label}: TIMEOUT — still pending after ${opts.timeoutMin}min` };
+    const now = Date.now();
+    // Chunk cap takes priority: exit with a RERUN message so the agent loops.
+    if (chunkDeadline !== null && now > chunkDeadline) {
+      return { code: 2, summary: `CI-WATCH ${label}: PENDING after ${opts.chunkMin}m — RERUN the SAME command to continue` };
+    }
+    if (now > deadline) return { code: 2, summary: `CI-WATCH ${label}: TIMEOUT — still pending after ${opts.timeoutMin}min` };
     await sleep(delay);
     delay = nextDelay(delay, cap);
   }

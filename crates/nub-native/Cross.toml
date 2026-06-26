@@ -1,0 +1,32 @@
+# cross-rs configuration for the nub-native addon's OWN workspace.
+#
+# Why this file is separate from the repo-root Cross.toml: cross reads the
+# Cross.toml at the CARGO WORKSPACE ROOT of the build (`metadata.workspace_root`
+# in cross's `toml()` — src/lib.rs), NOT the repo root and NOT the cwd. The
+# release workflow builds the addon with `cd crates/nub-native && cross build`,
+# and crates/nub-native is its OWN workspace (split out of the main nub workspace
+# so the CLI can use panic=abort while this cdylib stays panic=unwind, and
+# `exclude`d from the root workspace). So cross resolves the workspace root to
+# crates/nub-native and looks for THIS file — the repo-root Cross.toml is invisible
+# to the addon's cross build. Without this passthrough, the host RUSTFLAGS the
+# workflow sets are silently dropped inside the cross container and the musl
+# cdylib build fails with "cannot produce cdylib ... musl does not support these
+# crate types".
+#
+# cross does not pass arbitrary host env into the build container by default, so
+# anything the addon build needs from the workflow env must be whitelisted here.
+#
+# - RUSTFLAGS: the release workflow builds the musl addon with
+#   `RUSTFLAGS="-C target-feature=-crt-static"` (musl's default fully-static crt
+#   can't produce a cdylib). This passthrough is what carries that flag into the
+#   cross container.
+#
+# Note: the AUBE_PRIMER_* vars the repo-root Cross.toml passes through are NOT
+# duplicated here — they drive the CLI binary's build.rs metadata-primer embedding
+# (a separate `cross build -p nub-cli` run from the repo root, which correctly
+# finds the root Cross.toml). nub-native's build.rs does not read them; the addon
+# only needs RUSTFLAGS. Keep this list minimal to the addon's actual needs.
+[build.env]
+passthrough = [
+    "RUSTFLAGS",
+]

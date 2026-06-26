@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-native"]
+members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core"]
 # vendor/aube is its own Cargo workspace (the vendored aube package manager,
 # plain in-tree files vendored from nubjs/aube). The exclude is load-bearing: nub crates
 # take `path` dependencies into vendor/aube/crates/*, and cargo auto-adopts
@@ -8,19 +8,38 @@ members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/
 # crates still build as path deps (resolved into THIS workspace's Cargo.lock)
 # while their `workspace = true` field inheritance resolves against
 # vendor/aube/Cargo.toml.
-exclude = ["vendor/aube"]
+#
+# crates/nub-native is ALSO its own Cargo workspace, for a panic-strategy reason
+# (NOT a path-collision one): Cargo's `panic` setting is profile-GLOBAL within a
+# workspace, but nub-native (a cdylib loaded INTO the user's Node process via
+# napi) MUST stay `panic = "unwind"` — abort-on-panic there would kill the host
+# Node process instead of surfacing a JS error — while the `nub` CLI binary
+# (which only ever `process::exit`s and never relies on unwinding) wants
+# `panic = "abort"` to drop the unwind metadata and shrink the binary. The two
+# strategies can't coexist in one workspace's release profile, so nub-native
+# lives in its own workspace (crates/nub-native/Cargo.toml) with its own
+# `[profile.release] panic = "unwind"`, and is excluded here. It is built
+# directly (`--manifest-path crates/nub-native/Cargo.toml`); its `.cargo/config.toml`
+# routes output to this same root `target/` so the addon-copy paths are unchanged.
+# nub-native depends on `crates/nub-cache-key` (which stays a member here) via a
+# path dep that crosses the workspace boundary — the cache-key crate's
+# `workspace = true` inheritance resolves against THIS workspace, and nub-native
+# recompiles it under its own unwind profile for the final cdylib.
+exclude = ["vendor/aube", "crates/nub-native"]
 resolver = "3"
 
-# Tier-0 release tuning. `panic` is intentionally left at the default "unwind":
-# Cargo's panic setting is profile-global (not per-crate), and crates/nub-native
-# is a cdylib loaded INTO the user's Node process via napi — abort-on-panic there
-# would kill the Node process instead of surfacing a JS error. Governs the nub
-# workspace only; vendor/aube is a separate workspace.
+# Tier-0 release tuning. `panic = "abort"` drops the unwind tables/metadata from
+# the `nub` CLI binary — it always `process::exit`s and never relies on stack
+# unwinding (no `catch_unwind` on a CLI-side panic). The N-API cdylib, which DOES
+# require unwind (see the exclude comment above), lives in its own workspace and
+# keeps `panic = "unwind"`; that is the whole reason for the split. Governs the
+# nub workspace only; vendor/aube and crates/nub-native are separate workspaces.
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+panic = "abort"
 
 # Fast local-iteration profile for `nub-dev` / `make install-dev`. NOT a ship
 # profile — the release block above is untouched. Inherits `dev` (debug
@@ -52,7 +71,7 @@ opt-level = 2
 split-debuginfo = "unpacked"
 
 [workspace.package]
-version = "0.1.14"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"

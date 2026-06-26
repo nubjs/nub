@@ -2649,6 +2649,18 @@ fn run_workspace_target(
     let mut ran_count = 0usize;
     let bail = ws.bail;
 
+    // Share the discovered members read-only across all chunks/workers via a
+    // single refcount bump, instead of structurally cloning every chunk member
+    // into every worker (`num_workers × chunk_len` clones of a
+    // `WorkspacePackage`, whose `manifest` is a 10–50 KB `serde_json::Value`).
+    // Built ONCE here, above the chunk loop: topological chunking produces
+    // MANY chunks, so constructing it inside the loop would deep-clone the
+    // whole member set per chunk (`O(num_chunks × members.len())`). Both run
+    // paths index it by the global member index — the sequential branch
+    // directly (`&members[idx]`), each concurrent worker via an `Arc::clone`.
+    let members: std::sync::Arc<[nub_core::workspace::filter::WorkspacePackage]> =
+        std::sync::Arc::from(members.as_slice());
+
     for chunk in &chunks {
         if bail && total_failed > 0 {
             break;
@@ -2693,75 +2705,76 @@ fn run_workspace_target(
             let (tx, rx) = mpsc::channel::<usize>();
             let rx = Arc::new(std::sync::Mutex::new(rx));
 
-            let num_workers = concurrency.min(chunk.len());
-            let workers: Vec<_> = (0..num_workers)
-                .map(|_| {
-                    let rx = Arc::clone(&rx);
-                    let failed = Arc::clone(&failed);
-                    let ran = Arc::clone(&ran);
-                    // Clone the selected members so they cross the thread boundary
-                    // (the borrowed `&members` slice can't be `move`d); paired with
-                    // their original index for the prefix color. `WorkspacePackage`
-                    // derives Clone, so this replaces the prior 4-field tuple
-                    // snapshot with one structured clone.
-                    let members_snapshot: Vec<(
-                        usize,
-                        nub_core::workspace::filter::WorkspacePackage,
-                    )> = chunk
-                        .iter()
-                        .map(|&idx| (idx, members[idx].clone()))
-                        .collect();
-                    let ws_root_buf = ws_root.to_path_buf();
-                    // Owned target + per-script knobs so they cross the thread
-                    // boundary; reconstituted into the borrowed forms inside the
-                    // worker (the borrowed forms can't be `move`d).
-                    let target = OwnedTarget::from(target);
-                    let ignore_scripts = exec.ignore_scripts;
-                    let script_shell = ws.script_shell.clone();
+            // The per-worker loop body, factored out so it backs BOTH a spawned
+            // worker thread and the inline fallback (when thread creation fails
+            // under resource pressure). Each invocation pulls indices from the
+            // shared channel until it drains, so any number of live workers — even
+            // one, even the calling thread — completes ALL the work; thread-create
+            // EAGAIN only costs parallelism, never correctness.
+            let run_worker = |rx: Arc<std::sync::Mutex<mpsc::Receiver<usize>>>,
+                              failed: Arc<AtomicUsize>,
+                              ran: Arc<AtomicUsize>| {
+                let members = Arc::clone(&members);
+                let ws_root_buf = ws_root.to_path_buf();
+                let target = OwnedTarget::from(target);
+                let ignore_scripts = exec.ignore_scripts;
+                let script_shell = ws.script_shell.clone();
 
-                    thread::spawn(move || {
-                        let exec = ScriptExecOpts {
-                            ignore_scripts,
-                            script_shell: script_shell.as_deref(),
-                        };
-                        let target = target.borrow();
-                        loop {
-                            let work_idx = match rx.lock() {
-                                Ok(guard) => match guard.recv() {
-                                    Ok(idx) => idx,
-                                    Err(_) => break,
-                                },
+                move || {
+                    let exec = ScriptExecOpts {
+                        ignore_scripts,
+                        script_shell: script_shell.as_deref(),
+                    };
+                    let target = target.borrow();
+                    loop {
+                        let work_idx = match rx.lock() {
+                            Ok(guard) => match guard.recv() {
+                                Ok(idx) => idx,
                                 Err(_) => break,
-                            };
-                            if bail && failed.load(AtomicOrdering::Relaxed) > 0 {
-                                continue;
-                            }
-                            let Some((_, member)) =
-                                members_snapshot.iter().find(|(i, _)| *i == work_idx)
-                            else {
-                                continue;
-                            };
-                            let leaf = MemberLeaf {
-                                compat_mode,
-                                // The concurrent path always streams (prefixed) —
-                                // its whole reason for existing is interleaved output.
-                                stream: true,
-                                color_idx: work_idx,
-                                exec: &exec,
-                                aggregate,
-                            };
-                            match run_one_member(target, member, &ws_root_buf, &leaf) {
-                                MemberOutcome::Ran(0) => {
-                                    ran.fetch_add(1, AtomicOrdering::Relaxed);
-                                }
-                                MemberOutcome::Ran(_) => {
-                                    ran.fetch_add(1, AtomicOrdering::Relaxed);
-                                    failed.fetch_add(1, AtomicOrdering::Relaxed);
-                                }
-                                MemberOutcome::SkippedMissingScript => {}
-                            }
+                            },
+                            Err(_) => break,
+                        };
+                        if bail && failed.load(AtomicOrdering::Relaxed) > 0 {
+                            continue;
                         }
-                    })
+                        let Some(member) = members.get(work_idx) else {
+                            continue;
+                        };
+                        let leaf = MemberLeaf {
+                            compat_mode,
+                            // The concurrent path always streams (prefixed) —
+                            // its whole reason for existing is interleaved output.
+                            stream: true,
+                            color_idx: work_idx,
+                            exec: &exec,
+                            aggregate,
+                        };
+                        match run_one_member(target, member, &ws_root_buf, &leaf) {
+                            MemberOutcome::Ran(0) => {
+                                ran.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                            MemberOutcome::Ran(_) => {
+                                ran.fetch_add(1, AtomicOrdering::Relaxed);
+                                failed.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                            MemberOutcome::SkippedMissingScript => {}
+                        }
+                    }
+                }
+            };
+
+            let num_workers = concurrency.min(chunk.len());
+            // `Builder::spawn` (returns `io::Result`) over `thread::spawn` (which
+            // PANICS — and under `panic = "abort"` aborts the install — on
+            // thread-create EAGAIN under PID/thread pressure). A worker that fails
+            // to spawn is simply absent; the survivors drain the whole queue.
+            let workers: Vec<_> = (0..num_workers)
+                .filter_map(|i| {
+                    let body = run_worker(Arc::clone(&rx), Arc::clone(&failed), Arc::clone(&ran));
+                    thread::Builder::new()
+                        .name(format!("nub-run-worker-{i}"))
+                        .spawn(body)
+                        .ok()
                 })
                 .collect();
 
@@ -2769,6 +2782,13 @@ fn run_workspace_target(
                 let _ = tx.send(idx);
             }
             drop(tx);
+
+            // If EVERY worker failed to spawn (total thread exhaustion), drain the
+            // queue inline on the calling thread so the work still completes —
+            // serially, but never lost, and never a panic/abort.
+            if workers.is_empty() {
+                run_worker(Arc::clone(&rx), Arc::clone(&failed), Arc::clone(&ran))();
+            }
 
             for w in workers {
                 let _ = w.join();
@@ -3089,7 +3109,7 @@ fn build_script_command(
     lifecycle_event: &str,
     stream: StreamMode,
     script_shell_override: Option<&str>,
-) -> Result<std::process::Command> {
+) -> Result<(std::process::Command, String)> {
     use std::process::Command as StdCommand;
 
     // `.env` is NODE-SCOPED, not process-scoped (security + correctness, decided
@@ -3175,24 +3195,10 @@ fn build_script_command(
     // script body, so multi-word / metachar args reach the script as single
     // literal tokens while the body's own globs/expansions still run. A raw
     // join (the prior behavior) let the shell re-split/expand the args. Compat,
-    // not security — the args are the user's own argv (A42).
-    let full_cmd = if args.is_empty() {
-        cmd.to_string()
-    } else {
-        use nub_core::workspace::shell_escape;
-        let use_cmd = shell_escape::is_cmd(shell);
-        let double_escape = use_cmd && shell_escape::body_targets_batch_file(cmd);
-        let mut full = cmd.to_string();
-        for arg in args {
-            full.push(' ');
-            if use_cmd {
-                full.push_str(&shell_escape::cmd(arg, double_escape));
-            } else {
-                full.push_str(&shell_escape::sh(arg));
-            }
-        }
-        full
-    };
+    // not security — the args are the user's own argv (A42). The returned
+    // `full_cmd` is also what the `$ <cmd>` preamble echoes, so the displayed
+    // command matches the effective one (issue #146).
+    let full_cmd = nub_core::workspace::shell_escape::splice_args(cmd, args, shell);
 
     // Augmentation: NODE_OPTIONS + PATH shim so child `node` processes inside
     // the script inherit transpilation, polyfills, flag injection, and
@@ -3335,7 +3341,7 @@ fn build_script_command(
         command.stderr(std::process::Stdio::piped());
     }
 
-    Ok(command)
+    Ok((command, full_cmd))
 }
 
 fn spawn_script(
@@ -3346,7 +3352,7 @@ fn spawn_script(
     lifecycle_event: &str,
     exec: &ScriptExecOpts,
 ) -> Result<i32> {
-    let mut command = build_script_command(
+    let (mut command, display_cmd) = build_script_command(
         cmd,
         project,
         compat_mode,
@@ -3356,12 +3362,14 @@ fn spawn_script(
         exec.script_shell,
     )?;
     // Echo the command before running it, like npm/pnpm (and like Nub's own
-    // workspace/streaming path). Single-package runs inherit stdio with no
-    // per-package prefix, so just `$ <command>`, to stderr so it never pollutes
-    // the script's stdout. Runs once per lifecycle script (pre/main/post).
-    // Suppressed by `--silent`.
+    // workspace/streaming path). `display_cmd` is the script body with the
+    // forwarded args spliced + escaped exactly as executed, so the preamble
+    // matches the effective command (issue #146). Single-package runs inherit
+    // stdio with no per-package prefix, so just `$ <command>`, to stderr so it
+    // never pollutes the script's stdout. Runs once per lifecycle script
+    // (pre/main/post). Suppressed by `--silent`.
     if !SILENT.load(Ordering::Relaxed) {
-        eprintln!("$ {cmd}");
+        eprintln!("$ {display_cmd}");
     }
     // Forward terminating signals to the `sh -c <script>` child while it runs, so
     // `docker stop` / Ctrl-C / systemd reach the workload — not just Nub's leader.
@@ -3382,9 +3390,10 @@ fn spawn_script(
 /// `node --run`).
 ///
 /// `args` flow only to the main script; pre/post receive `&[]`, like npm.
-/// The `$ <cmd>` echo for each lifecycle step is emitted here (suppressed by
-/// `--silent`) so both stream call sites get identical sequencing + echoing
-/// from one place rather than duplicating it.
+/// The `$ <cmd>` echo for each lifecycle step is emitted inside
+/// [`spawn_script_prefixed`] (suppressed by `--silent`), alongside the ndjson
+/// `start` event, so both stream call sites echo identically — and the main
+/// step's echo carries the forwarded args spliced exactly as executed.
 #[allow(clippy::too_many_arguments)]
 fn run_single_script_prefixed(
     script: &str,
@@ -3397,18 +3406,6 @@ fn run_single_script_prefixed(
     exec: &ScriptExecOpts,
     aggregate: bool,
 ) -> Result<i32> {
-    // Each lifecycle step echoes `$ <cmd>` under its OWN name (prebuild /
-    // build / postbuild), matching pnpm — the output-line prefix below already
-    // uses the lifecycle name, so the echo lines up with it.
-    let echo_cmd = |lifecycle_name: &str, lifecycle_cmd: &str| {
-        // ndjson reports the `$ cmd` step via a JSON `start` event in
-        // spawn_script_prefixed, so suppress the human echo to keep stdout pure JSON.
-        if !SILENT.load(Ordering::Relaxed) && !reporter_is_ndjson() {
-            let cmd_prefix = format_stream_prefix_sep(prefix, lifecycle_name, color_idx, "$ ");
-            eprintln!("{cmd_prefix}{lifecycle_cmd}");
-        }
-    };
-
     // --ignore-scripts skips pre/post for the whole lifecycle; only the main
     // body runs (matching npm's interpretation, which run.md adopts).
     let run_hooks = !exec.ignore_scripts;
@@ -3419,7 +3416,6 @@ fn run_single_script_prefixed(
         if let Some(pre_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &pre_name)
         {
-            echo_cmd(&pre_name, &pre_cmd);
             let (code, _) = spawn_script_prefixed(
                 &pre_cmd,
                 project,
@@ -3437,7 +3433,6 @@ fn run_single_script_prefixed(
         }
     }
 
-    echo_cmd(script, cmd);
     let (code, _) = spawn_script_prefixed(
         cmd,
         project,
@@ -3459,7 +3454,6 @@ fn run_single_script_prefixed(
         if let Some(post_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &post_name)
         {
-            echo_cmd(&post_name, &post_cmd);
             let (post_code, _) = spawn_script_prefixed(
                 &post_cmd,
                 project,
@@ -3486,6 +3480,340 @@ fn run_single_script_prefixed(
 /// serialize the script *runs* themselves — only their final output emission.
 static AGGREGATE_FLUSH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Per-stream formatting + emission policy for a script's stdout/stderr drain.
+/// Owned so it can cross a thread boundary OR drive an inline drain — the same
+/// logic backs both paths. The stream (`R`) is held SEPARATELY (see
+/// [`PipeReaders`]) so a failed thread-spawn never loses the pipe: the policy
+/// can always still drain the stream inline.
+#[derive(Clone)]
+struct DrainPolicy {
+    ndjson: bool,
+    aggregate: bool,
+    is_stderr: bool,
+    prefix: String,
+    name: String,
+    script: String,
+}
+
+impl DrainPolicy {
+    /// Emit one raw line per this policy, returning the prefixed form to collect.
+    fn emit(&self, line: &str) -> Option<String> {
+        if self.ndjson {
+            let level = if self.is_stderr { "error" } else { "info" };
+            emit_ndjson("log", level, &self.name, &self.script, Some(line), None);
+            return None;
+        }
+        let prefixed = format!("{}{line}", self.prefix);
+        if !self.aggregate {
+            if self.is_stderr {
+                eprintln!("{prefixed}");
+            } else {
+                println!("{prefixed}");
+            }
+        }
+        Some(prefixed)
+    }
+
+    /// Drain `stream` to EOF on the CURRENT thread, returning the collected lines.
+    fn run<R: std::io::Read>(&self, stream: R) -> Vec<String> {
+        use std::io::BufRead as _;
+        let mut lines = Vec::new();
+        for line in std::io::BufReader::new(stream)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Some(prefixed) = self.emit(&line) {
+                lines.push(prefixed);
+            }
+        }
+        lines
+    }
+}
+
+/// Both of a script child's output pipes plus their per-stream policies, drained
+/// together so the child can never deadlock on a full pipe buffer.
+///
+/// The two pipes MUST be drained CONCURRENTLY: draining one to EOF before
+/// starting the other lets a child that fills the not-yet-read pipe block on
+/// `write` forever. The happy path drains stdout on its own thread while stderr
+/// drains on the calling thread. Under OS thread-create EAGAIN (the `nub ci`
+/// exit-101 family) — where `thread::spawn` would PANIC, and under
+/// `panic = "abort"` abort the whole process — we fall back to a SINGLE-THREAD
+/// concurrent drain that interleaves both pipes via `poll(2)`, preserving the
+/// no-deadlock guarantee without a second thread.
+struct PipeReaders {
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+    out_policy: DrainPolicy,
+    err_policy: DrainPolicy,
+}
+
+impl PipeReaders {
+    /// Drain both pipes to EOF, returning `(stdout_lines, stderr_lines)`. Never
+    /// deadlocks: stdout on a thread + stderr inline normally; both interleaved
+    /// on one thread via `poll(2)` when a thread can't be created.
+    fn drain(self) -> (Vec<String>, Vec<String>) {
+        let PipeReaders {
+            stdout,
+            stderr,
+            out_policy,
+            err_policy,
+        } = self;
+
+        let Some(out) = stdout else {
+            // No stdout pipe — only stderr to drain (inline, always concurrent
+            // enough since there's nothing to race it against).
+            let err_lines = stderr.map(|e| err_policy.run(e)).unwrap_or_default();
+            return (Vec::new(), err_lines);
+        };
+
+        // Happy path: stdout on its own thread (concurrent with the inline stderr
+        // drain below). On Unix we hand the thread a `dup`ed fd and KEEP the
+        // original `ChildStdout` — so a `Builder::spawn` failure (thread-create
+        // EAGAIN, which a bare `thread::spawn` would panic/abort on) leaves the
+        // original recoverable for the inline fallback. The dup and the original
+        // share the same OS pipe; only one ever reads it (the thread on success,
+        // the original inline on failure), so there's no double-drain.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::{AsRawFd, FromRawFd};
+            // SAFETY: dup an fd we own; wrap the new fd in an owning File. -1 on
+            // failure is handled below (drain inline).
+            let dup_fd = unsafe { libc::dup(out.as_raw_fd()) };
+            let spawn_result = if dup_fd < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                // SAFETY: `dup_fd` is a fresh, owned fd; `File` takes ownership.
+                let dup_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+                let policy = out_policy.clone();
+                std::thread::Builder::new()
+                    .name("nub-script-stdout".into())
+                    .spawn(move || policy.run(dup_file))
+            };
+            match spawn_result {
+                Ok(handle) => {
+                    let err_lines = stderr.map(|e| err_policy.run(e)).unwrap_or_default();
+                    let out_lines = handle.join().unwrap_or_default();
+                    (out_lines, err_lines)
+                }
+                Err(_) => {
+                    // Thread-create (or dup) EAGAIN: drain BOTH pipes concurrently
+                    // on this one thread so neither can deadlock the child.
+                    drain_both_inline(out, out_policy, stderr, err_policy)
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows never exhibited the thread-exhaustion abort, and has no
+            // `poll`-based inline multiplex here — move stdout into the thread as
+            // before. `Builder::spawn` still avoids the unconditional panic of
+            // `thread::spawn`; on the (astronomically rare) failure we drain
+            // stdout inline AFTER stderr, accepting the sequential-drain window.
+            let policy = out_policy.clone();
+            let spawn_result = std::thread::Builder::new()
+                .name("nub-script-stdout".into())
+                .spawn(move || policy.run(out));
+            match spawn_result {
+                Ok(handle) => {
+                    let err_lines = stderr.map(|e| err_policy.run(e)).unwrap_or_default();
+                    let out_lines = handle.join().unwrap_or_default();
+                    (out_lines, err_lines)
+                }
+                Err(_) => {
+                    let err_lines = stderr.map(|e| err_policy.run(e)).unwrap_or_default();
+                    // stdout was moved into the failed closure; it's gone. Lose
+                    // its lines (Windows-only, vanishing-probability path).
+                    (Vec::new(), err_lines)
+                }
+            }
+        }
+    }
+}
+
+/// Concurrently drain stdout + stderr on the CURRENT thread (no second thread),
+/// using `poll(2)` to multiplex the two pipes so a full buffer on either can
+/// never block the other — preserving the no-deadlock guarantee without a thread.
+/// Non-Unix has no `poll` here; it falls back to sequential draining, accepting
+/// the rare large-output deadlock window (the abort this replaces was Linux-only,
+/// and Windows never exhibited the thread-exhaustion bug).
+fn drain_both_inline(
+    out: std::process::ChildStdout,
+    out_policy: DrainPolicy,
+    err: Option<std::process::ChildStderr>,
+    err_policy: DrainPolicy,
+) -> (Vec<String>, Vec<String>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // `out` / `err` stay owned (and so their fds stay valid) until this block
+        // ends. Set both pipes non-blocking so a `read` after a `poll`-ready
+        // signal can never block (and returns `WouldBlock` when momentarily
+        // drained), which is what makes the single-thread multiplex safe.
+        set_nonblocking(out.as_raw_fd());
+        if let Some(e) = err.as_ref() {
+            set_nonblocking(e.as_raw_fd());
+        }
+        let mut out_pipe = LinePipe::new(out.as_raw_fd(), out_policy);
+        let mut err_pipe = err
+            .as_ref()
+            .map(|e| LinePipe::new(e.as_raw_fd(), err_policy));
+
+        loop {
+            let mut fds: Vec<libc::pollfd> = Vec::with_capacity(2);
+            if !out_pipe.done {
+                fds.push(libc::pollfd {
+                    fd: out_pipe.fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+            }
+            if let Some(ep) = err_pipe.as_ref() {
+                if !ep.done {
+                    fds.push(libc::pollfd {
+                        fd: ep.fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
+                }
+            }
+            if fds.is_empty() {
+                break;
+            }
+            // SAFETY: `fds` is a valid, len-sized slice of pollfd; -1 = no timeout.
+            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+            if rc < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break; // unrecoverable poll error — stop draining
+            }
+            for pfd in &fds {
+                if pfd.revents == 0 {
+                    continue;
+                }
+                if pfd.fd == out_pipe.fd {
+                    out_pipe.pump();
+                } else if let Some(ep) = err_pipe.as_mut() {
+                    if pfd.fd == ep.fd {
+                        ep.pump();
+                    }
+                }
+            }
+        }
+        let out_lines = out_pipe.finish();
+        let err_lines = err_pipe.map(LinePipe::finish).unwrap_or_default();
+        (out_lines, err_lines)
+    }
+    #[cfg(not(unix))]
+    {
+        // No `poll` — drain sequentially. Safe for the small-output common case;
+        // the thread-exhaustion abort this guards was never seen off Linux.
+        let out_lines = out_policy.run(out);
+        let err_lines = err.map(|e| err_policy.run(e)).unwrap_or_default();
+        (out_lines, err_lines)
+    }
+}
+
+/// Put a raw fd into non-blocking mode (best-effort — a failure just leaves the
+/// `poll`-then-`read` slightly more cautious; it does not break correctness).
+#[cfg(unix)]
+fn set_nonblocking(fd: std::os::unix::io::RawFd) {
+    // SAFETY: F_GETFL/F_SETFL on an fd we own; flags OR'd with O_NONBLOCK.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+/// A raw-fd pipe drained incrementally under `poll(2)`: reads available bytes,
+/// splits complete lines, emits + collects them per its [`DrainPolicy`], and
+/// buffers any partial trailing line until more arrives or EOF.
+#[cfg(unix)]
+struct LinePipe {
+    fd: std::os::unix::io::RawFd,
+    policy: DrainPolicy,
+    buf: Vec<u8>,
+    lines: Vec<String>,
+    done: bool,
+}
+
+#[cfg(unix)]
+impl LinePipe {
+    fn new(fd: std::os::unix::io::RawFd, policy: DrainPolicy) -> Self {
+        LinePipe {
+            fd,
+            policy,
+            buf: Vec::new(),
+            lines: Vec::new(),
+            done: false,
+        }
+    }
+
+    /// Read whatever is ready and emit any newly-complete lines.
+    fn pump(&mut self) {
+        let mut chunk = [0u8; 8192];
+        loop {
+            // SAFETY: read into a valid local buffer on a raw fd we own.
+            let n = unsafe {
+                libc::read(
+                    self.fd,
+                    chunk.as_mut_ptr() as *mut libc::c_void,
+                    chunk.len(),
+                )
+            };
+            if n > 0 {
+                self.buf.extend_from_slice(&chunk[..n as usize]);
+                self.drain_complete_lines();
+                continue; // keep reading until the pipe is momentarily empty
+            }
+            if n == 0 {
+                self.done = true; // EOF
+                return;
+            }
+            // n < 0
+            let e = std::io::Error::last_os_error();
+            match e.kind() {
+                std::io::ErrorKind::WouldBlock => return, // nothing more right now
+                std::io::ErrorKind::Interrupted => continue,
+                _ => {
+                    self.done = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn drain_complete_lines(&mut self) {
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let mut line = self.buf.drain(..=pos).collect::<Vec<u8>>();
+            line.pop(); // drop '\n'
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            let text = String::from_utf8_lossy(&line);
+            if let Some(prefixed) = self.policy.emit(&text) {
+                self.lines.push(prefixed);
+            }
+        }
+    }
+
+    /// Flush any partial trailing line (no terminating newline) and return all
+    /// collected lines.
+    fn finish(mut self) -> Vec<String> {
+        if !self.buf.is_empty() {
+            let text = String::from_utf8_lossy(&self.buf);
+            if let Some(prefixed) = self.policy.emit(&text) {
+                self.lines.push(prefixed);
+            }
+        }
+        self.lines
+    }
+}
+
 /// Spawn a script with piped stdout/stderr, prefixing each output line
 /// with `<prefix> <script>: `. Returns (exit_code, collected_output).
 ///
@@ -3506,9 +3834,9 @@ fn spawn_script_prefixed(
     exec: &ScriptExecOpts,
     aggregate: bool,
 ) -> Result<(i32, String)> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
 
-    let mut command = build_script_command(
+    let (mut command, display_cmd) = build_script_command(
         cmd,
         project,
         compat_mode,
@@ -3519,17 +3847,6 @@ fn spawn_script_prefixed(
     )?;
 
     nub_core::node::spawn::group_on_spawn(&mut command);
-    let mut child = command.spawn()?;
-    // Relay docker stop / Ctrl-C to the streamed child's whole process group too
-    // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
-    nub_core::node::spawn::track_child_group(child.id());
-    let mut output_buf = String::new();
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let prefix_out = format_stream_prefix(prefix, script_name, color_idx);
-    let prefix_err = prefix_out.clone();
 
     // `--reporter=ndjson`: every output site emits a JSON object on stdout instead
     // of the prefixed human line. The package `name` is the manifest name (falling
@@ -3542,54 +3859,64 @@ fn spawn_script_prefixed(
         .and_then(|v| v.as_str())
         .unwrap_or(prefix)
         .to_string();
+    // The `$ <cmd>` preamble / ndjson `start` event is emitted BEFORE the spawn so
+    // it always precedes any of the child's output. `display_cmd` carries the
+    // forwarded args spliced + escaped exactly as executed, so the preamble
+    // matches the effective command (issue #146); pre/post hooks receive no args,
+    // so theirs is just the body. Emitted here (not in the caller) so every step —
+    // and both the sequential and concurrent run paths — echo identically.
     if ndjson {
         emit_ndjson("start", "info", &pkg_name, script_name, None, None);
+    } else if !SILENT.load(Ordering::Relaxed) {
+        let cmd_prefix = format_stream_prefix_sep(prefix, script_name, color_idx, "$ ");
+        eprintln!("{cmd_prefix}{display_cmd}");
     }
+
+    let mut child = nub_core::node::spawn::spawn_with_eagain_retry(&mut command)?;
+    // Relay docker stop / Ctrl-C to the streamed child's whole process group too
+    // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
+    nub_core::node::spawn::track_child_group(child.id());
+    let mut output_buf = String::new();
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let prefix_out = format_stream_prefix(prefix, script_name, color_idx);
+    let prefix_err = prefix_out.clone();
+
     let (name_out, script_out) = (pkg_name.clone(), script_name.to_string());
     let (name_err, script_err) = (pkg_name.clone(), script_name.to_string());
 
-    // In aggregate mode the reader threads collect prefixed lines instead of
-    // emitting them live; the parent flushes the buffered blocks once, below.
-    let out_handle = std::thread::spawn(move || {
-        let mut lines = Vec::new();
-        if let Some(stdout) = stdout {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if ndjson {
-                    emit_ndjson("log", "info", &name_out, &script_out, Some(&line), None);
-                    continue;
-                }
-                let prefixed = format!("{prefix_out}{line}");
-                if !aggregate {
-                    println!("{prefixed}");
-                }
-                lines.push(prefixed);
-            }
-        }
-        lines
-    });
-
-    let err_handle = std::thread::spawn(move || {
-        let mut lines = Vec::new();
-        if let Some(stderr) = stderr {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if ndjson {
-                    emit_ndjson("log", "error", &name_err, &script_err, Some(&line), None);
-                    continue;
-                }
-                let prefixed = format!("{prefix_err}{line}");
-                if !aggregate {
-                    eprintln!("{prefixed}");
-                }
-                lines.push(prefixed);
-            }
-        }
-        lines
-    });
+    // In aggregate mode the drains collect prefixed lines instead of emitting
+    // them live; the parent flushes the buffered blocks once, below. `PipeReaders`
+    // drains both pipes CONCURRENTLY and never deadlocks — stdout on its own
+    // thread + stderr inline normally, or both interleaved on one thread via
+    // `poll(2)` when OS thread-create EAGAIN forces the inline fallback (the
+    // `nub ci` exit-101 family, where a bare `thread::spawn` would panic/abort).
+    let (out_lines, err_lines) = PipeReaders {
+        stdout,
+        stderr,
+        out_policy: DrainPolicy {
+            ndjson,
+            aggregate,
+            is_stderr: false,
+            prefix: prefix_out,
+            name: name_out,
+            script: script_out,
+        },
+        err_policy: DrainPolicy {
+            ndjson,
+            aggregate,
+            is_stderr: true,
+            prefix: prefix_err,
+            name: name_err,
+            script: script_err,
+        },
+    }
+    .drain();
 
     let status = child.wait()?;
     nub_core::node::spawn::untrack_child();
-    let out_lines = out_handle.join().unwrap_or_default();
-    let err_lines = err_handle.join().unwrap_or_default();
     let exit_code = nub_core::node::spawn::exit_code_from_status(&status);
     if ndjson {
         emit_ndjson(

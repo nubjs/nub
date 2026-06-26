@@ -98,8 +98,11 @@ augmentation**, and the collision self-guard then hard-fails "augmentation NOT a
 the binary with `runtime/` as siblings first — exactly what the CI `build` job stages.
 
 ```sh
-# Build the dev binary once (from the repo root):
-cargo build -p nub-cli -p nub-native
+# Build the dev binary once (from the repo root). nub-native is its own workspace
+# (excluded from the root one), so the addon builds from inside the crate; its
+# .cargo/config.toml routes output back into the shared root target/.
+cargo build -p nub-cli
+(cd crates/nub-native && cargo build)
 mkdir -p runtime/addons && cp target/debug/libnub_native.so runtime/addons/nub-native.node
 
 # Drive nub onto a specific Node via PATH (nub augments the PATH node):

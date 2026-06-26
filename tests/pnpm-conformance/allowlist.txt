@@ -43,7 +43,6 @@ throws error if pnpm tools dir is corrupt
 install should not fail if the used pnpm version does not satisfy
 install should fail if the project requires a different package manager
 install should not fail for packageManager field with hash
-install should not fail for packageManager field with url
 some commands should not fail if the required package manager is not pnpm
 self-update updates the packageManager field
 

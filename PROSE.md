@@ -106,6 +106,26 @@ A release note is the scannable rules applied to a changeset:
 - **A "Commits in this release" section at the bottom** — every commit as a bullet with its message and link — as the full audit trail beyond the themed sections.
 - **Tone: factual and neutral.** Each line states what changed. No superlatives, no competitive framing, no editorializing — the same bar as commit messages.
 
+### Marquee announcements (a major/milestone post, not a routine patch note)
+
+A signed milestone post — a major version, a launch — earns a different register from a patch release note. It is still factual and code-first, but it has a narrative arc and a small, controlled measure of personality.
+
+- **Arc: context → why-now → numbers → features → migration at the back.** Open with a one-line "it's here" plus brief context (why this version exists, what ceiling it clears), lead the body with the strongest quantified wins, then features, then breaking changes/migration last. Migration is redirected to its own page, not front-loaded — don't lead a celebratory post with "this breaks."
+- **Lead a performance claim with the multiplier, then back it with raw numbers.** State the ratio first and precisely ("~57% smaller (2.3x)", "14x faster"), then give the underlying measurement (ms, bytes, run count) so the ratio is auditable. The multiplier is the headline; the raw number is the proof. A before/after table is the default presentation.
+- **A short evaluative aside is allowed here — and ONLY here.** A signed milestone post may carry a controlled beat of voice: a two-word reaction after a number ("That's good!"), a flagged surprise ("This was an unexpected one."), one em-dash aside. This is the narrow exception to the "cut clever-but-empty lines" rule — it is licensed by the signed-announcement register and nowhere else (never in docs, patch notes, or GitHub comments). One or two per post, not a habit; the asides punctuate the facts, they don't replace them.
+- **Credit contributors and sponsors by name, specifically, with a link.** Attribution is prominent and warm — name the person/org, link them directly, say what they did. Vague "thanks to everyone who helped" is weaker than a named, linked acknowledgement.
+- **Sign it.** A milestone post closes with a brief personal sign-off from the author. (A routine patch note does not — it stays unsigned and impersonal.)
+
+### Migration / breaking-change entries
+
+A migration guide is a flat list of changes optimized for a reader scanning for the one that bit them.
+
+- **Lead each entry with a one-line summary as its heading, then the code.** The heading states what changed in a sentence ("Replaces the message param with error"); the before/after blocks follow. Don't make the reader parse code to learn what the entry is about.
+- **Label before/after blocks explicitly** with the version each belongs to, and use inline ✓/❌ on supported-vs-removed lines where a side-by-side is overkill.
+- **Tag the change TYPE in plain words.** "has been deprecated in favor of", "has been removed", "is no longer supported", "now behaves differently" — the reader sorts by severity at a glance. Removals get blunt, terse treatment; behavior changes get the old-state-then-new-state explanation they need.
+- **Explain WHY only when the why adds something.** Lean toward WHAT changed. A rationale earns its sentence when it prevents a "wait, why?" ("integers outside this range caused rounding errors") — otherwise state the change and move on. Don't manufacture a justification for every removal.
+- **Group related changes under a category heading** rather than listing every sub-change serially — collect a surface's changes under that surface's name.
+
 ---
 
 ## Naming and capitalization

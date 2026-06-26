@@ -38,6 +38,20 @@ You opt into the syntax by writing it; Nub makes it run.
 
 JSX and decorators each have their own page: see [JSX](/docs/runtime/jsx) for the `.jsx` / `.tsx` runtime and tsconfig configuration, and [Decorators](/docs/runtime/decorators) for the legacy `experimentalDecorators` form and `emitDecoratorMetadata`.
 
+## Plain JavaScript
+
+Your project's plain JavaScript — `.js`, `.mjs`, and `.cjs` — goes through the same pipeline. Modern syntax that Nub's Node floor can't parse natively is lowered exactly as it is in a `.ts` file, so identical source behaves the same whatever extension it carries: `using` / `await using`, a `v`-flag (unicode-sets) RegExp like `/\p{Letter}/v`, and decorators all run.
+
+```js
+// app.js — runs on every Node Nub supports
+using handle = openHandle();
+const letters = /\p{Letter}/v;
+```
+
+A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer — so a plain `.js` that needs no transform is exactly the file you wrote. Files inside `node_modules` are never transpiled; they load as the package shipped them, on every tier.
+
+JSX in a `.js` file is out of scope — use `.jsx`. Nub parses `.js` as JavaScript, not JSX, so a `<` is a comparison, not an element.
+
 ## Explicit resource management
 
 Explicit Resource Management — the `using` and `await using` declarations — runs on Nub's entire Node floor. Older Node (Node 22's V8) cannot parse `using` natively — it's a hard `SyntaxError` — so Nub's transpiler lowers it to the helper-based form before Node ever sees it.

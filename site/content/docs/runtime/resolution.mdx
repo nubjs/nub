@@ -45,6 +45,8 @@ import { Button } from "@/components/Button";
 
 Matching follows the `tsc` rules: an exact pattern wins outright, and among wildcard patterns the longest matching prefix wins. Node builtins always take precedence — `import "os"` is `node:os`, never `baseUrl/os.ts`.
 
+Path aliases work from any file, not just TypeScript ones — a `.js` file that imports a `paths` alias resolves it too. (The extensionless and `.js`→`.ts` behaviors below are the ones scoped to TypeScript-family parents.)
+
 ### `baseUrl`
 
 With `baseUrl` set and no matching `paths` entry, a bare specifier resolves relative to the base directory. A `import "lib/config"` finds `baseUrl/lib/config.ts` on its own.
@@ -80,13 +82,13 @@ The probe order is extension-aware — it depends on the parent file's extension
 ```text
 .ts  parent →  .ts  .tsx  .js  .jsx  .json
 .tsx parent →  .tsx  .ts  .jsx  .js  .json   # JSX extensions sort first
-.mts parent →  .mts  .mjs  …                 # prefers the matching .mjs sibling
-.cts parent →  .cts  .cjs  …                 # prefers the matching .cjs sibling
+.mts parent →  .mts  .ts  .mjs  .js  .json
+.cts parent →  .cts  .ts  .cjs  .js  .json
 ```
 
-A directory import honors the directory's `package.json` `"main"` before falling back to `index.*` probing.
+A directory import honors the directory's `package.json` `"main"` before falling back to probing `index.<ext>` in that same parent-aware order. Only `"main"` is consulted — `exports` is never read for a directory-path import, matching Node, which honors `exports` only for package-name resolution.
 
-This probing is scoped to TypeScript-family parent files only. A plain `.js` file stays strict about extensions, exactly like vanilla Node.
+This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts` / `.cts`) with a relative specifier. A plain `.js` file stays strict about extensions, exactly like vanilla Node.
 
 ## .js → .ts resolution
 
@@ -96,7 +98,7 @@ With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension on relative i
 import { handler } from "./handler.js";  // resolves ./handler.ts when no ./handler.js exists
 ```
 
-A real on-disk `./handler.js` always wins; the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`.
+The literal extension always wins first: a real on-disk `./handler.js` is used as-is, and the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts` — and likewise, a real `.cjs` beats a sibling `.cts`. This is the `tsc`/`tsx` emit convention, not a guess at the file's type.
 
 ## What falls through to Node
 

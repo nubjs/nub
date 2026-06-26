@@ -94,14 +94,26 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # Stable shared-key (restore main's warm cache on PR); save-if:main → PRs
+      # read-only. Same debug nub-cli + nub-native footprint as ci.yml's build legs.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: node-matrix
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            crates/nub-native
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
       - name: Build nub + native addon
         shell: bash
         run: |
-          cargo build -p nub-cli -p nub-native
+          cargo build -p nub-cli
+          # nub-native is its own workspace (split so the CLI uses panic=abort while
+          # the cdylib keeps panic=unwind); build it from inside the crate. Its local
+          # .cargo/config.toml routes output into the shared root target/.
+          (cd crates/nub-native && cargo build)
           mkdir -p runtime/addons
           cp target/debug/libnub_native.so runtime/addons/nub-native.node
       - name: Stage the reusable nub bundle

@@ -1,0 +1,206 @@
+{
+  "_doc": "Per-file WPT expectations for nub's Worker conformance gate. An entry is one of: {} (every subtest must pass), {skip:<reason>} (file not run — needs a DOM substrate nub has no business providing), or {fail:{expected:[<subtest names>], note:<why>}} (those subtests are documented, accepted divergences; every OTHER subtest in the file must still pass). expected-fail entries are DOCUMENTED divergences, not silent gaps — most are inherited from node:worker_threads and shared with native Node. The Blob-instanceof divergence (D2) is a real nub finding pending a maintainer document-vs-fix decision; see the note. An unexpected pass on an expected-fail subtest is reported (so the list can be tightened) but does not fail the run; an unexpected FAIL (regression) does.",
+  "tests": {
+    "webmessaging/MessageEvent.any.js": {},
+
+    "webmessaging/MessageEvent-trusted.any.js": {
+      "skip": "Both subtests assert MessageEvent.isTrusted===true. Node's worker_threads MessageEvent is isTrusted=false (verified: native Node is also false), so this is a Node-inherited divergence, not nub-specific. The BroadcastChannel subtest also needs an on-disk worker support file we do not vendor."
+    },
+
+    "webmessaging/MessagePort_initial_disabled.any.js": {
+      "fail": {
+        "expected": ["MessagePort_initial_disabled"],
+        "note": "PORT AUTO-START (Node-inherited). The spec requires that addEventListener('message') WITHOUT start() must not deliver; nub follows node:worker_threads, which starts a port on any listener (workerd shares this). Documented in the worker FAQ. The file itself notes it duplicates message-channels/no-start.any.js."
+      }
+    },
+
+    "webmessaging/MessagePort_onmessage_start.any.js": {},
+    "webmessaging/Channel_postMessage_event_properties.any.js": {},
+    "webmessaging/Channel_postMessage_target_source.any.js": {},
+    "webmessaging/Channel_postMessage_clone_port.any.js": {},
+    "webmessaging/Channel_postMessage_clone_port_error.any.js": {},
+    "webmessaging/Channel_postMessage_DataCloneErr.any.js": {},
+    "webmessaging/Channel_postMessage_ports_readonly_array.any.js": {},
+    "webmessaging/Channel_postMessage_with_transfer_outgoing_messages.any.js": {},
+    "webmessaging/Channel_postMessage_with_transfer_incoming_messages.any.js": {},
+    "webmessaging/Channel_postMessage_with_transfer_entangled.any.js": {},
+
+    "webmessaging/Channel_postMessage_Blob.any.js": {
+      "fail": {
+        "expected": ["Test Description: Messages can contain Blobs."],
+        "note": "DOM gap: the test reads the cloned Blob with `FileReader`, which is not a Node global (no DOM substrate). The Blob itself clones correctly (instanceof + bytes are fixed); only the FileReader-based readback is unavailable. Out of scope, like the other DOM-only rows."
+      }
+    },
+
+    "webmessaging/message-channels/basics.any.js": {},
+    "webmessaging/message-channels/close.any.js": {},
+
+    "webmessaging/message-channels/no-start.any.js": {
+      "fail": {
+        "expected": ["no-start"],
+        "note": "PORT AUTO-START (Node-inherited). addEventListener('message') without start() should not deliver per spec; node:worker_threads (and workerd) start the port on any listener. Documented in the worker FAQ. Same divergence as MessagePort_initial_disabled.any.js."
+      }
+    },
+
+    "webmessaging/message-channels/implied-start.any.js": {},
+    "webmessaging/message-channels/dictionary-transferrable.any.js": {},
+
+    "webmessaging/message-channels/worker-post-after-close.any.js": {
+      "skip": "CLOSE() SEMANTICS divergence. These probe the browser's GRACEFUL self.close() — queued tasks (and a postMessage issued right after close()) still run/flush. nub's worker-scope close() is process.exit(0) (hard), so a postMessage after close() is lost and the test's async_test never completes (0 subtests). A documentable divergence; skipped because it cannot yield a meaningful pass/fail under a hard close."
+    },
+
+    "webmessaging/message-channels/worker.any.js": {
+      "skip": "CLOSE() SEMANTICS divergence (same as worker-post-after-close): the blob: worker calls self.close() then postMessage(true); nub's hard process.exit(0) close drops the post, so the async_test never completes."
+    },
+
+    "html/infrastructure/safe-passing-of-structured-data/messagechannel.any.js": {
+      "fail": {
+        "expected": [
+          "FileList empty",
+          "Array FileList object, FileList empty",
+          "Object FileList object, FileList empty",
+          "ImageData 1x1 transparent black",
+          "ImageData 1x1 non-transparent non-black",
+          "Array ImageData object, ImageData 1x1 transparent black",
+          "Array ImageData object, ImageData 1x1 non-transparent non-black",
+          "Object ImageData object, ImageData 1x1 transparent black",
+          "Object ImageData object, ImageData 1x1 non-transparent non-black",
+          "ImageBitmap 1x1 transparent black",
+          "ImageBitmap 1x1 non-transparent non-black",
+          "Array ImageBitmap object, ImageBitmap 1x1 transparent black",
+          "Array ImageBitmap object, ImageBitmap 1x1 transparent non-black",
+          "Object ImageBitmap object, ImageBitmap 1x1 transparent black",
+          "Object ImageBitmap object, ImageBitmap 1x1 transparent non-black",
+          "Growable SharedArrayBuffer",
+          "ImageBitmap",
+          "OffscreenCanvas"
+        ],
+        "versioned": [
+          {
+            "maxMajor": 23,
+            "expected": [
+              "File basic",
+              "A subclass instance will deserialize as its closest serializable superclass"
+            ],
+            "note": "NODE structured-clone limitation on every line BELOW 24: structuredClone/postMessage of a File deserializes to a plain Blob — File-ness is lost. Verified on vanilla Node (no nub) on 18.19, 20, and 22 (22.15.1/22.16.0): `structuredClone(new File([…])) instanceof File === false`. Node 24+ fixed it (round-trips as File). nub is faithful here — the loss is in the underlying node:worker_threads/v8 serializer, which nub does not intermediate for a native MessageChannel; nub backfills the `File` global on the 18.x floor (runtime/polyfills.cjs) so the test can construct the File, but cannot make the native serializer preserve its subclass identity. The 'subclass deserializes as closest serializable superclass' subtest fails for the same reason (the File subclass collapses to Blob)."
+          },
+          {
+            "maxMajor": 21,
+            "expected": [
+              "A detached ArrayBuffer cannot be transferred",
+              "Transferring a non-transferable platform object fails",
+              "Serializing a non-serializable platform object fails"
+            ],
+            "note": "NODE native-serializer error behavior on lines BELOW 22: Node's native MessageChannel postMessage does NOT reject these transfer/serialize error cases on Node 18/20 — re-transferring an already-detached ArrayBuffer, transferring a non-transferable Blob, and serializing a non-serializable Response all silently succeed instead of throwing DataCloneError. Verified on vanilla Node (no nub) on 18.19 and 20 (no throw) vs Node 22.15+/24 (throws DataCloneError). nub does not intermediate a native MessageChannel's serializer, so this is the underlying Node behavior, not a nub divergence — expected-fail on the 18/20 legs only. The throw boundary is verified at the matrix legs (no-throw on 18.19/20, throws on 22.15+); if a sub-22.15 leg (22.0-22.14) is ever added, re-verify the exact minor where the native rejection landed."
+          },
+          {
+            "maxMajor": 19,
+            "expected": [
+              "Resizable ArrayBuffer",
+              "Length-tracking TypedArray",
+              "Length-tracking DataView",
+              "Serializing OOB TypedArray throws",
+              "Serializing OOB DataView throws",
+              "Resizable ArrayBuffer is transferable",
+              "Length-tracking TypedArray is transferable",
+              "Length-tracking DataView is transferable",
+              "Transferring OOB TypedArray throws",
+              "Transferring OOB DataView throws"
+            ],
+            "note": "NODE 18 V8 limitation: resizable/growable ArrayBuffer (the `maxByteLength` option + `ArrayBuffer.prototype.resize`) is a V8 feature that landed in Node 20 — it is absent on the 18.x compat floor (`new ArrayBuffer(n, {maxByteLength}).resize` is not a function). nub cannot add a V8 engine feature, so these resizable-buffer serialize/transfer subtests are expected-fail on the Node 18 leg only; Node 20+ has the feature and passes them."
+          }
+        ],
+        "note": "Structured-clone battery (152 subtests). The version-independent expected fails are all NON-Blob: (1) DOM-only types with NO Node substrate — FileList/ImageData/ImageBitmap need `document`/canvas (throw 'document is not defined' / 'OffscreenCanvas is not defined'); legitimately out of scope (no DOM on Node), kept expected-fail rather than skip so a future DOM polyfill surfaces as an unexpected-pass. (2) 'Growable SharedArrayBuffer instanceof ArrayBuffer' — a growable SAB is not an ArrayBuffer instance under Node. Plus three VERSION-GATED bands (see `versioned`), all genuine below-floor Node limitations nub cannot fix and does not mask on the versions where the behavior is correct: File→Blob clone loss on Node <24, native-serializer non-rejection on Node <22, and resizable-ArrayBuffer absence on Node 18. The 19 Blob clone rows now PASS — `cloned instanceof Blob` AND the Blob's bytes-via-Response are fixed (runtime/worker-blob-url.cjs makes globalThis.Blob a Proxy over the native Blob, keeping `globalThis.Blob.prototype === node:buffer.Blob.prototype` so a deserialized native Blob passes both `instanceof` and undici's webidl brand check). Every Map/Set/Date/typed-array/SAB-identity/transfer/circular case also passes."
+      }
+    },
+
+    "workers/Worker-custom-event.any.js": {},
+    "workers/Worker-replace-event-handler.any.js": {},
+
+    "urlpattern/urlpattern.any.js": {
+      "fail": {
+        "expected": [],
+        "versioned": [
+          {
+            "maxMajor": 23,
+            "expected": [
+              "Pattern: [{\"pathname\":\":a󠄀b\"}] Inputs: []",
+              "Pattern: [{\"pathname\":\"test/:a𐑐b\"}] Inputs: [{\"pathname\":\"test/foo\"}]",
+              "Pattern: [{\"protocol\":\"http\",\"port\":\"80 \"}] Inputs: [{\"protocol\":\"http\",\"port\":\"80\"}]",
+              "Pattern: [{\"port\":\"80\"}] Inputs: [{\"port\":\"8\\t0\"}]",
+              "Pattern: [{\"port\":\"80\"}] Inputs: [{\"port\":\"80x\"}]",
+              "Pattern: [{\"port\":\"80\"}] Inputs: [{\"port\":\"80?x\"}]",
+              "Pattern: [{\"port\":\"80\"}] Inputs: [{\"port\":\"80\\\\x\"}]",
+              "Pattern: [\"https://{sub.}?example{.com/}foo\"] Inputs: [\"https://example.com/foo\"]",
+              "Pattern: [{\"hostname\":\"bad#hostname\"}] Inputs: [{\"hostname\":\"bad\"}]",
+              "Pattern: [{\"hostname\":\"bad/hostname\"}] Inputs: [{\"hostname\":\"bad\"}]",
+              "Pattern: [{\"hostname\":\"bad\\\\\\\\hostname\"}] Inputs: [{\"hostname\":\"badhostname\"}]",
+              "Pattern: [{\"hostname\":\"bad\\nhostname\"}] Inputs: [{\"hostname\":\"badhostname\"}]",
+              "Pattern: [{\"hostname\":\"bad\\rhostname\"}] Inputs: [{\"hostname\":\"badhostname\"}]",
+              "Pattern: [{\"hostname\":\"bad\\thostname\"}] Inputs: [{\"hostname\":\"badhostname\"}]",
+              "Pattern: [{\"pathname\":\"/([[a-z]--a])\"}] Inputs: [{\"pathname\":\"/a\"}]",
+              "Pattern: [{\"pathname\":\"/([[a-z]--a])\"}] Inputs: [{\"pathname\":\"/z\"}]",
+              "Pattern: [{\"pathname\":\"/([\\\\d&&[0-1]])\"}] Inputs: [{\"pathname\":\"/0\"}]",
+              "Pattern: [{\"pathname\":\"/([\\\\d&&[0-1]])\"}] Inputs: [{\"pathname\":\"/3\"}]",
+              "Pattern: [{\"protocol\":\"http\",\"hostname\":\"example.com/ignoredpath\"}] Inputs: [\"http://example.com/\"]",
+              "Pattern: [{\"protocol\":\"http\",\"hostname\":\"example.com\\\\?ignoredsearch\"}] Inputs: [\"http://example.com/\"]",
+              "Pattern: [{\"protocol\":\"http\",\"hostname\":\"example.com#ignoredhash\"}] Inputs: [\"http://example.com/\"]",
+              "Pattern: [{\"pathname\":\"/:𠀀\"}] Inputs: [{\"pathname\":\"/foo\"}]"
+            ],
+            "note": "URLPATTERN-POLYFILL DIVERGENCES on the polyfill tiers (Node 18/20/22). Native URLPattern landed in Node 24; below it nub loads urlpattern-polyfill@10.1.0, whose regex generation diverges from native URLPattern on these inputs: (1) port normalization — the polyfill strips trailing spaces / non-numeric suffixes that native rejects at construction; (2) hostname validation — the polyfill accepts hostnames with control/special chars that native rejects; (3) Unicode set notation `[[a-z]--a]` / `[\\d&&[0-1]]`; (4) Unicode escapes in named-group names (astral-plane chars). Verified failing on real Node 18.19, 20, and 22.15 (identical set on all three) and passing on native Node 24+."
+          }
+        ],
+        "note": "URLPattern battery. URLPattern is native on Node 24+ and every subtest passes there; on the polyfill tiers (Node 18/20/22) nub uses urlpattern-polyfill@10.1.0 and the 22 subtests in the versioned band diverge. The earlier Node-24 named-capture band was removed: that native bug was fixed in Node 24.17, which is the version the floating `24` CI leg installs."
+      }
+    },
+
+    "urlpattern/urlpattern-constructor.any.js": {},
+
+    "urlpattern/urlpattern-hasregexpgroups.any.js": {},
+
+    "urlpattern/urlpattern-compare.tentative.any.js": {
+      "skip": "TENTATIVE API: URLPattern.prototype.compareComponent is in nub's urlpattern-polyfill but is absent in native Node 24+'s URLPattern, making the test pass only on some tiers. Tentative APIs are excluded from the conformance gate until the spec stabilizes."
+    },
+
+    "urlpattern/urlpattern-generate.tentative.any.js": {
+      "skip": "TENTATIVE API: URLPattern.prototype.generate is absent in both native and the polyfill; 11/20 subtests pass by expecting generate to be absent or undefined. Tentative APIs are excluded from the conformance gate until the spec stabilizes."
+    },
+
+    "web-locks/acquire.https.any.js": {},
+
+    "web-locks/held.https.any.js": {},
+    "web-locks/ifAvailable.https.any.js": {},
+    "web-locks/lock-attributes.https.any.js": {},
+    "web-locks/mode-exclusive.https.any.js": {},
+
+    "web-locks/mode-mixed.https.any.js": {},
+
+    "web-locks/mode-shared.https.any.js": {},
+
+    "web-locks/non-secure-context.any.js": {
+      "skip": "nub installs navigator.locks unconditionally regardless of isSecureContext; this test asserts navigator.locks is undefined in non-secure contexts, which nub never satisfies. Skipped rather than expected-fail because nub's run-file.mjs sets isSecureContext=false (no HTTPS context) for all tests."
+    },
+
+    "web-locks/query-empty.https.any.js": {},
+
+    "web-locks/query.https.any.js": {
+      "fail": {
+        "expected": [
+          "query() reports different ids for held locks from different contexts",
+          "query() can observe a deadlock"
+        ],
+        "note": "CROSS-WORKER TESTS: these two subtests spawn `new Worker('resources/worker.js')` to coordinate locks across contexts. nub's WPT runner operates in the main realm (window scope), where Worker is unavailable as a bare path specifier, and nub's locks are single-process only (no cross-worker coordination). The other 7 subtests pass across all CI matrix legs."
+      }
+    },
+
+    "web-locks/resource-names.https.any.js": {},
+
+    "web-locks/signal.https.any.js": {},
+
+    "web-locks/steal.https.any.js": {},
+
+    "html/webappapis/scripting/reporterror.any.js": {
+      "skip": "nub's reportError dispatches asynchronously (queueMicrotask(() => { throw err })) while the spec requires synchronous ErrorEvent dispatch at the global; the async throw also crashes the process before the __WPT_RESULT__ marker can be emitted. A spec-compliant implementation requires ErrorEvent and dispatchEvent on the global (not in any Node version). Tracked for a future runtime improvement."
+    }
+  }
+}

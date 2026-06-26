@@ -312,6 +312,23 @@ pub enum TrustExcludeParseError {
 }
 
 impl TrustExcludeRules {
+    /// An exclude set with no rules. Used by callers (e.g.
+    /// `minimumReleaseAgeExclude`) that must NOT inherit the
+    /// trust-policy default exclusions baked into [`Self::default`].
+    pub fn empty() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    /// Number of parsed rules. For diagnostics/logging only.
+    pub fn len(&self) -> usize {
+        self.rules.len()
+    }
+
+    /// True when there are no rules.
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
     fn from_name_excludes(names: &[&str]) -> Self {
         Self {
             rules: names
@@ -372,7 +389,7 @@ impl TrustExcludeRules {
         (Self { rules }, errors)
     }
 
-    fn matches(&self, name: &str, version: &node_semver::Version) -> bool {
+    pub(crate) fn matches(&self, name: &str, version: &node_semver::Version) -> bool {
         for rule in &self.rules {
             if !rule.name_matcher.matches(name) {
                 continue;
@@ -393,10 +410,21 @@ impl TrustExcludeRules {
     /// no-version rule can match in that case (pnpm behavior:
     /// `evaluateVersionPolicy` returns `true` for name-only rules
     /// before the version array branch is taken).
-    fn matches_name_only(&self, name: &str) -> bool {
+    pub(crate) fn matches_name_only(&self, name: &str) -> bool {
         self.rules
             .iter()
             .any(|r| r.exact_versions.is_none() && r.name_matcher.matches(name))
+    }
+
+    /// True when `name` is matched by at least one *version-pinned* rule
+    /// (a rule carrying an exact-version union). Callers use this to know
+    /// the cutoff must be evaluated per-candidate version rather than
+    /// skipped wholesale — a name-only match is handled by
+    /// [`Self::matches_name_only`] instead.
+    pub(crate) fn has_versioned_match(&self, name: &str) -> bool {
+        self.rules
+            .iter()
+            .any(|r| r.exact_versions.is_some() && r.name_matcher.matches(name))
     }
 }
 

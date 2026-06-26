@@ -238,12 +238,13 @@ fn honors_namespaced_overrides(role: Role) -> bool {
 }
 
 /// Does the active PM honor Bun's top-level `trustedDependencies` (the
-/// build-script allowlist)? Only bun — and bun@10 DROPPED it (pnpm@10's
-/// approve-builds migration also dropped `trustedDependencies` +
-/// `onlyBuiltDependencies`, and bun followed). `major` is bun's declared
-/// major; undeclared bun is assumed current (honors).
-pub(crate) fn honors_trusted_dependencies(role: Role, major: Option<u64>) -> bool {
-    role == Role::Bun && major.is_none_or(|m| m < 10)
+/// build-script allowlist)? Only bun — at every major. Bun's current line
+/// (1.3.x) still uses `trustedDependencies` for lifecycle-script approval
+/// (bun.com/docs/install/lifecycle; bun source `install/lifecycle.zig` +
+/// `lockfile.zig`), and ships no `onlyBuiltDependencies` / `approve-builds`
+/// migration (zero hits in bun source). No version gate applies.
+pub(crate) fn honors_trusted_dependencies(role: Role) -> bool {
+    role == Role::Bun
 }
 
 /// One graph-shaping field nub dropped because the active PM ignores it,
@@ -463,10 +464,13 @@ mod tests {
     }
 
     #[test]
-    fn bun_10_dropped_trusted_dependencies() {
-        assert!(honors_trusted_dependencies(Role::Bun, Some(9)));
-        assert!(honors_trusted_dependencies(Role::Bun, None));
-        assert!(!honors_trusted_dependencies(Role::Bun, Some(10)));
-        assert!(!honors_trusted_dependencies(Role::Pnpm, None));
+    fn only_bun_honors_trusted_dependencies() {
+        // Bun honors `trustedDependencies` at every major (no version drop —
+        // bun 1.3.x still uses it; see `honors_trusted_dependencies`).
+        assert!(honors_trusted_dependencies(Role::Bun));
+        assert!(!honors_trusted_dependencies(Role::Pnpm));
+        assert!(!honors_trusted_dependencies(Role::Npm));
+        assert!(!honors_trusted_dependencies(Role::Yarn));
+        assert!(!honors_trusted_dependencies(Role::Nub));
     }
 }

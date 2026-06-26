@@ -1,5 +1,5 @@
 use aube_lockfile::LocalSource;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,21 +25,43 @@ pub trait ReadPackageHook: Send {
 }
 
 /// Supply-chain mitigation: forbid versions younger than `min_age` for
-/// every package whose name isn't in `exclude`. Mirrors pnpm's
+/// every package not matched by an `exclude` rule. Mirrors pnpm's
 /// `minimumReleaseAge` / `minimumReleaseAgeExclude` /
 /// `minimumReleaseAgeStrict` triplet. Constructed by the install
 /// command, threaded into [`Resolver::with_minimum_release_age`].
-#[derive(Debug, Clone, Default)]
+///
+/// `exclude` reuses the same [`TrustExcludeRules`] grammar as
+/// `trustPolicyExclude`, so a `minimumReleaseAgeExclude` entry may be
+/// name-only (`lodash` — every version of the package skips the age
+/// gate, the original behavior), or version-pinned with a `||` union
+/// (`axios@0.18.1 || 0.21.1` — only those exact versions skip the
+/// gate), matching pnpm's documented `name@v1 || v2` support.
+#[derive(Debug, Clone)]
 pub struct MinimumReleaseAge {
     /// Minutes a version must have aged in the registry. `0` disables.
     pub minutes: u64,
-    /// Package names skipped by the cutoff filter entirely.
-    pub exclude: HashSet<String>,
+    /// Packages/versions skipped by the cutoff filter. Name-only rules
+    /// exempt the whole package; version-pinned rules exempt only the
+    /// listed exact versions.
+    pub exclude: crate::trust::TrustExcludeRules,
     /// When true, fail the install if no version satisfies the range
     /// without violating the cutoff. When false (the pnpm default), the
     /// resolver falls back to the lowest satisfying version, ignoring
     /// the cutoff for that pick only.
     pub strict: bool,
+}
+
+impl Default for MinimumReleaseAge {
+    fn default() -> Self {
+        Self {
+            minutes: 0,
+            // Empty — unlike `trustPolicyExclude`, the release-age gate
+            // ships no default exclusions, so `TrustExcludeRules::default()`
+            // (which seeds the trust-policy defaults) would be wrong here.
+            exclude: crate::trust::TrustExcludeRules::empty(),
+            strict: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +120,24 @@ impl MinimumReleaseAge {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
         let cutoff_secs = now.saturating_sub(self.minutes * 60);
         Some(format_iso8601_utc(cutoff_secs))
+    }
+
+    /// True when a *name-only* exclude rule matches `name` — the whole
+    /// package is exempt from the age gate regardless of which version is
+    /// picked (the original `minimumReleaseAgeExclude` behavior, preserved
+    /// exactly). Version-pinned rules are evaluated per-candidate during
+    /// the pick instead, so they do NOT trip this.
+    pub fn excludes_all_versions(&self, name: &str) -> bool {
+        self.exclude.matches_name_only(name)
+    }
+
+    /// True when `name` has at least one version-pinned exclude rule, so
+    /// the cutoff must be evaluated per-candidate rather than skipped for
+    /// the whole package. `false` means the package's exclude rules (if
+    /// any) are all name-only and were already handled by
+    /// [`Self::excludes_all_versions`].
+    pub fn has_versioned_exclude(&self, name: &str) -> bool {
+        self.exclude.has_versioned_match(name)
     }
 }
 

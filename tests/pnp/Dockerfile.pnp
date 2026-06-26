@@ -29,7 +29,12 @@ COPY . .
 # Cache the addon out to a non-mounted path so the runner COPY can reach it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p nub-cli -p nub-native && \
+    cargo build --release -p nub-cli && \
+    # nub-native is its own workspace (split so the CLI uses panic=abort while the
+    # cdylib stays panic=unwind), excluded from the root workspace — so it is NOT
+    # reachable as `-p nub-native` from the repo root. Build it from inside the
+    # crate; its .cargo/config.toml routes output back into the shared /src/target.
+    (cd crates/nub-native && cargo build --release) && \
     mkdir -p /out/runtime && cp -r runtime/. /out/runtime/ && \
     mkdir -p /out/runtime/addons && \
     cp target/release/libnub_native.so /out/runtime/addons/nub-native.node && \

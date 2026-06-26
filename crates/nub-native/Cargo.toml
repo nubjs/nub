@@ -1,3 +1,108 @@
+# nub-native is its OWN Cargo workspace (a single-member one), SPLIT OUT of the
+# main nub workspace solely for a panic-strategy reason. Cargo's `panic` setting
+# is profile-GLOBAL within a workspace; nub-native is a cdylib loaded INTO the
+# user's Node process via napi, so it MUST stay `panic = "unwind"` (abort-on-panic
+# would kill the host Node process instead of surfacing a JS error). The `nub` CLI
+# binary in the main workspace wants `panic = "abort"` to shrink the binary. Those
+# two can't coexist in one workspace's release profile, hence this split.
+#
+# Because it's its own workspace, it can NO LONGER inherit the main workspace's
+# `[workspace.package]` / `[workspace.dependencies]` / `[workspace.lints]`. Those
+# are duplicated below. The dependency pins MUST stay byte-identical to the main
+# workspace's `[workspace.dependencies]` — the oxc/napi pins are lockstep with the
+# npm pin (oxc-transform@0.132.0; see the main Cargo.toml comments and
+# package.json) and the blake3 transpile-cache-key contract. Any oxc/napi bump
+# must move in BOTH workspaces together.
+#
+# It depends on `crates/nub-cache-key` (which stays a member of the MAIN
+# workspace) via the `../nub-cache-key` path dep below — a path dep crossing the
+# workspace boundary. nub-cache-key's own `workspace = true` inheritance resolves
+# against the main workspace (where it is a member); here it is just a path
+# dependency that this workspace recompiles under its own unwind profile.
+#
+# Built directly (e.g. `cargo build -p nub-native --manifest-path
+# crates/nub-native/Cargo.toml`); `.cargo/config.toml` next to this file routes
+# output into the repo-root `target/` so the addon-copy paths in the Makefile and
+# CI (`target/<profile>/libnub_native.*`) are unchanged.
+[workspace]
+members = ["."]
+resolver = "3"
+
+[workspace.package]
+version = "0.2.2"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/nubjs/nub"
+
+# Pins MUST match the main workspace's [workspace.dependencies] exactly (see the
+# header comment). Only the subset nub-native actually uses is duplicated here.
+[workspace.dependencies]
+json5 = "0.4"
+jsonc-parser = { version = "0.24", features = ["serde"] }
+# napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
+# napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
+# (the OxcError / SourceMap return types would fail to bridge). napi 3 is the
+# version oxc itself ships on. The `napi8` feature pins the NAPI-version FLOOR to
+# 8 (node_api_version 8 — available since Node 12.22/14.12/15.0, comfortably below
+# the 18.19 floor) so any accidental higher-API use fails at compile-time rather
+# than at load on 18.19. serde-json preserves the bridge the data parsers rely on.
+napi = { version = "3", features = ["serde-json", "napi8"] }
+napi-derive = "3"
+# oxc transpiler — pinned EXACT to the oxc-transform npm version nub ships today
+# (see package.json: oxc-transform/oxc-parser/@oxc-project/runtime are all 0.132.0).
+# The internal Rust crates carry the SAME version number as the napi release;
+# oxc_sourcemap is independently versioned (oxc_codegen 0.132.0 depends on
+# oxc_sourcemap ^6.0.1). Any oxc bump must move in lockstep with the npm pin AND a
+# NUB_VERSION bump (transpile-cache buster), AND with the main workspace's pin.
+# DO NOT float without re-running the transpile-parity gate. OXC_VERSION = 0.132.0
+oxc = { version = "=0.132.0", features = ["full"] }
+oxc_napi = "=0.132.0"
+oxc_sourcemap = { version = "=6.0.1", features = ["napi"] }
+rustc-hash = "2"
+toml = "0.8"
+yaml-rust2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# blake3 content hash for the transpile-cache key + integrity prefix (SIMD,
+# replaced SHA-256 on the warm path; schema v4). Lockstep with the main workspace.
+blake3 = "1"
+
+# Mirrors the main workspace's [workspace.lints.clippy] — same zero-violation,
+# high-signal markers (unfinished/debug code shipping to users). Kept in sync so
+# nub-native is held to the identical lint bar under `cargo clippy`.
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# nub-native keeps `panic = "unwind"` — the whole reason for this split. The
+# cdylib is loaded into the user's Node process; abort-on-panic would kill the
+# host process instead of surfacing a JS error. Otherwise mirrors the main
+# workspace's release tuning.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"
+
+# Fast local-iteration profile, mirroring the main workspace's `fast` profile so
+# `make addon-fast` (which builds nub-native under `--profile fast`) behaves the
+# same here. panic stays unwind via the dev-inherited default.
+[profile.fast]
+inherits = "dev"
+opt-level = 0
+debug = "line-tables-only"
+codegen-units = 256
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.fast.package."*"]
+opt-level = 2
+
 [package]
 name = "nub-native"
 version.workspace = true
@@ -12,11 +117,11 @@ crate-type = ["cdylib"]
 # host at dlopen, never at link time. A cdylib links fine (undefined symbols are
 # allowed), but a `cargo test` harness is a normal executable and CANNOT link those
 # symbols (`undefined symbol: napi_create_object`). So opt it out of `cargo test`
-# to keep bare `cargo test` (whole-workspace, as CI runs) green. Regressed when
-# oxc_napi pulled napi 3 in. Pure logic that warrants a unit test is factored
-# out into the napi-free `nub-cache-key` crate, which IS testable (the transpile
-# cache-key derivation + its invalidation contract live there); the rest of the
-# addon is exercised by loading the built `.node` into Node (the nub-cli suite).
+# to keep bare `cargo test` green. Regressed when oxc_napi pulled napi 3 in. Pure
+# logic that warrants a unit test is factored out into the napi-free
+# `nub-cache-key` crate, which IS testable (the transpile cache-key derivation +
+# its invalidation contract live there); the rest of the addon is exercised by
+# loading the built `.node` into Node (the nub-cli suite).
 test = false
 doctest = false
 
@@ -47,7 +152,8 @@ rustc-hash.workspace = true
 serde.workspace = true
 blake3.workspace = true
 # Transpile cache-key derivation (the blake3 preimage), factored out so its
-# invalidation contract can be unit-tested off the un-testable cdylib.
+# invalidation contract can be unit-tested off the un-testable cdylib. A path dep
+# that crosses into the MAIN workspace (where nub-cache-key is a member).
 nub-cache-key = { path = "../nub-cache-key" }
 
 [build-dependencies]

@@ -112,6 +112,14 @@ if (__isFastTier) {
 // modules is unreliable, so they load via dynamic `import()` here.
 const __preloadedPolyfills = common.preloadPolyfillPackages(__require);
 installSyncPolyfills(__preloadedPolyfills);
+// navigator backfill (Node < 21: the `navigator` global is wholly absent). MUST run
+// BEFORE navigator-locks so Web Locks has a host on the 18.19–20.x floor. On Node >= 21
+// it is a no-op (navigator is native). Thread the floor's createRequire so the shim can
+// fetch node:os where process.getBuiltinModule is absent (the narrow floor). See
+// navigator-shim.mjs.
+const __navShim = await import("./navigator-shim.mjs");
+__navShim.setBootstrapCreateRequire(floorCreateRequire);
+__navShim.installNavigatorShim();
 if (typeof globalThis.navigator?.locks === "undefined") {
   await import("./navigator-locks.mjs");
 }

@@ -15,7 +15,7 @@ The CLI you type is pnpm-shaped; the files Nub reads and writes are npm's. When 
     { feature: <><code>optionalDependencies</code></>, status: 'yes' },
     { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes' },
     { feature: <code>overrides</code>, status: 'yes' },
-    { feature: <code>resolutions</code>, status: 'yes' },
+    { feature: <code>resolutions</code>, status: 'no', note: 'Yarn field; dropped with a warning under npm. Use overrides.' },
     { feature: <><code>engines</code> / <code>os</code> / <code>cpu</code> / <code>libc</code></>, status: 'yes' },
     { feature: <><code>packageManager</code></>, status: 'yes' },
     { feature: <><code>bundleDependencies</code></>, status: 'yes' },

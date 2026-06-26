@@ -434,11 +434,33 @@ pub static FEATURES: &[Feature] = &[
         )],
         evidence: "browser-shape Worker not in any Node; wraps node:worker_threads",
     },
+    // ── navigator global ────────────────────────────────────────────────────
+    // The `navigator` object (hardwareConcurrency / userAgent / language / languages
+    // / platform, and from 24.5 `locks`) was added in Node 21.0.0 (#47769). Below 21
+    // it is wholly absent, so any API hosted ON navigator — chiefly navigator.locks —
+    // has no object to attach to. nub backfills the navigator object from
+    // navigator-shim.mjs so the surface (and locks, below) reaches the 18.19 floor.
+    // The userAgent stays `Node.js/<major>` — never `Nub/…` (brand boundary).
+    Feature {
+        name: "navigator",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((21, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "navigator-shim.mjs",
+                    global: "globalThis.navigator",
+                },
+            ),
+            (band((21, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "navigator global added Node 21.0.0 (#47769); backfilled below the 21.0 floor",
+    },
     // ── navigator.locks (Web Locks API) ─────────────────────────────────────
     // Native on Node 24.5+ (worker: add web locks api, #58666 — NOT 24.0: the
     // global is undefined on 24.0–24.4); below that nub installs a Web Locks
     // polyfill onto `navigator.locks` (typeof-gated, so the 24.0–24.4 gap is
-    // covered either way).
+    // covered either way). On Node < 21 the polyfill rides on the navigator object
+    // the `navigator` row backfills (navigator-shim.mjs runs first).
     Feature {
         name: "navigator.locks",
         mitigations: &[

@@ -9,7 +9,7 @@ description: >-
   the fixture, verify it had the intended effect, then run command variants to
   probe edge cases. Ad-hoc e2e is a valid verification method on its own; this
   skill also covers when to promote a durable check into the committed test
-  suite. Pairs with the `nub-dev` build skill and AGENTS.md's pre-push loop.
+  suite. Pairs with the `dev-loop` build skill and AGENTS.md's pre-push loop.
 ---
 
 # Ad-hoc end-to-end testing of nub
@@ -40,7 +40,7 @@ Keep it minimal: the smaller the fixture, the clearer the signal.
 
 ### 2. Build the dev `nub`
 
-Use the `fast` profile from a worktree with a stable target dir (see the `nub-dev` skill). Either invoke the binary by path or via the `nub-dev` symlink:
+Use the `fast` profile from a worktree with a stable target dir (see the `dev-loop` skill). Either invoke the binary by path or via the `nub-dev` symlink:
 
 ```bash
 # from your worktree:

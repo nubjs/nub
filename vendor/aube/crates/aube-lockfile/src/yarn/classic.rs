@@ -128,27 +128,92 @@ pub(super) fn parse_classic_str(
         }
     }
 
-    // Build direct deps from the manifest, cross-referencing against spec_to_dep_path.
+    // Discover the workspace members once, up front, so both the root
+    // and member importers can recognize a dep on a SIBLING member.
+    // Classic yarn.lock never records workspace members (they aren't
+    // registry packages), so a member-to-member dependency is absent
+    // from `spec_to_dep_path` and would otherwise be dropped — the
+    // consumer then never gets the sibling symlinked into node_modules.
+    // `member_versions` maps each member's package name → its on-disk
+    // version; `member_manifests` carries the parsed manifests forward
+    // so we don't re-read them when building each member's importer.
+    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut member_versions: BTreeMap<String, String> = BTreeMap::new();
+    let mut member_manifests: Vec<(String, aube_manifest::PackageJson)> = Vec::new();
+    if let Some(workspaces) = &manifest.workspaces {
+        for member_dir in discover_workspace_members(project_dir, workspaces.patterns()) {
+            let member_pj_path = project_dir.join(&member_dir).join("package.json");
+            let Ok(member_pj) = aube_manifest::PackageJson::from_path(&member_pj_path) else {
+                continue;
+            };
+            if let Some(name) = &member_pj.name {
+                member_versions.insert(
+                    name.clone(),
+                    member_pj.version.clone().unwrap_or_else(|| "0.0.0".into()),
+                );
+            }
+            member_manifests.push((member_dir, member_pj));
+        }
+    }
+
+    // A dep on a workspace SIBLING links to the local member rather than
+    // a registry tarball. Mirror the resolver's `try_workspace_link`
+    // (aube-resolver `driver.rs`): a `workspace:`/`link:`/`portal:` spec
+    // binds unconditionally for the `*`/`^`/`~`/empty sigils, and a bare
+    // semver range binds when the member's version satisfies it. We emit
+    // a DirectDep whose `dep_path` (`name@version`) has NO entry in
+    // `packages` — the convention the linker keys on to symlink the
+    // sibling dir (`aube-linker` link.rs: `workspace_dirs.contains_key`
+    // && `!graph.packages.contains_key(dep_path)`). The real yarn.lock
+    // entry, when one exists (a member that is ALSO published), still
+    // wins via the `spec_to_dep_path` path checked first by the callers.
+    let workspace_link = |name: &str, range: &str| -> Option<String> {
+        let version = member_versions.get(name)?;
+        let matches = match range
+            .strip_prefix("workspace:")
+            .or_else(|| range.strip_prefix("link:"))
+            .or_else(|| range.strip_prefix("portal:"))
+        {
+            Some("" | "*" | "^" | "~") => true,
+            // `link:`/`portal:` to a member binds by name; the path tail
+            // is the on-disk location, not a version constraint.
+            Some(_) if range.starts_with("link:") || range.starts_with("portal:") => true,
+            Some(rest) => version_satisfies(version, rest),
+            None if range.is_empty() || range == "*" => true,
+            None => version_satisfies(version, range),
+        };
+        matches.then(|| format!("{name}@{version}"))
+    };
+
+    // Build direct deps from the manifest, cross-referencing against
+    // spec_to_dep_path; falling back to a workspace-sibling link.
     let mut direct: Vec<DirectDep> = Vec::new();
-    let push_direct = |name: &str, range: &str, dep_type: DepType, direct: &mut Vec<DirectDep>| {
+    let push_dep = |name: &str, range: &str, dep_type: DepType, into: &mut Vec<DirectDep>| {
         let spec = format!("{name}@{range}");
         if let Some(dep_path) = spec_to_dep_path.get(&spec) {
-            direct.push(DirectDep {
+            into.push(DirectDep {
                 name: name.to_string(),
                 dep_path: dep_path.clone(),
                 dep_type,
-                specifier: None,
+                specifier: Some(range.to_string()),
+            });
+        } else if let Some(dep_path) = workspace_link(name, range) {
+            into.push(DirectDep {
+                name: name.to_string(),
+                dep_path,
+                dep_type,
+                specifier: Some(range.to_string()),
             });
         }
     };
     for (name, range) in &manifest.dependencies {
-        push_direct(name, range, DepType::Production, &mut direct);
+        push_dep(name, range, DepType::Production, &mut direct);
     }
     for (name, range) in &manifest.dev_dependencies {
-        push_direct(name, range, DepType::Dev, &mut direct);
+        push_dep(name, range, DepType::Dev, &mut direct);
     }
     for (name, range) in &manifest.optional_dependencies {
-        push_direct(name, range, DepType::Optional, &mut direct);
+        push_dep(name, range, DepType::Optional, &mut direct);
     }
 
     let mut importers = BTreeMap::new();
@@ -161,39 +226,22 @@ pub(super) fn parse_classic_str(
     // yarn-source workspace converts to a single lone `.` importer and
     // the target PM frozen-rejects (pnpm ERR_PNPM_OUTDATED_LOCKFILE on a
     // child package.json, npm "Missing" members, bun "lockfile had
-    // changes"). Discover each member from the globs + disk and build
-    // its importer, cross-referencing its declared ranges against the
-    // flat resolution list the same way the root importer is built.
-    if let Some(workspaces) = &manifest.workspaces {
-        let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        for member_dir in discover_workspace_members(project_dir, workspaces.patterns()) {
-            let member_pj_path = project_dir.join(&member_dir).join("package.json");
-            let Ok(member_pj) = aube_manifest::PackageJson::from_path(&member_pj_path) else {
-                continue;
-            };
-            let mut member_direct: Vec<DirectDep> = Vec::new();
-            let mut push_member = |name: &str, range: &str, dep_type: DepType| {
-                let spec = format!("{name}@{range}");
-                if let Some(dep_path) = spec_to_dep_path.get(&spec) {
-                    member_direct.push(DirectDep {
-                        name: name.to_string(),
-                        dep_path: dep_path.clone(),
-                        dep_type,
-                        specifier: Some(range.to_string()),
-                    });
-                }
-            };
-            for (name, range) in &member_pj.dependencies {
-                push_member(name, range, DepType::Production);
-            }
-            for (name, range) in &member_pj.dev_dependencies {
-                push_member(name, range, DepType::Dev);
-            }
-            for (name, range) in &member_pj.optional_dependencies {
-                push_member(name, range, DepType::Optional);
-            }
-            importers.insert(member_dir, member_direct);
+    // changes"). Build each member's importer from the manifests
+    // gathered above, cross-referencing its declared ranges against the
+    // flat resolution list — and against the workspace siblings — the
+    // same way the root importer is built.
+    for (member_dir, member_pj) in &member_manifests {
+        let mut member_direct: Vec<DirectDep> = Vec::new();
+        for (name, range) in &member_pj.dependencies {
+            push_dep(name, range, DepType::Production, &mut member_direct);
         }
+        for (name, range) in &member_pj.dev_dependencies {
+            push_dep(name, range, DepType::Dev, &mut member_direct);
+        }
+        for (name, range) in &member_pj.optional_dependencies {
+            push_dep(name, range, DepType::Optional, &mut member_direct);
+        }
+        importers.insert(member_dir.clone(), member_direct);
     }
 
     Ok(LockfileGraph {
@@ -201,6 +249,22 @@ pub(super) fn parse_classic_str(
         packages,
         ..Default::default()
     })
+}
+
+/// Does `version` satisfy the semver `range`? An empty/whitespace range
+/// means "any" (npm/yarn/pnpm treat it as `*`; `node_semver` rejects it).
+/// Mirrors the resolver's `version_satisfies` for the workspace-link
+/// match — a bare uncached parse, since the workspace-sibling path runs
+/// only over the handful of member-to-member deps, not a resolver hot loop.
+fn version_satisfies(version: &str, range: &str) -> bool {
+    let range = if range.trim().is_empty() { "*" } else { range };
+    let (Ok(v), Ok(r)) = (
+        node_semver::Version::parse(version),
+        node_semver::Range::parse(range),
+    ) else {
+        return false;
+    };
+    v.satisfies(&r)
 }
 
 /// Expand the root manifest's `workspaces` globs against the on-disk

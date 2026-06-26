@@ -1,0 +1,133 @@
+name: WPT Worker
+
+# Conformance gate for nub's browser-shape Worker (the v0.2 headline). Runs a pinned,
+# vendored slice of web-platform-tests `.any.js` tests — the webmessaging battery, the
+# structured-clone battery over a MessageChannel, and the worker-scope event tests —
+# THROUGH nub's runtime, so the polyfilled globals under test (Worker, MessageChannel,
+# MessagePort, MessageEvent, structuredClone) are nub's. Gated on the per-file status
+# file (tests/worker-wpt/status.json): green = no unexpected failures vs that baseline.
+#
+# nub's Worker polyfill takes DIFFERENT code paths per Node tier — the fast tier
+# (>=22.15, sync module.registerHooks) and the compat tier (18.19-22.14, async
+# module.register loader-worker) — so a single-Node green masks tier defects. We run the
+# matrix across both: 18.19 (floor, compat tier), 20 (compat tier), 22.15 (first fast
+# tier), and the latest major.
+#
+# COST MODEL mirrors node-matrix.yml: build nub ONCE, reuse the bundle across every Node
+# leg (the Node version is a setup-node/PATH choice, not a rebuild). The runner is cheap
+# (subprocess-per-file, ~seconds), so every push/PR is fine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build nub (WPT)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # Stable shared-key (restore main's warm cache on PR); save-if:main → PRs
+      # read-only. Same debug nub-cli + nub-native footprint as ci.yml's build legs.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: wpt-worker
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      - name: Build nub + native addon
+        shell: bash
+        run: |
+          cargo build -p nub-cli
+          # nub-native is its own workspace (split so the CLI uses panic=abort while
+          # the cdylib keeps panic=unwind); build it from inside the crate. Its local
+          # .cargo/config.toml routes output into the shared root target/.
+          (cd crates/nub-native && cargo build)
+          mkdir -p runtime/addons
+          cp target/debug/libnub_native.so runtime/addons/nub-native.node
+      - name: Install runtime npm deps
+        run: npm ci --ignore-scripts
+      - name: Stage the reusable nub bundle
+        shell: bash
+        run: |
+          # nub walks up from the binary to find runtime/preload.* + runtime/addons, so they
+          # must travel as siblings of the binary.
+          mkdir -p nub-bundle
+          cp target/debug/nub nub-bundle/nub
+          cp -r runtime nub-bundle/runtime
+          # Vendor the pure-JS runtime polyfills into the bundle (same set as npm/build-local.sh).
+          # `reqFromRuntime()` in preload.cjs resolves packages relative to runtime/, so they
+          # must be in runtime/node_modules/. The source runtime/ tree has none; the published
+          # npm package copies them here during packaging. Mirror that in the CI bundle.
+          mkdir -p nub-bundle/runtime/node_modules
+          cp -r node_modules/urlpattern-polyfill nub-bundle/runtime/node_modules/
+          mkdir -p nub-bundle/runtime/node_modules/@petamoriken
+          cp -r "node_modules/@petamoriken/float16" nub-bundle/runtime/node_modules/@petamoriken/
+          mkdir -p nub-bundle/runtime/node_modules/@js-temporal
+          cp -r "node_modules/@js-temporal/polyfill" nub-bundle/runtime/node_modules/@js-temporal/
+          cp -r node_modules/jsbi nub-bundle/runtime/node_modules/
+          mkdir -p nub-bundle/runtime/node_modules/@oxc-project
+          cp -r "node_modules/@oxc-project/runtime" nub-bundle/runtime/node_modules/@oxc-project/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nub-bundle
+          path: nub-bundle
+          retention-days: 1
+
+  conformance:
+    name: WPT (node ${{ matrix.node }})
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both tiers: 18.19 (floor / compat), 20 (compat), 22.15 (first fast tier), latest.
+        node: ["18.19", "20", "22.15", "24"]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: nub-bundle
+          path: nub-bundle
+      - name: Run the WPT Worker conformance matrix
+        shell: bash
+        run: |
+          chmod +x nub-bundle/nub
+          WPT_NUB="$PWD/nub-bundle/nub" node tests/worker-wpt/harness/run-wpt.mjs
+
+  # Always-green aggregator so branch protection has one stable required check.
+  wpt-worker-gate:
+    name: WPT Worker gate
+    needs: [conformance]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: |
+          set -euo pipefail
+          result='${{ needs.conformance.result }}'
+          if [[ "$result" != "success" ]]; then
+            echo "WPT Worker conformance failed: $result"
+            exit 1
+          fi
+          echo "WPT Worker conformance green across all tiers."

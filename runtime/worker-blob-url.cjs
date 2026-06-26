@@ -34,43 +34,64 @@ function decode(parts) {
   return src;
 }
 
-// Wrap URL.createObjectURL/revokeObjectURL and subclass Blob to remember parts.
+// Wrap URL.createObjectURL/revokeObjectURL and Proxy Blob to remember parts.
 // Idempotent + transparent for every non-worker use. No-op when URL has no
 // createObjectURL (older floors) — blob: workers are then simply unavailable.
+//
+// The install-marker is a Symbol, not a string property: it sits on the native
+// Blob constructor (a shared global), so a string key would show up in
+// `Reflect.ownKeys(Blob)` / `"x" in Blob` — a (cosmetic) divergence from vanilla
+// Node. A Symbol keeps the marker invisible to those reflective surfaces.
+const INSTALLED = Symbol.for("nub.blobUrlSupport.installed");
 function installBlobUrlSupport() {
   if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return;
-  if (URL.createObjectURL.__nubWrapped) return;
+  if (URL.createObjectURL[INSTALLED]) return;
 
   const NativeBlob = globalThis.Blob;
-  if (typeof NativeBlob === "function" && !NativeBlob.__nubWrapped) {
-    // Transparent subclass: `instanceof Blob` stays true and the full Blob API is
-    // intact; we only record the construction parts for sync source assembly.
-    class Blob extends NativeBlob {
-      constructor(parts = [], options) {
-        super(parts, options);
-        blobParts.set(this, parts);
-      }
-    }
-    Object.defineProperty(Blob, "__nubWrapped", { value: true });
+  if (typeof NativeBlob === "function" && !NativeBlob[INSTALLED]) {
+    // Record construction parts WITHOUT changing Blob's identity. The earlier
+    // approach — a `class extends NativeBlob` swapped onto globalThis.Blob — broke
+    // brand identity in two ways that a structured-clone exposes:
+    //   1. A deserialized Blob (postMessage / structuredClone) is a NATIVE Blob, so
+    //      `cloned instanceof globalThis.Blob` was FALSE (subclass.prototype is not
+    //      in a native instance's chain) — a spec violation; native Node passes.
+    //   2. WORSE, undici's webidl `is.Blob` uses the ORDINARY `[Symbol.hasInstance]`
+    //      (a prototype-chain check that ignores a custom hasInstance) against
+    //      `globalThis.Blob`, so `new Response(clonedBlob).arrayBuffer()` failed the
+    //      brand check and stringified the Blob to "[object Blob]" (13 bytes) instead
+    //      of reading its bytes. A custom `Symbol.hasInstance` can't fix this — undici
+    //      bypasses it.
+    // The ROOT cause was `globalThis.Blob !== node:buffer.Blob`. A Proxy whose target
+    // is the native Blob keeps `globalThis.Blob.prototype === NativeBlob.prototype`,
+    // so every native Blob (constructed OR deserialized) passes both `instanceof` and
+    // undici's ordinary-hasInstance check exactly as on vanilla Node — while the
+    // `construct` trap still records parts for sync blob: worker source assembly. File
+    // (which `extends` native Blob) then needs NO re-parenting: its instances already
+    // have NativeBlob.prototype in their chain.
+    const BlobProxy = new Proxy(NativeBlob, {
+      construct(target, args, newTarget) {
+        // FORWARD newTarget so a user subclass (`class X extends Blob {}`) gets ITS
+        // prototype — passing `target` here would force NativeBlob.prototype and
+        // silently break `new X() instanceof X` + the subclass's methods (an
+        // additivity violation vs vanilla Node). When `new Blob(...)` is called
+        // directly, newTarget IS this Proxy; Reflect.construct(NativeBlob, args, Proxy)
+        // resolves the new instance's proto from `Proxy.prototype`, which the Proxy
+        // forwards to NativeBlob.prototype — so a direct Blob is byte-identical to a
+        // native one (same brand, passes instanceof + undici's webidl check).
+        const inst = Reflect.construct(target, args, newTarget);
+        if (args[0] != null) blobParts.set(inst, args[0]);
+        return inst;
+      },
+    });
+    Object.defineProperty(NativeBlob, INSTALLED, { value: true });
     Object.defineProperty(globalThis, "Blob", {
-      value: Blob,
+      value: BlobProxy,
       enumerable: false,
       writable: true,
       configurable: true,
     });
-
-    // `File` is a Node bootstrap global that `extends` the NATIVE Blob, realized
-    // before this swap. Without re-pointing, `new File(...) instanceof Blob`
-    // becomes FALSE (File still extends native Blob, but `globalThis.Blob` is now
-    // the subclass) — a silent additivity violation vs vanilla Node, where File
-    // IS-A Blob. Re-parent File's prototype chain onto the new Blob so the
-    // `instanceof` contract holds. Both the .prototype link (instances) and the
-    // constructor link (static inheritance) are re-pointed.
-    const File = globalThis.File;
-    if (typeof File === "function" && Object.getPrototypeOf(File) === NativeBlob) {
-      Object.setPrototypeOf(File.prototype, Blob.prototype);
-      Object.setPrototypeOf(File, Blob);
-    }
+    // File's `extends` link still points at the real NativeBlob (unchanged), so
+    // `new File(...) instanceof Blob` holds natively — no re-parenting needed.
   }
 
   const nativeCreate = URL.createObjectURL.bind(URL);
@@ -82,7 +103,7 @@ function installBlobUrlSupport() {
     if (parts) blobUrlSources.set(url, decode(parts));
     return url;
   };
-  Object.defineProperty(wrappedCreate, "__nubWrapped", { value: true });
+  Object.defineProperty(wrappedCreate, INSTALLED, { value: true });
   URL.createObjectURL = wrappedCreate;
   if (nativeRevoke) {
     URL.revokeObjectURL = function revokeObjectURL(url) {

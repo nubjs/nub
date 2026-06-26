@@ -296,6 +296,208 @@ fn legacy_decorators_require_experimental_flag() {
     );
 }
 
+// ── Project-source plain JS (.js/.mjs/.cjs) transpile ───────────────
+// nub transpiles PROJECT plain JS through the same pipeline as `.ts`, so
+// transformable syntax (`using`/`await using`, `v`-flag RegExp, decorators) lowers
+// uniformly — identical source must not behave differently by extension. A native
+// `transformableSyntax` verdict (riding the existing detect parse) gates a verbatim
+// skip-return for no-op JS so byte-parity is preserved; node_modules is excluded at
+// every dispatch site. See wiki/runtime/typescript.md + the transpile-project-js
+// design thread.
+
+#[test]
+fn js_transpilation_smoke_guard() {
+    // PERMANENT REGRESSION GUARD — DO NOT DELETE. Guards JS-file transpilation
+    // against being silently disabled (e.g. `.js`/`.mjs`/`.cjs` dropped from
+    // TRANSPILE_EXTS, the skip-gate inverted, or a dispatch site regressed). This is
+    // a BLACK-BOX test: it runs the real `nub` binary on project `.js`/`.mjs`/`.cjs`
+    // files that contain FLOOR-BREAKING syntax and asserts each one transpiles +
+    // executes on EVERY supported Node — including the 18.19 compat-tier floor.
+    //
+    // Why each fixture proves transpilation fired on its extension, even on 18.19:
+    //   * guard.mjs — a `using` declaration (ES2026), a hard SyntaxError on every
+    //     supported Node's V8. An ESM entry resolves the disposal helper on every
+    //     tier (the CJS-entry helper limitation does not apply to ESM), so it both
+    //     lowers AND executes on the 18.19 floor. Prints SMOKE-MJS:body,b,a.
+    //   * guard.js / guard.cjs — a `v`-flag (ES2024 unicode-sets) RegExp literal,
+    //     a hard PARSE error on 18.19's V8 that kills the whole module raw. oxc
+    //     lowers `/…/v` to a `new RegExp(…)` constructor, so a transpiled module
+    //     PARSES and the marker prints; the literal sits in an uncalled function so
+    //     the constructor never runs on 18.19 (where V8 rejects the `v` flag). The
+    //     marker only appears if nub transpiled the `.js`/`.cjs`.
+    // If any extension stops being transpiled, its marker vanishes (raw SyntaxError /
+    // parse error) and this test fails on the floor leg — the canary the maintainer
+    // asked for. Runs on the ambient CI matrix Node (18.19 through the host line).
+    for (file, marker) in [
+        ("guard.mjs", "SMOKE-MJS:body,b,a"),
+        ("guard.js", "SMOKE-JS:ok"),
+        ("guard.cjs", "SMOKE-CJS:ok"),
+    ] {
+        let (stdout, stderr, code) = run_nub("transpile-js-smoke", file);
+        assert_eq!(
+            code,
+            0,
+            "{file} must transpile + run on Node {:?} (transpilation disabled?): {stderr}",
+            target_node_version()
+        );
+        assert!(
+            stdout.contains(marker),
+            "{file} marker missing — nub did not transpile this extension on Node {:?}: \
+             stdout={stdout} stderr={stderr}",
+            target_node_version()
+        );
+    }
+}
+
+#[test]
+fn project_js_using_down_levels() {
+    // `using` is a SyntaxError on every supported Node's V8; this project `.js`
+    // must be down-leveled (the transformableSyntax verdict flags it) and run, just
+    // as the `.ts` equivalent does. On the compat tier below require(esm) the
+    // transpiled output's helper require can't be served (the SAME documented
+    // limitation as legacy_decorators_require_experimental_flag) — skip-with-reason
+    // there, assert the behavior where it's supported.
+    if !node_has_require_esm() {
+        eprintln!(
+            "SKIP project_js_using_down_levels on Node {:?}: CJS-entry helper require \
+             is unsupported below require(esm) (documented v0.x limitation)",
+            target_node_version()
+        );
+        return;
+    }
+    let (stdout, stderr, code) = run_nub("project-js", "using.js");
+    assert_eq!(
+        code, 0,
+        "project .js using should down-level + run: {stderr}"
+    );
+    assert!(stdout.contains("open:a,b"), "using block ran: {stdout}");
+    assert!(stdout.contains("using:done"), "completed: {stdout}");
+}
+
+#[test]
+fn project_js_v_flag_regexp_lowers() {
+    // The trigger the design's original verdict MISSED: a `v`-flag (unicode-sets,
+    // ES2024) RegExp literal. Raw `/…/v` is a PARSE error on the compat-tier floor
+    // (Node 18.19), killing the whole module; oxc lowers it to `new RegExp(…)` at
+    // es2022 so the module parses everywhere. The `v` flag itself is honored by V8
+    // on Node 20+, so the regex evaluates there; on 18.x V8 rejects the `v` flag
+    // even via the constructor (an inherent V8 floor limitation oxc can't polyfill),
+    // but the module still PARSES — which is the load-bearing win this trigger buys.
+    let (stdout, stderr, code) = run_nub("project-js", "vflag-regexp.js");
+    if node_at_least((20, 0, 0)) {
+        assert_eq!(
+            code, 0,
+            "v-flag regexp should lower + run on Node 20+: {stderr}"
+        );
+        assert!(
+            stdout.contains("vflag:true"),
+            "v-flag regex matched: {stdout}"
+        );
+    } else {
+        // Below 20: the lowering still makes the file PARSE (the win vs the raw
+        // literal's parse error), but V8 rejects the `v` flag at RegExp construction.
+        assert_ne!(
+            code, 0,
+            "v flag is unsupported in V8 below Node 20: {stderr}"
+        );
+        assert!(
+            stderr.contains("Invalid flags") || stderr.contains("RegExp"),
+            "should be a runtime RegExp error (parsed, not a parse error): {stderr}"
+        );
+    }
+}
+
+#[test]
+fn project_js_noop_is_byte_identical() {
+    // The load-bearing byte-parity guard: a project `.js` with NOTHING oxc lowers
+    // must be served VERBATIM — no quote/semicolon/whitespace normalization, no
+    // sourcemap footer. `f.toString()` exposes the loaded function's source; if nub
+    // had run it through codegen, the single quotes would become double and
+    // semicolons would be inserted. Asserting the raw form proves the skip-gate.
+    let (stdout, stderr, code) = run_nub("project-js", "noop.js");
+    assert_eq!(code, 0, "no-op .js should run: {stderr}");
+    // The verbatim function body: single quotes, no inserted semicolons, the
+    // trailing comma and original 2-space indentation all intact.
+    assert!(
+        stdout.contains(r#"const x = 'single'"#),
+        "single quotes must survive (not normalized to double): {stdout}"
+    );
+    assert!(
+        stdout.contains(r#"const obj = { a: 1, b: 2, }"#),
+        "object literal must not be reflowed; trailing comma preserved: {stdout}"
+    );
+    assert!(
+        !stdout.contains(r#"const x = "single";"#),
+        "must NOT show oxc's reformatted (double-quoted, semicolon'd) emit: {stdout}"
+    );
+}
+
+#[test]
+fn project_js_mjs_is_module_cjs_is_commonjs() {
+    // `.mjs` → module, `.cjs` → commonjs, regardless of package `type` — the format
+    // branches added to moduleFormatFor. A wrong format = invalid-ESM/CJS mismatch,
+    // so these fail to run if the branches are missing. Both are no-op (verbatim)
+    // files, so this also confirms the verbatim path resolves the right format.
+    let (out_mjs, err_mjs, code_mjs) = run_nub("project-js", "esm-format.mjs");
+    assert_eq!(code_mjs, 0, ".mjs should run as ESM: {err_mjs}");
+    assert!(
+        out_mjs.contains("MJS:true"),
+        "import.meta under module format: {out_mjs}"
+    );
+
+    let (out_cjs, err_cjs, code_cjs) = run_nub("project-js", "cjs-format.cjs");
+    assert_eq!(code_cjs, 0, ".cjs should run as CommonJS: {err_cjs}");
+    assert!(
+        out_cjs.contains("CJS:true"),
+        "module.exports under commonjs format: {out_cjs}"
+    );
+}
+
+#[test]
+fn node_modules_js_is_never_transpiled() {
+    // The make-or-break gate: dependency code must load RAW on every tier — the fast
+    // sync hook, the classic require shim, and the compat async-hooks load. Covered:
+    // a plain node_modules `.js` dep (which itself `require`s a sibling `.cjs` — Node
+    // has no native `_extensions['.cjs']`, so the classic shim's bail must fall back
+    // to the `.js` handler or the require crashes on the compat tier), and a pnpm
+    // `.pnpm`-virtual-store dep. If nub transpiled them, the reformattable source
+    // would be normalized; `using`-as-identifier in the plain dep would survive only
+    // because it's never parsed as a declaration. The marks prove the dep bodies ran
+    // unchanged. (Yarn PnP deps resolve to an in-zip path that still contains
+    // `/node_modules/`, so they gate identically — covered by the tests/pnp matrix.)
+    let (stdout, stderr, code) = run_nub("project-js", "main-deps.js");
+    assert_eq!(
+        code, 0,
+        "requiring node_modules deps should work raw: {stderr}"
+    );
+    assert!(
+        stdout.contains("DEPY:depy:identifier-not-keyword:depy-cjs:12"),
+        "plain node_modules dep (and its required .cjs helper) loaded raw: {stdout}"
+    );
+    assert!(
+        stdout.contains("DEPZ:depz-store:9"),
+        "pnpm .pnpm-store dep loaded raw: {stdout}"
+    );
+}
+
+#[test]
+fn project_js_decorator_routes_to_transform() {
+    // A decorator in project `.js` must route to the transform path (NOT the
+    // verbatim skip): with no experimentalDecorators it surfaces nub's Stage-3
+    // diagnostic, exactly as the `.ts` equivalent does — proving the decorator
+    // trigger flags `.js`.
+    let (_stdout, stderr, code) = run_nub("project-js", "decorator.js");
+    assert_ne!(
+        code, 0,
+        "Stage-3 decorator in .js should fail clearly: {stderr}"
+    );
+    assert!(
+        stderr.contains("Stage 3 decorators are not supported"),
+        "decorator in .js must hit the branded diagnostic (the transform path), \
+         not run verbatim: {stderr}"
+    );
+}
+
 #[test]
 fn js_parent_no_extensionless_probe() {
     // Contract: a non-TS (`.js`) parent does NOT get nub's TS-parent extensionless
@@ -480,6 +682,47 @@ fn urlpattern_available() {
     assert!(
         stdout.contains("urlpattern-nomatch:true"),
         "URLPattern non-match returns null: {stdout}"
+    );
+}
+
+#[test]
+fn web_locks_spec_behavior() {
+    // Web Locks works to the spec under nub on every supported Node: the hand-rolled
+    // polyfill below 24.5, native at/above. The fixture asserts steal, option/name
+    // validation, reader/writer fairness, AbortSignal, and core mutual exclusion —
+    // every assertion holds on BOTH paths, so this is a true differential test (a
+    // regression on either turns it red). On the 18.19–20.x compat legs it also proves
+    // the navigator backfill hosts navigator.locks. Verified against the WPT web-locks
+    // suite (68/68 of the runnable subtests, matching native Node) across 18.19/20.19/
+    // 22.15/24.4 at implementation time.
+    let (stdout, stderr, code) = run_nub("web-locks", "main.mjs");
+    assert_eq!(
+        code, 0,
+        "web-locks spec checks must pass: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("weblocks:ALL-OK"),
+        "all web-locks scenarios pass: {stdout}"
+    );
+}
+
+#[test]
+fn navigator_surface_present() {
+    // `navigator` is present and well-shaped under nub on every supported Node —
+    // native on 21+, backfilled by navigator-shim.mjs on 18.19–20.x — with a
+    // `Node.js/<major>` userAgent (never `Nub/…`: brand boundary).
+    let (stdout, stderr, code) = run_nub("navigator-shim", "main.mjs");
+    assert_eq!(
+        code, 0,
+        "navigator surface must be well-shaped: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("navshim:ALL-OK"),
+        "navigator surface checks pass: {stdout}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("navshim:ua:nub"),
+        "navigator.userAgent must not be nub-branded: {stdout}"
     );
 }
 
@@ -3077,6 +3320,37 @@ fn single_package_run_echoes_command_to_stderr_unless_silent() {
     assert!(
         String::from_utf8_lossy(&out_silent.stdout).contains("hello"),
         "the script must still run under --silent"
+    );
+
+    // #146: forwarded CLI args appear in the echoed preamble, spliced + escaped
+    // exactly as executed, so the displayed command matches the effective one. A
+    // metachar arg is shell-quoted in the echo (and reaches the script as one
+    // literal token), proving the echo reflects the real escaped command. The
+    // escaping is shell-specific: POSIX `sh` single-quotes, Windows `cmd.exe`
+    // caret-escapes, so the expected preamble and echoed output differ per OS.
+    let out_args = Command::new(nub_binary())
+        .args(["run", "greet", "--", "brave new world"])
+        .current_dir(&fixture)
+        .output()
+        .expect("failed to spawn nub");
+    let stderr_args = String::from_utf8_lossy(&out_args.stderr);
+    let stdout_args = String::from_utf8_lossy(&out_args.stdout);
+    assert_eq!(out_args.status.code(), Some(0), "stderr: {stderr_args}");
+    let (want_preamble, want_output) = if cfg!(windows) {
+        (
+            "$ echo hello ^\"brave^ new^ world^\"",
+            "hello \"brave new world\"",
+        )
+    } else {
+        ("$ echo hello 'brave new world'", "hello brave new world")
+    };
+    assert!(
+        stderr_args.contains(want_preamble),
+        "the preamble must include the escaped forwarded args: {stderr_args:?}"
+    );
+    assert!(
+        stdout_args.contains(want_output),
+        "the forwarded args must still reach the script unchanged: {stdout_args:?}"
     );
 }
 

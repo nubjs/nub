@@ -108,6 +108,31 @@ pub struct EngineContext {
     /// concern, not this read gate.)
     pub read_pnpm_global_config: bool,
 
+    /// Whether aube honors bare `pnpm_config_<registry-client-key>` /
+    /// `PNPM_CONFIG_<REGISTRY_CLIENT_KEY>` environment variables on the
+    /// registry-client config track — the default `registry`, the proxies,
+    /// the TLS knobs, `maxsockets`, `local-address`. `false` (default)
+    /// preserves upstream aube behavior: only `npm_config_*` / `NPM_CONFIG_*`
+    /// set these registry-client keys, and the `pnpm_config_` prefix is
+    /// stripped solely for `//`-scoped per-URI auth keys.
+    ///
+    /// pnpm REVERSED its env-var convention at v11: pnpm ≤10 reads
+    /// `npm_config_*` and ignores `pnpm_config_*`; pnpm 11 reads
+    /// `pnpm_config_*` / `PNPM_CONFIG_*` (its general settings env, see
+    /// pnpm's `config/reader/src/env.ts`) and ignores `npm_config_*`. An
+    /// embedder whose active PM is provably **pnpm v11+** sets this `true`
+    /// so the registry-client track mirrors pnpm 11; under any earlier pnpm,
+    /// any other PM, nub identity, or standalone aube it stays `false`.
+    ///
+    /// Scope note: this gates ONLY the registry-client track in
+    /// `aube-registry`. The GENERIC settings family (`aube-settings`, e.g.
+    /// `pnpm_config_auto_install_peers`) has its own `pnpm_config_*` aliases
+    /// gated separately by [`read_branded_pnpm_config`](Self::read_branded_pnpm_config).
+    /// pnpm 11's env reader requires a strictly snake_case suffix, so the
+    /// `//`-auth and `@scope:registry` forms are NOT readable via
+    /// `pnpm_config_*` on pnpm 11 — only the bare single/`_`-joined keys are.
+    pub read_pnpm_config_env_registry: bool,
+
     /// Whether aube reads Yarn Berry's `.yarnrc.yml` config surface and
     /// translates the subset that maps cleanly onto the existing npmrc-shaped
     /// registry/settings model. `false` (default) preserves upstream aube
@@ -233,6 +258,7 @@ impl Default for EngineContext {
             trusted_dependencies_honored: true,
             read_branded_pnpm_config: true,
             read_pnpm_global_config: true,
+            read_pnpm_config_env_registry: false,
             read_yarn_config: false,
             yarn_is_classic: false,
             read_bun_config: false,
@@ -297,6 +323,7 @@ mod tests {
         assert!(ctx.trusted_dependencies_honored);
         assert!(ctx.read_branded_pnpm_config);
         assert!(ctx.read_pnpm_global_config);
+        assert!(!ctx.read_pnpm_config_env_registry);
         assert!(!ctx.read_yarn_config);
         assert!(!ctx.yarn_is_classic);
         assert!(!ctx.read_bun_config);

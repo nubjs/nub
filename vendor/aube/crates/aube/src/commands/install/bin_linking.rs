@@ -175,9 +175,13 @@ pub(super) fn link_bins_for_dep(
         name,
         virtual_store_dir_max_length,
         placements,
-    )? && let Some(bin) = pkg_json.get("bin")
-    {
-        link_bin_entries(bin_dir, &pkg_dir, Some(name), bin, shim_opts)?;
+    )? {
+        if let Some(bin) = pkg_json.get("bin") {
+            link_bin_entries(bin_dir, &pkg_dir, Some(name), bin, shim_opts)?;
+        } else if let Some(dir_bin) = pkg_json.get("directories").and_then(|d| d.get("bin")) {
+            // `bin` wins; `directories.bin` is the fallback only.
+            link_dir_bins(bin_dir, &pkg_dir, dir_bin, shim_opts)?;
+        }
     }
     link_bundled_bins(bin_dir, &pkg_dir, graph, dep_path, shim_opts)?;
     Ok(())
@@ -261,10 +265,12 @@ pub(super) fn link_bins_for_workspace_dep(
         cache.insert(ws_dir.to_path_buf(), parsed.clone());
         parsed
     };
-    if let Some(pkg_json) = pkg_json
-        && let Some(bin) = pkg_json.get("bin")
-    {
-        link_bin_entries(bin_dir, ws_dir, Some(name), bin, shim_opts)?;
+    if let Some(pkg_json) = pkg_json {
+        if let Some(bin) = pkg_json.get("bin") {
+            link_bin_entries(bin_dir, ws_dir, Some(name), bin, shim_opts)?;
+        } else if let Some(dir_bin) = pkg_json.get("directories").and_then(|d| d.get("bin")) {
+            link_dir_bins(bin_dir, ws_dir, dir_bin, shim_opts)?;
+        }
     }
     Ok(())
 }
@@ -420,10 +426,14 @@ fn link_bundled_bins(
         let Ok(bundled_pkg_json) = serde_json::from_str::<serde_json::Value>(&content) else {
             continue;
         };
-        let Some(bin) = bundled_pkg_json.get("bin") else {
-            continue;
-        };
-        link_bin_entries(bin_dir, &bundled_dir, Some(bundled), bin, shim_opts)?;
+        if let Some(bin) = bundled_pkg_json.get("bin") {
+            link_bin_entries(bin_dir, &bundled_dir, Some(bundled), bin, shim_opts)?;
+        } else if let Some(dir_bin) = bundled_pkg_json
+            .get("directories")
+            .and_then(|d| d.get("bin"))
+        {
+            link_dir_bins(bin_dir, &bundled_dir, dir_bin, shim_opts)?;
+        }
     }
     Ok(())
 }
@@ -471,6 +481,135 @@ pub(super) fn link_bin_entries(
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Fallback bin-linking for a package that declares no top-level
+/// `bin` but DOES set `directories.bin`. Matches the dominant
+/// reference PMs (npm 11, pnpm 10, yarn-classic, bun all link it;
+/// only yarn-berry ignores it) and pnpm's exact rule in
+/// `bins/resolver/src/index.ts`: when `bin` is absent and
+/// `directories.bin` is present, every regular FILE under that
+/// directory (recursive, files only, symlinks NOT followed) becomes a
+/// bin named `basename(file)`.
+///
+/// `bin` always wins — this is invoked ONLY when `bin` is absent, so a
+/// package shipping both is unaffected (npm errors on both anyway).
+///
+/// CONTAINMENT: `directories.bin` is a package-authored relative path,
+/// so it is the attack surface. Two guards keep every shim inside the
+/// package:
+///
+/// 1. the dir itself must canonicalize to a path inside `pkg_dir`
+///    (rejects `../escape`, absolute, symlink-to-elsewhere) — pnpm's
+///    `isSubdir(pkgPath, binDir)` check;
+/// 2. each discovered file's basename is run through
+///    [`aube_linker::validate_bin_name`], dropping anything unsafe,
+///    same as the `bin`-field path.
+///
+/// The walk does not follow symlinks, so a symlinked subdir can't pull
+/// the walk outside the tree.
+fn link_dir_bins(
+    bin_dir: &std::path::Path,
+    pkg_dir: &std::path::Path,
+    directories_bin: &serde_json::Value,
+    shim_opts: aube_linker::BinShimOptions,
+) -> miette::Result<()> {
+    let Some(rel) = directories_bin.as_str() else {
+        return Ok(());
+    };
+    if rel.is_empty() {
+        return Ok(());
+    }
+
+    let bins_root = pkg_dir.join(rel);
+
+    // Containment guard 1: the bin dir must resolve within the package
+    // root. Canonicalize both sides so a `directories.bin` of `../x`,
+    // an absolute path, or a symlink pointing elsewhere is rejected. If
+    // the dir doesn't exist (`canonicalize` errors) there's nothing to
+    // link — silently skip, matching pnpm's ENOENT-swallow in
+    // `findFiles`.
+    let (Ok(canon_root), Ok(canon_bins)) = (
+        std::fs::canonicalize(pkg_dir),
+        std::fs::canonicalize(&bins_root),
+    ) else {
+        return Ok(());
+    };
+    // Reject both an escape (`../x`, absolute, symlink-elsewhere) AND
+    // the package root itself: pnpm's `isSubdir(pkgPath, binDir)` is
+    // false when the two are equal, so `directories.bin: "."` links
+    // NOTHING rather than shimming every file in the package.
+    if canon_bins == canon_root || !canon_bins.starts_with(&canon_root) {
+        return Ok(());
+    }
+
+    let mut files = Vec::new();
+    collect_files_no_symlink_follow(&bins_root, &mut files)?;
+    // Stable order so the result is deterministic regardless of
+    // readdir order across platforms.
+    files.sort();
+
+    for file in &files {
+        let Some(file_name) = file.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Containment guard 2: drop any basename that isn't a safe bin
+        // name (path separators, traversal, control chars, …). Same
+        // gate the `bin`-field path applies.
+        if aube_linker::validate_bin_name(file_name).is_err() {
+            continue;
+        }
+        create_bin_link(bin_dir, file_name, file, shim_opts)?;
+    }
+    Ok(())
+}
+
+/// Recursively collect regular files under `dir`, NOT following
+/// symlinks (mirrors pnpm's `glob('**', { onlyFiles: true,
+/// followSymbolicLinks: false })`). A symlinked subdirectory is left
+/// unvisited, so the walk can never escape `dir`'s real subtree. A
+/// symlinked file is skipped (it is not a regular file by
+/// `is_file()` on the symlink's own metadata via `symlink_metadata`).
+fn collect_files_no_symlink_follow(
+    dir: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+) -> miette::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        // The dir was guaranteed to exist by the canonicalize check in
+        // the caller, but a concurrent removal could still race; treat
+        // a vanished dir as empty rather than failing the install.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(miette!(
+                "failed to read directories.bin dir {}: {e}",
+                dir.display()
+            ));
+        }
+    };
+    for entry in entries {
+        let entry = entry.into_diagnostic()?;
+        let path = entry.path();
+        // `symlink_metadata` does NOT follow the final component, so a
+        // symlink is classified by its own type — a symlinked dir is
+        // not a dir here (skipped, no recursion), a symlinked file is
+        // not a regular file (skipped).
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(miette!("failed to stat {}: {e}", path.display()));
+            }
+        };
+        let ft = meta.file_type();
+        if ft.is_dir() {
+            collect_files_no_symlink_follow(&path, out)?;
+        } else if ft.is_file() {
+            out.push(path);
+        }
+        // symlinks (is_symlink) and other special files are skipped.
     }
     Ok(())
 }
@@ -895,6 +1034,271 @@ mod tests {
         assert!(
             !cmd.contains(r"..\..\..\..\..\"),
             ".cmd shim should not climb above the `.aube/` root; got:\n{cmd}"
+        );
+    }
+
+    /// Build a materialized dep that declares NO top-level `bin` but a
+    /// `directories.bin` pointing at `mybins/`, containing executable
+    /// files (incl. a nested subdir), and return the graph + project
+    /// dir so a `link_bins` pass can be run end-to-end. This is the
+    /// differential repro: npm 11 / pnpm 10 / yarn-classic / bun all
+    /// link `directories.bin`; pre-fix aube linked nothing.
+    fn fixture_dep_with_directories_bin(
+        project_dir: &std::path::Path,
+        manifest: &str,
+    ) -> (LockfileGraph, PathBuf) {
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let dep_path = "dep-dirbin@1.0.0";
+        let pkg_dir = materialized_pkg_dir(&aube_dir, dep_path, "dep-dirbin", 120, None);
+        std::fs::create_dir_all(pkg_dir.join("mybins/nested")).unwrap();
+        std::fs::write(pkg_dir.join("package.json"), manifest).unwrap();
+        std::fs::write(pkg_dir.join("mybins/alpha"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(pkg_dir.join("mybins/beta"), "#!/usr/bin/env node\n").unwrap();
+        // Recursive: a file in a subdir must also be linked (by basename).
+        std::fs::write(pkg_dir.join("mybins/nested/gamma"), "#!/usr/bin/env node\n").unwrap();
+
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "dep-dirbin".to_string(),
+                dep_path: dep_path.to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            }],
+        );
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            dep_path.to_string(),
+            locked("dep-dirbin", "1.0.0", BTreeMap::new()),
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages,
+            ..Default::default()
+        };
+        (graph, aube_dir)
+    }
+
+    fn run_link_bins(
+        project_dir: &std::path::Path,
+        graph: &LockfileGraph,
+        aube_dir: &std::path::Path,
+    ) {
+        link_bins(
+            project_dir,
+            "node_modules",
+            aube_dir,
+            graph,
+            120,
+            None,
+            aube_linker::BinShimOptions::default(),
+            &mut PkgJsonCache::new(),
+            None,
+            &mut WsPkgJsonCache::new(),
+        )
+        .unwrap();
+    }
+
+    /// THE PARITY REPRO. A dep with only `directories.bin` (no `bin`)
+    /// must get every regular file under that dir linked into
+    /// `.bin/<basename>`, recursively. Fails on pre-fix main (empty
+    /// `.bin/`), passes after the fallback lands.
+    #[test]
+    fn links_directories_bin_when_top_level_bin_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let (graph, aube_dir) = fixture_dep_with_directories_bin(
+            project_dir,
+            r#"{"name":"dep-dirbin","version":"1.0.0","directories":{"bin":"./mybins"}}"#,
+        );
+        run_link_bins(project_dir, &graph, &aube_dir);
+
+        let bin = project_dir.join("node_modules/.bin");
+        assert!(
+            bin.join("alpha").exists(),
+            "alpha (top-level file) must link"
+        );
+        assert!(bin.join("beta").exists(), "beta (top-level file) must link");
+        assert!(
+            bin.join("gamma").exists(),
+            "gamma (nested file) must link recursively by basename"
+        );
+    }
+
+    /// `bin` wins: when BOTH `bin` and `directories.bin` are present,
+    /// only the `bin` field is honored (npm errors on both; we match
+    /// pnpm's precedence — `bin` short-circuits `directories.bin`).
+    #[test]
+    fn top_level_bin_wins_over_directories_bin() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let (graph, aube_dir) = fixture_dep_with_directories_bin(
+            project_dir,
+            r#"{"name":"dep-dirbin","version":"1.0.0","bin":{"only-this":"mybins/alpha"},"directories":{"bin":"./mybins"}}"#,
+        );
+        run_link_bins(project_dir, &graph, &aube_dir);
+
+        let bin = project_dir.join("node_modules/.bin");
+        assert!(bin.join("only-this").exists(), "the `bin` entry must link");
+        assert!(
+            !bin.join("beta").exists() && !bin.join("gamma").exists(),
+            "directories.bin must be ignored when `bin` is present"
+        );
+    }
+
+    /// CONTAINMENT GUARD. A `directories.bin` that escapes the package
+    /// root (`../escape`) must link nothing — the canonicalized bin dir
+    /// is not a subdir of the package, so it is rejected wholesale.
+    #[test]
+    fn directories_bin_escaping_package_root_links_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let dep_path = "evil@1.0.0";
+        let pkg_dir = materialized_pkg_dir(&aube_dir, dep_path, "evil", 120, None);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"evil","version":"1.0.0","directories":{"bin":"../escape"}}"#,
+        )
+        .unwrap();
+        // A sibling `escape/` dir holding a file the attacker wants linked.
+        // It lives OUTSIDE the package root (one level up).
+        let escape = pkg_dir.parent().unwrap().join("escape");
+        std::fs::create_dir_all(&escape).unwrap();
+        std::fs::write(escape.join("pwned"), "#!/usr/bin/env node\n").unwrap();
+
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "evil".to_string(),
+                dep_path: dep_path.to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            }],
+        );
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            dep_path.to_string(),
+            locked("evil", "1.0.0", BTreeMap::new()),
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages,
+            ..Default::default()
+        };
+        run_link_bins(project_dir, &graph, &aube_dir);
+
+        let bin = project_dir.join("node_modules/.bin");
+        assert!(
+            !bin.join("pwned").exists(),
+            "a directories.bin that escapes the package root must link nothing"
+        );
+    }
+
+    /// `directories.bin: "."` (the package root itself) links NOTHING,
+    /// matching pnpm's `isSubdir`, which is false for equal paths. The
+    /// reflexive `starts_with` would otherwise shim every file in the
+    /// package (package.json, sources, …) into `.bin/`.
+    #[test]
+    fn directories_bin_pointing_at_package_root_links_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let dep_path = "rootdep@1.0.0";
+        let pkg_dir = materialized_pkg_dir(&aube_dir, dep_path, "rootdep", 120, None);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"rootdep","version":"1.0.0","directories":{"bin":"."}}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg_dir.join("index.js"), "module.exports = {}\n").unwrap();
+
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "rootdep".to_string(),
+                dep_path: dep_path.to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            }],
+        );
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            dep_path.to_string(),
+            locked("rootdep", "1.0.0", BTreeMap::new()),
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages,
+            ..Default::default()
+        };
+        run_link_bins(project_dir, &graph, &aube_dir);
+
+        let bin = project_dir.join("node_modules/.bin");
+        assert!(
+            !bin.join("index.js").exists() && !bin.join("package.json").exists(),
+            "directories.bin pointing at the package root must link nothing"
+        );
+    }
+
+    /// A symlinked subdirectory inside `directories.bin` is NOT
+    /// followed, so files reached only via the symlink are not linked
+    /// (pnpm: `followSymbolicLinks: false`). This stops a symlink from
+    /// pulling the walk outside the package tree.
+    #[cfg(unix)]
+    #[test]
+    fn directories_bin_does_not_follow_symlinked_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let dep_path = "symdep@1.0.0";
+        let pkg_dir = materialized_pkg_dir(&aube_dir, dep_path, "symdep", 120, None);
+        std::fs::create_dir_all(pkg_dir.join("mybins")).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"symdep","version":"1.0.0","directories":{"bin":"./mybins"}}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg_dir.join("mybins/real"), "#!/usr/bin/env node\n").unwrap();
+        // Outside-the-package dir with a tempting file, reachable only
+        // via a symlink planted inside mybins/.
+        let outside = project_dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("escaped"), "#!/usr/bin/env node\n").unwrap();
+        std::os::unix::fs::symlink(&outside, pkg_dir.join("mybins/link")).unwrap();
+
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "symdep".to_string(),
+                dep_path: dep_path.to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            }],
+        );
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            dep_path.to_string(),
+            locked("symdep", "1.0.0", BTreeMap::new()),
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages,
+            ..Default::default()
+        };
+        run_link_bins(project_dir, &graph, &aube_dir);
+
+        let bin = project_dir.join("node_modules/.bin");
+        assert!(bin.join("real").exists(), "the real in-tree file must link");
+        assert!(
+            !bin.join("escaped").exists(),
+            "a file reachable only through a symlinked subdir must NOT link"
         );
     }
 }

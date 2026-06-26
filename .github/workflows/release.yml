@@ -280,7 +280,8 @@ jobs:
       # so the test job exercises the real loaders. (linux-x64-glibc runner = native.)
       - name: Build nub-native addon (for data-format loader tests)
         run: |
-          cargo build --release -p nub-native
+          # nub-native is its own workspace (panic=unwind cdylib); build from inside the crate.
+          (cd crates/nub-native && cargo build --release)
           mkdir -p runtime/addons
           cp target/release/libnub_native.so runtime/addons/nub-native.node
       - run: cargo test
@@ -441,13 +442,17 @@ jobs:
               # untouched and stays portable. The resulting .node dyn-links
               # libgcc_s.so.1 (Rust's musl unwinder) — present on node:*-alpine
               # (pulled via libstdc++), so it loads. This is napi-rs's canonical
-              # musl recipe (what oxc/swc ship); `cross` forwards RUSTFLAGS by
-              # default (Cross.toml makes the passthrough explicit). Verified in
-              # Docker: builds + loads under node:alpine, exporting parseYaml/etc.
-              RUSTFLAGS="-C target-feature=-crt-static" $CMD build --release -p nub-native --target ${{ matrix.target }}
+              # musl recipe (what oxc/swc ship). The addon builds from inside its
+              # own workspace (`cd crates/nub-native`; it is excluded from the root
+              # workspace), so `cross` reads crates/nub-native/Cross.toml — NOT the
+              # repo-root one — for its RUSTFLAGS passthrough; that crate-local
+              # Cross.toml carries the passthrough so -C target-feature=-crt-static
+              # reaches the cross container. Verified in Docker: builds + loads
+              # under node:alpine, exporting parseYaml/etc.
+              (cd crates/nub-native && RUSTFLAGS="-C target-feature=-crt-static" $CMD build --release --target ${{ matrix.target }})
               ;;
             *)
-              $CMD build --release -p nub-native --target ${{ matrix.target }}
+              (cd crates/nub-native && $CMD build --release --target ${{ matrix.target }})
               ;;
           esac
         shell: bash
@@ -1025,3 +1030,66 @@ jobs:
             echo "--- attempt $attempt failed; retrying in ${DELAY}s ---"
             sleep "$DELAY"
           done
+
+  bump-homebrew-tap:
+    name: Bump Homebrew tap formula
+    # Update the nubjs/homebrew-tap formula to this release. Runs ONLY on a real
+    # tag-push release (never the debug `workflow_dispatch` build-only path) and
+    # AFTER github-release, because it reads the published `.sha256` sidecar
+    # assets from the release this run created.
+    if: github.event_name == 'push'
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the nub repo for the formula generator script.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      # Push access to nubjs/homebrew-tap is CROSS-REPO, so the default
+      # GITHUB_TOKEN (scoped to nubjs/nub only) cannot push there. A PAT (or
+      # fine-grained token) with contents:write on nubjs/homebrew-tap must be
+      # added as the HOMEBREW_TAP_TOKEN repo secret. If the secret is absent
+      # (empty string), skip the bump rather than fail the release.
+      - name: Check tap token present
+        id: gate
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN secret absent — skipping Homebrew tap bump. Add a PAT with contents:write on nubjs/homebrew-tap to enable it."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the tap
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          repository: nubjs/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Regenerate formula for this release
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          # The generator reads the release's `.sha256` sidecars via `gh`; the
+          # default GITHUB_TOKEN can read nubjs/nub releases.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash .github/scripts/gen-homebrew-formula.sh "$VERSION" homebrew-tap/Formula/nub.rb
+
+      - name: Commit and push the bump
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: homebrew-tap
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Formula/nub.rb; then
+            echo "Formula already at v$VERSION — nothing to commit."
+            exit 0
+          fi
+          git add Formula/nub.rb
+          git commit -m "nub: update formula to v$VERSION"
+          git push

@@ -39,6 +39,32 @@ fn merge_manifest_catalogs(out: &mut CatalogMap, manifest: &aube_manifest::Packa
     merge_catalog_source(out, &manifest.pnpm_catalog(), &manifest.pnpm_catalogs());
 }
 
+/// Read the yarn-style `catalog:` / `catalogs:` blocks out of the
+/// `.yarnrc.yml` at `dir` (if one exists) and merge them into `out`.
+///
+/// Yarn shipped catalogs in 4.10.0 (the catalog plugin is bundled by
+/// default from that release). The on-disk shape is byte-identical to
+/// pnpm's — top-level `catalog:` for the default catalog and `catalogs:`
+/// for named ones — so the same `WorkspaceConfig` deserializer reads it;
+/// only the file differs (`.yarnrc.yml` rather than `pnpm-workspace.yaml`).
+/// A malformed or catalog-less `.yarnrc.yml` is a no-op: `.yarnrc.yml`
+/// carries unrelated yarn config (registries, plugins, …), and a parse
+/// failure must not abort catalog discovery for the rest of the sources.
+fn merge_yarnrc_catalogs(out: &mut CatalogMap, dir: &std::path::Path) {
+    let path = dir.join(".yarnrc.yml");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if content.trim().is_empty() {
+        return;
+    }
+    let Ok(cfg) = aube_manifest::parse_yaml::<aube_manifest::WorkspaceConfig>(&path, content)
+    else {
+        return;
+    };
+    merge_catalog_source(out, &cfg.catalog, &cfg.catalogs);
+}
+
 /// Discover catalog entries from every supported source and merge them
 /// into a single map for the resolver.
 ///
@@ -52,7 +78,10 @@ fn merge_manifest_catalogs(out: &mut CatalogMap, manifest: &aube_manifest::Packa
 ///    root is the nearest ancestor with either a `pnpm-workspace.yaml` /
 ///    `aube-workspace.yaml` or a `package.json` carrying a `workspaces`
 ///    field — bun / npm / yarn projects use the latter and have no yaml.
-/// 4. `catalog:` / `catalogs:` in the nearest `pnpm-workspace.yaml` /
+/// 4. `catalog:` / `catalogs:` in the `.yarnrc.yml` at the project root
+///    and (when distinct) the workspace root — yarn's catalog feature
+///    (yarn 4.10+), same on-disk shape as pnpm's, different file.
+/// 5. `catalog:` / `catalogs:` in the nearest `pnpm-workspace.yaml` /
 ///    `aube-workspace.yaml` walking up from `project_root`.
 ///
 /// Walking up matters for monorepos where `aube install` runs from a
@@ -86,6 +115,19 @@ pub(crate) fn discover_catalogs(project_root: &std::path::Path) -> miette::Resul
         merge_manifest_catalogs(&mut out, &m);
     }
 
+    // (3b): yarn-style `.yarnrc.yml` catalogs (yarn 4.10+). Read at the
+    // project root and, when distinct, the workspace root — yarn's catalog
+    // is a project-level config that a subpackage install must still see.
+    // Lower precedence than the pnpm/aube workspace yaml below (which never
+    // co-exists with a yarn project in practice, but ordering keeps the
+    // pnpm-native source authoritative if both somehow appear).
+    merge_yarnrc_catalogs(&mut out, project_root);
+    if let Some(dir) = &workspace_root_dir
+        && dir != project_root
+    {
+        merge_yarnrc_catalogs(&mut out, dir);
+    }
+
     // (4): workspace yaml catalogs, highest precedence. Loaded from the
     // walk-up directory when present, else from `project_root`.
     let yaml_dir = workspace_yaml_dir.as_deref().unwrap_or(project_root);
@@ -102,4 +144,53 @@ pub(crate) fn discover_catalogs(project_root: &std::path::Path) -> miette::Resul
 /// [`discover_catalogs`] so every command sees the same merged view.
 pub(crate) fn load_workspace_catalogs(cwd: &std::path::Path) -> miette::Result<CatalogMap> {
     discover_catalogs(cwd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `.yarnrc.yml`'s default + named catalogs (yarn 4.10+) are discovered,
+    /// keyed identically to the pnpm dialect (`default` for the unnamed
+    /// catalog), so the resolver resolves `catalog:` / `catalog:<name>` deps
+    /// in a yarn project without a `pnpm-workspace.yaml` in sight.
+    #[test]
+    fn discovers_yarnrc_default_and_named_catalogs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"y","dependencies":{"react":"catalog:","lodash":"catalog:legacy"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".yarnrc.yml"),
+            "catalog:\n  react: ^18.3.1\ncatalogs:\n  legacy:\n    lodash: ^4.17.21\n",
+        )
+        .unwrap();
+
+        let cats = discover_catalogs(dir.path()).unwrap();
+        assert_eq!(
+            cats.get("default").unwrap().get("react").unwrap(),
+            "^18.3.1"
+        );
+        assert_eq!(
+            cats.get("legacy").unwrap().get("lodash").unwrap(),
+            "^4.17.21"
+        );
+    }
+
+    /// A `.yarnrc.yml` with only non-catalog yarn config (the common case —
+    /// registries, plugins) contributes nothing and never aborts discovery.
+    #[test]
+    fn yarnrc_without_catalogs_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{"name":"y"}"#).unwrap();
+        std::fs::write(
+            dir.path().join(".yarnrc.yml"),
+            "nodeLinker: node-modules\nnpmRegistryServer: \"https://registry.npmjs.org\"\n",
+        )
+        .unwrap();
+
+        assert!(discover_catalogs(dir.path()).unwrap().is_empty());
+    }
 }

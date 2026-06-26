@@ -5,14 +5,6 @@
     A fast all-in-one toolkit that augments Node.js instead of replacing it
   </p>
 </p>
-<br/>
-
-<p align="center">
-<a href="https://github.com/nubjs/nub/actions?query=branch%3Amain"><img src="https://github.com/nubjs/nub/actions/workflows/ci.yml/badge.svg?event=push&branch=main" alt="Nub CI status" /></a>
-<a href="https://opensource.org/licenses/MIT" rel="nofollow"><img src="https://img.shields.io/github/license/nubjs/nub" alt="License"></a>
-<a href="https://www.npmjs.com/package/@nubjs/nub" rel="nofollow"><img src="https://img.shields.io/npm/dw/@nubjs/nub.svg" alt="npm"></a>
-<a href="https://github.com/nubjs/nub" rel="nofollow"><img src="https://img.shields.io/github/stars/nubjs/nub" alt="stars"></a>
-</p>
 
 <div align="center">
   <a href="https://nubjs.com/docs">Docs</a>
@@ -20,8 +12,14 @@
   <a href="https://github.com/nubjs/nub">GitHub</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://x.com/colinhacks">𝕏</a>
-  <br />
+  <br/><br/>
 </div>
+
+<p align="center">
+<a href="https://github.com/nubjs/nub" rel="nofollow"><img src="https://nubjs.com/stars.svg" alt="stars"></a>
+</p>
+
+
 
 <br/>
 <br/>
@@ -62,6 +60,9 @@ curl -fsSL https://nubjs.com/install.sh | bash
 
 # Windows (PowerShell)
 irm https://nubjs.com/install.ps1 | iex
+
+# Homebrew (macOS / Linux)
+brew install nubjs/tap/nub
 
 # Or via npm (pnpm / yarn global add work too)
 npm install -g --ignore-scripts=false @nubjs/nub
@@ -318,3 +319,7 @@ View the [full `nub node` docs 👉](https://nubjs.com/docs/node).
 ## License
 
 MIT
+
+> <p align="center">
+>  <em>⭐️ If you read this far, consider starring the repo :) ⭐️</em>
+> </p>

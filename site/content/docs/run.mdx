@@ -44,6 +44,32 @@ Dispatch is handled in Rust with no Node bootstrap in the wrapper, so the runner
   source="https://github.com/nubjs/nub/tree/main/tests/bench/script-runner"
 />
 
+## Run several scripts at once
+
+A `/regex/` selector in place of a script name runs every script whose name matches, mirroring `pnpm run`. This is the in-package equivalent of `npm-run-all`'s `run-p` — without the extra dependency or the per-task PM re-spawn, since Nub spawns each script body directly.
+
+```bash
+nub run "/^build:/"     # runs build:js, build:css, build:types — concurrently
+```
+
+Matching scripts run concurrently by default, capped at `min(4, CPU count)`, with each line prefixed by its script name. To run them one at a time instead (the `run-s` behavior), cap the concurrency at one:
+
+```bash
+nub run --workspace-concurrency 1 "/^build:/"   # one at a time, in package.json order
+```
+
+The selector must be a slash-delimited regular expression literal (`/^build:/`); a plain `build:*` is treated as a literal script name, not a glob. Regex flags are not supported. An exact script name (no slashes) always runs that single script unchanged.
+
+Coming from `npm-run-all` / `npm-run-all2`:
+
+| npm-run-all | Nub |
+|---|---|
+| `run-p build:js build:css` | `nub run "/^build:(js\|css)$/"` |
+| `run-p "build:*"` | `nub run "/^build:/"` |
+| `run-s "build:*"` | `nub run --workspace-concurrency 1 "/^build:/"` |
+
+Selecting an *arbitrary, unrelated* set of scripts (for example `build`, `lint`, `test` together, which share no name pattern) is not yet supported — track [#102](https://github.com/nubjs/nub/issues/102).
+
 ## Forward arguments
 
 Trailing arguments after the script name are passed straight through to the script. You do not need the `--` separator that `npm run` requires.

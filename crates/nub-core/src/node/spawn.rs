@@ -15,6 +15,56 @@ use camino::Utf8PathBuf;
 use super::discovery::ResolvedNode;
 use super::flags;
 
+/// Spawn a child, retrying briefly on a TRANSIENT `EAGAIN`/`ENOMEM` from the
+/// kernel's `fork`/`clone` under peak thread/PID pressure. On a resource-
+/// constrained box (the `nub ci` exit-101 family) the OS can momentarily refuse
+/// a `fork` while siblings are mid-spawn; a short bounded backoff lets the
+/// transient spike pass instead of surfacing a spurious spawn failure. Non-
+/// transient errors (ENOENT, EACCES, …) propagate immediately — we never mask a
+/// real failure, and the retry count is small so a persistent shortage still
+/// fails fast rather than hanging.
+pub fn spawn_with_eagain_retry(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    use std::io::ErrorKind;
+    const MAX_RETRIES: u32 = 5;
+    let mut attempt = 0u32;
+    loop {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) => {
+                let transient = matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::OutOfMemory)
+                    || e.raw_os_error() == Some(libc_eagain())
+                    || e.raw_os_error() == Some(libc_enomem());
+                if !transient || attempt >= MAX_RETRIES {
+                    return Err(e);
+                }
+                // Exponential-ish backoff: 5ms, 10ms, 20ms, 40ms, 80ms — total
+                // ~155ms worst case, long enough for a spawn spike to drain,
+                // short enough to fail fast on a real shortage.
+                let backoff_ms = 5u64 << attempt;
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                attempt += 1;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn libc_eagain() -> i32 {
+    libc::EAGAIN
+}
+#[cfg(unix)]
+fn libc_enomem() -> i32 {
+    libc::ENOMEM
+}
+#[cfg(not(unix))]
+fn libc_eagain() -> i32 {
+    -1
+}
+#[cfg(not(unix))]
+fn libc_enomem() -> i32 {
+    -1
+}
+
 /// Terminating-signal forwarding to the current child, registered once per
 /// process. Nub catches SIGINT (Ctrl-C), SIGTERM (docker stop / systemd / CI
 /// cancel) and SIGHUP (terminal hangup) and re-sends the SAME signal to the Node
@@ -101,27 +151,35 @@ mod ctrl_c {
             if let Ok(mut signals) =
                 Signals::new([SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGQUIT])
             {
-                std::thread::spawn(move || {
-                    for signo in signals.forever() {
-                        // While the child owns the terminal foreground, the kernel
-                        // already delivered a TTY Ctrl-C to it directly — so a
-                        // SIGINT forward here would double it (issue #26). Suppress
-                        // SIGINT only; every other signal still forwards.
-                        if signo == SIGINT && SUPPRESS_SIGINT_FORWARD.load(Ordering::SeqCst) {
-                            continue;
-                        }
-                        let target = CURRENT_TARGET.load(Ordering::SeqCst);
-                        if target != 0 {
-                            // SAFETY: kill(2) with a stored-live target + the received
-                            // signal. A positive target signals one process; a negative
-                            // one signals process group `-target`. Benign if the
-                            // child/group already exited (ESRCH); cleared to 0 on exit.
-                            unsafe {
-                                libc::kill(target, signo);
+                // `Builder::spawn` (returns `io::Result`) over `thread::spawn`
+                // (which PANICS on OS thread-create failure): under thread/PID
+                // exhaustion an EAGAIN here would otherwise crash the parent — and
+                // under `panic = "abort"` abort it. On failure we simply don't
+                // install the forwarder, identical to the `Signals::new` error path
+                // (the pre-existing no-handler behavior), never crash.
+                let _ = std::thread::Builder::new()
+                    .name("nub-signal-forward".into())
+                    .spawn(move || {
+                        for signo in signals.forever() {
+                            // While the child owns the terminal foreground, the kernel
+                            // already delivered a TTY Ctrl-C to it directly — so a
+                            // SIGINT forward here would double it (issue #26). Suppress
+                            // SIGINT only; every other signal still forwards.
+                            if signo == SIGINT && SUPPRESS_SIGINT_FORWARD.load(Ordering::SeqCst) {
+                                continue;
+                            }
+                            let target = CURRENT_TARGET.load(Ordering::SeqCst);
+                            if target != 0 {
+                                // SAFETY: kill(2) with a stored-live target + the received
+                                // signal. A positive target signals one process; a negative
+                                // one signals process group `-target`. Benign if the
+                                // child/group already exited (ESRCH); cleared to 0 on exit.
+                                unsafe {
+                                    libc::kill(target, signo);
+                                }
                             }
                         }
-                    }
-                });
+                    });
             }
         });
     }
@@ -265,7 +323,7 @@ pub fn group_on_spawn(cmd: &mut Command) {
 /// spawns, not just Nub's leader.
 pub fn status_forwarding_signals(cmd: &mut Command) -> std::io::Result<ExitStatus> {
     group_on_spawn(cmd);
-    let mut child = cmd.spawn()?;
+    let mut child = spawn_with_eagain_retry(cmd)?;
     track_child_group(child.id());
     // Interactive path (stdin is a TTY + inherited stdio): hand the terminal
     // foreground to the child so a full-screen TUI can read it / receive Ctrl-C
@@ -393,10 +451,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         .as_deref()
         .map(|p| preload_injection(p, &config.node.version));
     let reentrancy_key = injection.as_ref().map(|i| i.node_options_token());
-    let is_reentrant = is_reentrant_in(
-        env::var("NODE_OPTIONS").ok().as_deref(),
-        reentrancy_key.as_deref(),
-    );
+    // Read the inherited NODE_OPTIONS once and reuse it for both the re-entrancy
+    // check and the flag-injection block below — the env value is constant across
+    // a single spawn.
+    let node_options = env::var("NODE_OPTIONS").ok();
+    let is_reentrant = is_reentrant_in(node_options.as_deref(), reentrancy_key.as_deref());
 
     // Augment only when we can locate our own preload. If `find_preload` fails —
     // a broken install, or (Windows, A-WIN2) the PATH-shim `node.exe` running
@@ -409,7 +468,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // wiki/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
         // Flag injection.
-        let node_options = env::var("NODE_OPTIONS").ok();
         let inject = flags::compute_inject_flags(
             config.node.version.clone(),
             config.user_args,
@@ -611,8 +669,12 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // re-entrant — i.e. NODE_OPTIONS does not already carry our preload — so
         // always (re)build it, appending any pre-existing NODE_OPTIONS. (The old
         // `already_injected` guard checked the same full path and is subsumed by
-        // `is_reentrant` above.)
-        let existing_opts = env::var("NODE_OPTIONS").ok().filter(|s| !s.is_empty());
+        // `is_reentrant` above.) Reuses the NODE_OPTIONS read at the top of the
+        // function rather than re-reading the (constant) env value.
+        let existing_opts = node_options
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let mut node_opts_parts: Vec<String> = Vec::new();
         for flag in &inject {
             node_opts_parts.push(flag.to_string());
@@ -730,8 +792,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // and keeps its existing behavior.
     group_on_spawn(&mut cmd);
 
-    let mut child = cmd
-        .spawn()
+    let mut child = spawn_with_eagain_retry(&mut cmd)
         .with_context(|| format!("failed to spawn {}", config.node.path))?;
 
     // Forward terminating/diagnostic signals to the child's process GROUP.
@@ -943,10 +1004,10 @@ pub fn compute_augmentation_env(
         .as_deref()
         .map(|p| preload_injection(p, &node_version));
     let reentrancy_key = injection.as_ref().map(|i| i.node_options_token());
-    if is_reentrant_in(
-        env::var("NODE_OPTIONS").ok().as_deref(),
-        reentrancy_key.as_deref(),
-    ) {
+    // Read the inherited NODE_OPTIONS once and reuse it for both the re-entrancy
+    // check and the NODE_OPTIONS rebuild below — the env value is constant here.
+    let node_options = env::var("NODE_OPTIONS").ok();
+    if is_reentrant_in(node_options.as_deref(), reentrancy_key.as_deref()) {
         return None;
     }
     // Nothing to inject if we can't locate our preload (broken install, or a
@@ -955,7 +1016,7 @@ pub fn compute_augmentation_env(
     let preload = preload?;
     let injection = injection.expect("injection is Some when preload is Some");
 
-    let existing_node_options = env::var("NODE_OPTIONS").ok().filter(|s| !s.is_empty());
+    let existing_node_options = node_options.filter(|s| !s.is_empty());
 
     // Build NODE_OPTIONS. Unlike the direct-spawn path (which passes flags as
     // argv to `node`), scripts run under a shell, so EVERY flag must travel via

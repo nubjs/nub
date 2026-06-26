@@ -57,7 +57,11 @@ jobs:
       - name: Build nub + native addon
         shell: bash
         run: |
-          cargo build -p nub-cli -p nub-native
+          cargo build -p nub-cli
+          # nub-native is its own workspace (split so the CLI uses panic=abort while
+          # the cdylib keeps panic=unwind); build it from inside the crate. Its local
+          # .cargo/config.toml routes output into the shared root target/.
+          (cd crates/nub-native && cargo build)
           mkdir -p runtime/addons
           cp target/debug/libnub_native.so runtime/addons/nub-native.node
       - name: Run native-deps harness

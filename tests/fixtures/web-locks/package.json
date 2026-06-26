@@ -1,0 +1,5 @@
+{
+  "name": "web-locks-fixture",
+  "private": true,
+  "description": "Pin-free project boundary (no engines.node / devEngines): keeps Node-version discovery from walking up to the repo-root engines (>=22.15) and provisioning latest, so this fixture runs on the matrix leg's Node — exercising the polyfill path below 24.5 and native at/above."
+}

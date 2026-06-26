@@ -88,11 +88,13 @@ pub fn transform_cached(
 
     // Cache hit path.
     if let Some(dir) = cache_dir.as_deref() {
-        if let Some(body) = cache_get(dir, &key) {
-            // body[0] is the stored format byte; the rest is the final code.
+        if let Some((format_byte, code)) = cache_get(dir, &key) {
+            // `cache_get` already stripped the integrity prefix + format byte in
+            // place, so `code` IS the final code with no extra allocation —
+            // `format_byte` is the stored format-byte value.
             return Ok(CachedTransformResult {
-                format: format_for(body.as_bytes().first().copied()).to_string(),
-                code: body[1..].to_string(),
+                format: format_for(Some(format_byte)).to_string(),
+                code,
                 errors: Vec::new(),
             });
         }
@@ -184,10 +186,31 @@ fn integrity(body: &[u8]) -> String {
     blake3::hash(body).to_hex()[..INTEGRITY_LEN].to_string()
 }
 
-fn cache_get(dir: &str, key: &str) -> Option<String> {
+/// Read a cache entry and return `(format_byte, code)` on a verified hit.
+///
+/// The integrity check is byte-identical to the on-disk format: the stored
+/// `[16-hex integrity][body]`, with `body = format_byte + code`. The single
+/// `read_to_string` buffer is REUSED as the returned `code` — after verifying
+/// integrity over the body slice (no copy), the integrity prefix and the leading
+/// format byte are drained off IN PLACE, so the warm-hit path allocates the body
+/// exactly once (the file read) rather than three times (the old chain was read,
+/// then `body.to_string()`, then the caller's `body[1..].to_string()`).
+///
+/// The `integrity()` re-hash still allocates a transient 16-byte hex string —
+/// unchanged, and unrelated to the body.
+fn cache_get(dir: &str, key: &str) -> Option<(u8, String)> {
     let path = std::path::Path::new(dir).join(key);
-    let raw = std::fs::read_to_string(&path).ok()?;
-    if raw.len() < INTEGRITY_LEN {
+    let mut raw = std::fs::read_to_string(&path).ok()?;
+    // Need the integrity prefix + at least the body's format byte.
+    if raw.len() < INTEGRITY_LEN + 1 {
+        return None;
+    }
+    // Belt-and-suspenders: a well-formed entry has an ASCII prefix + format byte,
+    // so both `INTEGRITY_LEN` and `INTEGRITY_LEN + 1` are char boundaries. A
+    // corrupted entry with a multi-byte UTF-8 sequence straddling either offset
+    // would panic the slice/drain below — treat it as a cache miss (self-heal)
+    // instead, matching the integrity-mismatch path.
+    if !raw.is_char_boundary(INTEGRITY_LEN) || !raw.is_char_boundary(INTEGRITY_LEN + 1) {
         return None;
     }
     let body = &raw[INTEGRITY_LEN..];
@@ -195,7 +218,15 @@ fn cache_get(dir: &str, key: &str) -> Option<String> {
         // Self-heal: any mismatch (truncation, corruption, edits) ⇒ miss.
         return None;
     }
-    Some(body.to_string())
+    // body[0] is the stored format byte; body[1..] is the final code. Drain the
+    // integrity prefix + format byte off the front in place — this shifts the
+    // remaining bytes within the SAME allocation, no re-alloc. INTEGRITY_LEN is a
+    // 16-ASCII-hex prefix and the format byte is ASCII ('c'|'m'), so the drain
+    // ends on a char boundary; the >= INTEGRITY_LEN+1 length check guarantees the
+    // format byte is present.
+    let format_byte = raw.as_bytes()[INTEGRITY_LEN];
+    raw.drain(..INTEGRITY_LEN + 1);
+    Some((format_byte, raw))
 }
 
 fn cache_set(dir: &str, key: &str, body: &str) {

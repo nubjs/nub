@@ -1328,6 +1328,46 @@ mod tests {
         assert_eq!(chunks[1], vec![2]);
     }
 
+    /// A cycle keeps the cyclic nodes out of every wave (they never reach
+    /// zero in-degree), so the leftover branch dumps them in ONE final chunk
+    /// after the acyclic prefix waves out normally. No node is dropped or
+    /// duplicated even when the graph isn't a DAG.
+    #[test]
+    fn topological_chunks_cycle_dumps_remainder_in_one_chunk() {
+        // D(3) is an acyclic head; C(2) depends on D; A(0)<->B(1) form a 2-cycle.
+        let deps = vec![
+            HashSet::from([1]), // 0 (A) -> B
+            HashSet::from([0]), // 1 (B) -> A   (the cycle)
+            HashSet::from([3]), // 2 (C) -> D
+            HashSet::new(),     // 3 (D) no deps
+        ];
+        let nodes: HashSet<usize> = [0, 1, 2, 3].into();
+        let chunks = topological_chunks(&nodes, &deps);
+
+        // Acyclic prefix waves out in dependency order: D, then C.
+        assert_eq!(chunks[0], vec![3], "D (no deps) is the first wave");
+        assert_eq!(chunks[1], vec![2], "C waves once its dep D is emitted");
+
+        // The cyclic remainder {A, B} is the single final chunk (order is the
+        // node-set iteration order, so compare as a set).
+        let leftover: HashSet<usize> = chunks.last().unwrap().iter().copied().collect();
+        assert_eq!(
+            leftover,
+            HashSet::from([0, 1]),
+            "the A<->B cycle is dumped together in the final chunk"
+        );
+        assert_eq!(
+            chunks.len(),
+            3,
+            "two acyclic waves + one leftover cycle chunk"
+        );
+
+        // Every node appears exactly once across all chunks (none lost or dupes).
+        let mut all: Vec<usize> = chunks.into_iter().flatten().collect();
+        all.sort_unstable();
+        assert_eq!(all, vec![0, 1, 2, 3]);
+    }
+
     #[test]
     fn resolve_concurrency_defaults() {
         let cores = std::thread::available_parallelism()

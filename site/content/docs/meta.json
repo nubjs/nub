@@ -12,6 +12,7 @@
     "pm-shim",
     "faq",
     "---",
-    "setup-nub"
+    "setup-nub",
+    "docker"
   ]
 }

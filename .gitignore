@@ -12,6 +12,13 @@
 !.vercelignore
 !.worktreeinclude
 !.github/
+# nub-native is its own Cargo workspace; its .cargo/config.toml routes build
+# output into the shared root target/. It is a tracked, load-bearing dotfile the
+# broad `.*` rule above would otherwise hide — without it a fresh checkout would
+# write the addon to crates/nub-native/target/ and the Makefile/CI copy paths
+# (target/<profile>/libnub_native.*) would miss it.
+!crates/nub-native/.cargo/
+!crates/nub-native/.cargo/config.toml
 
 # Vendored aube is plain in-tree files (Pattern B) — track its ENTIRE tree,
 # including dot-prefixed entries the broad `.*` rule above would otherwise hide
@@ -56,6 +63,10 @@ __pycache__/
 
 # === Build / IDE artifacts ===
 /target/
+# nub-native is its own Cargo workspace; its build output is routed into the root
+# /target/ above (via crates/nub-native/.cargo/config.toml), but guard against a
+# stray local target/ if it's ever built without that routing.
+/crates/nub-native/target/
 /dist/
 /build/
 /coverage/

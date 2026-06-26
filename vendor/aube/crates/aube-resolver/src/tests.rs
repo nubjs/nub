@@ -678,7 +678,7 @@ fn test_pick_version_highest_match() {
     // dist-tag preference doesn't apply and we fall through to the
     // strictly-highest version inside the range — 1.2.0.
     let packument = make_packument("foo", &["1.0.0", "1.1.0", "1.2.0", "2.0.0"], "2.0.0");
-    let result = pick_version(&packument, "^1.0.0", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "^1.0.0", None, false, None, false, None).unwrap();
     assert_eq!(result.version, "1.2.0");
 }
 
@@ -695,7 +695,7 @@ fn test_pick_version_prefers_dist_tag_latest_when_in_range() {
     // -> aube add foo@^100.0.0` flow, which expects the lockfile to
     // pin 100.0.0 even though 100.1.0 is available.
     let packument = make_packument("foo", &["1.0.0", "1.1.0", "1.2.0"], "1.0.0");
-    let result = pick_version(&packument, "^1.0.0", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "^1.0.0", None, false, None, false, None).unwrap();
     assert_eq!(result.version, "1.0.0");
 }
 
@@ -705,7 +705,7 @@ fn test_pick_version_falls_through_when_latest_outside_range() {
     // preference is a no-op; the strictly-highest matching version
     // (1.1.0) wins.
     let packument = make_packument("foo", &["1.0.0", "1.1.0", "2.0.0"], "2.0.0");
-    let result = pick_version(&packument, "^1.0.0", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "^1.0.0", None, false, None, false, None).unwrap();
     assert_eq!(result.version, "1.1.0");
 }
 
@@ -715,21 +715,21 @@ fn test_pick_version_lowest_ignores_dist_tag_preference() {
     // range, not whatever the publisher tagged latest. Confirm the
     // dist-tag preference is suppressed when pick_lowest is set.
     let packument = make_packument("foo", &["1.0.0", "1.1.0", "1.2.0"], "1.2.0");
-    let result = pick_version(&packument, "^1.0.0", None, true, None, false).unwrap();
+    let result = pick_version(&packument, "^1.0.0", None, true, None, false, None).unwrap();
     assert_eq!(result.version, "1.0.0");
 }
 
 #[test]
 fn test_pick_version_exact() {
     let packument = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
-    let result = pick_version(&packument, "1.0.0", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "1.0.0", None, false, None, false, None).unwrap();
     assert_eq!(result.version, "1.0.0");
 }
 
 #[test]
 fn test_pick_version_no_match() {
     let packument = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
-    let result = pick_version(&packument, "^2.0.0", None, false, None, false);
+    let result = pick_version(&packument, "^2.0.0", None, false, None, false, None);
     assert!(matches!(result, PickResult::NoMatch));
 }
 
@@ -746,19 +746,28 @@ fn test_pick_version_strict_distinguishes_age_gate_from_no_match() {
         .time
         .insert("1.1.0".into(), "2024-06-01T00:00:00.000Z".into());
     let cutoff = "2020-01-01T00:00:00.000Z";
-    let result = pick_version(&packument, "^1.0.0", None, false, Some(cutoff), true);
+    let result = pick_version(&packument, "^1.0.0", None, false, Some(cutoff), true, None);
     assert!(matches!(result, PickResult::AgeGated));
 
     // No version satisfies the range at all → still NoMatch even
     // in strict mode.
-    let result = pick_version(&packument, "^9.0.0", None, false, Some(cutoff), true);
+    let result = pick_version(&packument, "^9.0.0", None, false, Some(cutoff), true, None);
     assert!(matches!(result, PickResult::NoMatch));
 }
 
 #[test]
 fn test_pick_version_prefers_locked() {
     let packument = make_packument("foo", &["1.0.0", "1.1.0", "1.2.0"], "1.2.0");
-    let result = pick_version(&packument, "^1.0.0", Some("1.1.0"), false, None, false).unwrap();
+    let result = pick_version(
+        &packument,
+        "^1.0.0",
+        Some("1.1.0"),
+        false,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
     assert_eq!(result.version, "1.1.0");
 }
 
@@ -813,24 +822,57 @@ fn classify_regime_unparseable_pick_is_current() {
 }
 
 #[test]
+fn range_resolves_via_dist_tag_detection() {
+    use crate::semver_util::range_resolves_via_dist_tag;
+    let mut packument = make_packument("foo", &["1.0.0", "2.0.0"], "2.0.0");
+    packument
+        .dist_tags
+        .insert("next".to_string(), "2.0.0".to_string());
+
+    // Dist-tags: `latest` (always, even absent the tag) + any tag the
+    // packument carries.
+    assert!(range_resolves_via_dist_tag(&packument, "latest"));
+    assert!(range_resolves_via_dist_tag(&packument, "next"));
+    // Semver ranges are never dist-tags.
+    assert!(!range_resolves_via_dist_tag(&packument, "^1.0.0"));
+    assert!(!range_resolves_via_dist_tag(&packument, "1.2.3"));
+    assert!(!range_resolves_via_dist_tag(&packument, "*"));
+    // An unknown bareword that isn't a published tag is not a dist-tag
+    // (pick_version returns NoMatch for it; it must not force a refetch).
+    assert!(!range_resolves_via_dist_tag(&packument, "beta"));
+    // Protocol-shaped specs are never tags (dependency-confusion guard).
+    assert!(!range_resolves_via_dist_tag(&packument, "workspace:*"));
+    assert!(!range_resolves_via_dist_tag(&packument, "evil:steal"));
+}
+
+#[test]
 fn test_pick_version_locked_out_of_range() {
     let packument = make_packument("foo", &["1.0.0", "2.0.0"], "2.0.0");
     // Locked version doesn't satisfy range, should pick highest match
-    let result = pick_version(&packument, "^2.0.0", Some("1.0.0"), false, None, false).unwrap();
+    let result = pick_version(
+        &packument,
+        "^2.0.0",
+        Some("1.0.0"),
+        false,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
     assert_eq!(result.version, "2.0.0");
 }
 
 #[test]
 fn test_pick_version_dist_tag() {
     let packument = make_packument("foo", &["1.0.0", "2.0.0-beta.1"], "1.0.0");
-    let result = pick_version(&packument, "latest", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "latest", None, false, None, false, None).unwrap();
     assert_eq!(result.version, "1.0.0");
 }
 
 #[test]
 fn test_pick_version_lowest_picks_smallest_satisfying() {
     let packument = make_packument("foo", &["1.0.0", "1.1.0", "1.2.0", "2.0.0"], "2.0.0");
-    let result = pick_version(&packument, "^1.0.0", None, true, None, false).unwrap();
+    let result = pick_version(&packument, "^1.0.0", None, true, None, false, None).unwrap();
     assert_eq!(result.version, "1.0.0");
 }
 
@@ -848,7 +890,8 @@ fn test_pick_version_cutoff_filters_future_versions() {
         .insert("1.2.0".into(), "2023-01-01T00:00:00.000Z".into());
     // Highest pick, but cutoff forbids 1.2.0 → fall back to 1.1.0.
     let cutoff = "2022-06-01T00:00:00.000Z";
-    let result = pick_version(&packument, "^1.0.0", None, false, Some(cutoff), false).unwrap();
+    let result =
+        pick_version(&packument, "^1.0.0", None, false, Some(cutoff), false, None).unwrap();
     assert_eq!(result.version, "1.1.0");
 }
 
@@ -868,7 +911,8 @@ fn test_pick_version_lenient_falls_back_to_lowest_when_cutoff_excludes_all() {
         .time
         .insert("1.2.0".into(), "2025-01-01T00:00:00.000Z".into());
     let cutoff = "2020-01-01T00:00:00.000Z";
-    let result = pick_version(&packument, "^1.0.0", None, false, Some(cutoff), false).unwrap();
+    let result =
+        pick_version(&packument, "^1.0.0", None, false, Some(cutoff), false, None).unwrap();
     assert_eq!(result.version, "1.0.0");
 }
 
@@ -882,8 +926,97 @@ fn test_pick_version_strict_returns_age_gated_when_cutoff_excludes_all() {
         .time
         .insert("1.1.0".into(), "2024-06-01T00:00:00.000Z".into());
     let cutoff = "2020-01-01T00:00:00.000Z";
-    let result = pick_version(&packument, "^1.0.0", None, false, Some(cutoff), true);
+    let result = pick_version(&packument, "^1.0.0", None, false, Some(cutoff), true, None);
     assert!(matches!(result, PickResult::AgeGated));
+}
+
+#[test]
+fn test_pick_version_minimum_release_age_exclude_version_union() {
+    // pnpm supports `name@v1 || v2` in minimumReleaseAgeExclude: only
+    // the listed exact versions skip the age gate, not the whole
+    // package. Regression for the bug where a version-pinned entry was
+    // stored as a literal string and compared against the bare package
+    // name, so it never matched and was silently dropped.
+    let mut packument = make_packument("axios", &["0.18.1", "0.21.1", "1.0.0"], "1.0.0");
+    packument
+        .time
+        .insert("0.18.1".into(), "2024-01-01T00:00:00.000Z".into());
+    packument
+        .time
+        .insert("0.21.1".into(), "2024-06-01T00:00:00.000Z".into());
+    packument
+        .time
+        .insert("1.0.0".into(), "2025-01-01T00:00:00.000Z".into());
+    // Cutoff is BEFORE every version, so absent an exclude the strict
+    // gate rejects them all.
+    let cutoff = "2020-01-01T00:00:00.000Z";
+    let (rules, errs) = crate::trust::TrustExcludeRules::parse_lossy(["axios@0.18.1 || 0.21.1"]);
+    assert!(errs.is_empty(), "union pattern parses cleanly");
+    let exclude = Some((&rules, "axios"));
+
+    // 0.21.1 is excluded → it clears the gate and, being the highest
+    // excluded version, is picked even in strict mode.
+    let result = pick_version(
+        &packument,
+        ">=0.18.0",
+        None,
+        false,
+        Some(cutoff),
+        true,
+        exclude,
+    )
+    .unwrap();
+    assert_eq!(
+        result.version, "0.21.1",
+        "an excluded version bypasses the age gate"
+    );
+
+    // 1.0.0 is NOT on the exclude list, so restricting the range to it
+    // alone leaves every candidate age-gated → strict mode rejects.
+    let result = pick_version(
+        &packument,
+        "^1.0.0",
+        None,
+        false,
+        Some(cutoff),
+        true,
+        exclude,
+    );
+    assert!(
+        matches!(result, PickResult::AgeGated),
+        "a version not on the exclude list stays age-gated"
+    );
+}
+
+#[test]
+fn test_pick_version_minimum_release_age_exclude_name_only() {
+    // A name-only exclude entry (`lodash`) exempts every version of the
+    // package — the original behavior. (In the resolver the whole-package
+    // exemption is applied by disabling the cutoff upstream; here we
+    // verify the matcher itself treats every version as excluded.)
+    let mut packument = make_packument("lodash", &["4.17.20", "4.17.21"], "4.17.21");
+    packument
+        .time
+        .insert("4.17.20".into(), "2024-01-01T00:00:00.000Z".into());
+    packument
+        .time
+        .insert("4.17.21".into(), "2024-06-01T00:00:00.000Z".into());
+    let cutoff = "2020-01-01T00:00:00.000Z";
+    let (rules, _) = crate::trust::TrustExcludeRules::parse_lossy(["lodash"]);
+    assert!(rules.matches_name_only("lodash"));
+    let exclude = Some((&rules, "lodash"));
+    // Highest pick clears the gate because the name-only rule matches it.
+    let result = pick_version(
+        &packument,
+        "^4.0.0",
+        None,
+        false,
+        Some(cutoff),
+        true,
+        exclude,
+    )
+    .unwrap();
+    assert_eq!(result.version, "4.17.21");
 }
 
 #[test]
@@ -1386,6 +1519,128 @@ async fn primer_serves_frozen_pick_offline_even_on_an_aged_binary() {
     );
 }
 
+/// Regression for issue #135: a `latest` (dist-tag) spec must be
+/// re-read LIVE when the pick was served from the bundled primer — the
+/// primer bakes the tag's value at build time, and a dist-tag is a
+/// mutable pointer the publisher can repoint afterwards. The reported
+/// symptom: a binary built when `vite@latest` = 8.0.16 kept resolving
+/// `"vite": "latest"` to 8.0.16 long after the registry repointed
+/// `latest` to 8.1.0 (`aube update` served the stale primer pick while
+/// `aube install`'s fresh-resolve refetched — so the two diverged and
+/// `update` silently DOWNGRADED a correctly-installed 8.1.0).
+///
+/// Setup: pick a real primer entry, stand up a registry whose `latest`
+/// points to a version STRICTLY NEWER than the primer's baked latest,
+/// request `"latest"`, and assert the resolver picks the live newer
+/// version. Before the dist-tag arm in `primer_pick_needs_refetch` this
+/// resolved to the primer's stale latest with zero registry hits.
+#[tokio::test]
+async fn primer_dist_tag_pick_refetches_when_registry_repointed_latest() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // A real primer entry whose baked `latest` parses as semver AND
+    // resolves standalone (no runtime/peer/optional deps on the latest
+    // version), so the single-package mock registry is sufficient and the
+    // only failure mode is the version assertion below. Skip honestly on
+    // an empty primer.
+    let Some((name, primer_latest)) = crate::primer::names().find_map(|name| {
+        let pkt = crate::primer::get(name)?.packument();
+        let latest = pkt.dist_tags.get("latest")?.clone();
+        node_semver::Version::parse(&latest).ok()?;
+        let meta = pkt.versions.get(&latest)?;
+        (meta.dependencies.is_empty()
+            && meta.optional_dependencies.is_empty()
+            && meta.peer_dependencies.is_empty())
+        .then(|| (name.to_string(), latest))
+    }) else {
+        return;
+    };
+    let live_latest = {
+        let p = node_semver::Version::parse(&primer_latest).unwrap();
+        // A strictly-higher version the primer's slice does NOT carry, so
+        // the only way to resolve it is reading the live registry.
+        format!("{}.{}.{}", p.major, p.minor, p.patch + 1)
+    };
+
+    // Live registry: serves a full packument whose `latest` = the newer
+    // version. Any request reaching it means the dist-tag was re-read
+    // live (the fix); zero requests means the stale primer pick was
+    // served (the bug).
+    let mut full = make_packument(&name, &[&primer_latest, &live_latest], &live_latest);
+    full.modified = Some("2024-01-01T00:00:00.000Z".to_string());
+    full.time
+        .insert(primer_latest.clone(), "2024-01-01T00:00:00.000Z".to_string());
+    full.time
+        .insert(live_latest.clone(), "2024-01-02T00:00:00.000Z".to_string());
+    let full_body = serde_json::to_vec(&full).unwrap();
+
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let full_body = full_body.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0_u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    full_body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&full_body).await;
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-disttag-refetch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(base.join("packuments")).unwrap();
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    // `force_metadata_primer` routes the mock registry through the primer
+    // seed so the offline `latest` is the baked value; no cutoff, so only
+    // the dist-tag arm can force the refetch.
+    let mut resolver = Resolver::new(client)
+        .with_packument_cache(base.join("packuments"))
+        .with_force_metadata_primer(true);
+    let mut manifest = PackageJson::default();
+    manifest.dependencies.insert(name.clone(), "latest".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .unwrap_or_else(|e| panic!("resolve of {name}@latest failed: {e}"));
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+
+    assert!(
+        graph_has_package(&graph, &name, &live_latest),
+        "`{name}@latest` resolved to the primer's stale baked latest \
+         ({primer_latest}) instead of the registry's repointed latest \
+         ({live_latest}); the dist-tag pick was not re-read live \
+         ({} registry requests seen)",
+        hits.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert!(
+        hits.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "a primer-seeded `latest` pick must touch the registry to \
+         re-validate the dist-tag pointer; zero requests means the stale \
+         primer value was served"
+    );
+}
+
 /// Measurement (not a regression — `#[ignore]` so CI skips it): of the
 /// bundled primer's entries, what fraction of `latest`-tag picks are
 /// FROZEN — i.e. a strictly-newer stable version already exists past the
@@ -1801,7 +2056,8 @@ fn test_pick_version_cutoff_allows_missing_time_entries() {
     // remove every candidate, or the resolver can never make
     // progress on abbreviated-packument registries.
     let cutoff = "2000-01-01T00:00:00.000Z";
-    let result = pick_version(&packument, "^1.0.0", None, false, Some(cutoff), false).unwrap();
+    let result =
+        pick_version(&packument, "^1.0.0", None, false, Some(cutoff), false, None).unwrap();
     assert_eq!(result.version, "1.1.0");
 }
 
@@ -1815,7 +2071,7 @@ fn test_pick_version_with_deps() {
         .dependencies
         .insert("bar".to_string(), "^2.0.0".to_string());
 
-    let result = pick_version(&packument, "^1.0.0", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "^1.0.0", None, false, None, false, None).unwrap();
     assert_eq!(result.dependencies.get("bar").unwrap(), "^2.0.0");
 }
 
@@ -4532,7 +4788,7 @@ fn pick_version_exact_pin_not_hijacked_by_dist_tag() {
     packument
         .dist_tags
         .insert("1.0.0".to_string(), "1.5.0".to_string());
-    let result = pick_version(&packument, "1.0.0", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "1.0.0", None, false, None, false, None).unwrap();
     assert_eq!(result.version, "1.0.0");
 }
 
@@ -4541,7 +4797,7 @@ fn assert_protocol_hijack_blocked(spec: &str) {
     packument
         .dist_tags
         .insert(spec.to_string(), "1.0.0".to_string());
-    let result = pick_version(&packument, spec, None, false, None, false);
+    let result = pick_version(&packument, spec, None, false, None, false, None);
     assert!(
         matches!(result, super::semver_util::PickResult::NoMatch),
         "protocol-prefixed range {spec:?} reached dist-tag fallback",
@@ -4586,10 +4842,10 @@ fn colonless_dist_tag_still_resolves_after_scheme_guard() {
     packument
         .dist_tags
         .insert("nightly".to_string(), "1.0.0".to_string());
-    let result = pick_version(&packument, "nightly", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "nightly", None, false, None, false, None).unwrap();
     assert_eq!(result.version, "1.0.0");
 
-    let result = pick_version(&packument, "latest", None, false, None, false).unwrap();
+    let result = pick_version(&packument, "latest", None, false, None, false, None).unwrap();
     assert_eq!(result.version, "2.0.0");
 }
 

@@ -52,7 +52,7 @@ agreement (a coarse but high-signal check; deep output diffing is future work).
 ## Usage
 
 ```sh
-# build the dev nub first (see the nub-dev skill), then:
+# build the dev nub first (see the dev-loop skill), then:
 tests/conformance/cmdflag/run.sh /path/to/nub /path/to/fixture-checkout
 
 # cover the real-world ~/.npmrc condition that broke audit:

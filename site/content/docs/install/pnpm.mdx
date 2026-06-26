@@ -39,8 +39,10 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes' },
     { feature: <><code>dependenciesMeta.injected</code></>, status: 'partial', note: 'Not honored under Nub-identity migration.' },
     { feature: <><code>pnpm.overrides</code></>, status: 'yes' },
+    { feature: <><code>pnpm.packageExtensions</code></>, status: 'yes' },
+    { feature: <><code>pnpm.patchedDependencies</code></>, status: 'yes' },
     { feature: <><code>resolutions</code></>, status: 'yes' },
-    { feature: <code>overrides</code>, status: 'yes' },
+    { feature: <code>overrides</code>, status: 'no', note: 'npm/Bun field; ignored under pnpm. Use pnpm.overrides.' },
     { feature: <><code>onlyBuiltDependencies</code> / <code>neverBuiltDependencies</code></>, status: 'yes' },
     { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
     // ── Workspaces ────────────────────────────────────────────────────
@@ -98,6 +100,8 @@ When pnpm is the incumbent, Nub honors pnpm's configuration surface:
 
 - `pnpm-workspace.yaml` — `packages:` globs and the `catalog:` / `catalogs:` maps.
 - `pnpm.overrides` — version pins applied during resolution, written into the lockfile's `overrides:` block.
+- `pnpm.packageExtensions` — extra dependency/peer metadata merged onto resolved packages, hashed into the lockfile's `packageExtensionsChecksum`.
+- `pnpm.patchedDependencies` — patch files applied to dependency contents during linking, wired to `nub patch` / `patch-commit` / `patch-remove`.
 - `pnpm.onlyBuiltDependencies` / `pnpm.neverBuiltDependencies` / `pnpm.allowBuilds` — feed Nub's lifecycle-script policy.
 - `.pnpmfile.cjs` / `.pnpmfile.mjs` — the `readPackage`, `preResolution`, and `afterAllResolved` hooks run. Dependency-map edits from `readPackage` apply; package-map edits from `afterAllResolved` apply. New importers/packages, identity rewrites, `updateConfig` hooks, and config-dependency pnpmfiles are not supported.
 
@@ -116,7 +120,9 @@ catalog:
 }
 ```
 
-The pnpm resolver prefers `pnpm.overrides`; top-level `resolutions` is still honored (pnpm supports it for Yarn compatibility), but top-level `overrides` is npm/Bun's field and is ignored under pnpm.
+`overrides`, `packageExtensions`, and `patchedDependencies` are read from either home pnpm accepts — the `pnpm.*` namespace in `package.json` or the matching key in `pnpm-workspace.yaml`. The pnpm resolver prefers `pnpm.overrides`; top-level `resolutions` is still honored (pnpm supports it for Yarn compatibility), but top-level `overrides` is npm/Bun's field and is ignored under pnpm.
+
+These fields are honored because the project is **pnpm-owned** — a `packageManager: "pnpm@…"` declaration or an existing `pnpm-lock.yaml`. Adopting Nub into an existing pnpm repo keeps it pnpm-owned, so all three apply unchanged. Only switching the project to Nub's own identity (`nub pm use nub`) migrates them to the neutral `overrides` / `patchedDependencies` `package.json` fields.
 
 Under a non-pnpm incumbent — npm, Yarn, Bun, or a Nub-identity project — none of this is read. For npm, Yarn, and Bun incumbents, a stray `.pnpmfile.cjs` is ignored with a warning rather than applied silently:
 

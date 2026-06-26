@@ -129,6 +129,11 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     no_churn_lockfile_write: true,
     read_branded_settings_env: false,
     primer_ttl: None,
+    // Cap aube's CPU-bound pools (linker rayon pool, tokio worker seed) to the
+    // real cgroup CFS-CPU-quota budget on a constrained box; `None` on an
+    // unconstrained box leaves them at full cores. Same detector the nub-side
+    // install runtime uses (`build_runtime`), so both stay consistent.
+    cpu_budget: Some(super::resource_limits::cpu_budget),
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's

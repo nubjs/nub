@@ -209,6 +209,21 @@ function installLazyEsmPolyfills() {
     }
   };
 
+  // navigator backfill, ordered BEFORE the navigator.locks installs below so locks
+  // always has a host. The fast tier floor is 22.15 (navigator is always native, >= 21),
+  // so installNavigatorShim() version-checks and returns WITHOUT reading globalThis
+  // .navigator — never triggering the 24.5+ lazy-navigator realization. It does real
+  // work only if this preload is ever reached on Node < 21; on the fast floor it is a
+  // cheap no-op, wired for symmetry with the compat tier. See navigator-shim.mjs.
+  try {
+    __require("./navigator-shim.mjs").installNavigatorShim();
+  } catch (err) {
+    // require(esm) disabled (--no-experimental-require-module): navigator is native at
+    // the fast floor, so skipping the no-op shim is harmless. Any OTHER error is a real
+    // fault in the module — surface it rather than swallow it.
+    if (!err || err.code !== "ERR_REQUIRE_ESM") throw err;
+  }
+
   if (inWorkerThread) {
     // Worker-side scope bootstrap must be present synchronously where possible.
     loadEsmSideEffect("./worker-polyfill.mjs");

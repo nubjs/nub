@@ -59,6 +59,7 @@ pub mod install_family;
 pub mod log;
 pub mod present;
 pub mod publish_family;
+mod resource_limits;
 pub mod store_config_family;
 pub mod unsupported_config;
 pub mod use_align;
@@ -628,6 +629,12 @@ fn engine_session_inner(dir: Option<&Path>, noise: ConfigScopeNoise) -> Result<E
     // `AUBE_DIAG_SUMMARY=1 nub install` works the same as `AUBE_DIAG_SUMMARY=1
     // aube install`. The OnceLock inside diag::init() makes this idempotent.
     aube_util::diag::init();
+    // Raise the open-file-descriptor soft limit toward the hard ceiling. The aube
+    // engine does this in its own startup, but nub dispatches the command impls
+    // directly and never runs that path — without this a large concurrent install
+    // exhausts macOS's stingy default soft limit (256) and dies with
+    // `Too many open files (os error 24)`.
+    resource_limits::raise_nofile_limit();
     apply_dir(dir)?;
     engine_brand_preflight();
     let cwd = std::env::current_dir()?;
@@ -729,6 +736,29 @@ pub(crate) fn session_role_root(
     Some((role, detected.dir.clone()))
 }
 
+/// Per-process, mtime-validated cache of parsed `aube_manifest::PackageJson`
+/// keyed by file path. The PM-engine config phase parses the root manifest
+/// through aube's parser several times per command — `apply_config_scope`, the
+/// scan's `manifest_has_pnpm_overrides`, and `injected_deps_present`'s
+/// `manifest_has_injected` — and `first_catalog_specifier` parses every member
+/// manifest. This collapses repeat parses of one path to a single read. mtime
+/// validation keeps it stale-proof (a mid-command engine rewrite re-reads).
+///
+/// A parse ERROR (or missing file) yields `None` and is NOT cached, matching
+/// every call site's existing `let Ok(..) = .. else { skip }` handling exactly.
+static AUBE_MANIFEST_CACHE: nub_core::config_cache::MtimeCache<aube_manifest::PackageJson> =
+    nub_core::config_cache::MtimeCache::new();
+
+/// Read + parse `path` as an `aube_manifest::PackageJson` through
+/// [`AUBE_MANIFEST_CACHE`]. `None` on a missing/unparseable manifest (never
+/// cached) — behavior-identical to a direct `PackageJson::from_path(path).ok()`,
+/// just deduplicated across the repeat parses one command makes of the same path.
+pub(crate) fn cached_aube_manifest(
+    path: &Path,
+) -> Option<std::sync::Arc<aube_manifest::PackageJson>> {
+    AUBE_MANIFEST_CACHE.get_or_read(path, || aube_manifest::PackageJson::from_path(path).ok())
+}
+
 /// Apply the config-scoping policy for one verb invocation: resolve the
 /// active-PM role, scope the manifest's graph-shaping override fields to
 /// that role's dialect, register the scoped source + trusted-deps toggle on
@@ -750,7 +780,7 @@ fn apply_config_scope(
 
     let root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
     let manifest_path = root.join("package.json");
-    let Ok(manifest) = aube_manifest::PackageJson::from_path(&manifest_path) else {
+    let Some(manifest) = cached_aube_manifest(&manifest_path) else {
         return Ok(());
     };
 
@@ -773,9 +803,9 @@ fn apply_config_scope(
     let (effective, ignored) = config_scope::scope_overrides(role, major, minor, &tagged);
 
     // Register the scoped source as the engine's sole override source, and
-    // the trusted-deps toggle (only bun, only below the major that dropped
-    // it, honors `trustedDependencies`). Both are idempotent OnceLocks.
-    let trusted = config_scope::honors_trusted_dependencies(role, major);
+    // the trusted-deps toggle (only bun honors `trustedDependencies`). Both
+    // are idempotent OnceLocks.
+    let trusted = config_scope::honors_trusted_dependencies(role);
     aube_util::update_engine_context(|c| {
         c.embedder_overrides = Some(effective);
         c.trusted_dependencies_honored = trusted;
@@ -804,15 +834,17 @@ fn apply_config_scope(
     Ok(())
 }
 
-/// Does the active PM honor `catalog:` specifiers? pnpm@9+ and bun@1.2+
-/// implement catalogs; npm and yarn do not. nub identity honors catalogs
-/// (an un-branded cross-tool field, like `workspaces`). aube resolves both
-/// dialects: pnpm's `pnpm.catalog(s)` / `pnpm-workspace.yaml` AND bun's
-/// `workspaces.catalog(s)` in `package.json` (see aube's `discover_catalogs`),
-/// so honoring bun here resolves the real catalog rather than mis-failing a
-/// project that works under bun.
+/// Does the active PM honor `catalog:` specifiers? pnpm@9+, bun@1.2+, and
+/// yarn-berry (v2+) implement catalogs; npm and yarn-classic (v1) do not. nub
+/// identity honors catalogs (an un-branded cross-tool field, like
+/// `workspaces`). aube resolves every dialect: pnpm's `pnpm.catalog(s)` /
+/// `pnpm-workspace.yaml`, bun's `workspaces.catalog(s)` in `package.json`, and
+/// yarn's `catalog(s)` in `.yarnrc.yml` (see aube's `discover_catalogs`), so
+/// honoring a PM here resolves the real catalog rather than mis-failing a
+/// project that works under that PM.
 fn role_honors_catalog(role: config_scope::Role, major: Option<u64>, minor: Option<u64>) -> bool {
     use config_scope::Role;
+    let _ = minor;
     match role {
         // pnpm gained catalogs in 9.0.
         Role::Pnpm => major.map(|m| m >= 9).unwrap_or(true),
@@ -823,8 +855,18 @@ fn role_honors_catalog(role: config_scope::Role, major: Option<u64>, minor: Opti
             (Some(m), None) => m >= 2,
             _ => true,
         },
+        // yarn shipped catalogs in 4.10.0 (catalog plugin bundled by default).
+        // We honor them on ALL yarn-berry (v2+) rather than gating on a parsed
+        // 4.10: nub's yarn-minor detection isn't granular enough to reliably
+        // distinguish 4.10 from earlier berry, and resolving a `catalog:` on an
+        // older berry costs nothing — a project only carries `catalog:`
+        // specifiers (+ a `.yarnrc.yml` catalog block) if it's actually using
+        // the feature, so there is nothing to mis-resolve. Classic yarn v1 has
+        // no catalogs, so a `1.x` pin correctly refuses. Absent/unparseable
+        // version → assume modern berry and honor (the "assume modern" default).
+        Role::Yarn => major.map(|m| m >= 2).unwrap_or(true),
         Role::Nub => true,
-        Role::Npm | Role::Yarn => false,
+        Role::Npm => false,
     }
 }
 
@@ -860,8 +902,7 @@ fn first_catalog_specifier(manifest: &aube_manifest::PackageJson, root: &Path) -
     // independently, so a member-only `catalog:` ref must refuse too.
     if let Ok(members) = aube_workspace::find_workspace_packages(root) {
         for dir in members {
-            let Ok(member) = aube_manifest::PackageJson::from_path(&dir.join("package.json"))
-            else {
+            let Some(member) = cached_aube_manifest(&dir.join("package.json")) else {
                 continue;
             };
             if let Some(hit) = first_catalog_in_dep_maps(&member) {
@@ -901,8 +942,8 @@ fn catalog_unsupported_error(role: config_scope::Role, spec: &str) -> anyhow::Er
     let pm = role.display();
     anyhow::anyhow!(
         "nub: `catalog:` specifier ({spec}) is not supported — this project uses {pm}, \
-         which doesn't implement catalogs (pnpm@9+ and bun@1.2+ do). Inline the version, or switch \
-         the project to a PM that supports catalogs (`nub pm use pnpm`)."
+         which doesn't implement catalogs (pnpm@9+, bun@1.2+, and yarn-berry do). Inline the \
+         version, or switch the project to a PM that supports catalogs (`nub pm use pnpm`)."
     )
 }
 
@@ -922,6 +963,23 @@ pub(crate) fn parse_major_minor(version: &str) -> (Option<u64>, Option<u64>) {
         digits.parse::<u64>().ok()
     });
     (major, minor)
+}
+
+/// Whether the project's incumbent pnpm is provably v11+, the major at which
+/// pnpm switched its env-var convention from `npm_config_*` to `pnpm_config_*`.
+/// Reads the declared `packageManager`/`devEngines` pin (`declared_pm_raw`,
+/// packageManager first) and requires the name to be LITERALLY "pnpm" — a
+/// non-pnpm or unknown declared name (or a fresh project with no declaration)
+/// yields `false`. An undeclared/unparseable version also yields `false`: the
+/// dominant v9/v10 base ignores `pnpm_config_*`, so off is the safe default.
+/// Mirrors `store_config_family::project_scalar_home`'s detection exactly.
+fn pnpm_incumbent_major_is_v11_plus() -> bool {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
+        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+        .and_then(|v| parse_major_minor(&v).0)
+        .is_some_and(|major| major >= 11)
 }
 
 /// Emit one dim warning line per graph-shaping field nub ignored under the
@@ -1294,6 +1352,19 @@ pub(crate) fn engine_brand_preflight() {
         .map(|cwd| resolve_config_surface(&cwd))
         .unwrap_or(ConfigSurface::PnpmOrFresh);
     let read_branded_pnpm_config = matches!(surface, ConfigSurface::PnpmOrFresh);
+    // pnpm REVERSED its env-var convention at v11: pnpm ≤10 reads `npm_config_*`
+    // registry-client env vars and IGNORES `pnpm_config_*`; pnpm 11 reads
+    // `pnpm_config_*` / `PNPM_CONFIG_*` and IGNORES `npm_config_*`. Honor bare
+    // `pnpm_config_<registry-client-key>` (registry, proxies, TLS knobs) only
+    // under a provable pnpm-v11+ incumbent, so nub mirrors the project's actual
+    // pnpm. Detection matches `store_config_family::project_scalar_home`: the
+    // declared `packageManager`/`devEngines` pin, name LITERALLY "pnpm", major
+    // ≥ 11. Unknown/undeclared version → off (the dominant v9/v10 base ignores
+    // `pnpm_config_*`); the installed-PM `--version` probe and lockfile signal
+    // are intentionally not consulted (they'd only move an unknown off its
+    // already-correct default). `npm_config_*` keeps working universally.
+    let read_pnpm_config_env_registry =
+        read_branded_pnpm_config && pnpm_incumbent_major_is_v11_plus();
     let read_yarn_config = read_yarn_config_for_surface(&surface);
     // Classic Yarn (v1) reads `.yarnrc`; Yarn Berry (v2+) abandoned it for
     // `.yarnrc.yml` and ignores a stray legacy `.yarnrc`. Gate the engine's
@@ -1335,6 +1406,7 @@ pub(crate) fn engine_brand_preflight() {
         // enforced in store_config_family: `config set -g` never writes a
         // pnpm-branded global file.)
         c.read_pnpm_global_config = true;
+        c.read_pnpm_config_env_registry = read_pnpm_config_env_registry;
         c.read_yarn_config = read_yarn_config;
         c.yarn_is_classic = yarn_is_classic;
         c.read_bun_config = read_bun_config;
@@ -1874,17 +1946,151 @@ pub(crate) fn env_snapshot() -> Vec<(String, String)> {
 /// (`vendor/aube/crates/aube/src/lib.rs`): workers capped at 8 (the install
 /// semaphore already gates network), blocking pool at 128 (tarball decode +
 /// linker fan-out). The AUBE_TOKIO_* benchmark overrides are not honored here.
+///
+/// CONSTRAINT-AWARE sizing: on a resource-constrained box (a tight cgroup
+/// `pids.max` or low `RLIMIT_NPROC`) the unbounded `128` blocking pool plus the
+/// parallel native postinstalls can drive the total thread+process count past
+/// the kernel ceiling; tokio then PANICS when `clone(2)` returns `EAGAIN` growing
+/// its blocking pool, which under `panic = "abort"` aborts the whole install
+/// (the `nub ci` exit-101). When [`resource_limits::spawn_headroom`] detects a
+/// constraint we shrink BOTH pools to fit the headroom; on an unconstrained box
+/// it returns `None` and we keep the full-speed defaults — so normal-box install
+/// performance is untouched.
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(8);
+    // Use `resource_limits::available_cores()` (NOT a local `unwrap_or(4)`) so this
+    // `raw_cpu` matches the `cores` the `cpu_budget()` gate compares against — the
+    // two must agree on the same `unwrap_or(1)` fallback or the gate could disagree
+    // with the pool sizing in the rare `available_parallelism()`-errors case.
+    let raw_cpu = resource_limits::available_cores();
+    // The effective CPU budget auto-detected from a cgroup CFS quota — `None` on an
+    // unconstrained box, where we keep the full core count. This is the PROACTIVE
+    // CPU axis, composed below with the REACTIVE PID headroom: a CPU-bound pool is
+    // bounded by the smaller of the two.
+    let cpu_budget = resource_limits::cpu_budget();
+    let cpu = cpu_budget.unwrap_or(raw_cpu);
+    let mut workers = cpu.min(8);
+    let mut blocking = 128usize;
+    // The rayon GLOBAL pool is sized off the most restrictive of the two axes and
+    // capped EXACTLY ONCE below: `build_global` errors if the pool already exists,
+    // so the first cap wins — computing the final value first lets the PID share
+    // tighten rayon BELOW the CPU budget (and vice versa) instead of whichever cap
+    // happened to run first sticking. Start from the CPU budget (None → raw cores).
+    let mut rayon_target = cpu;
+
+    if let Some(headroom) = resource_limits::spawn_headroom() {
+        // ONE headroom budget split across the four concurrent OS-thread/process
+        // consumers (tokio workers + tokio blocking pool + rayon GLOBAL pool +
+        // parallel build-scripts) so their SUM stays under the ceiling — capping
+        // each independently at `min(headroom, …)` would let the sum blow past it.
+        let (w, b, rayon_threads, child) = resource_limits::split_budget(headroom);
+        workers = workers.min(w);
+        blocking = blocking.min(b);
+        // Compose with the CPU budget: rayon is bounded by the SMALLER of the
+        // CPU-quota-derived and PID-headroom-derived shares (both feed the same
+        // pool). Capped once after this block.
+        rayon_target = rayon_target.min(rayon_threads);
+        // Lower the parallel build-script count to match (single-threaded here, so
+        // the env mutation is race-free, and it runs BEFORE the env_snapshot the
+        // engine resolves settings from).
+        apply_constrained_child_concurrency(child);
+        tracing::debug!(
+            headroom,
+            cpu_budget = cpu,
+            workers,
+            blocking,
+            rayon = rayon_target,
+            child_concurrency = child,
+            "constrained box detected: capping install runtime pools (tokio + rayon) + build-script concurrency under the PID/thread + CPU-quota ceilings"
+        );
+    } else if let Some(budget) = cpu_budget {
+        // CPU-quota constraint with NO PID constraint: the box has a CFS quota but
+        // generous PIDs. Size the CPU-bound pools
+        // (workers + rayon, already set above) to the quota; the IO-bound blocking
+        // pool and child concurrency keep their full defaults (PID headroom is fine).
+        tracing::debug!(
+            cpu_budget = budget,
+            workers,
+            rayon = rayon_target,
+            "CPU-quota constraint detected: capping CPU-bound install pools (tokio workers + rayon) to the effective CPU budget"
+        );
+    }
+
+    // Internal diagnostic seam (NOT a public knob — `__NUB_*` per the brand
+    // boundary's internal exemption): when set, print the resolved pool sizing to
+    // real stderr, BEFORE the install's fd-capture can swallow a `tracing` line.
+    // Lets a constrained-box test assert the detected budget deterministically.
+    if std::env::var_os("__NUB_PRINT_CPU_BUDGET").is_some() {
+        eprintln!(
+            "__nub_cpu_budget raw_cpu={raw_cpu} cpu_budget={cpu_budget:?} workers={workers} blocking={blocking} rayon={rayon_target}"
+        );
+    }
+
+    // Size the rayon GLOBAL pool whenever EITHER axis constrains below the raw core
+    // count. The embedded engine fans CAS writes / delta / fetch out over rayon's
+    // IMPLICIT global pool, whose lazy init otherwise spins up
+    // `available_parallelism()` threads (v1-quota-blind, PID-unbounded) and PANICS
+    // on thread-create EAGAIN — the SAME exit-101 abort, relocated to rayon. Done
+    // once here, before any engine `par_iter` touches the pool.
+    if rayon_target < raw_cpu {
+        cap_rayon_global_pool(rayon_target);
+    }
+
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
-        .max_blocking_threads(128)
+        .max_blocking_threads(blocking)
         .enable_all()
         .build()
         .context("failed to build the install engine's tokio runtime")
+}
+
+/// Lower the parallel build-script process count (aube's `child_concurrency`,
+/// default 5) so the native-postinstall fan-out — each spawning Go/Rust
+/// grandchildren — stays under the PID ceiling. nub exports this through the
+/// NEUTRAL `npm_config_child_concurrency` setting (which aube honors, same as
+/// npm/pnpm), so standalone aube is UNCHANGED and no engine-brand var leaks; only
+/// nub, on a detected constraint, asks for fewer parallel builds. A user/CI-set
+/// value (any of the recognized keys) is left untouched.
+///
+/// SAFETY: called from `build_runtime` BEFORE the runtime is built and before any
+/// engine work — single-threaded at that point, so the `set_var` doesn't race
+/// other threads reading the environment.
+fn apply_constrained_child_concurrency(capped: usize) {
+    // Respect an explicit user/CI choice — never override a value they set. Only
+    // the NEUTRAL keys are honored: nub respects ZERO AUBE_*-branded env vars
+    // (AGENTS.md brand boundary), so `AUBE_CHILD_CONCURRENCY` is deliberately NOT
+    // read here even to defer to it.
+    const KEYS: [&str; 2] = [
+        "npm_config_child_concurrency",
+        "NPM_CONFIG_CHILD_CONCURRENCY",
+    ];
+    if KEYS.iter().any(|k| std::env::var_os(k).is_some()) {
+        return;
+    }
+    // SAFETY: see the doc comment — single-threaded at call time.
+    unsafe {
+        std::env::set_var("npm_config_child_concurrency", capped.to_string());
+    }
+}
+
+/// Size rayon's IMPLICIT GLOBAL thread pool under a detected PID/thread
+/// constraint, so the engine's `par_iter` CAS/delta/fetch fan-out can't lazily
+/// spin the pool up to `available_parallelism()` (which honors the cgroup CPU
+/// quota, NOT the PID quota) and PANIC on a thread-create EAGAIN — the same
+/// exit-101 abort the tokio cap closes, relocated to rayon.
+///
+/// `build_global` initializes the process-wide pool and ERRORS if it already
+/// exists. We tolerate that: a prior install in the same process (or rayon
+/// already lazily initialized) means the pool is set, and we can't resize it —
+/// the cap is best-effort, applied the first time on a constrained box. Setting
+/// `RAYON_NUM_THREADS` is NOT used (it only takes effect before first use and we
+/// can't guarantee that across an embedder), so the explicit `build_global` is
+/// the reliable lever when we own first-touch (pre-runtime, pre-engine here).
+fn cap_rayon_global_pool(threads: usize) {
+    // `build_global` errors if the global pool is already initialized — tolerate
+    // it (can't resize an existing pool); the cap took effect on first touch.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .build_global();
 }
 
 // ───────────────────────── fd capture ──────────────────────────
@@ -1939,19 +2145,64 @@ pub(crate) fn with_fd_captured<T>(fd: libc::c_int, f: impl FnOnce() -> T) -> (T,
         }
         libc::close(write_end);
         // Drain concurrently so a full pipe buffer can never deadlock `f`.
-        let mut reader = std::fs::File::from_raw_fd(read_end);
-        let drain = std::thread::spawn(move || {
+        // `Builder::spawn` (returns `io::Result`) over `thread::spawn` (which
+        // PANICS — and under `panic = "abort"` aborts the process — on
+        // thread-create EAGAIN under thread/PID pressure). On spawn failure we
+        // fall back to running `f` first and draining inline afterwards: this
+        // capture path is `config get registry`, whose output is a few bytes
+        // (well under the pipe buffer), so the post-`f` drain cannot deadlock.
+        // Probe thread availability with a trivial throwaway thread BEFORE moving
+        // the reader into a doomed spawn (`Builder::spawn` consumes its closure
+        // even on `Err`, so we can't recover the reader after a failed spawn).
+        let can_spawn = std::thread::Builder::new()
+            .name("nub-fd-capture-probe".into())
+            .spawn(|| {})
+            .map(|p| {
+                let _ = p.join();
+            })
+            .is_ok();
+        if can_spawn {
+            let mut reader = std::fs::File::from_raw_fd(read_end);
+            let drain = std::thread::Builder::new()
+                .name("nub-fd-capture".into())
+                .spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = reader.read_to_end(&mut buf);
+                    buf
+                });
+            match drain {
+                Ok(drain) => {
+                    let result = f();
+                    flush(fd); // post-run: push f's buffered tail into the pipe
+                    libc::dup2(saved, fd);
+                    libc::close(saved);
+                    // fd restored + our write end closed ⇒ the drain sees EOF.
+                    let bytes = drain.join().unwrap_or_default();
+                    (result, String::from_utf8_lossy(&bytes).into_owned())
+                }
+                Err(_) => {
+                    // Probe passed but the real spawn raced to failure: `reader`
+                    // is consumed, so close our read end and skip the capture.
+                    let result = f();
+                    flush(fd);
+                    libc::dup2(saved, fd);
+                    libc::close(saved);
+                    (result, String::new())
+                }
+            }
+        } else {
+            // No drain thread available. Run `f`, restore the fd, then drain the
+            // (few-byte `config get registry`) capture inline — too small to fill
+            // the pipe buffer, so a post-`f` drain cannot deadlock.
+            let result = f();
+            flush(fd);
+            libc::dup2(saved, fd);
+            libc::close(saved);
+            let mut reader = std::fs::File::from_raw_fd(read_end);
             let mut buf = Vec::new();
             let _ = reader.read_to_end(&mut buf);
-            buf
-        });
-        let result = f();
-        flush(fd); // post-run: push f's buffered tail into the pipe
-        libc::dup2(saved, fd);
-        libc::close(saved);
-        // fd restored + our write end closed ⇒ the drain thread sees EOF.
-        let bytes = drain.join().unwrap_or_default();
-        (result, String::from_utf8_lossy(&bytes).into_owned())
+            (result, String::from_utf8_lossy(&buf).into_owned())
+        }
     }
 }
 
@@ -3023,8 +3274,53 @@ mod tests {
         // ...but a catalog-honoring bun does not refuse it.
         assert!(role_honors_catalog(Role::Bun, Some(1), Some(2)));
 
-        // npm / yarn never honor catalogs.
+        // npm never honors catalogs; classic yarn v1 doesn't either.
         assert!(!role_honors_catalog(Role::Npm, Some(10), Some(0)));
-        assert!(!role_honors_catalog(Role::Yarn, Some(4), Some(0)));
+        assert!(!role_honors_catalog(Role::Yarn, Some(1), Some(22)));
+    }
+
+    #[test]
+    fn yarn_berry_honors_catalogs_classic_v1_does_not() {
+        // yarn shipped catalogs in 4.10.0, declared in `.yarnrc.yml` with the
+        // same `catalog:`/`catalogs:` shape as pnpm; aube discovers them. We
+        // honor catalogs on ALL yarn-berry (v2+) rather than gating on a parsed
+        // 4.10 — nub's yarn-minor detection isn't reliable enough to split 4.10
+        // from earlier berry, and a `catalog:` only appears if the project uses
+        // the feature, so there's nothing to mis-resolve. Classic yarn v1 has no
+        // catalogs and must still refuse.
+        use config_scope::Role;
+
+        assert!(
+            role_honors_catalog(Role::Yarn, Some(4), Some(10)),
+            "yarn 4.10 (berry) implements catalogs"
+        );
+        assert!(
+            role_honors_catalog(Role::Yarn, Some(4), Some(0)),
+            "yarn 4.x (berry) honors — minor not gated"
+        );
+        assert!(
+            role_honors_catalog(Role::Yarn, Some(2), None),
+            "yarn 2 (berry) honors — all berry honors"
+        );
+        assert!(
+            role_honors_catalog(Role::Yarn, None, None),
+            "an undeclared/unparseable yarn version assumes modern berry and honors"
+        );
+        assert!(
+            !role_honors_catalog(Role::Yarn, Some(1), Some(22)),
+            "classic yarn v1 never had catalogs and must refuse"
+        );
+
+        // A yarn-berry fixture with a real `catalog:` ref: the specifier is
+        // detected, but a berry identity does not refuse it. (The catalog VALUES
+        // live in `.yarnrc.yml`, resolved by aube's `discover_catalogs`; here we
+        // only assert the per-role gate, not the resolution.)
+        let d = workspace(&[(
+            "package.json",
+            r#"{"name":"root","packageManager":"yarn@4.10.0","dependencies":{"is-odd":"catalog:"}}"#,
+        )]);
+        let m = root_manifest(d.path());
+        assert!(first_catalog_specifier(&m, d.path()).is_some());
+        assert!(role_honors_catalog(Role::Yarn, Some(4), Some(10)));
     }
 }

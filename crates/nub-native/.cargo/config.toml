@@ -1,0 +1,22 @@
+# nub-native is its own Cargo workspace (split out so it can keep
+# `panic = "unwind"` while the main `nub` workspace uses `panic = "abort"` — see
+# ../Cargo.toml's split rationale and the root Cargo.toml's `exclude`). By default
+# a separate workspace writes artifacts to `crates/nub-native/target/`, but the
+# Makefile and CI copy the built addon from the repo-root `target/<profile>/`
+# (`libnub_native.{dylib,so}` / `nub_native.dll`). Route this workspace's output
+# back into the shared root `target/` so those copy paths are unchanged.
+#
+# Cargo discovers config by walking up from the CURRENT WORKING DIRECTORY (not the
+# --manifest-path dir), so this file is only honored when cargo is invoked with
+# cwd inside crates/nub-native. The Makefile and CI therefore `cd crates/nub-native`
+# before building the addon (see the Makefile `addon`/`addon-fast` targets). A
+# relative `target-dir` is resolved relative to the parent of the `.cargo`
+# directory holding this file (crates/nub-native), so `../../target` is the
+# repo-root `target/`.
+#
+# An explicit `CARGO_TARGET_DIR` in the environment OVERRIDES this (CLI/env
+# precedence > config file), so the fast-iteration loop's per-worktree
+# CARGO_TARGET_DIR and CI's rust-cache target dir still win — the desired
+# precedence (honor an explicit target dir; otherwise fall back to root target).
+[build]
+target-dir = "../../target"

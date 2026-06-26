@@ -59,7 +59,7 @@ Assertion verbs (run by `run.sh`):
 ## Usage
 
 ```sh
-# build the dev nub first (see the nub-dev skill), then:
+# build the dev nub first (see the dev-loop skill), then:
 tests/conformance/frontdoor/run.sh /path/to/nub                 # hermetic doc-mode core (every-PR leg)
 REF=1 tests/conformance/frontdoor/run.sh /path/to/nub           # also real-PM diffs (opt-in leg; needs PMs)
 tests/conformance/frontdoor/run.sh /path/to/nub run-flag        # one surface

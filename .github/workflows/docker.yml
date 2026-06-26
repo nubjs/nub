@@ -1,0 +1,163 @@
+name: Docker image
+
+# Builds the official nub Docker images (Debian slim + Alpine), installing the
+# released @nubjs/nub npm package onto an official, digest-pinned node:* base.
+#
+#   - On PR / push to main: build BOTH variants for the runner arch and run the
+#     in-image smoke test. Never pushes.
+#   - On a release tag (v*): build multi-arch (linux/amd64 + linux/arm64),
+#     smoke-test, then push to the configured registry with provenance + SBOM.
+#
+# REGISTRY WIRING IS A MAINTAINER-OWNED TODO — see the `vars`/`secrets` below.
+# The registry choice (Docker Hub `nubjs/nub` vs GHCR `ghcr.io/nubjs/nub` vs both)
+# and the image name are deliberately NOT hardcoded. Set them at merge:
+#
+#   Repo variables (Settings → Secrets and variables → Actions → Variables):
+#     DOCKER_IMAGE   e.g. "nubjs/nub" (Docker Hub) or "ghcr.io/nubjs/nub" (GHCR)
+#     DOCKER_REGISTRY (optional) e.g. "ghcr.io" — omit for Docker Hub
+#     DOCKERHUB_USERNAME (Docker Hub only) e.g. "nubjs"
+#   Secrets (only needed for the push leg):
+#     DOCKERHUB_TOKEN  (Docker Hub) — paired with the DOCKERHUB_USERNAME variable
+#     (GHCR uses the built-in GITHUB_TOKEN; no extra secret needed.)
+#
+# Until DOCKER_IMAGE is set, the push leg is skipped (the `if` guards it), so this
+# workflow is safe to merge as build-and-smoke-only. Full publish runbook: the PR
+# body and docker/PUBLISHING.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# packages: write is required for the GHCR push leg — the default GITHUB_TOKEN is
+# read-only for packages without it, so a GHCR `docker push` would 403. Harmless
+# for the Docker Hub path (which authenticates with its own token).
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build + smoke (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: slim
+            dockerfile: docker/Dockerfile.slim
+          - variant: alpine
+            dockerfile: docker/Dockerfile.alpine
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      # QEMU enables the linux/arm64 leg of the multi-arch push on an amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf  # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      # The nub version to bake in. On a release tag, install exactly that version;
+      # otherwise install the latest published @nubjs/nub.
+      - name: Resolve nub version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── BUILD + SMOKE (every event) ──────────────────────────────────────────
+      # Single-arch (runner arch) load so the smoke step can run the image. The
+      # base is digest-pinned in the Dockerfile, so NODE_BASE is not passed here.
+      - name: Build ${{ matrix.variant }} image (smoke)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: nub-local:${{ matrix.variant }}
+          build-args: |
+            NUB_VERSION=${{ steps.ver.outputs.value }}
+            NUB_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=docker-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.variant }}
+
+      - name: Smoke test ${{ matrix.variant }} image
+        run: docker run --rm nub-local:${{ matrix.variant }} /usr/local/bin/smoke.sh
+
+      - name: Report image size
+        run: |
+          docker image inspect nub-local:${{ matrix.variant }} --format '${{ matrix.variant }} size: {{.Size}} bytes'
+
+      # ── PUBLISH (release tags only, and only once a registry is configured) ───
+      # MAINTAINER TODO: set the DOCKER_IMAGE repo variable to enable this. With it
+      # unset, every step below no-ops — the workflow stays build+smoke only, and a
+      # PR can NEVER push (the event is `pull_request`, not `release`).
+      - name: Log in to registry
+        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3
+        with:
+          # GHCR: set DOCKER_REGISTRY=ghcr.io; username/password fall through to
+          #   github.actor + GITHUB_TOKEN (no extra secret).
+          # Docker Hub: leave DOCKER_REGISTRY unset; set DOCKERHUB_USERNAME var +
+          #   DOCKERHUB_TOKEN secret.
+          registry: ${{ vars.DOCKER_REGISTRY }}
+          username: ${{ vars.DOCKERHUB_USERNAME || github.actor }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # The slim variant carries the unsuffixed tags (`latest`, `<version>`);
+      # alpine is suffixed (`alpine`, `<version>-alpine`). Mirrors oven/bun.
+      - name: Compute push tags
+        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        id: tags
+        run: |
+          IMG="${{ vars.DOCKER_IMAGE }}"
+          VER="${{ steps.ver.outputs.value }}"
+          if [ "${{ matrix.variant }}" = "slim" ]; then
+            echo "list=${IMG}:latest,${IMG}:${VER},${IMG}:slim,${IMG}:${VER}-slim" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${IMG}:alpine,${IMG}:${VER}-alpine" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Multi-arch (amd64 + arm64) push with provenance + SBOM attestation. The
+      # arm64 leg builds under QEMU emulation (slow but cheap to add). This rebuilds
+      # rather than reusing the loaded single-arch image — buildx cannot `load` a
+      # multi-arch manifest, so the canonical pattern is build-and-push directly.
+      #
+      # Coverage note: the full smoke (TS run + PM install) above only exercises the
+      # runner-arch (amd64) image. Each arch IS build-time-verified — the Dockerfile's
+      # `RUN ... nub --version` executes per-platform under QEMU, proving the -musl/
+      # arm64 binary loads and reports a version — but the arm64 leg gets no full
+      # smoke. A QEMU arm64 smoke leg is a reasonable future addition.
+      - name: Build + push ${{ matrix.variant }} (multi-arch)
+        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ${{ steps.tags.outputs.list }}
+          build-args: |
+            NUB_VERSION=${{ steps.ver.outputs.value }}
+            NUB_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=docker-${{ matrix.variant }}

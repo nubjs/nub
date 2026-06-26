@@ -1,0 +1,5 @@
+{
+  "name": "navigator-shim-fixture",
+  "private": true,
+  "description": "Pin-free project boundary (no engines.node / devEngines): keeps Node-version discovery from provisioning latest, so this fixture runs on the matrix leg's Node — exercising the navigator backfill on 18.19–20.x and native navigator at 21+."
+}

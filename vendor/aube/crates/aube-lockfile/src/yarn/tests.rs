@@ -674,6 +674,127 @@ fn test_parse_berry_skips_workspace_root() {
     assert!(!graph.packages.contains_key("my-project@0.0.0-use.local"));
 }
 
+/// A classic yarn.lock never records workspace members (they aren't
+/// registry packages), so a member that depends on a SIBLING member has
+/// no resolution entry to cross-reference. The reconstructed member
+/// importer must still carry that sibling as a workspace-link DirectDep
+/// — a `dep_path` (`name@version`) with NO `packages` entry — so the
+/// linker symlinks the sibling into the consumer's node_modules. Before
+/// the fix the dep was silently dropped and the consumer couldn't
+/// resolve it (the yarn-incumbent bug).
+#[test]
+fn test_classic_member_links_workspace_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{ "name": "root", "private": true, "workspaces": ["packages/*"] }"#,
+    )
+    .unwrap();
+    for (member, body) in [
+        (
+            "app",
+            r#"{ "name": "@x/app", "version": "1.0.0", "dependencies": { "@x/utils": "1.0.0" } }"#,
+        ),
+        ("utils", r#"{ "name": "@x/utils", "version": "1.0.0" }"#),
+    ] {
+        let mdir = root.join("packages").join(member);
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::write(mdir.join("package.json"), body).unwrap();
+    }
+    // A genuinely empty classic lockfile — the members are the only deps.
+    let lock = root.join("yarn.lock");
+    std::fs::write(&lock, "# yarn lockfile v1\n").unwrap();
+
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    let graph = parse(&lock, &manifest).unwrap();
+
+    let app = graph
+        .importers
+        .get("packages/app")
+        .expect("app member importer must be reconstructed");
+    let utils = app
+        .iter()
+        .find(|d| d.name == "@x/utils")
+        .expect("the sibling workspace dep must survive as a DirectDep");
+    assert_eq!(utils.dep_path, "@x/utils@1.0.0");
+    // The workspace-link convention the linker keys on: a DirectDep whose
+    // dep_path has no `packages` entry => link the sibling dir, don't fetch.
+    assert!(
+        !graph.packages.contains_key(&utils.dep_path),
+        "a workspace-sibling dep must NOT have a packages entry"
+    );
+
+    // `utils` has no deps, so its importer is present but empty.
+    assert!(graph.importers.contains_key("packages/utils"));
+}
+
+/// Each arm of the workspace-link match: the `workspace:` protocol
+/// (always links), a `link:`-to-a-member spec (binds by name, path tail
+/// ignored), a SATISFIABLE caret range (the dominant real-world
+/// yarn-classic member-to-member form — exercises `version_satisfies`),
+/// and a bare-semver range the sibling does NOT satisfy (must NOT link —
+/// it resolves from the registry instead). The negative case is the one
+/// that guards against silently substituting the wrong local copy.
+#[test]
+fn test_classic_workspace_protocol_and_range_gating() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{ "name": "root", "private": true, "workspaces": ["packages/*"] }"#,
+    )
+    .unwrap();
+    for (member, body) in [
+        (
+            "app",
+            r#"{ "name": "@x/app", "version": "1.0.0",
+                "dependencies": {
+                    "@x/proto": "workspace:*",
+                    "@x/portal": "link:../portal",
+                    "@x/caret": "^1.0.0",
+                    "@x/mismatch": "2.0.0"
+                } }"#,
+        ),
+        ("proto", r#"{ "name": "@x/proto", "version": "9.9.9" }"#),
+        ("portal", r#"{ "name": "@x/portal", "version": "0.0.0" }"#),
+        ("caret", r#"{ "name": "@x/caret", "version": "1.4.2" }"#),
+        (
+            "mismatch",
+            r#"{ "name": "@x/mismatch", "version": "1.0.0" }"#,
+        ),
+    ] {
+        let mdir = root.join("packages").join(member);
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::write(mdir.join("package.json"), body).unwrap();
+    }
+    let lock = root.join("yarn.lock");
+    std::fs::write(&lock, "# yarn lockfile v1\n").unwrap();
+
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    let graph = parse(&lock, &manifest).unwrap();
+    let app = graph.importers.get("packages/app").unwrap();
+    let links = |name: &str| app.iter().any(|d| d.name == name);
+
+    // `workspace:*` links regardless of the version.
+    assert!(links("@x/proto"), "workspace:* must link the sibling");
+    // `link:`-to-a-member binds by name; the `../portal` path tail is the
+    // on-disk location, not a version constraint.
+    assert!(links("@x/portal"), "link: to a member must link it by name");
+    // `^1.0.0` against a member at `1.4.2` satisfies — the common case.
+    assert!(
+        links("@x/caret"),
+        "a satisfiable caret range must link the sibling"
+    );
+    // `2.0.0` against a sibling at `1.0.0` does NOT satisfy, so it is left
+    // for registry resolution — not silently linked to the wrong local
+    // copy. (No yarn.lock entry exists either, so it's simply absent.)
+    assert!(
+        !links("@x/mismatch"),
+        "an unsatisfied bare-semver range must not link the sibling"
+    );
+}
+
 /// Berry emits `version:` unquoted, so scalar-looking values can
 /// parse as numbers instead of strings. Our parser must unfold
 /// those back to strings instead of failing with "has no version" —
@@ -1746,7 +1867,11 @@ ms@^2.1.3:
 
     // The empty root importer carries no deps; the two members are
     // reconstructed as their own importers with their child deps.
-    assert_eq!(graph.importers["."].len(), 0, "root importer must stay empty");
+    assert_eq!(
+        graph.importers["."].len(),
+        0,
+        "root importer must stay empty"
+    );
     let pkg_a = graph
         .importers
         .get("packages/pkg-a")

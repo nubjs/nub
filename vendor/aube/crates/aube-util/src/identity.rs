@@ -212,6 +212,18 @@ pub struct Embedder {
     /// fixed: it's the host's call, not the user's, and it doesn't vary per
     /// project.
     pub primer_ttl: Option<std::time::Duration>,
+    /// Optional hook returning an effective CPU-count budget that caps the tool's
+    /// CPU-bound thread pools (the linker rayon pool, the tokio worker seed) below
+    /// the host's logical core count. `None` (aube's default) → no embedder cap,
+    /// so every pool sizes off `available_parallelism()` exactly as before
+    /// (byte-for-byte standalone behavior). An embedder running under a cgroup CPU
+    /// quota (a 0.5-CPU container) sets `Some(fn)` returning the real budget so the
+    /// pools don't over-subscribe the quota (CFS throttling) or feed thread/PID
+    /// exhaustion. The hook itself returns `None` when IT detects no constraint, so
+    /// even with a hook installed an unconstrained box keeps full-core pools.
+    /// Embedder-fixed pluggability (same shape as the other profile hooks); read
+    /// through [`effective_cpu_cap`](crate::effective_cpu_cap).
+    pub cpu_budget: Option<fn() -> Option<usize>>,
 }
 
 /// Standalone aube's embedder profile. Reproduces every hardcoded branding
@@ -240,6 +252,7 @@ pub const AUBE: Embedder = Embedder {
     no_churn_lockfile_write: false,
     read_branded_settings_env: true,
     primer_ttl: None,
+    cpu_budget: None,
 };
 
 static ACTIVE: OnceLock<&'static Embedder> = OnceLock::new();

@@ -103,13 +103,28 @@ impl Store {
     /// rest of aube expects them.
     pub fn with_root(root: PathBuf) -> Result<Self, Error> {
         let cache_dir = dirs::cache_dir().ok_or(Error::NoHome)?;
+        Ok(Self::with_root_and_cache_inner(root, cache_dir))
+    }
+
+    /// Open the store with both root and cache dir supplied explicitly.
+    /// Unlike [`with_root`] / [`default_location`] this never resolves a
+    /// HOME/XDG path of its own, so it cannot fail with [`Error::NoHome`]
+    /// — the caller resolves both paths (including any graceful `$TMPDIR`
+    /// fallback when no HOME is set). This is the path the embedded install
+    /// pipeline uses so a configured `storeDir` is honored even when the
+    /// environment has no HOME (a stripped test env or a minimal container).
+    pub fn with_root_and_cache(root: PathBuf, cache_dir: PathBuf) -> Result<Self, Error> {
+        Ok(Self::with_root_and_cache_inner(root, cache_dir))
+    }
+
+    fn with_root_and_cache_inner(root: PathBuf, cache_dir: PathBuf) -> Self {
         let store = Self {
             root,
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
         };
         store.migrate_legacy_index_dir();
-        Ok(store)
+        store
     }
 
     /// Open the store at a specific path (cache dir derived from store root).
@@ -359,6 +374,22 @@ mod tests {
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn with_root_and_cache_never_needs_home() {
+        // The embedded install pipeline resolves both the store root and the
+        // cache dir itself (with a $TMPDIR fallback) and hands them in, so a
+        // configured storeDir is honored even with no HOME in the env — e.g.
+        // pnpm's own test harness strips HOME. `with_root`/`default_location`
+        // would have aborted with `NoHome`; this ctor must not.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store/v1/files");
+        let cache_dir = tmp.path().join("cache");
+        let store = Store::with_root_and_cache(root.clone(), cache_dir.clone())
+            .expect("with_root_and_cache must not require HOME");
+        assert_eq!(store.root(), root);
+        assert_eq!(store.index_dir(), tmp.path().join("store/v1/index"));
     }
 
     #[test]

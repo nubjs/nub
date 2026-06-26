@@ -26,6 +26,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, cpSync, symlinkSync, lstatSync } from "node:fs";
 import { dirname, join, resolve, isAbsolute } from "node:path";
+import { homedir } from "node:os";
 
 const HELP = `new-worktree — create an isolated git worktree off origin/main
 
@@ -35,11 +36,11 @@ Usage:
 
 Arguments:
   <slug>              Branch name and default path suffix (worktree lands at
-                     /tmp/nub-wt-<slug>, branch <slug>).
+                     ~/.cache/nub/worktrees/<slug>, branch <slug>).
 
 Options:
   --base <ref>       Base ref for the new branch (default: origin/main).
-  --path <dir>       Explicit worktree path (default: /tmp/nub-wt-<slug>).
+  --path <dir>       Explicit worktree path (default: ~/.cache/nub/worktrees/<slug>).
   --no-fetch         Skip the initial \`git fetch origin\`.
   -h, --help         Show this help.
 
@@ -105,7 +106,7 @@ function parseArgs(argv: string[]): Opts {
   return {
     slug,
     base,
-    path: path ?? `/tmp/nub-wt-${slug}`,
+    path: path ?? `${homedir()}/.cache/nub/worktrees/${slug}`,
     fetch,
   };
 }
@@ -189,6 +190,9 @@ function main(): void {
   const mainRoot = mainWorktree(repoRoot);
 
   if (existsSync(opts.path)) die(`worktree path already exists: ${opts.path}`);
+
+  // Ensure the parent directory exists (e.g. ~/.cache/nub/worktrees/ on first run).
+  mkdirSync(dirname(opts.path), { recursive: true });
 
   if (opts.fetch) {
     const remoteRef = opts.base.includes("/") ? opts.base.split("/")[0] : "origin";

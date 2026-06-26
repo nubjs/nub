@@ -31,8 +31,27 @@
 //! symmetric brand-boundary discipline the rest of `pm_engine` enforces.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use nub_core::config_cache::MtimeCache;
 
 use super::config_scope::{IgnoredField, Role};
+
+/// Per-process, mtime-validated cache of raw config-file CONTENTS keyed by path.
+/// The unsupported-config readers each opened the same `.yarnrc.yml` / `.npmrc`
+/// file once PER KEY (immutable, scripts, network, hardened; omit, include,
+/// legacy-peer-deps, install-strategy) — several reads of one file per command.
+/// This collapses them to a single read per `(path, mtime)`; the per-key parse
+/// then runs against the cached string. mtime validation keeps it stale-proof:
+/// any rewrite of the file bumps the mtime, the next lookup misses and re-reads.
+static CONFIG_TEXT_CACHE: MtimeCache<String> = MtimeCache::new();
+
+/// Read a config file's full contents through [`CONFIG_TEXT_CACHE`]. `None`
+/// (missing / unreadable) is never cached — identical to `read_to_string().ok()`
+/// on those paths, just deduplicated across repeated readers in one command.
+fn read_config_text(path: &Path) -> Option<Arc<String>> {
+    CONFIG_TEXT_CACHE.get_or_read(path, || std::fs::read_to_string(path).ok())
+}
 
 /// A config-derived override of the dependency selection axis
 /// (`--prod`/`--dev`/`--no-optional`). `None` per field means "not pinned by
@@ -81,7 +100,7 @@ fn npm_omit_include(root: &Path) -> DepSelectionConfig {
     let mut omit: Vec<String> = Vec::new();
     let mut include: Vec<String> = Vec::new();
     for path in npmrc_paths(root) {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Some(content) = read_config_text(&path) else {
             continue;
         };
         if let Some(v) = npmrc_scalar(&content, "omit") {
@@ -132,7 +151,7 @@ pub(crate) fn frozen_from_config(role: Role, root: &Path) -> bool {
 /// yarn `.yarnrc.yml` `enableImmutableInstalls: true` or a non-empty
 /// `immutablePatterns:` block.
 fn yarn_immutable(root: &Path) -> bool {
-    let Ok(content) = std::fs::read_to_string(root.join(".yarnrc.yml")) else {
+    let Some(content) = read_config_text(&root.join(".yarnrc.yml")) else {
         return false;
     };
     if yarnrc_top_level_bool(&content, "enableImmutableInstalls") == Some(true) {
@@ -149,8 +168,7 @@ pub(crate) fn yarn_scripts_disabled(role: Role, root: &Path) -> bool {
     if role != Role::Yarn {
         return false;
     }
-    std::fs::read_to_string(root.join(".yarnrc.yml"))
-        .ok()
+    read_config_text(&root.join(".yarnrc.yml"))
         .and_then(|c| yarnrc_top_level_bool(&c, "enableScripts"))
         == Some(false)
 }
@@ -165,8 +183,7 @@ pub(crate) fn yarn_network_disabled(role: Role, root: &Path) -> bool {
     if role != Role::Yarn {
         return false;
     }
-    std::fs::read_to_string(root.join(".yarnrc.yml"))
-        .ok()
+    read_config_text(&root.join(".yarnrc.yml"))
         .and_then(|c| yarnrc_top_level_bool(&c, "enableNetwork"))
         == Some(false)
 }
@@ -182,8 +199,8 @@ pub(crate) fn yarn_network_disabled(role: Role, root: &Path) -> bool {
 /// The classic `.yarnrc` is a space-separated `key "value"` format (parsed by
 /// Yarn 1's own lockfile parser), distinct from Berry's `.yarnrc.yml`.
 fn yarn_offline_mirror_configured(root: &Path) -> bool {
-    std::fs::read_to_string(root.join(".yarnrc"))
-        .is_ok_and(|c| classic_yarnrc_has_key(&c, "yarn-offline-mirror"))
+    read_config_text(&root.join(".yarnrc"))
+        .is_some_and(|c| classic_yarnrc_has_key(&c, "yarn-offline-mirror"))
 }
 
 /// Whether the root (or any workspace member) manifest declares
@@ -201,7 +218,7 @@ pub(crate) fn injected_deps_present(root: &Path) -> bool {
 }
 
 fn manifest_has_injected(manifest_path: &Path) -> bool {
-    let Ok(manifest) = aube_manifest::PackageJson::from_path(manifest_path) else {
+    let Some(manifest) = super::cached_aube_manifest(manifest_path) else {
         return false;
     };
     let Some(meta) = manifest
@@ -358,7 +375,7 @@ fn scan_warn(role: Role, root: &Path) -> Vec<IgnoredField> {
 }
 
 fn manifest_has_pnpm_overrides(root: &Path) -> bool {
-    let Ok(manifest) = aube_manifest::PackageJson::from_path(&root.join("package.json")) else {
+    let Some(manifest) = super::cached_aube_manifest(&root.join("package.json")) else {
         return false;
     };
     manifest
@@ -371,7 +388,7 @@ fn manifest_has_pnpm_overrides(root: &Path) -> bool {
 }
 
 fn yarnrc_top_level_bool_str(root: &Path, key: &str) -> Option<bool> {
-    let content = std::fs::read_to_string(root.join(".yarnrc.yml")).ok()?;
+    let content = read_config_text(&root.join(".yarnrc.yml"))?;
     yarnrc_top_level_bool(&content, key)
 }
 
@@ -426,7 +443,7 @@ fn npmrc_value_in(paths: &[PathBuf], key: &str) -> Option<String> {
     paths
         .iter()
         .filter_map(|path| {
-            let content = std::fs::read_to_string(path).ok()?;
+            let content = read_config_text(path)?;
             npmrc_scalar(&content, key)
         })
         .next_back()
@@ -505,7 +522,7 @@ fn split_list(v: &str) -> Vec<String> {
 fn bunfig_install_bool(root: &Path, key: &str) -> Option<bool> {
     let mut value = None;
     for path in bunfig_paths(root) {
-        if let Ok(raw) = std::fs::read_to_string(&path)
+        if let Some(raw) = read_config_text(&path)
             && let Ok(parsed) = raw.parse::<toml::Value>()
             && let Some(b) = parsed
                 .get("install")
