@@ -322,3 +322,17 @@ MIT
 > <p align="center">
 >  <em>⭐️ If you read this far, consider starring the repo :) ⭐️</em>
 > </p>
+
+## Contributing
+
+We welcome contributions to Nub! Here are some guidelines to help you get started:
+
+1. **Reporting Issues**: If you encounter a bug or have a feature request, please open an issue in the GitHub repository. Be sure to provide as much detail as possible, including steps to reproduce the issue.
+
+2. **Pull Requests**: We appreciate pull requests that address bugs or add new features. Before submitting a pull request, please ensure that your code adheres to our coding standards and includes appropriate tests. 
+
+3. **Good First Issues**: If you're new to the project, check out the 'good first issue' label on our GitHub issues page. These are great starting points for new contributors.
+
+4. **Documentation**: Contributions to the documentation are also welcome! If you notice any missing or unclear information, feel free to submit a pull request with your improvements.
+
+Thank you for considering contributing to Nub!
