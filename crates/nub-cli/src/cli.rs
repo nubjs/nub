@@ -1534,6 +1534,34 @@ fn run_nub() -> Result<i32> {
                     rest.join(" ")
                 );
             }
+            // External-subcommand fallthrough (git `git-foo` / cargo `cargo-foo`):
+            // an unknown bareword that isn't a built-in, a redirected PM/init verb,
+            // or a likely script resolves to an executable named `nub-<verb>` and
+            // runs it with the remaining argv forwarded verbatim (no clap, so every
+            // flag passes through). Built-ins always win — they match in the
+            // pre-verb scan above, so a plugin can never shadow one. We probe ONLY
+            // the prefixed name (never the bare `first`), so a verb typo can't exec
+            // a random PATH binary. Resolution order: project-local
+            // node_modules/.bin (the nub-idiomatic place a plugin installs) then a
+            // PATH search (a globally-installed plugin). launch_bin runs a JS/TS
+            // plugin under nub's augmentation (the runtime value prop) and execs a
+            // native one. If nothing resolves, fall through to the bail below.
+            //
+            // PnP gap (deliberate, additive): unlike the nubx/exec path, this
+            // does NOT fall back to the PnP bin-runner when find_bin misses in a
+            // Yarn-PnP tree (no node_modules/.bin) — a plugin in a PnP project
+            // resolves only via PATH, not via PnP. Symmetry with the sibling
+            // resolver is a follow-up; PnP plugin support isn't documented.
+            //
+            // Resolution base reflects any `--cwd` already applied via
+            // set_current_dir above; cwd is unchanged since then.
+            let cwd = env::current_dir()?;
+            let plugin_name = format!("nub-{first}");
+            let plugin = nub_core::workspace::scripts::find_bin(&plugin_name, &cwd)
+                .or_else(|| find_on_path(&plugin_name));
+            if let Some(plugin_path) = plugin {
+                return launch_bin(&plugin_path, &rest[1..], compat, &cwd);
+            }
             bail!(
                 "nub: \"{first}\" is not a nub command — see `nub --help`\n\
                  \x20\x20(to run a script: nub run {first} · to run a file: nub ./{first})"
@@ -4332,6 +4360,29 @@ fn pnp_bin_runner_path() -> Option<String> {
             .to_string_lossy()
             .into_owned(),
     )
+}
+
+/// Resolve `name` against the `PATH` env, returning the first existing
+/// executable file. Used by the external-subcommand fallthrough for a globally-
+/// installed `nub-<verb>` plugin (the project-local node_modules/.bin lookup is
+/// tried first). On Windows a bare `name` is probed against the executable
+/// extensions (`.exe`/`.cmd`/`.bat`); on Unix the literal name is the entry.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let exts: &[&str] = &["", ".exe", ".cmd", ".bat"];
+    #[cfg(not(windows))]
+    let exts: &[&str] = &[""];
+
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        for ext in exts {
+            let candidate = dir.join(format!("{name}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Launch a resolved `node_modules/.bin` entry, shebang/extension-aware (A40).

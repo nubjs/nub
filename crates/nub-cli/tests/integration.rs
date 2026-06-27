@@ -5654,3 +5654,137 @@ fn run_script_reports_role_aware_user_agent() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ── Section 9: external-subcommand fallthrough (git/cargo-style nub-<verb>) ──
+//
+// `nub <unknown-bareword>` resolves an executable named `nub-<verb>` (project-
+// local node_modules/.bin, then PATH) and runs it with the rest of argv
+// forwarded verbatim. Built-ins always win; only the prefixed name is probed.
+
+/// A `nub-<verb>` plugin in node_modules/.bin runs on `nub <verb>` with every
+/// remaining argument forwarded verbatim (flags included, since this path never
+/// touches clap), and its exit code propagates.
+#[cfg(not(windows))]
+#[test]
+fn external_subcommand_runs_local_plugin_and_forwards_argv() {
+    let dir = unique_test_cache();
+    let bin = dir.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // A shell-script plugin that echoes its args and exits non-zero so we also
+    // confirm the child's exit code is what propagates (not nub's own).
+    let plugin = bin.join("nub-foo");
+    std::fs::write(&plugin, "#!/bin/sh\necho \"plugin-args: $*\"\nexit 7\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["foo", "a", "b", "--c"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub foo");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("plugin-args: a b --c"),
+        "argv must forward verbatim, flags included: {stdout}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "the plugin's exit code must propagate, not nub's"
+    );
+}
+
+/// An unknown bareword with no matching `nub-<verb>` still errors with the
+/// existing not-a-command guidance — the fallthrough adds a resolution attempt,
+/// it does not swallow the error when nothing resolves.
+#[test]
+fn external_subcommand_absent_still_errors() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = Command::new(nub_binary())
+        .args(["frobnicate", "--wat"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        // An empty PATH so a stray host `nub-frobnicate` can't exist; the prefixed
+        // name still must not resolve.
+        .env("PATH", "")
+        .output()
+        .expect("spawn nub frobnicate");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("\"frobnicate\" is not a nub command"),
+        "with no plugin the original error must surface: {stderr}"
+    );
+    assert_ne!(out.status.code(), Some(0));
+}
+
+/// A built-in verb is never shadowed by a same-named plugin: a `nub-run` in
+/// node_modules/.bin does NOT intercept `nub run` — the built-in `run` dispatch
+/// wins (here surfacing run's own no-script-named error, not the plugin's
+/// output).
+#[cfg(not(windows))]
+#[test]
+fn external_subcommand_never_shadows_a_builtin() {
+    let dir = unique_test_cache();
+    let bin = dir.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    let plugin = bin.join("nub-run");
+    std::fs::write(&plugin, "#!/bin/sh\necho INTERCEPTED-BY-PLUGIN\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["run", "nonexistent-script"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("INTERCEPTED-BY-PLUGIN"),
+        "the built-in `run` verb must win over a nub-run plugin: stdout={stdout}"
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "run with a missing script must error via the built-in, not exit 0 via the plugin"
+    );
+}
+
+/// A PM-engine verb is never shadowed by a same-named plugin: a `nub-add` in
+/// node_modules/.bin does NOT intercept `nub add` — the engine `add` dispatch
+/// wins (here surfacing the engine's no-packages-specified error, not the
+/// plugin's output). Same no-shadow contract as the built-in case above, but
+/// through the engine-verb branch of the pre-verb scan (lookup_verb), pinning
+/// that both verb sets resist plugin capture.
+#[cfg(not(windows))]
+#[test]
+fn external_subcommand_never_shadows_an_engine_verb() {
+    let dir = unique_test_cache();
+    let bin = dir.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    let plugin = bin.join("nub-add");
+    std::fs::write(&plugin, "#!/bin/sh\necho INTERCEPTED-BY-PLUGIN\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("add")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub add");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("INTERCEPTED-BY-PLUGIN"),
+        "the engine `add` verb must win over a nub-add plugin: stdout={stdout}"
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "add with no packages must error via the engine, not exit 0 via the plugin"
+    );
+}
