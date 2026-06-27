@@ -41,7 +41,11 @@ $Url = "https://github.com/nubjs/nub/releases/download/v$Version/nub-$Target.zip
 Write-Host "Downloading from $Url..."
 
 $TmpZip = Join-Path $env:TEMP "nub-$Target-$PID.zip"
+# Suppress the per-chunk progress bar — it re-renders on every received byte
+# and dominates the total download time in PowerShell.
+$prevProgressPreference = $ProgressPreference
 try {
+    $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $Url -OutFile $TmpZip -UseBasicParsing
     # Replace any prior bin\ for a clean upgrade. A stale runtime\ from a
     # pre-single-binary install is also removed for hygiene, then extract bin\.
@@ -52,6 +56,7 @@ try {
     Write-Error "Failed to download/extract nub: $_"
     exit 1
 } finally {
+    $ProgressPreference = $prevProgressPreference
     if (Test-Path $TmpZip) { Remove-Item -Force $TmpZip }
 }
 
