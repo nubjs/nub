@@ -2128,3 +2128,77 @@ fn git_hosted_remote_tarball_is_emitted_as_bun_git_tuple() {
          entry (the bug that fails bun's cold-cache frozen install):\n{body}"
     );
 }
+
+/// bun stamps `lockfileVersion: 2` on fresh installs as of bun 1.4
+/// (`bun.lock.rs`: `Version::CURRENT = V2`). v1→v2 added only parse-time
+/// strictness on identical on-disk content, so a v2 lockfile parses
+/// through the same path as v1 — its package versions and integrity
+/// hashes must land on the graph unchanged. The same `{ ident, "",
+/// { meta }, integrity }` tuple shape is used; only the header number
+/// differs from `test_parse_simple`.
+#[test]
+fn test_parse_accepts_lockfile_version_2() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let sri_foo = fake_sri('a');
+    let sri_bar = fake_sri('b');
+    let content = r#"{
+  "lockfileVersion": 2,
+  "workspaces": {
+    "": {
+      "name": "test",
+      "dependencies": {
+        "foo": "^1.0.0",
+        "bar": "^2.0.0",
+      },
+    },
+  },
+  "packages": {
+    "foo": ["foo@1.2.3", "", { "dependencies": { "bar": "^2.0.0" } }, "SRI_FOO"],
+    "bar": ["bar@2.5.0", "", {}, "SRI_BAR"],
+  }
+}"#
+    .replace("SRI_FOO", &sri_foo)
+    .replace("SRI_BAR", &sri_bar);
+    std::fs::write(tmp.path(), &content).unwrap();
+    let graph = parse(tmp.path()).unwrap();
+
+    assert_eq!(graph.packages.len(), 2);
+    assert_eq!(
+        graph.packages["foo@1.2.3"].integrity.as_deref(),
+        Some(sri_foo.as_str())
+    );
+    assert_eq!(
+        graph.packages["bar@2.5.0"].integrity.as_deref(),
+        Some(sri_bar.as_str())
+    );
+    assert_eq!(
+        graph.packages["foo@1.2.3"]
+            .dependencies
+            .get("bar")
+            .map(String::as_str),
+        Some("2.5.0")
+    );
+    let root = graph.importers.get(".").unwrap();
+    assert!(root.iter().any(|d| d.name == "foo"));
+    assert!(root.iter().any(|d| d.name == "bar"));
+}
+
+/// Only v1 and v2 are known bun.lock shapes; an unknown version
+/// (a future format, or a corrupt/hand-edited header) must still be
+/// rejected rather than silently mis-parsed against the v1/v2 layout.
+#[test]
+fn test_parse_rejects_unsupported_lockfile_version() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+  "lockfileVersion": 3,
+  "workspaces": { "": { "name": "test" } },
+  "packages": {}
+}"#;
+    std::fs::write(tmp.path(), content).unwrap();
+    let err = parse(tmp.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("lockfileVersion 3") && msg.contains("expected 1 or 2"),
+        "unsupported version error should name the version and the supported set, got: {msg}"
+    );
+}

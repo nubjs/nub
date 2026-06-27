@@ -23,11 +23,18 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         Err(e) => return Err(Error::parse_json_err(path, raw_content, &e)),
     };
 
-    if raw.lockfile_version != 1 {
+    // bun.lock's on-disk JSON shape is identical across v1 and v2: bun's
+    // own writer documents v1→v2 as added parse-time STRICTNESS on the
+    // same content (it rejects an off-registry npm tuple with missing
+    // integrity and an unsafe git `.bun-tag` that v1 tolerated), not a
+    // format change. v2 became the default for fresh installs in bun 1.4.
+    // So accept both versions through the identical parse path; we don't
+    // replicate bun's v2 strictness (this is a lenient reader).
+    if !matches!(raw.lockfile_version, 1 | 2) {
         return Err(Error::parse(
             path,
             format!(
-                "bun.lock lockfileVersion {} is not supported (expected 1)",
+                "bun.lock lockfileVersion {} is not supported (expected 1 or 2)",
                 raw.lockfile_version
             ),
         ));
