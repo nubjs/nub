@@ -85,7 +85,7 @@ fn bun_incumbent_reads_project_and_global_bunfig_install_subset() {
         r#"
         [install]
         registry = "https://global.registry.example/"
-        linker = "isolated"
+        linker = "hoisted"
         "#,
     )
     .unwrap();
@@ -98,7 +98,11 @@ fn bun_incumbent_reads_project_and_global_bunfig_install_subset() {
         config_get(&dir, &xdg_config, "@acme:registry"),
         "https://scope.registry.example/"
     );
-    assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "isolated");
+    // The global bunfig's `linker` IS read for a bun incumbent. `hoisted` is the
+    // NON-default value (nub's own default is now isolated+GVS), so resolving to
+    // `hoisted` proves the bunfig was read and overrode the embedder default —
+    // an `isolated` bunfig would be indistinguishable from that default.
+    assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "hoisted");
 }
 
 #[test]
@@ -149,7 +153,7 @@ fn nub_identity_does_not_read_project_or_global_bunfig() {
                 r#"
                 [install]
                 registry = "https://must-not-read.project.example/"
-                linker = "isolated"
+                linker = "hoisted"
                 "#,
             ),
         ],
@@ -169,7 +173,12 @@ fn nub_identity_does_not_read_project_or_global_bunfig() {
         config_get(&dir, &xdg_config, "registry"),
         "https://registry.npmjs.org/"
     );
-    assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "undefined");
+    // The bunfig's `linker = "hoisted"` must NOT be read under nub identity:
+    // nodeLinker resolves to nub's own default (isolated, with hoist=false for
+    // GVS), not the bunfig's `hoisted`. Asserting the NON-bunfig value is what
+    // proves the bunfig was ignored — the project still gets nub's isolated+GVS
+    // default like any other non-injected project.
+    assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "isolated");
 }
 
 #[test]
