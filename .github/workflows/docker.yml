@@ -4,9 +4,20 @@ name: Docker image
 # released @nubjs/nub npm package onto an official, digest-pinned node:* base.
 #
 #   - On PR / push to main: build BOTH variants for the runner arch and run the
-#     in-image smoke test. Never pushes.
-#   - On a release tag (v*): build multi-arch (linux/amd64 + linux/arm64),
-#     smoke-test, then push to the configured registry with provenance + SBOM.
+#     in-image smoke test. Never pushes (no `nub_version` input is supplied).
+#   - When CALLED with a `nub_version` (the `docker` job in release.yml invokes
+#     this via `workflow_call` after the npm publish, or a maintainer runs it via
+#     workflow_dispatch to backfill an image): build multi-arch (linux/amd64 +
+#     linux/arm64), smoke-test, then push to the configured registry with
+#     provenance + SBOM.
+#
+# WHY workflow_call (not `on: release: published`): release.yml creates the GitHub
+# Release with the default GITHUB_TOKEN, and GitHub's anti-recursion rule means an
+# event raised by GITHUB_TOKEN does NOT trigger another workflow — so a `release:
+# published` trigger here never fires for an AUTOMATED release (that's why the image
+# froze at v0.2.0). Running the publish as a same-run reusable-workflow job invoked
+# from release.yml sidesteps the cascade and sequences naturally after the npm
+# publish, so `@nubjs/nub@<version>` exists when the image build installs it.
 #
 # REGISTRY WIRING IS A MAINTAINER-OWNED TODO — see the `vars`/`secrets` below.
 # The registry choice (Docker Hub `nubjs/nub` vs GHCR `ghcr.io/nubjs/nub` vs both)
@@ -35,8 +46,26 @@ on:
     paths:
       - "docker/**"
       - ".github/workflows/docker.yml"
-  release:
-    types: [published]
+  # The publish path. release.yml's `docker` job calls this as a reusable workflow
+  # after publish-npm (see the WHY-workflow_call note in the header). A maintainer
+  # can also run it via workflow_dispatch to backfill an image for an already-shipped
+  # version. In BOTH cases `nub_version` is the bare semver to bake + tag, and its
+  # presence is what flips this run from build-and-smoke into a real push (the step
+  # `if:` guards key on `inputs.nub_version != ''`, NOT on github.event_name — under
+  # workflow_call github.event_name is the caller's `push`, indistinguishable from a
+  # docker/** push to main).
+  workflow_call:
+    inputs:
+      nub_version:
+        description: "Bare semver of @nubjs/nub to install + tag (e.g. 0.2.8; a leading v is stripped)."
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      nub_version:
+        description: "Bare semver of @nubjs/nub to install + tag (e.g. 0.2.8; a leading v is stripped). Backfills/republishes the image for that version."
+        type: string
+        required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -72,13 +101,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      # The nub version to bake in. On a release tag, install exactly that version;
-      # otherwise install the latest published @nubjs/nub.
+      # The nub version to bake in. When invoked with a `nub_version` input (the
+      # release.yml call or a workflow_dispatch backfill), install exactly that
+      # version; a PR/push build with no input installs the latest published
+      # @nubjs/nub. Read via env (not direct ${{ }} interpolation) to keep the
+      # input out of the shell command, and strip a leading `v` defensively so both
+      # `0.2.8` and `v0.2.8` produce a bare semver for NUB_VERSION.
       - name: Resolve nub version
         id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.nub_version }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "value=${INPUT_VERSION#v}" >> "$GITHUB_OUTPUT"
           else
             echo "value=latest" >> "$GITHUB_OUTPUT"
           fi
@@ -106,12 +141,16 @@ jobs:
         run: |
           docker image inspect nub-local:${{ matrix.variant }} --format '${{ matrix.variant }} size: {{.Size}} bytes'
 
-      # ── PUBLISH (release tags only, and only once a registry is configured) ───
-      # MAINTAINER TODO: set the DOCKER_IMAGE repo variable to enable this. With it
-      # unset, every step below no-ops — the workflow stays build+smoke only, and a
-      # PR can NEVER push (the event is `pull_request`, not `release`).
+      # ── PUBLISH (only when CALLED with a version, and a registry is configured) ──
+      # The push steps fire only when `inputs.nub_version` is non-empty — i.e. this
+      # run was invoked via workflow_call (from release.yml) or workflow_dispatch
+      # (a backfill). A PR/push-to-main build supplies no input, so inputs.nub_version
+      # is '' and every step below no-ops — the workflow stays build+smoke only and a
+      # PR can NEVER push. (Keying on inputs.nub_version, NOT github.event_name: under
+      # workflow_call github.event_name is the caller's `push`, which would otherwise
+      # collide with a docker/** push to main.) DOCKER_IMAGE unset also no-ops the push.
       - name: Log in to registry
-        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        if: inputs.nub_version != '' && vars.DOCKER_IMAGE != ''
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3
         with:
           # GHCR: set DOCKER_REGISTRY=ghcr.io; username/password fall through to
@@ -125,7 +164,7 @@ jobs:
       # The slim variant carries the unsuffixed tags (`latest`, `<version>`);
       # alpine is suffixed (`alpine`, `<version>-alpine`). Mirrors oven/bun.
       - name: Compute push tags
-        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        if: inputs.nub_version != '' && vars.DOCKER_IMAGE != ''
         id: tags
         run: |
           IMG="${{ vars.DOCKER_IMAGE }}"
@@ -147,7 +186,7 @@ jobs:
       # arm64 binary loads and reports a version — but the arm64 leg gets no full
       # smoke. A QEMU arm64 smoke leg is a reasonable future addition.
       - name: Build + push ${{ matrix.variant }} (multi-arch)
-        if: github.event_name == 'release' && vars.DOCKER_IMAGE != ''
+        if: inputs.nub_version != '' && vars.DOCKER_IMAGE != ''
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .

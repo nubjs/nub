@@ -928,6 +928,32 @@ jobs:
           fi
           echo "✓ all ${#EXPECTED[@]} release assets present on $TAG"
 
+  docker:
+    name: Publish Docker images
+    # Republish the official Docker images (ghcr.io/nubjs/nub) for THIS release, as a
+    # same-run job rather than via docker.yml's own trigger. WHY: docker.yml used to
+    # fire on `release: published`, but release.yml creates the GitHub Release with
+    # the default GITHUB_TOKEN, and GitHub's anti-recursion rule means a GITHUB_TOKEN-
+    # raised event does NOT trigger another workflow — so that trigger never fired for
+    # an automated release and the image froze at v0.2.0. Invoking docker.yml here via
+    # `workflow_call` runs the build+push INSIDE this run (no cascade) and `needs:
+    # publish-npm` sequences it after `@nubjs/nub@<version>` is live on npm, which the
+    # image installs at build time. Real tag-push releases only (mirrors bump-homebrew-
+    # tap / submit-winget) — a build-only debug dispatch must not push an image.
+    needs: publish-npm
+    if: github.event_name == 'push'
+    # The called workflow inherits the calling job's token scope; the GHCR push needs
+    # packages:write (release.yml's top-level token has only id-token+contents).
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+    # github.ref_name is the tag (e.g. v0.2.8); docker.yml's Resolve-version step
+    # strips the leading v into a bare NUB_VERSION.
+    with:
+      nub_version: ${{ github.ref_name }}
+    secrets: inherit
+
   test-install:
     name: Test install (${{ matrix.os }})
     needs: publish-npm
