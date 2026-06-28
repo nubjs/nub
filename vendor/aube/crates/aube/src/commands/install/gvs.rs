@@ -80,6 +80,34 @@ pub(super) fn effective_global_virtual_store(
     planned_gvs && !hoist && matches!(node_linker, aube_linker::NodeLinker::Isolated)
 }
 
+/// The global-virtual-store decision the fetch-pipelined materializer
+/// (`spawn_gvs_prewarm`) must use so its per-package materialize lands
+/// exactly where the link phase later reads it.
+///
+/// For the isolated linker this is the *effective* mode
+/// ([`effective_global_virtual_store`]), which folds in `hoist`: under the
+/// default `hoist=true` layout `Linker::link_all` recurses to
+/// `without_global_virtual_store` and materializes per-project, so the
+/// prewarm must too. Feeding the prewarm the raw (hoist-unaware) override
+/// instead made it populate the shared global store while the link phase
+/// re-materialized every package per-project off the fetch tail — wasted
+/// work and a serial materialize the pipeline was meant to hide.
+///
+/// The hoisted linker discards `.aube` regardless, so it keeps the raw
+/// override unchanged: forcing its prewarm per-project would only strand
+/// orphan `.aube/<dep_path>` dirs the hoisted sweep doesn't reclaim.
+pub(super) fn prewarm_global_virtual_store_override(
+    node_linker: aube_linker::NodeLinker,
+    effective_gvs: bool,
+    raw_override: Option<bool>,
+) -> Option<bool> {
+    if matches!(node_linker, aube_linker::NodeLinker::Isolated) {
+        Some(effective_gvs)
+    } else {
+        raw_override
+    }
+}
+
 pub(super) fn reset_on_mode_change(
     cwd: &Path,
     aube_dir: &Path,
@@ -146,23 +174,87 @@ mod tests {
     fn default_project_predicts_per_project_so_no_spurious_reset() {
         // hoist=true (default), isolated (default), GVS requested on (off-CI):
         // the linker writes per-project, so the effective mode is `false`.
-        assert!(!effective_global_virtual_store(true, true, NodeLinker::Isolated));
+        assert!(!effective_global_virtual_store(
+            true,
+            true,
+            NodeLinker::Isolated
+        ));
     }
 
     #[test]
     fn gvs_active_only_when_hoist_off_and_isolated() {
-        assert!(effective_global_virtual_store(true, false, NodeLinker::Isolated));
+        assert!(effective_global_virtual_store(
+            true,
+            false,
+            NodeLinker::Isolated
+        ));
     }
 
     #[test]
     fn hoisted_layout_never_uses_global_virtual_store() {
-        assert!(!effective_global_virtual_store(true, false, NodeLinker::Hoisted));
-        assert!(!effective_global_virtual_store(true, true, NodeLinker::Hoisted));
+        assert!(!effective_global_virtual_store(
+            true,
+            false,
+            NodeLinker::Hoisted
+        ));
+        assert!(!effective_global_virtual_store(
+            true,
+            true,
+            NodeLinker::Hoisted
+        ));
     }
 
     #[test]
     fn requested_off_stays_off_regardless_of_hoist() {
-        assert!(!effective_global_virtual_store(false, false, NodeLinker::Isolated));
-        assert!(!effective_global_virtual_store(false, true, NodeLinker::Isolated));
+        assert!(!effective_global_virtual_store(
+            false,
+            false,
+            NodeLinker::Isolated
+        ));
+        assert!(!effective_global_virtual_store(
+            false,
+            true,
+            NodeLinker::Isolated
+        ));
+    }
+
+    // The prewarm materializer must mirror the link phase's *effective*
+    // decision for the isolated linker so its per-package work lands where
+    // `link_all` reads it. Under default isolated (`hoist=true`,
+    // effective=false) it must route per-project; under GVS (`hoist=false`,
+    // effective=true) it stays on the shared store.
+    #[test]
+    fn prewarm_isolated_mirrors_effective_gvs() {
+        // default isolated (hoist=true) → effective false → per-project
+        assert_eq!(
+            prewarm_global_virtual_store_override(NodeLinker::Isolated, false, None),
+            Some(false)
+        );
+        // GVS (hoist=false) → effective true → shared store
+        assert_eq!(
+            prewarm_global_virtual_store_override(NodeLinker::Isolated, true, None),
+            Some(true)
+        );
+        // An explicit raw override is overridden by the effective decision:
+        // the link phase ignores it once hoist forces per-project.
+        assert_eq!(
+            prewarm_global_virtual_store_override(NodeLinker::Isolated, false, Some(true)),
+            Some(false)
+        );
+    }
+
+    // The hoisted linker discards `.aube`, so its prewarm decision is left
+    // as-is (the raw override) — never forced per-project, which would
+    // strand orphan `.aube/<dep_path>` dirs the hoisted sweep can't reclaim.
+    #[test]
+    fn prewarm_hoisted_passes_raw_override_through() {
+        assert_eq!(
+            prewarm_global_virtual_store_override(NodeLinker::Hoisted, false, Some(true)),
+            Some(true)
+        );
+        assert_eq!(
+            prewarm_global_virtual_store_override(NodeLinker::Hoisted, false, None),
+            None
+        );
     }
 }

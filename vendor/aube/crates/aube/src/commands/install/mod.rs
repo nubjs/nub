@@ -923,12 +923,25 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     // install on a default project see a spurious `disabled → enabled`
     // transition and wipe `node_modules` (issue #71). `resolve_node_linker`
     // is the same resolver the link phase uses, so the two stay in lockstep.
+    let resolved_node_linker = link::resolve_node_linker(&settings_ctx)?;
     let effective_gvs = gvs::effective_global_virtual_store(
         planned_gvs,
         aube_settings::resolved::hoist(&settings_ctx),
-        link::resolve_node_linker(&settings_ctx)?,
+        resolved_node_linker,
     );
     gvs::reset_on_mode_change(&cwd, &aube_dir, &modules_dir_name, effective_gvs)?;
+
+    // The fetch-pipelined materializer (`spawn_gvs_prewarm`) must target the
+    // SAME virtual store the link phase reads from, or its work is wasted and
+    // the materialize re-runs serially in `link_all`. Under the default
+    // isolated layout (`hoist=true`) `link_all` materializes per-project, so
+    // the prewarm must too; the raw, hoist-unaware override sent it to the
+    // shared global store instead. See `prewarm_global_virtual_store_override`.
+    let prewarm_gvs_override = gvs::prewarm_global_virtual_store_override(
+        resolved_node_linker,
+        effective_gvs,
+        use_global_virtual_store_override,
+    );
 
     // 3. Parse or resolve lockfile, streaming tarball fetches during resolution
     let phase_start = std::time::Instant::now();
@@ -1215,7 +1228,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 patch_hashes: lock_patch_hashes,
                 node_version: lock_node_version,
                 build_policy: lock_build_policy,
-                use_global_virtual_store_override,
+                use_global_virtual_store_override: prewarm_gvs_override,
                 virtual_store_dir: aube_dir.clone(),
             };
             let lock_materialize_handle =
@@ -2097,7 +2110,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 patch_hashes: materialize_patch_hashes,
                 node_version: node_version_for_prewarm.clone(),
                 build_policy: build_policy_for_prewarm.clone(),
-                use_global_virtual_store_override,
+                use_global_virtual_store_override: prewarm_gvs_override,
                 virtual_store_dir: aube_dir.clone(),
             };
             aube_util::diag::instant(
