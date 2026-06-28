@@ -687,9 +687,18 @@ fn engine_session_inner(
     noise: ConfigScopeNoise,
     strictness: IdentityStrictness,
 ) -> Result<EngineSession> {
-    // Initialize the diagnostics recorder from AUBE_DIAG_* env vars so that
-    // `AUBE_DIAG_SUMMARY=1 nub install` works the same as `AUBE_DIAG_SUMMARY=1
-    // aube install`. The OnceLock inside diag::init() makes this idempotent.
+    // Register the embedder profile BEFORE initializing diagnostics: the diag
+    // recorder reads its toggles through the active profile's `diag_env_prefix`
+    // (`NUB` under nub), so it must see NUB — not the AUBE fallback — at init,
+    // or `NUB_DIAG_*` is missed and `AUBE_DIAG_*` wrongly read. `register()` is
+    // an idempotent set-once OnceLock, so the later `engine_brand_preflight()`
+    // (which calls it again as its first step, alongside the project-state-
+    // dependent config surface) is a no-op for the registration.
+    identity::register();
+    // Initialize the diagnostics recorder from NUB_DIAG_* env vars so that
+    // `NUB_DIAG_SUMMARY=1 nub install` surfaces the same per-phase/per-op
+    // spans + summary table that `AUBE_DIAG_SUMMARY=1 aube install` does. The
+    // OnceLock inside diag::init() makes this idempotent.
     aube_util::diag::init();
     // Raise the open-file-descriptor soft limit toward the hard ceiling. The aube
     // engine does this in its own startup, but nub dispatches the command impls

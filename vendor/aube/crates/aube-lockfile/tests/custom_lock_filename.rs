@@ -24,6 +24,7 @@ static MYTOOL: Embedder = Embedder {
     manifest_namespace: "mytool",
     env_prefix: Some("MYTOOL"),
     config_env_prefix: Some("MYTOOL"),
+    diag_env_prefix: Some("MYTOOL"),
     cache_namespace: "mytool",
     data_namespace: "mytool",
     managed_config_system_dir: Some("mytool"),

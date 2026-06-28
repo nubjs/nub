@@ -173,7 +173,7 @@ struct InstallPhaseTimings {
 impl InstallPhaseTimings {
     fn from_env() -> Self {
         Self {
-            path: aube_util::env::embedder_env("BENCH_PHASES_FILE").map(std::path::PathBuf::from),
+            path: aube_util::env::diag_env("BENCH_PHASES_FILE").map(std::path::PathBuf::from),
             phases_ms: BTreeMap::new(),
             last_kernel_snap: aube_util::diag_kernel::snapshot(),
         }

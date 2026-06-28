@@ -6,17 +6,24 @@ How to performance-trace the nub package manager (install/resolve/fetch/**link**
 
 1. **Phase timings — works under nub TODAY.** `RUST_LOG=debug nub install` emits `phase:<name> <elapsed>` lines on stderr: `phase:resolve`, `phase:fetch (N packages)`, `phase:link (N files)`, `phase:link_bins`. This alone tells you the coarse split (is it network/resolve, or linking?). The aube engine wires these through the `tracing` crate.
 
-2. **Per-file / per-strategy diagnostic — exists in aube, GATED OFF under nub.** `aube_util::diag::event(Category::…, …)` emits structured JSONL to `AUBE_DIAG_FILE=<path>` — including, for the linker, one event per file naming the strategy used (`link_clonedir`, `link_reflink`, `link_macos_small_copy`, `link_copy`, `link_hardlink`). This is the load-independent crux for a link-perf question. **It is inert under the nub embedder** (`crates/nub-cli/src/pm_engine/identity.rs` sets `env_prefix: None`, so `embedder_env()` returns None and `AUBE_DIAG_*` is never read). To use it, build a throwaway dev binary with the prefix flipped on:
+2. **Rich diagnostics layer — native under nub via `NUB_DIAG_*`.** `aube_util::diag` emits structured JSONL to `NUB_DIAG_FILE=<path>` — including, for the linker, one event per file naming the strategy used (`link_clonedir`, `link_reflink`, `link_macos_small_copy`, `link_copy`, `link_hardlink`). This is the load-independent crux for a link-perf question. The full knob set (all off by default, zero cost when unset):
+
+   - `NUB_DIAG_FILE=<path>` — JSONL events to a file.
+   - `NUB_DIAG_PRINT=1` — live per-span lines to stderr.
+   - `NUB_DIAG_SUMMARY=1` — end-of-run aggregate table.
+   - `NUB_DIAG_CRITPATH=1` — retain records for the critical-path / lifecycle / starvation analyzers.
+   - `NUB_DIAG_THRESHOLD_MS=<n>` — filter live prints below `<n>` ms.
+   - `NUB_DIAG_KERNEL=1` — `getrusage` kernel deltas around phases.
+   - `NUB_BENCH_PHASES_FILE=<path>` — per-run phase-timing JSON for the bench harness.
 
 ```sh
-# in an isolated worktree (own CARGO_TARGET_DIR), edit identity.rs: env_prefix: Some("NUB")
-cargo build -p nub-cli --profile fast
+cargo build -p nub-cli --profile fast        # dev binary at <worktree>-target/fast/nub
 NUB=<worktree>-target/fast/nub
-AUBE_DIAG_FILE=/tmp/d.jsonl RUST_LOG=debug "$NUB" install --offline
+NUB_DIAG_FILE=/tmp/d.jsonl NUB_DIAG_SUMMARY=1 "$NUB" install --offline
 grep -o '"name":"link_[a-z_]*"' /tmp/d.jsonl | sort | uniq -c     # per-strategy tally
 ```
 
-(The `dev-tracing-telemetry` thread / `wiki/research/dev-tracing-telemetry.md` is making this accessible without the source flip + adding chrome-trace/flamegraph export — once that lands, prefer its toggle over the manual `env_prefix` flip.)
+(The diag layer reads `NUB_DIAG_*` under the nub embedder profile via the `diag_env_prefix` hook — no source edit needed. `AUBE_DIAG_*` is NOT read under nub. The `dev-tracing-telemetry` thread / `wiki/research/dev-tracing-telemetry.md` tracks the optional chrome-trace/flamegraph export layer on top.)
 
 ## The measurement discipline (load-independent — this host is permanently contended)
 
@@ -42,4 +49,4 @@ Span/JSONL instrumentation can distort a syscall-bound, parallel pass (observer 
 
 ## The one-liner to remember
 
-`RUST_LOG=debug nub install` for the phase split; if it's `phase:link`, build with `env_prefix: Some("NUB")` and `AUBE_DIAG_FILE=…` for the per-file strategy tally; A/B against `--node-linker isolated`; judge by strategy-tally + ratio, never the contended absolute.
+`RUST_LOG=debug nub install` for the phase split; if it's `phase:link`, set `NUB_DIAG_FILE=…` for the per-file strategy tally; A/B against `--node-linker isolated`; judge by strategy-tally + ratio, never the contended absolute.

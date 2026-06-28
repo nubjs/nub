@@ -267,14 +267,14 @@ impl DiagConfig {
      * per-event log is the costly bit.
      */
     pub fn from_env() -> Option<Self> {
-        let file = crate::env::embedder_env("DIAG_FILE").map(PathBuf::from);
-        let print = crate::env::embedder_env("DIAG_PRINT").is_some();
-        let summary_env = crate::env::embedder_env("DIAG_SUMMARY").is_some();
-        let critpath_env = crate::env::embedder_env("DIAG_CRITPATH").is_some();
+        let file = crate::env::diag_env("DIAG_FILE").map(PathBuf::from);
+        let print = crate::env::diag_env("DIAG_PRINT").is_some();
+        let summary_env = crate::env::diag_env("DIAG_SUMMARY").is_some();
+        let critpath_env = crate::env::diag_env("DIAG_CRITPATH").is_some();
         if file.is_none() && !print && !summary_env && !critpath_env {
             return None;
         }
-        let threshold_ms = crate::env::embedder_env("DIAG_THRESHOLD_MS")
+        let threshold_ms = crate::env::diag_env("DIAG_THRESHOLD_MS")
             .as_deref()
             .and_then(|s| s.to_str())
             .and_then(|s| s.parse::<u64>().ok())

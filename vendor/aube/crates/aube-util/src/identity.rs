@@ -111,6 +111,21 @@ pub struct Embedder {
     /// the host wants under its own brand, whereas the debug toggles vanish
     /// under an embedder that hides them. `None` reads no first-class config env.
     pub config_env_prefix: Option<&'static str>,
+    /// Env-var prefix for the diagnostics layer's small toggle set — the
+    /// `DIAG_*` knobs (`DIAG_FILE`/`DIAG_PRINT`/`DIAG_SUMMARY`/`DIAG_CRITPATH`/
+    /// `DIAG_THRESHOLD_MS`/`DIAG_KERNEL`) plus `BENCH_PHASES_FILE` — read through
+    /// [`diag_env`](crate::env::diag_env), e.g. `Some("AUBE")` → `AUBE_DIAG_FILE`,
+    /// `Some("NUB")` → `NUB_DIAG_FILE`. `None` reads none of them.
+    ///
+    /// Carved out from [`env_prefix`](Self::env_prefix) so a host can expose the
+    /// rich diagnostics layer under its OWN brand WITHOUT also inheriting aube's
+    /// ~30 other internal `{env_prefix}_*` debug toggles (`DISABLE_*`, `CAS_*`,
+    /// `INTERNAL_*`, …): those stay on `env_prefix`, the diag knobs follow this.
+    /// Standalone aube sets it to its `env_prefix` value (`Some("AUBE")`), so the
+    /// `AUBE_DIAG_*` surface is byte-for-byte unchanged; an embedder that hides
+    /// the general toggle family (`env_prefix = None`) can still opt the
+    /// diagnostics layer in by setting this to its own brand.
+    pub diag_env_prefix: Option<&'static str>,
     /// Leaf directory name under the OS cache root, e.g. `"aube"` →
     /// `<XDG_CACHE_HOME>/aube`.
     pub cache_namespace: &'static str,
@@ -290,6 +305,9 @@ pub const AUBE: Embedder = Embedder {
     manifest_namespace: "aube",
     env_prefix: Some("AUBE"),
     config_env_prefix: Some("AUBE"),
+    // Defaults to `env_prefix` so the `AUBE_DIAG_*` / `AUBE_BENCH_PHASES_FILE`
+    // surface is byte-for-byte unchanged for standalone aube.
+    diag_env_prefix: Some("AUBE"),
     cache_namespace: "aube",
     data_namespace: "aube",
     managed_config_system_dir: Some("aube"),
@@ -470,6 +488,7 @@ mod tests {
         assert_eq!(id.manifest_namespace, "aube");
         assert_eq!(id.env_prefix, Some("AUBE"));
         assert_eq!(id.config_env_prefix, Some("AUBE"));
+        assert_eq!(id.diag_env_prefix, Some("AUBE"));
         assert_eq!(id.cache_namespace, "aube");
         assert_eq!(id.data_namespace, "aube");
         assert_eq!(id.managed_config_system_dir, Some("aube"));

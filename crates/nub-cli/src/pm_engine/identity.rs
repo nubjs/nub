@@ -43,12 +43,14 @@
 ///   ROOT (top-level `workspaces`/`overrides`/`allowBuilds`), not a branded
 ///   `"nub"` object.
 /// - `env_prefix` = `None` — nub exposes NONE of aube's internal debug /
-///   diagnostic / perf-bisect toggle family (`AUBE_DISABLE_*`, `AUBE_DIAG_*`,
-///   `AUBE_CAS_*`, …). Those route through `aube_util::env::embedder_env`, which
-///   reads `{env_prefix}_<SUFFIX>` — so `None` makes every such toggle simply
+///   perf-bisect toggle family (`AUBE_DISABLE_*`, `AUBE_CAS_*`, `AUBE_INTERNAL_*`,
+///   …). Those route through `aube_util::env::embedder_env`, which reads
+///   `{env_prefix}_<SUFFIX>` — so `None` makes every such toggle simply
 ///   unreadable under nub, and the branded `AUBE_*` forms never leak into nub's
 ///   surface. (The user-facing settings-class `AUBE_*` aliases are gated
-///   separately by `read_branded_settings_env = false`.)
+///   separately by `read_branded_settings_env = false`. The diagnostics `DIAG_*`
+///   knobs are split out onto `diag_env_prefix` so nub can expose THEM under its
+///   own brand without re-admitting this whole family — see below.)
 /// - `config_env_prefix` = `Some("NUB")` — nub's three FIRST-CLASS config knobs
 ///   are read under nub's own brand via `aube_util::env::config_env`:
 ///   `NUB_CACHE_DIR` (the PM cache dir), `NUB_CONCURRENCY` (the tarball-fetch
@@ -57,6 +59,19 @@
 ///   deliberate, minimal exception to the brand boundary: a handful of knobs nub
 ///   legitimately owns under its own name. The corresponding `AUBE_*` forms are
 ///   never read under nub.
+/// - `diag_env_prefix` = `Some("NUB")` — exposes aube's rich diagnostics layer
+///   (per-phase/per-op spans, JSONL output, end-of-run summary table,
+///   critical-path analyzer, `getrusage` kernel deltas) under nub's OWN brand
+///   via `aube_util::env::diag_env`: `NUB_DIAG_FILE` (JSONL events to a file),
+///   `NUB_DIAG_PRINT`, `NUB_DIAG_SUMMARY`, `NUB_DIAG_CRITPATH`,
+///   `NUB_DIAG_THRESHOLD_MS`, `NUB_DIAG_KERNEL`, plus `NUB_BENCH_PHASES_FILE`.
+///   These are dev/perf-tracing knobs (a sanctioned internal `NUB_*` surface),
+///   off by default — unset, the diag layer's `ENABLED` atomic stays false and
+///   the instrumentation no-ops exactly as today, so there is zero hot-path
+///   cost. Carved out from `env_prefix` deliberately: routing JUST the `DIAG_*`
+///   knobs here lets nub reach the diagnostics layer without also exposing
+///   aube's ~30 unrelated internal `AUBE_*` toggles under `NUB_*`. The `AUBE_*`
+///   forms are never read under nub.
 /// - `cache_namespace` = `"nub/pm"` — engine cache lands at
 ///   `$XDG_CACHE_HOME/nub/pm` (a `/pm` sibling of nub's own runtime caches
 ///   under `$XDG_CACHE_HOME/nub/`), reproducing the old
@@ -132,6 +147,11 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     manifest_namespace: "",
     env_prefix: None,
     config_env_prefix: Some("NUB"),
+    // Exposes the diagnostics layer under nub's own brand (`NUB_DIAG_*` +
+    // `NUB_BENCH_PHASES_FILE`) without re-admitting the broad `AUBE_*` toggle
+    // family that `env_prefix: None` shuts off. Off by default — zero hot-path
+    // cost when unset.
+    diag_env_prefix: Some("NUB"),
     cache_namespace: "nub/pm",
     data_namespace: "nub",
     managed_config_system_dir: Some("nub"),
@@ -189,6 +209,7 @@ const _: () = {
     assert!(NUB.workspace_yaml.is_none());
     assert!(NUB.env_prefix.is_none());
     assert!(matches!(NUB.config_env_prefix, Some(p) if matches!(p.as_bytes(), b"NUB")));
+    assert!(matches!(NUB.diag_env_prefix, Some(p) if matches!(p.as_bytes(), b"NUB")));
     assert!(NUB.vendor.is_some());
     assert!(!NUB.self_engines_check);
     assert!(!NUB.canonical_lockfile_always_wins);

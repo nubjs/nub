@@ -84,7 +84,7 @@ pub fn snapshot() -> Option<KernelSnapshot> {
  * other platforms.
  */
 pub fn enabled() -> bool {
-    crate::env::embedder_env("DIAG_KERNEL").is_some() && snapshot().is_some()
+    crate::env::diag_env("DIAG_KERNEL").is_some() && snapshot().is_some()
 }
 
 /**

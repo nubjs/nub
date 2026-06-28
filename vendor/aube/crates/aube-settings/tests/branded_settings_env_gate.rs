@@ -35,6 +35,7 @@ static MYTOOL_NO_BRANDED_ENV: Embedder = Embedder {
     // MYTOOL_* var: with the family disabled, no branded settings var is read.
     env_prefix: Some("MYTOOL"),
     config_env_prefix: Some("MYTOOL"),
+    diag_env_prefix: Some("MYTOOL"),
     cache_namespace: "mytool",
     data_namespace: "mytool",
     managed_config_system_dir: Some("mytool"),

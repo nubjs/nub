@@ -21,6 +21,7 @@ static ROOT_TOOL: Embedder = Embedder {
     manifest_namespace: "",
     env_prefix: None,
     config_env_prefix: None,
+    diag_env_prefix: None,
     cache_namespace: "roottool",
     data_namespace: "roottool",
     managed_config_system_dir: Some("roottool"),

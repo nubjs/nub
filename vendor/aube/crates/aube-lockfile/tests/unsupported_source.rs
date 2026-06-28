@@ -27,6 +27,7 @@ static STRICT: Embedder = Embedder {
     manifest_namespace: "aube",
     env_prefix: Some("AUBE"),
     config_env_prefix: Some("AUBE"),
+    diag_env_prefix: Some("AUBE"),
     cache_namespace: "aube",
     data_namespace: "aube",
     managed_config_system_dir: Some("aube"),

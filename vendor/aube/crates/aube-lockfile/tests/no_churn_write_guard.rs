@@ -34,6 +34,7 @@ static NO_CHURN_TOOL: Embedder = Embedder {
     manifest_namespace: "nochurn",
     env_prefix: Some("NOCHURN"),
     config_env_prefix: Some("NOCHURN"),
+    diag_env_prefix: Some("NOCHURN"),
     cache_namespace: "nochurn",
     data_namespace: "nochurn",
     managed_config_system_dir: Some("nochurn"),

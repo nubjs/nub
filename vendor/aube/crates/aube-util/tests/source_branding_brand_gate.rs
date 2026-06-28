@@ -29,6 +29,7 @@ static NUBLIKE: Embedder = Embedder {
     manifest_namespace: "",
     env_prefix: None,
     config_env_prefix: Some("NUB"),
+    diag_env_prefix: None,
     cache_namespace: "nublike",
     data_namespace: "nublike",
     managed_config_system_dir: Some("nublike"),

@@ -128,6 +128,25 @@ pub fn config_env(suffix: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(format!("{prefix}_{suffix}"))
 }
 
+/// Read one of the diagnostics layer's toggles through the active embedder's
+/// [`diag_env_prefix`](crate::identity::Embedder::diag_env_prefix). For
+/// standalone aube (`Some("AUBE")`) `diag_env("DIAG_FILE")` reads
+/// `AUBE_DIAG_FILE`; for an embedder with `diag_env_prefix = Some("NUB")` it
+/// reads `NUB_DIAG_FILE`. `None` reads nothing.
+///
+/// Distinct from [`embedder_env`]: that family follows the broad `env_prefix`
+/// and carries aube's whole internal `{env_prefix}_*` toggle surface (~30
+/// `DISABLE_*`/`CAS_*`/`INTERNAL_*` knobs), whereas this routes ONLY the
+/// `DIAG_*` knobs and `BENCH_PHASES_FILE` through their own prefix — so a host
+/// can expose the diagnostics layer under its own brand without inheriting the
+/// rest. Default-preserving: standalone aube sets `diag_env_prefix` to its
+/// `env_prefix`, so these reads resolve to exactly the `AUBE_*` forms they did
+/// when this family lived on `embedder_env`.
+pub fn diag_env(suffix: &str) -> Option<std::ffi::OsString> {
+    let prefix = embedder().diag_env_prefix?;
+    std::env::var_os(format!("{prefix}_{suffix}"))
+}
+
 /// Parse a primer-TTL env value into an *override* of the embedder's default.
 ///
 /// Returns:
@@ -390,6 +409,21 @@ mod tests {
             assert_eq!(
                 config_env("CACHE_DIR").as_deref(),
                 Some(std::ffi::OsStr::new("/tmp/x")),
+            );
+        });
+        // The diag family defaults to `env_prefix` under AUBE, so `diag_env`
+        // reads exactly the `AUBE_DIAG_*` forms it read when these knobs lived
+        // on `embedder_env` — the default-preserving contract for the carve-out.
+        with_var("AUBE_DIAG_FILE", "/tmp/d.jsonl", || {
+            assert_eq!(
+                diag_env("DIAG_FILE").as_deref(),
+                Some(std::ffi::OsStr::new("/tmp/d.jsonl")),
+            );
+        });
+        with_var("AUBE_BENCH_PHASES_FILE", "/tmp/p.json", || {
+            assert_eq!(
+                diag_env("BENCH_PHASES_FILE").as_deref(),
+                Some(std::ffi::OsStr::new("/tmp/p.json")),
             );
         });
     }
