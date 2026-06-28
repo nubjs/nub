@@ -12,9 +12,11 @@
 //!      mode (same path `--frozen-lockfile` takes).
 //!   3. `enableScripts: false` (yarn) → force a block-all-builds policy that
 //!      overrides even nub's curated default-trust floor.
-//!   4. `dependenciesMeta.*.injected` → auto-switch to the isolated linker (the
-//!      only layout where aube materializes injected copies) instead of
-//!      silently dropping the directive under nub's hoisted default.
+//!   4. `dependenciesMeta.*.injected` → the carve-out from the isolated+GVS
+//!      default: nub's default flips every other non-injected project to
+//!      `hoist=false` (no hidden hoist tree, GVS on), but injected copies
+//!      materialize only with the hidden hoist tree, so an injected project
+//!      keeps the engine's isolated + `hoist=true` default (GVS off).
 //!
 //! (`minimumReleaseAge` from bunfig is wired in [`super::bun_config`] — it maps
 //! to a synthetic `.npmrc` entry the settings registry already reads.)
@@ -205,10 +207,10 @@ fn yarn_offline_mirror_configured(root: &Path) -> bool {
 
 /// Whether the root (or any workspace member) manifest declares
 /// `dependenciesMeta.<pkg>.injected: true`. aube materializes injected copies
-/// only under the isolated linker, so when injection is present nub auto-
-/// switches the embedder's `nodeLinker` default to `isolated` (instead of the
-/// hoisted default for flat-layout incumbents) rather than silently dropping
-/// the directive.
+/// only with the hidden hoist tree on, so an injected project is the carve-out
+/// from the isolated+GVS default: instead of `hoist=false` (GVS on) it keeps
+/// the engine's isolated + `hoist=true` default (GVS off), rather than silently
+/// dropping the directive.
 pub(crate) fn injected_deps_present(root: &Path) -> bool {
     manifest_has_injected(&root.join("package.json"))
         || aube_workspace::find_workspace_packages(root)

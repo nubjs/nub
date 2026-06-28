@@ -988,7 +988,8 @@ fn warn_phantom_dependencies() {
         "  npm and yarn use a flat, hoisted layout. Packages you imported but never",
         "  declared in package.json (\"phantom dependencies\") were only reachable via",
         "  that hoisting and may no longer resolve. If an install or run fails on a",
-        "  missing module, add it to package.json explicitly.",
+        "  missing module, add it to package.json explicitly — or add",
+        "  node-linker=hoisted to .npmrc to keep the flat layout.",
     ];
     eprintln!();
     for line in lines {
