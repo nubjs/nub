@@ -16,7 +16,7 @@
 // (it imported them as ESM), so this module never require()s the core there.
 
 const module_ = require("node:module");
-const { readdirSync } = require("node:fs");
+const { readdirSync, existsSync } = require("node:fs");
 const { fileURLToPath, pathToFileURL } = require("node:url");
 const { join, dirname, extname: pathExtname } = require("node:path");
 
@@ -335,14 +335,17 @@ function resolveViaParentRequire(specifier, parentURL) {
 // `phantomDepHint` returns the one-line opt-out to append — but ONLY when the
 // package is genuinely a phantom dep.
 //
-// The discriminator is the virtual store: nub names every package in the
-// project's graph `<name>@<version>` (scoped `/` → `+`) under
-// `node_modules/.nub`, so a matching entry means the package IS installed but
-// unreachable from here — a phantom dep. A genuine typo / absent dep has no
-// entry and gets Node's error verbatim. This is correct under GVS (entries are
-// symlinks into the global store) and non-GVS (real dirs) alike, and the
-// hoisted opt-out leaves NO `<name>@*` entries (only `.nub-state`) so it never
-// matches — nor do node-suite / plain-Node trees (no `.nub` at all).
+// Two conditions, both required, so the hint fires ONLY for a true phantom dep:
+//   (1) the bare package is in the project's graph — nub names every graph
+//       package `<name>@<version>` (scoped `/` → `+`) under `node_modules/.nub`,
+//       so a matching entry means it's installed (GVS: symlinks into the global
+//       store; non-GVS: real dirs);
+//   (2) the bare package is NOT reachable at any `node_modules/<pkg>` up the
+//       tree — otherwise the package resolves and the MODULE_NOT_FOUND is a
+//       missing SUBPATH/file inside it (`react-dom/client-typo`), not a phantom.
+// A genuine typo / absent dep fails (1); a subpath miss of a declared dep fails
+// (2); the hoisted opt-out leaves no `<name>@*` entries (only internal state),
+// and node-suite / plain-Node trees have no `.nub` at all — none get the hint.
 // NOT COVERED: the compat-tier ESM loader (Node 18.19–22.14 `import`) resolves
 // in preload-async-hooks.mjs and can't reach this CJS helper, so that band
 // surfaces Node's standard error without the hint; the fast tier (22.15+) and
@@ -363,29 +366,31 @@ function phantomDepHint(specifier, fromPath) {
     return null;
   }
   const prefix = pkg.replace(/\//g, "+") + "@";
+  let inStore = false;
   for (let i = 0; i < 40 && dir; i++) {
-    let entries;
-    try {
-      entries = readdirSync(join(dir, "node_modules", ".nub"));
-    } catch {
-      entries = null;
-    }
-    if (entries) {
-      // Nearest `.nub` is the project's virtual store; decide here rather than
-      // walking past it into a parent monorepo store.
-      if (!entries.some((e) => e.startsWith(prefix))) return null;
-      return (
-        `\n\n"${pkg}" is installed but not reachable here — it's a phantom dependency (an ` +
-        `undeclared transitive). nub's isolated node_modules exposes only the packages ` +
-        `declared in package.json. Add "${pkg}" to your dependencies, or add ` +
-        "`node-linker=hoisted` to .npmrc to use a flat node_modules."
-      );
+    const nm = join(dir, "node_modules");
+    // Reachable here ⇒ the bare package resolves, so this miss is a subpath/file
+    // inside it, not a phantom dep — suppress. existsSync follows the isolated
+    // layout's top-level symlink to the real package.
+    if (existsSync(join(nm, pkg))) return null;
+    if (!inStore) {
+      try {
+        inStore = readdirSync(join(nm, ".nub")).some((e) => e.startsWith(prefix));
+      } catch {
+        /* no `.nub` at this level */
+      }
     }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return null;
+  // In the graph's virtual store yet never reachable up the tree → phantom dep.
+  return inStore
+    ? `\n\n"${pkg}" is installed but not reachable here — it's a phantom dependency (an ` +
+        `undeclared transitive). nub's isolated node_modules exposes only the packages ` +
+        `declared in package.json. Add "${pkg}" to your dependencies, or add ` +
+        "`node-linker=hoisted` to .npmrc to use a flat node_modules."
+    : null;
 }
 
 // Append `hint` to a thrown error's message AND its printed `.stack`. V8
