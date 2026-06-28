@@ -239,6 +239,21 @@ impl InstallPhaseTimings {
     }
 }
 
+/// Diagnostics-only suffix that makes a ZERO-work warm phase unmistakable in
+/// the `RUST_LOG=debug` `phase:*` lines. A coherent/up-to-date tree still
+/// traverses the fetch+link pipeline (OSV gate, GVS verify, bin sweep) and
+/// burns real wall-time while fetching 0 packages / linking 0 files; without
+/// this marker a reader misattributes that pipeline-traversal cost to actual
+/// work. `" [no-work: warm/up-to-date]"` when `no_work`, else `""`. Pure
+/// formatting — no behavioral effect, debug-level only.
+pub(super) fn phase_no_work_marker(no_work: bool) -> &'static str {
+    if no_work {
+        " [no-work: warm/up-to-date]"
+    } else {
+        ""
+    }
+}
+
 /// Persist the global no-integrity content-address bindings from a run's
 /// freshly `computed` sha512s. Each no-integrity package is bound by the
 /// registry tarball URL it resolves to (derived from THIS project's
@@ -1109,8 +1124,10 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 graph.packages.len()
             );
             tracing::debug!(
-                "phase:resolve (from lockfile) {:.1?}",
-                phase_start.elapsed()
+                "phase:resolve (from lockfile) {:.1?} ({} packages){}",
+                phase_start.elapsed(),
+                graph.packages.len(),
+                phase_no_work_marker(graph.packages.is_empty())
             );
             phase_timings.record("resolve", phase_start.elapsed());
 
@@ -1303,8 +1320,9 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 None => unreachable!("OSV JoinSet had exactly one spawned task"),
             };
             tracing::debug!(
-                "phase:fetch {:.1?} ({fetched} packages)",
-                phase_start.elapsed()
+                "phase:fetch {:.1?} ({fetched} packages){}",
+                phase_start.elapsed(),
+                phase_no_work_marker(fetched == 0)
             );
             phase_timings.record("fetch", phase_start.elapsed());
 
@@ -2069,7 +2087,12 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             if let Some(p) = prog_ref {
                 p.set_phase("fetching");
             }
-            tracing::debug!("phase:resolve (fresh) {:.1?}", phase_start.elapsed());
+            tracing::debug!(
+                "phase:resolve (fresh) {:.1?} ({} packages){}",
+                phase_start.elapsed(),
+                graph.packages.len(),
+                phase_no_work_marker(graph.packages.is_empty())
+            );
             phase_timings.record("resolve", phase_start.elapsed());
             drop(_diag_resolve);
             aube_util::diag::instant(aube_util::diag::Category::Install, "resolve_end", None);
@@ -2141,8 +2164,9 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             };
             let (canonical_indices, mut cached, mut fetched, computed_integrities) = fetch_result;
             tracing::debug!(
-                "phase:fetch {:.1?} ({fetched} packages, {cached} cached)",
-                fetch_phase_start.elapsed()
+                "phase:fetch {:.1?} ({fetched} packages, {cached} cached){}",
+                fetch_phase_start.elapsed(),
+                phase_no_work_marker(fetched == 0)
             );
             phase_timings.record("fetch", fetch_phase_start.elapsed());
             drop(_diag_fetch_wait);
@@ -2164,10 +2188,11 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             );
             prewarm_graph_hashes = prewarm_hashes_from_task;
             tracing::debug!(
-                "phase:prewarm-gvs {:.1?} ({} packages, {} files)",
+                "phase:prewarm-gvs {:.1?} ({} packages, {} files){}",
                 materialize_phase_start.elapsed(),
                 prewarm_stats.packages_linked,
                 prewarm_stats.files_linked,
+                phase_no_work_marker(prewarm_stats.files_linked == 0)
             );
             phase_timings.record("prewarm_gvs", materialize_phase_start.elapsed());
 

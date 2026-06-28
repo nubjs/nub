@@ -327,9 +327,10 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     };
 
     tracing::debug!(
-        "phase:link {:.1?} ({} files)",
+        "phase:link {:.1?} ({} files){}",
         phase_start.elapsed(),
-        stats.files_linked
+        stats.files_linked,
+        super::phase_no_work_marker(stats.files_linked == 0)
     );
     phase_timings.record("link", phase_start.elapsed());
 
