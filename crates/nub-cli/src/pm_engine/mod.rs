@@ -744,7 +744,11 @@ fn engine_session_inner(
     let truly_fresh = is_truly_fresh_project(&cwd, detected.as_ref());
     // Set-unless-user-set: ranks below CLI flags, env vars, and every
     // config file in the engine's settings precedence.
-    aube_settings::set_embedder_defaults(nub_setting_defaults(detected.as_ref(), truly_fresh));
+    aube_settings::set_embedder_defaults(nub_setting_defaults(
+        detected.as_ref(),
+        truly_fresh,
+        &cwd,
+    ));
     // Route the engine's lifecycle scripts through nub's runtime augmentation
     // (project-pinned + augmented Node, shim on PATH, preload) — the SAME
     // augmentation `nub run` / `nub exec` apply, so run / exec / lifecycle
@@ -1926,16 +1930,17 @@ fn strip_yarnrc_value(rest: &str) -> &str {
     rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
-/// - Layout policy: flat-layout incumbent kinds (npm/yarn/bun) default to the
+/// - Layout policy: EVERY non-injected project — every incumbent
+///   (npm/yarn/bun/pnpm) and a fresh nub-identity project — defaults to the
 ///   isolated layout with the hidden hoist tree OFF (`nodeLinker=isolated` +
-///   `hoist=false`) — the config that engages the global virtual store, since
+///   `hoist=false`), the config that engages the global virtual store since
 ///   aube's `effective_gvs = planned_gvs && !hoist && Isolated`. This is the
 ///   greenlit compat→correctness shift (2026-06-28): isolated is strict (no
-///   phantom deps) and GVS-fast; a project that relies on phantom deps opts
-///   back into the flat tree with one `.npmrc` line (`node-linker=hoisted`).
-///   pnpm/aube kinds and fresh projects push no layout entry, keeping the
-///   engine's isolated default WITH the hidden hoist tree on (stock-aube
-///   phantom-dep tolerance, matching pnpm's own default). A user-set
+///   phantom deps) and GVS-fast across every project; a project that relies on
+///   phantom deps opts back into the flat tree with one `.npmrc` line
+///   (`node-linker=hoisted`). The ONLY carve-out is injected deps
+///   (`dependenciesMeta.*.injected`), which need the hidden hoist tree and so
+///   keep the engine's isolated + hoist=true default (GVS off). A user-set
 ///   `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins — embedder-tier default.
 /// - Fresh-write lockfile format: a TRULY-fresh project (no PM-preference
 ///   signal of any kind — `truly_fresh`) writes nub's neutral `lock.yaml`
@@ -1947,6 +1952,7 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 fn nub_setting_defaults(
     detected: Option<&DetectedLockfile>,
     truly_fresh: bool,
+    cwd: &Path,
 ) -> Vec<(String, String)> {
     let fresh_format = if truly_fresh { "aube" } else { "pnpm" };
     let mut defaults = vec![
@@ -1971,31 +1977,23 @@ fn nub_setting_defaults(
             data.join("store").to_string_lossy().into_owned(),
         ));
     }
-    let flat_incumbent = matches!(
-        detected.map(|d| d.kind),
-        Some(
-            LockfileKind::Npm
-                | LockfileKind::NpmShrinkwrap
-                | LockfileKind::Yarn
-                | LockfileKind::YarnBerry
-                | LockfileKind::Bun
-        )
-    );
-    let injected = detected
-        .map(|d| unsupported_config::injected_deps_present(&d.dir))
-        .unwrap_or(false);
-    // GREENLIT 2026-06-28 compat→correctness flip: flat-layout incumbents
-    // (npm/yarn/bun) default to isolated with the hidden hoist tree OFF.
-    // Pushing `hoist=false` under the engine's isolated default is precisely
-    // what engages the global virtual store (aube gvs.rs: `effective_gvs =
-    // planned_gvs && !hoist && Isolated`); `nodeLinker=isolated` is pushed
-    // explicitly so the layout intent reads at this call site even though it
-    // equals the engine default. Injected deps (`dependenciesMeta.*.injected`)
-    // are the carve-out: they need the hidden tree to sibling-link packed
-    // copies, so they stay on stock-aube isolated+hoist=true (GVS off) — that
-    // path is proven, injected-under-GVS is not. A user-set `nodeLinker`/
-    // `hoist` (env/.npmrc/yaml) still wins; this is only the embedder default.
-    if flat_incumbent && !injected {
+    // Scan for injected deps at the incumbent's root when detected, else the
+    // cwd — a fresh project (`detected.is_none()`) is rooted at the cwd, so it
+    // is still excluded from the GVS default below if it declares injected deps.
+    let injected_root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
+    let injected = unsupported_config::injected_deps_present(injected_root);
+    // GREENLIT 2026-06-28 compat→correctness flip: EVERY non-injected project —
+    // any incumbent (npm/yarn/bun/pnpm) and a fresh nub-identity project —
+    // defaults to isolated with the hidden hoist tree OFF. Pushing `hoist=false`
+    // under the engine's isolated default is what engages the global virtual
+    // store (aube gvs.rs: `effective_gvs = planned_gvs && !hoist && Isolated`);
+    // `nodeLinker=isolated` is pushed explicitly so the layout intent reads at
+    // this call site even though it equals the engine default. Injected deps
+    // (`dependenciesMeta.*.injected`) are the ONE carve-out: they need the
+    // hidden tree to sibling-link packed copies, so they keep stock-aube
+    // isolated+hoist=true (GVS off) — proven, where injected-under-GVS is not.
+    // A user-set `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins.
+    if !injected {
         defaults.push(("nodeLinker".to_string(), "isolated".to_string()));
         defaults.push(("hoist".to_string(), "false".to_string()));
     }
@@ -2476,14 +2474,19 @@ mod tests {
             fresh: false,
         };
 
-        // Flat-layout incumbents ⇒ isolated + hoist=false (the GVS-engaging
-        // config: aube's effective_gvs needs `!hoist && Isolated`).
+        // Every non-injected incumbent kind AND a fresh project default to
+        // isolated + hoist=false (the GVS-engaging config: aube's effective_gvs
+        // needs `!hoist && Isolated`). The tempdir has no injected manifest.
         for kind in [
             LockfileKind::Npm,
+            LockfileKind::NpmShrinkwrap,
+            LockfileKind::Yarn,
             LockfileKind::YarnBerry,
             LockfileKind::Bun,
+            LockfileKind::Pnpm,
+            LockfileKind::Aube,
         ] {
-            let defaults = nub_setting_defaults(Some(&detected(kind)), false);
+            let defaults = nub_setting_defaults(Some(&detected(kind)), false, dir.path());
             assert_eq!(
                 get(&defaults, "nodeLinker"),
                 Some("isolated"),
@@ -2496,50 +2499,76 @@ mod tests {
             );
         }
 
-        // pnpm-shaped kinds and no lockfile ⇒ no layout entry (engine's
-        // isolated + hoist=true default applies, GVS off, stock-aube
-        // phantom-dep tolerance, matching pnpm's own default).
-        for kind in [LockfileKind::Pnpm, LockfileKind::Aube] {
-            let defaults = nub_setting_defaults(Some(&detected(kind)), false);
-            assert_eq!(
-                get(&defaults, "nodeLinker"),
-                None,
-                "{kind:?} must not inject a nodeLinker default"
-            );
-            assert_eq!(
-                get(&defaults, "hoist"),
-                None,
-                "{kind:?} must not inject a hoist default"
-            );
-        }
+        // A fresh project (no lockfile) gets the same GVS default.
+        let fresh = nub_setting_defaults(None, true, dir.path());
         assert_eq!(
-            get(&nub_setting_defaults(None, true), "nodeLinker"),
-            None,
-            "no lockfile must not inject a nodeLinker default"
+            get(&fresh, "nodeLinker"),
+            Some("isolated"),
+            "fresh ⇒ isolated"
         );
         assert_eq!(
-            get(&nub_setting_defaults(None, true), "hoist"),
-            None,
-            "no lockfile must not inject a hoist default"
+            get(&fresh, "hoist"),
+            Some("false"),
+            "fresh ⇒ hoist off (GVS)"
         );
     }
 
     #[test]
+    fn injected_deps_keep_the_hidden_hoist_tree_and_opt_out_of_gvs() {
+        // The ONE carve-out: a project declaring `dependenciesMeta.*.injected`
+        // needs the hidden hoist tree, so it keeps the engine's isolated +
+        // hoist=true default (no nodeLinker/hoist pushed) — GVS off. Covered for
+        // both a detected incumbent and a fresh project rooted at cwd.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","dependenciesMeta":{"foo":{"injected":true}}}"#,
+        )
+        .unwrap();
+        let detected = DetectedLockfile {
+            kind: LockfileKind::Npm,
+            dir: dir.path().to_path_buf(),
+            fresh: false,
+        };
+        for defaults in [
+            nub_setting_defaults(Some(&detected), false, dir.path()),
+            nub_setting_defaults(None, true, dir.path()), // fresh, injected at cwd
+        ] {
+            assert_eq!(
+                get(&defaults, "nodeLinker"),
+                None,
+                "injected ⇒ no nodeLinker push"
+            );
+            assert_eq!(
+                get(&defaults, "hoist"),
+                None,
+                "injected ⇒ no hoist push (GVS off)"
+            );
+        }
+    }
+
+    #[test]
     fn fresh_write_format_flips_with_truly_fresh() {
+        let dir = tempfile::tempdir().unwrap();
         // A truly-fresh project writes nub's neutral `lock.yaml`
         // (`defaultLockfileFormat=aube`); every other surface keeps the
         // pnpm-lock fresh-write default for drop-in interop.
         assert_eq!(
-            get(&nub_setting_defaults(None, true), "defaultLockfileFormat"),
+            get(
+                &nub_setting_defaults(None, true, dir.path()),
+                "defaultLockfileFormat"
+            ),
             Some("aube"),
             "truly-fresh must write nub's lock.yaml"
         );
         assert_eq!(
-            get(&nub_setting_defaults(None, false), "defaultLockfileFormat"),
+            get(
+                &nub_setting_defaults(None, false, dir.path()),
+                "defaultLockfileFormat"
+            ),
             Some("pnpm"),
             "a project with a pnpm signal keeps the pnpm-lock fresh-write default"
         );
-        let dir = tempfile::tempdir().unwrap();
         let pnpm = DetectedLockfile {
             kind: LockfileKind::Pnpm,
             dir: dir.path().to_path_buf(),
@@ -2547,7 +2576,7 @@ mod tests {
         };
         assert_eq!(
             get(
-                &nub_setting_defaults(Some(&pnpm), false),
+                &nub_setting_defaults(Some(&pnpm), false, dir.path()),
                 "defaultLockfileFormat"
             ),
             Some("pnpm"),
@@ -2576,7 +2605,7 @@ mod tests {
             // identity-settings invariants for the non-truly-fresh surfaces
             // (the truly-fresh lockfile-format flip is covered separately in
             // `fresh_write_format_flips_with_truly_fresh`).
-            let defaults = nub_setting_defaults(detected.as_ref(), false);
+            let defaults = nub_setting_defaults(detected.as_ref(), false, dir.path());
             assert_eq!(get(&defaults, "defaultLockfileFormat"), Some("pnpm"));
             assert_eq!(get(&defaults, "virtualStoreDir"), Some("node_modules/.nub"));
             assert_eq!(get(&defaults, "stateDir"), Some("node_modules/.nub"));
@@ -2626,7 +2655,7 @@ mod tests {
 
         for kind in all_kinds {
             let d = kind.map(detected);
-            let defaults = nub_setting_defaults(d.as_ref(), false);
+            let defaults = nub_setting_defaults(d.as_ref(), false, dir.path());
             let label = format!("{kind:?}");
 
             // Must always carry the safe explicit-allowlist posture.

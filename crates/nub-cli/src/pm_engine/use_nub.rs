@@ -826,29 +826,16 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
     let mut migration = plan_migration(&source)?;
     migration.notes.append(&mut merge_notes);
 
-    // Layout preservation (the maintainer ruling, 2026-06-10): a hoisted-origin repo
-    // (npm/yarn/bun lockfile converted) keeps its flat layout — going
-    // isolated is the team's deliberate follow-up, not a side effect of
-    // switching tools. Skipped when the migration itself carries a
-    // node-linker (the explicit setting wins).
-    let hoisted_origin = matches!(
-        &plan,
-        AlignPlan::Convert {
-            from_kind: aube_lockfile::LockfileKind::Npm
-                | aube_lockfile::LockfileKind::NpmShrinkwrap
-                | aube_lockfile::LockfileKind::Yarn
-                | aube_lockfile::LockfileKind::YarnBerry
-                | aube_lockfile::LockfileKind::Bun,
-            ..
-        }
-    );
     // Phantom-dependency warning gate (writeup §6): switching FROM a *hoisting*
-    // PM (npm or yarn — flat node_modules) changes the layout, so undeclared
-    // imports that only resolved via hoisting may break. pnpm/bun are already
-    // isolated (non-hoisting), so they get no warning; nor does a fresh project
-    // or a pnpm→nub rename. Bun is part of `hoisted_origin` above only for the
-    // layout-preservation note (it carries a flat-ish lockfile shape there), but
-    // it is NOT a hoisting PM for phantom-deps purposes — exclude it here.
+    // PM (npm or yarn — flat node_modules) to nub's isolated default changes
+    // the layout, so undeclared imports that only resolved via hoisting may
+    // break. The switch no longer writes `node-linker=hoisted` to preserve the
+    // flat layout (it once did; dropped 2026-06-28 to match the isolated+GVS
+    // install default — the layout-preservation note is gone, the warning
+    // stays). pnpm/bun are already isolated (non-hoisting), so they get no
+    // warning; nor does a fresh project or a pnpm→nub rename. (Bun's lockfile
+    // shape is flat-ish, but it is NOT a hoisting PM for phantom-deps purposes —
+    // exclude it here.)
     let from_hoisting_pm = matches!(
         &plan,
         AlignPlan::Convert {
@@ -859,17 +846,6 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
             ..
         }
     );
-    if hoisted_origin && !migration.npmrc.iter().any(|(k, _)| k == "node-linker") {
-        migration
-            .npmrc
-            .push(("node-linker".into(), "hoisted".into()));
-        migration.notes.push(
-            "layout preserved: the project was on a hoisted (flat) node_modules layout, so \
-             node-linker=hoisted is written to .npmrc — remove it to adopt nub's isolated layout"
-                .into(),
-        );
-    }
-
     // ── writes ──────────────────────────────────────────────────────────
     let nub_version = env!("CARGO_PKG_VERSION");
     let mut manifest_notes = Vec::new();
