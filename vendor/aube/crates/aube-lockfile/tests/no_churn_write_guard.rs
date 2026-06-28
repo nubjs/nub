@@ -49,6 +49,7 @@ static NO_CHURN_TOOL: Embedder = Embedder {
     cpu_budget: None,
     tty_progress: false,
     strict_unsupported_source: false,
+    warm_trust_revalidate: true,
 };
 
 fn pkg(name: &str, version: &str, integrity: &str) -> LockedPackage {

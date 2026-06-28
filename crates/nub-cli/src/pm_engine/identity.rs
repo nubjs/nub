@@ -163,6 +163,14 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // git/jsr/unknown protocol in a yarn.lock or bun.lock) aborts at plan time
     // for a non-optional dep, instead of reclassify→404 / silent drop.
     strict_unsupported_source: true,
+    // A fully-satisfied warm install (node_modules present, lockfile/manifest/
+    // settings/layout all match) short-circuits to an instant "Already up to
+    // date" regardless of `trustPolicy`, matching npm/pnpm/bun and aube's own
+    // offline + `aube run` auto-install paths. The trust gate is a resolve-time
+    // downgrade defense with nothing to validate on a no-op (zero resolve/fetch/
+    // link); any install that does REAL work misses the short-circuit and still
+    // trips the gate during resolution. Standalone aube keeps the re-validation.
+    warm_trust_revalidate: false,
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's
@@ -200,4 +208,5 @@ const _: () = {
     assert!(!NUB.gvs_incompatible_warning);
     assert!(NUB.primer_ttl.is_none());
     assert!(NUB.tty_progress);
+    assert!(!NUB.warm_trust_revalidate);
 };

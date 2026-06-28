@@ -35,6 +35,7 @@ static MYTOOL: Embedder = Embedder {
     cpu_budget: None,
     tty_progress: false,
     strict_unsupported_source: false,
+    warm_trust_revalidate: true,
 };
 
 #[test]

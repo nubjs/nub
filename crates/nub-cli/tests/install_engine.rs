@@ -661,3 +661,110 @@ fn install_links_yarn_workspace_member_into_consumer() {
         "yarn.lock must be byte-identical after a read-only workspace install"
     );
 }
+
+/// Run `nub <args>` in `dir` against a CALLER-OWNED store/cache so a second
+/// install warm-hits the first's node_modules + CAS — the realistic
+/// warm-satisfied loop, unlike [`run_install`] which isolates a fresh store
+/// per call.
+fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -> (String, i32) {
+    let out = Command::new(nub_binary())
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_DATA_HOME", store)
+        .env("XDG_CACHE_HOME", cache)
+        .output()
+        .expect("failed to spawn nub");
+    (
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// A second `nub install` on an unchanged, fully-satisfied tree short-circuits
+/// to the instant "Already up to date" exit — even online under the default
+/// `trustPolicy=no-downgrade`. Before the fix the trust posture disabled the
+/// warm short-circuit on any online install (gated in `install_fast_path_eligible`
+/// before `check_needs_install` ran), so the second install re-ran the full
+/// resolve/fetch/link pipeline every time; nub's `warm_trust_revalidate=false`
+/// profile now lets a no-op skip the redundant re-validation. The short-circuit
+/// is the load-independent signal: `emit_up_to_date` fires ONLY on the fast path,
+/// and it does so here with a fresh (empty) packument cache, proving nothing was
+/// re-resolved or re-fetched. The security half (real work still trips the gate)
+/// is covered by `frozen_install_with_trust_downgrade_still_aborts`.
+#[test]
+#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
+fn warm_satisfied_install_short_circuits_under_no_downgrade() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("warm-satisfied");
+    let store = pm_tmpdir("warm-store");
+    let cache = pm_tmpdir("warm-cache");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"warm","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
+    )
+    .unwrap();
+
+    // Cold install populates node_modules + the freshness state sidecar.
+    let (cold_stderr, cold_code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(cold_code, 0, "cold install must succeed: {cold_stderr}");
+    assert!(
+        dir.join("node_modules/is-positive/package.json").is_file(),
+        "is-positive must be installed by the cold pass: {cold_stderr}"
+    );
+    assert!(
+        !cold_stderr.contains("Already up to date"),
+        "the COLD install must NOT report up-to-date (it did real work): {cold_stderr}"
+    );
+
+    // Second install, online, default trust posture — must short-circuit.
+    let (warm_stderr, warm_code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(warm_code, 0, "warm install must succeed: {warm_stderr}");
+    assert!(
+        warm_stderr.contains("Already up to date"),
+        "a warm-satisfied online install must short-circuit to 'Already up to date' \
+         under the default trustPolicy=no-downgrade, got: {warm_stderr}"
+    );
+}
+
+/// SECURITY INVARIANT: the warm short-circuit must NOT weaken the trust gate on
+/// an install that does real work. A fresh install of a package whose picked
+/// version dropped the trust evidence an earlier version carried
+/// (`node-gyp@10.3.0` lost the provenance attestation `10.3.1` had) is real work
+/// — `check_needs_install` returns `Some`, so the fast path is bypassed and the
+/// full pipeline runs, where `trustPolicy=no-downgrade` aborts during
+/// resolution. The short-circuit is reachable only on a no-op, never on this.
+/// (Depends on `node-gyp@10.3.0`'s live registry provenance metadata staying a
+/// downgrade vs `10.3.1`; the canonical case is recorded in
+/// `.fray/install-warm-fastpath-trust-gate.md`.)
+#[test]
+#[ignore = "network: resolves node-gyp@10.3.0 from the npm registry to assert the trust-downgrade abort"]
+fn frozen_install_with_trust_downgrade_still_aborts() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("trust-downgrade");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"dg","version":"1.0.0","dependencies":{"node-gyp":"10.3.0"}}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(
+        code, 23,
+        "a trust-downgrade install must abort with the trust exit code (23), got {code}: \
+         {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("ERR_NUB_TRUST_DOWNGRADE"),
+        "the abort must carry the trust-downgrade code: {stderr}"
+    );
+    assert!(
+        !dir.join("node_modules/node-gyp").exists(),
+        "no package may be linked when the trust gate aborts resolution"
+    );
+}

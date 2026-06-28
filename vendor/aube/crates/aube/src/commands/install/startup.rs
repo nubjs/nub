@@ -74,7 +74,16 @@ fn install_fast_path_eligible(
     if !preconditions_met {
         return false;
     }
-    if trust_policy_requires_validation(cwd, opts) {
+    // Trust re-validation only blocks the short-circuit under embedders that opt
+    // into re-validating an already-satisfied tree (`warm_trust_revalidate`,
+    // aube's default). When it does NOT (nub), the gate is skipped here and the
+    // warm path is decided purely by `check_needs_install` below: only a
+    // fully-satisfied no-op (`None`) short-circuits, and any real work
+    // (`Some(reason)`) falls through to the full pipeline where the trust check
+    // fires during resolution. So skipping this gate never lets an install that
+    // installs anything bypass the trust posture — it only drops the redundant
+    // re-validation of an unchanged, on-disk, previously-validated tree.
+    if aube_util::embedder().warm_trust_revalidate && trust_policy_requires_validation(cwd, opts) {
         return false;
     }
     // Surface *why* the warm path was missed at debug level — the state
