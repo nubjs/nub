@@ -133,6 +133,17 @@ pub(super) async fn run_gvs_prewarm_materializer(
         probe = probe.with_use_global_virtual_store(enabled);
     }
     if !probe.uses_global_virtual_store() {
+        // Per-project materialize must apply patches at materialize time, the
+        // same as `link_all`'s per-project step1 (`materialize_into`). Without
+        // this the prewarm writes an UNPATCHED `.aube/<dep_path>`, and the
+        // link phase's existence-gated step1 then accepts it as cached —
+        // silently shipping unpatched bytes for any `patchedDependencies`.
+        // (The per-project prewarm was patch-less before too, but only the CI /
+        // explicit-GVS-off path reached it; routing the default isolated layout
+        // here makes the patch application load-bearing.)
+        if !patches.is_empty() {
+            probe = probe.with_patches(patches);
+        }
         return run_aube_dir_materializer(probe, graph, cwd, link_concurrency, materialize_rx)
             .await;
     }
