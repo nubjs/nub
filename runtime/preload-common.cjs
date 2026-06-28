@@ -327,6 +327,88 @@ function resolveViaParentRequire(specifier, parentURL) {
   }
 }
 
+// Phantom-dependency remediation for nub's isolated layout. The isolated layout
+// (the post-flip default for npm/yarn/bun incumbents, and the standing default
+// for pnpm/fresh projects) exposes only DECLARED packages at the importer's
+// node_modules, so an UNDECLARED transitive that resolved under a flat
+// node_modules fails. When a BARE specifier hits (ERR_)MODULE_NOT_FOUND,
+// `phantomDepHint` returns the one-line opt-out to append — but ONLY when the
+// package is genuinely a phantom dep.
+//
+// The discriminator is the virtual store: nub names every package in the
+// project's graph `<name>@<version>` (scoped `/` → `+`) under
+// `node_modules/.nub`, so a matching entry means the package IS installed but
+// unreachable from here — a phantom dep. A genuine typo / absent dep has no
+// entry and gets Node's error verbatim. This is correct under GVS (entries are
+// symlinks into the global store) and non-GVS (real dirs) alike, and the
+// hoisted opt-out leaves NO `<name>@*` entries (only `.nub-state`) so it never
+// matches — nor do node-suite / plain-Node trees (no `.nub` at all).
+// NOT COVERED: the compat-tier ESM loader (Node 18.19–22.14 `import`) resolves
+// in preload-async-hooks.mjs and can't reach this CJS helper, so that band
+// surfaces Node's standard error without the hint; the fast tier (22.15+) and
+// CommonJS `require()` on every tier are covered.
+function phantomDepHint(specifier, fromPath) {
+  if (!specifier || !fromPath) return null;
+  const c = specifier[0];
+  if (c === "." || c === "/" || c === "#" || c === "\\") return null;
+  if (specifier.startsWith("node:") || module_.isBuiltin(specifier)) return null;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(specifier)) return null; // file:/data:/http:/C:\ …
+  const parts = specifier.split("/");
+  const pkg = c === "@" ? parts.slice(0, 2).join("/") : parts[0];
+  if (!pkg) return null;
+  let dir;
+  try {
+    dir = dirname(String(fromPath).startsWith("file:") ? fileURLToPath(fromPath) : fromPath);
+  } catch {
+    return null;
+  }
+  const prefix = pkg.replace(/\//g, "+") + "@";
+  for (let i = 0; i < 40 && dir; i++) {
+    let entries;
+    try {
+      entries = readdirSync(join(dir, "node_modules", ".nub"));
+    } catch {
+      entries = null;
+    }
+    if (entries) {
+      // Nearest `.nub` is the project's virtual store; decide here rather than
+      // walking past it into a parent monorepo store.
+      if (!entries.some((e) => e.startsWith(prefix))) return null;
+      return (
+        `\n\n"${pkg}" is installed but not reachable here — it's a phantom dependency (an ` +
+        `undeclared transitive). nub's isolated node_modules exposes only the packages ` +
+        `declared in package.json. Add "${pkg}" to your dependencies, or add ` +
+        "`node-linker=hoisted` to .npmrc to use a flat node_modules."
+      );
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+// Append `hint` to a thrown error's message AND its printed `.stack`. V8
+// materializes `.stack` LAZILY from the current `.message`, so the original
+// hint-free stack MUST be read before `.message` is mutated — reading it after
+// would already contain the new message and the `.replace` would double the
+// hint. The marker makes it idempotent if the same error passes two catch
+// sites. Best-effort: a frozen/exotic error is left verbatim.
+function annotateError(err, hint) {
+  try {
+    if (!err || typeof err !== "object" || err.__nubPhantomHinted) return;
+    Object.defineProperty(err, "__nubPhantomHinted", { value: true, configurable: true });
+    const oldStack = typeof err.stack === "string" ? err.stack : null;
+    const oldMsg = err.message;
+    err.message = oldMsg + hint;
+    if (oldStack !== null) {
+      err.stack = oldStack.includes(oldMsg) ? oldStack.replace(oldMsg, err.message) : oldStack + hint;
+    }
+  } catch {
+    /* read-only error: leave verbatim */
+  }
+}
+
 function makeHooks(core, watchReporting) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
@@ -354,6 +436,10 @@ function makeHooks(core, watchReporting) {
       if (isAsyncLoaderSyncStub(err)) {
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
         if (fallback) return fallback;
+      }
+      if (err && err.code === "ERR_MODULE_NOT_FOUND") {
+        const hint = phantomDepHint(specifier, context.parentURL);
+        if (hint) annotateError(err, hint);
       }
       throw err;
     }
@@ -669,6 +755,11 @@ function installCjsRequireHooks(core, withClassicTranspile) {
         const lookupPaths = module_._resolveLookupPaths(request, parent) || [];
         const found = module_._findPath(request, lookupPaths, isMain);
         if (found) return found;
+      }
+      if (e && e.code === "MODULE_NOT_FOUND") {
+        const fromPath = parent && typeof parent.filename === "string" ? parent.filename : null;
+        const hint = phantomDepHint(request, fromPath);
+        if (hint) annotateError(e, hint);
       }
       throw e;
     }

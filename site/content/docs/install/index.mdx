@@ -432,7 +432,13 @@ Files materialize into `node_modules` by reflink (APFS/btrfs), hardlink (ext4), 
 
 The default `node_modules` layout is **isolated**: direct dependencies sit at the top level, transitive packages link into a per-project virtual store, and phantom dependencies fail instead of resolving by accident. Nub's virtual store is `node_modules/.nub/` (pnpm uses `node_modules/.pnpm/`) — same shape, not byte-shared, so alternating tools relinks the tree.
 
-Passing `--node-linker hoisted` produces a flat, npm-style layout instead. The npm, Yarn, and Bun incumbents default to `hoisted`; pnpm and Nub-identity projects keep `isolated`.
+Every incumbent defaults to **isolated** — npm, Yarn, and Bun included, alongside pnpm and Nub-identity projects. A project that relies on phantom (undeclared) dependencies opts into the flat, npm-style layout with one line in `.npmrc`:
+
+```ini
+node-linker=hoisted
+```
+
+The `--node-linker hoisted` flag does the same for a single command. When an undeclared package fails to resolve at runtime, Nub's error names it and points at this opt-out.
 
 ### Offline installs
 

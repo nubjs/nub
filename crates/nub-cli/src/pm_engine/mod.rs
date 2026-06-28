@@ -1926,10 +1926,17 @@ fn strip_yarnrc_value(rest: &str) -> &str {
     rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
-/// - Layout policy: flat-layout lockfile kinds (npm/yarn/bun) default
-///   `nodeLinker` to `hoisted`; pnpm/aube kinds and fresh projects keep the
-///   engine's `isolated` default (no entry pushed, so user/env settings
-///   resolve exactly as in stock aube).
+/// - Layout policy: flat-layout incumbent kinds (npm/yarn/bun) default to the
+///   isolated layout with the hidden hoist tree OFF (`nodeLinker=isolated` +
+///   `hoist=false`) — the config that engages the global virtual store, since
+///   aube's `effective_gvs = planned_gvs && !hoist && Isolated`. This is the
+///   greenlit compat→correctness shift (2026-06-28): isolated is strict (no
+///   phantom deps) and GVS-fast; a project that relies on phantom deps opts
+///   back into the flat tree with one `.npmrc` line (`node-linker=hoisted`).
+///   pnpm/aube kinds and fresh projects push no layout entry, keeping the
+///   engine's isolated default WITH the hidden hoist tree on (stock-aube
+///   phantom-dep tolerance, matching pnpm's own default). A user-set
+///   `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins — embedder-tier default.
 /// - Fresh-write lockfile format: a TRULY-fresh project (no PM-preference
 ///   signal of any kind — `truly_fresh`) writes nub's neutral `lock.yaml`
 ///   (`defaultLockfileFormat=aube`, which under the nub embedder resolves to
@@ -1964,7 +1971,7 @@ fn nub_setting_defaults(
             data.join("store").to_string_lossy().into_owned(),
         ));
     }
-    let hoisted_kind = matches!(
+    let flat_incumbent = matches!(
         detected.map(|d| d.kind),
         Some(
             LockfileKind::Npm
@@ -1974,18 +1981,23 @@ fn nub_setting_defaults(
                 | LockfileKind::Bun
         )
     );
-    // `dependenciesMeta.*.injected` is materialized only under the isolated
-    // linker (aube needs the `.nub/` virtual store to sibling-link packed
-    // copies). When a flat-layout incumbent declares injected deps, keep the
-    // engine's `isolated` default instead of forcing `hoisted` — otherwise the
-    // injection directive is silently dropped and peer deps resolve against the
-    // wrong tree. A user-set `nodeLinker` (env/.npmrc/yaml) still wins; this
-    // only declines to push the embedder-tier hoisted default.
     let injected = detected
         .map(|d| unsupported_config::injected_deps_present(&d.dir))
         .unwrap_or(false);
-    if hoisted_kind && !injected {
-        defaults.push(("nodeLinker".to_string(), "hoisted".to_string()));
+    // GREENLIT 2026-06-28 compat→correctness flip: flat-layout incumbents
+    // (npm/yarn/bun) default to isolated with the hidden hoist tree OFF.
+    // Pushing `hoist=false` under the engine's isolated default is precisely
+    // what engages the global virtual store (aube gvs.rs: `effective_gvs =
+    // planned_gvs && !hoist && Isolated`); `nodeLinker=isolated` is pushed
+    // explicitly so the layout intent reads at this call site even though it
+    // equals the engine default. Injected deps (`dependenciesMeta.*.injected`)
+    // are the carve-out: they need the hidden tree to sibling-link packed
+    // copies, so they stay on stock-aube isolated+hoist=true (GVS off) — that
+    // path is proven, injected-under-GVS is not. A user-set `nodeLinker`/
+    // `hoist` (env/.npmrc/yaml) still wins; this is only the embedder default.
+    if flat_incumbent && !injected {
+        defaults.push(("nodeLinker".to_string(), "isolated".to_string()));
+        defaults.push(("hoist".to_string(), "false".to_string()));
     }
     defaults
 }
@@ -2464,38 +2476,51 @@ mod tests {
             fresh: false,
         };
 
-        // Flat-layout kinds ⇒ nodeLinker defaults to hoisted.
+        // Flat-layout incumbents ⇒ isolated + hoist=false (the GVS-engaging
+        // config: aube's effective_gvs needs `!hoist && Isolated`).
         for kind in [
             LockfileKind::Npm,
             LockfileKind::YarnBerry,
             LockfileKind::Bun,
         ] {
+            let defaults = nub_setting_defaults(Some(&detected(kind)), false);
             assert_eq!(
-                get(
-                    &nub_setting_defaults(Some(&detected(kind)), false),
-                    "nodeLinker"
-                ),
-                Some("hoisted"),
-                "{kind:?} must default to the hoisted layout"
+                get(&defaults, "nodeLinker"),
+                Some("isolated"),
+                "{kind:?} must default to the isolated layout"
+            );
+            assert_eq!(
+                get(&defaults, "hoist"),
+                Some("false"),
+                "{kind:?} must turn the hidden hoist tree off so GVS engages"
             );
         }
 
-        // pnpm-shaped kinds and no lockfile ⇒ no entry (engine's isolated
-        // default applies, user/env settings resolve as in stock aube).
+        // pnpm-shaped kinds and no lockfile ⇒ no layout entry (engine's
+        // isolated + hoist=true default applies, GVS off, stock-aube
+        // phantom-dep tolerance, matching pnpm's own default).
         for kind in [LockfileKind::Pnpm, LockfileKind::Aube] {
+            let defaults = nub_setting_defaults(Some(&detected(kind)), false);
             assert_eq!(
-                get(
-                    &nub_setting_defaults(Some(&detected(kind)), false),
-                    "nodeLinker"
-                ),
+                get(&defaults, "nodeLinker"),
                 None,
                 "{kind:?} must not inject a nodeLinker default"
+            );
+            assert_eq!(
+                get(&defaults, "hoist"),
+                None,
+                "{kind:?} must not inject a hoist default"
             );
         }
         assert_eq!(
             get(&nub_setting_defaults(None, true), "nodeLinker"),
             None,
             "no lockfile must not inject a nodeLinker default"
+        );
+        assert_eq!(
+            get(&nub_setting_defaults(None, true), "hoist"),
+            None,
+            "no lockfile must not inject a hoist default"
         );
     }
 

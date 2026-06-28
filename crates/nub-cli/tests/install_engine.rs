@@ -295,11 +295,12 @@ fn install_with_pnpm_workspace_stays_pnpm_shaped_no_stamp() {
 }
 
 /// A project with a (frozen-satisfiable) package-lock.json: the layout policy
-/// defaults to the hoisted (npm-style) layout, and the lockfile format is
-/// preserved — no aube-lock.yaml appears next to package-lock.json.
+/// defaults to the isolated layout (the GVS flip — npm/yarn/bun incumbents no
+/// longer force hoisted), and the lockfile format is preserved — no
+/// aube-lock.yaml appears next to package-lock.json.
 #[test]
 #[ignore = "network: fetches is-positive@3.1.0 (resolution comes from the lockfile)"]
-fn install_with_package_lock_hoists_and_preserves_the_npm_lockfile() {
+fn install_with_package_lock_isolates_and_preserves_the_npm_lockfile() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
         return;
@@ -342,9 +343,13 @@ fn install_with_package_lock_hoists_and_preserves_the_npm_lockfile() {
         dep.join("package.json").is_file(),
         "is-positive must be installed: stderr: {stderr}"
     );
+    // npm/yarn/bun incumbents now default to the isolated layout (the GVS flip):
+    // a declared dep is a top-level SYMLINK into the `.nub` virtual store, not a
+    // real directory. (GVS engagement itself is off-CI-gated, but the isolated
+    // symlink layout holds regardless.)
     assert!(
-        !dep.symlink_metadata().unwrap().file_type().is_symlink(),
-        "package-lock projects default to the hoisted layout (real dir, not a symlink)"
+        dep.symlink_metadata().unwrap().file_type().is_symlink(),
+        "package-lock projects default to the isolated layout (a symlink into .nub)"
     );
     assert!(
         dir.join("package-lock.json").is_file(),

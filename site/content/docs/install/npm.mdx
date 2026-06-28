@@ -119,7 +119,13 @@ npm ignores the Yarn-style top-level `resolutions`, so Nub drops it with a warni
 
 ## Install behavior
 
-The default `node_modules` layout is **hoisted** — the flat npm-style scheme.
+The default `node_modules` layout is **isolated** — direct dependencies at the top level, transitive packages in a per-project virtual store, and phantom (undeclared) dependencies that fail instead of resolving by accident. This is stricter than npm's flat tree, so a project that relies on undeclared transitives opts back in with one line in `.npmrc`:
+
+```ini
+node-linker=hoisted
+```
+
+When an undeclared package fails to resolve at runtime, Nub's error names it and points at this opt-out.
 
 Lifecycle scripts run under Nub's deny-by-default trust posture plus a gated default-trust floor (see [the default-trust floor](/docs/install#default-trust-floor)), not npm's run-everything default. Curated, age-vetted packages build automatically; everything else is skipped with `WARN_NUB_IGNORED_BUILD_SCRIPTS` until `nub approve-builds`. Platform-gated optionals (e.g. `fsevents`) resolve and round-trip into the lock.
 
