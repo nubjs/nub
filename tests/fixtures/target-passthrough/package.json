@@ -1,0 +1,6 @@
+{
+  "name": "target-passthrough",
+  "scripts": {
+    "echo": "node echo-argv.js"
+  }
+}

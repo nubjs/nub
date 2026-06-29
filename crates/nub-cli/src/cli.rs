@@ -1699,12 +1699,19 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
         // First bare token after the subcommand = the positional. The prefix is
         // everything up to and including it; the rest is forwarded verbatim — but
         // a single `--` immediately after the positional is the conventional
-        // end-of-options separator (npm/pnpm/yarn/cargo all drop it), so consume
-        // it. (`nub run build -- a b c` → args `["a","b","c"]`.) Only that first
-        // `--` is stripped; any later `--` is a literal argument.
+        // end-of-options separator the pnpm-style runners (run/exec/nubx) consume
+        // (npm/pnpm/yarn/cargo all drop it). (`nub run build -- a b c` →
+        // `["a","b","c"]`.) Only that first `--` is consumed; a later `--` is a
+        // literal argument.
+        //
+        // `watch` is EXEMPT: it is a file-run (`node --watch <file>`), so it keeps
+        // `--` byte-for-byte like the `nub <file>` runner and the `nub --watch`
+        // flag-form (which never reaches this split). The subcommand and flag
+        // spellings of watch MUST agree, and node never strips — so watch forwards
+        // the `--` verbatim.
         let prefix = rest[..=i].to_vec();
         let mut start = i + 1;
-        if rest.get(start).is_some_and(|t| t == "--") {
+        if subcommand != "watch" && rest.get(start).is_some_and(|t| t == "--") {
             start += 1;
         }
         let suffix = rest[start..].to_vec();
@@ -7743,6 +7750,25 @@ mod tests {
         // No separator: args forward verbatim, including a literal `--` mid-stream.
         let (_, suffix) =
             split_subcommand_argv(["run", "build", "a", "b"].map(String::from).to_vec());
+        assert_eq!(suffix, ["a", "b"]);
+    }
+
+    #[test]
+    fn watch_keeps_the_post_target_dashdash() {
+        // `nub watch` is a file-run (`node --watch <file>`), so unlike the
+        // pnpm-style runners it does NOT consume the first post-target `--` — it
+        // forwards it verbatim, matching `node` and the `nub --watch` flag-form
+        // (which never reaches this split). The two spellings of watch must agree.
+        let (_, suffix) = split_subcommand_argv(
+            ["watch", "app.js", "--", "a", "b"]
+                .map(String::from)
+                .to_vec(),
+        );
+        assert_eq!(suffix, ["--", "a", "b"]);
+
+        // Contrast: `run` still consumes that first `--` (option B, current).
+        let (_, suffix) =
+            split_subcommand_argv(["run", "build", "--", "a", "b"].map(String::from).to_vec());
         assert_eq!(suffix, ["a", "b"]);
     }
 
