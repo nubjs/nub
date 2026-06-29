@@ -212,6 +212,22 @@ fn target_boundary_is_resolved_before_passthrough() {
         "a value-flag value that looks like the target must bind to the flag"
     );
 
+    // file: a REPEATED value flag before the target — each occurrence consumes its
+    // own value (both fixture files exist), and the target is the token after the
+    // last one. Only `z` is forwarded.
+    assert_eq!(
+        forwarded_argv(&[
+            "--env-file",
+            "echo-argv.js",
+            "--env-file",
+            "package.json",
+            "echo-argv.js",
+            "z",
+        ]),
+        svec(&["z"]),
+        "a repeated value flag must consume each value; the target follows the last"
+    );
+
     // run: a `=`-joined consumed runner flag before the script doesn't leak.
     assert_eq!(
         forwarded_argv(&["run", "--reporter=silent", "echo", "aa", "bb"]),
