@@ -1696,25 +1696,16 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
             }
             continue;
         }
-        // First bare token after the subcommand = the positional. The prefix is
-        // everything up to and including it; the rest is forwarded verbatim — but
-        // a single `--` immediately after the positional is the conventional
-        // end-of-options separator the pnpm-style runners (run/exec/nubx) consume
-        // (npm/pnpm/yarn/cargo all drop it). (`nub run build -- a b c` →
-        // `["a","b","c"]`.) Only that first `--` is consumed; a later `--` is a
-        // literal argument.
-        //
-        // `watch` is EXEMPT: it is a file-run (`node --watch <file>`), so it keeps
-        // `--` byte-for-byte like the `nub <file>` runner and the `nub --watch`
-        // flag-form (which never reaches this split). The subcommand and flag
-        // spellings of watch MUST agree, and node never strips — so watch forwards
-        // the `--` verbatim.
+        // First bare token after the subcommand = the positional. It TERMINATES
+        // runner parsing: everything after it is the target's, forwarded VERBATIM
+        // — including any `--`, which is NOT stripped and NOT special-cased
+        // (Option A, decided 2026-06-28). Matches the gold standard — real `node
+        // <file> -- a`, `pnpm 10 run build -- a`, and `pnpm 10 exec bin -- a` all
+        // keep the `--` in the child's argv — and the already-correct `nub <file>`
+        // runner. Uniform across run/exec/watch/nubx; no per-subcommand carve-out.
+        // (`nub run build -- a b` → args `["--","a","b"]`.)
         let prefix = rest[..=i].to_vec();
-        let mut start = i + 1;
-        if subcommand != "watch" && rest.get(start).is_some_and(|t| t == "--") {
-            start += 1;
-        }
-        let suffix = rest[start..].to_vec();
+        let suffix = rest[i + 1..].to_vec();
         return (prefix, suffix);
     }
     // No positional found (e.g. `nub run`, `nub exec --help`): hand the whole
@@ -7728,48 +7719,41 @@ mod tests {
     }
 
     #[test]
-    fn run_strips_the_post_script_dashdash_separator() {
-        // `nub run build -- a b c` must forward `["a","b","c"]`, not
-        // `["--","a","b","c"]`: the first `--` after the script positional is the
-        // conventional end-of-options separator (npm/pnpm/yarn/cargo all drop it).
-        // Only that first `--` is consumed; a later `--` is a literal argument.
-        let (_, suffix) = split_subcommand_argv(
-            ["run", "build", "--", "a", "b", "c"]
-                .map(String::from)
-                .to_vec(),
-        );
-        assert_eq!(suffix, ["a", "b", "c"]);
+    fn runners_keep_the_post_target_dashdash_verbatim() {
+        // Option A (decided 2026-06-28): the target token terminates runner
+        // parsing and everything after it forwards VERBATIM — the `--` is kept,
+        // uniform across run/exec/watch and byte-identical to `node` / `pnpm 10`.
+        // No `--` is ever consumed as a separator; only a LEADING `--` (before the
+        // target — handled by the explicit-separator branch) ends runner options.
+        for verb in ["run", "exec", "watch"] {
+            let (_, suffix) = split_subcommand_argv(
+                [verb, "target", "--", "a", "b", "c"]
+                    .map(String::from)
+                    .to_vec(),
+            );
+            assert_eq!(
+                suffix,
+                ["--", "a", "b", "c"],
+                "{verb}: post-target `--` kept"
+            );
 
-        let (_, suffix) = split_subcommand_argv(
-            ["run", "build", "--", "a", "--", "b"]
-                .map(String::from)
-                .to_vec(),
-        );
-        assert_eq!(suffix, ["a", "--", "b"]);
+            // A repeated `--` is equally literal — nothing is consumed.
+            let (_, suffix) = split_subcommand_argv(
+                [verb, "target", "--", "a", "--", "b"]
+                    .map(String::from)
+                    .to_vec(),
+            );
+            assert_eq!(
+                suffix,
+                ["--", "a", "--", "b"],
+                "{verb}: repeated `--` literal"
+            );
 
-        // No separator: args forward verbatim, including a literal `--` mid-stream.
-        let (_, suffix) =
-            split_subcommand_argv(["run", "build", "a", "b"].map(String::from).to_vec());
-        assert_eq!(suffix, ["a", "b"]);
-    }
-
-    #[test]
-    fn watch_keeps_the_post_target_dashdash() {
-        // `nub watch` is a file-run (`node --watch <file>`), so unlike the
-        // pnpm-style runners it does NOT consume the first post-target `--` — it
-        // forwards it verbatim, matching `node` and the `nub --watch` flag-form
-        // (which never reaches this split). The two spellings of watch must agree.
-        let (_, suffix) = split_subcommand_argv(
-            ["watch", "app.js", "--", "a", "b"]
-                .map(String::from)
-                .to_vec(),
-        );
-        assert_eq!(suffix, ["--", "a", "b"]);
-
-        // Contrast: `run` still consumes that first `--` (option B, current).
-        let (_, suffix) =
-            split_subcommand_argv(["run", "build", "--", "a", "b"].map(String::from).to_vec());
-        assert_eq!(suffix, ["a", "b"]);
+            // No separator: args forward verbatim, including a literal `--` mid-stream.
+            let (_, suffix) =
+                split_subcommand_argv([verb, "target", "a", "b"].map(String::from).to_vec());
+            assert_eq!(suffix, ["a", "b"], "{verb}: no-separator passthrough");
+        }
     }
 
     #[test]

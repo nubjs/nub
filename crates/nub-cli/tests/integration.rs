@@ -3517,6 +3517,8 @@ fn single_package_run_echoes_command_to_stderr_unless_silent() {
     // literal token), proving the echo reflects the real escaped command. The
     // escaping is shell-specific: POSIX `sh` single-quotes, Windows `cmd.exe`
     // caret-escapes, so the expected preamble and echoed output differ per OS.
+    // The post-target `--` is forwarded verbatim (Option A) — byte-identical to
+    // `pnpm 10 run greet -- "brave new world"`.
     let out_args = Command::new(nub_binary())
         .args(["run", "greet", "--", "brave new world"])
         .current_dir(&fixture)
@@ -3527,11 +3529,14 @@ fn single_package_run_echoes_command_to_stderr_unless_silent() {
     assert_eq!(out_args.status.code(), Some(0), "stderr: {stderr_args}");
     let (want_preamble, want_output) = if cfg!(windows) {
         (
-            "$ echo hello ^\"brave^ new^ world^\"",
-            "hello \"brave new world\"",
+            "$ echo hello -- ^\"brave^ new^ world^\"",
+            "hello -- \"brave new world\"",
         )
     } else {
-        ("$ echo hello 'brave new world'", "hello brave new world")
+        (
+            "$ echo hello -- 'brave new world'",
+            "hello -- brave new world",
+        )
     };
     assert!(
         stderr_args.contains(want_preamble),

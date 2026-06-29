@@ -6,35 +6,18 @@
 //! regression in any command's split — dropping a flag, stealing a trailing
 //! flag, mis-binding a value flag's value as the target — fails here.
 //!
+//! The post-target `--` is KEPT VERBATIM by every command (decided 2026-06-28,
+//! Option A): the target token ends runner parsing, and `--` is neither required
+//! nor special-cased — uniform across file/run/exec/watch and byte-identical to
+//! `node` and `pnpm 10`. (npm/yarn/bun strip it; nub deliberately does not.)
+//!
 //! Golden values are captured from the real reference tools (offline, so the
 //! tests stay deterministic and CI-cheap):
-//!   - node 26.2.0  — oracle for the file runner and `nub watch` (both file-runs)
-//!   - pnpm 10.15.1 — oracle for `nub run` / `nub exec`
-//!   - npm 11.13.0  — the contrasting `--`-stripping reference (option B below)
-//!
-//! THE ONE MAINTAINER-PENDING CELL: whether `nub run` / `nub exec` CONSUME the
-//! single end-of-options `--` immediately after the target, or forward it
-//! verbatim. node + pnpm 10 KEEP it (option A); npm + yarn + bun STRIP it
-//! (option B), which is nub's CURRENT behavior. The file runner CANNOT strip
-//! (node-compat), so "strip" and "consistent everywhere" are mutually exclusive
-//! — hence the open A/B call. That cell is isolated in exactly one constant
-//! ([`RUNNER_KEEPS_POST_TARGET_DASHDASH`]); flip it when the maintainer decides
-//! and every run/exec `--` assertion follows. Every OTHER property here is
-//! stable under both choices.
+//!   - node 26.2.0  — oracle for the file runner and `nub watch` (file-runs)
+//!   - pnpm 10.15.1 — oracle for `nub run` / `nub exec` (also keeps `--`)
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// A/B PENDING (maintainer, 2026-06-28): does the post-target `--` survive into
-/// the run/exec child's argv?
-///   - `false` = option B (CURRENT): `nub run`/`nub exec` strip the first
-///     post-target `--` (npm/yarn/bun behavior).
-///   - `true`  = option A: keep it (node/pnpm 10 behavior; would make run/exec
-///     match the file runner, which always keeps).
-///
-/// This governs ONLY the run/exec post-target `--`. The file runner and `watch`
-/// are file-runs and ALWAYS keep `--` (asserted unconditionally below).
-const RUNNER_KEEPS_POST_TARGET_DASHDASH: bool = false;
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -51,15 +34,6 @@ fn fixture_dir() -> PathBuf {
 
 fn svec(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
-}
-
-/// The post-target `--` cell: pick the expected argv per the A/B constant.
-fn dd(kept: &[&str], stripped: &[&str]) -> Vec<String> {
-    svec(if RUNNER_KEEPS_POST_TARGET_DASHDASH {
-        kept
-    } else {
-        stripped
-    })
 }
 
 /// Pull the fixture's `ARGV:[...]` line out of captured output and parse the
@@ -163,38 +137,38 @@ fn file_runner_forwards_verbatim_like_node() {
     }
 }
 
-/// `nub run` and `nub exec` forward post-target flags verbatim and never require
-/// `--`. The single post-target `--` is the A/B cell.
+/// `nub run` and `nub exec` forward everything after the target VERBATIM, keeping
+/// the post-target `--` — byte-identical to `pnpm 10 run`/`pnpm 10 exec` and to
+/// the file runner (Option A). `--` is never required.
 #[test]
-fn run_and_exec_passthrough_and_dashdash_cell() {
+fn run_and_exec_keep_post_target_dashdash_like_pnpm() {
     for &(verb, target) in &[("run", "echo"), ("exec", "echo-argv")] {
-        // Flags after the target reach the target — STABLE under both A/B.
+        // Flags after the target reach the target — no `--` required.
         assert_eq!(
             forwarded_argv(&[verb, target, "--foo", "bar"]),
             svec(&["--foo", "bar"]),
             "{verb}: flags after the target must pass through"
         );
 
-        // The single post-target `--` — the maintainer-pending A/B cell.
+        // The post-target `--` is kept verbatim (= node / pnpm 10).
         assert_eq!(
             forwarded_argv(&[verb, target, "--", "--foo", "bar"]),
-            dd(&["--", "--foo", "bar"], &["--foo", "bar"]),
-            "{verb}: post-target `--` (A/B cell, keeps={RUNNER_KEEPS_POST_TARGET_DASHDASH})"
+            svec(&["--", "--foo", "bar"]),
+            "{verb}: post-target `--` must be kept"
         );
 
-        // Only the FIRST `--` is ever the separator; a second `--` is a literal
-        // arg. Under B the first is consumed and the second survives.
+        // Every `--` is literal — a repeated separator survives in full.
         assert_eq!(
             forwarded_argv(&[verb, target, "--", "a", "--", "b"]),
-            dd(&["--", "a", "--", "b"], &["a", "--", "b"]),
-            "{verb}: a repeated `--` is literal (A/B cell, keeps={RUNNER_KEEPS_POST_TARGET_DASHDASH})"
+            svec(&["--", "a", "--", "b"]),
+            "{verb}: a repeated `--` is literal and kept"
         );
     }
 }
 
 /// The target boundary is resolved correctly before the passthrough suffix
 /// begins — consumed/`=`-joined runner flags and value flags whose value looks
-/// like the target don't shift where forwarding starts. STABLE under both A/B.
+/// like the target don't shift where forwarding starts.
 #[test]
 fn target_boundary_is_resolved_before_passthrough() {
     // file: a consumed `=`-joined nub flag before the file is not forwarded.
@@ -237,7 +211,7 @@ fn target_boundary_is_resolved_before_passthrough() {
 
     // run: a script forced via the LEADING `--` separator (before the target) —
     // that `--` ends runner options and is consumed (pnpm 10 + node), distinct
-    // from a post-target `--`. STABLE under both A/B.
+    // from a post-target `--`, which is kept.
     assert_eq!(
         forwarded_argv(&["run", "--", "echo", "zz"]),
         svec(&["zz"]),
