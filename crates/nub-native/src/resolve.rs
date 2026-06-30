@@ -110,7 +110,7 @@ fn try_resolve_file(target: &str, parent_ext: &str, allow_dir_main: bool) -> Opt
     }
 
     // 3. Extensionless: probe in parent-ext-aware order.
-    if existing_ext.is_empty() {
+    if existing_ext.is_empty() || !TS_PARENT_EXTS.contains(&existing_ext.as_str()) {
         let probe = probe_order(parent_ext);
         for ext in probe {
             let candidate = format!("{target}{ext}");
