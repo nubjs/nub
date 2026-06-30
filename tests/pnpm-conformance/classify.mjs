@@ -5,10 +5,13 @@
 //                     or a tracked bug)
 //   SURPRISE        — failed and matches NO allowlist entry (a real, unexpected
 //                     divergence — fails the run)
-//   STALE-ALLOW     — an allowlist entry that matched NO failure (the bug may be
-//                     fixed; the entry should be removed)
+//   STALE-ALLOW     — an allowlist entry that matched NO failure (the test now
+//                     passes or was renamed — prune the entry)
 //
-// Exit 0 only if there are zero SURPRISE failures and zero STALE-ALLOW entries.
+// Exit 0 if there are zero SURPRISE failures. STALE-ALLOW entries are reported
+// loudly but are NON-FATAL: a known failure that starts passing is an
+// improvement, not a regression, so it must not turn the gate red (maintainer
+// call 2026-06-30 — green on known reality, red ONLY on a genuine NEW failure).
 import fs from 'node:fs'
 
 const args = process.argv.slice(2)
@@ -29,6 +32,15 @@ const allow = fs
 
 const matchedAllow = new Set()
 
+// An allowlist entry is EITHER a test-file path (matched as a substring of the
+// failing suite's path — skips a wholly-intended file) OR an exact test fullName
+// (matched by equality). Distinguishing them by shape is what stops a short name
+// like "update" from substring-matching the path "pnpm/test/update.ts" and
+// swallowing its siblings.
+const isFilePath = (a) => /(^|\/)test\/.*\.(ts|tsx|js|mjs|cjs)$/.test(a)
+const matches = (a, fullName, file) =>
+  isFilePath(a) ? file.includes(a) : fullName === a
+
 let passed = 0
 const known = []
 const surprises = []
@@ -38,7 +50,7 @@ for (const suite of results.testResults ?? []) {
   // A suite that fails to even load/compile reports no assertionResults but a
   // failureMessage. Treat that as a surprise unless the file path is allowlisted.
   if ((suite.assertionResults ?? []).length === 0 && suite.status === 'failed') {
-    const hit = allow.find((a) => file.includes(a))
+    const hit = allow.find((a) => isFilePath(a) && file.includes(a))
     if (hit) {
       matchedAllow.add(hit)
       known.push({ name: `${file} (suite load failure)`, hit })
@@ -52,7 +64,7 @@ for (const suite of results.testResults ?? []) {
     if (t.status === 'passed') {
       passed++
     } else if (t.status === 'failed') {
-      const hit = allow.find((a) => fullName.includes(a) || file.includes(a))
+      const hit = allow.find((a) => matches(a, fullName, file))
       if (hit) {
         matchedAllow.add(hit)
         known.push({ name: fullName, hit })
@@ -94,18 +106,18 @@ if (surprises.length) {
   }
 }
 if (staleAllow.length) {
-  console.log('\n-- STALE ALLOWLIST ENTRIES (matched no failure — remove them) --')
+  console.log('\n-- STALE ALLOWLIST ENTRIES (non-fatal — matched no failure, prune them) --')
   for (const a of staleAllow) console.log(`  ? "${a}"`)
 }
 
 console.log('')
-if (surprises.length === 0 && staleAllow.length === 0) {
-  console.log('RESULT: green-or-known-failing ✓')
+// Only a SURPRISE (a genuinely-new failure not on the allowlist) fails the run.
+// Stale entries are surfaced above but never red — pruning them is housekeeping,
+// not a regression gate.
+if (surprises.length === 0) {
+  const staleNote = staleAllow.length ? ` (${staleAllow.length} stale entr${staleAllow.length === 1 ? 'y' : 'ies'} to prune)` : ''
+  console.log(`RESULT: green-or-known-failing ✓${staleNote}`)
   process.exit(0)
 }
-if (surprises.length) {
-  console.log(`RESULT: ${surprises.length} surprise failure(s) — investigate.`)
-} else {
-  console.log('RESULT: allowlist has stale entries — prune them.')
-}
+console.log(`RESULT: ${surprises.length} surprise failure(s) — a new regression. Investigate.`)
 process.exit(1)

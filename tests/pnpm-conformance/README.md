@@ -18,7 +18,7 @@ npm's own suite is NOT usable this way: it constructs npm's internal JS `Npm` cl
 
 ## Why a pinned clone (not a vendored subset)
 
-The reference checkout `.repos/pnpm` tracks pnpm's `main` (currently 11.x), which drifts from the version nub spoofs. The harness clones pnpm at a tag matching nub's pinned pnpm major (`v10.15.1`, aligned with `PNPM_PIN` in `lockfile-roundtrip.yml`) so the suite's assertions match the behavior nub targets. A vendored subset was the documented fallback if bootstrap proved too flaky; the pinned-clone bootstrap proved tractable (one `pnpm install` + a lean compile), so we use it — it never rots against the version under test.
+The reference checkout `.repos/pnpm` tracks pnpm's `main`, which drifts from the version nub spoofs. The harness clones pnpm at the EXACT version nub reports on `pnpm --version` (`v11.3.0` == `PNPM_PARITY_VERSION` in `crates/nub-cli/src/pm_engine/mod.rs`) so the suite's version-string assertions match the behavior nub targets. A vendored subset was the documented fallback if bootstrap proved too flaky; the pinned-clone bootstrap proved tractable (one `pnpm install` + a lean compile), so we use it — it never rots against the version under test.
 
 ## Files
 
@@ -27,7 +27,8 @@ The reference checkout `.repos/pnpm` tracks pnpm's `main` (currently 11.x), whic
 | `run.sh` | the harness: clone → bootstrap → seam-swap → jest → classify |
 | `nub-pnpm-shim.cjs` | the seam replacement (re-execs nub as pnpm; `__NUB_BIN__` is baked at swap time) |
 | `classify.mjs` | parses jest `--json` output; classifies each failure against the allowlist |
-| `allowlist.txt` | known-OK failures: intended divergences + tracked bugs |
+| `allowlist.txt` | known-OK failures: intended divergences + tracked bugs (GENERATED — see below) |
+| `gen-allowlist.mjs` | regenerates `allowlist.txt` from a run's results JSON, bucketed by category |
 
 ## Running it locally
 
@@ -38,40 +39,46 @@ cargo build -p nub-cli
 # A real pnpm must be on PATH — NOT for the commands under test (those go to nub
 # via the seam), but for the suite's registry mock, which launches verdaccio via
 # `pnpm --use-node-version=20.x`. Install one separate from any nub shim:
-npm install -g pnpm@10.15.1
+npm install -g pnpm@11.3.0
 
-# Full suite (clones to a temp dir, pins v10.15.1):
+# Full suite (clones to a temp dir, pins v11.3.0):
 tests/pnpm-conformance/run.sh target/debug/nub
 
 # A single test file (fast iteration; stale-allowlist check is skipped on subsets):
-tests/pnpm-conformance/run.sh target/debug/nub v10.15.1 test/root.ts
+tests/pnpm-conformance/run.sh target/debug/nub v11.3.0 test/root.ts
 
 # Reuse a clone across runs (skips the slow bootstrap):
 PNPM_CLONE_DIR=/tmp/pnpm-conf KEEP_CLONE=1 tests/pnpm-conformance/run.sh target/debug/nub
 ```
 
-Exit 0 iff every failing test is allowlisted AND no allowlist entry is stale.
+Exit 0 iff no failing test is a SURPRISE (an un-allowlisted divergence). A stale allowlist entry is reported but does NOT fail the run — a known failure that starts passing is an improvement, not a regression.
 
 ## Bootstrap, step by step
 
-1. **Clone** pnpm/pnpm at the pinned tag (`git clone --depth 1 --branch v10.15.1`).
+1. **Clone** pnpm/pnpm at the pinned tag (`git clone --depth 1 --branch v11.3.0`).
 2. **Install** the monorepo deps (`corepack pnpm install --frozen-lockfile`, ~30 s). Corepack runs the repo's own pinned pnpm.
 3. **Compile** only the `pnpm` front-door package — `tsc --build` then `bundle` (produces `pnpm/dist/pnpm.cjs`) plus the runtime-asset copies. We deliberately SKIP the full `compile-only` script: it also typechecks + lints the entire monorepo (many minutes, irrelevant to running the suite).
 4. **Swap the seam**: detect whether the suite spawns `bin/pnpm.cjs` or `bin/pnpm.mjs` (version-dependent), back it up, and write the shim with the absolute nub path baked in. (Baked, not env-passed: the suite's `createEnv()` rebuilds a clean env keeping only `PATH`/`COLORTERM`/`APPDATA`, so an exported `NUB_BIN` would be stripped before the shim runs.)
 5. **Run jest** scoped to `pnpm/test/` from inside the `pnpm/` package (so its `@pnpm/jest-config/with-registry` preset — which boots the registry mock — is active).
 6. **Classify** the jest `--json` output against the allowlist.
 
-## The allowlist
+## The allowlist (generated)
 
-`allowlist.txt` lists KNOWN-OK failures as substrings matched against each failing test's full name. Two kinds of entry:
+The suite has a large, stable set of known failures — intended/out-of-scope divergences (pnpm version-switching, per-package Node provisioning, `pnpm server`/`self-update`, the global-install layout, patch/configurational-dependency hooks, supportedArchitectures), harness-infrastructure brittleness (the registry mock not honored on a flow, an `execPnpm.ts` helper that crashes on empty output, multi-minute timeouts on unimplemented features), and genuine nub↔pnpm divergences worth fixing. The maintainer call (2026-06-30) is to SKIP all of them so the nightly is green on this known reality and reds ONLY on a genuine NEW regression.
 
-- **Intended divergences** — nub is deliberately not pnpm: `nub upgrade` is self-update (not pnpm's `update` alias); no implicit script shortcuts (nub requires the explicit `run` verb); the top-level file-run surface; the global-install root layout (`<pnpm-home>/global-nub` vs pnpm's `global/<LAYOUT_VERSION>/node_modules`).
-- **Tracked bugs** — real nub bugs, allowlisted as known-failing until fixed (B1/B2/B3 in the `pnpm-compat-harness-bugs` thread). Remove a cluster the moment its fix lands.
+So `allowlist.txt` is GENERATED, not hand-maintained, from a real full-suite run:
 
-The classifier flags two failure modes that fail the run:
+```bash
+node tests/pnpm-conformance/gen-allowlist.mjs <results.json> > tests/pnpm-conformance/allowlist.txt
+```
 
-- **SURPRISE** — a failing test matching NO allowlist entry: an unexpected divergence (a candidate bug).
-- **STALE-ALLOW** — an allowlist entry that matched no failure (only checked on a full run): the bug may be fixed; prune the entry. This keeps the allowlist honest and shrinking.
+Every currently-failing test becomes an EXACT-fullName entry (matched as a substring against a failing test's full name), bucketed into commented category sections. The **genuine-divergence** bucket is thread-referenced (`pnpm-conformance-divergences` D1–D7, `pnpm-conformance-99`) so real bugs are skipped-but-not-buried: fix the bug, then drop its line (or regenerate after the next run). Regenerate after any deliberate suite/pin change; the diff shows exactly which failures appeared or disappeared.
+
+The classifier reports three things; only one reds the run:
+
+- **SURPRISE** (FATAL) — a failing test matching NO allowlist entry: a genuinely new divergence / regression. This is the whole value of the gate.
+- **STALE-ALLOW** (non-fatal) — an allowlist entry that matched no failure (a known failure that now passes or was renamed): reported loudly for pruning, but it does NOT red the run — an improvement is not a regression.
+- **KNOWN-FAILING** — a failure matching an allowlist entry: expected, skipped.
 
 ## Flake sources (and mitigations)
 
@@ -83,25 +90,10 @@ The classifier flags two failure modes that fail the run:
 
 `.github/workflows/pnpm-conformance.yml` runs this NIGHTLY (08:00 UTC) and on-demand (`workflow_dispatch`, with optional `pnpm_tag` / `jest_args` inputs). It is intentionally NOT a per-PR gate: it is a new external-suite surface with real flake sources, so it must not block the trunk. Promote it to a per-PR gate only after it proves stable across several nightly runs.
 
-## Proven runs (2026-06-20, local, nub v0.1.7, pnpm v10.15.1)
+## Baseline (2026-06-30, local, pnpm v11.3.0)
 
-Full front-door suite (`pnpm/test/`, 50 suites / 337 tests, ~10 min on an M-series host):
-
-```
-PASS:          293
-KNOWN-FAILING: 25   (allowlisted divergences)
-SURPRISE:      0
-STALE-ALLOW:   0    → exit 0 (green-or-known-failing)
-```
-
-The 25 known-failing tests cluster into three real divergence families the harness surfaced (all allowlisted pending a maintainer call — none auto-changed):
-
-- **Global install / link / bin / `-g`** (~13 tests) — nub uses its own global layout (`<pnpm-home>/global-nub`) and does not replicate pnpm's global install/link/uninstall/`bin -g`/`root -g` surface.
-- **`packageManager`-field version management** (~9 tests) — nub does not replicate pnpm's `manage-package-manager-versions` / version-switch / self-update-edits-the-field behavior. One path leaks nub-identity text where pnpm emits "This project is configured to use yarn".
-- **Per-package node version, empty-dir package.json creation, dlx `.npmrc` registry** — assorted single-test divergences.
-
-These route to the `pnpm-compat-harness-bugs` thread to decide, per family, which (if any) should converge to pnpm's behavior vs stay an intended divergence.
+Full front-door suite (`pnpm/test/`, 50 suites / 337 tests, ~45–60 min including the slow `server.ts`/`recursive` suites). With the generated allowlist the classifier reports `SURPRISE: 0` → exit 0. The known-failing set is bucketed in `allowlist.txt`; the genuine-divergence bucket is tracked in `pnpm-conformance-divergences` (D1–D7) and `pnpm-conformance-99`, to be fixed on their own threads. Regenerate the baseline after a deliberate suite/pin change.
 
 ## Keeping the pin in sync
 
-When nub's spoofed pnpm version changes, update in lockstep: `PNPM_TAG`/`PNPM_PIN` in the workflow, `PNPM_PIN` in `lockfile-roundtrip.yml`, and the version references in this README. A version-skew between the cloned suite and what nub targets produces false divergences.
+When nub's spoofed pnpm version (`PNPM_PARITY_VERSION` in `crates/nub-cli/src/pm_engine/mod.rs`) changes, update `PNPM_TAG`/`PNPM_PIN` in the workflow + the version references here to the SAME version, then **regenerate `allowlist.txt`** from a fresh run (`gen-allowlist.mjs`) — a version change shifts the failure set, and the generated allowlist must match. (`lockfile-roundtrip.yml` pins its own version for lockfile-FORMAT coverage, a separate axis — it no longer tracks this pin.)

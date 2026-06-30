@@ -24,9 +24,9 @@ on:
   workflow_dispatch:
     inputs:
       pnpm_tag:
-        description: "pnpm git tag to clone & pin (e.g. v10.15.1)"
+        description: "pnpm git tag to clone & pin (e.g. v11.3.0)"
         required: false
-        default: "v10.15.1"
+        default: "v11.3.0"
       jest_args:
         description: "extra jest args (e.g. a single file: test/root.ts) — leave blank for the full suite"
         required: false
@@ -34,10 +34,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pin pnpm to the major nub spoofs (keep in sync with PNPM_PIN in
-  # lockfile-roundtrip.yml and the harness README).
-  PNPM_TAG: ${{ github.event.inputs.pnpm_tag || 'v10.15.1' }}
-  PNPM_PIN: "10.15.1"
+  # Pin pnpm to the EXACT version nub spoofs on `pnpm --version`
+  # (PNPM_PARITY_VERSION in crates/nub-cli/src/pm_engine/mod.rs). Matching it
+  # keeps version-string assertions from false-failing — the harness README's
+  # "pin to nub's spoofed major" rule. (lockfile-roundtrip.yml pins its own
+  # version for lockfile-FORMAT coverage — a separate axis — so the two no
+  # longer track each other.) Bump both this and PNPM_PARITY_VERSION together,
+  # then regenerate the allowlist (tests/pnpm-conformance/gen-allowlist.mjs).
+  PNPM_TAG: ${{ github.event.inputs.pnpm_tag || 'v11.3.0' }}
+  PNPM_PIN: "11.3.0"
   # B3 flake mitigation: gate nub/aube self-update so no banner pollutes stdout.
   NUB_NO_UPDATE: "1"
   AUBE_NO_UPDATE_CHECK: "1"

@@ -12,19 +12,20 @@
 #   tests/pnpm-conformance/run.sh <nub-binary> [pnpm-tag] [jest-args...]
 #
 #   <nub-binary>  absolute or repo-relative path to the built nub (e.g. target/debug/nub)
-#   pnpm-tag      pnpm git tag to clone & pin (default: PNPM_PIN env or v10.15.1).
+#   pnpm-tag      pnpm git tag to clone & pin (default: PNPM_PIN env or v11.3.0).
 #                 PIN to nub's spoofed pnpm major to avoid version-skew false negs.
 #   jest-args     extra args passed through to jest (e.g. a single test file:
 #                 `test/root.ts` to run just one, or `-t 'pattern'`).
 #
 # Env:
-#   PNPM_PIN          pnpm version to pin (without the leading v; default 10.15.1)
+#   PNPM_PIN          pnpm version to pin (without the leading v; default 11.3.0)
 #   PNPM_CLONE_DIR    where to clone pnpm (default: a temp dir; reused if present)
 #   KEEP_CLONE=1      do not delete a temp clone on exit (for debugging)
 #   NUB_NO_UPDATE=1   gate nub's self-update check off (set automatically; B3 flake)
 #
-# Exit: 0 if every failing test is allowlisted (known divergence/bug); non-zero
-# if any SURPRISE failure (an unexpected divergence) or stale allowlist entry.
+# Exit: 0 if every failing test is allowlisted (a known divergence/bug); non-zero
+# ONLY on a SURPRISE failure (a new, un-allowlisted divergence — a regression).
+# A stale allowlist entry is reported but non-fatal (see classify.mjs).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,11 +38,11 @@ if [ -z "$NUB_BIN_ARG" ]; then
   exit 2
 fi
 shift
-PNPM_TAG="${1:-v${PNPM_PIN:-10.15.1}}"
+PNPM_TAG="${1:-v${PNPM_PIN:-11.3.0}}"
 # Allow passing a bare jest-arg in $1 (only shift the tag if it looks like a tag).
 case "$PNPM_TAG" in
   v[0-9]*|[0-9]*) [[ $# -gt 0 ]] && shift; [[ "$PNPM_TAG" == v* ]] || PNPM_TAG="v$PNPM_TAG" ;;
-  *) PNPM_TAG="v${PNPM_PIN:-10.15.1}" ;;
+  *) PNPM_TAG="v${PNPM_PIN:-11.3.0}" ;;
 esac
 JEST_EXTRA=("$@")
 
@@ -174,7 +175,14 @@ JEST_ARGS=(--json --outputFile="$RESULTS_JSON" --ci)
 if [ "${#JEST_EXTRA[@]}" -gt 0 ]; then
   JEST_ARGS+=("${JEST_EXTRA[@]}")
 else
-  JEST_ARGS+=(--testPathPattern 'test/')
+  # jest 30 (pnpm 11.x) renamed --testPathPattern -> --testPathPatterns; jest 29
+  # (pnpm 10.x) used the singular. Pick the flag the installed jest accepts.
+  JEST_MAJOR="$("$JEST_BIN" --version 2>/dev/null | sed 's/[^0-9].*//')"
+  if [ "${JEST_MAJOR:-0}" -ge 30 ]; then
+    JEST_ARGS+=(--testPathPatterns 'test/')
+  else
+    JEST_ARGS+=(--testPathPattern 'test/')
+  fi
 fi
 cd "$CLONE_DIR/pnpm"
 set +e
