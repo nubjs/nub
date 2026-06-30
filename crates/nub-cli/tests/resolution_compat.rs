@@ -252,11 +252,11 @@ fn ts_resolution_conformance() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
-    // import: tsconfig `paths` alias + extensionless `.ts` + `.js`→`.ts` emit swap.
+    // import: tsconfig `paths` alias + extensionless `.ts` + dotted filename extensionless `.ts` + `.js`→`.ts` emit swap.
     assert_eq!(
         run("main.ts"),
-        "alias-ok extless-ok swap-ok",
-        "tsconfig path / extensionless / .js→.ts swap must all resolve via import (parity with tsc/tsx)"
+        "alias-ok extless-ok dotted-extless-ok swap-ok",
+        "tsconfig path / extensionless / dotted extensionless / .js→.ts swap must all resolve via import (parity with tsc/tsx)"
     );
     // require: a tsconfig-paths alias from a `.cts` (CommonJS-TS) parent.
     assert_eq!(
