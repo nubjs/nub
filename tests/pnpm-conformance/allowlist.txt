@@ -75,11 +75,9 @@ dlx with supportedArchitectures CLI options ["--cpu=arm64", "--os=darwin"]
 dlx with supportedArchitectures CLI options ["--cpu=arm64", "--os=win32"]
 dlx with supportedArchitectures CLI options ["--cpu=x64", "--os=linux", "--libc=musl"]
 
-# ── infra-timeout (3) ─────────────────────────────────────────────
+# ── infra-timeout (1) ─────────────────────────────────────────────
 # HARNESS INFRA — jest timeout (unimplemented feature hangs).
 recursive installation using server
-test/install/selfUpdate.ts
-test/server.ts
 
 # ── genuine-divergence (118) ────────────────────────────────────────
 # GENUINE nub<->pnpm divergence worth fixing — NOT buried; tracked in pnpm-conformance-divergences (D1-D7) + pnpm-conformance-99. Remove the entry (or regenerate) when the divergence is fixed.

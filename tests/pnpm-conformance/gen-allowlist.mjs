@@ -100,8 +100,13 @@ out.push('# fix the bug, then drop its line (or regenerate after the next run).'
 out.push('#')
 out.push('# Regenerate after a deliberate suite/pin change:')
 out.push('#   node tests/pnpm-conformance/gen-allowlist.mjs <results.json> > tests/pnpm-conformance/allowlist.txt')
+// A wholly-intended file's tests can span two categories (e.g. server.ts has
+// both `server`- and timeout-flavored failures), so the same file-path entry
+// would emit under each. Emit each path once, in its first category.
+const emitted = new Set()
 for (const [k, desc] of CATS) {
-  const entries = [...byCat.get(k)].sort()
+  const entries = [...byCat.get(k)].sort().filter((e) => !emitted.has(e))
+  for (const e of entries) emitted.add(e)
   if (!entries.length) continue
   out.push('')
   out.push(`# ── ${k} (${entries.length}) ${'─'.repeat(Math.max(0, 58 - k.length))}`)

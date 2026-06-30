@@ -177,7 +177,8 @@ if [ "${#JEST_EXTRA[@]}" -gt 0 ]; then
 else
   # jest 30 (pnpm 11.x) renamed --testPathPattern -> --testPathPatterns; jest 29
   # (pnpm 10.x) used the singular. Pick the flag the installed jest accepts.
-  JEST_MAJOR="$("$JEST_BIN" --version 2>/dev/null | sed 's/[^0-9].*//')"
+  # First integer run of `jest --version` (robust to a leading v / extra text).
+  JEST_MAJOR="$("$JEST_BIN" --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
   if [ "${JEST_MAJOR:-0}" -ge 30 ]; then
     JEST_ARGS+=(--testPathPatterns 'test/')
   else
