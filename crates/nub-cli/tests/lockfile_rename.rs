@@ -1,4 +1,4 @@
-//! Transitional rename of nub's own lockfile: `lock.yaml` → `package.lock`.
+//! Transitional rename of nub's own lockfile: `lock.yaml` → `nub.lock`.
 //! A virgin install writes the new name; an unmigrated `lock.yaml` is renamed
 //! byte-identically on the next mutating op (and a redundant one is removed);
 //! workspace members migrate too. All rows run OFFLINE with empty-dependency
@@ -55,7 +55,7 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
 const EMPTY_LOCK: &str = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
 const EMPTY_PKG: &str = r#"{"name":"app","version":"1.0.0"}"#;
 
-/// A truly-fresh project (no lockfile, no PM signal) writes `package.lock`,
+/// A truly-fresh project (no lockfile, no PM signal) writes `nub.lock`,
 /// not the legacy `lock.yaml`.
 #[test]
 fn virgin_install_writes_package_lock() {
@@ -63,8 +63,8 @@ fn virgin_install_writes_package_lock() {
     let (stdout, stderr, code) = run(&dir, &["install", "--offline"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        dir.join("package.lock").is_file(),
-        "virgin install must write package.lock: {stderr}"
+        dir.join("nub.lock").is_file(),
+        "virgin install must write nub.lock: {stderr}"
     );
     assert!(
         !dir.join("lock.yaml").exists(),
@@ -72,7 +72,7 @@ fn virgin_install_writes_package_lock() {
     );
 }
 
-/// An existing `lock.yaml` is migrated to `package.lock` byte-identically on
+/// An existing `lock.yaml` is migrated to `nub.lock` byte-identically on
 /// the next install, and the stale file is gone.
 #[test]
 fn existing_lock_yaml_is_migrated_byte_identically() {
@@ -87,14 +87,14 @@ fn existing_lock_yaml_is_migrated_byte_identically() {
         "the legacy lock.yaml must be removed after migration"
     );
     assert_eq!(
-        std::fs::read_to_string(dir.join("package.lock")).unwrap(),
+        std::fs::read_to_string(dir.join("nub.lock")).unwrap(),
         EMPTY_LOCK,
         "the migration is a byte-identical rename"
     );
 }
 
 /// When BOTH names exist, the redundant `lock.yaml` is removed and
-/// `package.lock` is kept untouched (no double-lockfile left behind).
+/// `nub.lock` is kept untouched (no double-lockfile left behind).
 #[test]
 fn both_present_keeps_package_lock_and_removes_legacy() {
     let kept = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n# kept\n";
@@ -102,7 +102,7 @@ fn both_present_keeps_package_lock_and_removes_legacy() {
         "both",
         &[
             ("package.json", EMPTY_PKG),
-            ("package.lock", kept),
+            ("nub.lock", kept),
             ("lock.yaml", EMPTY_LOCK),
         ],
     );
@@ -113,9 +113,9 @@ fn both_present_keeps_package_lock_and_removes_legacy() {
         "the redundant legacy lock.yaml must be removed"
     );
     assert_eq!(
-        std::fs::read_to_string(dir.join("package.lock")).unwrap(),
+        std::fs::read_to_string(dir.join("nub.lock")).unwrap(),
         kept,
-        "the existing package.lock must be kept verbatim, not overwritten by the legacy file"
+        "the existing nub.lock must be kept verbatim, not overwritten by the legacy file"
     );
 }
 
@@ -131,7 +131,7 @@ fn workspace_member_lock_yaml_migrates() {
                 r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
             ),
             // Root carries nub's lockfile so the project resolves as nub identity.
-            ("package.lock", EMPTY_LOCK),
+            ("nub.lock", EMPTY_LOCK),
             (
                 "packages/a/package.json",
                 r#"{"name":"a","version":"1.0.0"}"#,
@@ -146,14 +146,14 @@ fn workspace_member_lock_yaml_migrates() {
         "a workspace member's legacy lock.yaml must migrate too: {stderr}"
     );
     assert!(
-        dir.join("packages/a/package.lock").is_file(),
-        "the member's lockfile must land at package.lock"
+        dir.join("packages/a/nub.lock").is_file(),
+        "the member's lockfile must land at nub.lock"
     );
 }
 
 /// `nub ci` is a frozen, ephemeral install: it installs fine from an existing
 /// `lock.yaml` (read-both) but must NEVER migrate or otherwise mutate a
-/// checked-in file — no rename, no `package.lock` written, `lock.yaml` left
+/// checked-in file — no rename, no `nub.lock` written, `lock.yaml` left
 /// byte-for-byte untouched.
 #[test]
 fn ci_never_migrates_or_mutates_the_lockfile() {
@@ -172,8 +172,8 @@ fn ci_never_migrates_or_mutates_the_lockfile() {
         "ci must leave lock.yaml byte-for-byte untouched"
     );
     assert!(
-        !dir.join("package.lock").exists(),
-        "ci must not rename or write package.lock — a frozen install never mutates checked-in files"
+        !dir.join("nub.lock").exists(),
+        "ci must not rename or write nub.lock — a frozen install never mutates checked-in files"
     );
 }
 

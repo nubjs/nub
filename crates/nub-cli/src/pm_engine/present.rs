@@ -182,7 +182,7 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
 ///
 /// - The frozen-install / `nub ci` missing-lockfile hint names a single
 ///   lockfile to commit (`pnpm-lock.yaml`), but which file a fresh
-///   `nub install` writes is context-dependent (`package.lock` for a truly-fresh
+///   `nub install` writes is context-dependent (`nub.lock` for a truly-fresh
 ///   project, `pnpm-lock.yaml` otherwise), so naming one is misleading.
 ///   Neutralized to "a lockfile" — a nub-only correction (standalone aube's
 ///   `pnpm-lock.yaml` hint is correct for it, so this stays out of the fork).

@@ -187,7 +187,7 @@ pub(crate) fn role_of(declared: Option<&str>, kind: Option<LockfileKind>) -> Opt
         LockfileKind::Npm | LockfileKind::NpmShrinkwrap => Role::Npm,
         LockfileKind::Yarn | LockfileKind::YarnBerry => Role::Yarn,
         LockfileKind::Bun => Role::Bun,
-        // The generic package.lock (aube's `Aube` slot under nub's filename
+        // The generic nub.lock (aube's `Aube` slot under nub's filename
         // toggle) is nub identity.
         LockfileKind::Aube => Role::Nub,
     })

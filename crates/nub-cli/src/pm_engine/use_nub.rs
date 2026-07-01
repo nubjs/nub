@@ -9,7 +9,7 @@
 //! `devEngines.packageManager {name:"nub", version:"^<ver>", onFail:"warn"}`
 //! (the non-locking cross-tool signal, always written) plus — ONLY on the
 //! explicit `pm use nub@<exact>` opt-in — the hard `packageManager: "nub@<exact>"`
-//! pin; the lockfile renamed (or converted) to `package.lock` (pnpm-v9 bytes,
+//! pin; the lockfile renamed (or converted) to `nub.lock` (pnpm-v9 bytes,
 //! generic name), and `pnpm-workspace.yaml` ALWAYS migrated and deleted:
 //!
 //! - resolution-bearing keys → `package.json` under ecosystem-standard
@@ -817,7 +817,7 @@ fn pnpm_vocab_precedence(root: &Path) -> VocabPrecedence {
 /// (bare `nub pm use nub`) writes only the non-locking devEngines caret range on
 /// the running version. Prints the file-by-file summary; never silent.
 pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
-    // The brand preflight registers the yaml names + package.lock filename the
+    // The brand preflight registers the yaml names + nub.lock filename the
     // discovery below and the engine writers read.
     super::engine_brand_preflight();
 
@@ -912,7 +912,7 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
         AlignPlan::Keep { kept, remove } => {
             let kept_name = kept.file_name().unwrap_or_default().to_string_lossy();
             // The explicit graduation must leave the project on the current
-            // name: converge a kept LEGACY-named nub lockfile to `package.lock`
+            // name: converge a kept LEGACY-named nub lockfile to `nub.lock`
             // (byte-identical rename), rather than reporting "kept" and leaving
             // the old filename for a later install to migrate.
             if kept_name == NUB_LEGACY_LOCKFILE {

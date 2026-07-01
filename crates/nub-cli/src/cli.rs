@@ -6469,7 +6469,7 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
                 );
             }
         }
-        // nub → pnpm: package.lock renamed back, byte-identical (the two-mode
+        // nub → pnpm: nub.lock renamed back, byte-identical (the two-mode
         // eject — the format was never forked, so the rename IS the eject).
         AlignPlan::Rename { from, remove } => {
             let to = root.join(use_align::lockfile_name(name));

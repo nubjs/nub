@@ -950,7 +950,7 @@ impl WorkspaceFilterFlags {
 /// `nub install` — route through the embedded aube install engine.
 pub fn run_install(flags: InstallFlags) -> Result<i32> {
     let session = super::engine_session(flags.dir.as_deref())?;
-    // Transitional: rename a legacy `lock.yaml` to `package.lock` before the
+    // Transitional: rename a legacy `lock.yaml` to `nub.lock` before the
     // engine resolves (no-op unless this is a nub-identity project carrying the
     // old name).
     super::migrate_session_lockfile(&session);
@@ -1059,7 +1059,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // Virgin install only: stamp a caret RANGE into `devEngines.packageManager`
     // so the project advertises nub the standard, cross-tool way WITHOUT locking
     // itself to one exact nub version. nub's canonical lockfile is deliberately
-    // NEUTRAL (`package.lock`), so — unlike every other PM, whose branded lockfile
+    // NEUTRAL (`nub.lock`), so — unlike every other PM, whose branded lockfile
     // is itself the repo's PM signal — nub leaves no signal downstream tools
     // (turbo, pmd, nypm) can read; the `devEngines.packageManager` object IS that
     // signal, and detectors key on its `name`, so a `^` range is signal-equivalent
@@ -1067,7 +1067,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // NOT the exact `packageManager: nub@<v>` field: that hard, corepack-visible
     // pin freezes the repo at one nub version and stays the OPT-IN gesture of an
     // explicit `nub pm use nub@<exact>`. The write is gated on
-    // `session.truly_fresh`, captured BEFORE the engine wrote `package.lock`: `true`
+    // `session.truly_fresh`, captured BEFORE the engine wrote `nub.lock`: `true`
     // ONLY when nub is the FIRST package manager to touch the project (no foreign
     // lockfile, no pre-existing nub lockfile, no `packageManager`/`devEngines`
     // declaration). Any incumbent signal ⇒ `false` ⇒ no write — nub never imposes

@@ -145,7 +145,7 @@ fn nub_identity_does_not_read_project_or_global_bunfig() {
                 r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1"}"#,
             ),
             (
-                "package.lock",
+                "nub.lock",
                 "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
             ),
             (

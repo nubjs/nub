@@ -23,7 +23,7 @@ In a workspace, the chain runs from any member: Nub walks up to the root, which 
 | **pnpm** — [docs →](/docs/install/pnpm) | `pnpm-lock.yaml` (v9) | read + write |
 | **Yarn** — [docs →](/docs/install/yarn) | `yarn.lock` | **read-only** |
 | **Bun** — [docs →](/docs/install/bun) | `bun.lock` | read + write |
-| **Nub** — [docs →](/docs/pm) | `package.lock` (pnpm v9 bytes) | read + write |
+| **Nub** — [docs →](/docs/pm) | `nub.lock` (pnpm v9 bytes) | read + write |
 
 A no-churn guard leaves a graph-equal lockfile untouched, and Nub never drops its own lockfile into a project it doesn't own. The `bun.lockb` binary format is rejected — convert to text `bun.lock` first.
 
@@ -152,7 +152,7 @@ Under its own identity, Nub reads only neutral, cross-tool config — never anot
       href: '/docs/pm',
       highlight: true,
       items: [
-        { code: 'package.lock', ok: true },
+        { code: 'nub.lock', ok: true },
         { code: '.npmrc', ok: true },
         { code: 'overrides', ok: true },
         { code: 'resolutions', ok: true },
@@ -173,9 +173,9 @@ The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly 
 
 ### Nub identity
 
-A project is Nub's own in three cases: it declares Nub through `nub pm use nub`, `package.lock` is the only lockfile signal, or a fresh project has no declaration and no lockfile. The switch aligns the manifest and lockfile, migrates pnpm workspace config into neutral `package.json` fields, and moves the project onto a neutral surface:
+A project is Nub's own in three cases: it declares Nub through `nub pm use nub`, `nub.lock` is the only lockfile signal, or a fresh project has no declaration and no lockfile. The switch aligns the manifest and lockfile, migrates pnpm workspace config into neutral `package.json` fields, and moves the project onto a neutral surface:
 
-- **Lockfile:** `package.lock` — the pnpm v9 schema byte-for-byte, under Nub's own basename
+- **Lockfile:** `nub.lock` — the pnpm v9 schema byte-for-byte, under Nub's own basename
 - **Package fields:** `workspaces`, `overrides`, `resolutions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
 - **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
 - **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own directories
@@ -185,7 +185,7 @@ A fresh `nub install` records Nub as the manager with a non-locking range — `d
 This is the brand boundary in both directions: Nub never emits its own brand into your config, and under its own identity reads *only* neutral, cross-tool config — never `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `pnpm.*` namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, or aube's `AUBE_*` knobs. To keep pnpm hooks or pnpm-named workspace config active, stay pnpm-owned or run `nub pm use pnpm`.
 
 ```console
-# captured: Nub-identity project (package.lock) with a stray pnpm-workspace.yaml
+# captured: Nub-identity project (nub.lock) with a stray pnpm-workspace.yaml
 $ nub install
 nub: pnpm-workspace.yaml is not read under nub identity — migrate it
      (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`).
@@ -214,7 +214,7 @@ Error: ERR_NUB_LOCKFILE_DECLARATION_MISMATCH
   help: nub pm use <pm> to declare it, or remove the stale lockfile
 ```
 
-Under Nub identity, `package.lock` beside a foreign lockfile is the ambiguity error.
+Under Nub identity, `nub.lock` beside a foreign lockfile is the ambiguity error.
 </Callout>
 
 <Callout title="Inference vs the pinned PM">

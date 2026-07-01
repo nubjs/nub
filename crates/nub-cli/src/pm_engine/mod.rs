@@ -804,7 +804,7 @@ fn engine_session_inner(
     }
     // Truly-fresh = no PM-preference signal anywhere (no lockfile, no
     // declaration, no pnpm-named file). On this path nub claims identity via the
-    // neutral lockfile: the embedder default flips to `package.lock`, the quiet
+    // neutral lockfile: the embedder default flips to `nub.lock`, the quiet
     // identity marker the classifier reads back as nub. Any incumbent signal
     // makes the project pnpm-shaped/compat and is respected untouched. On a
     // virgin install the install family ALSO stamps the non-locking
@@ -1465,7 +1465,7 @@ fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
 /// [`engine_session`]). Every seam is idempotent.
 pub(crate) fn engine_brand_preflight() {
     // Static identity FIRST, before anything reads project state or branding.
-    // The whole compile-time profile — name, `nub/<ver>` UA, `package.lock`
+    // The whole compile-time profile — name, `nub/<ver>` UA, `nub.lock`
     // canonical lockfile, `["nub"]`/`["pnpm"]` detection names, and the five
     // embedder-fixed toggles (engines-self check OFF, runtime-switching OFF,
     // warm-store-verify OFF, canonical-lockfile-always-wins OFF, self-update
@@ -1764,7 +1764,7 @@ fn resolve_config_surface(cwd: &Path) -> ConfigSurface {
     }
     // Nothing decided anywhere within the walk. A truly-fresh project (no
     // PM-preference signal of any kind, no pnpm-named file) becomes NUB
-    // identity: the next install writes `package.lock` and stamps the manifest,
+    // identity: the next install writes `nub.lock` and stamps the manifest,
     // and the project self-reinforces as nub-identity thereafter. A
     // pnpm-named file seen in the walk keeps the pnpm-shaped surface.
     if saw_pnpm_named {
@@ -1866,7 +1866,7 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 /// `npm_config_node_linker`, `.npmrc`, or workspace yaml all win):
 ///
 /// - `defaultLockfileFormat` — a TRULY-fresh project (no PM-preference signal
-///   of any kind) writes nub's neutral `package.lock` (`=aube`); every other
+///   of any kind) writes nub's neutral `nub.lock` (`=aube`); every other
 ///   surface writes `pnpm-lock.yaml` (`=pnpm`) for drop-in interop. See
 ///   [`nub_setting_defaults`]'s `truly_fresh` arm.
 /// - `virtualStoreDir` / `stateDir` = `node_modules/.nub` — the isolated
@@ -2018,7 +2018,7 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 ///   keep the engine's isolated + hoist=true default (GVS off). A user-set
 ///   `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins — embedder-tier default.
 /// - Fresh-write lockfile format: a TRULY-fresh project (no PM-preference
-///   signal of any kind — `truly_fresh`) writes nub's neutral `package.lock`
+///   signal of any kind — `truly_fresh`) writes nub's neutral `nub.lock`
 ///   (`defaultLockfileFormat=aube`, which under the nub embedder resolves to
 ///   the `lock.yaml` basename); every other surface writes `pnpm-lock.yaml`,
 ///   keeping a pnpm-incumbent / mixed project drop-in interoperable. A
@@ -2095,7 +2095,7 @@ fn nub_setting_defaults(
 /// `None` only then); this additionally requires that no pnpm-NAMED file
 /// (`pnpm-workspace.yaml`, `.pnpmfile.*`, `.pnpmrc`) sits in the walk — a
 /// pnpm-named file is a genuine pnpm signal that makes the project pnpm-shaped,
-/// not nub's to claim. On the truly-fresh path nub writes `package.lock` and
+/// not nub's to claim. On the truly-fresh path nub writes `nub.lock` and
 /// stamps the manifest with its own identity; any incumbent signal is
 /// respected and left untouched.
 fn is_truly_fresh_project(cwd: &Path, detected: Option<&DetectedLockfile>) -> bool {
@@ -2115,7 +2115,7 @@ fn is_truly_fresh_project(cwd: &Path, detected: Option<&DetectedLockfile>) -> bo
 }
 
 /// Whether `dir` holds nub's own canonical lockfile under EITHER the current
-/// name (`package.lock`) or the legacy name (`lock.yaml`) still honored through
+/// name (`nub.lock`) or the legacy name (`lock.yaml`) still honored through
 /// the rename transition. The bespoke nub-side identity probes
 /// (`resolve_config_surface`) check the file directly rather than through the
 /// engine's candidate set, so they consult both names here.
@@ -2125,8 +2125,8 @@ fn nub_lockfile_present(dir: &Path) -> bool {
 }
 
 /// Transitional auto-migration of nub's own lockfile name: `lock.yaml` →
-/// `package.lock`. The bytes are identical (pnpm-lock v9), so this is a pure
-/// rename; when `package.lock` already exists the redundant `lock.yaml` is
+/// `nub.lock`. The bytes are identical (pnpm-lock v9), so this is a pure
+/// rename; when `nub.lock` already exists the redundant `lock.yaml` is
 /// simply removed. Runs at the project root and every workspace member dir at
 /// the start of a mutating PM op, so a project upgraded onto the new name
 /// converges silently. Best-effort: any IO error is ignored — the engine's
@@ -2140,10 +2140,10 @@ pub(crate) fn migrate_legacy_nub_lockfile(root: &Path) {
 }
 
 /// Run [`migrate_legacy_nub_lockfile`] when `session` resolved a nub-identity
-/// project — the only identity that owns the `package.lock`/`lock.yaml` pair
+/// project — the only identity that owns the `nub.lock`/`lock.yaml` pair
 /// (so a pnpm/npm/yarn/bun incumbent's tree is never touched). Call at the
 /// start of every MUTATING PM op (install/ci/add/remove/update/dedupe), before
-/// the engine resolves, so the engine reads and writes `package.lock` with no
+/// the engine resolves, so the engine reads and writes `nub.lock` with no
 /// stale `lock.yaml` left behind.
 pub(crate) fn migrate_session_lockfile(session: &EngineSession) {
     if let Some(d) = session.detected.as_ref()
@@ -2744,7 +2744,7 @@ mod tests {
     #[test]
     fn fresh_write_format_flips_with_truly_fresh() {
         let dir = tempfile::tempdir().unwrap();
-        // A truly-fresh project writes nub's neutral `package.lock`
+        // A truly-fresh project writes nub's neutral `nub.lock`
         // (`defaultLockfileFormat=aube`); every other surface keeps the
         // pnpm-lock fresh-write default for drop-in interop.
         assert_eq!(
@@ -2753,7 +2753,7 @@ mod tests {
                 "defaultLockfileFormat"
             ),
             Some("aube"),
-            "truly-fresh must write nub's package.lock"
+            "truly-fresh must write nub's nub.lock"
         );
         assert_eq!(
             get(
@@ -3080,10 +3080,10 @@ mod tests {
         }
 
         // ── undeclared: lockfile presence decides ────────────────────────
-        // A lone package.lock (nub's canonical name) → nub identity.
+        // A lone nub.lock (nub's canonical name) → nub identity.
         let d = root(&[
             ("package.json", "{}"),
-            ("package.lock", "lockfileVersion: '9.0'\n"),
+            ("nub.lock", "lockfileVersion: '9.0'\n"),
         ]);
         assert_eq!(
             resolve_config_surface(d.path()),

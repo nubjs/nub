@@ -33,12 +33,12 @@
 /// - `self_names` = `["nub"]`, `compatible_names` = `["pnpm"]` — nub is the
 ///   tool, pnpm the compatible drop-in (was `set_detection_self_names` +
 ///   `set_package_manager_names`).
-/// - `lockfile_basename` = `"package.lock"` — nub's generic, unbranded
+/// - `lockfile_basename` = `"nub.lock"` — nub's generic, unbranded
 ///   canonical lockfile (pnpm-lock v9 bytes), pairing with `package.json`; was
 ///   `set_aube_lock_base_filename(NUB_LOCKFILE)`.
 /// - `lockfile_legacy_basenames` = `["lock.yaml"]` — nub's pre-rename name,
 ///   still recognized on read during the transition and migrated to
-///   `package.lock` on the next mutating PM op.
+///   `nub.lock` on the next mutating PM op.
 /// - `workspace_yaml` = `None` — nub has no branded workspace YAML of its own.
 ///   The shared `pnpm-workspace.yaml` compat surface is gated separately on the
 ///   `EngineContext` (`read_branded_pnpm_config`), per the role.
@@ -99,7 +99,7 @@
 ///   `managed_config_system_dir = None` would skip the system read — here the
 ///   user/project branded-file read/write is skipped entirely. Standalone aube
 ///   keeps `Some("aube")`, so its `~/.config/aube/config.toml` path is unchanged.
-/// - `canonical_lockfile_always_wins` = `false` — `package.lock` never silently
+/// - `canonical_lockfile_always_wins` = `false` — `nub.lock` never silently
 ///   outranks a foreign lockfile beside it; that state is the loud
 ///   ambiguity/contradiction error (was
 ///   `set_canonical_lockfile_always_wins(false)`).
@@ -156,7 +156,7 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     compatible_names: &["pnpm"],
     lockfile_basename: super::use_align::NUB_LOCKFILE,
     // `lock.yaml` (nub's pre-rename name) stays readable through the transition
-    // and is migrated to `package.lock` on the next mutating PM op; sunset at
+    // and is migrated to `nub.lock` on the next mutating PM op; sunset at
     // the next major.
     lockfile_legacy_basenames: &[super::use_align::NUB_LEGACY_LOCKFILE],
     workspace_yaml: None,
@@ -229,7 +229,7 @@ pub(crate) fn register() {
 // drift is a build break, not a test-run failure (and runtime `assert!` on a
 // const trips clippy's `assertions_on_constants`).
 const _: () = {
-    assert!(matches!(NUB.lockfile_basename.as_bytes(), b"package.lock"));
+    assert!(matches!(NUB.lockfile_basename.as_bytes(), b"nub.lock"));
     assert!(matches!(NUB.lockfile_legacy_basenames, [b] if matches!(b.as_bytes(), b"lock.yaml")));
     assert!(matches!(NUB.cache_namespace.as_bytes(), b"nub/pm"));
     assert!(matches!(NUB.data_namespace.as_bytes(), b"nub"));

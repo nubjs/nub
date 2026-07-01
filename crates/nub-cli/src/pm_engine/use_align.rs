@@ -18,12 +18,11 @@ use anyhow::{Context, Result, bail};
 use aube_lockfile::LockfileKind;
 
 /// Nub's own lockfile name under nub identity (the two-mode model): the
-/// engine's canonical-lockfile slot under a generic, deliberately unbranded
-/// filename — `package.lock` pairs with `package.json`, and its
-/// format-agnostic `.lock` extension survives a future serialization change.
-/// Bytes stay pnpm-lock v9 compatible. Carried on the NUB embedder profile's
-/// `lockfile_basename`.
-pub(crate) const NUB_LOCKFILE: &str = "package.lock";
+/// engine's canonical-lockfile slot under nub's own basename — `nub.lock`,
+/// whose format-agnostic `.lock` extension survives a future serialization
+/// change. Bytes stay pnpm-lock v9 compatible. Carried on the NUB embedder
+/// profile's `lockfile_basename`.
+pub(crate) const NUB_LOCKFILE: &str = "nub.lock";
 
 /// Nub's PRIOR canonical lockfile name, still recognized on read during the
 /// rename transition (carried on the NUB profile's `lockfile_legacy_basenames`)
@@ -81,7 +80,7 @@ pub(crate) enum AlignPlan {
         from_kind: LockfileKind,
         remove: Vec<PathBuf>,
     },
-    /// The pnpm ↔ nub pair: same bytes (`package.lock` IS pnpm-v9 format under
+    /// The pnpm ↔ nub pair: same bytes (`nub.lock` IS pnpm-v9 format under
     /// a generic name), different filename — a rename, never a parse/rewrite,
     /// so the file stays byte-identical and the real PM's `--frozen-lockfile`
     /// acceptance is preserved exactly.
@@ -507,14 +506,14 @@ mod tests {
             }
         );
 
-        // package.lock under `use nub` is already nub's artifact: kept.
+        // nub.lock under `use nub` is already nub's artifact: kept.
         let dir = root("keep-nub", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
         assert!(matches!(
             plan_alignment(&dir, "nub").unwrap(),
             AlignPlan::Keep { .. }
         ));
 
-        // package.lock → npm is a real format change: converted, not renamed.
+        // nub.lock → npm is a real format change: converted, not renamed.
         let dir = root("nub-to-npm", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
         assert!(matches!(
             plan_alignment(&dir, "npm").unwrap(),
@@ -524,7 +523,7 @@ mod tests {
             }
         ));
 
-        // package.lock + a foreign family with neither being the target:
+        // nub.lock + a foreign family with neither being the target:
         // ambiguity, loud, naming both files.
         let dir = root(
             "nub-ambig",
@@ -536,7 +535,7 @@ mod tests {
         let err = plan_alignment(&dir, "bun").unwrap_err().to_string();
         assert!(
             err.contains(NUB_LOCKFILE) && err.contains("package-lock.json"),
-            "ambiguity must name package.lock and package-lock.json, got: {err}"
+            "ambiguity must name nub.lock and package-lock.json, got: {err}"
         );
     }
 
