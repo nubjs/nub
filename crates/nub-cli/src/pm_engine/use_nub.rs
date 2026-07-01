@@ -826,7 +826,7 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
 
     let manifest_content = std::fs::read_to_string(root.join("package.json"))
         .with_context(|| format!("reading {}", root.join("package.json").display()))?;
-    let manifest: Value = serde_json::from_str(&manifest_content)
+    let manifest: Value = serde_json::from_str(nub_core::strip_utf8_bom(&manifest_content))
         .with_context(|| format!("parsing {}", root.join("package.json").display()))?;
     let pnpm_ns = manifest.get("pnpm").and_then(Value::as_object).cloned();
 
@@ -1059,11 +1059,10 @@ fn remove_strays(paths: &[std::path::PathBuf], why: &str) -> Result<()> {
 /// to move (the idempotent rerun).
 pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
     let manifest_path = root.join("package.json");
-    let manifest: Value = serde_json::from_str(
-        &std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("reading {}", manifest_path.display()))?,
-    )
-    .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    let manifest_raw = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let manifest: Value = serde_json::from_str(nub_core::strip_utf8_bom(&manifest_raw))
+        .with_context(|| format!("parsing {}", manifest_path.display()))?;
 
     let workspaces = manifest.get("workspaces");
     let (packages, catalog, catalogs) = match workspaces {

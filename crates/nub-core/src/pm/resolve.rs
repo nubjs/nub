@@ -744,11 +744,15 @@ fn edit_manifest(
         );
     }
 
-    let content =
+    let raw =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let format = detect_format(&content);
+    // Strip a leading BOM before both format-sniffing and parsing; the rewrite
+    // is emitted BOM-free (npm/pnpm write without one), which is the desired
+    // normalization rather than round-tripping the BOM.
+    let content = crate::strip_utf8_bom(&raw);
+    let format = detect_format(content);
     let mut manifest: serde_json::Value =
-        serde_json::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
+        serde_json::from_str(content).with_context(|| format!("parsing {}", path.display()))?;
 
     let obj = manifest
         .as_object_mut()
@@ -1196,6 +1200,29 @@ mod tests {
             !empty.join("package.json").exists(),
             "write_declared_pm must not scaffold a package.json"
         );
+    }
+
+    #[test]
+    fn write_declared_pm_reads_through_a_utf8_bom_and_rewrites_bom_free() {
+        // A BOM-prefixed manifest (Windows editors / PowerShell 5.1) must parse
+        // for the pin write, not error at the read-modify-write seam — and the
+        // rewrite is emitted BOM-free (npm/pnpm write without one).
+        let dir = tmpdir("write-pin-bom");
+        write_pkg(&dir, "\u{feff}{\n  \"name\": \"app\"\n}\n");
+        let written = write_declared_pm("pnpm", "9.1.0", "abc", &dir, false)
+            .unwrap()
+            .path;
+        let bytes = std::fs::read(&written).unwrap();
+        assert!(
+            !bytes.starts_with(b"\xEF\xBB\xBF"),
+            "the rewrite must not carry a BOM"
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            manifest["packageManager"].as_str(),
+            Some("pnpm@9.1.0+sha512.abc"),
+        );
+        assert_eq!(manifest["name"].as_str(), Some("app"));
     }
 
     #[test]
