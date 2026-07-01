@@ -539,26 +539,28 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             });
         }
 
-        // Yarn PnP: `--require <.pnp.cjs>` BEFORE nub's own preload so PnP's
-        // `_resolveFilename` + zipfs patches install first; nub's resolve hooks
-        // then layer on top. Inside the `!compat_mode && !is_reentrant` gate, so
-        // `--node` and re-entrant child shells both skip PnP for free.
-        if let Some(pnp) = config.pnp {
-            cmd.arg("--require").arg(pnp);
-        }
-
         // `process.versions.nub` source: hand the running binary's version to the
         // preload so it can publish the self-identification marker. Coupled to the
         // preload injection below — both live in this augment block, so `--node`
         // and re-entrant child shells skip it for free.
         cmd.env(VERSION_ENV, env!("CARGO_PKG_VERSION"));
 
-        // Preload injection: `--require <cjs-path>` (fast tier) or `--import <url>`
-        // (compat tier). See PreloadInjection for why the channel is tier-specific.
-        if let Some(ref inj) = injection {
-            cmd.arg(inj.flag);
-            cmd.arg(&inj.value);
-        }
+        // Value-bearing preload/PnP `--require`/`--import` flags are NOT passed via
+        // argv here — ONLY via NODE_OPTIONS (assembled below). The direct child
+        // inherits that NODE_OPTIONS, so it is still fully augmented; keeping the
+        // flags off argv avoids a fork-reconstruction hazard: a child that rebuilds
+        // its Node flags by MERGING process.execArgv + NODE_OPTIONS (Next's
+        // getParsedNodeOptions→formatNodeOptions, jest-worker) would collect the
+        // SAME preload/PnP path from both channels and space-join the duplicate into
+        // one broken `--require "a b"`, dying with `Cannot find module 'a b'`. Boolean
+        // flags above stay argv-safe (idempotent when merged twice); only these
+        // value-bearing, path-carrying flags double destructively, so only they are
+        // routed single-channel. NODE_OPTIONS `--require` preserves the R1 sync-entry
+        // semantics identically to argv (R1 is the `--require`-vs-`--import` tier
+        // choice — see PreloadInjection — not the argv-vs-NODE_OPTIONS channel), and
+        // this matches the already-single-channel `compute_augmentation_env` script
+        // path. PnP's install-before-preload ordering is preserved by the
+        // NODE_OPTIONS token order (PnP token pushed before the preload token below).
 
         // Coverage-exclude nub's own runtime (R9). When the user runs the test
         // runner under `--experimental-test-coverage`, Node instruments every
@@ -566,9 +568,12 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // them into the user's coverage report, tanking the aggregate (a 100% TS
         // fixture drops to ~55%) and adding phantom rows. Node accepts MULTIPLE
         // `--test-coverage-exclude=<glob>` flags, so we add one more keyed to the
-        // ABSOLUTE nub runtime dir (the directory holding the preload we just
-        // injected) — never a broad `**/runtime/**`, which would also exclude a
-        // user's own `runtime/` source.
+        // ABSOLUTE nub runtime dir (the directory holding the preload injected via
+        // NODE_OPTIONS below) — never a broad `**/runtime/**`, which would also
+        // exclude a user's own `runtime/` source. This flag is safe to pass on argv
+        // even though it also rides NODE_OPTIONS: it is repeatable, so a merged
+        // duplicate is two independent exclude tokens (a harmless re-exclude), not a
+        // space-joined single value like the preload/PnP `--require` above.
         if flags::test_coverage_exclude_supported(&config.node.version) {
             if let Some(glob) = coverage_exclude_glob(
                 config.user_args,
