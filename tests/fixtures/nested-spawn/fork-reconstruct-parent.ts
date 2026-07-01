@@ -1,43 +1,27 @@
-// Regression guard for the dual-channel preload doubling: on the `nub <file>`
-// path nub must inject its preload `--require` into NODE_OPTIONS ONLY, never also
-// into argv. A tool that rebuilds a fork's Node flags by MERGING process.execArgv
-// + NODE_OPTIONS (Next `next build`'s getParsedNodeOptions -> formatNodeOptions,
-// jest-worker) would otherwise collect the SAME preload path from both channels
-// and space-join the duplicate into one quoted `--require "a b"`, killing the
-// fork with `Cannot find module 'a b'`. This fixture reproduces that exact
-// reconstruction and asserts the collected `--require` set holds the preload
-// EXACTLY ONCE, then forks a .ts child to confirm the single flag still augments.
-import { fork } from "node:child_process";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+// Regression guard for the dual-channel preload doubling. On the `nub <file>`
+// path nub must inject its preload flag (fast tier: `--require <cjs>`; compat
+// tier: `--import <url>`) into NODE_OPTIONS ONLY, never also into argv. A tool
+// that rebuilds a fork's Node flags by MERGING process.execArgv + NODE_OPTIONS
+// (Next `next build`'s getParsedNodeOptions -> formatNodeOptions, jest-worker)
+// would otherwise collect the SAME preload path from BOTH channels; when it then
+// space-joins and quotes the duplicate (`--require "a b"`), the fork dies with
+// `Cannot find module 'a b'`. The channel-level invariant that kills the bug on
+// EVERY tier: the preload token is in NODE_OPTIONS but ABSENT from execArgv, so a
+// merge collects it exactly once.
+import { execArgv, env } from "node:process";
 
-const here = dirname(fileURLToPath(import.meta.url));
+// nub's preload token in either channel — `--require=<...>/preload.cjs` (fast) or
+// `--import=<...>/preload.mjs` (compat). execArgv splits `--require <path>` into
+// two tokens, so join it before matching.
+const PRELOAD = /(--require|--import)[= ]\S*[/\\]preload\.(c?js|mjs)/;
 
-// getParsedNodeOptions(): merge execArgv (as separate tokens) + NODE_OPTIONS
-// (space-split) and collect every `--require`/`-r` value.
-function collectRequires(): string[] {
-  const tokens: string[] = [...process.execArgv];
-  for (const t of (process.env.NODE_OPTIONS || "").split(" ").filter(Boolean)) tokens.push(t);
-  const requires: string[] = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t === "--require" || t === "-r") requires.push(tokens[++i]);
-    else if (t.startsWith("--require=")) requires.push(t.slice("--require=".length));
-    else if (t.startsWith("-r=")) requires.push(t.slice(3));
-  }
-  return requires;
-}
+const inArgv = PRELOAD.test(execArgv.join(" "));
+const inNodeOptions = PRELOAD.test(env.NODE_OPTIONS || "");
+console.log("preload-in-argv:" + inArgv);
+console.log("preload-in-node-options:" + inNodeOptions);
 
-const requires = collectRequires();
-const preloadRequires = requires.filter((r) => /preload\.(c?js)$/.test(r));
-console.log("preload-require-count:" + preloadRequires.length);
-
-// formatNodeOptions(): re-emit as a single NODE_OPTIONS, quoting the space-joined
-// value the way Next does so a spacey install path survives the tokenizer. With
-// the fix this is one path (loads fine); pre-fix it was two (Cannot find module).
-const childNodeOptions = requires.length ? `--require "${requires.join(" ")}"` : "";
-const child = fork(join(here, "fork-reconstruct-child.ts"), [], {
-  execArgv: [], // Next clears execArgv and routes everything through NODE_OPTIONS
-  env: { ...process.env, NODE_OPTIONS: childNodeOptions },
-});
-child.on("exit", (code) => console.log("child-exit:" + code));
+// A fork-reconstruction that merges both channels must see the preload once. Count
+// distinct preload tokens across the merged token stream (pre-fix: 2; fixed: 1).
+const tokens = [...execArgv, ...(env.NODE_OPTIONS || "").split(" ")].join(" ");
+const preloadHits = tokens.match(new RegExp(PRELOAD, "g")) || [];
+console.log("preload-merged-count:" + preloadHits.length);

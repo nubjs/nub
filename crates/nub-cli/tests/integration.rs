@@ -1296,28 +1296,30 @@ fn fork_ts_with_ipc() {
 }
 
 #[test]
-fn fork_reconstructing_child_gets_a_single_preload_require() {
-    // Dual-channel doubling regression: on the `nub <file>` path the preload
-    // `--require` must ride NODE_OPTIONS ONLY, never also argv. A tool that
-    // rebuilds a fork's flags by MERGING process.execArgv + NODE_OPTIONS (Next
-    // `next build`, jest-worker) would otherwise collect the preload path TWICE
-    // and space-join it into one quoted `--require "a b"`, killing the fork with
-    // `Cannot find module 'a b'`. The fixture reproduces that reconstruction; the
-    // count must be 1 (not doubled), and the child must still transpile its enum
-    // (proving the single-channel preload still augments).
+fn preload_flag_rides_node_options_only_never_argv() {
+    // Dual-channel doubling regression, tier-robust. On the `nub <file>` path the
+    // preload flag (fast tier `--require`, compat tier `--import`) must ride
+    // NODE_OPTIONS ONLY, never also argv. A tool that rebuilds a fork's flags by
+    // MERGING process.execArgv + NODE_OPTIONS (Next `next build`, jest-worker)
+    // would otherwise collect the preload path TWICE and space-join the quoted
+    // duplicate into one broken `--require "a b"`, killing the fork with
+    // `Cannot find module 'a b'`. The invariant that kills the bug on EVERY tier:
+    // the preload is present in NODE_OPTIONS, ABSENT from execArgv, so a merge
+    // collects it exactly once. (Verified failing pre-fix — `preload-in-argv:true`,
+    // `preload-merged-count:2` — on both the fast and compat tiers.)
     let (stdout, stderr, code) = run_nub("nested-spawn", "fork-reconstruct-parent.ts");
-    assert_eq!(code, 0, "fork-reconstruct parent should exit 0: {stderr}");
+    assert_eq!(code, 0, "reconstruct parent should exit 0: {stderr}");
     assert!(
-        stdout.contains("preload-require-count:1"),
-        "preload must appear in exactly ONE channel (no argv+NODE_OPTIONS double): {stdout}"
+        stdout.contains("preload-in-argv:false"),
+        "the preload flag must NOT be on argv (argv+NODE_OPTIONS double is the bug): {stdout}"
     );
     assert!(
-        stdout.contains("fork-reconstruct-child-ok"),
-        "the reconstructed single --require must still carry nub's preload (enum transpiled): {stdout}\nstderr: {stderr}"
+        stdout.contains("preload-in-node-options:true"),
+        "the preload flag must ride NODE_OPTIONS (how the direct child stays augmented): {stdout}"
     );
     assert!(
-        stdout.contains("child-exit:0"),
-        "the fork must not die on a doubled `--require`: {stdout}\nstderr: {stderr}"
+        stdout.contains("preload-merged-count:1"),
+        "a fork that merges execArgv+NODE_OPTIONS must see the preload exactly once: {stdout}"
     );
 }
 
