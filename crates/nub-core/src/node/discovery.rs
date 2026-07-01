@@ -816,12 +816,73 @@ fn node_executable_override() -> Result<Option<ResolvedNode>, DiscoveryError> {
 /// nub's cache root (`$XDG_CACHE_HOME/nub` or `~/.cache/nub`). Public so the
 /// `nub node` command group can locate the store + index cache without
 /// reimplementing the path logic.
+///
+/// Windows fallback: under a service/SYSTEM account (e.g. sshd) `home_dir()` can
+/// resolve to a system directory (`C:\WINDOWS`, the SYSTEM profile) or fail
+/// outright, either of which makes `~/.cache/nub` unusable and bricked `nub
+/// node` / `nub pm shim`. There we fall back to `%LOCALAPPDATA%\nub` — the
+/// platform-correct per-user store the service account can actually write. A
+/// normal Windows user profile keeps the established `~/.cache/nub` so existing
+/// caches aren't orphaned; an explicit `XDG_CACHE_HOME` still wins everywhere.
 pub fn cache_dir() -> Option<PathBuf> {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| dirs_next::home_dir().map(|h| h.join(".cache")))?;
-    Some(base.join("nub"))
+    if let Some(xdg) = env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(xdg).join("nub"));
+    }
+
+    #[cfg(windows)]
+    {
+        windows_cache_dir(
+            dirs_next::home_dir(),
+            env::var_os("LOCALAPPDATA")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .or_else(dirs_next::cache_dir),
+            env::var_os("SystemRoot")
+                .or_else(|| env::var_os("windir"))
+                .map(PathBuf::from),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        dirs_next::home_dir().map(|h| h.join(".cache").join("nub"))
+    }
+}
+
+/// Resolve nub's Windows cache dir when there is no `XDG_CACHE_HOME` override.
+/// Pure (takes its env inputs) so the decision is unit-testable off Windows.
+/// See [`cache_dir`] for the rationale.
+#[cfg(any(windows, test))]
+fn windows_cache_dir(
+    home: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    system_root: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match home {
+        Some(home) if !is_windows_system_home(&home, system_root.as_deref()) => {
+            Some(home.join(".cache").join("nub"))
+        }
+        _ => local_app_data.map(|p| p.join("nub")),
+    }
+}
+
+/// True when `home` is, or lives under, the Windows system root — the tell of a
+/// service/SYSTEM account (`C:\WINDOWS`, `C:\WINDOWS\system32\config\systemprofile`)
+/// whose `~/.cache` is not a usable per-user location. Case-insensitive (Windows
+/// paths are), and boundary-aware so a sibling like `C:\WINDOWS.old\me` never
+/// matches.
+#[cfg(any(windows, test))]
+fn is_windows_system_home(home: &Path, system_root: Option<&Path>) -> bool {
+    let root_l = system_root
+        .unwrap_or_else(|| Path::new("C:\\Windows"))
+        .to_string_lossy()
+        .to_lowercase();
+    if root_l.is_empty() {
+        return false;
+    }
+    let home_l = home.to_string_lossy().to_lowercase();
+    home_l == root_l
+        || home_l.starts_with(&format!("{root_l}\\"))
+        || home_l.starts_with(&format!("{root_l}/"))
 }
 
 /// nub's own Node download store (`<cache_dir>/node/`), where each subdirectory
@@ -988,6 +1049,57 @@ fn nvm_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_cache_dir_falls_back_to_localappdata_for_system_or_missing_home() {
+        let lad = PathBuf::from("C:\\Windows\\system32\\config\\systemprofile\\AppData\\Local");
+        let sysroot = Some(PathBuf::from("C:\\Windows"));
+
+        // Service/SYSTEM account: HOME is a system dir (C:\WINDOWS) or the SYSTEM
+        // profile beneath it, or unresolvable — all fall back to %LOCALAPPDATA%\nub.
+        for home in [
+            Some(PathBuf::from("C:\\Windows")),
+            Some(PathBuf::from(
+                "C:\\Windows\\system32\\config\\systemprofile",
+            )),
+            None,
+        ] {
+            assert_eq!(
+                windows_cache_dir(home, Some(lad.clone()), sysroot.clone()),
+                Some(lad.join("nub")),
+            );
+        }
+
+        // A normal user profile keeps the established ~/.cache/nub location.
+        let user = PathBuf::from("C:\\Users\\alice");
+        assert_eq!(
+            windows_cache_dir(Some(user.clone()), Some(lad.clone()), sysroot.clone()),
+            Some(user.join(".cache").join("nub")),
+        );
+
+        // System home but LOCALAPPDATA also unresolvable → None (honest failure,
+        // no bogus path).
+        assert_eq!(
+            windows_cache_dir(Some(PathBuf::from("C:\\Windows")), None, sysroot),
+            None,
+        );
+    }
+
+    #[test]
+    fn is_windows_system_home_is_case_insensitive_and_boundary_aware() {
+        let root = Some(Path::new("C:\\Windows"));
+        assert!(is_windows_system_home(Path::new("C:\\WINDOWS"), root));
+        assert!(is_windows_system_home(
+            Path::new("c:\\windows\\system32\\config\\systemprofile"),
+            root,
+        ));
+        // A mere prefix-stem sibling must NOT be treated as a system home.
+        assert!(!is_windows_system_home(
+            Path::new("C:\\Windows.old\\me"),
+            root
+        ));
+        assert!(!is_windows_system_home(Path::new("C:\\Users\\alice"), root));
+    }
 
     #[test]
     fn which_node_finds_something() {
