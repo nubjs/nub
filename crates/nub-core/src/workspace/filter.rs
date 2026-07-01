@@ -205,7 +205,7 @@ pub fn discover_members(workspace_root: &Path) -> Vec<WorkspacePackage> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    let manifest: serde_json::Value = match serde_json::from_str(&content) {
+    let manifest: serde_json::Value = match serde_json::from_str(crate::strip_utf8_bom(&content)) {
         Ok(v) => v,
         Err(_) => return vec![],
     };
@@ -342,7 +342,8 @@ fn expand_member_patterns(workspace_root: &Path, patterns: &[String]) -> Vec<Wor
         let dir = workspace_root.join(&rel);
         let member_pkg = dir.join("package.json");
         if let Ok(content) = fs::read_to_string(&member_pkg)
-            && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Ok(manifest) =
+                serde_json::from_str::<serde_json::Value>(crate::strip_utf8_bom(&content))
         {
             let name = manifest
                 .get("name")

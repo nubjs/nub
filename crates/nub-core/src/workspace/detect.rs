@@ -114,7 +114,8 @@ fn detect_project_walk(cwd: &Path) -> Option<(Project, Vec<PathBuf>)> {
         let pkg_path = dir.join("package.json");
         if pkg_path.is_file()
             && let Ok(content) = fs::read_to_string(&pkg_path)
-            && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Ok(manifest) =
+                serde_json::from_str::<serde_json::Value>(crate::strip_utf8_bom(&content))
         {
             if project_root.is_none() {
                 project_root = Some((dir.clone(), manifest.clone()));
@@ -137,7 +138,8 @@ fn detect_project_walk(cwd: &Path) -> Option<(Project, Vec<PathBuf>)> {
             if project_root.is_none() {
                 let pkg_path = dir.join("package.json");
                 if let Ok(content) = fs::read_to_string(&pkg_path)
-                    && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
+                    && let Ok(manifest) =
+                        serde_json::from_str::<serde_json::Value>(crate::strip_utf8_bom(&content))
                 {
                     project_root = Some((dir.clone(), manifest));
                 }
@@ -282,7 +284,8 @@ pub fn find_workspace_members(workspace_root: &Path, _filter: Option<&str>) -> V
     let Ok(content) = fs::read_to_string(&pkg_path) else {
         return vec![];
     };
-    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) else {
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(crate::strip_utf8_bom(&content))
+    else {
         return vec![];
     };
 

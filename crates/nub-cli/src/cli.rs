@@ -2667,7 +2667,9 @@ fn run_workspace_target(
     // targets only the root). Its index is the appended slot.
     let root_idx = if ws.include_workspace_root {
         if let Ok(content) = std::fs::read_to_string(ws_root.join("package.json")) {
-            if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Ok(manifest) =
+                serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&content))
+            {
                 let name = manifest
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -5826,7 +5828,9 @@ fn check_manifest_json(cwd: &Path) -> Result<()> {
                     return Err(e).with_context(|| format!("reading {}", pkg.display()));
                 }
             };
-            if let Err(e) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Err(e) =
+                serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&content))
+            {
                 bail!(
                     "{ERR_NUB_MANIFEST_PARSE}: package.json is not valid JSON ({}): {e}",
                     pkg.display()
@@ -6586,7 +6590,8 @@ fn dev_engines_range(cwd: &Path, pm_name: &str) -> Option<String> {
     let project = nub_core::workspace::detect::detect_project(cwd)?;
     let manifest: serde_json::Value = match &project.workspace_root {
         Some(ws) if *ws != project.root => {
-            serde_json::from_str(&std::fs::read_to_string(ws.join("package.json")).ok()?).ok()?
+            let raw = std::fs::read_to_string(ws.join("package.json")).ok()?;
+            serde_json::from_str(nub_core::strip_utf8_bom(&raw)).ok()?
         }
         _ => project.manifest,
     };
@@ -7023,8 +7028,8 @@ fn field_pin_provenance(cwd: &Path) -> nub_core::pm::shim::PinProvenance {
         .and_then(|project| {
             let manifest: serde_json::Value = match &project.workspace_root {
                 Some(ws) if *ws != project.root => {
-                    serde_json::from_str(&std::fs::read_to_string(ws.join("package.json")).ok()?)
-                        .ok()?
+                    let raw = std::fs::read_to_string(ws.join("package.json")).ok()?;
+                    serde_json::from_str(nub_core::strip_utf8_bom(&raw)).ok()?
                 }
                 _ => project.manifest,
             };
@@ -8971,6 +8976,21 @@ mod tests {
         std::fs::write(good.join("package.json"), r#"{"name":"app"}"#).unwrap();
         assert!(check_manifest_json(&good).is_ok());
         assert!(check_manifest_json(&pm_tmpdir("manifest-none")).is_ok());
+
+        // A UTF-8-BOM-prefixed manifest (PowerShell 5.1 / Windows editors write
+        // one by default) is valid JSON to npm/pnpm — the pre-flight check must
+        // strip the BOM before serde_json rather than reject it as "not valid
+        // JSON at line 1 column 1".
+        let bom = pm_tmpdir("manifest-bom");
+        std::fs::write(
+            bom.join("package.json"),
+            format!("\u{feff}{}", r#"{"name":"app"}"#),
+        )
+        .unwrap();
+        assert!(
+            check_manifest_json(&bom).is_ok(),
+            "a UTF-8 BOM-prefixed package.json must pass the pre-flight check"
+        );
 
         // A package.json that EXISTS but can't be read (EACCES) must surface a
         // coded permission error — NOT get swallowed into "no package.json found"

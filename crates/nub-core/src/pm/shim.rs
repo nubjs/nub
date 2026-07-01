@@ -1242,11 +1242,10 @@ pub fn sibling_bin(primary_bin: &Path, entry: &str) -> Result<PathBuf> {
             )
         })?;
     let manifest_path = pkg_root.join("package.json");
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("reading {}", manifest_path.display()))?,
-    )
-    .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    let manifest_raw = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(crate::strip_utf8_bom(&manifest_raw))
+        .with_context(|| format!("parsing {}", manifest_path.display()))?;
     let subpath = super::registry::named_bin_subpath(&manifest, entry).with_context(|| {
         format!(
             "{} declares no bin entry named \"{entry}\"",

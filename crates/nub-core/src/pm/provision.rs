@@ -255,8 +255,8 @@ pub fn provision_pm_from_tarball(
 /// `package/` dir as someone else's completed install).
 fn cached_bin(pm_store: &Path, version: &str) -> Option<PathBuf> {
     let pkg_dir = pm_store.join(version).join("package");
-    let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(pkg_dir.join("package.json")).ok()?).ok()?;
+    let raw = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(crate::strip_utf8_bom(&raw)).ok()?;
     let bin = pkg_dir.join(registry::bin_subpath(&manifest)?);
     bin.is_file().then_some(bin)
 }

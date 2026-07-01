@@ -450,7 +450,7 @@ fn project_manifest(cwd: &Path) -> Option<serde_json::Value> {
     match &project.workspace_root {
         Some(ws) if *ws != project.root => {
             let content = fs::read_to_string(ws.join("package.json")).ok()?;
-            serde_json::from_str(&content).ok()
+            serde_json::from_str(crate::strip_utf8_bom(&content)).ok()
         }
         _ => Some(project.manifest),
     }
