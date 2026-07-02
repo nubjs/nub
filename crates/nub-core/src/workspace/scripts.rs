@@ -303,9 +303,13 @@ pub fn bin_path(project_root: &Path, workspace_root: Option<&Path>) -> String {
 
     // Walk from project root up, adding each node_modules/.bin.
     let mut dir = project_root.to_path_buf();
-    for _ in 0..16 {
+    for depth in 0..16 {
         let bin_dir = dir.join("node_modules").join(".bin");
-        if bin_dir.is_dir() {
+        // The project's own .bin goes on PATH even when it doesn't exist yet —
+        // npm and pnpm add it unconditionally, so an install-then-run script
+        // (`npm ci && tool`) can invoke a bin created mid-script (#281).
+        // Ancestor entries stay existence-gated.
+        if depth == 0 || bin_dir.is_dir() {
             dirs.push(bin_dir.to_string_lossy().to_string());
         }
         if workspace_root.is_some() && Some(dir.as_path()) == workspace_root {
@@ -394,7 +398,9 @@ pub fn script_shell(project_root: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScriptSelection, find_bin, npm_env, npmrc_value, script_shell, select_scripts};
+    use super::{
+        ScriptSelection, bin_path, find_bin, npm_env, npmrc_value, script_shell, select_scripts,
+    };
     use std::fs;
 
     #[test]
@@ -521,6 +527,21 @@ mod tests {
         // A key absent from the project .npmrc falls through to None (no ~/.npmrc
         // key named this in CI).
         assert!(npmrc_value(&tmp, "nub-no-such-key").is_none());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bin_path_includes_project_bin_before_it_exists() {
+        let tmp = std::env::temp_dir().join(format!("nub-binpath-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+
+        // No node_modules yet — the project-level .bin must still lead the PATH
+        // so a script that creates it mid-run can invoke its bins (#281).
+        let path = bin_path(&tmp, None);
+        let expected = tmp.join("node_modules").join(".bin");
+        let first = path.split(crate::PATH_LIST_SEPARATOR).next().unwrap();
+        assert_eq!(first, expected.to_string_lossy().as_ref());
 
         let _ = fs::remove_dir_all(&tmp);
     }
