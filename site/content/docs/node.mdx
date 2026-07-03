@@ -18,6 +18,16 @@ Installed in 8.0s
 # ...your script runs, on exactly the Node you pinned
 ```
 
+On a fresh machine with no Node at all — you installed Nub before anything else — a plain `nub file.ts` still runs. With no pin and no `node` on `PATH`, Nub provisions the latest release and runs your code on it, reusing the newest version already in its cache before downloading. Pin a version whenever you want a reproducible one (`nub node pin <version>`); until then, each run picks up the latest.
+
+```console
+$ nub app.ts          # fresh machine: no pin, no Node on PATH
+Using Node.js {{NODE_VERSION}} (resolved from latest)
+Installing from nodejs.org... (30 MB)
+Installed in 5.1s
+# ...your script runs
+```
+
 Everything below is for doing one of these steps deliberately instead of letting it happen on the next run. For the full provisioning story — the `~/.cache/nub` layout, the per-invocation shim — see [Running files → The Node version](/docs/runtime#node-version-resolution).
 
 ## Version precedence
@@ -33,7 +43,7 @@ Like Corepack's shims, `nub` itself auto-installs Node versions as needed. When 
 3. **`.node-version`**
 4. **`.nvmrc`**
 5. **`package.json#/engines/node`** — interpreted as a resolution range, not an exact pin: Nub resolves to the newest available version satisfying it.
-6. **Nothing pinned anywhere up the tree** — whatever `node` is already on your `PATH`.
+6. **Nothing pinned anywhere up the tree** — whatever `node` is on your `PATH`, or the latest release when there's no `node` at all.
 
 This resolved Node version is auto-installed and cached for future runs.
 

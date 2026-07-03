@@ -45,8 +45,8 @@ pub enum DiscoveryError {
 
     #[error(
         "no Node binary found on PATH\n\
-         \x20\x20Install one with: nub node install (or `nub node install <version>` to pick a version)\n\
-         \x20\x20(nub augments your Node — it doesn't bundle one; a pin in .node-version / .nvmrc / engines.node is provisioned automatically.)"
+         \x20\x20nub augments your installed Node — it doesn't bundle one.\n\
+         \x20\x20Pin a version and nub provisions it on demand: nub node pin <version>"
     )]
     NoNodeOnPath,
 
@@ -90,6 +90,16 @@ pub enum DiscoveryError {
         pin_source: String,
         reason: String,
     },
+
+    /// The zero-config runner path (no PATH node, no project pin) tried to
+    /// auto-provision the latest Node and failed. Distinct from
+    /// [`ProvisionFailed`] because there is no pin to name — the "pinned via"
+    /// framing wouldn't apply.
+    #[error(
+        "no Node on PATH and no project pin — tried to provision the latest Node and failed: {reason}\n\
+         \x20\x20Check your network / proxy, or install Node and put it on PATH."
+    )]
+    UnpinnedProvisionFailed { reason: String },
 }
 
 /// Format the `Unsupported` error text. Centralized so the canonical
@@ -271,16 +281,21 @@ fn shell_path_node_cached(pin_source: Option<String>) -> Option<ResolvedNode> {
 pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
     // Fast path: PATH / nub's store / nvm already satisfy the pin (or there's no
     // pin). Aliases never satisfy a concrete check, so they always fall through.
-    let discover_err = match discover_node(cwd) {
+    // Only PinnedNotFound / NoNodeOnPath are recoverable here (provision the pin,
+    // or auto-provision when unpinned); every other error propagates unchanged.
+    match discover_node(cwd) {
         Ok(node) => return Ok(node),
-        Err(e @ (DiscoveryError::PinnedNotFound { .. } | DiscoveryError::NoNodeOnPath)) => e,
+        Err(DiscoveryError::PinnedNotFound { .. } | DiscoveryError::NoNodeOnPath) => {}
         Err(other) => return Err(other),
-    };
+    }
     // Re-resolve the chain for the pin to provision. Warnings are deliberately
     // not re-printed — the discover_node call above already emitted them; a
     // refusal can't reach here (discover_node returned it as `other`).
     let Some((raw, pin, pin_source)) = resolve_pin_chain(cwd)?.pin else {
-        return Err(discover_err); // no pin → nothing to provision
+        // No pin AND no node on PATH (discover_node's no-pin branch returns Ok
+        // when PATH has a node). Rather than dead-ending on a fresh machine,
+        // auto-provision so the zero-config "default node runner" just works.
+        return provision_unpinned_node();
     };
 
     let fail = |reason: String| DiscoveryError::ProvisionFailed {
@@ -341,6 +356,67 @@ pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryE
         version: concrete,
         pin_source: Some(pin_source),
     })
+}
+
+/// Provision a Node when the project has NO pin and NO node is on PATH — the
+/// fresh-machine case (#294). Two states, cheapest first:
+///
+/// - **Store-first (silent):** reuse the highest version already in nub's store,
+///   so a warm store never triggers a surprise download and repeat runs stay
+///   instant. Matches the silent behavior of a pinned store hit.
+/// - **Empty store:** download `latest` from nodejs.org — the same on-demand
+///   fetch the pinned path uses (announced by [`provision_node`]'s Using /
+///   Installing lines, so the multi-hundred-MB download is never a silent hang).
+///
+/// Unpinned `latest` is a deliberate moving target: no pin is written, so each
+/// fresh-machine run picks up the newest secure release. A project that wants a
+/// reproducible version pins one (`nub node pin <version>`), which routes through
+/// the pinned provisioning path instead. `pin_source` stays `None` — the run is
+/// genuinely unpinned, so downstream pin-disagreement warnings don't fire.
+fn provision_unpinned_node() -> Result<ResolvedNode, DiscoveryError> {
+    if let Some(node) = highest_store_node() {
+        return Ok(node);
+    }
+
+    let fail = |reason: String| DiscoveryError::UnpinnedProvisionFailed { reason };
+    let host = crate::version_management::HostTarget::detect()
+        .ok_or_else(|| fail("this host is not a platform nodejs.org publishes".to_string()))?;
+    let store_root = cache_dir().ok_or_else(|| {
+        fail("could not locate a cache directory (no $HOME / $XDG_CACHE_HOME)".to_string())
+    })?;
+    let mirror = crate::version_management::resolve_mirror_base(&host);
+    let index = crate::version_management::node_index::load_index(&store_root, &mirror)
+        .map_err(|e| fail(format!("could not fetch the Node release index: {e:#}")))?;
+    let concrete = crate::version_management::node_index::resolve_spec("latest", &index)
+        .ok_or_else(|| fail("no published Node version to resolve `latest` to".to_string()))?;
+
+    let version_dir =
+        crate::version_management::provision_node(&concrete, &host, &store_root, Some("latest"))
+            .map_err(|e| fail(format!("{e:#}")))?;
+    let bin = store_node_binary(&version_dir).ok_or_else(|| {
+        fail("installed, but no node binary was found in the extracted tree".to_string())
+    })?;
+    Ok(ResolvedNode {
+        path: bin,
+        version: concrete,
+        pin_source: None,
+    })
+}
+
+/// The highest SUPPORTED version in nub's store, ignoring any pin (`*` satisfies
+/// every version). Backs the unpinned store-first path. Sub-floor cached versions
+/// (e.g. a leftover `nub node pin 16` the user later unpinned) are filtered out so
+/// an unpinned run falls through to downloading `latest` instead of dead-ending on
+/// `Unsupported` — and because a supported version always outranks a sub-floor one,
+/// filtering the single highest is equivalent to picking the highest supported.
+/// Parameterized over `store` for testability; `highest_store_node` is the wrapper.
+fn highest_store_node_in(store: &Path) -> Option<ResolvedNode> {
+    nub_store_node_in(store, &VersionPin::Range(vec![semver::VersionReq::STAR]))
+        .filter(|n| n.version.is_supported())
+}
+
+fn highest_store_node() -> Option<ResolvedNode> {
+    highest_store_node_in(&cache_dir()?.join("node"))
 }
 
 /// Enforce the hard floor: Node 18.19.0. Below that, Nub cannot
@@ -1615,6 +1691,49 @@ mod tests {
     }
 
     #[test]
+    fn unpinned_store_first_picks_newest_supported_else_falls_through() {
+        // The #294 no-pin/no-node runner policy (store-first, via
+        // `highest_store_node_in`): highest cached version wins with NO pin
+        // constraint, so a warm store never triggers a download.
+        let seed = |store: &Path, versions: &[&str]| {
+            for v in versions {
+                let bin = store.join(v).join("bin");
+                std::fs::create_dir_all(&bin).unwrap();
+                std::fs::write(bin.join("node"), b"#!/bin/sh\n").unwrap();
+            }
+        };
+
+        let store = resolution_tmpdir("store-any");
+        seed(&store, &["18.19.0", "22.15.0", "20.11.0"]);
+        assert_eq!(
+            highest_store_node_in(&store)
+                .expect("a cached version")
+                .version,
+            NodeVersion::new(22, 15, 0),
+            "newest cached wins regardless of pin"
+        );
+        let _ = std::fs::remove_dir_all(&store);
+
+        // A store holding ONLY sub-floor versions (a leftover `nub node pin 16`
+        // the user unpinned) must NOT be selected — it falls through so the
+        // caller downloads a working `latest` instead of dead-ending Unsupported.
+        let old = resolution_tmpdir("store-old");
+        seed(&old, &["16.20.0", "17.0.0"]);
+        assert!(
+            highest_store_node_in(&old).is_none(),
+            "sub-floor-only store → None → caller downloads `latest`"
+        );
+        let _ = std::fs::remove_dir_all(&old);
+
+        let empty = resolution_tmpdir("store-empty");
+        assert!(
+            highest_store_node_in(&empty).is_none(),
+            "empty store → None → caller downloads `latest`"
+        );
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
     fn engines_disagreement_silent_when_satisfied_or_unpinned() {
         let dir = resolution_tmpdir("agree");
         std::fs::write(dir.join("package.json"), r#"{"engines":{"node":">=18"}}"#).unwrap();
@@ -1696,14 +1815,19 @@ mod tests {
     }
 
     #[test]
-    fn no_node_on_path_offers_install_remedy() {
-        // A user who installed nub before any Node must be told the way out —
-        // nub augments Node, it doesn't bundle one — instead of a dead-end
-        // "no Node binary found on PATH".
+    fn no_node_on_path_offers_a_working_remedy() {
+        // The remedy must point at a command that actually works from a fresh,
+        // pin-free machine. Bare `nub node install` used to be suggested here but
+        // itself errors with no pin (#294) — the message now points at
+        // `nub node pin <version>`, which succeeds.
         let msg = DiscoveryError::NoNodeOnPath.to_string();
         assert!(
-            msg.contains("nub node install"),
-            "points at nub's own provisioning: {msg}"
+            msg.contains("nub node pin"),
+            "points at the working pin command: {msg}"
+        );
+        assert!(
+            !msg.contains("nub node install"),
+            "must not resurrect the dead-ending bare-install hint: {msg}"
         );
         assert!(
             msg.contains("doesn't bundle one"),
