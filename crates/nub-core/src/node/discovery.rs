@@ -849,7 +849,7 @@ pub fn cache_dir() -> Option<PathBuf> {
 }
 
 /// nub's config root (`$XDG_CONFIG_HOME/nub` or `~/.config/nub`) — the home of
-/// the global settings file `nub.toml`. Deliberately NOT `dirs_next::config_dir`,
+/// the global settings file `nub.jsonc`. Deliberately NOT `dirs_next::config_dir`,
 /// which resolves to macOS `~/Library/Preferences`: nub follows the XDG `~/.config`
 /// convention on every unix (the norm for developer-facing config, e.g. gh/git/
 /// starship) so the file lands where users expect it. Config and cache live in

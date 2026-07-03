@@ -88,7 +88,10 @@ libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 dirs-next = "2"
 json5 = "0.4"
-jsonc-parser = { version = "0.24", features = ["serde"] }
+# Reads (`serde`) + comment/order-preserving read-modify-write (`cst`) of JSONC —
+# the transpiler's tsconfig parsing and nub's own global config file
+# (~/.config/nub/nub.jsonc).
+jsonc-parser = { version = "0.24", features = ["serde", "cst"] }
 # napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the
@@ -110,10 +113,6 @@ oxc_napi = "=0.132.0"
 oxc_sourcemap = { version = "=6.0.1", features = ["napi"] }
 rustc-hash = "2"
 toml = "0.8"
-# Comment/order-preserving TOML read-modify-write for nub's own global config
-# file (~/.config/nub/nub.toml). Already in the tree transitively via `toml 0.8`
-# → adding it as a direct dep reuses the same compiled crate (no new build).
-toml_edit = "0.22"
 # Interactive terminal primitive (raw-mode key reads, cursor control) for the
 # dlx consent radio in nubx_consent.rs. Already compiled in via `demand` (aube's
 # build-approval picker) → direct dep reuses the same crate (no new build).

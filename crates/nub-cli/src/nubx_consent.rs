@@ -12,7 +12,7 @@
 //! - **Interactive TTY** → an arrow-key consent select (Yes / No / Never) on the
 //!   *first* fetch of a spec, then run without re-asking once that spec is
 //!   recorded as consented. Picking **Never** persists the global kill-switch
-//!   `exec.implicit-dlx = never` (see [`crate::config`]) and disables this whole
+//!   `exec.implicitDlx = never` (see [`crate::config`]) and disables this whole
 //!   implicit tier until re-enabled.
 //!
 //! `-y`/`--yes` is the explicit non-interactive escape hatch: it lets CI / non-TTY
@@ -43,7 +43,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A pinned spec ignores this (immutable identity → consent never expires).
 const FLOATING_TTL_SECS: u64 = 24 * 60 * 60;
 
-/// The abort message printed when `exec.implicit-dlx = never` and the subject
+/// The abort message printed when `exec.implicitDlx = never` and the subject
 /// missed every local tier. LOCKED, maintainer-authored copy — reproduce verbatim,
 /// no rewording/capitalization/backtick changes. A test pins the exact bytes.
 const NEVER_ABORT_MESSAGE: &str = "No matching script or executable found.\nTo run a package from the remote registry, try `nub dlx`";
@@ -88,7 +88,7 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
         };
     }
 
-    // The global kill-switch (`exec.implicit-dlx = never`) is read FIRST — before
+    // The global kill-switch (`exec.implicitDlx = never`) is read FIRST — before
     // CI/TTY probing, any prompt, prefetch, or network. Writing it via the `Never`
     // option (or `nub config set`) permanently disables the implicit registry tier;
     // explicit `nub dlx <spec>` / `nubx -y <spec>` (above) stay open. The subject
@@ -143,7 +143,7 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
             } else {
                 eprintln!(
                     "nubx: disabled the implicit dlx tier. Re-enable with \
-                     `nub config set exec.implicit-dlx prompt`."
+                     `nub config set exec.implicitDlx prompt`."
                 );
             }
             Decision::Refused(1)

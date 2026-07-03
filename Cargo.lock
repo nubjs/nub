@@ -2230,6 +2230,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonc-parser"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ebcfcb2f2b016f7372835b99cd3be24cc13ce9823107beb0f98b09c6092ba9f"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "junction"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2619,6 +2628,7 @@ dependencies = [
  "console",
  "dirs-next",
  "dotenvy",
+ "jsonc-parser",
  "libc",
  "miette",
  "mimalloc",
@@ -2635,7 +2645,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
- "toml_edit",
  "tracing",
  "tracing-subscriber",
  "url",

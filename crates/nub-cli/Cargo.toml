@@ -92,7 +92,9 @@ sha2.workspace = true
 tracing.workspace = true
 tempfile = "3"
 toml.workspace = true
-toml_edit.workspace = true
+# Comment-preserving JSONC read (serde) + read-modify-write (cst) for nub's own
+# global config file (~/.config/nub/nub.jsonc, see src/config.rs).
+jsonc-parser.workspace = true
 console.workspace = true
 # Multi-thread runtime for the embedded aube install engine (pm_engine.rs).
 # Mirrors aube's own cli_main runtime shape; tokio is dormant on every other
