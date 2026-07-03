@@ -484,14 +484,15 @@ fn unpinned_path_miss_provisions_a_dynamic_default_within_the_lockfile_family() 
     std::fs::write(proj.join("package.json"), manifest).unwrap();
     std::fs::write(proj.join("pnpm-lock.yaml"), "lockfileVersion: '6.0'\n").unwrap();
 
-    // No pnpm anywhere on PATH; the store's .npmrc points at a dead registry,
-    // so the provisioning ATTEMPT is observable (announcement + fetch error)
-    // with zero real network.
+    // No pnpm anywhere on PATH; the PROJECT's .npmrc points at a dead registry
+    // (registry_config/npmrc_value reads project_root/.npmrc + $HOME/.npmrc —
+    // never the cache-store root), so the provisioning ATTEMPT is observable
+    // (announcement + fetch error) with zero real network.
     let empty = work.join("empty-path");
     std::fs::create_dir_all(&empty).unwrap();
     let cache = work.join("cache");
-    std::fs::create_dir_all(cache.join("nub")).unwrap();
-    std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(proj.join(".npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
     let link = shim_link(&work, "pnpm");
 
     let (_stdout, stderr, code) = run(
