@@ -6450,6 +6450,26 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // shape; a hand-written range is the user's intent and stays verbatim.
         "update" | "up" => {
             check_manifest_json(&cwd)?;
+            // A project may DECLARE a manager nub doesn't provision (bun, or any
+            // name outside npm/pnpm/yarn). `resolve_pin_with_source` reads such a
+            // pin as unresolvable, so the generic "no pin — declare one" context
+            // below would dead-end the user: they already declared it, and
+            // `nub pm use <name>` can't provision it either. Name the real
+            // identity and its own update path instead. Excludes nub (its own
+            // manager) and Berry (which resolves below — the YarnBerry arm owns
+            // that message). Mirrors the `which` verb's declared-unprovisionable
+            // branch.
+            if let Some(id) = resolve::project_pm_identity(&cwd)
+                && id.name != "nub"
+                && !id.berry
+                && resolve::resolve_pin_with_source(&cwd).is_none()
+            {
+                let name = &id.name;
+                bail!(
+                    "this project is pinned to {name} — nub doesn't provision or update {name}. \
+                     Update {name} with its own tooling (e.g. `{name} upgrade`)."
+                );
+            }
             let res = resolve::resolve_pin_with_source(&cwd).context(
                 "no package manager is pinned to update — declare one with `nub pm use <pm>`",
             )?;
@@ -9459,6 +9479,26 @@ mod tests {
                 "`{verb}` with no pin must name the state and the remedy, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn update_on_a_bun_pin_names_bun_not_the_declare_a_pm_dead_end() {
+        // A bun pin resolves as unprovisionable, so the generic "no pin —
+        // declare one" remedy would loop the user (bun IS declared; nub can't
+        // provision it). The update verb must name bun and its own tooling
+        // instead — no `nub pm use` dead-end.
+        let dir = offline_project("up-bun", r#"{"packageManager":"bun@1.1.0"}"#);
+        let err = with_cwd(&dir, || run_pm(&["update".into()]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("pinned to bun") && err.contains("bun upgrade"),
+            "update on a bun pin must name bun and its own update path, got: {err}"
+        );
+        assert!(
+            !err.contains("nub pm use"),
+            "update on a bun pin must NOT emit the declare-a-pm dead-end, got: {err}"
+        );
     }
 
     #[test]
