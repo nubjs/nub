@@ -133,6 +133,31 @@ pub struct EngineContext {
     /// `pnpm_config_*` on pnpm 11 — only the bare single/`_`-joined keys are.
     pub read_pnpm_config_env_registry: bool,
 
+    /// Whether project/user `.npmrc` files are read for *settings* only through
+    /// pnpm 11's auth/registry/network allowlist, dropping every
+    /// layout/behavior key. `false` (default) preserves upstream behavior — the
+    /// open key space, where any setting is readable from `.npmrc` (pnpm ≤10 /
+    /// npm semantics, which standalone aube mirrors).
+    ///
+    /// pnpm reversed how it reads a project `.npmrc` at v11: v9/v10 read every
+    /// setting from `.npmrc`; v11 reads ONLY the auth/registry/network allowlist
+    /// (`isNpmrcReadableKey`, pnpm `config/reader/src/localConfig.ts:189-198`:
+    /// `@…`/`//…`-scoped keys, the npm-auth family, and the proxy/TLS keys) from
+    /// `.npmrc` and takes every layout/behavior setting from
+    /// `pnpm-workspace.yaml`/`config.yaml` instead. An embedder whose active PM
+    /// is provably **pnpm v11+** sets this `true` so the *settings* view of
+    /// `.npmrc` matches pnpm 11; under any earlier pnpm, any other PM, nub
+    /// identity, or standalone aube it stays `false`.
+    ///
+    /// Scope note: this gates ONLY the settings-facing `.npmrc` readers
+    /// (`load_npmrc_entries` / `load_npmrc_entries_split`, feeding
+    /// `aube_settings`). The registry-client auth track
+    /// (`NpmConfig::load`) walks `.npmrc` on its own path and is unaffected —
+    /// it already extracts only auth/registry/network keys, which are exactly
+    /// the keys the allowlist keeps, so auth resolution is identical with the
+    /// posture on or off.
+    pub npmrc_settings_allowlist: bool,
+
     /// Whether aube reads Yarn Berry's `.yarnrc.yml` config surface and
     /// translates the subset that maps cleanly onto the existing npmrc-shaped
     /// registry/settings model. `false` (default) preserves upstream aube
@@ -259,6 +284,7 @@ impl Default for EngineContext {
             read_branded_pnpm_config: true,
             read_pnpm_global_config: true,
             read_pnpm_config_env_registry: false,
+            npmrc_settings_allowlist: false,
             read_yarn_config: false,
             yarn_is_classic: false,
             read_bun_config: false,

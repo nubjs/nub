@@ -712,6 +712,55 @@ fn yarnrc_node_linker_reaches_split_settings_sources_only_when_gated_on() {
 }
 
 #[test]
+fn pnpm11_npmrc_allowlist_drops_layout_keys_but_keeps_auth_registry_network() {
+    let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let project = tempfile::tempdir().unwrap();
+    // A project `.npmrc` mixing layout/behavior keys (dropped under pnpm 11)
+    // with auth/registry/network keys (kept). `no-proxy` (hyphen) is
+    // allowlisted; npm's `noproxy` spelling is NOT — the pnpm-11 quirk.
+    std::fs::write(
+        project.path().join(".npmrc"),
+        "node-linker=hoisted\n\
+         ignore-scripts=true\n\
+         registry=https://example.test/\n\
+         @myorg:registry=https://npm.myorg.test/\n\
+         //example.test/:_authToken=TKN\n\
+         strict-ssl=false\n\
+         no-proxy=example.test\n\
+         noproxy=other.test\n",
+    )
+    .unwrap();
+
+    // Posture OFF (standalone-aube default / pnpm ≤10): open key space —
+    // the layout key survives.
+    aube_util::update_engine_context(|c| c.npmrc_settings_allowlist = false);
+    let open = load_npmrc_entries_split(project.path());
+    assert!(
+        open.project.iter().any(|(k, _)| k == "node-linker"),
+        "open key space must keep the layout key"
+    );
+
+    // Posture ON (pnpm-11 incumbent): layout/behavior keys dropped;
+    // auth/registry/network keys kept.
+    aube_util::update_engine_context(|c| c.npmrc_settings_allowlist = true);
+    let gated = load_npmrc_entries_split(project.path());
+    aube_util::update_engine_context(|c| c.npmrc_settings_allowlist = false);
+
+    let has = |k: &str| gated.project.iter().any(|(key, _)| key == k);
+    assert!(!has("node-linker"), "layout key must be dropped");
+    assert!(!has("ignore-scripts"), "behavior key must be dropped");
+    assert!(!has("noproxy"), "npm's `noproxy` spelling is not allowlisted");
+    assert!(has("registry"), "registry must survive");
+    assert!(has("@myorg:registry"), "scoped registry must survive");
+    assert!(
+        has("//example.test/:_authToken"),
+        "URL-scoped auth token must survive"
+    );
+    assert!(has("strict-ssl"), "TLS key must survive");
+    assert!(has("no-proxy"), "`no-proxy` (hyphen) must survive");
+}
+
+#[test]
 fn classic_yarnrc_translates_core_registry_scope_and_auth_fields() {
     let entries = translate_classic_yarnrc_content(
         r#"

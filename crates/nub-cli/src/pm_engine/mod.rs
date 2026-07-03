@@ -1125,12 +1125,46 @@ pub(crate) fn parse_major_minor(version: &str) -> (Option<u64>, Option<u64>) {
 /// dominant v9/v10 base ignores `pnpm_config_*`, so off is the safe default.
 /// Mirrors `store_config_family::project_scalar_home`'s detection exactly.
 fn pnpm_incumbent_major_is_v11_plus() -> bool {
+    declared_pnpm_major().is_some_and(|major| major >= 11)
+}
+
+/// The declared incumbent pnpm major, or `None` when the project does not
+/// declare pnpm as its package manager (a non-pnpm/unknown/absent
+/// `packageManager`/`devEngines` name, or an undeclared/unparseable version).
+/// Reads the pin packageManager-first, requiring the name to be LITERALLY
+/// "pnpm" — the shared major detection behind [`pnpm_incumbent_major_is_v11_plus`]
+/// and [`pnpm_npmrc_key_policy`], matching
+/// `store_config_family::project_scalar_home`.
+fn declared_pnpm_major() -> Option<u64> {
     std::env::current_dir()
         .ok()
         .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
         .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
         .and_then(|v| parse_major_minor(&v).0)
-        .is_some_and(|major| major >= 11)
+}
+
+/// How a detected pnpm major reads project/user `.npmrc` for *settings*. pnpm
+/// reversed this at v11: v9/v10 (and the unknown-major default) read the open
+/// key space — every setting is readable from `.npmrc`; v11 reads ONLY the
+/// auth/registry/network allowlist from `.npmrc` and takes every layout/behavior
+/// setting from `pnpm-workspace.yaml`/`config.yaml`. Keyed on the major so a
+/// future major slots in as one more arm rather than a new special case.
+enum NpmrcKeyPolicy {
+    /// pnpm ≤10 / npm / unknown-major default: the open `.npmrc` key space.
+    Open,
+    /// pnpm 11+: the auth/registry/network allowlist only (pnpm 11's
+    /// `isNpmrcReadableKey`); layout/behavior keys are dropped.
+    Pnpm11Allowlist,
+}
+
+/// Map a detected incumbent pnpm major to its [`NpmrcKeyPolicy`]. An unknown
+/// major (`None`) defaults to `Open` — the dominant/most-compatible model per
+/// AGENTS ("unknown major → the v10 open-`.npmrc` model").
+fn pnpm_npmrc_key_policy(major: Option<u64>) -> NpmrcKeyPolicy {
+    match major {
+        Some(m) if m >= 11 => NpmrcKeyPolicy::Pnpm11Allowlist,
+        _ => NpmrcKeyPolicy::Open,
+    }
 }
 
 /// Emit one dim warning line per graph-shaping field nub ignored under the
@@ -1527,6 +1561,18 @@ pub(crate) fn engine_brand_preflight() {
     // already-correct default). `npm_config_*` keeps working universally.
     let read_pnpm_config_env_registry =
         read_branded_pnpm_config && pnpm_incumbent_major_is_v11_plus();
+    // pnpm 11 reads a project/user `.npmrc` for *settings* through its
+    // auth/registry/network allowlist only, taking every layout/behavior key
+    // from `pnpm-workspace.yaml`/`config.yaml`; pnpm ≤10 reads the open key
+    // space. Mirror the DETECTED pnpm major (the per-major compat rule),
+    // architected as the `major → policy` map in [`pnpm_npmrc_key_policy`].
+    // Gated on `read_branded_pnpm_config` so it engages only under a pnpm
+    // incumbent — a fresh/unknown-major project keeps the open v10 model.
+    let npmrc_settings_allowlist = read_branded_pnpm_config
+        && matches!(
+            pnpm_npmrc_key_policy(declared_pnpm_major()),
+            NpmrcKeyPolicy::Pnpm11Allowlist
+        );
     let read_yarn_config = read_yarn_config_for_surface(&surface);
     // Classic Yarn (v1) reads `.yarnrc`; Yarn Berry (v2+) abandoned it for
     // `.yarnrc.yml` and ignores a stray legacy `.yarnrc`. Gate the engine's
@@ -1556,6 +1602,7 @@ pub(crate) fn engine_brand_preflight() {
         matches!(surface, ConfigSurface::NonPnpmCompat { role: "npm", .. });
     aube_util::update_engine_context(|c| {
         c.read_branded_pnpm_config = read_branded_pnpm_config;
+        c.npmrc_settings_allowlist = npmrc_settings_allowlist;
         // GLOBAL config is read PM-AGNOSTICALLY and UNGATED by cwd incumbency:
         // nub honors whatever global config the user already has from any tool —
         // npm's `~/.npmrc`, pnpm's global `config.yaml`, pnpm's global `auth.ini`.
@@ -2558,6 +2605,30 @@ mod tests {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn pnpm_npmrc_key_policy_narrows_only_at_v11() {
+        // pnpm reversed its `.npmrc` settings-reading at v11: ≤10 reads the
+        // open key space, 11+ restricts to the auth/registry allowlist. An
+        // unknown major defaults to Open (the dominant/most-compatible model).
+        assert!(matches!(
+            pnpm_npmrc_key_policy(Some(9)),
+            NpmrcKeyPolicy::Open
+        ));
+        assert!(matches!(
+            pnpm_npmrc_key_policy(Some(10)),
+            NpmrcKeyPolicy::Open
+        ));
+        assert!(matches!(
+            pnpm_npmrc_key_policy(Some(11)),
+            NpmrcKeyPolicy::Pnpm11Allowlist
+        ));
+        assert!(matches!(
+            pnpm_npmrc_key_policy(Some(12)),
+            NpmrcKeyPolicy::Pnpm11Allowlist
+        ));
+        assert!(matches!(pnpm_npmrc_key_policy(None), NpmrcKeyPolicy::Open));
     }
 
     #[test]

@@ -22,6 +22,43 @@ fn pnpm_auth_ini_enabled() -> bool {
     aube_util::engine_context().read_pnpm_global_config
 }
 
+/// pnpm 11's `.npmrc` key allowlist (`isNpmrcReadableKey`, pnpm
+/// `config/reader/src/localConfig.ts:189-198`): under a pnpm-11 incumbent a
+/// project/user `.npmrc` contributes ONLY auth/registry/network keys to the
+/// settings view; every layout/behavior key is dropped (its home is
+/// `pnpm-workspace.yaml`/`config.yaml`). Matched on the key exactly as pnpm
+/// spells it — note `no-proxy` (hyphen) is allowlisted while npm's `noproxy`
+/// is not.
+fn is_pnpm11_npmrc_readable_key(key: &str) -> bool {
+    key.starts_with('@')
+        || key.starts_with("//")
+        || matches!(
+            key,
+            // NPM_AUTH_SETTINGS
+            "ca" | "cafile" | "cert" | "key" | "registry" | "_auth" | "_authToken" | "_password"
+            | "email" | "username"
+            // NETWORK_INI_KEYS
+            | "https-proxy" | "proxy" | "no-proxy" | "http-proxy" | "local-address" | "strict-ssl"
+        )
+}
+
+/// Apply pnpm 11's `.npmrc` settings allowlist when the embedder profile
+/// requests it ([`aube_util::EngineContext::npmrc_settings_allowlist`]);
+/// otherwise return the entries untouched — the open key space that is
+/// standalone aube's default (pnpm ≤10 / npm semantics). Gates the
+/// settings-facing `.npmrc` readers only; the registry-client auth track walks
+/// `.npmrc` on its own path and keeps every auth key regardless, so this never
+/// affects auth resolution.
+fn apply_npmrc_settings_allowlist(entries: Vec<(String, String)>) -> Vec<(String, String)> {
+    if !aube_util::engine_context().npmrc_settings_allowlist {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|(k, _)| is_pnpm11_npmrc_readable_key(k))
+        .collect()
+}
+
 impl NpmConfig {
     /// Load config by reading npmrc-style sources in priority order:
     /// builtin, global, user, project, auth sidecars, supported incumbent
@@ -199,6 +236,11 @@ pub fn load_npmrc_entries_split(project_dir: &Path) -> SplitNpmrcEntries {
     }
     split.project.extend(yarn_env);
     split.project.extend(bun_env);
+    // pnpm-11 incumbent: the settings view of `.npmrc` is the auth/registry
+    // allowlist only (applied to BOTH user and project scope, matching pnpm 11,
+    // which drops layout keys from `~/.npmrc` as well as the project file).
+    split.user = apply_npmrc_settings_allowlist(split.user);
+    split.project = apply_npmrc_settings_allowlist(split.project);
     if let Ok(mut map) = cache.lock() {
         map.insert(key, split.clone());
     }
@@ -334,10 +376,12 @@ pub fn load_npmrc_entries(project_dir: &Path) -> Vec<(String, String)> {
                 .map(|(k, v)| (NpmrcSource::Env, k, v)),
         );
     }
-    let entries = tagged
-        .into_iter()
-        .map(|(_, k, v)| (k, v))
-        .collect::<Vec<_>>();
+    let entries = apply_npmrc_settings_allowlist(
+        tagged
+            .into_iter()
+            .map(|(_, k, v)| (k, v))
+            .collect::<Vec<_>>(),
+    );
     if let Ok(mut map) = cache.lock() {
         map.insert(key, entries.clone());
     }
@@ -349,6 +393,7 @@ struct NpmrcCacheKey {
     project_dir: PathBuf,
     read_branded_pnpm_config: bool,
     read_pnpm_config_env_registry: bool,
+    npmrc_settings_allowlist: bool,
     read_yarn_config: bool,
     synthetic_user_npmrc_entries: Vec<(String, String)>,
     synthetic_project_npmrc_entries: Vec<(String, String)>,
@@ -372,6 +417,7 @@ fn npmrc_cache_key(project_dir: &Path) -> NpmrcCacheKey {
         project_dir: project_dir.to_path_buf(),
         read_branded_pnpm_config: ctx.read_branded_pnpm_config,
         read_pnpm_config_env_registry: ctx.read_pnpm_config_env_registry,
+        npmrc_settings_allowlist: ctx.npmrc_settings_allowlist,
         read_yarn_config: ctx.read_yarn_config,
         synthetic_user_npmrc_entries: ctx.synthetic_user_npmrc_entries,
         synthetic_project_npmrc_entries: ctx.synthetic_project_npmrc_entries,
