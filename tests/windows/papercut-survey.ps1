@@ -343,7 +343,7 @@ Invoke-Check -id "run-greet" -label "nub run greet (plain node script)" -severit
 
 Invoke-Check -id "run-posix-ism" -label "nub run posix-ism (FOO=val node -e) via default cmd.exe" `
     -severity "major" `
-    -note "CMD.EXE cannot interpret 'FOO=val cmd' inline env assignment  -  expect fail without --shell-emulator; pass is if nub degrades gracefully" -Body {
+    -note "CMD.EXE cannot interpret 'FOO=val cmd' inline env assignment  -  expect fail without --posix-shell; pass is if nub degrades gracefully" -Body {
     $r = Invoke-Process $NubBin @("run", "posix-ism") -cwd $fixPkg
     # On Windows with cmd.exe, 'FOO=1 node …' is not valid CMD syntax.
     # PASS if nub either: (a) routes it through sh and it works, or
@@ -359,7 +359,7 @@ Invoke-Check -id "run-posix-ism" -label "nub run posix-ism (FOO=val node -e) via
     }
 }
 
-Invoke-Check -id "run-shell-emulator" -label "nub run posix-ism --shell-emulator (Git-for-Windows sh)" `
+Invoke-Check -id "run-posix-shell" -label "nub run posix-ism --posix-shell (Git-for-Windows sh)" `
     -severity "minor" `
     -note "Only passes if Git for Windows is installed and sh.exe is on PATH; skip otherwise" -Body {
     # Check if sh.exe is findable first
@@ -367,7 +367,7 @@ Invoke-Check -id "run-shell-emulator" -label "nub run posix-ism --shell-emulator
     if (-not $sh) {
         return @{ pass=$true; detail="SKIP  -  sh.exe not on PATH (no Git for Windows)" }
     }
-    $r = Invoke-Process $NubBin @("run", "--shell-emulator", "posix-ism") -cwd $fixPkg
+    $r = Invoke-Process $NubBin @("run", "--posix-shell", "posix-ism") -cwd $fixPkg
     @{
         stdout    = $r.stdout
         stderr    = $r.stderr

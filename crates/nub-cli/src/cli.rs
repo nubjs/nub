@@ -100,18 +100,18 @@ fn npm_config_reporter_is_silent() -> bool {
         .unwrap_or(false)
 }
 
-/// `--shell-emulator`: run script bodies through a detected POSIX `sh` instead of
+/// `--posix-shell`: run script bodies through a detected POSIX `sh` instead of
 /// the platform default. The default is already `sh` on Unix (so the flag is a
 /// no-op there); on Windows the default is `cmd`, which can't run POSIX-isms
 /// (`FOO=1 cmd`, `$VAR`, `&&`), so the flag routes the body through a `sh` found
 /// on PATH / in a Git-for-Windows install. Set once when `run` parses the flag.
-static SHELL_EMULATOR: AtomicBool = AtomicBool::new(false);
+static POSIX_SHELL: AtomicBool = AtomicBool::new(false);
 
-fn shell_emulator_enabled() -> bool {
-    SHELL_EMULATOR.load(Ordering::Relaxed)
+fn posix_shell_enabled() -> bool {
+    POSIX_SHELL.load(Ordering::Relaxed)
 }
 
-/// Locate a POSIX `sh` for `--shell-emulator`. Searches PATH (`sh`/`sh.exe`), then
+/// Locate a POSIX `sh` for `--posix-shell`. Searches PATH (`sh`/`sh.exe`), then
 /// the standard Git-for-Windows install dirs. Platform-independent — on Unix it
 /// finds `/bin/sh`, on Windows the Git/WSL `sh.exe`. `None` if none is found
 /// (the caller turns that into an actionable error).
@@ -438,7 +438,14 @@ pub enum Command {
         /// Run script bodies through a POSIX `sh` (found on PATH / a Git-for-Windows
         /// install) instead of the platform default. No-op on Unix (already `sh`);
         /// on Windows it replaces `cmd` so POSIX-isms (`FOO=1 …`, `$VAR`, `&&`) work.
-        #[arg(long = "shell-emulator")]
+        #[arg(long = "posix-shell")]
+        posix_shell: bool,
+
+        /// Removed spelling of `--posix-shell`. Kept as a hidden arg so the old name
+        /// hard-errors with guidance rather than clap's generic "unexpected argument"
+        /// — the rename corrected a misnomer (the flag forces a system POSIX `sh`, it
+        /// is not pnpm's built-in JavaScript shell emulator), so it is not aliased.
+        #[arg(long = "shell-emulator", hide = true)]
         shell_emulator: bool,
 
         /// Buffer each package's output and flush it on completion (no
@@ -1883,6 +1890,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             stream,
             reporter,
             reporter_hide_prefix,
+            posix_shell,
             shell_emulator,
             if_present,
             no_check,
@@ -1913,7 +1921,12 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 HIDE_STREAM_PREFIX.store(true, Ordering::Relaxed);
             }
             if shell_emulator {
-                SHELL_EMULATOR.store(true, Ordering::Relaxed);
+                bail!(
+                    "--shell-emulator was renamed to --posix-shell. It forces script execution through a system POSIX `sh` (unlike pnpm's shell-emulator, which is a built-in JavaScript shell)."
+                );
+            }
+            if posix_shell {
+                POSIX_SHELL.store(true, Ordering::Relaxed);
             }
             // `--workspace <name>` is npm's member selection; it desugars to a
             // name filter and composes with any `--filter`/`-F` selectors.
@@ -3535,14 +3548,14 @@ fn build_script_command(
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
-    // `--shell-emulator`: with no explicit shell set, route the body through a
+    // `--posix-shell`: with no explicit shell set, route the body through a
     // detected POSIX `sh` so Windows' `cmd` default is replaced (a no-op on Unix,
     // where the default is already `sh`). Error actionably if none is found.
     let custom_shell = match custom_shell {
         Some(s) => Some(s),
-        None if shell_emulator_enabled() => Some(find_posix_sh().ok_or_else(|| {
+        None if posix_shell_enabled() => Some(find_posix_sh().ok_or_else(|| {
             anyhow::anyhow!(
-                "--shell-emulator: no POSIX `sh` found on PATH. On Windows, install Git for Windows (provides sh.exe) or use WSL; or pass --script-shell <path-to-sh>."
+                "--posix-shell: no POSIX `sh` found on PATH. On Windows, install Git for Windows (provides sh.exe) or use WSL; or pass --script-shell <path-to-sh>."
             )
         })?),
         None => None,
@@ -3559,7 +3572,7 @@ fn build_script_command(
     // script body is passed to cmd.exe exactly as written (npm's
     // `windowsVerbatimArguments: true`), so Rust's MSVCRT re-quoting never mangles
     // a `node -e "…"` body or undoes the per-arg cmd escaping below. A custom POSIX
-    // shell (e.g. Git-Bash `sh.exe` via `--shell-emulator`) does its own parsing,
+    // shell (e.g. Git-Bash `sh.exe` via `--posix-shell`) does its own parsing,
     // so it takes the normal escaped-`arg` path.
     let cmd_verbatim = custom_shell.is_none() && cfg!(windows);
 
@@ -8085,7 +8098,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn find_posix_sh_locates_sh() {
-        // `--shell-emulator` needs a POSIX `sh`. On any Unix box `sh` is on PATH,
+        // `--posix-shell` needs a POSIX `sh`. On any Unix box `sh` is on PATH,
         // so the detector must find it. (The Windows Git-for-Windows search path is
         // exercised on the windows-latest CI leg — Docker on the dev box is Linux
         // only and can't stand in for it.)
