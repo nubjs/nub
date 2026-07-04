@@ -63,7 +63,7 @@ pub(crate) fn scan_and_warn(project: &Project) {
     if !policy_enabled(&project.root) {
         return;
     }
-    if !project.root.join("node_modules").is_dir() {
+    if !tree_installed(&project.root, project.workspace_root.as_deref()) {
         return;
     }
 
@@ -84,6 +84,16 @@ pub(crate) fn scan_and_warn(project: &Project) {
     phantoms.sort();
 
     report(&phantoms);
+}
+
+/// Whether an installed tree exists to diagnose against. A phantom is
+/// transitively PRESENT, so with nothing installed there is nothing to find (and
+/// no reason to pay for the source walk). In a hoisted workspace a member has no
+/// local `node_modules` — its deps live at the workspace root — so a tree at
+/// EITHER the project root or the workspace root counts.
+fn tree_installed(root: &Path, workspace_root: Option<&Path>) -> bool {
+    root.join("node_modules").is_dir()
+        || workspace_root.is_some_and(|w| w.join("node_modules").is_dir())
 }
 
 fn report(phantoms: &[(String, String)]) {
@@ -201,6 +211,15 @@ fn walk_source(dir: &Path, budget: &mut usize, visit: &mut dyn FnMut(&Path, &str
             if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
                 continue;
             }
+            // A nested `package.json` marks a distinct package (a workspace
+            // member, a nested tool). Its imports are declared in ITS OWN
+            // manifest, not the root's — checking them against the root manifest
+            // would false-flag a member's properly-declared, root-hoisted dep. So
+            // the scan is scoped to ONE package: nub checks a member's phantoms
+            // when it runs inside that member (where `detect_project` roots there).
+            if path.join("package.json").is_file() {
+                continue;
+            }
             walk_source(&path, budget, visit);
         } else if file_type.is_file() && is_source_file(&path) {
             if entry.metadata().map(|m| m.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
@@ -227,20 +246,26 @@ fn is_source_file(path: &Path) -> bool {
 }
 
 /// True iff `name` resolves in the `node_modules` chain from `root` AND its real
-/// (symlink-resolved) location is inside a `node_modules` directory — i.e. it is
-/// a genuine transitively-present dependency, not a workspace member.
+/// (symlink-resolved) location lives UNDER the specific `node_modules` it was
+/// found in — i.e. it is a genuine transitively-present dependency, not a
+/// workspace member.
 ///
 /// A workspace member is symlinked into `node_modules` but resolves to
-/// first-party source OUTSIDE any `node_modules`, so this returns false for it
-/// (never a phantom). pnpm's `.pnpm/<name>@<v>/node_modules/<name>` target still
-/// lives under `node_modules`, so a real isolated-store dep still counts.
+/// first-party source OUTSIDE it, so `starts_with` is false and it is never a
+/// phantom. pnpm's `<nm>/.pnpm/<name>@<v>/node_modules/<name>` target still lives
+/// under the same `node_modules`, so a real isolated-store dep still counts. The
+/// check is anchored to THIS `node_modules` (not "a `node_modules` component
+/// anywhere in the absolute path"), so a project that itself lives under some
+/// ancestor `node_modules` doesn't defeat the workspace-member exclusion.
 fn resolves_as_hoisted_dep(root: &Path, name: &str) -> bool {
     let mut dir = Some(root);
     while let Some(d) = dir {
-        let pkg = d.join("node_modules").join(name).join("package.json");
+        let nm = d.join("node_modules");
+        let pkg = nm.join(name).join("package.json");
         if pkg.is_file() {
-            let real = std::fs::canonicalize(&pkg).unwrap_or(pkg);
-            return real.components().any(|c| c.as_os_str() == "node_modules");
+            let real = std::fs::canonicalize(&pkg).unwrap_or_else(|_| pkg.clone());
+            let nm_real = std::fs::canonicalize(&nm).unwrap_or(nm);
+            return real.starts_with(&nm_real);
         }
         dir = d.parent();
     }
@@ -412,6 +437,80 @@ mod tests {
         )
         .unwrap();
         assert!(run(&root, r#"{"name":"app"}"#).is_empty());
+    }
+
+    #[test]
+    fn tree_installed_accepts_local_or_workspace_root_node_modules() {
+        let root = tmpdir("tree");
+        let member = root.join("packages").join("m");
+        fs::create_dir_all(&member).unwrap();
+        // No tree anywhere → false.
+        assert!(!tree_installed(&member, Some(&root)));
+        // Hoisted workspace: only the workspace root has node_modules → true (the
+        // member's deps live there, so the scan must still run).
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        assert!(tree_installed(&member, Some(&root)));
+        // A standalone project with a local tree → true.
+        fs::create_dir_all(member.join("node_modules")).unwrap();
+        assert!(tree_installed(&member, None));
+    }
+
+    #[test]
+    fn hoisted_workspace_root_run_does_not_flag_member_deps() {
+        // The P1 regression: running from a workspace ROOT, the scan must not
+        // walk a member's source and flag a dep the MEMBER declares (but the root
+        // doesn't) just because npm/Yarn hoisted it to the root node_modules. The
+        // member's own package.json marks a package boundary the walk stops at.
+        let root = tmpdir("ws-root");
+        let member = root.join("packages").join("foo");
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(
+            member.join("package.json"),
+            r#"{"name":"@app/foo","dependencies":{"member-dep":"1"}}"#,
+        )
+        .unwrap();
+        fs::write(member.join("src").join("i.ts"), "import 'member-dep';").unwrap();
+        // member-dep is declared by the member but hoisted to the ROOT tree and
+        // absent from the root manifest — the false-positive shape.
+        install_dep(&root, "member-dep");
+        let got = run(
+            &root,
+            r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#,
+        );
+        assert!(
+            got.is_empty(),
+            "member's declared dep must not be flagged at the root: {got:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_package_phantom_is_flagged() {
+        let root = tmpdir("scoped");
+        fs::write(root.join("index.js"), "require('@scope/ghost/sub');").unwrap();
+        install_dep(&root, "@scope/ghost");
+        let got = run(&root, r#"{"name":"app"}"#);
+        assert_eq!(
+            got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["@scope/ghost"]
+        );
+    }
+
+    #[test]
+    fn soft_in_one_file_hard_in_another_aggregates_to_hard() {
+        // A package guarded in one file but imported unguarded in another is a
+        // real dependency (hard wins across the whole project).
+        let root = tmpdir("agg");
+        fs::write(
+            root.join("a.cjs"),
+            "let x; try { x = require('shared-ghost'); } catch {}",
+        )
+        .unwrap();
+        fs::write(root.join("b.cjs"), "const y = require('shared-ghost');").unwrap();
+        install_dep(&root, "shared-ghost");
+        let got = run(&root, r#"{"name":"app"}"#);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "shared-ghost");
+        assert_eq!(got[0].1, "b.cjs", "example cites the hard-occurrence file");
     }
 
     #[test]
