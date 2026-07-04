@@ -2092,10 +2092,21 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 /// rather than a runtime consumer-backend — those resolve anyway and aren't the
 /// pick-your-backend class. Users grow or shrink the list via the
 /// `forceMaterializePackages` setting (embedder-tier, so any user config still wins).
+///
+/// `@storybook/addon-interactions`, `@storybook/core`, `storybook`, and
+/// `@storybook/builder-webpack5` were removed (differential-verified against a real
+/// `storybook build`, not just static analysis): the flagged `react`/`@storybook/icons`
+/// imports live solely in `dist/manager.js`, which Storybook's manager-builder consumes
+/// as an esbuild entry — esbuild's global-externals plugin intercepts those specifiers
+/// before Node module resolution ever runs, so force-materializing never mattered
+/// ("Manager built" succeeds identically with or without it). Worse,
+/// `@storybook/builder-webpack5` force-materialized ALONE regressed a working case:
+/// its declared dependent `@storybook/react-webpack5` (not on this list) stays
+/// store-resident and can no longer find its own dependency once pulled out, turning a
+/// passing `storybook build` into `Cannot find module '@storybook/builder-webpack5'`.
 const NUB_FORCE_MATERIALIZE_PACKAGES: &str = "@hookform/resolvers,cypress,langsmith,\
-@storybook/addon-interactions,@storybook/core,@testing-library/jest-dom,drizzle-orm,\
-storybook,swiper,@angular/common,@angular/router,@apollo/client,\
-@storybook/builder-webpack5,@vercel/analytics,preact,next-themes,\
+@testing-library/jest-dom,drizzle-orm,swiper,@angular/common,@angular/router,\
+@apollo/client,@vercel/analytics,preact,next-themes,\
 @react-pdf/renderer";
 
 /// - Layout policy: EVERY project defaults to the isolated layout
