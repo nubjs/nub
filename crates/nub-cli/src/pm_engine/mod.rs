@@ -2053,6 +2053,22 @@ fn strip_yarnrc_value(rest: &str) -> &str {
     rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
+/// Curated `forceMaterializePackages` list: subpath adapters that statically
+/// import a consumer-installed backend they don't declare. Under nub's default
+/// GVS each of these must be a real project-local directory so its realpath
+/// stays inside the project and Node's upward walk reaches the backend at the
+/// project root (`@hookform/resolvers/zod` → the app's `zod`). Derived from the
+/// phantom-dep detector's top-5000 subpath-adapter offenders, minus the entries
+/// whose imported target is a ubiquitous BUILD tool (`@babel/*`,
+/// `babel-plugin-macros`, `tslib`, `typescript`) rather than a runtime
+/// consumer-backend — those resolve anyway and aren't the pick-your-backend
+/// class. Users grow or shrink it via the `forceMaterializePackages` setting
+/// (embedder-tier, so any user config still wins).
+const NUB_FORCE_MATERIALIZE_PACKAGES: &str = "@hookform/resolvers,cypress,langsmith,\
+@storybook/addon-interactions,@storybook/core,@testing-library/jest-dom,drizzle-orm,\
+storybook,swiper,@angular/common,@angular/router,@apollo/client,\
+@storybook/builder-webpack5,@vercel/analytics,lib0,preact";
+
 /// - Layout policy: EVERY project defaults to the isolated layout
 ///   (`nodeLinker=isolated`) — strict (no phantom deps) and GVS-fast; a project
 ///   that relies on phantom deps opts back into the flat tree with one `.npmrc`
@@ -2097,6 +2113,10 @@ fn nub_setting_defaults(
         (
             "disableGlobalVirtualStoreForPackages".to_string(),
             "next,nuxt,parcel".to_string(),
+        ),
+        (
+            "forceMaterializePackages".to_string(),
+            NUB_FORCE_MATERIALIZE_PACKAGES.to_string(),
         ),
     ];
     if let Some(data) = nub_data_dir() {
@@ -2683,6 +2703,35 @@ mod tests {
             get(&fresh, "hoist"),
             None,
             "fresh ⇒ no hoist push (GVS engages by default)"
+        );
+    }
+
+    #[test]
+    fn force_materialize_default_seeds_the_curated_adapter_list() {
+        // nub seeds the per-package force-materialize list (subpath adapters
+        // that import a consumer-installed backend they don't declare) as an
+        // embedder default so they resolve under the default GVS. The exemplar
+        // `@hookform/resolvers` is present; build-time/helper subpath imports
+        // are excluded (not the runtime consumer-backend class).
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
+        let list = get(&fresh, "forceMaterializePackages")
+            .expect("nub must seed forceMaterializePackages");
+        let names: Vec<&str> = list.split(',').collect();
+        assert!(
+            names.contains(&"@hookform/resolvers"),
+            "the exemplar adapter must be on the list: {list}"
+        );
+        for excluded in ["ox", "event-target-shim", "@nestjs/swagger"] {
+            assert!(
+                !names.contains(&excluded),
+                "{excluded} is a build-time/helper import and must be excluded"
+            );
+        }
+        // List-1 (whole-install GVS-off) stays the validated-clean trio.
+        assert_eq!(
+            get(&fresh, "disableGlobalVirtualStoreForPackages"),
+            Some("next,nuxt,parcel"),
         );
     }
 

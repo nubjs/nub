@@ -459,6 +459,71 @@ fn test_link_all_creates_pnpm_virtual_store() {
 }
 
 #[test]
+fn force_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
+    // Under the global virtual store every `.aube/<dep>` is normally a symlink
+    // into the shared store, so the package realpath escapes the project. A
+    // package on the force-materialize list must instead be a real
+    // project-local directory (its realpath back inside the project) so Node's
+    // upward walk from inside it reaches a consumer-installed, undeclared
+    // backend at the project root — while every OTHER package stays a symlink.
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_force_materialize(&["foo".to_string()]);
+    let graph = make_graph();
+
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    // foo is force-materialized: a real directory, not a shared-store symlink,
+    // with its files materialized project-local.
+    let aube_foo = project_dir.join("node_modules/.aube/foo@1.0.0");
+    let foo_is_symlink = aube_foo
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink();
+    assert!(
+        !foo_is_symlink,
+        "force-materialized foo must be a real dir, not a global-store symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(aube_foo.join("node_modules/foo/index.js")).unwrap(),
+        "module.exports = 'foo';"
+    );
+    // foo's declared dep still resolves through the sibling symlink inside it.
+    assert!(
+        aube_foo
+            .join("node_modules/bar")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "foo's transitive dep must remain a sibling symlink"
+    );
+
+    // bar is unlisted: it stays a global-virtual-store symlink.
+    assert!(
+        project_dir
+            .join("node_modules/.aube/bar@2.0.0")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "an unlisted package must stay a global-virtual-store symlink"
+    );
+
+    // The top-level entry resolves foo's content regardless.
+    assert_eq!(
+        std::fs::read_to_string(project_dir.join("node_modules/foo/index.js")).unwrap(),
+        "module.exports = 'foo';"
+    );
+}
+
+#[test]
 fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
     // Reproduces jdx/aube#393: a partially corrupt CAS leaves the
     // cached package index pointing at a missing shard. Materialize

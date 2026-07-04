@@ -167,6 +167,13 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     let virtual_store_only = aube_settings::resolved::virtual_store_only(settings_ctx);
     let node_linker = resolve_node_linker(settings_ctx)?;
     tracing::debug!("node-linker: {:?}", node_linker);
+    // Per-package force-materialize: subpath adapters that must be real
+    // project-local dirs even under GVS so their realpath stays inside the
+    // project (see `Linker::with_force_materialize`). Empty on standalone aube
+    // (settings default `[]`); nub seeds the curated list as an embedder
+    // default. Consulted by the linker only in the GVS pass.
+    let force_materialize_packages =
+        aube_settings::resolved::force_materialize_packages(settings_ctx);
 
     let mut linker = aube_linker::Linker::new(store, strategy)
         .with_shamefully_hoist(shamefully_hoist)
@@ -191,7 +198,8 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         .with_no_integrity_read_keys(crate::state::read_no_integrity_index_for(
             cwd,
             graph_for_link.packages.values(),
-        ));
+        ))
+        .with_force_materialize(&force_materialize_packages);
     if let Some(enabled) = use_global_virtual_store_override {
         linker = linker.with_use_global_virtual_store(enabled);
     }

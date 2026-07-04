@@ -42,6 +42,7 @@ impl Linker {
             virtual_store_only: self.virtual_store_only,
             no_integrity_read_keys: self.no_integrity_read_keys.clone(),
             link_progress: self.link_progress.clone(),
+            force_materialize: self.force_materialize.clone(),
         }
     }
 
@@ -295,6 +296,61 @@ impl Linker {
                             let mut local_stats = LinkStats::default();
                             let local_aube_entry = aube_dir.join(entry_name);
                             let global_entry = self.virtual_store.join(subdir);
+
+                            // Force-materialize: this package must be a real
+                            // project-local directory (not a shared-store
+                            // symlink) so its realpath stays inside the project
+                            // and Node's upward node_modules walk from inside it
+                            // reaches a consumer-installed, undeclared backend at
+                            // the project root (the subpath-adapter phantom
+                            // class). Materializes exactly as the per-project
+                            // (GVS-off) branch does — the local `.aube/<entry>`
+                            // name is dep_path-keyed regardless of GVS, so the
+                            // top-level and sibling symlinks resolve unchanged. A
+                            // prior GVS install or the fetch prewarm may have left
+                            // a symlink here; replace it. An existing real
+                            // directory is reused as cached.
+                            if self.force_materialize_matches(&pkg.name) {
+                                match std::fs::symlink_metadata(&local_aube_entry) {
+                                    Ok(meta) if meta.file_type().is_symlink() => {
+                                        let _ = std::fs::remove_dir(&local_aube_entry)
+                                            .or_else(|_| std::fs::remove_file(&local_aube_entry));
+                                    }
+                                    Ok(_) => {
+                                        local_stats.packages_cached += 1;
+                                        return Ok(local_stats);
+                                    }
+                                    Err(_) => {}
+                                }
+                                let owned_index;
+                                let index = match package_indices.get(dep_path) {
+                                    Some(idx) => idx,
+                                    None => {
+                                        owned_index = self
+                                            .store
+                                            .load_index(
+                                                pkg.registry_name(),
+                                                &pkg.version,
+                                                self.index_read_key(pkg),
+                                            )
+                                            .ok_or_else(|| {
+                                                Error::MissingPackageIndex(dep_path.to_string())
+                                            })?;
+                                        &owned_index
+                                    }
+                                };
+                                self.materialize_into(
+                                    &aube_dir,
+                                    &aube_dir,
+                                    dep_path,
+                                    pkg,
+                                    index,
+                                    &mut local_stats,
+                                    false,
+                                    nested_link_targets.as_ref(),
+                                )?;
+                                return Ok(local_stats);
+                            }
 
                             // Single readlink classifies the entry into one of
                             // three states and drives the whole per-package

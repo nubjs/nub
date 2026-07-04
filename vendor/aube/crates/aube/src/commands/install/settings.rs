@@ -170,14 +170,20 @@ pub(super) fn find_gvs_incompatible_trigger<'a>(
 /// symlinks. Callers use this to detect the transition and wipe
 /// `node_modules/` before the linker runs.
 ///
-/// Assumes a consistent `.aube/` tree (every entry the same type),
-/// which is what a successful install produces. A crash mid-link
-/// during a transition could leave a mixed tree; we classify from the
-/// first entry `read_dir` yields and let the next install self-heal
-/// — worst case is one extra wipe, which is identical to the cost of
-/// the transition we're already handling.
+/// Symlink-PRIORITY classification: any single symlink entry means the tree
+/// is in global-virtual-store mode. GVS-on trees are NOT necessarily uniform
+/// — `forceMaterializePackages` makes a handful of adapter entries real dirs
+/// while the rest stay shared-store symlinks, a legitimately MIXED tree — so
+/// classifying from the first `read_dir` entry would be order-dependent (a
+/// forced real dir landing first would misread the whole tree as per-project
+/// and trigger a spurious wipe on every install). Per-project mode is the
+/// only mode with NO symlink entries, so `false` is returned only after the
+/// full scan finds real dirs and zero symlinks. For a consistent tree (every
+/// entry the same type — standalone aube's default) the result is identical
+/// to the first-entry classification; only the mixed tree differs.
 pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<bool> {
     let entries = std::fs::read_dir(aube_dir).ok()?;
+    let mut saw_real_dir = false;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
@@ -199,11 +205,11 @@ pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<boo
         // and move on to the next candidate.
         match std::fs::read_link(entry.path()) {
             Ok(_) => return Some(true),
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => return Some(false),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => saw_real_dir = true,
             Err(_) => continue,
         }
     }
-    None
+    saw_real_dir.then_some(false)
 }
 
 /// Honor `cleanupUnusedCatalogs` by pruning declared-but-unreferenced
@@ -1250,6 +1256,44 @@ mod network_concurrency_tests {
         assert_eq!(network_concurrency_for_workers(24), 72);
         assert_eq!(network_concurrency_for_workers(64), 128);
         assert_eq!(network_concurrency_for_workers(usize::MAX), 128);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod gvs_mode_detect_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    // `forceMaterializePackages` produces a MIXED `.aube` tree — some entries
+    // are shared-store symlinks, some are force-materialized real dirs. The
+    // detector must classify such a tree as GVS-on regardless of `read_dir`
+    // order; a forced real dir landing first must NOT misread it as per-project
+    // (which would wipe node_modules on every install).
+    #[test]
+    fn mixed_tree_with_any_symlink_reads_as_gvs() {
+        let dir = tempfile::tempdir().unwrap();
+        let aube = dir.path();
+        std::fs::create_dir_all(aube.join("real@1.0.0/node_modules/real")).unwrap();
+        symlink("/nonexistent-store/dep@2.0.0", aube.join("dep@2.0.0")).unwrap();
+        assert_eq!(detect_aube_dir_gvs_mode(aube), Some(true));
+    }
+
+    #[test]
+    fn all_real_dirs_reads_as_per_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let aube = dir.path();
+        std::fs::create_dir_all(aube.join("a@1.0.0/node_modules/a")).unwrap();
+        std::fs::create_dir_all(aube.join("b@1.0.0/node_modules/b")).unwrap();
+        assert_eq!(detect_aube_dir_gvs_mode(aube), Some(false));
+    }
+
+    #[test]
+    fn all_symlinks_reads_as_gvs() {
+        let dir = tempfile::tempdir().unwrap();
+        let aube = dir.path();
+        symlink("/store/a@1.0.0", aube.join("a@1.0.0")).unwrap();
+        symlink("/store/b@1.0.0", aube.join("b@1.0.0")).unwrap();
+        assert_eq!(detect_aube_dir_gvs_mode(aube), Some(true));
     }
 }
 

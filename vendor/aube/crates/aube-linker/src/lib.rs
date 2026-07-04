@@ -250,6 +250,18 @@ pub struct Linker {
     /// [`with_link_progress`]: Linker::with_link_progress
     /// [`note_files_linked`]: Linker::note_files_linked
     link_progress: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// Package names materialized as real project-local directories even when
+    /// the global virtual store is active — the per-package escape hatch for
+    /// subpath adapters that statically import a consumer-installed backend
+    /// they don't declare (`@hookform/resolvers/zod` → `zod`). Under GVS every
+    /// other package is a symlink into the shared store, whose realpath escapes
+    /// the project, so Node's upward `node_modules` walk from inside the adapter
+    /// can't reach the backend at the project root; materializing just the
+    /// adapter puts its realpath back inside the project and the walk succeeds.
+    /// Matched by exact name against each graph package. Empty for standalone
+    /// callers and every existing test → the GVS pass is byte-for-byte
+    /// unchanged.
+    force_materialize: std::collections::HashSet<String>,
 }
 
 /// Strategy for linking files from the store to node_modules.

@@ -11,8 +11,8 @@
 //!
 //! This pins the three-part contract:
 //!   1. default profile → aube's built-in list, unchanged;
-//!   2. an embedder default → replaces the built-in list (nub's desired list:
-//!      adds `@sveltejs/kit`, drops `vite`/`vitepress`, keeps the rest);
+//!   2. an embedder default → replaces the built-in list (nub's shipped list:
+//!      drops `vite`/`vitepress`, keeps `next`/`nuxt`/`parcel`);
 //!   3. any real user/project source still outranks the embedder default.
 //!
 //! Lives in its own integration-test binary because `set_embedder_defaults` is
@@ -27,10 +27,10 @@ const SETTING: &str = "disableGlobalVirtualStoreForPackages";
 /// this string list is the "default is unchanged" half of the contract.
 const AUBE_DEFAULT: &[&str] = &["next", "nuxt", "vite", "vitepress", "parcel"];
 
-/// nub's desired list, encoded as the value the NUB embedder will feed through
-/// `set_embedder_defaults`. (The nub-side wiring lives in the nub repo; here we
-/// only prove the override path and that the default is untouched.)
-const NUB_LIST: &[&str] = &["@sveltejs/kit", "next", "nuxt", "parcel"];
+/// nub's shipped list, encoded as the value the NUB embedder feeds through
+/// `set_embedder_defaults` (`nub_setting_defaults` in the nub repo). Here we
+/// only prove the override path and that the default is untouched.
+const NUB_LIST: &[&str] = &["next", "nuxt", "parcel"];
 
 fn ctx<'a>(
     ws: &'a BTreeMap<String, yaml_serde::Value>,

@@ -1117,6 +1117,38 @@ sources.npmrc = ["disableGlobalVirtualStoreForPackages", "disable-global-virtual
 sources.workspaceYaml = ["disableGlobalVirtualStoreForPackages"]
 examples = []
 
+[forceMaterializePackages]
+description = "Package names force-materialized project-local even under the global virtual store."
+type = "list<string>"
+default = "[]"
+docs = """
+Under the global virtual store a package's `node_modules/.aube/<pkg>` is a
+symlink into `~/.cache/aube/virtual-store/`, so the package's realpath lives
+outside the project. Node resolves an undeclared import by walking realpath
+parents, so a package that statically imports a specifier it doesn't declare —
+a subpath adapter importing a consumer-installed backend it picks at runtime
+(`@hookform/resolvers/zod` importing the `zod` the app installed) — can't
+reach the project's `node_modules/` from inside the shared store and fails to
+resolve.
+
+Listing the adapter here force-materializes THAT package as a real
+project-local directory (reflink/hardlink/copy from the store, near-zero on
+copy-on-write filesystems) while every other package stays a shared-store
+symlink. Its realpath is then project-local, so Node's upward directory walk
+reaches the consumer-installed backend at the project root. Unlike
+`disableGlobalVirtualStoreForPackages` — which drops the WHOLE install to
+per-project materialization — this is per-package: only the named adapters pay
+the local-copy cost, and the rest of the tree keeps cross-project sharing.
+
+The default is empty. `CI=1` and `disableGlobalVirtualStoreForPackages`
+already force per-project materialization, where this setting is a no-op.
+"""
+sources.cli = []
+sources.env = ["npm_config_force_materialize_packages", "NPM_CONFIG_FORCE_MATERIALIZE_PACKAGES", "AUBE_FORCE_MATERIALIZE_PACKAGES"]
+sources.npmrc = ["forceMaterializePackages", "force-materialize-packages"]
+sources.workspaceYaml = ["forceMaterializePackages"]
+examples = []
+
 # ========================================= Store =========================================
 
 [storeDir]
