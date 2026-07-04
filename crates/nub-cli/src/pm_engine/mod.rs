@@ -2080,7 +2080,7 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 const NUB_FORCE_MATERIALIZE_PACKAGES: &str = "@hookform/resolvers,cypress,langsmith,\
 @storybook/addon-interactions,@storybook/core,@testing-library/jest-dom,drizzle-orm,\
 storybook,swiper,@angular/common,@angular/router,@apollo/client,\
-@storybook/builder-webpack5,@vercel/analytics,lib0,preact,next-themes,\
+@storybook/builder-webpack5,@vercel/analytics,preact,next-themes,\
 @react-pdf/renderer";
 
 /// - Layout policy: EVERY project defaults to the isolated layout
