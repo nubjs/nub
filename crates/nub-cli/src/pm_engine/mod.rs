@@ -2053,21 +2053,35 @@ fn strip_yarnrc_value(rest: &str) -> &str {
     rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
-/// Curated `forceMaterializePackages` list: subpath adapters that statically
-/// import a consumer-installed backend they don't declare. Under nub's default
-/// GVS each of these must be a real project-local directory so its realpath
-/// stays inside the project and Node's upward walk reaches the backend at the
-/// project root (`@hookform/resolvers/zod` → the app's `zod`). Derived from the
-/// phantom-dep detector's top-5000 subpath-adapter offenders, minus the entries
-/// whose imported target is a ubiquitous BUILD tool (`@babel/*`,
-/// `babel-plugin-macros`, `tslib`, `typescript`) rather than a runtime
-/// consumer-backend — those resolve anyway and aren't the pick-your-backend
-/// class. Users grow or shrink it via the `forceMaterializePackages` setting
-/// (embedder-tier, so any user config still wins).
+/// Curated `forceMaterializePackages` list. Each entry ships a file that
+/// references an undeclared sibling — either a runtime backend (`import` of a
+/// consumer-installed peer) or an ambient `@types/*` its `.d.ts` consumes — and
+/// resolution of that sibling depends on the entry's realpath staying inside the
+/// project. Under nub's default GVS a store entry's realpath is the machine-global
+/// virtual store, so the upward `node_modules` walk from it escapes the project and
+/// the sibling is never found. Force-materializing the entry makes it a real
+/// project-local directory, so the walk stays in-project and reaches the sibling at
+/// the project root. Two offender classes, one mechanism:
+/// - Runtime subpath adapters that statically import a backend they don't declare
+///   (`@hookform/resolvers/zod` → the app's `zod`).
+/// - Ambient-`@types` consumers whose shipped `.d.ts` import an undeclared
+///   `@types/react` (`next-themes`, `@react-pdf/renderer` — #286). Force-materialize
+///   restores tsc parity with pnpm: the project-local realpath's `@types` walk
+///   reaches the app's own `@types/react` (verified 0-error parity for next-themes,
+///   exact residual-error parity for @react-pdf, whose remaining errors are upstream
+///   package issues present under pnpm too).
+///
+/// The runtime entries are derived from the phantom-dep detector's top-5000
+/// subpath-adapter offenders, minus the entries whose imported target is a
+/// ubiquitous BUILD tool (`@babel/*`, `babel-plugin-macros`, `tslib`, `typescript`)
+/// rather than a runtime consumer-backend — those resolve anyway and aren't the
+/// pick-your-backend class. Users grow or shrink the list via the
+/// `forceMaterializePackages` setting (embedder-tier, so any user config still wins).
 const NUB_FORCE_MATERIALIZE_PACKAGES: &str = "@hookform/resolvers,cypress,langsmith,\
 @storybook/addon-interactions,@storybook/core,@testing-library/jest-dom,drizzle-orm,\
 storybook,swiper,@angular/common,@angular/router,@apollo/client,\
-@storybook/builder-webpack5,@vercel/analytics,lib0,preact";
+@storybook/builder-webpack5,@vercel/analytics,lib0,preact,next-themes,\
+@react-pdf/renderer";
 
 /// - Layout policy: EVERY project defaults to the isolated layout
 ///   (`nodeLinker=isolated`) — strict (no phantom deps) and GVS-fast; a project
@@ -2722,6 +2736,15 @@ mod tests {
             names.contains(&"@hookform/resolvers"),
             "the exemplar adapter must be on the list: {list}"
         );
+        // The #286 ambient-`@types` class: consumers whose shipped `.d.ts` import
+        // an undeclared `@types/react` need the same project-local realpath so
+        // tsc's `@types` walk reaches the app's own `@types/react` under GVS.
+        for types_consumer in ["next-themes", "@react-pdf/renderer"] {
+            assert!(
+                names.contains(&types_consumer),
+                "{types_consumer} (#286 ambient-@types class) must be on the list: {list}"
+            );
+        }
         for excluded in ["ox", "event-target-shim", "@nestjs/swagger"] {
             assert!(
                 !names.contains(&excluded),
