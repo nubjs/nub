@@ -466,6 +466,12 @@ enableGlobalVirtualStore=false
 
 Either layout resolves the same packages — including type packages (`@types/*`) pulled in transitively but not declared, which stay reachable in both.
 
+A few packages statically import a backend you pick at runtime — `@hookform/resolvers/zod` imports the `zod` your app installs, without declaring it. Under the shared store the adapter's real path sits outside the project, so Node's directory walk can't reach that backend and the import throws. Nub materializes those adapters into the project automatically so they resolve, while the rest of the tree keeps sharing. Add your own with one line in `.npmrc`:
+
+```ini
+forceMaterializePackages[]=my-adapter
+```
+
 ### Offline installs
 
 Like pnpm, Nub relinks files from the global store into `node_modules` via reflink (APFS/btrfs) or hardlink (ext4) when the store already holds every package — no re-download, no byte-for-byte copy. The benchmark below measures the warm reinstall case: `node_modules` is removed, packages are already on disk, and the installer rebuilds the project layout.
