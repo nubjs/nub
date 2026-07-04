@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod nubx_consent;
 mod nubx_resolve;
+mod phantom_scan;
 mod pm_engine;
 mod self_shim;
 mod verify_deps;

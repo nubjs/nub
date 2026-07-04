@@ -100,6 +100,13 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
     // No manifest here or above → nothing to verify (a bare `nub foo.ts` in a
     // non-project dir stays on the fast path).
     let project = nub_core::workspace::detect::detect_project(cwd)?;
+
+    // Static phantom-dependency nudge — warn-only, and independent of the
+    // staleness policy below (a project can want phantom warnings without the
+    // staleness gate, or vice-versa), sharing this entrypoint's compat/marker/
+    // once-per-command guards. It never aborts the run.
+    crate::phantom_scan::scan_and_warn(&project);
+
     let policy = resolve_policy(&project.root);
     if policy == Policy::Off {
         return None;

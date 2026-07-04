@@ -13,13 +13,17 @@
 //! so the emitted phantom set is trustworthy enough to drive the vendored
 //! `packageExtensions`/force-materialize list.
 
-pub mod builtins;
 pub mod classify;
-pub mod extract;
 pub mod fetch;
 pub mod graph;
 pub mod manifest;
-pub mod specifier;
+
+// The specifier-extraction + classification primitives are shared with the
+// shipped `nub` CLI via `nub-phantom-core` (single source of truth — the guard
+// modeling and builtin/name classification live there, not duplicated here).
+// Re-exported so the in-crate `crate::builtins` / `crate::extract` /
+// `crate::specifier` paths resolve unchanged.
+pub use nub_phantom_core::{builtins, extract, specifier};
 
 use std::path::Path;
 

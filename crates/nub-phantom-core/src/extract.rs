@@ -18,14 +18,14 @@
 //! unconditionally. This only ever errs toward soft (a false negative on
 //! hardness), never toward a false phantom — safe for the never-false-flag bar.
 
-use oxc::allocator::Allocator;
-use oxc::ast::ast::{
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{
     Argument, ConditionalExpression, Expression, IfStatement, ImportDeclarationSpecifier,
     LogicalExpression, Statement, TryStatement,
 };
-use oxc::ast_visit::{Visit, walk};
-use oxc::parser::Parser;
-use oxc::span::SourceType;
+use oxc_ast_visit::{Visit, walk};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 
 /// How a specifier was referenced. Kept for reporting; the classifier treats all
 /// as runtime edges (soft-ness, not kind, gates the phantom/soft split).
@@ -176,7 +176,7 @@ impl<'a> Visit<'a> for SpecVisitor {
 
 /// A named import declaration is a runtime (value) import unless every specifier
 /// is inline-`type`. A bare import (no specifiers) is always runtime.
-fn import_has_value(decl: &oxc::ast::ast::ImportDeclaration<'_>) -> bool {
+fn import_has_value(decl: &oxc_ast::ast::ImportDeclaration<'_>) -> bool {
     match &decl.specifiers {
         None => true,
         Some(specs) if specs.is_empty() => true,
@@ -190,13 +190,13 @@ fn import_has_value(decl: &oxc::ast::ast::ImportDeclaration<'_>) -> bool {
 
 /// `export { a, type B } from 'y'` is a runtime re-export unless every specifier
 /// is inline-`type`.
-fn export_named_has_value(decl: &oxc::ast::ast::ExportNamedDeclaration<'_>) -> bool {
+fn export_named_has_value(decl: &oxc_ast::ast::ExportNamedDeclaration<'_>) -> bool {
     decl.specifiers.is_empty() || decl.specifiers.iter().any(|s| !s.export_kind.is_type())
 }
 
 /// If `call` is `require("lit")` or `require.resolve("lit")`, return the literal
 /// specifier and which. Any non-string-literal argument yields `None`.
-fn require_call<'a>(call: &'a oxc::ast::ast::CallExpression<'a>) -> Option<(&'a str, RefKind)> {
+fn require_call<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> Option<(&'a str, RefKind)> {
     let kind = match &call.callee {
         Expression::Identifier(id) if id.name == "require" => RefKind::Require,
         Expression::StaticMemberExpression(m) => match &m.object {

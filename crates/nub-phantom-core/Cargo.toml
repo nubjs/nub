@@ -1,0 +1,36 @@
+# nub-phantom-core — the precision-critical phantom-classification primitives,
+# shared by the shipped `nub` CLI (verify_deps phantom scan) and the excluded
+# `nub-phantom` eval tool. Single source of truth for specifier extraction +
+# classification so the two consumers can never diverge.
+#
+# LEAN OXC SUBSET (the load-bearing dependency choice): this crate depends on the
+# individual oxc parser/AST crates — NOT the `oxc` umbrella with features=["full"].
+# The umbrella pulls the transformer, codegen, semantic, minifier, and mangler
+# — none of which specifier extraction needs. Because `nub-cli` links this crate,
+# keeping to the parser-only subset is what lets the phantom scan reuse the SAME
+# oxc 0.132.0 parser nub transpiles with (byte-identical extraction semantics)
+# WITHOUT dragging the full-oxc compile into the shipped CLI + every CI leg (the
+# reason the main workspace excludes `crates/nub-phantom`). The versions are
+# pinned EXACT to the workspace's `oxc` pin (=0.132.0) and move in lockstep with
+# it — see the root Cargo.toml OXC_VERSION note.
+[package]
+name = "nub-phantom-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "nub_phantom_core"
+path = "src/lib.rs"
+
+[dependencies]
+oxc_allocator = "=0.132.0"
+oxc_ast = "=0.132.0"
+oxc_ast_visit = "=0.132.0"
+oxc_parser = "=0.132.0"
+oxc_span = "=0.132.0"
+
+[lints]
+workspace = true

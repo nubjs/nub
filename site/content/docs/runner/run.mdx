@@ -148,6 +148,23 @@ NUB_VERIFY_DEPS_BEFORE_RUN=off nub run build
 
 Nub does not install on your behalf here — `install` is accepted as a value but behaves like `warn`, since Nub won't reshape a tree another package manager set up. Run `nub install` when you see the warning. The check also applies to `nub <file>`, `nub exec`, and `nubx`, and is skipped in [`--node` / compat mode](#--node) and inside an already-running script (so a script that spawns `node` doesn't re-check).
 
+## Undeclared dependencies
+
+Nub also flags a *phantom* dependency — a package your own source imports but never declares, that resolves today only because some dependency-of-a-dependency hoisted it into `node_modules`. It works under a flat npm or Yarn install and breaks the moment the tree is installed isolated, so Nub names the file and the fix before that happens:
+
+```
+nub: src/index.ts imports `ansi-styles`, which isn't in package.json. Run `nub add ansi-styles` (WARN_PHANTOM_DEP).
+```
+
+The scan is deliberately conservative — it warns only on a package that is imported unguarded (a `try/catch` optional load is left alone), is absent from every dependency field, and is actually present in `node_modules`. Builtins, self-imports, `@types/*`, and workspace packages never warn, and it reads your first-party source only — `node_modules` and build output are skipped. It is warn-only and never changes the exit code.
+
+Turn it off with the `phantom-check` key in `.npmrc`, or the `NUB_PHANTOM_CHECK` variable for one shell:
+
+```ini
+# .npmrc
+phantom-check = off
+```
+
 ## The `npm_*` environment
 
 Nub populates the child process with the full npm-compatible environment, so scripts and tooling that read `npm_*` variables behave exactly as they do under `npm run`. Locally installed CLIs are on `PATH` via the `node_modules/.bin` chain, so you can call them by bare name.

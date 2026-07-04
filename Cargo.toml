@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core"]
+members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core", "crates/nub-phantom-core"]
 # vendor/aube is its own Cargo workspace (the vendored aube package manager,
 # plain in-tree files vendored from nubjs/aube). The exclude is load-bearing: nub crates
 # take `path` dependencies into vendor/aube/crates/*, and cargo auto-adopts
@@ -26,13 +26,21 @@ members = ["crates/nub-cache-key", "crates/nub-cli", "crates/nub-core"]
 # `workspace = true` inheritance resolves against THIS workspace, and nub-native
 # recompiles it under its own unwind profile for the final cdylib.
 #
-# crates/nub-phantom is an INTERNAL/eval tool (the phantom-dependency detector +
-# ecosystem scanner), NOT part of the shipped `nub` binary. It is its own
-# single-member workspace, excluded here, because it depends on the full oxc
-# parser (`oxc` features=["full"]) — pulling that into the main workspace would
-# bloat the `nub` CLI's build graph and every default `cargo build`/CI leg for a
-# parser the CLI never uses. Built on demand:
+# crates/nub-phantom is an INTERNAL/eval tool (the phantom-dependency ecosystem
+# scanner over published npm tarballs), NOT part of the shipped `nub` binary. It
+# is its own single-member workspace, excluded here, because it pulls the
+# registry-fetch stack (reqwest/tar/flate2) plus its own binary — build weight
+# the CLI never needs. Its precision-critical extraction/classification core now
+# lives in `crates/nub-phantom-core` (a real member below), shared with the CLI's
+# pre-run phantom scan so the two can't diverge; nub-phantom depends on it rather
+# than carrying its own copy. Built on demand:
 # `cargo build --manifest-path crates/nub-phantom/Cargo.toml --release`.
+#
+# crates/nub-phantom-core (a MEMBER, not excluded) holds those shared primitives.
+# It depends on the LEAN oxc parser subset (oxc_parser/oxc_ast/oxc_ast_visit/
+# oxc_span/oxc_allocator), NOT the `oxc` umbrella with features=["full"] — so
+# linking it into the CLI adds the parser, not the transformer/codegen/semantic/
+# minifier tail. See its Cargo.toml.
 exclude = ["vendor/aube", "crates/nub-native", "crates/nub-phantom"]
 resolver = "3"
 

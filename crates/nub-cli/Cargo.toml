@@ -20,6 +20,11 @@ embed-runtime = ["nub-core/embed-runtime"]
 
 [dependencies]
 nub-core = { path = "../nub-core" }
+# Shared phantom-classification primitives (specifier extraction + guard modeling
+# + builtin/name classification) for the pre-run phantom scan (src/phantom_scan.rs).
+# Depends on the LEAN oxc parser subset, not the full `oxc` umbrella — see the
+# crate's Cargo.toml for why that keeps the shipped CLI's build graph lean.
+nub-phantom-core = { path = "../nub-phantom-core" }
 # Vendored aube (vendor/aube — plain in-tree files, vendored from nubjs/aube). aube-lockfile
 # is a pure library crate (no CLI/tokio surface); `aube` is the command layer
 # as a library (lib target landed in nubjs/aube@b15cdcb) — `nub install` /
