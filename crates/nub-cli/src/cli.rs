@@ -100,45 +100,6 @@ fn npm_config_reporter_is_silent() -> bool {
         .unwrap_or(false)
 }
 
-/// `--posix-shell`: run script bodies through a detected POSIX `sh` instead of
-/// the platform default. The default is already `sh` on Unix (so the flag is a
-/// no-op there); on Windows the default is `cmd`, which can't run POSIX-isms
-/// (`FOO=1 cmd`, `$VAR`, `&&`), so the flag routes the body through a `sh` found
-/// on PATH / in a Git-for-Windows install. Set once when `run` parses the flag.
-static POSIX_SHELL: AtomicBool = AtomicBool::new(false);
-
-fn posix_shell_enabled() -> bool {
-    POSIX_SHELL.load(Ordering::Relaxed)
-}
-
-/// Locate a POSIX `sh` for `--posix-shell`. Searches PATH (`sh`/`sh.exe`), then
-/// the standard Git-for-Windows install dirs. Platform-independent — on Unix it
-/// finds `/bin/sh`, on Windows the Git/WSL `sh.exe`. `None` if none is found
-/// (the caller turns that into an actionable error).
-fn find_posix_sh() -> Option<String> {
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            for name in ["sh", "sh.exe"] {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Some(candidate.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-    // Standard Git-for-Windows locations (these paths simply don't exist on Unix).
-    for p in [
-        r"C:\Program Files\Git\bin\sh.exe",
-        r"C:\Program Files\Git\usr\bin\sh.exe",
-        r"C:\Program Files (x86)\Git\bin\sh.exe",
-    ] {
-        if std::path::Path::new(p).is_file() {
-            return Some(p.to_string());
-        }
-    }
-    None
-}
-
 /// Emit one ndjson event on stdout (`--reporter=ndjson`). The base shape is the
 /// `{ level, name, script, time, msg }` that `@pnpm/cli.default-reporter`
 /// consumes, plus an `event` discriminator (`start`/`log`/`end`/`summary`) and an
@@ -434,19 +395,6 @@ pub enum Command {
         /// Override the shell used to invoke the script command.
         #[arg(long, value_name = "PATH")]
         script_shell: Option<String>,
-
-        /// Run script bodies through a POSIX `sh` (found on PATH / a Git-for-Windows
-        /// install) instead of the platform default. No-op on Unix (already `sh`);
-        /// on Windows it replaces `cmd` so POSIX-isms (`FOO=1 …`, `$VAR`, `&&`) work.
-        #[arg(long = "posix-shell")]
-        posix_shell: bool,
-
-        /// Removed spelling of `--posix-shell`. Kept as a hidden arg so the old name
-        /// hard-errors with guidance rather than clap's generic "unexpected argument"
-        /// — the rename corrected a misnomer (the flag forces a system POSIX `sh`, it
-        /// is not pnpm's built-in JavaScript shell emulator), so it is not aliased.
-        #[arg(long = "shell-emulator", hide = true)]
-        shell_emulator: bool,
 
         /// Buffer each package's output and flush it on completion (no
         /// interleaving). Default on CI / non-TTY.
@@ -1890,8 +1838,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             stream,
             reporter,
             reporter_hide_prefix,
-            posix_shell,
-            shell_emulator,
             if_present,
             no_check,
             ignore_scripts,
@@ -1919,14 +1865,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             }
             if reporter_hide_prefix {
                 HIDE_STREAM_PREFIX.store(true, Ordering::Relaxed);
-            }
-            if shell_emulator {
-                bail!(
-                    "--shell-emulator was renamed to --posix-shell. It forces script execution through a system POSIX `sh` (unlike pnpm's shell-emulator, which is a built-in JavaScript shell)."
-                );
-            }
-            if posix_shell {
-                POSIX_SHELL.store(true, Ordering::Relaxed);
             }
             // `--workspace <name>` is npm's member selection; it desugars to a
             // name filter and composes with any `--filter`/`-F` selectors.
@@ -3548,18 +3486,6 @@ fn build_script_command(
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
-    // `--posix-shell`: with no explicit shell set, route the body through a
-    // detected POSIX `sh` so Windows' `cmd` default is replaced (a no-op on Unix,
-    // where the default is already `sh`). Error actionably if none is found.
-    let custom_shell = match custom_shell {
-        Some(s) => Some(s),
-        None if posix_shell_enabled() => Some(find_posix_sh().ok_or_else(|| {
-            anyhow::anyhow!(
-                "--posix-shell: no POSIX `sh` found on PATH. On Windows, install Git for Windows (provides sh.exe) or use WSL; or pass --script-shell <path-to-sh>."
-            )
-        })?),
-        None => None,
-    };
     let (shell, shell_flag) = if let Some(ref s) = custom_shell {
         (s.as_str(), "-c")
     } else if cfg!(windows) {
@@ -3572,7 +3498,7 @@ fn build_script_command(
     // script body is passed to cmd.exe exactly as written (npm's
     // `windowsVerbatimArguments: true`), so Rust's MSVCRT re-quoting never mangles
     // a `node -e "…"` body or undoes the per-arg cmd escaping below. A custom POSIX
-    // shell (e.g. Git-Bash `sh.exe` via `--posix-shell`) does its own parsing,
+    // shell (e.g. Git-Bash `sh.exe` via `--script-shell`) does its own parsing,
     // so it takes the normal escaped-`arg` path.
     let cmd_verbatim = custom_shell.is_none() && cfg!(windows);
 
@@ -8113,21 +8039,6 @@ mod tests {
             is_node_bin(&node_shim),
             "#!/usr/bin/env node entry must run under node"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn find_posix_sh_locates_sh() {
-        // `--posix-shell` needs a POSIX `sh`. On any Unix box `sh` is on PATH,
-        // so the detector must find it. (The Windows Git-for-Windows search path is
-        // exercised on the windows-latest CI leg — Docker on the dev box is Linux
-        // only and can't stand in for it.)
-        let sh = find_posix_sh().expect("find_posix_sh must locate sh on Unix");
-        let stem = std::path::Path::new(&sh)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        assert_eq!(stem, "sh", "resolved path should be an `sh`: {sh}");
     }
 
     #[test]

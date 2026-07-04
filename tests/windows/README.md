@@ -22,7 +22,7 @@ Docker is available on the host (macOS/Linux) for Linux-specific tests; it is NO
    npm install -g @nubjs/nub
    nub --version
    ```
-5. **Git for Windows** *(optional)* — needed for the `--posix-shell` check (`sh.exe`). Install from <https://gitforwindows.org/>; the `sh-detection` check auto-skips if absent.
+5. **Git for Windows** *(optional)* — needed for the `run-script-shell` check (`sh.exe`). Install from <https://gitforwindows.org/>; the check auto-skips if no `sh.exe` is found.
 
 ## Snapshot discipline
 
@@ -71,7 +71,7 @@ The script prints a colour-coded console report and writes a `results.json` in t
 | `file-stdin` | stdin execution (`nub -`) | major | stdin plumbing |
 | `run-greet` | `nub run` plain script | blocker | script dispatch |
 | `run-posix-ism` | `FOO=val node` via cmd.exe | major | cmd.exe cannot inline-assign env; expected degradation |
-| `run-posix-shell` | `--posix-shell` with `sh.exe` | minor | Git-for-Windows sh.exe path |
+| `run-script-shell` | `--script-shell <sh>` with `sh.exe` | minor | Git-for-Windows sh.exe path (harness locates sh, passes it explicitly) |
 | `run-install-fixture` | `nub install` for subsequent checks | blocker | PM install on Windows |
 | `run-cmd-bin` | `.cmd` shim via `nub exec` | major | `cmd /C` dispatch for `.cmd`/`.bat` bins |
 | `nubx-cowsay` | DLX fetch-and-run | major | network + temp extraction on Windows |
@@ -95,7 +95,7 @@ The script prints a colour-coded console report and writes a `results.json` in t
 
 - **`.cmd`/`.bat` bin shims** — `launch_bin` in `cli.rs` dispatches via `cmd /C <path>` for `.cmd`/`.bat` extensions; any regression here silently breaks every npm bin on Windows (most bins land as `.cmd` shims). Check `run-cmd-bin`.
 - **`.ps1` bin shims** — dispatched via `powershell -NoProfile -ExecutionPolicy Bypass -File <path>`. Execution policy on the VM may block this even with `-Bypass`; if so that is a papercut worth reporting.
-- **`nub run` POSIX-ism scripts** — default shell on Windows is `cmd.exe`, which does not support `FOO=1 node …` inline env syntax. `--posix-shell` routes through `sh.exe` (Git-for-Windows / WSL path). Without Git for Windows the flag errors with a clear message (`--posix-shell: no POSIX sh found`); the degraded-but-not-crashed posture is what `run-posix-ism` checks.
+- **`nub run` POSIX-ism scripts** — default shell on Windows is `cmd.exe`, which does not support `FOO=1 node …` inline env syntax. Passing `--script-shell <path-to-sh>` routes the script body through that shell (e.g. a Git-for-Windows / WSL `sh.exe`); the `run-script-shell` check locates an `sh.exe` and hands it over explicitly. Under the default `cmd.exe` the POSIX-ism script fails — the degraded-but-not-crashed posture is what `run-posix-ism` checks.
 - **`nub upgrade` self-owned channel** — explicitly documented as unsupported on Windows (the `~/.nub` tarball self-replace cannot overwrite a running `.exe`). `upgrade --dry-run` notes this in its output; actual `upgrade` falls back to printing the `npm install -g` command. Not a blocker but worth confirming the message is clear.
 - **`nub upgrade` via npm** — `npm_upgrade_command_invocation` uses `cmd /C npm install -g …` on Windows (not `sh -c …`), because `npm.cmd` only resolves through `cmd.exe`. A regression here would surface as "program not found" on plain Windows boxes without Git-Bash.
 - **NTFS file watcher** — Node's `--watch` uses `ReadDirectoryChangesW`; on ARM64 VMs under Hyper-V this can be slow to coalesce events. `watch-restart` allows 4 seconds for the restart to appear; adjust `-Timeout` if the VM is slow.

@@ -343,7 +343,7 @@ Invoke-Check -id "run-greet" -label "nub run greet (plain node script)" -severit
 
 Invoke-Check -id "run-posix-ism" -label "nub run posix-ism (FOO=val node -e) via default cmd.exe" `
     -severity "major" `
-    -note "CMD.EXE cannot interpret 'FOO=val cmd' inline env assignment  -  expect fail without --posix-shell; pass is if nub degrades gracefully" -Body {
+    -note "CMD.EXE cannot interpret 'FOO=val cmd' inline env assignment  -  expect fail under the default cmd shell; pass is if nub degrades gracefully" -Body {
     $r = Invoke-Process $NubBin @("run", "posix-ism") -cwd $fixPkg
     # On Windows with cmd.exe, 'FOO=1 node …' is not valid CMD syntax.
     # PASS if nub either: (a) routes it through sh and it works, or
@@ -359,15 +359,29 @@ Invoke-Check -id "run-posix-ism" -label "nub run posix-ism (FOO=val node -e) via
     }
 }
 
-Invoke-Check -id "run-posix-shell" -label "nub run posix-ism --posix-shell (Git-for-Windows sh)" `
+Invoke-Check -id "run-script-shell" -label "nub run posix-ism --script-shell <sh> (POSIX sh via explicit shell)" `
     -severity "minor" `
-    -note "Only passes if Git for Windows is installed and sh.exe is on PATH; skip otherwise" -Body {
-    # Check if sh.exe is findable first
-    $sh = Get-Command "sh" -ErrorAction SilentlyContinue
-    if (-not $sh) {
-        return @{ pass=$true; detail="SKIP  -  sh.exe not on PATH (no Git for Windows)" }
+    -note "Only passes if a POSIX sh.exe is findable (Git for Windows / WSL); skip otherwise. --script-shell is the explicit escape hatch for running POSIX-ism script bodies on Windows." -Body {
+    # Locate a POSIX sh.exe to hand to --script-shell. The harness does the finding
+    # (PATH, then the standard Git-for-Windows install dirs) since --script-shell
+    # takes an explicit path rather than auto-detecting.
+    $sh = $null
+    $onPath = Get-Command "sh" -ErrorAction SilentlyContinue
+    if ($onPath) {
+        $sh = $onPath.Source
+    } else {
+        foreach ($p in @(
+            "C:\Program Files\Git\bin\sh.exe",
+            "C:\Program Files\Git\usr\bin\sh.exe",
+            "C:\Program Files (x86)\Git\bin\sh.exe"
+        )) {
+            if (Test-Path $p) { $sh = $p; break }
+        }
     }
-    $r = Invoke-Process $NubBin @("run", "--posix-shell", "posix-ism") -cwd $fixPkg
+    if (-not $sh) {
+        return @{ pass=$true; detail="SKIP  -  no sh.exe found (no Git for Windows / WSL)" }
+    }
+    $r = Invoke-Process $NubBin @("run", "--script-shell", $sh, "posix-ism") -cwd $fixPkg
     @{
         stdout    = $r.stdout
         stderr    = $r.stderr

@@ -3,8 +3,9 @@ name: ci-adhoc-test
 description: >-
   Run ad-hoc / exploratory tests on a real OS or platform via CI when the
   behavior CANNOT be reproduced on the local host or in Docker — macOS Seatbelt
-  / sandbox-exec / codesigning, Windows cmd.exe / the --posix-shell flag / .cmd
-  resolution / Authenticode, musl-vs-glibc, Linux-arm64, a specific Node floor.
+  / sandbox-exec / codesigning, Windows cmd.exe / --script-shell shell
+  selection / .cmd resolution / Authenticode, musl-vs-glibc, Linux-arm64, a
+  specific Node floor.
   Invoke (via the Skill tool) whenever the user asks to "test this on
   macOS/Windows CI", "probe this across operating systems / platforms", "run an
   ad-hoc cross-platform check", or any validation that needs a real macOS or
@@ -17,7 +18,7 @@ description: >-
 
 # Ad-hoc testing on a real OS/platform via CI
 
-Some behavior can only be observed on a real target platform: macOS Seatbelt / `sandbox-exec` / Gatekeeper / codesigning, Windows `cmd.exe` / the `--posix-shell` flag / `.cmd`/`.bat` resolution / Authenticode / SmartScreen, musl-vs-glibc detection, Linux-arm64, a pinned Node floor. Docker closes the **Linux** corners cheaply (see AGENTS.md's Docker section) but runs Linux containers only — it is **not** a substitute for macOS or Windows. CI runners (`macos-latest`, `windows-latest`) are the only way to exercise those, and this skill is how you do it as a throwaway probe.
+Some behavior can only be observed on a real target platform: macOS Seatbelt / `sandbox-exec` / Gatekeeper / codesigning, Windows `cmd.exe` / `--script-shell` shell selection / `.cmd`/`.bat` resolution / Authenticode / SmartScreen, musl-vs-glibc detection, Linux-arm64, a pinned Node floor. Docker closes the **Linux** corners cheaply (see AGENTS.md's Docker section) but runs Linux containers only — it is **not** a substitute for macOS or Windows. CI runners (`macos-latest`, `windows-latest`) are the only way to exercise those, and this skill is how you do it as a throwaway probe.
 
 ## The key fact: no PR is required
 

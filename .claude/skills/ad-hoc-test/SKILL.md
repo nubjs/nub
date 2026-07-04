@@ -107,7 +107,7 @@ Ad-hoc verification proves *this* change; a committed test prevents the *next* r
 
 This is the final step of the [pre-push local verification loop in AGENTS.md](../../../AGENTS.md) — incorporate the verification into the suite where reasonable, so the reviewer's pass is cheap and the CI run is a formality.
 
-**Local host won't show the behavior?** If the thing you need to probe is OS/platform-gated — macOS Seatbelt / `sandbox-exec` / codesigning, Windows cmd.exe / the `--posix-shell` flag / Authenticode, musl/glibc, a Node floor — this local loop can't reach it. Linux corners go to Docker (AGENTS.md's Docker section); a real **macOS or Windows** behavior goes to the **`ci-adhoc-test` skill** — a self-contained probe under `tests/<probe>/` run by a branch-scoped workflow with **no PR required**.
+**Local host won't show the behavior?** If the thing you need to probe is OS/platform-gated — macOS Seatbelt / `sandbox-exec` / codesigning, Windows cmd.exe / `--script-shell` shell selection / `.cmd` resolution / Authenticode, musl/glibc, a Node floor — this local loop can't reach it. Linux corners go to Docker (AGENTS.md's Docker section); a real **macOS or Windows** behavior goes to the **`ci-adhoc-test` skill** — a self-contained probe under `tests/<probe>/` run by a branch-scoped workflow with **no PR required**.
 
 ---
 
