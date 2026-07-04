@@ -99,6 +99,20 @@ pub struct WorkspaceConfig {
     #[serde(default)]
     pub disable_global_virtual_store_for_packages: Option<Vec<String>>,
 
+    /// Package names force-materialized project-local even under the
+    /// global virtual store. Unlike
+    /// `disable_global_virtual_store_for_packages` (which disables the
+    /// GVS for the whole install), this materializes only the named
+    /// package's own `node_modules/.aube/<pkg>` entry — for a subpath
+    /// adapter that statically imports a specifier it doesn't declare
+    /// (e.g. `@hookform/resolvers/zod` importing the consumer's
+    /// installed `zod`) and so can't resolve across the store's
+    /// symlink boundary. Defaults to `[]`. Declared here so
+    /// `settings.toml`'s workspaceYaml source stays in sync with the
+    /// actual deserialize surface.
+    #[serde(default)]
+    pub force_materialize_packages: Option<Vec<String>>,
+
     /// Package import method: "auto", "hardlink", "copy", "clone", "clone-or-copy".
     #[serde(default)]
     pub package_import_method: Option<String>,
