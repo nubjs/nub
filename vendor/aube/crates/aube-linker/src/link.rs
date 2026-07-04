@@ -306,20 +306,37 @@ impl Linker {
                             // class). Materializes exactly as the per-project
                             // (GVS-off) branch does — the local `.aube/<entry>`
                             // name is dep_path-keyed regardless of GVS, so the
-                            // top-level and sibling symlinks resolve unchanged. A
+                            // top-level and sibling symlinks resolve unchanged.
+                            // Only registry packages reach here — source deps
+                            // (git/tarball/file/link) were filtered from
+                            // `step1_prep` above and keep the shared-store path;
+                            // the curated force-materialize list is registry-only,
+                            // so that gap is unreachable in practice. A
                             // prior GVS install or the fetch prewarm may have left
                             // a symlink here; replace it. An existing real
-                            // directory is reused as cached.
+                            // directory is reused as cached. Classification uses
+                            // `read_link`, not `file_type().is_symlink()`: on
+                            // Windows the GVS entry is an NTFS junction (created by
+                            // `sys::create_dir_link`) whose `is_symlink()` is false
+                            // and `is_dir()` is true, so the file-type bit would
+                            // misread a stale junction as a real dir and skip the
+                            // conversion. `read_link` succeeds on both Unix symlinks
+                            // and junction reparse points and returns `InvalidInput`
+                            // on a real directory — the same signal `classify_entry_state`
+                            // and `detect_aube_dir_gvs_mode` rely on.
                             if self.force_materialize_matches(&pkg.name) {
-                                match std::fs::symlink_metadata(&local_aube_entry) {
-                                    Ok(meta) if meta.file_type().is_symlink() => {
+                                match std::fs::read_link(&local_aube_entry) {
+                                    Ok(_) => {
+                                        // Stale shared-store symlink / junction — drop it.
                                         let _ = std::fs::remove_dir(&local_aube_entry)
                                             .or_else(|_| std::fs::remove_file(&local_aube_entry));
                                     }
-                                    Ok(_) => {
+                                    Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                                        // Already a real project-local directory.
                                         local_stats.packages_cached += 1;
                                         return Ok(local_stats);
                                     }
+                                    // Missing (`NotFound`) or any other error → materialize below.
                                     Err(_) => {}
                                 }
                                 let owned_index;
