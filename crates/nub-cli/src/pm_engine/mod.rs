@@ -1377,6 +1377,19 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
         return;
     };
     let (env_overlay, path_prepends) = augmentation_to_lifecycle_overlay(&aug, node.path.as_str());
+    // The shim dir + provisioned node for the engine's runtime spawn helpers —
+    // the boundary the transient bin-exec paths (dlx / create / `nubx <tool>`)
+    // read but the lifecycle overlay above never reaches. `runtime_switching`
+    // is off (nub owns provisioning), so aube's resolver stays inert and
+    // `runtime::path_entries()` / `apply_child_env` would otherwise surface no
+    // node — a fetched bin's `exec node` shebang then dies with `node: not
+    // found` on a machine with no system node (#303). Supplying the shim dir
+    // fronts PATH so `exec node` re-enters nub-as-node; pinning the real
+    // provisioned node keeps NODE / npm_node_execpath valid for node-gyp-style
+    // re-spawners. Both default to None for standalone aube, so its bin-exec
+    // paths are byte-identical.
+    let runtime_node_dir = aug.shim_dir.as_deref().map(PathBuf::from);
+    let runtime_node_bin = Some(PathBuf::from(node.path.as_str()));
     // Hand the overlay to the engine via the runtime context. aube copies
     // `env_overlay` / `path_prepends` from `engine_context()` into its
     // `ScriptSettings` at settings-resolution time (the spawn path composes them
@@ -1386,6 +1399,8 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
     aube_util::update_engine_context(|c| {
         c.env_overlay = env_overlay;
         c.path_prepends = path_prepends;
+        c.runtime_node_dir = runtime_node_dir;
+        c.runtime_node_bin = runtime_node_bin;
     });
 }
 

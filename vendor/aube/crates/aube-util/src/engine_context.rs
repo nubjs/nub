@@ -240,6 +240,27 @@ pub struct EngineContext {
     /// empty = behavior-preserving.
     pub env_overlay: Vec<(OsString, OsString)>,
 
+    /// A directory holding a resolvable `node`, supplied by an embedder that
+    /// owns Node provisioning itself (`Embedder::runtime_switching = false`) and
+    /// therefore leaves aube's runtime resolver inert. When the resolver
+    /// produced no switch, [`crate::runtime`]'s spawn helpers fall back to this
+    /// so a fetched-bin `exec node` shebang, a dlx/create child, and node-program
+    /// spawns still resolve `node` on a machine with no system `node` on PATH.
+    ///
+    /// Distinct from [`path_prepends`](Self::path_prepends): that reaches only
+    /// the LIFECYCLE-script overlay, which the transient bin-exec paths (dlx /
+    /// create / `nubx <tool>`) never touch. This reaches those paths through the
+    /// runtime helpers instead. `None` (default) = upstream behavior — the
+    /// resolver owns node discovery — byte-identical for standalone aube.
+    pub runtime_node_dir: Option<PathBuf>,
+
+    /// The node executable the embedder provisioned. Pins `NODE` /
+    /// `npm_node_execpath` on runtime-spawned children when the resolver didn't
+    /// switch, so those stay the embedder's provisioned node instead of falling
+    /// back to an ambient PATH `node` (absent on a node-less machine). `None`
+    /// (default) keeps the ambient-`node` fallback — upstream behavior.
+    pub runtime_node_bin: Option<PathBuf>,
+
     /// Replacement lifecycle `npm_config_user_agent` product token. `None`
     /// (default) falls back to the compile-time [`Embedder::user_agent`] —
     /// standalone aube reports `aube/<version>`. An embedder sets `Some` when
@@ -294,6 +315,8 @@ impl Default for EngineContext {
             synthetic_project_npmrc_entries: Vec::new(),
             path_prepends: Vec::new(),
             env_overlay: Vec::new(),
+            runtime_node_dir: None,
+            runtime_node_bin: None,
             lifecycle_user_agent_product: None,
             npm_save_prefix_on_bare_exact: false,
         }
@@ -359,6 +382,8 @@ mod tests {
         assert!(ctx.synthetic_project_npmrc_entries.is_empty());
         assert!(ctx.path_prepends.is_empty());
         assert!(ctx.env_overlay.is_empty());
+        assert_eq!(ctx.runtime_node_dir, None);
+        assert_eq!(ctx.runtime_node_bin, None);
         assert_eq!(ctx.lifecycle_user_agent_product, None);
         assert!(!ctx.npm_save_prefix_on_bare_exact);
     }

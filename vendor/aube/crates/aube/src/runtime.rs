@@ -97,39 +97,79 @@ pub fn current() -> Option<&'static RuntimeContext> {
 }
 
 /// The node executable spawn sites should use: the switched runtime's
-/// binary when one resolved, otherwise bare `"node"` (PATH lookup at
-/// spawn time, today's behavior).
+/// binary when one resolved, otherwise the embedder-provisioned node
+/// ([`EngineContext::runtime_node_bin`]) when an embedder owns provisioning,
+/// otherwise bare `"node"` (PATH lookup at spawn time, today's behavior).
+///
+/// [`EngineContext::runtime_node_bin`]: aube_util::EngineContext::runtime_node_bin
 pub fn node_program() -> PathBuf {
-    current()
-        .and_then(|c| c.node_bin.clone())
-        .unwrap_or_else(|| PathBuf::from("node"))
+    resolve_node_bin(
+        current().and_then(|c| c.node_bin.clone()),
+        aube_util::engine_context().runtime_node_bin,
+        None,
+    )
+    .unwrap_or_else(|| PathBuf::from("node"))
 }
 
 /// PATH entries to prepend (after `node_modules/.bin`) when spawning
-/// scripts/binaries. Empty when no switching is active.
+/// scripts/binaries. The switched runtime's bin dir when one resolved;
+/// otherwise the embedder-provisioned node dir
+/// ([`EngineContext::runtime_node_dir`]) when an embedder owns provisioning
+/// (`runtime_switching = false`) — the boundary that lets a fetched-bin
+/// `exec node` shebang resolve on a machine with no system `node`. Empty when
+/// neither applies (standalone aube with no active switch — unchanged).
+///
+/// [`EngineContext::runtime_node_dir`]: aube_util::EngineContext::runtime_node_dir
 pub fn path_entries() -> Vec<PathBuf> {
-    current()
-        .and_then(|c| c.bin_dir.clone())
-        .into_iter()
-        .collect()
+    resolve_path_entry(
+        current().and_then(|c| c.bin_dir.clone()),
+        aube_util::engine_context().runtime_node_dir,
+    )
+    .into_iter()
+    .collect()
 }
 
 /// Set the npm-compat env vars naming the node binary on a child
 /// command (`npm_node_execpath`, and `NODE` which npm also exports).
 ///
-/// Prefers the switched runtime's node; when no switch is active,
-/// falls back to the ambient `node` resolved on `PATH` so these vars
-/// are populated on every spawn — pnpm/npm always set them, and tools
-/// (`node-gyp`, `node-pre-gyp`, re-spawners) read `npm_node_execpath`
-/// to locate the exact node that drove the package manager.
+/// Prefers the switched runtime's node; then the embedder-provisioned node
+/// ([`EngineContext::runtime_node_bin`]) when an embedder owns provisioning —
+/// so on a node-less machine these stay the provisioned node instead of
+/// resolving to nothing; then the ambient `node` on `PATH`. pnpm/npm always
+/// set them, and tools (`node-gyp`, `node-pre-gyp`, re-spawners) read
+/// `npm_node_execpath` to locate the exact node that drove the package manager.
+///
+/// [`EngineContext::runtime_node_bin`]: aube_util::EngineContext::runtime_node_bin
 pub fn apply_child_env(cmd: &mut tokio::process::Command) {
-    let node_bin = current()
-        .and_then(|ctx| ctx.node_bin.clone())
-        .or_else(aube_runtime::node_on_path);
+    let node_bin = resolve_node_bin(
+        current().and_then(|ctx| ctx.node_bin.clone()),
+        aube_util::engine_context().runtime_node_bin,
+        aube_runtime::node_on_path(),
+    );
     if let Some(node_bin) = node_bin {
         cmd.env("npm_node_execpath", &node_bin);
         cmd.env("NODE", &node_bin);
     }
+}
+
+/// The node-binary fallback ladder shared by [`node_program`] and
+/// [`apply_child_env`]: the switched runtime's node wins; then the
+/// embedder-provisioned node (set when an embedder owns provisioning and the
+/// resolver stayed inert); then the ambient fallback the caller supplies (the
+/// PATH `node` for env vars, `None` for `node_program`'s bare-`"node"` case).
+/// Pure so the precedence is unit-tested without touching the process globals.
+fn resolve_node_bin(
+    switched: Option<PathBuf>,
+    embedder: Option<PathBuf>,
+    ambient: Option<PathBuf>,
+) -> Option<PathBuf> {
+    switched.or(embedder).or(ambient)
+}
+
+/// The PATH-entry fallback for [`path_entries`]: the switched runtime's bin dir
+/// wins; else the embedder-provisioned node dir. Pure for the same reason.
+fn resolve_path_entry(switched: Option<PathBuf>, embedder: Option<PathBuf>) -> Option<PathBuf> {
+    switched.or(embedder)
 }
 
 /// The runtime-relevant settings, extracted from a `ResolveCtx` so
@@ -692,6 +732,43 @@ impl aube_runtime::DownloadProgress for CliProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_bin_prefers_switched_then_embedder_then_ambient() {
+        let sw = PathBuf::from("/switched/node");
+        let emb = PathBuf::from("/embedder/node");
+        let amb = PathBuf::from("/usr/bin/node");
+        // Switched runtime wins over everything.
+        assert_eq!(
+            resolve_node_bin(Some(sw.clone()), Some(emb.clone()), Some(amb.clone())),
+            Some(sw)
+        );
+        // No switch (embedder owns provisioning) → the embedder's node, NOT the
+        // ambient PATH node. This is the #303 fix: on a node-less machine the
+        // embedder-provisioned node pins NODE/npm_node_execpath.
+        assert_eq!(
+            resolve_node_bin(None, Some(emb.clone()), Some(amb.clone())),
+            Some(emb)
+        );
+        // Standalone aube (no embedder node) → ambient fallback, unchanged.
+        assert_eq!(resolve_node_bin(None, None, Some(amb.clone())), Some(amb));
+        // Nothing anywhere → None (node_program's bare-"node" case).
+        assert_eq!(resolve_node_bin(None, None, None), None);
+    }
+
+    #[test]
+    fn path_entry_switch_wins_else_embedder_dir() {
+        let sw = PathBuf::from("/switched/bin");
+        let emb = PathBuf::from("/embedder/shim");
+        assert_eq!(
+            resolve_path_entry(Some(sw.clone()), Some(emb.clone())),
+            Some(sw)
+        );
+        // No switch → the embedder shim dir, so a fetched-bin `exec node`
+        // resolves on a node-less machine (#303). Empty for standalone aube.
+        assert_eq!(resolve_path_entry(None, Some(emb.clone())), Some(emb));
+        assert_eq!(resolve_path_entry(None, None), None);
+    }
 
     #[test]
     fn lockfile_pin_round_trip_shapes() {
