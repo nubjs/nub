@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "nub-native"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "blake3",
  "json5",
