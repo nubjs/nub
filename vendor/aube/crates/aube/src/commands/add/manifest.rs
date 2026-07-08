@@ -566,19 +566,33 @@ pub(super) async fn update_manifest_for_add(
     }
 
     // Apply queued `--save-catalog` upserts. Lands once at the end of
-    // the per-package loop so the workspace yaml is rewritten at most
-    // once per command — `edit_workspace_yaml` no-ops when nothing
-    // structural changes (preserving comments under filtered/recursive
-    // re-runs that all target the same catalog).
+    // the per-package loop so the catalog config is rewritten at most
+    // once per command. A manifest-root embedder under its own identity
+    // writes the neutral `workspaces.catalog(s)` surface it reads; other
+    // surfaces keep the workspace-yaml path for pnpm/aube compatibility.
     if !catalog_upserts.is_empty() {
-        let yaml_root = crate::dirs::find_workspace_yaml_root(cwd)
+        let workspace_root = crate::dirs::find_workspace_yaml_root(cwd)
             .or_else(|| crate::dirs::find_workspace_root(cwd))
             .unwrap_or_else(|| cwd.to_path_buf());
-        let yaml_path = aube_manifest::workspace::workspace_yaml_target(&yaml_root);
-        crate::commands::catalogs::upsert_catalog_entries(&yaml_path, &catalog_upserts)?;
+        if write_catalogs_to_manifest_root() {
+            crate::commands::catalogs::upsert_catalog_entries_in_manifest(
+                &workspace_root,
+                &catalog_upserts,
+            )?;
+        } else {
+            let yaml_path = aube_manifest::workspace::workspace_yaml_target(&workspace_root);
+            crate::commands::catalogs::upsert_catalog_entries(&yaml_path, &catalog_upserts)?;
+        }
     }
 
     Ok(())
+}
+
+fn write_catalogs_to_manifest_root() -> bool {
+    let ctx = aube_util::engine_context();
+    aube_util::embedder().manifest_namespace.is_empty()
+        && ctx.read_manifest_root_config
+        && !ctx.read_branded_pnpm_config
 }
 
 /// Resolve a `pkg@workspace:<range>` spec against the local workspace

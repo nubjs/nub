@@ -275,6 +275,91 @@ pub(crate) fn upsert_catalog_entries(
     Ok(())
 }
 
+/// Upsert a batch of catalog entries into `package.json#workspaces.catalog(s)`.
+///
+/// This is the manifest-root companion to [`upsert_catalog_entries`]. It is
+/// used when the active embedder reads neutral root manifest config (Nub
+/// identity) and does not read pnpm-named workspace YAML. Existing entries are
+/// never overwritten, matching pnpm's `--save-catalog` behavior.
+pub(crate) fn upsert_catalog_entries_in_manifest(
+    workspace_root: &Path,
+    entries: &[CatalogUpsert],
+) -> miette::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let path = workspace_root.join("package.json");
+    crate::commands::update_manifest_json_object(&path, |root| {
+        let workspaces = normalize_workspaces_object(root)?;
+        for entry in entries {
+            let CatalogUpsert {
+                catalog,
+                package,
+                range,
+            } = entry;
+            let map = if catalog == "default" {
+                json_submap(workspaces, "catalog")?
+            } else {
+                let catalogs = json_submap(workspaces, "catalogs")?;
+                json_submap(catalogs, catalog)?
+            };
+            map.entry(package.clone())
+                .or_insert_with(|| serde_json::Value::String(range.clone()));
+        }
+        Ok(())
+    })
+    .wrap_err_with(|| {
+        format!(
+            "failed to write {} after --save-catalog",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn normalize_workspaces_object<'a>(
+    root: &'a mut serde_json::Map<String, serde_json::Value>,
+) -> miette::Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+    let current = root.remove("workspaces");
+    let workspaces = match current {
+        Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
+        Some(serde_json::Value::Array(packages)) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("packages".to_string(), serde_json::Value::Array(packages));
+            serde_json::Value::Object(obj)
+        }
+        Some(serde_json::Value::String(package)) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "packages".to_string(),
+                serde_json::Value::Array(vec![serde_json::Value::String(package)]),
+            );
+            serde_json::Value::Object(obj)
+        }
+        Some(other) => {
+            root.insert("workspaces".to_string(), other);
+            return Err(miette::miette!(
+                "package.json `workspaces` must be an object, array, or string to update catalogs"
+            ));
+        }
+        None => serde_json::Value::Object(serde_json::Map::new()),
+    };
+    root.insert("workspaces".to_string(), workspaces);
+    root.get_mut("workspaces")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| miette::miette!("package.json `workspaces` must be an object"))
+}
+
+fn json_submap<'a>(
+    map: &'a mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> miette::Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+    map.entry(key.to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| miette::miette!("package.json `workspaces.{key}` must be an object"))
+}
+
 /// Inner-mapping accessor mirroring `aube-manifest::workspace::workspace_yaml_submap`,
 /// duplicated here so this crate doesn't have to re-export the private helper.
 /// Errors when the key exists but isn't a mapping.
@@ -330,6 +415,97 @@ mod tests {
             false,
         );
         assert!(matches!(r, CatalogRewrite::UseDefaultCatalog));
+    }
+
+    #[test]
+    fn manifest_catalog_upsert_writes_default_and_named_without_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"root","workspaces":{"packages":["packages/*"]}}"#,
+        )
+        .unwrap();
+
+        upsert_catalog_entries_in_manifest(
+            dir.path(),
+            &[
+                CatalogUpsert {
+                    catalog: "default".into(),
+                    package: "react".into(),
+                    range: "^19.0.0".into(),
+                },
+                CatalogUpsert {
+                    catalog: "server".into(),
+                    package: "@types/node".into(),
+                    range: "^26.1.0".into(),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(
+            !dir.path().join("pnpm-workspace.yaml").exists(),
+            "manifest catalog writes must not create a workspace yaml"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(json["workspaces"]["catalog"]["react"], "^19.0.0");
+        assert_eq!(
+            json["workspaces"]["catalogs"]["server"]["@types/node"],
+            "^26.1.0"
+        );
+    }
+
+    #[test]
+    fn manifest_catalog_upsert_preserves_existing_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"workspaces":{"packages":["apps/*"],"catalog":{"react":"^18.0.0"}}}"#,
+        )
+        .unwrap();
+
+        upsert_catalog_entries_in_manifest(
+            dir.path(),
+            &[CatalogUpsert {
+                catalog: "default".into(),
+                package: "react".into(),
+                range: "^19.0.0".into(),
+            }],
+        )
+        .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(json["workspaces"]["catalog"]["react"], "^18.0.0");
+    }
+
+    #[test]
+    fn manifest_catalog_upsert_converts_workspace_array() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+
+        upsert_catalog_entries_in_manifest(
+            dir.path(),
+            &[CatalogUpsert {
+                catalog: "default".into(),
+                package: "react".into(),
+                range: "^19.0.0".into(),
+            }],
+        )
+        .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(json["workspaces"]["packages"][0], "packages/*");
+        assert_eq!(json["workspaces"]["catalog"]["react"], "^19.0.0");
     }
 
     #[test]

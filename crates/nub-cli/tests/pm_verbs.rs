@@ -88,6 +88,27 @@ fn run_nub(dir: &Path, args: &[&str]) -> Output {
     run_nub_with(dir, args, &pm_tmpdir("xdg-data"), &pm_tmpdir("xdg-cache"))
 }
 
+fn run_nub_no_self_shim_with(
+    dir: &Path,
+    args: &[&str],
+    xdg_data: &Path,
+    xdg_cache: &Path,
+) -> Output {
+    let out = Command::new(nub_binary())
+        .args(args)
+        .current_dir(dir)
+        .env("NUB_SELF_SHIM", "0")
+        .env("XDG_DATA_HOME", xdg_data)
+        .env("XDG_CACHE_HOME", xdg_cache)
+        .output()
+        .expect("failed to spawn nub");
+    Output {
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        code: out.status.code().unwrap_or(-1),
+    }
+}
+
 /// Offline guard for the `#[ignore]` network tests: true when the registry
 /// answers a TCP connect within 3s.
 fn registry_reachable() -> bool {
@@ -173,6 +194,74 @@ fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
     assert!(
         !manifest.contains("is-positive"),
         "remove must strip the dependency: {manifest}"
+    );
+}
+
+/// Regression for #369: under nub identity the `--save-catalog` writer must
+/// seed the root manifest's neutral `workspaces.catalog` field, not emit an
+/// unread `pnpm-workspace.yaml` and leave the member manifest pointing at an
+/// undefined `catalog:`.
+#[test]
+#[ignore = "network: resolves + fetches @types/node from the npm registry"]
+fn add_save_catalog_under_nub_identity_writes_workspaces_catalog() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("save-catalog-nub");
+    let server = dir.join("apps/server");
+    std::fs::create_dir_all(&server).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{
+  "name": "root",
+  "workspaces": { "packages": ["apps/*"] },
+  "devEngines": {
+    "packageManager": { "name": "nub", "version": "^0.0.0", "onFail": "warn" }
+  }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        server.join("package.json"),
+        r#"{"name":"server","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let (data, cache) = (
+        pm_tmpdir("save-catalog-nub-data"),
+        pm_tmpdir("save-catalog-nub-cache"),
+    );
+
+    let add = run_nub_no_self_shim_with(
+        &server,
+        &["add", "--save-catalog", "@types/node@26.1.0", "-D"],
+        &data,
+        &cache,
+    );
+    assert_eq!(
+        add.code, 0,
+        "stdout: {}\nstderr: {}",
+        add.stdout, add.stderr
+    );
+    add.assert_brand_clean();
+
+    let root_manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(
+        root_manifest["workspaces"]["catalog"]["@types/node"],
+        "26.1.0"
+    );
+    let member_manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(server.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        member_manifest["devDependencies"]["@types/node"],
+        "catalog:"
+    );
+    assert!(
+        !dir.join("pnpm-workspace.yaml").exists(),
+        "nub identity must not write an unread pnpm-workspace.yaml"
     );
 }
 
