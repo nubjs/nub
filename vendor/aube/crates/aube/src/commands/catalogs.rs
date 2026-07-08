@@ -327,30 +327,36 @@ fn normalize_workspaces_object<'a>(
             .ok_or_else(|| miette::miette!("package.json `workspaces` must be an object"));
     }
 
-    let current = root.remove("workspaces");
-    let workspaces = match current {
-        Some(serde_json::Value::Array(packages)) => {
-            let mut obj = serde_json::Map::new();
-            obj.insert("packages".to_string(), serde_json::Value::Array(packages));
-            serde_json::Value::Object(obj)
-        }
-        Some(serde_json::Value::String(package)) => {
-            let mut obj = serde_json::Map::new();
-            obj.insert(
-                "packages".to_string(),
-                serde_json::Value::Array(vec![serde_json::Value::String(package)]),
-            );
-            serde_json::Value::Object(obj)
-        }
-        Some(other) => {
-            root.insert("workspaces".to_string(), other);
-            return Err(miette::miette!(
-                "package.json `workspaces` must be an object, array, or string to update catalogs"
-            ));
-        }
-        None => serde_json::Value::Object(serde_json::Map::new()),
-    };
-    root.insert("workspaces".to_string(), workspaces);
+    if let Some(current) = root.get_mut("workspaces") {
+        let workspaces = match std::mem::take(current) {
+            serde_json::Value::Array(packages) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("packages".to_string(), serde_json::Value::Array(packages));
+                serde_json::Value::Object(obj)
+            }
+            serde_json::Value::String(package) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert(
+                    "packages".to_string(),
+                    serde_json::Value::Array(vec![serde_json::Value::String(package)]),
+                );
+                serde_json::Value::Object(obj)
+            }
+            other => {
+                *current = other;
+                return Err(miette::miette!(
+                    "package.json `workspaces` must be an object, array, or string to update catalogs"
+                ));
+            }
+        };
+        *current = workspaces;
+    } else {
+        root.insert(
+            "workspaces".to_string(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+    }
+
     root.get_mut("workspaces")
         .and_then(serde_json::Value::as_object_mut)
         .ok_or_else(|| miette::miette!("package.json `workspaces` must be an object"))
@@ -539,6 +545,44 @@ mod tests {
                 .unwrap();
         assert_eq!(json["workspaces"]["packages"][0], "packages/*");
         assert_eq!(json["workspaces"]["catalog"]["react"], "^19.0.0");
+    }
+
+    #[test]
+    fn manifest_catalog_upsert_preserves_key_order_when_converting_workspace_array() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"archie","private":true,"workspaces":["apps/*","packages/*"],"scripts":{"lint":"lint"},"devEngines":{"packageManager":{"name":"nub"}},"engines":{"node":">=24"}}"#,
+        )
+        .unwrap();
+
+        upsert_catalog_entries_in_manifest(
+            dir.path(),
+            &[CatalogUpsert {
+                catalog: "default".into(),
+                package: "@types/node".into(),
+                range: "^26.1.1".into(),
+            }],
+        )
+        .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("package.json")).unwrap())
+                .unwrap();
+        let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "name",
+                "private",
+                "workspaces",
+                "scripts",
+                "devEngines",
+                "engines"
+            ]
+        );
+        assert_eq!(json["workspaces"]["packages"][0], "apps/*");
+        assert_eq!(json["workspaces"]["catalog"]["@types/node"], "^26.1.1");
     }
 
     #[test]
