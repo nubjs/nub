@@ -320,9 +320,15 @@ pub(crate) fn upsert_catalog_entries_in_manifest(
 fn normalize_workspaces_object<'a>(
     root: &'a mut serde_json::Map<String, serde_json::Value>,
 ) -> miette::Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+    if matches!(root.get("workspaces"), Some(serde_json::Value::Object(_))) {
+        return root
+            .get_mut("workspaces")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| miette::miette!("package.json `workspaces` must be an object"));
+    }
+
     let current = root.remove("workspaces");
     let workspaces = match current {
-        Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
         Some(serde_json::Value::Array(packages)) => {
             let mut obj = serde_json::Map::new();
             obj.insert("packages".to_string(), serde_json::Value::Array(packages));
@@ -480,6 +486,33 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.path().join("package.json")).unwrap())
                 .unwrap();
         assert_eq!(json["workspaces"]["catalog"]["react"], "^18.0.0");
+    }
+
+    #[test]
+    fn manifest_catalog_upsert_preserves_existing_workspaces_key_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"workspaces":{"packages":["apps/*"]},"devEngines":{"packageManager":{"name":"nub"}},"engines":{"node":">=24"}}"#,
+        )
+        .unwrap();
+
+        upsert_catalog_entries_in_manifest(
+            dir.path(),
+            &[CatalogUpsert {
+                catalog: "default".into(),
+                package: "react".into(),
+                range: "^19.0.0".into(),
+            }],
+        )
+        .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("package.json")).unwrap())
+                .unwrap();
+        let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["workspaces", "devEngines", "engines"]);
+        assert_eq!(json["workspaces"]["catalog"]["react"], "^19.0.0");
     }
 
     #[test]
