@@ -72,13 +72,16 @@ fi
 
 # --- Install ---
 
-install_dir="$HOME/.nub"
-bin_dir="$install_dir/bin"
-exe="$bin_dir/nub"
+default_install_dir=$(cd "$HOME" && pwd)/.nub
+install_dir=${NUB_INSTALL_DIR:-$default_install_dir}
+mkdir -p "$install_dir" || error "Failed to create install directory: $install_dir"
+install_dir=$(cd "$install_dir" && pwd) || error "Invalid NUB_INSTALL_DIR: $install_dir"
+install_bin_dir="$install_dir/bin"
+install_exe="$install_bin_dir/nub"
 
 info "Installing nub v${version} for ${target}..."
 
-mkdir -p "$bin_dir" || error "Failed to create install directory: $bin_dir"
+mkdir -p "$install_bin_dir" || error "Failed to create install directory: $install_bin_dir"
 
 # Download the per-platform archive and extract it into the install dir. nub is a
 # single self-contained binary that embeds its runtime (preload + vendored
@@ -97,98 +100,160 @@ curl --fail --location --progress-bar --output "$tmp_archive" "$url" ||
 # Replace any prior bin/ for a clean upgrade (other files under $install_dir,
 # e.g. caches, are preserved). A stale runtime/ from a pre-single-binary install
 # is also removed so it can't shadow the embedded runtime. Then extract bin/.
-rm -rf "${install_dir:?}/bin" "${install_dir:?}/runtime"
+if test "$install_dir" = "$default_install_dir"; then
+    rm -rf "$install_dir/bin" "$install_dir/runtime"
+else
+    rm -f "$install_dir/bin/nub" "$install_dir/bin/nubx"
+fi
 tar -xzf "$tmp_archive" -C "$install_dir" ||
     error "Failed to extract nub archive from: $url"
 
-[[ -f "$exe" ]] || error "Archive did not contain bin/nub"
-chmod +x "$exe" || error "Failed to set permissions on $exe"
+[[ -f "$install_exe" ]] || error "Archive did not contain bin/nub"
+chmod +x "$install_exe" || error "Failed to set permissions on $install_exe"
 
 # `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
 # args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
 # bin/nub, so create the nubx alias as a relative symlink alongside it. `-f`
 # makes this idempotent across reinstall/upgrade and harmless if a future
 # archive ever ships its own nubx. Relative target keeps it valid if ~/.nub moves.
-ln -sf nub "$bin_dir/nubx" || error "Failed to create nubx symlink in $bin_dir"
+ln -sf nub "$install_bin_dir/nubx" || error "Failed to create nubx symlink in $install_bin_dir"
 
-success "Installed nub v${version} (with nubx) to $exe"
+success "Installed nub v${version} (with nubx) to $install_exe"
 
 # --- PATH setup ---
 
-tildify() {
-    if [[ $1 == "$HOME"/* ]]; then
-        echo "~${1#$HOME}"
-    else
-        echo "$1"
+configure_shell_path() {
+    local bin_dir=$1
+
+    local shell_name=$(basename "${SHELL:-bash}")
+
+    case "$shell_name" in
+        bash) configure_shell_path__posix "$bin_dir" "$HOME/.bashrc" "$HOME/.bash_profile";;
+        zsh) configure_shell_path__posix "$bin_dir" "$HOME/.zshrc" "$HOME/.zshenv";;
+        fish) configure_shell_path__fish "$bin_dir";;
+        *) configure_shell_path__unknown "$bin_dir";;
+    esac
+}
+configure_shell_path__posix() {
+    local bin_dir=$1
+    shift
+
+    local shell_file="$1"
+
+    for file in "$@"; do
+        if test -w "$file"; then
+            shell_file=$file
+            break
+        fi
+    done
+
+    if test -f "$shell_file" && test ! -w "$shell_file"; then
+        return
     fi
+
+    sed "s/^$(printf '%8s')//" <<END >> "$shell_file"
+
+        # nub
+        $(print_extend_path__posix "$bin_dir")
+END
+
+    RefreshCommand=". $(replace_home_path_with_var "$shell_file")"
+
+    local tilde_bin_dir=$(replace_home_path_with_tilde "$bin_dir")
+    local tilde_shell_file=$(replace_home_path_with_tilde "$shell_file")
+
+    info "Added $tilde_bin_dir to \$PATH in $tilde_shell_file"
+}
+configure_shell_path__fish() {
+    local bin_dir=$1
+
+    local shell_file=${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish
+
+    for file in "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"; do
+        if test -w "$file"; then
+            shell_file=$file
+            break
+        fi
+    done
+
+    if test -f "$shell_file" && test ! -w "$shell_file"; then
+       return
+    fi
+
+    mkdir -p "$(dirname "$shell_file")"
+
+    local bin_dir_portable=$(replace_home_path_with_var "$bin_dir")
+
+    sed "s/^$(printf '%8s')//" <<END >> "$shell_file"
+
+        # nub
+        set --global --export PATH "$bin_dir_portable" \$PATH
+END
+
+    RefreshCommand="source $(replace_home_path_with_var "$shell_file")"
+
+    local tilde_bin_dir=$(replace_home_path_with_tilde "$bin_dir")
+    local tilde_shell_file=$(replace_home_path_with_tilde "$shell_file")
+
+    info "Added $tilde_bin_dir to \$PATH in $tilde_shell_file"
+}
+configure_shell_path__unknown() {
+    local bin_dir=$1
+
+    echo 'Please add the nub bin path to your shell configuration:'
+    echo -e "  ${Bold}$(print_extend_path__posix "$bin_dir")${Color_Off}"
 }
 
-tilde_bin_dir=$(tildify "$bin_dir")
+print_extend_path__posix() {
+    local dir=$1
 
-# PATH export lines reference $HOME so they stay portable across machines.
-posix_path_line='export PATH="$HOME/.nub/bin:$PATH"'
-fish_path_line='set -gx PATH $HOME/.nub/bin $PATH'
+    local dir_portable=$(replace_home_path_with_var "$dir")
 
-# Check if already in PATH
-if echo "$PATH" | tr ':' '\n' | grep -qx "$bin_dir"; then
-    success "Already in PATH. Run: nub --version"
-    exit 0
-fi
+    printf 'export PATH="%s:$PATH"' "$dir_portable"
+}
 
-refresh_command=""
+replace_home_path_with_var() {
+    # We replace home path with $HOME variable reference, so path stays portable across machines.
+    local path=$1
 
-case $(basename "${SHELL:-bash}") in
-zsh)
-    config="$HOME/.zshrc"
-    if [[ -w "$config" ]] || [[ ! -f "$config" ]]; then
-        {
-            echo ''
-            echo '# nub'
-            echo "$posix_path_line"
-        } >> "$config"
-        info "Added ${tilde_bin_dir} to \$PATH in ~/.zshrc"
-        refresh_command="exec \$SHELL"
-    fi
-    ;;
-bash)
-    config=""
-    for f in "$HOME/.bashrc" "$HOME/.bash_profile"; do
-        if [[ -w "$f" ]]; then config="$f"; break; fi
-    done
-    if [[ -n "$config" ]]; then
-        {
-            echo ''
-            echo '# nub'
-            echo "$posix_path_line"
-        } >> "$config"
-        info "Added ${tilde_bin_dir} to \$PATH in $(tildify "$config")"
-        refresh_command="source $(tildify "$config")"
-    fi
-    ;;
-fish)
-    config="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
-    if [[ -w "$config" ]] || [[ ! -f "$config" ]]; then
-        mkdir -p "$(dirname "$config")"
-        {
-            echo ''
-            echo '# nub'
-            echo "$fish_path_line"
-        } >> "$config"
-        info "Added ${tilde_bin_dir} to \$PATH in $(tildify "$config")"
-        refresh_command="source $(tildify "$config")"
-    fi
-    ;;
-*)
-    echo "Manually add to your shell config:"
-    echo -e "  ${Bold}${posix_path_line}${Color_Off}"
-    ;;
+    case "$path" in
+        $HOME/*) printf '%s' "\$HOME/${path#"$HOME"/}";;
+        *) printf '%s' "$path";;
+    esac
+}
+replace_home_path_with_tilde() {
+    # We replace home path with ~ reference, so path stays portable across machines.
+    local path=$1
+
+    case "$path" in
+        $HOME/*) printf '%s' "~/${path#"$HOME"/}";;
+        *) printf '%s' "$path";;
+    esac
+}
+
+no_shell_path=$(printf '%s' "${NUB_NO_MODIFY_PATH:-0}" | tr '[:upper:]' '[:lower:]')
+
+case "$no_shell_path" in
+    0|no|false|off) ;;
+    1|yes|true|on) configure_shell_path__unknown "$install_bin_dir"; exit;;
+    *) error "Invalid NUB_NO_MODIFY_PATH: $NUB_NO_MODIFY_PATH";;
 esac
 
-echo ""
-info "To get started, run:"
-echo ""
-if [[ -n "$refresh_command" ]]; then
-    echo -e "  ${Bold}${refresh_command}${Color_Off}"
+# Check if already in PATH.
+if echo "$PATH" | tr ':' '\n' | grep -qxF "$install_bin_dir"; then
+    success "Already in PATH. Run: nub --version"
+    exit
+fi
+
+RefreshCommand=''
+
+configure_shell_path "$install_bin_dir"
+
+echo ''
+info 'To get started, run:'
+echo ''
+if [[ -n "$RefreshCommand" ]]; then
+    echo -e "  ${Bold}${RefreshCommand}${Color_Off}"
 fi
 echo -e "  ${Bold}nub --version${Color_Off}"
-echo ""
+echo ''

@@ -27,11 +27,21 @@ if ($Version -eq "latest") {
 Write-Host "Installing nub v$Version for $Target..." -ForegroundColor Cyan
 
 # --- Install ---
-$InstallDir = "$env:USERPROFILE\.nub"
-$BinDir = "$InstallDir\bin"
-$Exe = "$BinDir\nub.exe"
+# Both paths are normalized so the "does nub own this directory?" test at the
+# cleanup step below is exact rather than a string compare of two spellings.
+$DefaultInstallDir = [System.IO.Path]::GetFullPath("$env:USERPROFILE\.nub")
+$InstallDir = if ($env:NUB_INSTALL_DIR) { $env:NUB_INSTALL_DIR } else { $DefaultInstallDir }
 
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+try {
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+} catch {
+    Write-Error "Failed to create install directory: $InstallDir"
+    exit 1
+}
+$InstallDir = (Resolve-Path -LiteralPath $InstallDir).Path
+
+$InstallBinDir = "$InstallDir\bin"
+$InstallExe = "$InstallBinDir\nub.exe"
 
 # Download the per-platform archive and extract it into the install dir. nub is a
 # single self-contained binary that embeds its runtime (preload + vendored
@@ -48,10 +58,16 @@ $prevProgressPreference = $ProgressPreference
 try {
     $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $Url -OutFile $TmpZip -UseBasicParsing
-    # Replace any prior bin\ for a clean upgrade. A stale runtime\ from a
-    # pre-single-binary install is also removed for hygiene, then extract bin\.
-    if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
-    if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }
+    # nub owns the default dir outright, so replace any prior bin\ for a clean
+    # upgrade and drop a stale runtime\ from a pre-single-binary install. A
+    # user-supplied NUB_INSTALL_DIR may hold foreign files, so there we remove
+    # only the two executables we wrote. Then extract bin\.
+    if ($InstallDir -ieq $DefaultInstallDir) {
+        if (Test-Path $InstallBinDir) { Remove-Item -Recurse -Force $InstallBinDir }
+        if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }
+    } else {
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "$InstallBinDir\nub.exe", "$InstallBinDir\nubx.exe"
+    }
     Expand-Archive -Path $TmpZip -DestinationPath $InstallDir -Force
 } catch {
     Write-Error "Failed to download/extract nub: $_"
@@ -61,7 +77,7 @@ try {
     if (Test-Path $TmpZip) { Remove-Item -Force $TmpZip }
 }
 
-if (-not (Test-Path $Exe)) {
+if (-not (Test-Path $InstallExe)) {
     Write-Error "Archive did not contain bin\nub.exe"
     exit 1
 }
@@ -71,17 +87,29 @@ if (-not (Test-Path $Exe)) {
 # bin\nub.exe, so create the nubx alias. On Windows we COPY rather than symlink:
 # symlinks require admin/Developer Mode, and a copy reliably yields argv[0]
 # "nubx.exe". Re-extract on upgrade wipes bin\, so this is recreated each run.
-$Exex = "$BinDir\nubx.exe"
-Copy-Item -Path $Exe -Destination $Exex -Force
+$InstallExex = "$InstallBinDir\nubx.exe"
+Copy-Item -Path $InstallExe -Destination $InstallExex -Force
 
-Write-Host "Installed nub (with nubx) to $Exe" -ForegroundColor Green
+Write-Host "Installed nub (with nubx) to $InstallExe" -ForegroundColor Green
 
 # --- PATH setup ---
+$NoModifyPath = if ($env:NUB_NO_MODIFY_PATH) { $env:NUB_NO_MODIFY_PATH.ToLowerInvariant() } else { "0" }
+if ($NoModifyPath -in @("1", "yes", "true", "on")) {
+    Write-Host "Please add the nub bin path to your PATH:"
+    Write-Host "  $InstallBinDir" -ForegroundColor White
+    exit 0
+} elseif ($NoModifyPath -notin @("0", "no", "false", "off")) {
+    Write-Error "Invalid NUB_NO_MODIFY_PATH: $env:NUB_NO_MODIFY_PATH"
+    exit 1
+}
+
+# Split on the separator rather than `-like "*$InstallBinDir*"`: a user-supplied
+# NUB_INSTALL_DIR can carry wildcard characters, which -like would interpret.
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($UserPath -notlike "*$BinDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$BinDir;$UserPath", "User")
-    $env:Path = "$BinDir;$env:Path"
-    Write-Host "Added $BinDir to PATH" -ForegroundColor Green
+if (($UserPath -split ';') -notcontains $InstallBinDir) {
+    [Environment]::SetEnvironmentVariable("Path", "$InstallBinDir;$UserPath", "User")
+    $env:Path = "$InstallBinDir;$env:Path"
+    Write-Host "Added $InstallBinDir to PATH" -ForegroundColor Green
 } else {
     Write-Host "Already in PATH" -ForegroundColor Green
 }
