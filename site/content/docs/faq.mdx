@@ -374,6 +374,19 @@ Same as installing — match how you installed: `brew update && brew upgrade nub
 
 Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. If you'd rather go through your package manager, `npm install -g --ignore-scripts=false @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing, and on macOS and Linux `brew install nubjs/tap/nub` works too.
 
+Two environment variables customize the script, following the same convention as rustup and uv:
+
+- `NUB_INSTALL_DIR` — install somewhere other than `~/.nub`. `nub upgrade` still updates it in place.
+- `NUB_NO_MODIFY_PATH` — set it truthy (`1`/`yes`/`true`/`on`) to skip the shell-profile edit; the script prints the `PATH` line for you to add yourself.
+
+Set them on the shell that runs the script — the right side of the pipe, not on `curl`:
+
+```bash
+curl -fsSL https://nubjs.com/install.sh | NUB_INSTALL_DIR="$HOME/.local/nub" NUB_NO_MODIFY_PATH=1 bash
+```
+
+On Windows, set `$env:NUB_INSTALL_DIR` / `$env:NUB_NO_MODIFY_PATH` before the `irm | iex`.
+
 ## Does it have a dev server?
 
 No. Vite already owns this; `nub run dev` runs whatever your project's `dev` script is — faster, because the `nub run` wrapper costs less than the `pnpm run` wrapper, but the dev server itself is still Vite (or Next.js, or whatever you're running).

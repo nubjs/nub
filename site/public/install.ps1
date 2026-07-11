@@ -1,6 +1,10 @@
 #!/usr/bin/env pwsh
 # Nub installer for Windows (PowerShell)
 # Usage: irm https://raw.githubusercontent.com/nubjs/nub/main/install.ps1 | iex
+#
+# Customization (env vars):
+#   NUB_INSTALL_DIR      install location, absolute path (default: %USERPROFILE%\.nub)
+#   NUB_NO_MODIFY_PATH   truthy (1/yes/true/on) to skip editing the User PATH
 
 $ErrorActionPreference = "Stop"
 
@@ -27,11 +31,15 @@ if ($Version -eq "latest") {
 Write-Host "Installing nub v$Version for $Target..." -ForegroundColor Cyan
 
 # --- Install ---
-$InstallDir = "$env:USERPROFILE\.nub"
+# The install location is overridable via NUB_INSTALL_DIR (default %USERPROFILE%\.nub).
+# Both the resolved dir and the default are normalized to full paths so the
+# "is this the default location?" test below is an exact comparison.
+$DefaultInstallDir = [System.IO.Path]::GetFullPath("$env:USERPROFILE\.nub")
+$InstallDir = if ($env:NUB_INSTALL_DIR) { $env:NUB_INSTALL_DIR } else { $DefaultInstallDir }
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+$InstallDir = (Resolve-Path -LiteralPath $InstallDir).Path
 $BinDir = "$InstallDir\bin"
 $Exe = "$BinDir\nub.exe"
-
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 # Download the per-platform archive and extract it into the install dir. nub is a
 # single self-contained binary that embeds its runtime (preload + vendored
@@ -48,10 +56,16 @@ $prevProgressPreference = $ProgressPreference
 try {
     $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $Url -OutFile $TmpZip -UseBasicParsing
-    # Replace any prior bin\ for a clean upgrade. A stale runtime\ from a
-    # pre-single-binary install is also removed for hygiene, then extract bin\.
-    if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
-    if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }
+    # Replace any prior nub artifacts for a clean upgrade. In the default ~\.nub —
+    # which nub owns outright — drop the whole bin\ and a stale runtime\ from a
+    # pre-single-binary install. A user-supplied NUB_INSTALL_DIR may hold unrelated
+    # files, so there remove only the two executables we wrote. Then extract bin\.
+    if ($InstallDir -ieq $DefaultInstallDir) {
+        if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
+        if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }
+    } else {
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "$BinDir\nub.exe", "$BinDir\nubx.exe"
+    }
     Expand-Archive -Path $TmpZip -DestinationPath $InstallDir -Force
 } catch {
     Write-Error "Failed to download/extract nub: $_"
@@ -74,11 +88,35 @@ if (-not (Test-Path $Exe)) {
 $Exex = "$BinDir\nubx.exe"
 Copy-Item -Path $Exe -Destination $Exex -Force
 
+# Install receipt: marks this dir as a nub self-managed install so `nub upgrade`
+# recognizes it as in-place-upgradeable even when NUB_INSTALL_DIR relocated it out
+# of the default ~\.nub (cli.rs detect_channel checks for this file).
+$Receipt = @'
+# This file marks a nub self-managed install so `nub upgrade` can update it in
+# place. Created by the nub installer; safe to delete (deleting it disables
+# in-place self-update for a non-default install location).
+'@
+Set-Content -LiteralPath "$InstallDir\.nub-receipt" -Value $Receipt
+
 Write-Host "Installed nub (with nubx) to $Exe" -ForegroundColor Green
 
 # --- PATH setup ---
+# Honor NUB_NO_MODIFY_PATH: skip the User PATH edit and just print the dir to add
+# (rustup/uv convention).
+$NoModifyPath = "$env:NUB_NO_MODIFY_PATH".ToLowerInvariant()
+if ($NoModifyPath -in @("1", "yes", "true", "on")) {
+    Write-Host "Add the nub bin path to your PATH:"
+    Write-Host "  $BinDir" -ForegroundColor White
+    exit 0
+} elseif ($NoModifyPath -notin @("", "0", "no", "false", "off")) {
+    Write-Error "Invalid NUB_NO_MODIFY_PATH: $env:NUB_NO_MODIFY_PATH (expected 1/yes/true/on or 0/no/false/off)"
+    exit 1
+}
+
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($UserPath -notlike "*$BinDir*") {
+# Compare against the exact segments rather than a substring match: a custom
+# NUB_INSTALL_DIR could be a substring of an unrelated existing entry.
+if (($UserPath -split ';') -notcontains $BinDir) {
     [Environment]::SetEnvironmentVariable("Path", "$BinDir;$UserPath", "User")
     $env:Path = "$BinDir;$env:Path"
     Write-Host "Added $BinDir to PATH" -ForegroundColor Green

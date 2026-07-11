@@ -5096,14 +5096,22 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
     if s.contains("/homebrew/") || s.contains("/Cellar/") || s.contains("/linuxbrew/") {
         return UpgradeChannel::Homebrew;
     }
-    // Self-owned: the binary sits at `<install_dir>/bin/nub`, where install_dir
-    // ends in `.nub` (install.sh: `$HOME/.nub/bin/nub`). Derive install_dir by
-    // walking up from the binary so a copied-but-intact `.nub` tree still swaps.
+    // Self-owned: the binary sits at `<install_dir>/bin/nub`. Derive install_dir
+    // by walking up from the binary, then accept it as self-owned when EITHER the
+    // dir is the default `.nub` (covers installs predating the receipt) OR it
+    // carries a `.nub-receipt` marker the installer writes. The receipt is what
+    // makes a relocated `NUB_INSTALL_DIR` in-place-upgradeable, while still
+    // rejecting an unrelated `<dir>/bin/nub` (e.g. a distro `/usr/bin/nub`) that
+    // has neither signal. Order matters: npm/homebrew already returned above, so a
+    // package-managed binary never reaches here.
     let install_dir = bin_path
         .parent()
         .filter(|bin_dir| bin_dir.file_name().is_some_and(|n| n == "bin"))
         .and_then(Path::parent)
-        .filter(|install_dir| install_dir.file_name().is_some_and(|n| n == ".nub"));
+        .filter(|install_dir| {
+            install_dir.file_name().is_some_and(|n| n == ".nub")
+                || install_dir.join(".nub-receipt").is_file()
+        });
     match install_dir {
         Some(dir) => UpgradeChannel::SelfOwned {
             install_dir: dir.to_path_buf(),
@@ -5213,7 +5221,12 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                 println!("  command: {HOMEBREW_UPGRADE_DISPLAY}");
             }
             UpgradeChannel::SelfOwned { install_dir } => {
-                println!("would upgrade to {target} via self-owned (~/.nub)");
+                // Show the resolved dir, not a hardcoded ~/.nub — a receipt-marked
+                // NUB_INSTALL_DIR relocates it.
+                println!(
+                    "would upgrade to {target} via self-owned ({})",
+                    install_dir.display()
+                );
                 if cfg!(windows) {
                     println!(
                         "  note: a real self-owned upgrade is unsupported on Windows; \
@@ -8754,9 +8767,70 @@ mod tests {
             }
             other => panic!("expected SelfOwned, got {other:?}"),
         }
+        // An arbitrary `<dir>/bin/nub` with neither the `.nub` name nor a receipt
+        // stays Unknown — this is what keeps a distro `/usr/bin/nub` from being
+        // mistaken for a self-managed install and overwritten by `nub upgrade`.
+        assert_eq!(
+            detect_channel(Path::new("/some/random/place/bin/nub")),
+            UpgradeChannel::Unknown
+        );
         assert_eq!(
             detect_channel(Path::new("/some/random/place/nub")),
             UpgradeChannel::Unknown
+        );
+    }
+
+    // Receipt-based self-owned detection: a relocated NUB_INSTALL_DIR (not named
+    // `.nub`) is in-place-upgradeable IFF the installer's `.nub-receipt` marker is
+    // present next to bin/. Without it, the same layout stays Unknown. Uses a real
+    // temp dir because the receipt check hits the filesystem.
+    #[test]
+    fn detect_channel_honors_install_receipt_for_relocated_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path().join("custom-nub");
+        let bin = install_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let nub = bin.join("nub");
+
+        // No receipt yet → not recognized as self-owned.
+        assert_eq!(detect_channel(&nub), UpgradeChannel::Unknown);
+
+        // Installer drops the receipt → recognized, with install_dir recovered.
+        std::fs::write(install_dir.join(".nub-receipt"), "# marker\n").unwrap();
+        match detect_channel(&nub) {
+            UpgradeChannel::SelfOwned { install_dir: dir } => assert_eq!(dir, install_dir),
+            other => panic!("expected SelfOwned once the receipt exists, got {other:?}"),
+        }
+    }
+
+    // The critical repeat-upgrade invariant: a self-owned upgrade swaps only bin/,
+    // so the `.nub-receipt` marker MUST survive it — otherwise the NEXT upgrade
+    // would fail to re-detect a relocated install as self-owned. Exercises the real
+    // `swap_dir` the upgrade uses.
+    #[test]
+    fn install_receipt_survives_a_selfowned_bin_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path();
+        std::fs::create_dir_all(install_dir.join("bin")).unwrap();
+        std::fs::write(install_dir.join("bin").join("nub"), b"old").unwrap();
+        let receipt = install_dir.join(".nub-receipt");
+        std::fs::write(&receipt, "# marker\n").unwrap();
+
+        // Stage the replacement bin/ in a sibling dir (same filesystem, as the real
+        // upgrade does) and swap it in.
+        let staged = install_dir.join("staged-bin");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("nub"), b"new").unwrap();
+        swap_dir(install_dir, "bin", &staged).unwrap();
+
+        assert_eq!(
+            std::fs::read(install_dir.join("bin").join("nub")).unwrap(),
+            b"new",
+            "bin/ should hold the swapped-in binary"
+        );
+        assert!(
+            receipt.is_file(),
+            ".nub-receipt must survive the bin swap so repeat upgrades keep detecting self-owned"
         );
     }
 

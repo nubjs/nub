@@ -3,6 +3,15 @@
 set -e # errexit
 set -u # nounset
 
+# Local end-to-end harness for install.sh. Each case runs the REAL installer
+# against a throwaway HOME/NUB_INSTALL_DIR sandbox (so it downloads the actual
+# latest release from GitHub — network required) and asserts the resulting on-disk
+# state: the binaries, the `.nub-receipt` marker, and the shell-profile edits for
+# each shell + the NUB_INSTALL_DIR / NUB_NO_MODIFY_PATH knobs. Cross-OS coverage of
+# the same paths runs in CI via .github/workflows/verify-install.yml.
+#
+# Usage: tests/installer/run.sh   (set TEST_CLEAN=0 to keep the sandbox for debugging)
+
 # Required on MacOS due to a Bash 3.2.57 bug.
 case "$(dirname "$0")" in
     /*|./*) Dir=$(cd "$(dirname "$0")" && pwd);;
@@ -69,7 +78,9 @@ mksandboxdir() {
 
     mkdir -p "$dir"
 
-    printf '%s' "$dir"
+    # Emit the normalized (symlink-resolved) path so callers compare against the
+    # exact string install.sh derives via `cd … && pwd` (macOS' /var → /private/var).
+    (cd "$dir" && pwd)
 }
 test_begin() {
     describe "$@"
@@ -84,6 +95,8 @@ test_end() {
     fi
 }
 
+# Runs the installer (inheriting the caller's env) and asserts the install
+# artifacts landed in $1: both binaries and the self-managed-install receipt.
 test_install() {
     local dir=$1
 
@@ -96,6 +109,8 @@ test_install() {
         || throw 'file does not exist' "$dir/bin/nub"
     test -f "$dir/bin/nubx" \
         || throw 'file does not exist' "$dir/bin/nubx"
+    test -f "$dir/.nub-receipt" \
+        || throw 'install receipt not written' "$dir/.nub-receipt"
 }
 
 test_begin 'install for Bash shell'
@@ -104,6 +119,9 @@ test_begin 'install for Bash shell'
     export SHELL=/bin/bash
     export HOME=$(mksandboxdir)
 
+    # bash appends only to an EXISTING writable rc (unchanged from the shipped
+    # script; the zsh/fish branches create theirs). A real bash user has one.
+    touch "$HOME/.bashrc"
     test_install "$HOME/.nub"
 
     grep -q -F '# nub' "$HOME/.bashrc" \
@@ -139,12 +157,12 @@ test_begin 'install for Fish shell'
 
     grep -q -F '# nub' "$HOME/.config/fish/config.fish" \
         || throw 'shell configuration not found [1]' "$HOME/.config/fish/config.fish"
-    grep -q -F 'set --global --export PATH "$HOME/.nub/bin" $PATH' "$HOME/.config/fish/config.fish" \
+    grep -q -F 'set -gx PATH "$HOME/.nub/bin" $PATH' "$HOME/.config/fish/config.fish" \
         || throw 'shell configuration not found [2]' "$HOME/.config/fish/config.fish"
 )
 test_end $?
 
-test_begin 'install for Dash shell'
+test_begin 'install for Dash shell (unknown shell prints the manual line)'
 (
     set -e
     export SHELL=/bin/dash
@@ -157,7 +175,7 @@ test_begin 'install for Dash shell'
 )
 test_end $?
 
-test_begin 'install without creating shell configuration'
+test_begin 'install with NUB_NO_MODIFY_PATH does not create a shell profile'
 (
     set -e
     export SHELL=/bin/bash
@@ -171,7 +189,7 @@ test_begin 'install without creating shell configuration'
 )
 test_end $?
 
-test_begin 'install without changing shell configuration'
+test_begin 'install with NUB_NO_MODIFY_PATH does not alter an existing shell profile'
 (
     set -e
     export SHELL=/bin/bash
@@ -186,19 +204,38 @@ test_begin 'install without changing shell configuration'
 )
 test_end $?
 
-test_begin 'install for Bash with custom installation dir'
+test_begin 'install with NUB_INSTALL_DIR relocates the install and PATH line'
 (
     set -e
     export SHELL=/bin/bash
     export HOME=$(mksandboxdir home)
     export NUB_INSTALL_DIR=$(mksandboxdir install)
 
+    touch "$HOME/.bashrc"
     test_install "$NUB_INSTALL_DIR"
 
     grep -q -F '# nub' "$HOME/.bashrc" \
         || throw 'shell configuration not found [1]' "$HOME/.bashrc"
+    # An out-of-home custom dir is emitted as its absolute (normalized) path.
     grep -q -F "export PATH=\"$NUB_INSTALL_DIR/bin:\$PATH\"" "$HOME/.bashrc" \
         || throw 'shell configuration not found [2]' "$HOME/.bashrc"
+)
+test_end $?
+
+test_begin 'install for Fish with a custom dir containing a space (quoted PATH line)'
+(
+    set -e
+    export SHELL=/bin/fish
+    export HOME=$(mksandboxdir home)
+    unset XDG_CONFIG_HOME
+    export NUB_INSTALL_DIR="$(mksandboxdir 'my tools')/nub"
+
+    test_install "$NUB_INSTALL_DIR"
+
+    conf="$HOME/.config/fish/config.fish"
+    # The dir must be quoted or fish word-splits the space into two PATH entries.
+    grep -q -F "set -gx PATH \"$NUB_INSTALL_DIR/bin\" \$PATH" "$conf" \
+        || throw 'fish PATH line not quoted for a spaced dir' "$conf"
 )
 test_end $?
 
