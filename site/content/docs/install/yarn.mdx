@@ -42,7 +42,7 @@ Both formats are read:
     { feature: <>workspace selectors</>, status: 'partial', note: 'No git-since ([ref]) selector.' },
     // ── Config files ──────────────────────────────────────────────────
     { feature: <code>.npmrc</code>, status: 'yes' },
-    { feature: <code>.yarnrc.yml</code>, status: 'partial', note: 'Not read: per-host proxies, PnP.' },
+    { feature: <code>.yarnrc.yml</code>, status: 'partial', note: 'Per-host proxies are not read; PnP installs are refused.' },
     { feature: <code>.yarnrc</code>, status: 'partial', note: 'Registry and auth keys only.' },
     // ── Environment variables ─────────────────────────────────────────
     { feature: <><code>npm_config_*</code></>, status: 'yes' },
@@ -143,25 +143,16 @@ Nub maps the Yarn linker settings it can represent:
 # .yarnrc.yml
 nodeLinker: node-modules  # hoisted node_modules
 nodeLinker: pnpm          # isolated symlink layout
-nodeLinker: pnp           # ❌ warns; installs node_modules instead
+nodeLinker: pnp           # nub install and nub ci abort before mutation
 ```
 
-Yarn Berry defaults to PnP when `nodeLinker` is absent. On install, Nub prints one warning and links a `node_modules` tree:
-
-```console
-# captured: nub 0.1.1, Yarn Berry lockfile with no nodeLinker
-$ nub install
-nub: this Yarn project uses Plug'n'Play (nodeLinker: pnp or Yarn
-     Berry's default), which nub does not implement — installing a
-     node_modules tree instead. [WARN_NUB_PNP_LINKER_DOWNGRADE]
-nub 0.1.1 · ✓ Already up to date
-```
+Yarn Berry defaults to PnP when `nodeLinker` is absent. Both `nub install` and `nub ci` abort before mutation with `ERR_NUB_PNP_UNSUPPORTED`. Select `nodeLinker: node-modules` to install with Nub.
 
 **Nub-the-runtime fully supports Plug'n'Play.** If a project was *already* installed by Yarn in PnP mode, Nub can run it — `nub <file>`, `nub run`, and `nubx` honor `.pnp.cjs` across all supported Node versions. What Nub cannot do is *produce* a PnP install. So the supported workflow for a PnP project is: install with `yarn`, run with `nub`. See [Plug'n'Play resolution](/docs/runtime/resolution#yarn-plugnplay) for how Nub resolves a PnP project at runtime.
 
 ## Gaps
 
-Several Yarn `package.json` and `.yarnrc.yml` fields still have no effect under Nub:
+Nub does not fully support these Yarn settings:
 
 - Per-host `networkSettings` proxies — the proxy Nub applies is process-wide, not per registry host.
-- `nodeLinker: pnp` — PnP install generation is out of scope; Nub warns and links `node_modules` instead. Install with Yarn, run with Nub.
+- Yarn PnP (`nodeLinker: pnp`) — both `nub install` and `nub ci` abort before mutation with `ERR_NUB_PNP_UNSUPPORTED`. Install with Yarn and run with Nub, or select `nodeLinker: node-modules`.
