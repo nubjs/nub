@@ -92,7 +92,7 @@ split-debuginfo = "unpacked"
 [workspace.package]
 version = "0.4.11"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.93"
 license = "MIT"
 repository = "https://github.com/nubjs/nub"
 

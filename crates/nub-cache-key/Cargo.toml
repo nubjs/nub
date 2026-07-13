@@ -13,12 +13,11 @@
 # workspace into the container — the repo-root manifest is absent there, so any
 # `.workspace = true` field in this crate cannot find a workspace root to inherit
 # from and the manifest parse fails ("failed to find a workspace root", #112
-# fallout that broke the v0.2.0 cross matrix). Inlining the values (identical to
-# the root `[workspace.package]` / `[workspace.lints.clippy]` / blake3 pin) lets
-# this manifest parse standalone in the cross container while staying byte-identical
-# to what it inherited as a root-workspace member. Keep these literals in lockstep
-# with the root `Cargo.toml`'s `[workspace.package]`, `[workspace.lints.clippy]`,
-# and the blake3 pin.
+# fallout that broke the v0.2.0 cross matrix). Inlining the values lets this
+# manifest parse standalone in the cross container. Keep the shared literals in
+# lockstep with the root `Cargo.toml`'s `[workspace.package]`,
+# `[workspace.lints.clippy]`, and blake3 pin; `rust-version` stays at this crate's
+# independently verified standalone floor.
 [package]
 name = "nub-cache-key"
 version = "0.2.0"
