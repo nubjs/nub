@@ -683,13 +683,13 @@ fn deny_not_dodgeable_via_dotdot_or_symlink() {
 
 #[test]
 fn hardlink_to_denied_secret_leaks_via_alias() {
-    // Seatbelt file-read rules are path-pattern based, like Landlock's: a `!<secret>`
+    // Seatbelt file-read rules are path-pattern based: a `!<secret>`
     // deny matches the PATH, not the inode. A pre-existing same-uid hardlink to the
     // secret, at a name the deny never targets, is readable — and reading it reads the
-    // SHARED inode, so the path-denied secret leaks through the alias. BOUNDED: needs a
+    // SHARED inode, so the path-denied secret leaks through the alias. Bounded: needs a
     // hardlink created OUTSIDE the sandbox beforehand (no clean Seatbelt fix — the inode
-    // was legitimately named twice). The macOS twin of the Linux residual of the same
-    // name; if a future mechanism closes it, this assertion flips and flags the change.
+    // was legitimately named twice). If a future mechanism closes it, this assertion
+    // flips and flags the change.
     let f = fixture();
     let secret = f.proj.join("secret.txt");
     fs::write(&secret, "REALSECRET").unwrap();
@@ -701,8 +701,8 @@ fn hardlink_to_denied_secret_leaks_via_alias() {
         f.allowed(surface.clone(), CAT, &[&s(&alias)]),
         "hardlink residual: an alias to the denied inode reads the secret"
     );
-    // Divergence from Landlock (inode-keyed): Seatbelt matches the PATH, so WITH the alias
-    // present the secret's OWN denied path still reads EPERM — only the alias name leaks.
+    // Seatbelt matches the path, so with the alias present the secret's own denied path
+    // still reads EPERM — only the alias name leaks.
     assert!(
         !f.allowed(surface, CAT, &[&s(&secret)]),
         "path-based deny: the secret's own denied path stays denied even with the alias present"

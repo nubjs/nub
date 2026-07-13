@@ -43,9 +43,9 @@ mod linux;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 
-// The OS-agnostic Linux mount/grant derivation. Compiled on Linux (its real consumer)
-// and under `test` on any host — so its security-critical carve logic is unit-tested
-// on the macOS dev host over tempfile trees, without a kernel.
+// The OS-agnostic Linux mount-plan derivation. Compiled on Linux (its real consumer)
+// and under `test` on any host so authored-order and rejection invariants are tested
+// without a Linux kernel.
 #[cfg(any(target_os = "linux", test))]
 mod linux_grants;
 

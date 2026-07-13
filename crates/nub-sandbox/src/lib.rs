@@ -103,3 +103,20 @@ pub use compiler::{
 pub use matcher::Homes;
 pub use policy::SandboxPolicy;
 pub use proxy::{Decision, EgressProxy, GrantDecider, Host, StaticDecider};
+
+/// Whether applying this policy needs the embedder to supply bounded current-path
+/// roots for wildcard deny inventory. Exact denies are enforced directly and need
+/// no enumeration.
+pub fn requires_deny_search_roots(policy: &SandboxPolicy) -> bool {
+    policy.fs.rules.entries.iter().any(|rule| {
+        if rule.effect != policy::Effect::Deny {
+            return false;
+        }
+        let literal = rule
+            .matcher
+            .as_str()
+            .strip_suffix("/**")
+            .unwrap_or(rule.matcher.as_str());
+        literal.is_empty() || literal.contains(['*', '?', '[', '{'])
+    })
+}

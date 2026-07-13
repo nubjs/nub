@@ -42,6 +42,7 @@ serde.workspace = true
 # tsconfig hashing; declaring it here keeps nub-core's behavior identical with
 # and without feature unification against nub-native.
 serde_json = { workspace = true, features = ["preserve_order"] }
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 # sha1 (ancient PM publishes carry only a sha1 dist.shasum) sits alongside sha2.
 # Pinned 0.10 to share `digest` 0.10 with sha2 — a single Digest trait, no second
 # major. sha512 is preferred; sha1 is the fail-closed fallback only.
@@ -83,6 +84,7 @@ signal-hook = "0.3"
 [dev-dependencies]
 criterion.workspace = true
 blake3 = { workspace = true }
+tempfile = "3"
 # Encoder for the runtime_cache unit tests (they build a tiny tar.zst to exercise
 # the decode/unpack/rename/GC path). The PRODUCT decodes with pure-Rust `ruzstd`;
 # only the test fixtures need the libzstd encoder, so it stays a dev-dep.

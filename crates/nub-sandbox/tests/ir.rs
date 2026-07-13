@@ -102,42 +102,42 @@ fn apply_scrubs_env_when_enforced() {
     );
 }
 
-/// Raw Landlock ABI probe (Linux) — the degradation shape depends on whether the
-/// kernel can enforce Landlock.
-#[cfg(target_os = "linux")]
-fn landlock_available() -> bool {
-    let abi = unsafe { libc::syscall(444, std::ptr::null::<libc::c_void>(), 0usize, 1u64) };
-    abi >= 2
-}
-
 #[test]
 fn apply_degradation_reflects_backend_capability() {
     let ctx = common::ctx(true, &[]);
-    let policy = compile(&json!({ "fs": ["./x"], "net": false }), &ctx).unwrap();
-    let prepared = apply(&policy, CommandSpec::new("true")).unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let policy = compile(
+        &json!({ "fs": [cwd.to_string_lossy().to_string()], "net": false }),
+        &ctx,
+    )
+    .unwrap();
+    let prepared = match apply(
+        &policy,
+        CommandSpec::new("true").cwd(&cwd).deny_search_root(&cwd),
+    ) {
+        Ok(prepared) => prepared,
+        #[cfg(target_os = "linux")]
+        Err(degradation) => {
+            assert!(
+                degradation.lost.contains(&"fs".to_string()),
+                "missing Bubblewrap must fail the fs axis explicitly"
+            );
+            return;
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(degradation) => panic!("backend setup failed unexpectedly: {degradation:?}"),
+    };
     let d = &prepared.degradation;
-    // macOS (Seatbelt) and Linux (Landlock+seccomp) have real backends: fs +
-    // deny-all net are genuinely enforced, so nothing is degraded. A Landlock-less
-    // Linux kernel loses only fs (net is still seccomp-enforced) — never a silent
-    // full claim. Other OSes still run the env-scrub skeleton, which honestly
-    // reports fs + net as not-enforced.
+    // macOS (Seatbelt) and Linux (Bubblewrap+seccomp) have real backends: fs +
+    // deny-all net are genuinely enforced, so nothing is degraded. Other OSes still
+    // run the env-scrub skeleton, which honestly reports fs + net as not-enforced.
     #[cfg(target_os = "macos")]
     assert!(d.is_full(), "macOS enforces fs + deny-all net");
     #[cfg(target_os = "linux")]
-    {
-        if landlock_available() {
-            assert!(
-                d.is_full(),
-                "Linux enforces fs + deny-all net with Landlock"
-            );
-        } else {
-            assert!(d.lost.contains(&"fs".to_string()), "no Landlock → fs lost");
-            assert!(
-                !d.lost.contains(&"net".to_string()),
-                "net still seccomp-enforced"
-            );
-        }
-    }
+    assert!(
+        d.is_full(),
+        "Linux enforces fs + deny-all net with Bubblewrap"
+    );
     // Windows (AppContainer) enforces the literal read-confine grant (`./x`) + coarse
     // deny-all net fully — BUT the default `.env*` READ-deny is now injected on every
     // read-granting policy, and a deny landing INSIDE a granted read subtree can't be

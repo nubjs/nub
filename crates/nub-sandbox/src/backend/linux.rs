@@ -5,7 +5,7 @@
 //! Exact deny paths are layered last so a writable project cannot re-expose them.
 #![cfg(target_os = "linux")]
 
-use crate::backend::linux_grants::{self, DerivedGrants, fs_confines};
+use crate::backend::linux_grants::{self, MountAccess, fs_confines};
 use crate::backend::{CommandSpec, Degradation, Prepared};
 use crate::matcher::path::{PathMatcher, canonicalize_including_nonexistent};
 use crate::policy::{Effect, FsAccess, SandboxPolicy, TmpMode};
@@ -14,7 +14,7 @@ use seccompiler::{
     SeccompRule, TargetArch,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{Seek, Write};
@@ -48,6 +48,7 @@ enum MaskKind {
 struct Mask {
     path: PathBuf,
     kind: MaskKind,
+    directory: bool,
 }
 
 struct BubblewrapLaunch {
@@ -100,31 +101,61 @@ pub fn apply(
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("/"));
-    let (write_grants, write_partial) = linux_grants::derive_write_mount_grants(policy);
-    if write_partial {
+    let cwd = fs::canonicalize(&cwd).map_err(|e| Degradation {
+        lost: vec!["fs".to_string()],
+        reason: Some(format!(
+            "resolving sandbox working directory {}: {e}",
+            cwd.display()
+        )),
+    })?;
+    let entry_program = resolve_program(&spec.program, &cwd, target_path(policy).as_deref())
+        .ok_or_else(|| Degradation {
+            lost: vec!["process-entry".to_string()],
+            reason: Some(format!(
+                "sandbox entry program could not be resolved in the target environment: {}",
+                Path::new(&spec.program).display()
+            )),
+        })?;
+    let mut mount_plan =
+        linux_grants::compile_mount_plan(policy).map_err(|reason| Degradation {
+            lost: vec!["fs-partial".to_string()],
+            reason: Some(reason),
+        })?;
+    // Rebinding an inherited read-only filesystem as writable cannot widen it on
+    // Linux, but recording the effective cap makes the argv plan explicit and
+    // prevents later launcher changes from accidentally claiming otherwise.
+    cap_inherited_read_only(&mut mount_plan);
+
+    if crate::requires_deny_search_roots(policy) && spec.deny_search_roots.is_empty() {
         return Err(Degradation {
-            lost: vec!["fs-write-partial".to_string()],
-            reason: Some("write policy exceeded the concrete mount-plan budget".to_string()),
+            lost: vec!["fs-read-deny".to_string()],
+            reason: Some(
+                "bounded deny globs require declared project/workspace search roots".to_string(),
+            ),
         });
     }
-    for grant in &write_grants {
-        pre_create(&grant.path);
-    }
-
-    let mut deny_search_roots = spec.deny_search_roots.clone();
-    if deny_search_roots.is_empty() {
-        deny_search_roots.push(cwd.clone());
-    }
-    let mut masks = collect_masks(policy, &deny_search_roots).map_err(|reason| Degradation {
-        lost: vec!["fs-read-deny".to_string()],
-        reason: Some(reason),
-    })?;
+    let mut masks =
+        collect_masks(policy, &spec.deny_search_roots).map_err(|reason| Degradation {
+            lost: vec!["fs-read-deny".to_string()],
+            reason: Some(reason),
+        })?;
     masks.extend(alternate_procfs_masks().map_err(|reason| Degradation {
         lost: vec!["proc".to_string()],
         reason: Some(reason),
     })?);
-    masks.sort_by(|a, b| a.path.cmp(&b.path));
-    masks.dedup_by(|a, b| a.path == b.path);
+    masks = merge_masks(masks);
+    validate_masks_against_mount_plan(policy, &masks, &mount_plan).map_err(|reason| {
+        Degradation {
+            lost: vec!["fs-read-deny".to_string()],
+            reason: Some(reason),
+        }
+    })?;
+    validate_entry_visibility(&entry_program, policy.fs.tmp, &masks, &mount_plan).map_err(
+        |reason| Degradation {
+            lost: vec!["process-entry".to_string()],
+            reason: Some(reason),
+        },
+    )?;
     let masks = masks
         .into_iter()
         .filter(|mask| !mask_already_enforced(mask))
@@ -147,8 +178,7 @@ pub fn apply(
         RootView::Minimal => {
             append_minimal_read_mounts(
                 &mut command,
-                policy,
-                &spec,
+                &entry_program,
                 ca_bundle,
                 &bwrap.visible_path,
             )?;
@@ -179,12 +209,18 @@ pub fn apply(
         }
     }
 
-    for grant in &write_grants {
-        command.arg("--bind").arg(&grant.path).arg(&grant.path);
+    for grant in &mount_plan {
+        command
+            .arg(match grant.access {
+                MountAccess::ReadOnly => "--ro-bind",
+                MountAccess::ReadWrite => "--bind",
+            })
+            .arg(&grant.path)
+            .arg(&grant.path);
     }
 
     let mut mask_sources = Vec::new();
-    for mask in masks.iter().filter(|m| !m.path.is_dir()) {
+    for mask in masks.iter().filter(|m| !m.directory) {
         let source = open_inheritable_dev_null().map_err(|e| Degradation {
             lost: vec!["fs-read-deny".to_string()],
             reason: Some(format!("opening empty mask source: {e}")),
@@ -201,7 +237,7 @@ pub fn apply(
             .arg(&mask.path);
         mask_sources.push(source);
     }
-    for mask in masks.iter().filter(|m| m.path.is_dir()) {
+    for mask in masks.iter().filter(|m| m.directory) {
         command
             .arg("--perms")
             .arg(match mask.kind {
@@ -217,6 +253,12 @@ pub fn apply(
         // Delay this until child mounts under `/tmp` have been installed; otherwise
         // Bubblewrap cannot create their destination mountpoints.
         command.args(["--remount-ro", "/tmp"]);
+    }
+    if root_view == RootView::Minimal {
+        // Bubblewrap creates destination ancestors in its synthetic root. Freeze
+        // them after every authored mount and mask has landed so they do not become
+        // accidental write grants; explicit writable submounts retain their flags.
+        command.args(["--remount-ro", "/"]);
     }
 
     let mut degradation = Degradation::full();
@@ -249,7 +291,7 @@ pub fn apply(
     };
 
     command.arg("--chdir").arg(&cwd).arg("--");
-    command.arg(&spec.program).args(&spec.args);
+    command.arg(&entry_program).args(&spec.args);
 
     if policy.env.enforce {
         command.env_clear();
@@ -295,7 +337,7 @@ fn root_view(policy: &SandboxPolicy) -> RootView {
     let mut decision = policy.fs.rules.default_effect;
     let mut access = FsAccess::Read;
     for rule in &policy.fs.rules.entries {
-        if rule.matcher.as_str() == "**" {
+        if linux_grants::is_whole_root(rule.matcher.as_str()) {
             decision = rule.effect;
             access = rule.access;
         }
@@ -310,31 +352,15 @@ fn root_view(policy: &SandboxPolicy) -> RootView {
 
 fn append_minimal_read_mounts(
     command: &mut Command,
-    policy: &SandboxPolicy,
-    spec: &CommandSpec,
+    entry_program: &Path,
     ca_bundle: Option<&Path>,
     bwrap: &Path,
 ) -> Result<(), Degradation> {
-    let DerivedGrants {
-        grants,
-        read_partial,
-    } = linux_grants::derive_read_grants(policy);
-    if read_partial {
-        return Err(Degradation {
-            lost: vec!["fs-read-partial".to_string()],
-            reason: Some("read policy exceeded the concrete mount-plan budget".to_string()),
-        });
-    }
     let mut mounted = BTreeSet::new();
     for dir in ESSENTIAL_READ_DIRS {
         append_ro_mount(command, Path::new(dir), &mut mounted);
     }
-    for grant in grants {
-        append_ro_mount(command, &grant.path, &mut mounted);
-    }
-    if let Some(program) = resolve_program(&spec.program, spec.cwd.as_deref()) {
-        append_ro_mount(command, &program, &mut mounted);
-    }
+    append_ro_mount(command, entry_program, &mut mounted);
     if let Some(bundle) = ca_bundle {
         append_ro_mount(command, bundle, &mut mounted);
     }
@@ -355,7 +381,7 @@ fn collect_masks(
     deny_search_roots: &[PathBuf],
 ) -> Result<Vec<Mask>, String> {
     let matcher = PathMatcher::new(&policy.fs.rules);
-    let mut candidates: Vec<(PathBuf, MaskKind)> = Vec::new();
+    let mut candidates: Vec<(PathBuf, PathBuf, MaskKind, bool)> = Vec::new();
     let mut needs_bounded_snapshot = false;
 
     for rule in &policy.fs.rules.entries {
@@ -364,7 +390,12 @@ fn collect_masks(
         }
         let pattern = rule.matcher.as_str();
         if let Some(path) = exact_rule_root(pattern) {
-            candidates.push((path, MaskKind::Unreadable));
+            candidates.push((
+                path.clone(),
+                path,
+                MaskKind::Unreadable,
+                pattern.ends_with("/**"),
+            ));
             continue;
         }
         if is_direct_snapshot_glob(pattern, deny_search_roots) {
@@ -377,63 +408,210 @@ fn collect_masks(
     }
 
     if needs_bounded_snapshot {
-        collect_direct_denied_candidates(deny_search_roots, &matcher, &mut candidates);
+        collect_direct_denied_candidates(policy, deny_search_roots, &matcher, &mut candidates)?;
     }
 
-    let mut seen = HashSet::new();
     let mut masks = Vec::new();
-    for (path, kind) in candidates {
-        let path = canonicalize_including_nonexistent(&path);
-        if !path.exists() || !seen.insert(path.clone()) {
-            continue;
+    for (logical, path, kind, masks_subtree) in candidates {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "statting deny candidate {}: {error}",
+                    path.display()
+                ));
+            }
+        };
+        let path = fs::canonicalize(&path)
+            .map_err(|e| format!("resolving deny candidate {}: {e}", path.display()))?;
+        let verdict = matcher.decide_logical_or_resolved(&logical, &path);
+        if masks_subtree && verdict.effect == Effect::Allow {
+            return Err(format!(
+                "denied subtree {} has an exact directory allow that stock Bubblewrap cannot preserve",
+                path.display()
+            ));
         }
-        let verdict = matcher.decide(&path);
-        if verdict.effect == Effect::Deny {
-            masks.push(Mask { path, kind });
+        if verdict.effect == Effect::Deny || masks_subtree {
+            masks.push(Mask {
+                path,
+                kind,
+                directory: metadata.is_dir(),
+            });
         }
     }
-    masks.sort_by(|a, b| a.path.cmp(&b.path));
-    // If a denied directory is already hidden, child entries need no mounts.
-    let dirs: Vec<PathBuf> = masks
-        .iter()
-        .filter(|m| m.path.is_dir())
-        .map(|m| m.path.clone())
-        .collect();
-    masks.retain(|m| {
-        m.path.is_dir()
-            || !dirs
-                .iter()
-                .any(|dir| m.path != *dir && m.path.starts_with(dir))
-    });
-    Ok(masks)
+    Ok(merge_masks(masks))
 }
 
 fn collect_direct_denied_candidates(
+    policy: &SandboxPolicy,
     roots: &[PathBuf],
     matcher: &PathMatcher,
-    out: &mut Vec<(PathBuf, MaskKind)>,
-) {
+    out: &mut Vec<(PathBuf, PathBuf, MaskKind, bool)>,
+) -> Result<(), String> {
+    let roots = strict_search_roots(roots)?;
     for root in roots {
-        let Ok(entries) = fs::read_dir(root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        let entries = fs::read_dir(&root)
+            .map_err(|e| format!("enumerating deny-search root {}: {e}", root.display()))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|e| format!("enumerating deny-search root {}: {e}", root.display()))?;
+            let logical = root.join(entry.file_name());
             let path = entry.path();
-            if matcher.decide(&path).effect != Effect::Deny {
+            match fs::metadata(&path) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "statting deny candidate {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+            let resolved = fs::canonicalize(&path)
+                .map_err(|e| format!("resolving deny candidate {}: {e}", path.display()))?;
+            if !matcher.matches_deny_entry(&logical, &resolved) {
                 continue;
             }
-            let kind = if entry
+            if matcher
+                .decide_logical_or_resolved(&logical, &resolved)
+                .effect
+                != Effect::Deny
+            {
+                continue;
+            }
+            let dotenv_name = entry
                 .file_name()
                 .to_str()
-                .is_some_and(|name| name.starts_with(".env"))
-            {
+                .is_some_and(|name| name.starts_with(".env"));
+            let explicit_user_deny = builtin_env_band_start(policy).is_some_and(|end| {
+                matcher.last_matching_effect_before(&logical, &resolved, end) == Some(Effect::Deny)
+            });
+            let kind = if dotenv_name && !explicit_user_deny {
                 MaskKind::EmptyReadable
             } else {
                 MaskKind::Unreadable
             };
-            out.push((path, kind));
+            out.push((logical, resolved, kind, false));
         }
     }
+    Ok(())
+}
+
+fn strict_search_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut roots_out = BTreeSet::new();
+    for root in roots {
+        let root = fs::canonicalize(root)
+            .map_err(|e| format!("resolving deny-search root {}: {e}", root.display()))?;
+        let metadata = fs::metadata(&root)
+            .map_err(|e| format!("statting deny-search root {}: {e}", root.display()))?;
+        if !metadata.is_dir() {
+            return Err(format!(
+                "deny-search root is not a directory: {}",
+                root.display()
+            ));
+        }
+        roots_out.insert(root);
+    }
+    Ok(roots_out.into_iter().collect())
+}
+
+fn merge_masks(masks: Vec<Mask>) -> Vec<Mask> {
+    let mut merged: BTreeMap<PathBuf, Mask> = BTreeMap::new();
+    for mask in masks {
+        merged
+            .entry(mask.path.clone())
+            .and_modify(|current| {
+                if mask.kind == MaskKind::Unreadable {
+                    current.kind = MaskKind::Unreadable;
+                }
+                current.directory |= mask.directory;
+            })
+            .or_insert(mask);
+    }
+    let directories = merged
+        .values()
+        .filter(|mask| mask.directory)
+        .map(|mask| mask.path.clone())
+        .collect::<Vec<_>>();
+    merged
+        .into_values()
+        .filter(|mask| {
+            mask.directory
+                || !directories
+                    .iter()
+                    .any(|dir| mask.path != *dir && mask.path.starts_with(dir))
+        })
+        .collect()
+}
+
+fn builtin_env_band_start(policy: &SandboxPolicy) -> Option<usize> {
+    let entries = &policy.fs.rules.entries;
+    if entries.len() < 4
+        || entries[entries.len() - 2].matcher.as_str() != "**/.env*/**"
+        || entries[entries.len() - 1].matcher.as_str() != ".env*/**"
+    {
+        return None;
+    }
+    (0..entries.len() - 2).rev().find(|&index| {
+        index + 1 < entries.len() - 2
+            && entries[index].effect == Effect::Deny
+            && entries[index].matcher.as_str() == "**/.env*"
+            && entries[index + 1].effect == Effect::Deny
+            && entries[index + 1].matcher.as_str() == ".env*"
+    })
+}
+
+fn validate_masks_against_mount_plan(
+    policy: &SandboxPolicy,
+    masks: &[Mask],
+    grants: &[linux_grants::MountGrant],
+) -> Result<(), String> {
+    let matcher = PathMatcher::new(&policy.fs.rules);
+    for mask in masks.iter().filter(|mask| mask.directory) {
+        for grant in grants
+            .iter()
+            .filter(|grant| grant.path != mask.path && grant.path.starts_with(&mask.path))
+        {
+            if matcher.decide(&grant.path).effect == Effect::Allow {
+                return Err(format!(
+                    "denied directory {} contains a later allowed mount {}; stock Bubblewrap cannot preserve that ordering",
+                    mask.path.display(),
+                    grant.path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_entry_visibility(
+    entry: &Path,
+    tmp: TmpMode,
+    masks: &[Mask],
+    grants: &[linux_grants::MountGrant],
+) -> Result<(), String> {
+    if masks
+        .iter()
+        .any(|mask| entry == mask.path || (mask.directory && entry.starts_with(&mask.path)))
+    {
+        return Err(format!(
+            "sandbox entry program is hidden by the final filesystem policy: {}",
+            entry.display()
+        ));
+    }
+    if tmp != TmpMode::Shared
+        && entry.starts_with("/tmp")
+        && !grants
+            .iter()
+            .any(|grant| entry == grant.path || entry.starts_with(&grant.path))
+    {
+        return Err(format!(
+            "sandbox entry program is hidden by the temporary-directory policy: {}",
+            entry.display()
+        ));
+    }
+    Ok(())
 }
 
 fn alternate_procfs_masks() -> Result<Vec<Mask>, String> {
@@ -459,6 +637,7 @@ fn alternate_procfs_masks() -> Result<Vec<Mask>, String> {
             masks.push(Mask {
                 path: mountpoint,
                 kind: MaskKind::Unreadable,
+                directory: true,
             });
         }
     }
@@ -539,14 +718,25 @@ fn mask_already_enforced(mask: &Mask) -> bool {
     if metadata.dev() == parent_metadata.dev() || !mount_is_read_only(&mask.path) {
         return false;
     }
-    match (metadata.is_dir(), mask.kind) {
-        (false, MaskKind::EmptyReadable) => metadata.len() == 0,
-        (false, MaskKind::Unreadable) => metadata.permissions().mode() & 0o444 == 0,
-        (true, MaskKind::EmptyReadable) => {
-            fs::read_dir(&mask.path).is_ok_and(|mut entries| entries.next().is_none())
+    let inherited_kind = if metadata.is_dir() {
+        if fs::read_dir(&mask.path).is_err() {
+            Some(MaskKind::Unreadable)
+        } else if fs::read_dir(&mask.path).is_ok_and(|mut entries| entries.next().is_none()) {
+            Some(MaskKind::EmptyReadable)
+        } else {
+            None
         }
-        (true, MaskKind::Unreadable) => fs::read_dir(&mask.path).is_err(),
-    }
+    } else if metadata.permissions().mode() & 0o444 == 0 {
+        Some(MaskKind::Unreadable)
+    } else if metadata.len() == 0 {
+        Some(MaskKind::EmptyReadable)
+    } else {
+        None
+    };
+    matches!(
+        (inherited_kind, mask.kind),
+        (Some(MaskKind::Unreadable), _) | (Some(MaskKind::EmptyReadable), MaskKind::EmptyReadable)
+    )
 }
 
 fn mount_is_read_only(path: &Path) -> bool {
@@ -559,6 +749,21 @@ fn mount_is_read_only(path: &Path) -> bool {
     }
     let stat = unsafe { stat.assume_init() };
     stat.f_flag & libc::ST_RDONLY != 0
+}
+
+fn cap_inherited_read_only(plan: &mut [linux_grants::MountGrant]) {
+    cap_inherited_read_only_with(plan, mount_is_read_only);
+}
+
+fn cap_inherited_read_only_with(
+    plan: &mut [linux_grants::MountGrant],
+    is_read_only: impl Fn(&Path) -> bool,
+) {
+    for grant in plan {
+        if grant.access == MountAccess::ReadWrite && is_read_only(&grant.path) {
+            grant.access = MountAccess::ReadOnly;
+        }
+    }
 }
 
 fn exact_rule_root(pattern: &str) -> Option<PathBuf> {
@@ -746,28 +951,40 @@ fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
     command
 }
 
-fn pre_create(path: &Path) {
-    if !path.exists() {
-        let _ = fs::create_dir_all(path);
-    }
+fn target_path(policy: &SandboxPolicy) -> Option<OsString> {
+    target_path_with(policy, std::env::var_os("PATH"))
 }
 
-fn resolve_program(program: &OsStr, child_cwd: Option<&Path>) -> Option<PathBuf> {
+fn target_path_with(policy: &SandboxPolicy, ambient: Option<OsString>) -> Option<OsString> {
+    if policy.env.enforce {
+        return policy.env.constructed.get("PATH").map(OsString::from);
+    }
+    Some(ambient.unwrap_or_else(|| OsString::from("/usr/bin:/bin")))
+}
+
+fn resolve_program(program: &OsStr, child_cwd: &Path, path: Option<&OsStr>) -> Option<PathBuf> {
     let p = Path::new(program);
-    if p.is_absolute() {
-        return p.exists().then(|| p.to_path_buf());
+    if p.is_absolute() || p.components().count() > 1 {
+        let candidate = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            child_cwd.join(p)
+        };
+        return executable(&candidate)
+            .then(|| fs::canonicalize(candidate).ok())
+            .flatten();
     }
-    if p.components().count() > 1 {
-        let base = child_cwd
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())?;
-        let resolved = canonicalize_including_nonexistent(&base.join(p));
-        return resolved.exists().then_some(resolved);
-    }
-    let path = std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(p))
-        .find(|candidate| executable(candidate))
+    std::env::split_paths(path?).find_map(|dir| {
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            child_cwd.join(dir)
+        };
+        let candidate = dir.join(p);
+        executable(&candidate)
+            .then(|| fs::canonicalize(candidate).ok())
+            .flatten()
+    })
 }
 
 #[cfg(test)]
@@ -816,6 +1033,7 @@ mod tests {
             vec![Mask {
                 path: project.join(".env"),
                 kind: MaskKind::EmptyReadable,
+                directory: false,
             }]
         );
     }
@@ -840,6 +1058,133 @@ mod tests {
     }
 
     #[test]
+    fn explicit_dotenv_deny_is_unreadable_not_an_empty_readable_default() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let denied = project.join(".env");
+        fs::write(&denied, "SECRET").unwrap();
+        let p = policy(
+            root.path(),
+            json!({"fs": ["...", "./", format!("!{}", denied.display())]}),
+        );
+        let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
+        assert_eq!(masks.len(), 1);
+        assert_eq!(masks[0].kind, MaskKind::Unreadable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn logical_dotenv_symlink_is_masked_and_alias_convergence_keeps_unreadable() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let target = project.join("shared-secret");
+        fs::write(&target, "SECRET").unwrap();
+        symlink(&target, project.join(".env")).unwrap();
+
+        let default_policy = policy(root.path(), json!({"fs": ["...", "./"]}));
+        let masks = collect_masks(&default_policy, std::slice::from_ref(&project)).unwrap();
+        assert_eq!(masks.len(), 1);
+        assert_eq!(masks[0].path, fs::canonicalize(&target).unwrap());
+        assert_eq!(masks[0].kind, MaskKind::EmptyReadable);
+
+        let explicit = policy(
+            root.path(),
+            json!({"fs": ["...", "./", format!("!{}", target.display())]}),
+        );
+        let masks = collect_masks(&explicit, std::slice::from_ref(&project)).unwrap();
+        assert_eq!(masks.len(), 1);
+        assert_eq!(masks[0].path, fs::canonicalize(&target).unwrap());
+        assert_eq!(masks[0].kind, MaskKind::Unreadable);
+    }
+
+    #[test]
+    fn deny_search_roots_are_strict_and_exact_absence_is_skipped() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let p = policy(root.path(), json!({"fs": ["...", "./"]}));
+        let missing = project.join("missing-root");
+        let error = collect_masks(&p, &[missing]).unwrap_err();
+        assert!(error.contains("deny-search root"), "{error}");
+
+        let exact_missing = project.join("absent-policy.json");
+        let p = policy(
+            root.path(),
+            json!({"fs": [format!("!{}", exact_missing.display())]}),
+        );
+        assert!(collect_masks(&p, &[]).unwrap().is_empty());
+        assert!(!exact_missing.exists());
+    }
+
+    #[test]
+    fn mask_merge_is_stable_and_unreadable_wins_alias_convergence() {
+        let path = PathBuf::from("/same");
+        let masks = merge_masks(vec![
+            Mask {
+                path: path.clone(),
+                kind: MaskKind::EmptyReadable,
+                directory: false,
+            },
+            Mask {
+                path: PathBuf::from("/z"),
+                kind: MaskKind::EmptyReadable,
+                directory: false,
+            },
+            Mask {
+                path: path.clone(),
+                kind: MaskKind::Unreadable,
+                directory: false,
+            },
+        ]);
+        assert_eq!(masks[0].path, path);
+        assert_eq!(masks[0].kind, MaskKind::Unreadable);
+        assert_eq!(masks[1].path, PathBuf::from("/z"));
+    }
+
+    #[test]
+    fn denied_directory_with_later_allowed_child_is_rejected() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let denied = project.join("denied");
+        let child = denied.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let p = policy(
+            root.path(),
+            json!({"fs": [
+                "...",
+                format!("!{}", denied.display()),
+                child.to_string_lossy().to_string()
+            ]}),
+        );
+        let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
+        let plan = linux_grants::compile_mount_plan(&p).unwrap();
+        let error = validate_masks_against_mount_plan(&p, &masks, &plan).unwrap_err();
+        assert!(error.contains("later allowed mount"), "{error}");
+    }
+
+    #[test]
+    fn denied_subtree_with_exact_directory_allow_is_rejected() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let denied = project.join("denied");
+        fs::create_dir_all(&denied).unwrap();
+        let p = policy(
+            root.path(),
+            json!({"fs": [
+                "...",
+                format!("!{}/**", denied.display()),
+                denied.to_string_lossy().to_string()
+            ]}),
+        );
+        let error = collect_masks(&p, std::slice::from_ref(&project)).unwrap_err();
+        assert!(error.contains("exact directory allow"), "{error}");
+    }
+
+    #[test]
     fn direct_sandbox_config_glob_is_unreadable_without_recursive_scan() {
         let root = tempdir().unwrap();
         let project = root.path().join("project");
@@ -856,6 +1201,7 @@ mod tests {
             vec![Mask {
                 path: project.join("tool.sandbox.json"),
                 kind: MaskKind::Unreadable,
+                directory: false,
             }]
         );
     }
@@ -880,5 +1226,86 @@ mod tests {
             unescape_mountinfo_path(r"/tmp/with\040space\134slash").unwrap(),
             OsString::from("/tmp/with space\\slash")
         );
+    }
+
+    #[test]
+    fn inherited_read_only_mount_caps_a_writable_request() {
+        let mut plan = vec![linux_grants::MountGrant {
+            path: PathBuf::from("/inherited/read-only"),
+            access: MountAccess::ReadWrite,
+        }];
+        cap_inherited_read_only_with(&mut plan, |_| true);
+        assert_eq!(plan[0].access, MountAccess::ReadOnly);
+    }
+
+    #[test]
+    fn entry_resolution_uses_target_path_and_relative_entries_use_child_cwd() {
+        let root = tempdir().unwrap();
+        let cwd = root.path().join("project");
+        let bin = cwd.join("target-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let tool = bin.join("tool");
+        fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut enforced = SandboxPolicy::default();
+        enforced.env.enforce = true;
+        enforced
+            .env
+            .constructed
+            .insert("PATH".to_string(), "target-bin".to_string());
+        assert_eq!(
+            target_path_with(&enforced, Some(OsString::from("/wrong"))),
+            Some(OsString::from("target-bin"))
+        );
+        assert_eq!(
+            resolve_program(OsStr::new("tool"), &cwd, target_path(&enforced).as_deref()),
+            Some(fs::canonicalize(&tool).unwrap())
+        );
+
+        let inherited = SandboxPolicy::default();
+        assert_eq!(
+            target_path_with(&inherited, Some(OsString::from("/ambient"))),
+            Some(OsString::from("/ambient"))
+        );
+
+        let mut missing = enforced.clone();
+        missing.env.constructed.remove("PATH");
+        assert_eq!(
+            target_path_with(&missing, Some(OsString::from("/ambient"))),
+            None
+        );
+        assert_eq!(resolve_program(OsStr::new("tool"), &cwd, None), None);
+
+        let direct = cwd.join("direct");
+        fs::write(&direct, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&direct, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut empty = enforced;
+        empty
+            .env
+            .constructed
+            .insert("PATH".to_string(), String::new());
+        assert_eq!(target_path(&empty), Some(OsString::new()));
+        assert_eq!(
+            resolve_program(OsStr::new("direct"), &cwd, target_path(&empty).as_deref()),
+            Some(fs::canonicalize(&direct).unwrap())
+        );
+    }
+
+    #[test]
+    fn entry_hidden_by_final_mask_or_tmp_view_is_rejected() {
+        let entry = PathBuf::from("/tmp/project/tool");
+        let mask = Mask {
+            path: entry.clone(),
+            kind: MaskKind::Unreadable,
+            directory: false,
+        };
+        assert!(validate_entry_visibility(&entry, TmpMode::Shared, &[mask], &[]).is_err());
+        assert!(validate_entry_visibility(&entry, TmpMode::Deny, &[], &[]).is_err());
+        let grant = linux_grants::MountGrant {
+            path: PathBuf::from("/tmp/project"),
+            access: MountAccess::ReadOnly,
+        };
+        assert!(validate_entry_visibility(&entry, TmpMode::Deny, &[], &[grant]).is_ok());
     }
 }

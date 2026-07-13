@@ -67,14 +67,12 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// The rootless twins (`.env*`) mirror each band for a depth-0 match; canonical
 /// candidates are absolute, so `**/…` is the form that bites.
 ///
-/// SINGLE SOURCE OF TRUTH — the union is re-exported as `crate::compiler::ENV_DENY_GLOBS`
-/// and consumed by `linux_grants::is_builtin_env_glob` (the generous-`**` system-dir
-/// seeding skips exactly these builtin denies) + the write-view drop, so it never drifts.
+/// The test-only union below guards that the two bands never drift.
 pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &["**/.env*", ".env*"];
 pub(crate) const ENV_DENY_SUBTREE_GLOBS: &[&str] = &["**/.env*/**", ".env*/**"];
 /// The union — the drift-guard the Linux grant derivation recognizes as builtin. Gated to
 /// its consumer's cfg (linux/test) so a macOS/Windows non-test build doesn't warn unused.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 pub(crate) const ENV_DENY_GLOBS: &[&str] = &["**/.env*", "**/.env*/**", ".env*", ".env*/**"];
 
 /// Secret name-word tokens matched as a case-insensitive SUBSTRING anywhere in a

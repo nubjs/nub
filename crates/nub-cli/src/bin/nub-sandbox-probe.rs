@@ -47,8 +47,8 @@ fn arg(args: &[String], i: usize) -> &str {
     args.get(i).map(String::as_str).unwrap_or("")
 }
 
-/// Open-for-read IS the read-permission gate on all three backends (Landlock /
-/// Seatbelt / AppContainer deny at `open`), so a successful open = allowed. The
+/// Open-for-read is the read-permission gate on all three backends, so a successful
+/// open means allowed. The
 /// one-byte read confirms a usable descriptor; an empty file (0 bytes) still counts.
 fn do_read(path: &str) -> bool {
     match std::fs::File::open(path) {

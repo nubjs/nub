@@ -1,14 +1,12 @@
 # nub-sandbox — known limitations
 
-> **Linux Bubblewrap transition.** The active Linux backend now uses a private
-> mount/PID/network view. Older Landlock/seccomp sections below describe the baseline
-> being replaced and are not claims about the active backend. The current Linux bounds
-> are: unprivileged user namespaces must be usable; `CLOSE_RANGE_CLOEXEC` requires Linux
-> 5.11; UID 0 is rejected because capability-free nested sandboxing cannot be preserved;
-> per-host proxy bridging is not wired yet and therefore fails safe to no network;
-> denied globs are expanded only across caller-supplied workspace/package roots at
-> startup; pre-existing hardlink aliases remain readable; and separately writable bind
-> roots create `EXDEV` boundaries for raw cross-root `rename`/`link` calls.
+> **Linux Bubblewrap backend.** Linux uses an unmodified stock Bubblewrap executable
+> to construct a private mount/PID/network view. Current bounds: unprivileged user
+> namespaces must be usable; `CLOSE_RANGE_CLOEXEC` requires Linux 5.11; UID 0 is
+> rejected pending a capability-based probe; per-host proxy bridging is not wired and
+> therefore fails safe to no network; denied globs are expanded only across declared
+> project/workspace/package roots at startup; and pre-existing hardlink aliases remain
+> an open research item.
 
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
@@ -16,15 +14,14 @@ policy reaches (a per-host net policy with no proxy → coarse deny; per-host Wi
 without elevation → a fail-CLOSED `Degradation` error, never a silent coarse-degrade) is
 surfaced via `Degradation`. The **within-axis over-grant**
 residuals below are a different class — documented here, NOT signalled: hardlink-to-secret,
-the `/etc` no-deny-carve edge, derive→open TOCTOU, bind-mounted procfs, the macOS
-floating-name move-block shapes, Linux `ConnectTcp` at `ptrace_scope≥2`, and NAT64/6to4.
+derive→mount TOCTOU, the macOS floating-name move-block shapes, and NAT64/6to4.
 This file is the durable "what's-not-covered" record the final PR and the build-jail thread
 depend on.
 
 Two kinds of residual appear here:
 
-- **Engine residuals** — a bound the OS primitive itself imposes (Landlock has no
-  address filter; an inheritable Windows allow-ACE defeats a nested deny). The engine
+- **Engine residuals** — a bound the OS primitive itself imposes (for example, an
+  inheritable Windows allow-ACE defeats a nested deny). The engine
   reports these and does not claim them closed.
 - **Launcher-handoff items** — the engine constructs the child's confinement correctly,
   but a complete guarantee needs the *launcher* (the future build-jail/embedder that
@@ -76,52 +73,12 @@ address. Three halves:
   network-specific NAT64 `/96` is not), and partial coverage would misrepresent the
   guarantee. Same `is_blocked_egress_ip` seam if the threat model later wants it.
 
-### Linux per-host egress: the port-scoped `ConnectTcp` residual (CLOSED via seccomp user_notify)
+### Linux per-host egress is not yet wired
 
-Under a per-host allowlist the child is forced through the loopback egress proxy, and
-Landlock ABI-v4 `ConnectTcp` pins `connect()` to the proxy's port. Landlock has **no
-address filter**, so historically a direct TCP `connect()` to an *external* host on the
-(random, per-run) proxy port bypassed the per-host gate. **This is now closed** by a
-seccomp `USER_NOTIF` supervisor over `connect()`: a filter installed in the child's
-pre_exec (raw `seccomp(…, NEW_LISTENER)`, unprivileged under `no_new_privs`) routes every
-`connect()` to a notification the nub PARENT services — it reads the child's destination
-sockaddr from `/proc/<pid>/mem`, re-validates the notif id, and permits ONLY
-`127.0.0.1:<proxy_port>`. On ALLOW the supervisor OWNS the connect (connects a fresh socket
-to the FIXED proxy address and injects it over the child's fd via `NOTIF_ADDFD` SETFD),
-which makes the allow path TOCTOU-robust against a post-read sockaddr rewrite; DENY returns
-EPERM. Two sibling bypasses of the same gate are closed alongside it, both pure seccomp
-(so they hold even where the supervisor is skipped, below): (1) the **TCP-Fast-Open**
-variant — `sendto`/`sendmsg(MSG_FASTOPEN)`, which initiates a connection *without*
-`connect()` — via a `MSG_FASTOPEN`-flag deny on the send syscalls; (2) **non-TCP stream
-protocols** — Landlock's `ConnectTcp` governs only `IPPROTO_TCP`, so an `AF_INET`
-`SOCK_STREAM` socket over SCTP (`IPPROTO_SCTP`) or MPTCP (`IPPROTO_MPTCP`, which is
-default-on and transparently falls back to TCP against any server) would pass the type
-narrowing yet dodge the hook — closed by narrowing the `socket()` protocol (arg2) to TCP
-only. See `backend/linux_connect_notify.rs` and `backend/linux.rs` (`build_seccomp`).
-
-- **Residual bound (narrow, hardened-host only):** the supervisor reads the child's memory
-  via `/proc/<pid>/mem`, which yama `ptrace_scope >= 2` forbids even for a parent. On such
-  hosts the supervisor is skipped (`viable()` is false) and the pre-existing port-scoped
-  `ConnectTcp` residual remains — per-host egress keeps working rather than breaking. The
-  default `ptrace_scope <= 1` closes it fully. No capability-floor change: `USER_NOTIF`
-  (≥5.0) and `NOTIF_ADDFD` (≥5.9) sit below the Landlock-v4 (6.7) kernel floor proxy mode
-  already requires. macOS (address+port carve) and Windows have no equivalent gap.
-- **The same supervisor pattern extends to inbound** (`listen()`/`bind()` — the bind-less
-  `listen()` autobind residual below): a future hardening slot, not wired now.
-
-### Linux bind-less `listen()` autobind (P3, strictly dominated)
-
-Landlock hooks `bind()` and `connect()` but has **no `socket_listen` hook**, so a
-`listen()` issued WITHOUT an explicit `bind()` still autobinds a random ephemeral port —
-an inbound listener remains creatable on an unpredictable port. Explicit `bind()`
-(including `bind(port = 0)`) IS denied and VM-proven; only the bind-less path is open.
-
-- **Why it adds nothing:** strictly weaker than the `ConnectTcp` residual above — the
-  port is unpredictable, the listener needs inbound reachability, and the child has no
-  outbound channel to signal the drawn port under net-deny. It confers no capability the
-  port-scoped connect edge doesn't already bound; noted only so it is not later mistaken
-  for full inbound closure. Same full-close as above (seccomp `user_notify` / netns).
-  Documented in `backend/linux.rs` (`apply_landlock`).
+The stock-Bubblewrap backend currently provides full network or a private network
+namespace for deny/restricted policy. The authenticated proxy/control plane required for
+per-host egress is deferred. A per-host policy therefore tightens to no network and is
+reported as `net-per-host`; it never silently widens to unrestricted egress.
 
 ### Windows per-host egress + MITM: opt-in elevated "strict Windows" tier
 
@@ -288,75 +245,29 @@ responsibility, not an engine mechanism nub supplies.
   from the cross-layer tighten-only *intersection* (CLI > user-global > project), which IS
   enforced — a lower-trust layer may only add restrictions, never widen.
 
-## Filesystem (bounded P2s, threat-model-mitigated)
+## Filesystem
 
-Each is documented in code at the site noted; none is silently mis-reported.
-
-- **Linux `/etc` granted wholesale for the loader — a user deny now carves it (FIXED).**
-  Build toolchains read `/etc` (resolv.conf, CA bundles), so the essential-read set grants
-  `/etc` (and `/usr`,`/lib`,…) whole for the dynamic loader. Previously an explicit
-  `!/etc/secret` was NOT honored — the wholesale essential-base grant overrode the carve,
-  so a secret under `/etc` stayed readable despite the deny (VM-verified: `!/etc/**`,
-  `!/etc/secret`, `!/etc/*`, `!/etc` all failed to deny). Now the essential-base grant
-  CARVES an essential dir when a user deny reaches inside it (an implicit-allow walk
-  excluding the denied path), so the deny is honored while the loader's own files stay
-  readable — VM-verified surgical (wholesale vs carved `/etc` differ in exactly the denied
-  file; `ld.so.cache`, `ca-certificates.crt`, dynamic linking all unaffected). Residual:
-  with NO user deny, `/etc` is still granted whole (a secret under it is readable — user
-  secrets do not live in `/etc`, and net-deny blocks exfil). (`backend/linux.rs` +
-  `backend/linux_grants.rs` `essential_dir_needs_carve`/`derive_essential_dir_carve`.)
-- **Linux dangerous-write-root over-grant — CLOSED (cross-OS consistency, F2).** A write
-  grant that resolves to a dangerous top-level root (`/`, `/etc`, `/usr`, `/home`, …) was
-  HONORED on Linux while macOS/Windows dropped it, so a `..`-collapsed surface path
-  (`<proj>/../../..` → `/`, collapsed lexically at compile time) or an explicit `/`/`**`
-  rw grant became a filesystem-wide write hole. The Linux grant derivation now drops such
-  a grant fail-safe, mirroring the macOS/Windows `is_dangerous_write_root` guard. VM-verified:
-  pre-fix an explicit `/` rw and a `..`-collapse-to-`/` both wrote OUTSIDE the project;
-  post-fix both are denied while a legitimate scoped rw grant (`./writable`) still writes,
-  and a co-listed scoped grant survives alongside the dropped dangerous root. Reads are
-  exempt (a generous `(subpath "/")` read is a legitimate posture); `/tmp` is excluded (the
-  legitimate broad temp target). (`backend/linux_grants.rs` `is_dangerous_write_root` /
-  `derive_write_grants`; `tests/linux_enforcement.rs` `dangerous_write_root_grant_is_dropped`.)
-- **Linux write-target for a not-yet-existing file becomes a DIRECTORY (not a parent
-  widen).** Landlock cannot grant write to a file that does not yet exist, so the backend
-  pre-creates the target and grants that subtree. VM-verified: `pre_create` uses
-  `create_dir_all`, so the requested leaf is created as a DIRECTORY and its subtree is
-  write-granted — the containing PARENT dir is NOT widened (a sibling in the parent stays
-  denied). Consequences: (a) a tool expecting to write a FILE at that path finds a
-  directory; (b) the over-grant is the target-as-dir subtree, bounded within the named
-  path. Fix: none clean at the Landlock layer. (`backend/linux.rs` `pre_create`.)
-- **Linux hardlink-to-secret (VM-verified).** A pre-existing same-uid hardlink to a
-  secret, at a name the deny never targets, is granted `ReadFile`, which grants read on
-  the SHARED inode — so the path-denied secret is reachable through the alias (and, since
-  the grant is inode-keyed, the denied path itself then leaks too). VM-verified: with the
-  alias present the secret leaks; without it the path-deny holds. Bounded: requires a
-  hardlink created *outside* the sandbox beforehand. Fix: none clean at the Landlock layer
-  (the inode was legitimately named twice). Regression test:
-  `hardlink_to_denied_secret_leaks_via_alias`.
+- **Linux mount plans are current-path and literal.** Non-whole wildcard allows,
+  `/proc`/`/sys`/`/dev` allows, unsafe broad write roots, and missing literal sources are
+  rejected before launch. Missing deny targets are skipped. The engine never creates a
+  host path to satisfy policy.
+- **Linux deny-glob inventory is bounded.** Only current cwd, the nearest project,
+  the containing workspace, and declared current-existing package roots are enumerated.
+  Enumeration is immediate per root; project contents are never recursively scanned.
+- **Linux hardlink-to-secret remains under separate review.** A pre-existing hardlink
+  alias is another pathname to the same object and may remain readable when only the
+  denied pathname is masked. The production rule is deliberately deferred to the
+  dedicated hardlink decision rather than guessed here.
+- **Linux derive→mount TOCTOU.** Mount and mask planning canonicalizes paths before
+  Bubblewrap installs the view. A same-uid local process that can replace a path during
+  setup could shift a target. This is bounded to a local race and is not silently claimed
+  closed.
+- **Alternate procfs mounts are masked.** Existing procfs mountpoints outside `/proc`
+  are discovered from `/proc/self/mountinfo` and layered unreadable in the child view.
 - **macOS hardlink-to-secret (host-verified).** Seatbelt file-read rules are path-pattern
-  based, like Landlock's, so the same alias holds: a pre-existing same-uid hardlink to a
-  secret, at a name the deny never targets, is readable, and reading it reads the SHARED
-  inode — so the path-denied secret leaks through the alias. Host-verified: with the alias
-  present the secret leaks; without it the path-deny holds. Unlike Landlock's inode-keyed
-  grant, Seatbelt matches the PATH, so the denied path itself stays denied — only the alias
-  name reads. Bounded: requires a hardlink created *outside* the sandbox beforehand. Fix:
-  none clean at the Seatbelt layer (the inode was legitimately named twice). Regression
-  test: `hardlink_to_denied_secret_leaks_via_alias` (`tests/macos_enforcement.rs`).
-- **Linux derive→open TOCTOU.** Grant derivation canonicalizes paths on the host, then
-  the kernel enforces at `open()` later; a path swapped in between could shift a target.
-  Bounded: a same-uid local race within the confined tree. (Inherent to a canonicalize-
-  then-enforce split; not deterministically reproducible.)
-- **Linux bind-mounted procfs at a non-standard path.** The `/proc` filter (the
-  ascendant-env boundary) is path-literal (`starts_with("/proc")`), so a procfs
-  bind-mounted at a non-standard path is not filtered and IS grantable when a covering fs
-  grant reaches it — VM-verified: under `{fs:["/tmp"]}` a `/proc` bind-mounted at
-  `/tmp/altproc` was readable (`/tmp/altproc/version` leaked). The environ-secret read
-  itself (`/proc/<pid>/environ`) is additionally gated by `ptrace_may_access`, which held
-  in every VM topology tried (ancestor non-dumpable / sibling non-attachable under
-  `ptrace_scope>=1`), so the specific ascendant-env leak was not reproduced — but the
-  filter bypass is real. Bounded: requires the ability to bind-mount procfs (prior
-  privilege/setup) before entering the sandbox. Fix: a mount namespace, or resolve the
-  mount type rather than the path prefix.
+  based, so a pre-existing same-uid hardlink to a secret at an un-denied name remains
+  readable. The denied path itself stays denied. Regression test:
+  `hardlink_to_denied_secret_leaks_via_alias` (`tests/macos_enforcement.rs`).
 - **macOS move/rename secret-relocation — literal AND regex directory-pinning denies CLOSED.**
   A write-deny keyed to a secret's path is defeatable by renaming a container dir out from
   under the deny. Both deny shapes now pin the container: a literal `(subpath)` deny pins its
@@ -390,14 +301,14 @@ Each is documented in code at the site noted; none is silently mis-reported.
   ACE on the grant defeats a nested deny — the same AAP-class trap). So a `.env*` file
   under a granted dir stays readable on Windows, and the backend HONESTLY reports it via
   the `fs-read-deny` `Degradation` (`deny_shadows_grant` in `backend/windows.rs`), never
-  silently. macOS (Seatbelt deny-regex) and Linux (allow-only enumeration carve) enforce
+  silently. macOS (Seatbelt deny-regex) and Linux (Bubblewrap masks) enforce
   it fully. Fix (future): the DACL inheritance-break mechanism (a PROTECTED DACL on the
   confined root that strips inherited ACEs and re-grants only intended principals) can
   carve the deny and remove this degradation — not yet built. Consequence today: every
   read-granting Windows policy reports reduced mode for the `.env*` carve while the
   read-CONFINE itself (deny everything outside the allow-set) is fully enforced.
 
-### Private tmp (`<tmp>: "rw"`/`false`) — macOS ENFORCED; Linux/Windows REPORTED, not enforced
+### Private tmp (`<tmp>: "rw"`/`false`) — macOS/Linux enforced; Windows reported
 
 `<tmp>` is a SENTINEL that always denotes a specially-provisioned per-run PRIVATE dir — never
 the shared system tmp — so its value is a plain fs permission on that dir. `{ "fs": { "<tmp>":
@@ -418,73 +329,17 @@ shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp
     the backend otherwise write-grants for the Apple toolchain (`xcrun_db`), so a from-source
     native compile that needs it fails under `Private`/`Deny`. You cannot both hide the shared
     tmp and keep a grant into it; the mode is opt-in, and a native-build run stays on Shared.
-- **Linux / Windows — REPORTED, not enforced (fail-safe).** The child's temp env is pointed at
-  the fresh dir best-effort, but the shared-tmp is NOT yet hidden, so the backend reports a
-  `tmp-private`/`tmp-deny` `Degradation` (reduced mode) rather than silently running the child
-  on the visible shared tmp. Fix is a MAINTAINER-DECISION follow-up: Linux needs a Landlock
-  allow-only carve that excludes the shared tmp from the read/write grants (allow-only has no
-  deny primitive); Windows needs a decision on redirecting `TEMP`/`TMP` while satisfying the
-  OS-essential temp floor the child needs to start. Wired through the IR + reported so the axis
-  is honest today; enforcement lands per-OS later. (`backend/{linux,windows}.rs` `apply`,
-  `backend::tmp_lost_axis`.)
+- **Linux — ENFORCED.** `Private` bind-mounts the fresh per-run directory at `/tmp`;
+  `Deny` installs an empty traverse-only tmpfs and remounts it read-only after any
+  explicitly allowed descendant mounts are layered.
+- **Windows — REPORTED, not enforced (fail-safe).** The child's temp env is pointed at
+  the fresh dir best-effort, but the shared temp path is not yet hidden, so the backend
+  reports `tmp-private`/`tmp-deny` instead of silently claiming the axis.
 
-## Linux syscall-boundary hardening (defense-in-depth, seccomp/`/dev`)
+## Linux namespace and syscall boundary
 
-Three former residuals now closed at the syscall boundary so FS/env confinement no longer
-leans on a host-policy chain. All VM-verified (kernel 6.17, Ubuntu 24.04) with differential
-probes carrying positive + negative controls; each has a committed regression test.
-
-- **Linux userns + mount family — the FS-escape now denied in seccomp (O1, CLOSED).** An
-  unprivileged user namespace (`unshare`/`clone(CLONE_NEWUSER)`) plus a bind-mount under a
-  granted dir is the strongest FS-confinement escape. It was previously blocked only by a
-  CHAIN — Landlock never grants `/proc` (so a `uid_map` write fails), the kernel refuses a
-  mount from an unmapped userns, and host AppArmor — none of which the engine owns. The
-  seccomp filter now denies `unshare`, `mount`, `umount2`, `pivot_root`, `move_mount`,
-  `fsopen`, `fsmount`, `fsconfig`, `fspick`, `mount_setattr`, `open_tree` wholesale (the
-  classic + new-mount-API surface), and `clone` when its flags register carries
-  `CLONE_NEWUSER`/`CLONE_NEWNS`. `clone3` hides its flags behind a pointer (seccomp cannot
-  inspect them), so a companion filter returns `ENOSYS` for `clone3` — glibc then falls back
-  to the flag-filtered `clone` (the same technique Docker's default profile uses), closing the
-  `clone3(CLONE_NEWUSER)` path without breaking threading. VM-verified: `unshare` and
-  `clone(CLONE_NEWUSER)` return EPERM and `clone3` ENOSYS under sandbox, while the same
-  unprivileged forms succeed unsandboxed; normal `sh`/`python3`/PTY children AND a full Node
-  run (Worker-thread pthread_create → clone3→ENOSYS→clone fallback, plus crypto) are
-  unaffected. Two bounded trade-offs, both accepted: (a) a binary that calls `clone3`
-  DIRECTLY and does not fall back on ENOSYS loses threading — rare, and the same trade Docker's
-  default profile makes; (b) a nub-sandboxed child that builds its OWN user+mount-namespace
-  sandbox (an `unshare`/`bwrap`-based tool, a browser/Electron zygote) is denied under ANY
-  sandboxing axis, env-scrub-only included — the intended defense-in-depth posture, not a bug.
-  Residual: a procfs *bind-mounted before* entering the sandbox is still not created via these
-  syscalls (that residual is the "bind-mounted procfs at a non-standard path" item above); O1
-  removes the in-sandbox mount-creation route to it.
-  (`backend/linux.rs` `build_seccomp`/`clone_userns_newns_rules`/`build_clone3_enosys`;
-  `seccomp_denies_userns_and_mount_family`.)
-- **Linux pidfd fd-theft — `pidfd_getfd` now denied (O2, CLOSED).** `pidfd_getfd` steals an
-  open fd out of another process (needs `PTRACE_MODE_ATTACH`; no legitimate confined use) and
-  was not in the denylist. It is now denied in seccomp. `pidfd_open` stays ALLOWED — it has
-  legitimate self-child uses (`pidfd_send_signal`/`waitid`) and cannot itself steal an fd.
-  VM-verified: under sandbox `pidfd_open` still returns a valid fd while `pidfd_getfd` is
-  EPERM; both go through unsandboxed. (`backend/linux.rs` `build_seccomp`;
-  `seccomp_denies_pidfd_getfd_keeps_pidfd_open`.)
-- **Linux `/dev` narrowed to a least-privilege allowlist (O3, CLOSED).** A read-confined
-  child was granted wholesale `/dev` rw. It is now granted per-node:
-  `null`/`zero`/`full`/`random`/`urandom`/`tty` (standard sink/source/entropy/tty) plus
-  `ptmx` + the `pts` subtree (PTYs). Everything else under `/dev` — and listing `/dev`
-  itself — is denied and fails CLOSED (EACCES, visible), not leaked. Landlock does no
-  directory-traverse check, so a leaf grant suffices to open the node by path without
-  granting the `/dev` directory. VM-verified: `/dev/null` + `/dev/urandom` and a full PTY
-  (ptmx → pts slave) work under read-confine, `python3` and a full Node run still spawn, and a
-  non-allowlisted node (`/dev/shm` write) is denied while relaxed-fs admits it. Bounded
-  trade-offs of the narrowing (each fails CLOSED + visible, never a silent leak): a
-  read-confined child can no longer open `/dev/shm` (POSIX shared memory —
-  `multiprocessing.shared_memory`, some native addons), `/dev/fd` / `/dev/stdin|out|err`
-  (these symlink into `/proc/self/fd`, deliberately ungranted — breaks `bash <(…)` process
-  substitution and `fs.read('/dev/stdin')`), or any device node outside the set; add the node
-  to the policy allow-set if a workload needs it. The granted `/dev/pts` subtree is rw, so a
-  child can reach ANOTHER same-uid process's PTY (Landlock + DAC do not scope by owner within
-  the subtree); on kernels older than the `dev.tty.legacy_tiocsti=0` default this permits
-  TIOCSTI keystroke injection into that terminal — bounded to same-uid, which already shares a
-  trust domain. Residual: the env-scrub-only relaxed path (fs deliberately relaxed) still
-  grants `/dev` among the top-levels — narrowing it there would contradict "fs relaxed"; the
-  allowlist governs the read-confine path where `/dev` is explicitly granted.
-  (`backend/linux.rs` `DEV_ALLOWLIST`; `dev_allowlist_permits_pty_and_nodes_denies_rest`.)
+Stock Bubblewrap creates fresh user, PID, IPC, device, and process-filesystem views.
+Network-deny policy also creates a private network namespace and installs a small seccomp
+filter for socket families that cross that namespace plus `io_uring_setup`. Unrestricted
+network policy installs no network filter. Nested namespace inheritance and conditional
+keyring hardening are separate unfinished work and are not claimed here.

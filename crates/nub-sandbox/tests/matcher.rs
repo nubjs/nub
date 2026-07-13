@@ -195,8 +195,8 @@ fn net_wildcard_matches_any_depth_but_not_sibling_domains() {
 
 #[test]
 fn net_wildcard_holds_on_enforced_proxy_decider() {
-    // The per-host allow/deny verdict on BOTH the Linux (Landlock+proxy) and macOS
-    // (Seatbelt+proxy) enforced paths flows through the egress proxy's StaticDecider,
+    // The per-host allow/deny verdict on both enforced proxy paths flows through the
+    // egress proxy's StaticDecider,
     // which delegates to the SAME HostMatcher. Assert the wildcard contract survives
     // that delegation end-to-end — a match/no-match set proven at the enforcement seam,
     // not only the matcher unit.

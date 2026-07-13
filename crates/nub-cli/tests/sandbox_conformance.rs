@@ -12,7 +12,7 @@
 //! subtree) and env (scrub incl. the npm_config auth-not-leaked case) are proven
 //! black-box on ALL THREE OSes here. The deeper per-host proxy filtering and the
 //! Linux seccomp syscall denials (socket/ptrace/vmread) live in the per-backend
-//! enforcement tests (`{macos,linux,windows}_enforcement`, `{macos,linux}_proxy`)
+//! enforcement tests (`{macos,linux,windows}_enforcement`, `macos_proxy`)
 //! that run alongside this in the conformance CI workflow — the probe is black-box
 //! and cannot introspect a proxy's SNI decision or a raw syscall the way those do.
 //! net here is the coarse egress-deny axis, which IS uniform across the backends.
@@ -81,35 +81,45 @@ fn probe_bin() -> PathBuf {
     sibling_bin("nub-sandbox-probe")
 }
 
-// ── Landlock gate (Linux only) ────────────────────────────────────────────────────
+// ── Bubblewrap behavior gate (Linux only) ─────────────────────────────────────────
 
-/// Linux fs/net enforcement rides Landlock+seccomp; on a kernel without Landlock the
-/// deny cases would silently "pass" (nothing enforced), so SKIP them there — unless
-/// `NUB_SANDBOX_REQUIRE_LANDLOCK=1` (the conformance-CI real-kernel leg), where a
-/// missing Landlock must fail loudly rather than read as green. env fixtures are
-/// parent-side construction (kernel-independent) and never gated.
+/// Exercise the stock Bubblewrap operations the backend needs, rather than trusting
+/// a version string. The required CI leg turns an unavailable primitive into a hard
+/// failure; local hosts may skip kernel-enforcement assertions.
 #[cfg(target_os = "linux")]
 fn linux_enforceable() -> bool {
-    const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
-    let abi = unsafe {
-        libc::syscall(
-            SYS_LANDLOCK_CREATE_RULESET,
-            std::ptr::null::<libc::c_void>(),
-            0usize,
-            1u64,
-        )
-    };
-    if abi >= 2 {
+    let available = Command::new("bwrap")
+        .args([
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-user",
+            "--cap-drop",
+            "ALL",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--",
+            "true",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    if available {
         return true;
     }
     let required = matches!(
-        std::env::var("NUB_SANDBOX_REQUIRE_LANDLOCK").as_deref(),
+        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     );
     assert!(
         !required,
-        "NUB_SANDBOX_REQUIRE_LANDLOCK set but no Landlock ABI>=2 — fs/net conformance \
-         cannot be proven on this kernel (real-kernel gate)"
+        "NUB_SANDBOX_REQUIRE_BWRAP set but the required stock Bubblewrap mount/user/PID \
+         operations could not run"
     );
     false
 }
@@ -197,6 +207,21 @@ impl Tree {
         for d in [&proj, &home, &outside] {
             std::fs::create_dir_all(d).unwrap();
         }
+        // Security inventory never creates policy sources and never recursively scans
+        // the project. Materialize the write root and declare the nested package so
+        // each case supplies the same bounded current-path roots the real frontend uses.
+        std::fs::create_dir_all(proj.join("writable")).unwrap();
+        std::fs::create_dir_all(proj.join("nested")).unwrap();
+        let manifest = if cfg!(target_os = "linux") {
+            br#"{"workspaces":["nested"]}"#.as_slice()
+        } else {
+            // Linux deliberately rejects recursive workspace inventory. Other
+            // backends do not consume that inventory, so this must not preflight-
+            // fail otherwise-valid native enforcement.
+            br#"{"workspaces":["nested/**"]}"#.as_slice()
+        };
+        std::fs::write(proj.join("package.json"), manifest).unwrap();
+        std::fs::write(proj.join("nested/package.json"), b"{}").unwrap();
         // On Windows the sandboxed child must ALSO be C:\-traversable — the sibling probe
         // under the CI checkout is unreachable from a LowBox token — so copy it into the
         // C:\-rooted tree, in a DEDICATED `bin/` subdir. The Windows backend auto-grants
@@ -353,7 +378,7 @@ fn drive(name: &str) {
         if !applies_here(case) {
             continue;
         }
-        // Skip fs/net enforcement assertions on a Landlock-less Linux (env is fine).
+        // Skip fs/net enforcement assertions when stock Bubblewrap cannot run.
         if !fs_net_enforceable && case.probe != "env" {
             continue;
         }

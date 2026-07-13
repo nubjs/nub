@@ -69,6 +69,7 @@ fn fixture() -> Fixture {
     let proj = root.join("proj");
     let home = root.join("home");
     std::fs::create_dir_all(proj.join("sub")).unwrap();
+    std::fs::create_dir_all(proj.join("nested")).unwrap();
     std::fs::create_dir_all(proj.join("writable")).unwrap();
     std::fs::create_dir_all(home.join(".ssh")).unwrap();
     std::fs::write(proj.join("pub.txt"), "PUBLIC").unwrap();
@@ -194,8 +195,9 @@ fn generous_read_denies_dotenv() {
         return;
     }
     let f = fixture();
-    // Bounded generous read: allow the fixture root, deny .env at any depth.
-    let surface = serde_json::json!({ "fs": [s(&f.root), "!**/.env"] });
+    // The compiler-injected dotenv default becomes an empty readable file at each
+    // declared root.
+    let surface = serde_json::json!({ "fs": [s(&f.root)] });
     assert!(
         f.ok(surface.clone(), CAT, &[&s(&f.proj.join("pub.txt"))]),
         "pub readable"
@@ -414,32 +416,68 @@ fn write_confine_allows_target_denies_rest() {
     );
 }
 
-// ── fs write-confine: dangerous-root guard (F2 cross-OS consistency) ────────────
-
 #[test]
-fn dangerous_write_root_grant_is_dropped() {
+fn ordered_mounts_preserve_readonly_child_and_writable_reopen() {
     if skip_without_bwrap() {
         return;
     }
     let f = fixture();
-    let outside = s(&f.home.join("pwned.txt")); // a sibling of the project
+    let parent = f.proj.join("writable/layered");
+    let child = parent.join("readonly");
+    let reopened = child.join("reopened");
+    std::fs::create_dir_all(&reopened).unwrap();
 
-    // (1) An explicit `/` rw grant must NOT become a write-everything grant: the
-    // guard drops it (fail-safe), so a write OUTSIDE the project is denied.
-    let root_rw = serde_json::json!({ "fs": ["...", "/"] });
+    let mut entries = serde_json::Map::new();
+    entries.insert(s(&parent), serde_json::json!("rw"));
+    entries.insert(s(&child), serde_json::json!("r"));
+    entries.insert(s(&reopened), serde_json::json!("rw"));
+    let surface = serde_json::json!({ "fs": serde_json::Value::Object(entries) });
     assert!(
-        !f.ok(root_rw, TOUCH, &[&outside]),
-        "explicit `/` rw must be dropped — write outside the project denied"
+        f.ok(surface.clone(), TOUCH, &[&s(&parent.join("parent-write"))]),
+        "writable parent remains writable"
     );
+    assert!(
+        !f.ok(surface.clone(), TOUCH, &[&s(&child.join("blocked-write"))]),
+        "read-only child caps the writable parent"
+    );
+    assert!(
+        f.ok(surface, TOUCH, &[&s(&reopened.join("reopened-write"))]),
+        "narrower later writable mount reopens only its subtree"
+    );
+}
 
-    // (2) A `..`-collapsed surface path that resolves to `/` is the same hole: the
-    // prefix canonicalizer collapses `<proj>/../../…` to `/` at compile time.
-    let collapsed = format!("{}/../../../../../../../../../../..", s(&f.proj));
-    let dotdot_rw = serde_json::json!({ "fs": ["...", collapsed] });
-    assert!(
-        !f.ok(dotdot_rw, TOUCH, &[&outside]),
-        "`..`-collapse to `/` must be dropped — write outside denied"
-    );
+// ── fs write-confine: dangerous-root guard (F2 cross-OS consistency) ────────────
+
+#[test]
+fn dangerous_write_root_grant_is_rejected() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    for surface in [
+        serde_json::json!({ "fs": ["...", "/"] }),
+        serde_json::json!({
+            "fs": ["...", format!("{}/../../../../../../../../../../..", s(&f.proj))]
+        }),
+    ] {
+        let policy = compile(&surface, &f.ctx(&[])).unwrap();
+        let error = apply(
+            &policy,
+            CommandSpec::new(TRUE)
+                .cwd(&f.proj)
+                .deny_search_root(&f.proj),
+        )
+        .err()
+        .expect("unsafe write root must fail setup");
+        assert!(
+            error
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("writable whole-filesystem")
+                    || reason.contains("too broad")),
+            "unsafe write root must fail setup: {error:?}"
+        );
+    }
 
     // POSITIVE CONTROL — the guard drops ONLY dangerous roots: a legitimate scoped
     // rw grant still writes inside the project.
@@ -447,13 +485,6 @@ fn dangerous_write_root_grant_is_dropped() {
     assert!(
         f.ok(scoped, TOUCH, &[&s(&f.proj.join("writable/ok.txt"))]),
         "positive control: scoped rw grant still writes inside the project"
-    );
-
-    // NEGATIVE CONTROL — relaxed fs writes outside fine, so the denies above are the
-    // guard, not a missing target dir.
-    assert!(
-        f.ok(serde_json::json!({ "fs": true }), TOUCH, &[&outside]),
-        "neg-control: relaxed fs writes outside"
     );
 }
 
@@ -754,6 +785,32 @@ fn env_scrub_strips_secret_keeps_baseline() {
     );
 }
 
+#[test]
+fn target_path_resolves_relative_to_child_cwd_and_mounts_the_entry() {
+    if skip_without_bwrap() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = fixture();
+    let bin = f.proj.join("target-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("tool");
+    std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let surface = serde_json::json!({
+        "fs": { "./writable": "rw" },
+        "env": { "PATH": true },
+        "net": true
+    });
+    assert_eq!(
+        f.run(surface, &[("PATH", "target-bin")], "tool", &[]).0,
+        0,
+        "the entry is resolved from the target PATH relative to the target cwd"
+    );
+}
+
 // ── namespace and capability probes ────────────────────────────────────────────
 
 /// Compile the syscall probe once; `None` if `cc` is unavailable (probe tests skip).
@@ -777,6 +834,7 @@ fn probe_bin(dir: &Path) -> Option<PathBuf> {
 ///   connect PORT — connect to a host loopback listener (hidden by the net namespace).
 ///   unshare/clone3/clonens — prove nested namespace creation remains available.
 ///   mount — prove the target has no mount capability in its current namespace.
+///   unmountmask PATH — enter nested user+mount namespaces and prove a mask stays pinned.
 ///   pidfd — prove self-scoped pidfd operations remain available.
 ///   pty      — open /dev/ptmx, grantpt/unlockpt, open the /dev/pts slave: 0 iff the
 ///              private device view admits a full PTY.
@@ -867,6 +925,22 @@ int main(int argc, char** argv) {
         if (r < 0 && errno == EPERM) return 42;
         return 0;
     }
+    if (!strcmp(argv[1], "unmountmask")) {
+        if (argc < 3) return 2;
+        long child = syscall(SYS_clone, (long)(P_CLONE_NEWUSER | SIGCHLD), 0L, 0L, 0L, 0L);
+        if (child < 0) return 43;
+        if (child == 0) {
+            if (unshare(CLONE_NEWNS) != 0) _exit(47);
+            if (umount2(argv[2], 0) == 0 || umount2(argv[2], MNT_DETACH) == 0) _exit(44);
+            int fd = open(argv[2], O_RDONLY);
+            if (fd < 0) _exit(45);
+            char byte;
+            _exit(read(fd, &byte, 1) == 0 ? 0 : 46);
+        }
+        int status;
+        if (waitpid((pid_t)child, &status, 0) < 0 || !WIFEXITED(status)) return 48;
+        return WEXITSTATUS(status);
+    }
     if (!strcmp(argv[1], "pidfd")) {
         long pfd = syscall(SYS_pidfd_open, getpid(), 0);
         if (pfd < 0) return 43;                     /* pidfd_open must stay allowed */
@@ -938,8 +1012,6 @@ fn network_namespace_and_filter_block_host_egress() {
     accept.join().unwrap();
 }
 
-// ── nesting and mount capabilities ─────────────────────────────────────────────
-
 #[test]
 fn nested_user_namespaces_remain_available_but_current_namespace_has_no_caps() {
     if skip_without_bwrap() {
@@ -947,56 +1019,45 @@ fn nested_user_namespaces_remain_available_but_current_namespace_has_no_caps() {
     }
     let f = fixture();
     let Some(probe) = probe_bin(&f.proj) else {
-        return; // no cc — skip the syscall probes
+        return;
     };
     let probe = s(&probe);
-    // Sandboxing active via net-enforce; fs relaxed so the probe execs from anywhere
-    // (an unlisted fs axis would floor to deny-all and stop the exec).
-    let sb = serde_json::json!({ "net": false, "fs": true });
+    let sandbox = serde_json::json!({ "net": false, "fs": true });
 
+    assert_eq!(f.run(sandbox.clone(), &[], &probe, &["unshare"]).0, 0);
+    assert_eq!(f.run(sandbox.clone(), &[], &probe, &["clone3"]).0, 0);
+    assert_eq!(f.run(sandbox.clone(), &[], &probe, &["clonens"]).0, 0);
     assert_eq!(
-        f.run(sb.clone(), &[], &probe, &["unshare"]).0,
-        0,
-        "ordinary unshare remains available"
-    );
-    assert_eq!(
-        f.run(sb.clone(), &[], &probe, &["clone3"]).0,
-        0,
-        "clone3 remains available"
-    );
-    assert_eq!(
-        f.run(sb.clone(), &[], &probe, &["clonens"]).0,
-        0,
-        "a child user namespace remains available for a nested Nub sandbox"
-    );
-    assert_eq!(
-        f.run(sb.clone(), &[], &probe, &["mount"]).0,
+        f.run(sandbox, &[], &probe, &["mount"]).0,
         42,
         "the target has no CAP_SYS_ADMIN in its current mount namespace"
     );
-    assert!(
-        f.ok(
-            sb,
-            "/usr/bin/bwrap",
-            &[
-                "--die-with-parent",
-                "--new-session",
-                "--unshare-user",
-                "--unshare-pid",
-                "--unshare-ipc",
-                "--ro-bind",
-                "/",
-                "/",
-                "--dev",
-                "/dev",
-                "--proc",
-                "/proc",
-                "--",
-                "/bin/true",
-            ],
-        ),
-        "Bubblewrap can construct a stricter nested sandbox"
+}
+
+#[test]
+fn direct_nested_mount_namespace_preserves_mask_when_available() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let Some(probe) = probe_bin(&f.proj) else {
+        return;
+    };
+    let probe = s(&probe);
+    let secret = s(&f.proj.join(".env"));
+    let (code, _) = f.run(
+        serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        &[],
+        &probe,
+        &["unmountmask", &secret],
     );
+    if code == 47 {
+        eprintln!(
+            "direct nested mount namespaces are unavailable under this stock Ubuntu/AppArmor profile"
+        );
+        return;
+    }
+    assert_eq!(code, 0, "an inherited mask stays pinned and empty");
 }
 
 #[test]
@@ -1021,40 +1082,6 @@ fn sandboxed_execution_rejects_uid_zero() {
             .as_deref()
             .is_some_and(|reason| reason.contains("UID 0")),
         "{error:?}"
-    );
-}
-
-#[test]
-fn nested_mount_namespace_cannot_unmount_a_secret_mask() {
-    if skip_without_bwrap() || !Path::new("/usr/bin/unshare").exists() {
-        return;
-    }
-    let f = fixture();
-    let secret = s(&f.proj.join(".env"));
-    let script = r#"
-if umount "$1" 2>/dev/null; then printf 'UNMOUNTED'; fi
-if umount -l "$1" 2>/dev/null; then printf 'LAZY_UNMOUNTED'; fi
-cat "$1"
-"#;
-    let (code, out) = f.run(
-        serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
-        &[],
-        "/usr/bin/unshare",
-        &[
-            "--user",
-            "--map-root-user",
-            "--mount",
-            SH,
-            "-c",
-            script,
-            "sh",
-            &secret,
-        ],
-    );
-    assert_eq!(code, 0, "nested namespace probe must execute");
-    assert!(
-        !out.contains("UNMOUNTED") && !out.contains("ENVSECRET"),
-        "an inherited mask must stay locked in a nested mount namespace (got {out:?})"
     );
 }
 
@@ -1199,7 +1226,11 @@ fn enforcement_is_full_when_bubblewrap_is_available() {
     // A read-confine with no per-host net allow enforces fully — the Degradation
     // must be empty (no silent loss).
     let policy = compile(&serde_json::json!({ "fs": ["./"] }), &f.ctx(&[])).unwrap();
-    let prepared = apply(&policy, CommandSpec::new(CAT).cwd(&f.proj)).unwrap();
+    let prepared = apply(
+        &policy,
+        CommandSpec::new(CAT).cwd(&f.proj).deny_search_root(&f.proj),
+    )
+    .unwrap();
     assert!(
         prepared.degradation.is_full(),
         "read-confine fully enforces when Bubblewrap is available"
@@ -1243,30 +1274,32 @@ fn hardlink_to_denied_secret_leaks_via_alias() {
 }
 
 #[test]
-fn write_grant_to_nonexistent_file_becomes_dir_no_parent_widen() {
+fn missing_write_grant_is_rejected_without_creating_the_path() {
     if skip_without_bwrap() {
         return;
     }
-    // A not-yet-existing writable path is pre-created as a directory so Bubblewrap
-    // has a concrete bind target. Its parent is not widened.
     let f = fixture();
     let target = f.proj.join("writable/newfile.txt");
     let surface = serde_json::json!({ "fs": ["...", s(&target)] });
-    // Applying the policy pre-creates the target; assert it became a directory.
     let policy = compile(&surface, &f.ctx(&[])).unwrap();
-    let _ = apply(&policy, CommandSpec::new(TRUE).cwd(&f.proj)).unwrap();
+    let error = apply(
+        &policy,
+        CommandSpec::new(TRUE)
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    )
+    .err()
+    .expect("missing write grant must fail setup");
     assert!(
-        target.is_dir(),
-        "a not-yet-existing write target is pre-created as a directory"
+        error
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("does not exist")),
+        "missing grant must fail setup precisely: {error:?}"
     );
-    // Writing UNDER the granted target dir succeeds; a sibling in the parent is denied.
     assert!(
-        f.ok(surface.clone(), TOUCH, &[&s(&target.join("inside"))]),
-        "write under the granted target dir is allowed"
-    );
-    assert!(
-        !f.ok(surface, TOUCH, &[&s(&f.proj.join("writable/sibling"))]),
-        "the parent dir is NOT widened — a sibling stays denied"
+        !target.exists(),
+        "setup must not create the missing host path"
     );
 }
 

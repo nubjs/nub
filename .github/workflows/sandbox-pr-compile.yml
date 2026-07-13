@@ -1,5 +1,5 @@
 # Cheap PRE-MERGE cross-OS COMPILE gate for the sandbox crate. The full
-# sandbox-conformance matrix (real Seatbelt/Landlock/AppContainer enforcement,
+# sandbox-conformance matrix (real Seatbelt/Bubblewrap/AppContainer enforcement,
 # sandbox-conformance.yml) only runs on `push` to sandbox-primitives — i.e.
 # POST-merge — so a cfg(windows)-only (or cfg(linux)/cfg(macos)-only) compile
 # break can land on a PR and slip through ~N merges before the next branch push

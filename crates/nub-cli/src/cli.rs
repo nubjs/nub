@@ -2657,8 +2657,15 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
 
     let spec = nub_sandbox::CommandSpec::new(program)
         .args(prog_args.iter().map(String::as_str))
-        .cwd(&cwd)
-        .deny_search_root(&cwd);
+        .cwd(&cwd);
+    #[cfg(target_os = "linux")]
+    let spec = if nub_sandbox::requires_deny_search_roots(&policy) {
+        let roots = nub_core::workspace::sandbox_inventory::discover(&cwd)
+            .map_err(|e| anyhow::anyhow!("inventorying sandbox deny-search roots: {e}"))?;
+        spec.deny_search_roots(roots)
+    } else {
+        spec
+    };
     let prepared = nub_sandbox::apply(&policy, spec).map_err(|d| {
         // Surface the fail-closed reason cleanly (e.g. Windows per-host/MITM needing
         // elevation), not a Debug dump — this is the user-facing error.

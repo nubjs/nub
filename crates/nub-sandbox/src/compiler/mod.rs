@@ -18,12 +18,6 @@ mod preset;
 mod resolve;
 pub mod scope;
 
-/// The default `.env*` deny globs, re-exported as the single source of truth the
-/// Linux grant derivation shares (no drift between the injected deny set and the
-/// system-dir fast-path's builtin-deny recognition). Gated to the `linux_grants`
-/// consumer's cfg so a macOS/Windows build that never references it doesn't warn.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) use defaults::ENV_DENY_GLOBS;
 pub use resolve::{CommandRunner, ShellRunner};
 
 use crate::matcher::path::Homes;

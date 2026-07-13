@@ -250,9 +250,53 @@ impl PathMatcher {
     pub fn decide(&self, candidate: &Path) -> FsDecision {
         let canon = canonicalize_including_nonexistent(candidate);
         let norm = normalize_slashes(&canon.to_string_lossy());
+        self.decide_normalized(&norm, None)
+    }
+
+    /// Evaluate one logical directory-entry spelling and its resolved object as a
+    /// single candidate. A deny matching either spelling wins at its authored
+    /// position, which prevents a symlink named `.env` from losing its logical-name
+    /// deny when canonicalization follows the link.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn decide_logical_or_resolved(&self, logical: &Path, resolved: &Path) -> FsDecision {
+        let logical = normalize_slashes(&logical.to_string_lossy());
+        let resolved = normalize_slashes(&resolved.to_string_lossy());
+        self.decide_normalized(&logical, Some(&resolved))
+    }
+
+    /// Last matching effect among entries before `end`. Used by the Linux mask
+    /// planner to distinguish an explicit user deny from compiler-injected dotenv
+    /// defaults without adding backend provenance to the public policy IR.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn last_matching_effect_before(
+        &self,
+        logical: &Path,
+        resolved: &Path,
+        end: usize,
+    ) -> Option<Effect> {
+        let logical = normalize_slashes(&logical.to_string_lossy());
+        let resolved = normalize_slashes(&resolved.to_string_lossy());
+        self.entries
+            .iter()
+            .take(end)
+            .filter(|(glob, _, _)| glob.is_match(&logical) || glob.is_match(&resolved))
+            .map(|(_, effect, _)| *effect)
+            .next_back()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn matches_deny_entry(&self, logical: &Path, resolved: &Path) -> bool {
+        let logical = normalize_slashes(&logical.to_string_lossy());
+        let resolved = normalize_slashes(&resolved.to_string_lossy());
+        self.entries.iter().any(|(glob, effect, _)| {
+            *effect == Effect::Deny && (glob.is_match(&logical) || glob.is_match(&resolved))
+        })
+    }
+
+    fn decide_normalized(&self, first: &str, second: Option<&str>) -> FsDecision {
         let mut winner: Option<(Effect, FsAccess)> = None;
         for (glob, effect, access) in &self.entries {
-            if glob.is_match(&norm) {
+            if glob.is_match(first) || second.is_some_and(|path| glob.is_match(path)) {
                 winner = Some((*effect, *access));
             }
         }
