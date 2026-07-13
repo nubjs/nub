@@ -7,7 +7,7 @@
 //! loss in [`Degradation`] so the caller surfaces a WARNING; a hard fail-closed
 //! (a required axis unenforceable) is `Err(Degradation)`.
 //!
-//! BACKEND STATUS: macOS (Seatbelt, [`macos`]), Linux (Landlock+seccomp,
+//! BACKEND STATUS: macOS (Seatbelt, [`macos`]), Linux (Bubblewrap mount/PID views,
 //! [`linux`]), and Windows (AppContainer LowBox, [`windows`]) are wired; any other
 //! OS runs the env-scrub-only [`generic_apply`] skeleton — which constructs the
 //! child env and reports fs/net as NOT enforced. Every path preserves the API shape
@@ -15,7 +15,7 @@
 //! seam slots into.
 //!
 //! LAUNCH SEAM: a backend either configures [`Prepared::command`] for the caller to
-//! spawn (macOS wraps `sandbox-exec`; Linux installs a `pre_exec` hook; the skeleton
+//! spawn (macOS wraps `sandbox-exec`; Linux wraps Bubblewrap; the skeleton
 //! just scrubs env) OR — Windows only — OWNS the whole spawn lifecycle, because an
 //! AppContainer launch cannot be a pre-built `std::process::Command`: it needs a
 //! custom `CreateProcessW` with `STARTUPINFOEX`/`SECURITY_CAPABILITIES`, a Job Object
@@ -36,11 +36,6 @@ mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
 
-// The unprivileged seccomp USER_NOTIF supervisor that closes the port-scoped
-// ConnectTcp residual in NetMode::Proxy (Linux-only mechanism; see the module doc).
-#[cfg(target_os = "linux")]
-mod linux_connect_notify;
-
 // The Windows AppContainer backend. Compiled on Windows (its real consumer) and
 // under `test` on any host — so its OS-agnostic IR→plan derivation (grant carve,
 // capability selection, dangerous-root guard) is unit-tested on the macOS dev host
@@ -48,7 +43,7 @@ mod linux_connect_notify;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 
-// The OS-agnostic Landlock grant derivation. Compiled on Linux (its real consumer)
+// The OS-agnostic Linux mount/grant derivation. Compiled on Linux (its real consumer)
 // and under `test` on any host — so its security-critical carve logic is unit-tested
 // on the macOS dev host over tempfile trees, without a kernel.
 #[cfg(any(target_os = "linux", test))]
@@ -93,6 +88,10 @@ pub struct CommandSpec {
     pub args: Vec<std::ffi::OsString>,
     /// Working directory for the child, if the caller pins one.
     pub cwd: Option<std::path::PathBuf>,
+    /// Directories whose existing immediate children may be materialized for
+    /// bounded deny globs such as `.env*` and `*.sandbox.json`. The frontend adds
+    /// the workspace root and each package root; no backend recursively walks them.
+    pub deny_search_roots: Vec<std::path::PathBuf>,
 }
 
 impl CommandSpec {
@@ -101,6 +100,7 @@ impl CommandSpec {
             program: program.into(),
             args: Vec::new(),
             cwd: None,
+            deny_search_roots: Vec::new(),
         }
     }
     pub fn arg(mut self, a: impl Into<std::ffi::OsString>) -> Self {
@@ -117,6 +117,19 @@ impl CommandSpec {
     }
     pub fn cwd(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(dir.into());
+        self
+    }
+    pub fn deny_search_root(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.deny_search_roots.push(dir.into());
+        self
+    }
+    pub fn deny_search_roots<I, P>(mut self, dirs: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<std::path::PathBuf>,
+    {
+        self.deny_search_roots
+            .extend(dirs.into_iter().map(Into::into));
         self
     }
 }
@@ -138,13 +151,11 @@ pub struct Prepared {
     /// value stops the listener. `None` when net is unconfined or coarse-deny (no
     /// proxy needed). Set by [`apply`], not the per-OS backends.
     pub(crate) proxy: Option<EgressProxy>,
-    /// Linux per-host connect-notify supervisor (closes the ConnectTcp port residual).
-    /// When `Some`, [`Prepared::status`] spawns `command`, receives the child's seccomp
-    /// listener fd, and runs the supervisor for the child's lifetime instead of a plain
-    /// `command.status()`. Set only by [`linux::apply`] in `NetMode::Proxy` (and only
-    /// where the supervisor is viable); `None` otherwise.
+    /// Files whose descriptors Bubblewrap consumes while constructing the mount
+    /// view (currently the empty regular-file source used for exact deny masks).
+    /// Keeping them here guarantees they remain open until `command` is spawned.
     #[cfg(target_os = "linux")]
-    pub(crate) connect_notify: Option<linux_connect_notify::ConnectNotify>,
+    pub(crate) _inherited_files: Vec<std::fs::File>,
     /// Windows AppContainer launch plan — the backend owns spawn+wait+teardown when
     /// this is `Some`. Absent (or on other OSes) → [`Prepared::status`] spawns
     /// `command`.
@@ -170,12 +181,6 @@ impl Prepared {
         #[cfg(target_os = "windows")]
         if let Some(launch) = self.launch.take() {
             return launch.run();
-        }
-        // Linux per-host: run the connect-notify supervisor over the child's lifetime.
-        // `self` (holding `self.proxy`) outlives this call, so the egress proxy stays up.
-        #[cfg(target_os = "linux")]
-        if let Some(cn) = self.connect_notify.take() {
-            return cn.run(&mut self.command);
         }
         self.command.status()
     }
@@ -292,8 +297,8 @@ fn set_proxy_env(command: &mut Command, port: u16, token: Option<&str>) {
 /// enforces env, the child env is cleared and set to exactly the policy's
 /// constructed map. Each OS backend additionally hardens a scrubbed env so the
 /// withheld secret can't be recovered from a co-resident same-uid process: Linux via
-/// seccomp (`ptrace`/`process_vm_readv` deny — memory scrape) + Landlock (`/proc`
-/// close — the `/proc/<ppid>/environ` file); macOS via the Seatbelt env-read closure
+/// a fresh PID namespace and procfs (the host parent is not visible); macOS via the
+/// Seatbelt env-read closure
 /// (`deny process-info*` + self-restore, which shuts the `KERN_PROCARGS2` argv/env
 /// read). Because the macOS closure lives in the SBPL profile, a policy that withholds
 /// a secret is wrapped even when fs/net are relaxed (see `macos::needs_wrap`). fs/net
@@ -431,6 +436,8 @@ fn generic_apply(
         command,
         degradation,
         proxy: None,
+        #[cfg(target_os = "linux")]
+        _inherited_files: Vec::new(),
         _private_tmp: None,
     })
 }
@@ -443,6 +450,7 @@ fn generic_apply(
 /// unenforced private/deny-tmp for a real one (fail-safe honesty, never silent).
 /// macOS ENFORCES the mode in its SBPL, so it never consults this (hence the cfg).
 #[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn tmp_lost_axis(policy: &SandboxPolicy) -> Option<&'static str> {
     match policy.fs.tmp {
         crate::policy::TmpMode::Shared => None,

@@ -1,7 +1,7 @@
 # nub-sandbox — the build-jail embedder seam
 
 `nub-sandbox` is the frontend-less OS-enforcement engine (macOS Seatbelt / Linux
-Landlock+seccomp / Windows AppContainer). It has no command grammar, reads no config
+Bubblewrap / Windows AppContainer). It has no command grammar, reads no config
 file, and carries no package-manager type. A *front-end* — the build-jail
 (default-on dep-script confinement), a runtime profile (`nub <file>` / `nub run`), a
 `nub sandbox -- <cmd>` launcher, a programmatic spawn API — is the **embedder**: it
@@ -75,7 +75,10 @@ let surface = json!({ "fs": ["./src"], "net": ["registry.npmjs.org"] });
 let policy = compile(&surface, &ctx)?;
 
 // 3. Apply the policy to a command → a launch-ready child (Boundary B).
-let spec = CommandSpec::new("node").arg("build.js").cwd(project_root);
+let spec = CommandSpec::new("node")
+    .arg("build.js")
+    .cwd(&project_root)
+    .deny_search_roots(workspace_and_package_roots);
 let prepared = apply(&policy, spec)
     .map_err(|deg| /* required axis unenforceable — fail closed, do NOT spawn */ deg)?;
 
@@ -94,8 +97,7 @@ Two rules the sketch encodes:
   less), not a hard stop.
 - **Always launch via `Prepared::status(self)`**, never `prepared.command.status()`.
   On Windows the AppContainer launcher owns the whole spawn/wait/ACL-teardown
-  lifecycle behind `status`; on Linux the per-host connect-notify supervisor runs
-  there; and `status` holds the egress proxy for the child's whole run (dropping
+  lifecycle behind `status`; `status` also holds the egress proxy for the child's whole run (dropping
   `Prepared` shuts the listener). The `command` field is used directly only on the
   mac/linux/skeleton non-Windows path, internally.
 
@@ -119,8 +121,8 @@ request). Every field is `serde`-round-trippable.
 
 | Type | Role |
 | --- | --- |
-| `CommandSpec { program, args, cwd }` | the host-provided command to confine (builder: `CommandSpec::new(prog).arg(..).args(..).cwd(..)`) |
-| `Prepared { command, degradation, .. }` | the launch-ready child; spawn via `Prepared::status`. Also privately owns the egress proxy / Linux connect-notify supervisor / Windows launch plan |
+| `CommandSpec { program, args, cwd, deny_search_roots }` | the host-provided command plus the bounded workspace/package roots whose existing direct children are checked for deny globs. No recursive discovery occurs in the engine. |
+| `Prepared { command, degradation, .. }` | the launch-ready child; spawn via `Prepared::status`. Also privately owns Bubblewrap data descriptors, the egress proxy, and the Windows launch plan. |
 | `Degradation { lost, reason }` | which axes degraded (`warning()` → the one-line user string). `Err(Degradation)` = hard fail-closed; a non-empty `lost` on `Ok` = a surfaced partial |
 | `CompileError` / `CompileWarning` | the `compile` failure / non-fatal-smell channels — each carries the surface path it occurred at |
 
@@ -191,7 +193,8 @@ the thing that keeps this seam clean:
 
 - **No PM dependency.** `Cargo.toml` declares no `nub-cli` / `nub-core` /
   `vendor/aube` dependency (only serde/serde_json/tracing/globset/regex/ipnet and the
-  per-OS libc/landlock/seccompiler/windows-sys).
+  per-OS libc/seccompiler/windows-sys dependencies, plus SHA-256 verification for the
+  bundled Linux helper).
 - **No PM type on the public API.** Everything the seam moves is plain data owned
   here: a `serde_json::Value` in, the `SandboxPolicy` IR through,
   `Prepared`/`Degradation`/`CompileError`/`CompileWarning` out. No aube/PM type

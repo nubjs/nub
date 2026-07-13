@@ -136,6 +136,7 @@ pub(crate) fn derive_read_grants(policy: &SandboxPolicy) -> DerivedGrants {
 
 /// Derive the WRITE grants (read+write subtrees) plus a `write_partial` honesty
 /// flag. The caller pre-creates a not-yet-existing write root before installing.
+#[cfg(test)]
 pub(crate) fn derive_write_grants(policy: &SandboxPolicy) -> (Vec<Grant>, bool) {
     if !write_confines(&policy.fs) {
         return (Vec::new(), false);
@@ -168,6 +169,59 @@ pub(crate) fn derive_write_grants(policy: &SandboxPolicy) -> (Vec<Grant>, bool) 
     (out, partial)
 }
 
+/// Derive Bubblewrap's coarse writable bind roots. Unlike Landlock's allow-only
+/// rules, a mount plan can bind the authored writable root once and then layer exact
+/// deny mounts over it. This keeps setup independent of the number of project files.
+pub(crate) fn derive_write_mount_grants(policy: &SandboxPolicy) -> (Vec<Grant>, bool) {
+    if !write_confines(&policy.fs) {
+        return (Vec::new(), false);
+    }
+
+    let mut grants = Vec::new();
+    let mut partial = false;
+    for rule in &policy.fs.rules.entries {
+        if rule.effect != Effect::Allow || rule.access != FsAccess::ReadWrite {
+            continue;
+        }
+        let pattern = rule.matcher.as_str();
+        if pattern.is_empty() || matches!(pattern, "**" | "/**" | "/") {
+            continue;
+        }
+        let trimmed = pattern.strip_suffix("/**").unwrap_or(pattern);
+        if trimmed.is_empty() || trimmed.contains(['*', '?', '[', '{']) {
+            partial = true;
+            continue;
+        }
+        let path = PathBuf::from(trimmed);
+        if is_dangerous_write_root(&path) {
+            continue;
+        }
+        grants.push(Grant {
+            path,
+            kind: GrantKind::WriteSubtree,
+        });
+    }
+
+    grants.sort_by(|a, b| {
+        a.path
+            .components()
+            .count()
+            .cmp(&b.path.components().count())
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    let mut collapsed: Vec<Grant> = Vec::new();
+    for grant in grants {
+        if collapsed
+            .iter()
+            .any(|parent| grant.path.starts_with(&parent.path))
+        {
+            continue;
+        }
+        collapsed.push(grant);
+    }
+    (collapsed, partial)
+}
+
 /// Whether an explicit USER-authored (non-`.env*`-builtin) deny reaches into the
 /// essential system dir `dir`. The Linux backend grants the essential loader set
 /// (`/usr`,`/etc`,…) WHOLESALE so a dynamically-linked child can exec/link; but an
@@ -175,6 +229,7 @@ pub(crate) fn derive_write_grants(policy: &SandboxPolicy) -> (Vec<Grant>, bool) 
 /// secret placed under `/etc` stays readable despite the user asking to deny it.
 /// Built-in `.env*` globs are excluded: they never target system dirs, and skipping
 /// them keeps the wholesale fast-path for the common no-deny case.
+#[cfg(test)]
 pub(crate) fn essential_dir_needs_carve(policy: &SandboxPolicy, dir: &Path) -> bool {
     View::essential(&policy.fs.rules).has_nonbuiltin_deny_reaching(dir)
 }
@@ -186,6 +241,7 @@ pub(crate) fn essential_dir_needs_carve(policy: &SandboxPolicy, dir: &Path) -> b
 /// loader's files (`/etc/ld.so.cache`, `resolv.conf`, CA bundles) stay readable
 /// while `!/etc/secret` is honored. Budget-capped like [`derive_read_grants`]; on
 /// overflow the remainder is left ungranted (fail-safe) and `read_partial` is set.
+#[cfg(test)]
 pub(crate) fn derive_essential_dir_carve(policy: &SandboxPolicy, dir: &Path) -> DerivedGrants {
     let mut out = DerivedGrants::default();
     let view = View::essential(&policy.fs.rules);
@@ -266,6 +322,7 @@ fn walk_read(dir: &Path, view: &View, out: &mut DerivedGrants, visits: &mut usiz
 /// without also granting the denied sibling, so that narrow corner is left denied
 /// (fail-safe) — existing allowed subtrees/files stay writable. Budget-capped like
 /// the read walk: on overflow the remainder is left ungranted and `partial` is set.
+#[cfg(test)]
 fn walk_write(
     dir: &Path,
     view: &View,
@@ -341,6 +398,7 @@ impl View {
     /// is rename-safe: a carved dir grants only its enumerated children, so renaming
     /// `.env` to a fresh name yields no read grant). A USER-authored `!.env` deny is
     /// NOT builtin and still caps write normally.
+    #[cfg(test)]
     fn write(set: &FsRuleSet) -> Self {
         Self::project_where(
             set,
@@ -358,6 +416,7 @@ impl View {
     /// system dir carves it while the loader keeps the rest. An `Allow` of any access
     /// is readable; a `Deny` denies read (same read projection as [`View::read`], only
     /// the default flips to `Allow`).
+    #[cfg(test)]
     fn essential(set: &FsRuleSet) -> Self {
         Self::project(set, Effect::Allow, |r| r.effect)
     }
@@ -534,6 +593,7 @@ fn is_proc_or_sys(path: &Path) -> bool {
 /// ancestor's env via `/proc/<ppid>/environ`), so even a policy that does NOT
 /// confine fs installs this ruleset: everything readable/writable except `/proc`,
 /// `/sys` — preserving "fs relaxed" while closing the ancestor-env file vector.
+#[cfg(test)]
 pub(crate) fn relaxed_top_levels_except_proc_sys() -> Vec<PathBuf> {
     read_top_levels()
         .into_iter()
@@ -789,6 +849,49 @@ mod tests {
             !write_reachable(&g, &f.proj.join("sub/x")),
             "a nested write-deny must not be write-granted"
         );
+    }
+
+    #[test]
+    fn mount_write_plan_keeps_one_project_bind_and_leaves_denies_to_masks() {
+        let f = fixture();
+        let denied = format!("!{}", f.proj.join("policy.sandbox.json").display());
+        let (grants, partial) = derive_write_mount_grants(
+            &f.compile(serde_json::json!({ "fs": ["...", "./", denied] })),
+        );
+        assert!(!partial);
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].path, f.proj);
+    }
+
+    #[test]
+    fn mount_write_plan_rejects_wildcard_widening() {
+        let f = fixture();
+        let (_grants, partial) = derive_write_mount_grants(
+            &f.compile(serde_json::json!({ "fs": { "./packages/*": "rw" } })),
+        );
+        assert!(
+            partial,
+            "a wildcard write cannot become a parent-directory bind"
+        );
+    }
+
+    #[test]
+    fn mount_write_plan_drops_whole_filesystem_without_partial_failure() {
+        let f = fixture();
+        let policy = f.compile(serde_json::json!({ "fs": ["...", "/"] }));
+        let (grants, partial) = derive_write_mount_grants(&policy);
+        assert!(
+            !partial,
+            "whole-fs spellings should be dropped, not treated as wildcard widening: {:?}",
+            policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .map(|r| (r.matcher.as_str(), r.effect, r.access))
+                .collect::<Vec<_>>()
+        );
+        assert!(grants.is_empty());
     }
 
     #[test]

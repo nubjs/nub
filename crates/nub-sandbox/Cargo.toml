@@ -30,6 +30,7 @@ tracing = { workspace = true }
 globset = "0.4"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
+sha2 = { workspace = true }
 
 # Per-session egress-proxy token: getrandom mints the 256-bit bearer (OS CSPRNG, no
 # userspace-seeded PRNG); base64 decodes the client's HTTP `Proxy-Authorization: Basic`
@@ -58,18 +59,14 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 pem = "3"
 tempfile = "3"
 
-# libc: macOS needs it (confstr scratch-dir lookup in the Seatbelt backend); Linux
-# uses it in the Landlock/seccomp backend (prctl + the raw landlock ABI probe).
+# libc: macOS needs it for confstr scratch-dir lookup; Linux uses it for secure
+# descriptor inheritance and the Bubblewrap launcher boundary.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = { workspace = true }
 
-# Landlock (fs read/write-confine) + seccompiler (net + ptrace-family syscall
-# deny) back the Linux backend. Both are already in the workspace lockfile
-# (transitive via vendor/aube) — no new supply-chain surface. Linux-only: the
-# backend is `#[cfg(target_os = "linux")]`, so the OS-agnostic grant DERIVATION
-# (linux_grants.rs, host-tested) references neither.
+# Bubblewrap installs this classic BPF program only when network confinement is
+# requested. Filesystem confinement remains mount-only and pays no syscall-filter cost.
 [target.'cfg(target_os = "linux")'.dependencies]
-landlock = "0.4"
 seccompiler = "0.5"
 
 # windows-sys backs the Windows AppContainer backend: the LowBox launch

@@ -1,5 +1,15 @@
 # nub-sandbox — known limitations
 
+> **Linux Bubblewrap transition.** The active Linux backend now uses a private
+> mount/PID/network view. Older Landlock/seccomp sections below describe the baseline
+> being replaced and are not claims about the active backend. The current Linux bounds
+> are: unprivileged user namespaces must be usable; `CLOSE_RANGE_CLOEXEC` requires Linux
+> 5.11; UID 0 is rejected because capability-free nested sandboxing cannot be preserved;
+> per-host proxy bridging is not wired yet and therefore fails safe to no network;
+> denied globs are expanded only across caller-supplied workspace/package roots at
+> startup; pre-existing hardlink aliases remain readable; and separately writable bind
+> roots create `EXDEV` boundaries for raw cross-root `rename`/`link` calls.
+
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
 policy reaches (a per-host net policy with no proxy → coarse deny; per-host Windows egress

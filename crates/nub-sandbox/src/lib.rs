@@ -80,7 +80,7 @@
 //! # Backend status
 //!
 //! The compiler + IR + matcher are complete and exhaustively tested. [`apply`]
-//! enforces fs/net/env on macOS (Seatbelt), real-kernel Linux (Landlock + seccomp),
+//! enforces fs/net/env on macOS (Seatbelt), real-kernel Linux (Bubblewrap),
 //! and Windows (AppContainer LowBox), each proven by per-axis enforcement tests with
 //! negative controls; any other OS runs an env-scrub-only skeleton that reports fs/net
 //! as NOT enforced (never silent). The [`conformance`] harness evaluates

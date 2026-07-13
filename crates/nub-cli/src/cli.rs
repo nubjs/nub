@@ -2618,8 +2618,8 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
 /// INTERNAL, UNDOCUMENTED test entry for the `nub-sandbox` engine (design.md
 /// §2.6). Loads a SURFACE `sandbox` block from an explicit file (NOT the project
 /// nub.jsonc), compiles it to a resolved policy, and launches `<program> [args]`
-/// under it via the engine's `apply`. Stage 1: env-scrub only (OS backends land
-/// later); a non-full [`Degradation`] is surfaced to stderr, never silent.
+/// under it via the engine's `apply`. A non-full [`Degradation`] is surfaced to
+/// stderr, never silent.
 ///
 /// The file may be either a bare surface block (`{ "fs": … }`) or a document with
 /// a top-level `"sandbox"` key. Trusted (an explicit user-supplied policy file),
@@ -2655,7 +2655,10 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
         eprintln!("warning: {w}");
     }
 
-    let spec = nub_sandbox::CommandSpec::new(program).args(prog_args.iter().map(String::as_str));
+    let spec = nub_sandbox::CommandSpec::new(program)
+        .args(prog_args.iter().map(String::as_str))
+        .cwd(&cwd)
+        .deny_search_root(&cwd);
     let prepared = nub_sandbox::apply(&policy, spec).map_err(|d| {
         // Surface the fail-closed reason cleanly (e.g. Windows per-host/MITM needing
         // elevation), not a Debug dump — this is the user-facing error.

@@ -1,16 +1,14 @@
-//! Linux Landlock/seccomp backend — REAL enforcement tests.
+//! Linux Bubblewrap backend — REAL enforcement tests.
 //!
 //! Each test compiles a surface policy, applies it, SPAWNS the child under
-//! Landlock/seccomp, and asserts the kernel allowed or denied the action. Every
-//! confinement assertion is paired with a NEGATIVE CONTROL (the axis lifted → the
+//! a private mount/PID/network view, and asserts the kernel allowed or denied the
+//! action. Every confinement assertion is paired with a NEGATIVE CONTROL (the axis lifted → the
 //! same action succeeds) so a pass can't be hollow. Linux-only, and a no-op (skips)
-//! on a kernel without Landlock — CI runs it on `ubuntu-24.04` (kernel 6.x, Landlock
-//! present); the dev host proves it in a Lima/Colima Ubuntu 24.04 VM.
+//! where Bubblewrap cannot create an unprivileged user namespace; the dev host proves
+//! it in a Lima/Colima Ubuntu 24.04 VM.
 //!
-//! Syscall-level axes (net socket-creation, ptrace, process_vm_readv) use a tiny C
-//! probe compiled at runtime with `cc`; the seccomp deny is isolated from the host's
-//! `yama.ptrace_scope` by targeting SELF (yama always permits self, so a lifted
-//! seccomp lets it through — proving the block is ours).
+//! A tiny C probe compiled at runtime with `cc` checks namespace/capability behavior
+//! without depending on shell or language-runtime interpretations of errno.
 #![cfg(target_os = "linux")]
 
 use nub_sandbox::compiler::{CompileCtx, ShellRunner};
@@ -21,37 +19,39 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tempfile::TempDir;
 
-/// Raw Landlock ABI probe (mirrors the backend's) — skip the suite on a kernel that
-/// can't enforce, so a Landlock-less environment reports "ok" rather than red.
-fn landlock_available() -> bool {
-    const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
-    let abi = unsafe {
-        libc::syscall(
-            SYS_LANDLOCK_CREATE_RULESET,
-            std::ptr::null::<libc::c_void>(),
-            0usize,
-            1u64,
-        )
-    };
-    abi >= 2
+fn bwrap_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        ["/usr/bin/bwrap", "/bin/bwrap"].iter().any(|program| {
+            std::process::Command::new(program)
+                .args([
+                    "--die-with-parent",
+                    "--unshare-user",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--",
+                    "/bin/true",
+                ])
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    })
 }
 
-/// Returns true when the caller should SKIP (no Landlock on this kernel). Under
-/// `NUB_SANDBOX_REQUIRE_LANDLOCK=1` — set by the conformance-CI real-kernel leg — a
-/// missing Landlock PANICS instead: a hollow skip must never read as green on the
-/// runner whose whole job is to prove Landlock enforces there.
-fn skip_without_landlock() -> bool {
-    if landlock_available() {
+/// Returns true when the caller should skip. A conformance runner can require the
+/// primitive so an unavailable user namespace never reads as a green hollow skip.
+fn skip_without_bwrap() -> bool {
+    if bwrap_available() {
         return false;
     }
     let required = matches!(
-        std::env::var("NUB_SANDBOX_REQUIRE_LANDLOCK").as_deref(),
+        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     );
     assert!(
         !required,
-        "NUB_SANDBOX_REQUIRE_LANDLOCK set but this kernel exposes no Landlock ABI>=2 — \
-         enforcement cannot be proven here (conformance real-kernel gate)"
+        "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
     );
     true
 }
@@ -118,11 +118,24 @@ impl Fixture {
         let policy = compile(&surface, &self.ctx(env)).expect("compiles");
         let spec = CommandSpec::new(program)
             .args(args.iter().copied())
-            .cwd(&self.proj);
+            .cwd(&self.proj)
+            // These stand in for the workspace root and known package roots the
+            // frontend supplies. The backend never recursively discovers them.
+            .deny_search_roots([
+                self.proj.clone(),
+                self.proj.join("sub"),
+                self.proj.join("nested"),
+            ]);
         let prepared = apply(&policy, spec).expect("apply");
         let mut cmd = prepared.command;
-        cmd.stderr(Stdio::null()).stdin(Stdio::null());
+        cmd.stderr(Stdio::piped()).stdin(Stdio::null());
         let out = cmd.output().expect("spawn");
+        if !out.status.success() && !out.stderr.is_empty() {
+            eprintln!(
+                "sandbox child stderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
         (
             out.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -147,7 +160,7 @@ const TRUE: &str = "/bin/true";
 
 #[test]
 fn read_confine_allows_project_denies_outside() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -177,7 +190,7 @@ fn read_confine_allows_project_denies_outside() {
 
 #[test]
 fn generous_read_denies_dotenv() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -187,14 +200,11 @@ fn generous_read_denies_dotenv() {
         f.ok(surface.clone(), CAT, &[&s(&f.proj.join("pub.txt"))]),
         "pub readable"
     );
-    assert!(
-        !f.ok(surface.clone(), CAT, &[&s(&f.proj.join(".env"))]),
-        ".env denied"
-    );
-    assert!(
-        !f.ok(surface, CAT, &[&s(&f.proj.join("sub/.env"))]),
-        "nested .env denied"
-    );
+    for path in [f.proj.join(".env"), f.proj.join("sub/.env")] {
+        let (code, out) = f.run(surface.clone(), &[], CAT, &[&s(&path)]);
+        assert_eq!(code, 0, "dotenv compatibility mask stays readable");
+        assert!(out.is_empty(), "{} reads as an empty file", s(&path));
+    }
     assert!(
         f.ok(
             serde_json::json!({ "fs": true }),
@@ -205,11 +215,118 @@ fn generous_read_denies_dotenv() {
     );
 }
 
+#[test]
+fn existing_sandbox_config_files_are_unreadable_and_pinned() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let root_policy = f.proj.join("tool.sandbox.json");
+    let package_policy = f.proj.join("nested/package.sandbox.json");
+    std::fs::create_dir_all(package_policy.parent().unwrap()).unwrap();
+    std::fs::write(&root_policy, "ROOTSECRET").unwrap();
+    std::fs::write(&package_policy, "PACKAGESECRET").unwrap();
+    let surface = serde_json::json!({
+        "fs": ["...", "./", "!**/*.sandbox.json"]
+    });
+
+    for path in [&root_policy, &package_policy] {
+        assert!(
+            !f.ok(surface.clone(), CAT, &[&s(path)]),
+            "{} is unreadable",
+            s(path)
+        );
+        assert!(
+            !f.ok(surface.clone(), "/bin/rm", &["-f", &s(path)]),
+            "{} cannot be unlinked from beneath its mask mount",
+            s(path)
+        );
+    }
+    assert_eq!(std::fs::read_to_string(root_policy).unwrap(), "ROOTSECRET");
+    assert_eq!(
+        std::fs::read_to_string(package_policy).unwrap(),
+        "PACKAGESECRET"
+    );
+}
+
+#[test]
+fn sandbox_config_created_after_start_is_out_of_scope() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let future = f.proj.join("future.sandbox.json");
+    let surface = serde_json::json!({
+        "fs": ["...", "./", "!**/*.sandbox.json"]
+    });
+    let script = format!(
+        "printf CREATED > '{}' && test \"$(cat '{}')\" = CREATED",
+        future.display(),
+        future.display()
+    );
+    assert!(
+        f.ok(surface, SH, &["-c", &script]),
+        "a deny target missing from the startup snapshot is intentionally not tracked"
+    );
+}
+
+#[test]
+fn private_tmp_hides_shared_tmp_and_remains_writable() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let marker = std::env::temp_dir().join(format!("nub-shared-tmp-{}", std::process::id()));
+    let private_probe = format!("nub-private-tmp-{}", std::process::id());
+    std::fs::write(&marker, "HOST").unwrap();
+    let script = format!(
+        "test ! -e '{}' && test \"$TMPDIR\" = /tmp && printf PRIVATE > /tmp/{}",
+        marker.display(),
+        private_probe
+    );
+    assert!(
+        f.ok(
+            serde_json::json!({ "fs": { "./": "rw", "<tmp>": "rw" } }),
+            SH,
+            &["-c", &script],
+        ),
+        "private tmp is writable and hides the shared host tmp"
+    );
+    assert!(!std::env::temp_dir().join(private_probe).exists());
+    std::fs::remove_file(marker).unwrap();
+}
+
+#[test]
+fn denied_tmp_still_allows_an_explicit_project_under_tmp() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let blocked = std::env::temp_dir().join(format!("nub-denied-tmp-{}", std::process::id()));
+    let script = format!(
+        "! touch '{}' && printf PROJECT > ./tmp-policy-project-write",
+        blocked.display()
+    );
+    assert!(
+        f.ok(
+            serde_json::json!({ "fs": { "./": "rw", "<tmp>": false } }),
+            SH,
+            &["-c", &script],
+        ),
+        "a project bind layered over denied /tmp stays writable"
+    );
+    assert!(!blocked.exists());
+    assert_eq!(
+        std::fs::read_to_string(f.proj.join("tmp-policy-project-write")).unwrap(),
+        "PROJECT"
+    );
+}
+
 // ── new secret deny-set additions (A2): each denied under a generous read ──────
 
 #[test]
 fn new_secret_paths_denied_under_generous_read() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -245,9 +362,10 @@ fn new_secret_paths_denied_under_generous_read() {
         ),
         (f.proj.join(".envrc"), ".envrc"),
     ] {
+        let (_code, out) = f.run(generous.clone(), &[], CAT, &[&s(&path)]);
         assert!(
-            !f.ok(generous.clone(), CAT, &[&s(&path)]),
-            "{label} must be denied under generous read"
+            out.is_empty(),
+            "{label} must not reveal bytes under generous read"
         );
     }
     // negative controls — relaxed fs reads each fine, so the deny (not a missing
@@ -269,7 +387,7 @@ fn new_secret_paths_denied_under_generous_read() {
 
 #[test]
 fn write_confine_allows_target_denies_rest() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -300,7 +418,7 @@ fn write_confine_allows_target_denies_rest() {
 
 #[test]
 fn dangerous_write_root_grant_is_dropped() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -343,12 +461,12 @@ fn dangerous_write_root_grant_is_dropped() {
 
 #[test]
 fn confine_not_dodgeable_via_symlink_or_dotdot() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
-    // A symlink inside the confined project pointing OUT to the home ssh key: Landlock
-    // checks the RESOLVED inode (the key, not granted) → the read is denied.
+    // A symlink inside the confined project pointing OUT to an unmounted home secret
+    // cannot make that target appear in the private filesystem view.
     let link = f.proj.join("escape");
     std::os::unix::fs::symlink(f.home.join(".ssh/id_rsa"), &link).unwrap();
     let confine = serde_json::json!({ "fs": ["./"] });
@@ -370,7 +488,7 @@ fn confine_not_dodgeable_via_symlink_or_dotdot() {
 
 #[test]
 fn ancestor_proc_environ_is_unreadable() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -404,15 +522,14 @@ fn ancestor_proc_environ_is_unreadable() {
 
 #[test]
 fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
     // A pure env-scrub with fs RELAXED must STILL close /proc — otherwise the
     // scrubbed child recovers the ancestor's env via /proc/<ppid>/environ, defeating
     // the scrub. `{env:false}` with a non-empty ambient WITHHOLDS a var, so the
-    // backend installs a relaxed-minus-/proc Landlock ruleset for the env-read
-    // boundary (fs stays relaxed; only /proc,/sys are closed).
+    // backend gives the child a private PID namespace and fresh procfs.
     let read_environ = "/bin/cat /proc/$PPID/environ 2>/dev/null || true";
     // `fs: true` is now NAMED explicitly: under the complete-statement model an
     // unlisted axis FLOORS (deny-all), so `{ env: false }` alone would confine fs
@@ -438,41 +555,98 @@ fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
 }
 
 #[test]
-fn env_passthrough_does_not_close_proc() {
-    if skip_without_landlock() {
+fn every_sandboxed_process_gets_a_private_proc_view() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
-    // `{env:true}` is a PASSTHROUGH: nothing is withheld, so there is no ancestor
-    // secret to protect and /proc must stay open (a config the user chose to be
-    // permissive) — the `/proc` close only fires when the scrub actually withholds.
-    let read_environ = "/bin/cat /proc/$PPID/environ 2>/dev/null || true";
+    // Even with env passthrough, a sandboxed process gets a fresh procfs. It may see
+    // itself and its in-namespace supervisor, never Nub's host-side parent environ.
+    let read_environ = format!(
+        "/bin/cat /proc/{}/environ 2>/dev/null || true",
+        std::process::id()
+    );
     // fs named RELAXED explicitly (an unlisted axis now floors → the probe couldn't
     // exec); this test is about env passthrough NOT closing /proc.
     let (_c, out) = f.run(
         serde_json::json!({ "env": true, "fs": true }),
         &[("FOO", "bar")],
         SH,
-        &["-c", read_environ],
+        &["-c", &read_environ],
     );
     assert!(
-        out.contains("PATH="),
-        "env passthrough must NOT close /proc (nothing withheld)"
+        out.is_empty(),
+        "host parent environ must stay outside the PID namespace"
     );
 }
 
 #[test]
-fn bind_mounted_procfs_at_nonstandard_path_is_a_bounded_residual() {
-    if skip_without_landlock() {
+fn explicit_denies_win_below_fresh_proc_and_dev_mounts() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
-    // `is_proc_or_sys` filters by `path.starts_with("/proc")` — a path-LITERAL check. A
-    // procfs bind-mounted OUTSIDE that prefix, inside a read-granted subtree, is not
-    // recognized as procfs and IS granted → its non-sensitive files leak. This test
-    // reproduces that residual AND its bound: real `/proc` stays blocked (the canonical
-    // filter works), and the ancestor `environ` stays closed by the ORTHOGONAL ptrace
-    // gate on `/proc/<pid>/environ`, which the alt mount does not bypass.
+    assert!(
+        !f.ok(
+            serde_json::json!({ "fs": ["...", "./", "!/proc/1/status"] }),
+            CAT,
+            &["/proc/1/status"]
+        ),
+        "a policy deny below the fresh procfs must remain effective"
+    );
+    assert!(
+        !f.ok(
+            serde_json::json!({ "fs": ["...", "./", "!/dev/null"] }),
+            CAT,
+            &["/dev/null"]
+        ),
+        "a policy deny below the fresh device tree must remain effective"
+    );
+}
+
+#[test]
+fn inherited_secret_file_descriptors_are_closed_before_bubblewrap_exec() {
+    use std::os::fd::AsRawFd;
+
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let secret = std::fs::File::open(f.proj.join(".env")).unwrap();
+    let fd = secret.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+        0
+    );
+
+    let policy = compile(&serde_json::json!({ "fs": ["...", "./"] }), &f.ctx(&[])).unwrap();
+    let script = format!("cat /proc/self/fd/{fd} 2>/dev/null || true");
+    let mut prepared = apply(
+        &policy,
+        CommandSpec::new(SH)
+            .args(["-c", &script])
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    )
+    .unwrap();
+    let output = prepared.command.output().unwrap();
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("ENVSECRET"),
+        "an already-open descriptor must not bypass the path mask"
+    );
+}
+
+#[test]
+fn bind_mounted_procfs_at_nonstandard_path_is_masked() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    // A host procfs bind-mounted outside `/proc` would otherwise be carried through a
+    // broad root bind. The backend reads mountinfo before launch and masks every such
+    // alternate mount, while replacing canonical `/proc` with the sandbox's fresh view.
     //
     // The bind-mount needs CAP_SYS_ADMIN. Prefer a PRE-PROVISIONED mount named by
     // `NUB_SANDBOX_ALTPROC` (a privileged setup step points it at a `mount --bind /proc`
@@ -513,41 +687,23 @@ fn bind_mounted_procfs_at_nonstandard_path_is_a_bounded_residual() {
         }
     };
 
-    // Grant read of the REGULAR PARENT dir that CONTAINS the alt mount — never the mount
-    // itself (a procfs bind mount shares /proc's dentries, so granting it would grant real
-    // /proc too and dissolve the control). The subtree grant on the parent reaches down
-    // into the bind mount during path-walk — that reach is the residual. `**/altproc` is
-    // the covering shape the task documents (`{fs:["/tmp"]}` over `/tmp/altproc`).
-    let grant_dir = altproc
-        .parent()
-        .expect("alt mount has a parent dir")
-        .to_path_buf();
-    let grant = serde_json::json!({ "fs": [s(&grant_dir)] });
+    // Exercise the coding-agent posture: broad host visibility with network/process
+    // isolation forcing a Bubblewrap view. The alternate mount would be visible through
+    // the root bind if the mount-table mask were absent.
+    let broad_read = serde_json::json!({ "fs": true, "net": false, "env": true });
 
-    // Canonical `/proc` filter WORKS: real `/proc/version` is denied under read-confine.
-    let (_c, real) = f.run(grant.clone(), &[], CAT, &["/proc/version"]);
-    assert!(
-        !real.contains("Linux"),
-        "real /proc must stay blocked under read-confine (got {real:?})"
-    );
-    // RESIDUAL: the bind-mounted procfs is granted → `version` leaks at the alt path.
+    // Canonical `/proc` is a fresh procfs for the child PID namespace. The alternate
+    // host procfs is masked even though its regular parent is readable.
     let alt_version = s(&altproc.join("version"));
-    let (_c, altver) = f.run(grant.clone(), &[], CAT, &[&alt_version]);
+    let (_c, altver) = f.run(broad_read.clone(), &[], CAT, &[&alt_version]);
     assert!(
-        altver.contains("Linux"),
-        "residual: procfs bind-mounted outside `/proc` leaks `version` (got {altver:?})"
+        !altver.contains("Linux"),
+        "procfs bind-mounted outside `/proc` must be masked (got {altver:?})"
     );
 
-    // BOUND: the crown-jewel — the ancestor's `environ` — is read the SAME way (same
-    // `$PPID/environ` path through the alt mount) with and without the sandbox, so the
-    // only variable is confinement. Unconfined it IS readable (a same-uid /proc read;
-    // yama ptrace_scope gates ATTACH, not READ) — that is the negative control proving the
-    // vector is real. Under confinement it is NOT readable: the sandbox's isolation (the
-    // userns/credential boundary) closes the ancestor-environ read even through the alt
-    // procfs. So the path-literal residual leaks only NON-sensitive procfs (`version`),
-    // never the env — the bound.
+    // The ancestor's environment is likewise unavailable through the alternate path.
     let read_environ = format!("/bin/cat {}/$PPID/environ 2>/dev/null || true", s(&altproc));
-    let (_c, env_confined) = f.run(grant, &[], SH, &["-c", &read_environ]);
+    let (_c, env_confined) = f.run(broad_read, &[], SH, &["-c", &read_environ]);
     let (_c, env_control) = f.run(serde_json::json!(false), &[], SH, &["-c", &read_environ]);
     if env_control.contains("PATH=") {
         assert!(
@@ -556,10 +712,8 @@ fn bind_mounted_procfs_at_nonstandard_path_is_a_bounded_residual() {
              mount (unconfined control read it; confined must not)"
         );
     } else {
-        // The ambient policy (ptrace/root creds) already blocks the read, so the residual
-        // can expose nothing here regardless — no attributable bound to assert.
         eprintln!(
-            "note: unconfined control could not read the ancestor environ; the bound holds trivially"
+            "note: unconfined control could not read the ancestor environ; the mask still blocks procfs metadata"
         );
     }
 }
@@ -568,7 +722,7 @@ fn bind_mounted_procfs_at_nonstandard_path_is_a_bounded_residual() {
 
 #[test]
 fn env_scrub_strips_secret_keeps_baseline() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -600,7 +754,7 @@ fn env_scrub_strips_secret_keeps_baseline() {
     );
 }
 
-// ── seccomp: net + ptrace family (via a compiled C probe) ───────────────────────
+// ── namespace and capability probes ────────────────────────────────────────────
 
 /// Compile the syscall probe once; `None` if `cc` is unavailable (probe tests skip).
 fn probe_bin(dir: &Path) -> Option<PathBuf> {
@@ -617,22 +771,15 @@ fn probe_bin(dir: &Path) -> Option<PathBuf> {
     ok.then_some(bin)
 }
 
-/// Probe: `probe <cmd>` exits 42 when the syscall was DENIED, 0 when it went through
-/// (43 = an over-deny the test flags). vmread/ptrace/pidfd target SELF so the verdict
-/// is the seccomp filter's, not the host's yama policy. Commands:
-///   socket/vmread/ptrace — the net + env-read-vector denies (existing).
-///   unshare  — `unshare(CLONE_FILES)`: an UNPRIVILEGED, host-policy-independent
-///              unshare that succeeds everywhere → proves the wholesale O1 `unshare`
-///              deny (which blocks every flag, incl. CLONE_NEWUSER, by syscall number).
-///   clone3   — `clone3(flags=0)`: a plain unprivileged fork → 42 iff the ENOSYS
-///              companion filter fired (glibc-fallback), proving clone3 (every flag,
-///              incl. CLONE_NEWUSER) is force-failed at the syscall boundary.
-///   clonens  — raw `clone(CLONE_NEWUSER|SIGCHLD)`: the register-flag escape → 42 iff
-///              the flag-filter denied it (unsandboxed it creates a userns child).
-///   pidfd    — `pidfd_open(self)` then `pidfd_getfd`: 42 iff getfd is denied while
-///              pidfd_open stays allowed (O2); 43 iff pidfd_open was wrongly denied.
+/// Probe: `probe <cmd>` exits 42 when an operation was denied, 0 when it went through
+/// (43 = an over-deny the test flags). Commands:
+///   socket/vmread/ptrace — harmless self-scoped syscalls that remain available.
+///   connect PORT — connect to a host loopback listener (hidden by the net namespace).
+///   unshare/clone3/clonens — prove nested namespace creation remains available.
+///   mount — prove the target has no mount capability in its current namespace.
+///   pidfd — prove self-scoped pidfd operations remain available.
 ///   pty      — open /dev/ptmx, grantpt/unlockpt, open the /dev/pts slave: 0 iff the
-///              O3 allowlist admits a full PTY (nonzero = which step the narrowing broke).
+///              private device view admits a full PTY.
 const PROBE_C: &str = r#"
 #define _GNU_SOURCE
 #include <errno.h>
@@ -643,7 +790,9 @@ const PROBE_C: &str = r#"
 #include <sched.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <sys/ptrace.h>
+#include <sys/mount.h>
 #include <sys/uio.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -669,6 +818,16 @@ int main(int argc, char** argv) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0 && errno == EPERM) return 42;
         return 0;
+    }
+    if (!strcmp(argv[1], "connect")) {
+        if (argc < 3) return 2;
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return 42;
+        struct sockaddr_in addr; memset(&addr, 0, sizeof addr);
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons((uint16_t)atoi(argv[2]));
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        return connect(fd, (struct sockaddr*)&addr, sizeof addr) == 0 ? 0 : 42;
     }
     if (!strcmp(argv[1], "vmread")) {
         char buf[8]; char src[8] = "abcdefg";
@@ -703,6 +862,11 @@ int main(int argc, char** argv) {
         if (r > 0) { int st; waitpid((pid_t)r, &st, 0); }
         return 0;
     }
+    if (!strcmp(argv[1], "mount")) {
+        int r = mount("tmpfs", ".", "tmpfs", 0, "size=4096");
+        if (r < 0 && errno == EPERM) return 42;
+        return 0;
+    }
     if (!strcmp(argv[1], "pidfd")) {
         long pfd = syscall(SYS_pidfd_open, getpid(), 0);
         if (pfd < 0) return 43;                     /* pidfd_open must stay allowed */
@@ -726,8 +890,8 @@ int main(int argc, char** argv) {
 "#;
 
 #[test]
-fn seccomp_denies_net_ptrace_and_vmread() {
-    if skip_without_landlock() {
+fn network_namespace_and_filter_block_host_egress() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -736,53 +900,49 @@ fn seccomp_denies_net_ptrace_and_vmread() {
     };
     let probe = s(&probe);
 
-    // net enforce → socket(AF_INET) blocked; fs relaxed so the probe still runs.
-    // `fs: true` is NAMED explicitly now (an unlisted axis floors to deny-all, which
-    // would stop the probe from exec'ing at all).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+
+    // Net enforcement creates a route-less namespace and blocks socket families that
+    // can reach the host through a local IPC endpoint. Harmless self-inspection
+    // syscalls remain available.
     let net_deny = serde_json::json!({ "net": false, "fs": true });
     assert_eq!(
         f.run(net_deny.clone(), &[], &probe, &["socket"]).0,
         42,
-        "AF_INET socket denied"
+        "AF_INET socket creation is denied"
     );
-    // ptrace + process_vm_readv denied whenever sandboxing (here via net enforce).
     assert_eq!(
         f.run(net_deny.clone(), &[], &probe, &["ptrace"]).0,
-        42,
-        "ptrace denied"
+        0,
+        "self ptrace remains available"
     );
     assert_eq!(
-        f.run(net_deny, &[], &probe, &["vmread"]).0,
+        f.run(net_deny.clone(), &[], &probe, &["vmread"]).0,
+        0,
+        "self process_vm_readv remains available"
+    );
+    assert_eq!(
+        f.run(net_deny, &[], &probe, &["connect", &port]).0,
         42,
-        "process_vm_readv denied"
+        "the sandbox cannot reach a listener in the host network namespace"
     );
 
-    // negative control — no sandbox → every syscall goes through. `sandbox: false`
-    // is the unambiguous fully-unjailed surface (a bare `{ fs: true }` now floors
-    // net → seccomp would block the socket, defeating the control).
-    let relaxed = serde_json::json!(false);
+    let accept = std::thread::spawn(move || listener.accept().map(|_| ()).unwrap());
     assert_eq!(
-        f.run(relaxed.clone(), &[], &probe, &["socket"]).0,
+        f.run(serde_json::json!(false), &[], &probe, &["connect", &port])
+            .0,
         0,
-        "neg: socket allowed unsandboxed"
+        "negative control reaches the host listener without the net namespace"
     );
-    assert_eq!(
-        f.run(relaxed.clone(), &[], &probe, &["ptrace"]).0,
-        0,
-        "neg: ptrace allowed unsandboxed"
-    );
-    assert_eq!(
-        f.run(relaxed, &[], &probe, &["vmread"]).0,
-        0,
-        "neg: vmread allowed unsandboxed"
-    );
+    accept.join().unwrap();
 }
 
-// ── O1: userns + mount-family seccomp deny (FS-escape closed at the boundary) ────
+// ── nesting and mount capabilities ─────────────────────────────────────────────
 
 #[test]
-fn seccomp_denies_userns_and_mount_family() {
-    if skip_without_landlock() {
+fn nested_user_namespaces_remain_available_but_current_namespace_has_no_caps() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -794,52 +954,115 @@ fn seccomp_denies_userns_and_mount_family() {
     // (an unlisted fs axis would floor to deny-all and stop the exec).
     let sb = serde_json::json!({ "net": false, "fs": true });
 
-    // `unshare` is denied wholesale — proven with CLONE_FILES (unprivileged, succeeds
-    // on every host), so the deny is by syscall NUMBER and covers CLONE_NEWUSER too.
     assert_eq!(
         f.run(sb.clone(), &[], &probe, &["unshare"]).0,
-        42,
-        "unshare denied (blocks the userns-creating form by syscall number)"
+        0,
+        "ordinary unshare remains available"
     );
-    // `clone3` is force-failed to ENOSYS (the glibc-fallback companion filter) — a
-    // plain fork via clone3 is blocked, so every clone3 flag set (incl. CLONE_NEWUSER)
-    // cannot create a namespace; glibc falls back to the flag-filtered `clone`.
     assert_eq!(
         f.run(sb.clone(), &[], &probe, &["clone3"]).0,
-        42,
-        "clone3 forced to ENOSYS (userns via clone3 closed; glibc falls back to clone)"
-    );
-    // The register-flag escape: `clone(CLONE_NEWUSER)` denied by the flag-filter.
-    // Deterministic under sandbox regardless of host unprivileged-userns policy (the
-    // seccomp EPERM precedes the kernel's userns check).
-    assert_eq!(
-        f.run(sb, &[], &probe, &["clonens"]).0,
-        42,
-        "clone(CLONE_NEWUSER) denied by the flag-filter"
-    );
-
-    // Negative controls — unsandboxed, the two unprivileged host-independent forms go
-    // through, proving the blocks above are ours (not a missing-capability artifact).
-    // (`clonens` is intentionally not controlled here: its unsandboxed success needs
-    // host unprivileged-userns; `unshare`/`clone3` carry the negative side robustly.)
-    let relaxed = serde_json::json!(false);
-    assert_eq!(
-        f.run(relaxed.clone(), &[], &probe, &["unshare"]).0,
         0,
-        "neg: unshare(CLONE_FILES) allowed unsandboxed"
+        "clone3 remains available"
     );
     assert_eq!(
-        f.run(relaxed, &[], &probe, &["clone3"]).0,
+        f.run(sb.clone(), &[], &probe, &["clonens"]).0,
         0,
-        "neg: clone3 fork allowed unsandboxed"
+        "a child user namespace remains available for a nested Nub sandbox"
+    );
+    assert_eq!(
+        f.run(sb.clone(), &[], &probe, &["mount"]).0,
+        42,
+        "the target has no CAP_SYS_ADMIN in its current mount namespace"
+    );
+    assert!(
+        f.ok(
+            sb,
+            "/usr/bin/bwrap",
+            &[
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-user",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--",
+                "/bin/true",
+            ],
+        ),
+        "Bubblewrap can construct a stricter nested sandbox"
     );
 }
 
-// ── O2: pidfd fd-theft closed (getfd denied; pidfd_open preserved) ───────────────
+#[test]
+fn sandboxed_execution_rejects_uid_zero() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let f = fixture();
+    let policy =
+        compile(&serde_json::json!({ "fs": ["...", "./"] }), &f.ctx(&[])).expect("compiles");
+    let Err(error) = apply(
+        &policy,
+        CommandSpec::new("/bin/true")
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    ) else {
+        panic!("UID 0 must fail before Bubblewrap launch");
+    };
+    assert!(
+        error
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("UID 0")),
+        "{error:?}"
+    );
+}
 
 #[test]
-fn seccomp_denies_pidfd_getfd_keeps_pidfd_open() {
-    if skip_without_landlock() {
+fn nested_mount_namespace_cannot_unmount_a_secret_mask() {
+    if skip_without_bwrap() || !Path::new("/usr/bin/unshare").exists() {
+        return;
+    }
+    let f = fixture();
+    let secret = s(&f.proj.join(".env"));
+    let script = r#"
+if umount "$1" 2>/dev/null; then printf 'UNMOUNTED'; fi
+if umount -l "$1" 2>/dev/null; then printf 'LAZY_UNMOUNTED'; fi
+cat "$1"
+"#;
+    let (code, out) = f.run(
+        serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        &[],
+        "/usr/bin/unshare",
+        &[
+            "--user",
+            "--map-root-user",
+            "--mount",
+            SH,
+            "-c",
+            script,
+            "sh",
+            &secret,
+        ],
+    );
+    assert_eq!(code, 0, "nested namespace probe must execute");
+    assert!(
+        !out.contains("UNMOUNTED") && !out.contains("ENVSECRET"),
+        "an inherited mask must stay locked in a nested mount namespace (got {out:?})"
+    );
+}
+
+// ── PID namespace self operations ──────────────────────────────────────────────
+
+#[test]
+fn self_pidfd_operations_remain_available_inside_the_pid_namespace() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
@@ -847,8 +1070,6 @@ fn seccomp_denies_pidfd_getfd_keeps_pidfd_open() {
         return;
     };
     let probe = s(&probe);
-    // Under sandbox: pidfd_open must still succeed (probe returns 43 if wrongly
-    // denied), and pidfd_getfd — the fd-theft primitive — must be EPERM (42).
     assert_eq!(
         f.run(
             serde_json::json!({ "net": false, "fs": true }),
@@ -857,26 +1078,19 @@ fn seccomp_denies_pidfd_getfd_keeps_pidfd_open() {
             &["pidfd"]
         )
         .0,
-        42,
-        "pidfd_getfd denied while pidfd_open stays allowed"
-    );
-    // Negative control — unsandboxed, the fd theft goes through.
-    assert_eq!(
-        f.run(serde_json::json!(false), &[], &probe, &["pidfd"]).0,
         0,
-        "neg: pidfd_getfd allowed unsandboxed"
+        "self pidfd_open/getfd remain available; host processes are outside this PID namespace"
     );
 }
 
-// ── O3: /dev narrowed to an allowlist (least-privilege, PTY still works) ──────────
+// ── private /dev view (PTY still works) ─────────────────────────────────────────
 
 #[test]
-fn dev_allowlist_permits_pty_and_nodes_denies_rest() {
-    if skip_without_landlock() {
+fn private_dev_permits_pty_entropy_and_isolated_shm() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
-    // Read-confine engages the O3 /dev narrowing (wholesale `/dev` rw → per-node).
     let confine = serde_json::json!({ "fs": ["./"] });
 
     // Allowlisted nodes are usable: write /dev/null + read /dev/urandom.
@@ -889,23 +1103,23 @@ fn dev_allowlist_permits_pty_and_nodes_denies_rest() {
                 "printf x > /dev/null && head -c 4 /dev/urandom > /dev/null"
             ]
         ),
-        "allowlisted /dev/null + /dev/urandom usable under read-confine"
+        "/dev/null + /dev/urandom usable under read-confine"
     );
-    // A non-allowlisted node fails CLOSED: /dev/shm (world-writable tmpfs) write denied.
+    // `/dev/shm` is a fresh private tmpfs, not the host's shared-memory directory.
     assert!(
-        !f.ok(
+        f.ok(
             confine.clone(),
             SH,
             &["-c", "printf x > /dev/shm/nub_dev_probe"]
         ),
-        "non-allowlisted /dev/shm write denied under read-confine"
+        "private /dev/shm remains usable under read-confine"
     );
-    // A PTY-spawning program works: /dev/ptmx + the /dev/pts slave are allowlisted.
+    // A PTY-spawning program works: /dev/ptmx + the /dev/pts slave are present.
     if let Some(probe) = probe_bin(&f.proj) {
         assert_eq!(
             f.run(confine.clone(), &[], &s(&probe), &["pty"]).0,
             0,
-            "PTY (ptmx + pts slave) opens under the /dev allowlist"
+            "PTY (ptmx + pts slave) opens under the private /dev view"
         );
     }
     // A dynamically-linked interpreter still spawns under the narrowed /dev.
@@ -921,8 +1135,7 @@ fn dev_allowlist_permits_pty_and_nodes_denies_rest() {
             "python3 (dynamic interpreter) runs under the narrowed /dev"
         );
     }
-    // Negative control — with fs relaxed, the non-allowlisted /dev/shm write succeeds,
-    // proving the deny above is the narrowing (not a missing tmpfs).
+    // The same private shm behavior remains usable with fs relaxed.
     assert!(
         f.ok(
             serde_json::json!({ "fs": true }),
@@ -948,19 +1161,15 @@ fn node_bin() -> Option<String> {
 
 #[test]
 fn node_threads_and_crypto_under_full_hardening() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
     let Some(node) = node_bin() else {
         return; // no Node on this host — skip (VM/CI runners have one)
     };
     let f = fixture();
-    // Read-confine engages the whole stack at once: O1 seccomp (userns/mount deny +
-    // clone3→ENOSYS) + O2 (pidfd_getfd deny) + O3 (/dev allowlist); the unlisted net
-    // axis floors to deny-all, so seccomp is installed. This is the strictest posture.
-    // The Worker spawns a libuv/V8 thread — glibc issues clone3 for pthread_create, so
-    // this exercises the ENOSYS→clone fallback; crypto.randomBytes exercises the /dev
-    // entropy allowlist FROM the worker thread.
+    // The Worker exercises normal thread creation; crypto.randomBytes exercises the
+    // private device view from that worker.
     let script = "const {Worker}=require('worker_threads');\
         const w=new Worker(\"const{parentPort}=require('worker_threads');\
         parentPort.postMessage(require('crypto').randomBytes(4).toString('hex'))\",{eval:true});\
@@ -974,27 +1183,26 @@ fn node_threads_and_crypto_under_full_hardening() {
     );
     assert!(
         out.contains("NODEOK"),
-        "node must start, spawn a Worker thread (clone3→ENOSYS→clone fallback), and use \
-         crypto under the full O1/O2/O3 hardening (exit {code}, out {out:?})"
+        "node must start, spawn a Worker thread, and use crypto under Bubblewrap \
+         (exit {code}, out {out:?})"
     );
 }
 
 // ── graceful degradation is honest ──────────────────────────────────────────────
 
 #[test]
-fn enforcement_is_full_on_a_landlock_kernel() {
-    if skip_without_landlock() {
+fn enforcement_is_full_when_bubblewrap_is_available() {
+    if skip_without_bwrap() {
         return;
     }
     let f = fixture();
     // A read-confine with no per-host net allow enforces fully — the Degradation
-    // must be empty (no silent loss). (The Landlock-unavailable degrade path is
-    // covered by the parent-side logic + the LinuxKit case, not reachable here.)
+    // must be empty (no silent loss).
     let policy = compile(&serde_json::json!({ "fs": ["./"] }), &f.ctx(&[])).unwrap();
     let prepared = apply(&policy, CommandSpec::new(CAT).cwd(&f.proj)).unwrap();
     assert!(
         prepared.degradation.is_full(),
-        "read-confine fully enforces on a Landlock kernel"
+        "read-confine fully enforces when Bubblewrap is available"
     );
 }
 
@@ -1005,14 +1213,11 @@ fn enforcement_is_full_on_a_landlock_kernel() {
 
 #[test]
 fn hardlink_to_denied_secret_leaks_via_alias() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
-    // Landlock keys on the INODE reached, not the path. A pre-existing same-uid
-    // hardlink to a secret, at a name the deny never targets, is granted `ReadFile`,
-    // which grants read on the SHARED inode — so the path-denied secret is reachable
-    // through the alias. BOUNDED: requires a hardlink created OUTSIDE the sandbox
-    // beforehand (no clean Landlock fix — the inode was legitimately named twice).
+    // The boundary protects configured paths, not every alias to the same inode. A
+    // pre-existing hardlink under an unprotected name can still read those bytes.
     let f = fixture();
     let secret = f.proj.join("secret.txt");
     std::fs::write(&secret, "REALSECRET").unwrap();
@@ -1039,14 +1244,11 @@ fn hardlink_to_denied_secret_leaks_via_alias() {
 
 #[test]
 fn write_grant_to_nonexistent_file_becomes_dir_no_parent_widen() {
-    if skip_without_landlock() {
+    if skip_without_bwrap() {
         return;
     }
-    // Landlock cannot grant write to a not-yet-existing FILE, so the backend
-    // pre-creates the target as a DIRECTORY and grants that subtree. Captured
-    // behavior (correcting LIMITATIONS.md "write-target widening"): the leaf becomes a
-    // dir and its subtree is writable, but the PARENT is NOT widened — a sibling in
-    // the parent stays denied.
+    // A not-yet-existing writable path is pre-created as a directory so Bubblewrap
+    // has a concrete bind target. Its parent is not widened.
     let f = fixture();
     let target = f.proj.join("writable/newfile.txt");
     let surface = serde_json::json!({ "fs": ["...", s(&target)] });
@@ -1069,16 +1271,16 @@ fn write_grant_to_nonexistent_file_becomes_dir_no_parent_widen() {
 }
 
 #[test]
-fn etc_user_deny_is_carved_from_the_essential_base() {
-    if skip_without_landlock() {
+fn exact_etc_user_deny_is_masked_without_hiding_other_config() {
+    if skip_without_bwrap() {
         return;
     }
-    // The essential loader dirs (/etc,…) are granted wholesale, but an explicit user
-    // deny reaching one must CARVE it. End-to-end proof needs a secret planted under
+    // The system config tree stays readable, but an explicit existing deny is mounted
+    // over exactly. End-to-end proof needs a secret planted under
     // the REAL /etc (root only), so this runs only where /etc is writable (the
     // conformance real-kernel/root leg); it SKIPS as a non-root user rather than
     // reporting a hollow pass. The dir-agnostic derivation is covered portably by
-    // `linux_grants::essential_dir_carve_honors_user_deny_keeps_rest`.
+    // the derivation unit tests.
     let secret = Path::new("/etc/nub_sandbox_etc_carve_secret");
     if std::fs::write(secret, "ETCSECRET").is_err() {
         return; // not root — the portable unit test covers the derivation
@@ -1095,7 +1297,7 @@ fn etc_user_deny_is_carved_from_the_essential_base() {
     let _ = std::fs::remove_file(secret);
     assert!(
         !leaked.1.contains("ETCSECRET"),
-        "a user deny under /etc must be carved (secret not readable)"
+        "a user deny under /etc must be masked (secret not readable)"
     );
     assert!(
         hostname_ok,

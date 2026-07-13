@@ -337,8 +337,8 @@ pub enum EnvFormat {
 // ── pid ──────────────────────────────────────────────────────────────────────
 
 /// PID/isolation posture. `isolate` requests env-read isolation on Linux (§2.4);
-/// PID-ns is opportunistic (userns-gated) — the primary env-read boundary is
-/// Landlock `/proc` read-confine + seccomp ptrace-deny, not this flag.
+/// Bubblewrap supplies a private PID namespace and fresh procfs whenever a Linux
+/// policy needs enforcement.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PidPolicy {
     pub isolate: bool,
