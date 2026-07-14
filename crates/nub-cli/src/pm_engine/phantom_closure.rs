@@ -86,6 +86,55 @@ pub(crate) fn register() {
 /// default can't be added in one place and silently dropped by the other.
 pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
 
+/// Curated "project-context" packages (nub#457): each one's build script READS or
+/// MUTATES the CONSUMING project rather than only its own dir — git-hook installers
+/// walk up from `cwd` to the project root and write `.git/hooks`; the rest generate
+/// project-local files or resolve peers/bridges against the host tree. Under GVS a
+/// build runs in the shared global store, DETACHED from any project, so a
+/// cwd/upward-walk lands on the per-package store wrapper (which has no
+/// package.json) and the script crashes — #457: `simple-git-hooks` postinstall →
+/// ENOENT — or silently emits shared-mutable wrong output. Ejecting them
+/// (disk-materialize project-local, via the SAME importer-closure + expand hook the
+/// phantom seeds use) restores a real project above `cwd`.
+///
+/// DELIBERATELY curated, NOT "all script-havers": self-contained builds (node-gyp
+/// native compiles, prebuilt-binary downloaders like esbuild) read only their own
+/// dir, produce identical output anywhere, and share it cross-project via the
+/// side-effects cache — ejecting them would erode the symlink-in-store sharing win
+/// for zero correctness gain, so they STAY in GVS (built once, shared). Every name
+/// here is verified category-C (build reads/mutates the host project); absent names
+/// cost nothing (the seed union is presence-gated against the resolved graph).
+///
+/// Gate: this rides the same [`enabled`] seam as phantom eject, so disabling the
+/// internal eject seam also disables curated eject (reintroducing #457) — an
+/// accepted property of that internal-only escape hatch.
+pub(super) const NUB_PROJECT_CONTEXT_EJECT: &[&str] = &[
+    // Git-hook installers — walk up from cwd to the project root, write `.git/hooks`.
+    "simple-git-hooks",
+    "lefthook",
+    "@evilmartians/lefthook",
+    "@arkweid/lefthook",
+    "pre-commit",
+    "pre-push",
+    "ghooks",
+    "git-validate",
+    "shared-git-hooks",
+    "yorkie",
+    "git-commit-msg-linter",
+    // Other host-project reader/mutators (generate project-local files, resolve
+    // peers/bridges against the consuming tree).
+    "install-peers",
+    "msw",
+    "@bahmutov/add-typescript-to-cypress",
+    "@cypress/snapshot",
+    "cordova.plugins.diagnostic",
+    "vue-demi",
+    "vue-inbrowser-compiler-demi",
+    "@intlify/vue-i18n-bridge",
+    "@intlify/vue-router-bridge",
+    "storage-engine",
+];
+
 /// Keep only nub's own embedder-default seed names, dropping every user-source
 /// entry — the mechanism that retires the user-facing `diskMaterializePackages`
 /// knob under nub while leaving standalone aube's byte-for-byte.
@@ -200,6 +249,20 @@ fn plan_from_flags(
             .any(|peer| is_top_level(&types_package_name(peer)));
         if seed_for_targets || seed_for_type_peers {
             seed_names_set.insert(flag.name.as_str());
+        }
+    }
+
+    // Curated project-context eject (nub#457): union every `NUB_PROJECT_CONTEXT_EJECT`
+    // name PRESENT in the resolved graph. Their builds read/mutate the consuming
+    // project, so a GVS store-detached materialization crashes or emits
+    // shared-mutable wrong output; seeding them here routes them through the SAME
+    // importer-closure + disk-materialize path as the phantom seeds (a git-hook leaf
+    // has ~0 importers, so its closure is just itself). The presence gate keeps an
+    // absent name free.
+    let graph_names: HashSet<&str> = graph.packages.values().map(|p| p.name.as_str()).collect();
+    for &name in NUB_PROJECT_CONTEXT_EJECT {
+        if graph_names.contains(name) {
+            seed_names_set.insert(name);
         }
     }
 
@@ -583,6 +646,39 @@ mod tests {
         let g = graph(&[("lodash@4.17.21", "lodash", &[])]);
         let plan = plan_from_flags(&g, &[], &[]);
         assert!(plan.names.is_empty());
+    }
+
+    // Curated project-context eject (nub#457): a build that reads/mutates the
+    // consuming project ejects from GVS; a self-contained build stays symlinked.
+
+    #[test]
+    fn project_context_pkg_ejects_from_gvs() {
+        // `simple-git-hooks` postinstall walks up from cwd to the project root; under
+        // GVS the store-detached copy crashes (#457 ENOENT). As a curated
+        // project-context leaf it seeds its own closure (no importers, no phantom
+        // flag) purely by name.
+        let g = graph(&[("simple-git-hooks@2.13.1", "simple-git-hooks", &[])]);
+        let plan = plan_from_flags(&g, &[], &[]);
+        assert!(
+            plan.names.iter().any(|n| n == "simple-git-hooks"),
+            "a curated project-context package ejects: {:?}",
+            plan.names
+        );
+    }
+
+    #[test]
+    fn self_contained_build_stays_symlinked() {
+        // esbuild ships a prebuilt-binary downloader — self-contained, output shared
+        // cross-project via the side-effects cache — so it is deliberately NOT
+        // curated and stays in GVS (symlinked, built once). No phantom flag, so
+        // nothing seeds it: the eject is curated, not blanket-on-every-script-haver.
+        let g = graph(&[("esbuild@0.20.0", "esbuild", &[])]);
+        let plan = plan_from_flags(&g, &[], &[]);
+        assert!(
+            plan.names.is_empty(),
+            "a self-contained build is not ejected: {:?}",
+            plan.names
+        );
     }
 
     #[test]
