@@ -82,5 +82,39 @@ else
   fail "async-loader collision: unexpected failure (exit=$coll_rc, stdout=[$coll_out], stderr=[$coll_err])"
 fi
 
+# ── Scenario C: preload async-tier selection for a foreign loader flag (nub#460) ──
+# tsx/ts-node deliver their async ESM loader through THIS process's own startup flags — a
+# `--import <loader>` in execArgv (tsx's bin re-execs node) or `NODE_OPTIONS="--import tsx/esm"`.
+# When nub is invoked nested (`nub run` → `nub run` → tsx), via a `child_process` spawn
+# (Playwright globalSetup), or behind a shell wrapper, the launcher's argv scan never sees
+# that tsx — so nub must detect the loader flag INTRINSICALLY at preload
+# (shouldAutoAsyncTierAtPreload) and switch to its async tier. On the broken-compose band
+# (22.15–24.11) staying on the sync `module.registerHooks` fast tier is the #460 crash; off
+# the band the fast tier composes natively and must stay. entry.mjs asserts the correct tier
+# (TIER_OK) and fails (TIER_FAIL) if nub stayed sync on the band — teeth on exactly the
+# broken versions. Exercises the NODE_OPTIONS delivery channel (execArgv is covered by the
+# real-tsx e2e in the PR). Distinct from Scenario B (loader registered from USER code at
+# runtime, recovered via stub-recovery); this is the preload tier-selection path.
+imp_reg="file://$FIX/import-flag-async-loader/register-async-loader.mjs"
+# Both delivery channels a foreign loader flag can arrive through — they land in different
+# places (NODE_OPTIONS stays in process.env.NODE_OPTIONS; a re-exec/CLI --import lands in
+# process.execArgv), and the detection must catch each.
+#   C1: NODE_OPTIONS="--import <loader>"  (the CI/shell-config shape)
+#   C2: nub --import <loader> entry.mjs   (the execArgv/re-exec shape tsx's bin uses)
+c1_out="$(cd "$FIX/import-flag-async-loader" && NODE_OPTIONS="--import $imp_reg" "$NUB" entry.mjs 2>/tmp/nm-imp-err.txt)"; c1_rc=$?
+c1_err="$(cat /tmp/nm-imp-err.txt)"
+if [[ $c1_rc -eq 0 && "$c1_out" == *"TIER_OK"* ]]; then
+  pass "foreign loader flag via NODE_OPTIONS → correct hook tier ($c1_out)"
+else
+  fail "foreign loader flag via NODE_OPTIONS (exit=$c1_rc, stdout=[$c1_out], stderr=[$c1_err])"
+fi
+c2_out="$(cd "$FIX/import-flag-async-loader" && "$NUB" --import "$imp_reg" entry.mjs 2>/tmp/nm-imp2-err.txt)"; c2_rc=$?
+c2_err="$(cat /tmp/nm-imp2-err.txt)"
+if [[ $c2_rc -eq 0 && "$c2_out" == *"TIER_OK"* ]]; then
+  pass "foreign loader flag via execArgv → correct hook tier ($c2_out)"
+else
+  fail "foreign loader flag via execArgv (exit=$c2_rc, stdout=[$c2_out], stderr=[$c2_err])"
+fi
+
 echo "== Node $NODE_VER: $fails failure(s) =="
 exit $((fails > 0 ? 1 : 0))

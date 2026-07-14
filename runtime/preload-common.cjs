@@ -231,6 +231,56 @@ function userAsyncLoaderActive() {
   return __userAsyncLoaderRegistered || cliAsyncLoaderPresent();
 }
 
+// The Node band where the async `module.register` loader's `resolveSync`/`loadSync`
+// are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`: 22.15.0 ..= 24.11.0
+// (fixed in 24.11.1, nodejs/node#59666). Mirrors the Rust `node_hook_compose_broken`
+// (spawn.rs) for every RELEASE version; a pre-release like `22.15.0-rc.1` reads as in-band
+// here (the numeric parse ignores the `-rc` tag) where the Rust semver sorts it just below
+// the 22.15.0 floor — a harmless over-selection (the async tier is always correct and the
+// two signals are OR'd), never a crash. Outside this band a foreign async loader composes
+// with nub's sync hooks natively, so the fast tier stays.
+function nodeHookComposeBroken() {
+  const p = String(process.versions.node).split(".");
+  const maj = parseInt(p[0], 10) || 0;
+  const min = parseInt(p[1], 10) || 0;
+  const pat = parseInt(p[2], 10) || 0;
+  const geFloor = maj > 22 || (maj === 22 && min >= 15);
+  const leCeil = maj < 24 || (maj === 24 && (min < 11 || (min === 11 && pat === 0)));
+  return geFloor && leCeil;
+}
+
+// Does a foreign async ESM loader flag (`--import` / `--loader` / `--experimental-loader`)
+// ride in THIS process's own startup flags, via EITHER channel? tsx/ts-node deliver their
+// loader through one of two paths, and they land in different places:
+//   • re-exec argv → `process.execArgv` (tsx's bin re-execs `node --import <loader>`), and
+//   • `NODE_OPTIONS="--import tsx/esm"` → `process.env.NODE_OPTIONS` (NOT hoisted into
+//     execArgv — verified on Node 24.x), the common CI/shell-config delivery.
+// Both must be scanned. nub's own fast-tier injection is `--require` (never `--import`/
+// `--loader`) on this band, and its compat-tier `--import preload.mjs` lives below 22.15
+// (outside the broken band this gates on), so any such flag here is FOREIGN.
+function foreignAsyncLoaderFlagPresent() {
+  if (cliAsyncLoaderPresent()) return true; // execArgv channel
+  const opts = process.env.NODE_OPTIONS;
+  if (typeof opts !== "string" || opts === "") return false;
+  return /(?:^|\s)--(?:experimental-)?(?:import|loader)(?:=|\s|$)/.test(opts);
+}
+
+// Should nub auto-select its async loader-worker tier at PRELOAD time because a foreign
+// async ESM loader (tsx/ts-node) rides in THIS process's own startup flags, on the
+// broken-compose band? This is the INTRINSIC counterpart to the launcher's predictive argv
+// scan (`__NUB_FORCE_ASYNC_TIER`, spawn.rs): because it reads the process's OWN flags, it
+// fires regardless of how the process was launched — a nested `nub run`, a `child_process`
+// spawn (Playwright's globalSetup), or a shell wrapper — all spawn shapes the launcher-side
+// scan cannot see (nub#460). nub's `--require` preload runs before `--import` executes, so
+// the flag is observable here before the foreign loader registers, letting nub pick the
+// composable tier up front (a mid-flight sync→async swap is impossible — the loader-worker
+// cannot be registered from inside another loader's registration on this band). Deliberately
+// conservative: any such flag on the band takes the async tier, even the rare one that
+// registers no loader — a small worker-startup cost on a shrinking Node band, never a crash.
+function shouldAutoAsyncTierAtPreload() {
+  return nodeHookComposeBroken() && foreignAsyncLoaderFlagPresent();
+}
+
 // ── Internal `module.register()` without the DEP0205 leak ────────────
 // `module.register()` is the loader-WORKER registration surface (async ESM hooks in
 // a dedicated thread). nub uses it for the compat tier (18.19–22.14, where the sync
@@ -1236,6 +1286,7 @@ module.exports = {
   installWatchReporting,
   registerLoaderWorker,
   makeHooks,
+  shouldAutoAsyncTierAtPreload,
   installCjsRequireHooks,
   preloadPolyfillPackages,
   installTemporalLazyGlobal,
