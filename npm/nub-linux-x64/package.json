@@ -2,7 +2,7 @@
   "name": "@nubjs/nub-linux-x64",
   "version": "0.4.11",
   "description": "Nub binary for linux-x64",
-  "license": "MIT",
+  "license": "MIT AND LGPL-2.0-or-later AND BSD-3-Clause",
   "repository": "https://github.com/nubjs/nub",
   "os": [
     "linux"

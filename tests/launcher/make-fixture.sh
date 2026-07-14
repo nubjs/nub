@@ -31,7 +31,7 @@ LAUNCHER="$NM/@nubjs/nub"
 HOSTPKG="$NM/@nubjs/nub-host"
 
 rm -rf "$DEST"
-mkdir -p "$LAUNCHER/bin" "$HOSTPKG/bin" "$DEST/bin" "$DEST/fakenode"
+mkdir -p "$LAUNCHER/bin" "$HOSTPKG/bin/nub-resources" "$DEST/bin" "$DEST/fakenode"
 
 # The cross-platform launcher package (what `npm i -g @nubjs/nub` extracts).
 cp "$NUBPKG/bin/nub" "$NUBPKG/bin/nubx" "$NUBPKG/bin/launch.js" "$LAUNCHER/bin/"
@@ -55,6 +55,10 @@ node -e '
 FAKE_SRC="$DEST/.fake-native"
 cat > "$FAKE_SRC" <<'F'
 #!/bin/sh
+if [ -n "${__NUB_VALIDATE_RESOURCE_BUNDLE:-}" ] && [ "${1:-}" = --version ]; then
+  echo "v$(cat "$(dirname "$0")/nub-resources/nub-version")"
+  exit 0
+fi
 case "${0##*/}" in
   nubx*) echo "nubx-mode $*";;
   *)     echo "nub 9.9.9-ci $*";;
@@ -68,6 +72,9 @@ rm -f "$FAKE_SRC"
 # copy when not owner). The heal/ensure code is what we're testing, so we do NOT
 # pre-chmod it here.
 chmod 0644 "$HOSTPKG/bin/nub" "$HOSTPKG/bin/nubx"
+printf 'fixture Bubblewrap resource\n' > "$HOSTPKG/bin/nub-resources/bwrap"
+node -p 'require(process.argv[1]).version' "$NUBPKG/package.json" > "$HOSTPKG/bin/nub-resources/nub-version"
+chmod 0644 "$HOSTPKG/bin/nub-resources/bwrap"
 printf '{"name":"@nubjs/nub-host","version":"9.9.9","files":["bin"]}\n' \
   > "$HOSTPKG/package.json"
 

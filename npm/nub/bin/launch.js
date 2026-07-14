@@ -28,7 +28,8 @@
 // The native binary selects its verb from argv[0]'s basename (nub vs nubx); the
 // healed trampoline exec's bin/<verb> in the platform package (which ships both
 // names), so no argv0 override is needed past the heal.
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
+const crypto = require("crypto");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
@@ -62,6 +63,28 @@ function isExecutable(p) {
   try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; }
 }
 
+function adjacentResourceExecutable(binPath) {
+  return process.platform !== "linux" ||
+    isExecutable(path.join(path.dirname(binPath), "nub-resources", "bwrap"));
+}
+
+function validatedBundle(bin, expectedVersion) {
+  try {
+    const st = fs.lstatSync(path.dirname(bin));
+    if (st.isSymbolicLink()) return false;
+    if (typeof process.getuid === "function" && st.uid !== process.getuid()) return false;
+    if ((st.mode & 0o077) !== 0) return false;
+    const probe = spawnSync(bin, ["--version"], {
+      encoding: "utf8",
+      env: { ...process.env, __NUB_VALIDATE_RESOURCE_BUNDLE: "1" },
+      windowsHide: true,
+    });
+    return probe.status === 0 && probe.stdout.trim().split(/\r?\n/, 1)[0] === `v${expectedVersion}`;
+  } catch {
+    return false;
+  }
+}
+
 // Make `binPath` runnable by us, returning a path that IS executable — `binPath`
 // itself when we can fix it in place, otherwise a user-owned executable copy.
 //
@@ -80,10 +103,13 @@ function isExecutable(p) {
 // every recovery fails (the caller surfaces the spawn error).
 function ensureExecutable(binPath, verb) {
   if (process.platform === "win32") return binPath; // .exe needs no +x bit
-  if (isExecutable(binPath)) return binPath;
+  if (isExecutable(binPath) && adjacentResourceExecutable(binPath)) return binPath;
   // Common case: we own the file (e.g. `sudo`-free user-prefix install) — chmod in place.
   try { fs.chmodSync(binPath, 0o755); } catch {}
-  if (isExecutable(binPath)) return binPath;
+  if (process.platform === "linux") {
+    try { fs.chmodSync(path.join(path.dirname(binPath), "nub-resources", "bwrap"), 0o755); } catch {}
+  }
+  if (isExecutable(binPath) && adjacentResourceExecutable(binPath)) return binPath;
   // Non-owner / read-only store: stage a user-owned executable copy in the cache.
   // Key the copy on the source path + size + mtime so a binary upgrade re-stages and
   // we never exec stale bytes; an existing fresh+executable copy is reused as-is.
@@ -97,20 +123,52 @@ function ensureExecutable(binPath, verb) {
     // this path with no argv0 override — a tagged filename like `nubx-<tag>` would make
     // `nubx` misclassify as plain `nub`. So the staleness tag goes in the DIRECTORY,
     // and the executable keeps its real name: `<cache>/nub/bin/<tag>/<verb>`.
-    const tag = `${st.size}-${Math.trunc(st.mtimeMs)}`;
-    const dir = path.join(base, "nub", "bin", tag);
-    fs.mkdirSync(dir, { recursive: true });
-    const dest = path.join(dir, verb);
-    if (isExecutable(dest)) {
-      const dst = fs.statSync(dest);
-      if (dst.size === st.size) return dest; // already staged, current, runnable
+    const sourceDir = path.dirname(binPath);
+    if (process.platform !== "linux") {
+      const tag = `${st.size}-${Math.trunc(st.mtimeMs)}`;
+      const dir = path.join(base, "nub", "bin", tag);
+      fs.mkdirSync(dir, { recursive: true });
+      const dest = path.join(dir, verb);
+      if (isExecutable(dest) && fs.statSync(dest).size === st.size) return dest;
+      const tmp = path.join(dir, `.${verb}.${process.pid}.${Date.now()}.tmp`);
+      fs.copyFileSync(binPath, tmp);
+      fs.chmodSync(tmp, 0o755);
+      fs.renameSync(tmp, dest);
+      if (isExecutable(dest)) return dest;
     }
-    // Atomic stage: copy to a unique temp in the same dir, chmod, rename into place.
-    const tmp = path.join(dir, `.${verb}.${process.pid}.${Date.now()}.tmp`);
-    fs.copyFileSync(binPath, tmp);
-    fs.chmodSync(tmp, 0o755);
-    fs.renameSync(tmp, dest);
-    if (isExecutable(dest)) return dest;
+    const resourceDir = path.join(sourceDir, "nub-resources");
+    const resource = fs.statSync(path.join(resourceDir, "bwrap"));
+    const identity = crypto.createHash("sha256").update(sourceDir).digest("hex").slice(0, 12);
+    const tag = `${identity}-${st.size}-${Math.trunc(st.mtimeMs)}-${resource.size}-${Math.trunc(resource.mtimeMs)}`;
+    const parent = path.join(base, "nub", "bin");
+    const dir = path.join(parent, tag);
+    fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+    fs.chmodSync(parent, 0o700);
+    const dest = path.join(dir, verb);
+    const version = require("../package.json").version;
+    if (validatedBundle(dest, version)) return dest;
+
+    const tmp = path.join(parent, `.${tag}.${process.pid}.${Date.now()}.tmp`);
+    try {
+      fs.mkdirSync(tmp, { mode: 0o700 });
+      for (const name of ["nub", "nubx"]) {
+        const source = path.join(sourceDir, name);
+        if (!fs.existsSync(source)) continue;
+        fs.copyFileSync(source, path.join(tmp, name));
+        fs.chmodSync(path.join(tmp, name), 0o755);
+      }
+      fs.cpSync(resourceDir, path.join(tmp, "nub-resources"), { recursive: true });
+      fs.chmodSync(path.join(tmp, "nub-resources", "bwrap"), 0o755);
+      if (!validatedBundle(path.join(tmp, verb), version)) throw new Error("staged Nub bundle failed validation");
+      try {
+        fs.renameSync(tmp, dir);
+      } catch (error) {
+        if (!validatedBundle(dest, version)) throw error;
+      }
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+    }
+    if (validatedBundle(dest, version)) return dest;
   } catch {}
   return binPath; // give up; caller's spawn surfaces the real error
 }

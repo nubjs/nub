@@ -142,8 +142,8 @@ mkdir -p "$bin_dir" || error "Failed to create install directory: $bin_dir"
 # Download the per-platform archive and extract it into the install dir. nub is a
 # single self-contained binary that embeds its runtime (preload + vendored
 # node_modules + native addon) and JIT-extracts it to ~/.cache/nub on first run.
-# The archive ships bin/ plus a vestigial empty runtime/ (kept only to satisfy the
-# sidecar-era `nub upgrade`; the binary ignores ~/.nub/runtime — see release.yml).
+# The archive ships bin/ plus a compatibility runtime/ layout for the sidecar-era
+# `nub upgrade`; current binaries use only resources adjacent to bin/nub.
 # (Windows is handled by install.ps1 above, so $target is always darwin/linux.)
 archive_name="nub-${target}.tar.gz"
 url="https://github.com/nubjs/nub/releases/download/v${version}/${archive_name}"
@@ -151,7 +151,15 @@ checksum_url="${url}.sha256"
 
 tmp_archive=$(mktemp) || error "Failed to create temp file"
 tmp_checksum=$(mktemp) || { rm -f "$tmp_archive"; error "Failed to create temp file"; }
-trap 'rm -f "$tmp_archive" "$tmp_checksum"' EXIT
+staged_install=$(mktemp -d "$install_dir/.nub-install.XXXXXX") || error "Failed to create staging directory"
+backup_install=$(mktemp -d "$install_dir/.nub-backup.XXXXXX") || error "Failed to create backup directory"
+preserve_backup=0
+cleanup_install() {
+    rm -f "$tmp_archive" "$tmp_checksum"
+    rm -rf "$staged_install"
+    [[ "$preserve_backup" == 1 ]] || rm -rf "$backup_install"
+}
+trap cleanup_install EXIT
 
 curl --fail --location --progress-bar --output "$tmp_archive" "$url" ||
     error "Failed to download nub from: $url"
@@ -170,27 +178,66 @@ if [[ "$actual_sha256" != "$expected_sha256" ]]; then
     error "Checksum mismatch for $url (expected $expected_sha256, got $actual_sha256). Refusing to install a corrupt or mismatched archive."
 fi
 
-# Replace any prior nub artifacts for a clean upgrade. In the default ~/.nub —
-# which nub owns outright — drop the whole bin/ and a stale runtime/ from a
-# pre-single-binary install. A user-supplied NUB_INSTALL_DIR may hold unrelated
-# files, so there remove only the two executables we wrote. Then extract bin/.
-if [[ "$install_dir" == "$default_install_dir" ]]; then
-    rm -rf "${install_dir:?}/bin" "${install_dir:?}/runtime"
-else
-    rm -f "${bin_dir:?}/nub" "${bin_dir:?}/nubx"
-fi
-tar -xzf "$tmp_archive" -C "$install_dir" ||
+tar -xzf "$tmp_archive" -C "$staged_install" ||
     error "Failed to extract nub archive from: $url"
+staged_exe="$staged_install/bin/nub"
+[[ -f "$staged_exe" ]] || error "Archive did not contain bin/nub"
+chmod +x "$staged_exe" || error "Failed to set permissions on staged bin/nub"
+reported=$(__NUB_VALIDATE_RESOURCE_BUNDLE=1 "$staged_exe" --version 2>/dev/null | head -1 | tr -d '[:space:]') ||
+    error "Staged Nub bundle failed validation"
+[[ "$reported" == "v$version" ]] || error "Staged binary reports $reported, expected v$version"
 
-[[ -f "$exe" ]] || error "Archive did not contain bin/nub"
-chmod +x "$exe" || error "Failed to set permissions on $exe"
+owned=(bin/nub-resources runtime/nub-resources bin/nub bin/nubx)
+restore_backups() {
+    local rel failed=0
+    for rel in "${owned[@]}"; do
+        if [[ -e "$backup_install/$rel" || -L "$backup_install/$rel" ]]; then
+            mkdir -p "$(dirname "$install_dir/$rel")" &&
+                mv "$backup_install/$rel" "$install_dir/$rel" || failed=1
+        fi
+    done
+    return "$failed"
+}
+rollback_install() {
+    local rel failed=0
+    for rel in "${owned[@]}"; do
+        rm -rf "$install_dir/$rel" || failed=1
+    done
+    restore_backups || failed=1
+    return "$failed"
+}
+abort_install() {
+    local message="$1" phase="$2"
+    if [[ "$phase" == backup ]]; then
+        restore_backups || preserve_backup=1
+    else
+        rollback_install || preserve_backup=1
+    fi
+    if [[ "$preserve_backup" == 1 ]]; then
+        error "$message; restoration also failed, backup preserved at $backup_install"
+    fi
+    error "$message"
+}
+for rel in "${owned[@]}"; do
+    if [[ -e "$install_dir/$rel" || -L "$install_dir/$rel" ]]; then
+        mkdir -p "$(dirname "$backup_install/$rel")"
+        mv "$install_dir/$rel" "$backup_install/$rel" || abort_install "Failed to back up $rel" backup
+    fi
+done
+for rel in bin/nub-resources runtime/nub-resources bin/nub bin/nubx; do
+    if [[ -e "$staged_install/$rel" || -L "$staged_install/$rel" ]]; then
+        mkdir -p "$(dirname "$install_dir/$rel")"
+        mv "$staged_install/$rel" "$install_dir/$rel" || abort_install "Failed to install $rel" publish
+    fi
+done
+[[ -f "$exe" ]] || abort_install "Failed to publish bin/nub" publish
+chmod +x "$exe" || abort_install "Failed to set permissions on $exe" publish
 
 # `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
-# args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
-# bin/nub, so create the nubx alias as a relative symlink alongside it. `-f`
-# makes this idempotent across reinstall/upgrade and harmless if a future
-# archive ever ships its own nubx. Relative target keeps it valid if ~/.nub moves.
-ln -sf nub "$bin_dir/nubx" || error "Failed to create nubx symlink in $bin_dir"
+# args_os()[0].file_stem(): "nubx" -> exec). Replace the archive's second copy
+# with a relative alias so it stays valid if ~/.nub moves.
+ln -sf nub "$bin_dir/nubx" || abort_install "Failed to create nubx symlink in $bin_dir" publish
+rm -rf "$backup_install"
 
 # Install receipt: marks this dir as a nub self-managed install so `nub upgrade`
 # recognizes it as in-place-upgradeable even when NUB_INSTALL_DIR relocated it out

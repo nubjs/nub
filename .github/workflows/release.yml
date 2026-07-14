@@ -326,9 +326,33 @@ jobs:
       - name: Run lockfile conformance matrix
         run: tests/aube-conformance/run.sh target/debug/nub
 
+  bwrap-resource:
+    name: Build Bubblewrap resource (${{ matrix.arch }})
+    needs: verify
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf  # v3
+      - name: Build twice and verify reproducibility
+        env:
+          DOCKER_DEFAULT_PLATFORM: ${{ matrix.platform }}
+        run: scripts/build-bwrap-resource.sh "bwrap-${{ matrix.arch }}"
+      - name: Upload resource
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: bwrap-${{ matrix.arch }}
+          path: bwrap-${{ matrix.arch }}
+
   build:
     name: Build (${{ matrix.platform }})
-    needs: [verify, primer]
+    needs: [verify, primer, bwrap-resource]
     runs-on: ${{ matrix.runner }}
     # Primer embed (see the `primer` job + the "Download metadata primer" step):
     # TOP/CAP select which downloaded primer-top{TOP}-v{CAP}-s<schema> file
@@ -350,6 +374,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Download matching Bubblewrap resource
+        if: startsWith(matrix.platform, 'linux-')
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: bwrap-${{ contains(matrix.platform, 'arm64') && 'arm64' || 'x64' }}
+          path: bwrap-resource
+
+      - name: Pin Bubblewrap resource into the Nub binary
+        if: startsWith(matrix.platform, 'linux-')
+        shell: bash
+        run: |
+          echo "NUB_BWRAP_VERSION=0.11.2" >> "$GITHUB_ENV"
+          echo "NUB_BWRAP_SHA256=$(awk '{print $1}' bwrap-resource/bwrap.sha256)" >> "$GITHUB_ENV"
 
       # Pull the metadata primer generated ONCE by the `primer` job into the dir
       # vendor/aube/crates/aube-resolver/build.rs reads. It lands as the
@@ -503,7 +541,7 @@ jobs:
             exit 1
           fi
 
-      - name: Assemble platform package (single binary — bin/ only)
+      - name: Assemble platform package
         shell: bash
         run: |
           # The runtime is EMBEDDED in the binary (staged + built above), so the
@@ -518,6 +556,11 @@ jobs:
             cp "target/${{ matrix.target }}/release/nub" "$PKG/bin/nub"
             cp "target/${{ matrix.target }}/release/nub" "$PKG/bin/nubx"
             chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
+          fi
+          if [[ "${{ matrix.platform }}" == linux-* ]]; then
+            cp -a bwrap-resource "$PKG/bin/nub-resources"
+            chmod +x "$PKG/bin/nub-resources/bwrap"
+            __NUB_VALIDATE_RESOURCE_BUNDLE=1 "$PKG/bin/nub" --version
           fi
 
       - name: Upload platform package
@@ -638,7 +681,12 @@ jobs:
           # leading `v` so it compares apples-to-apples with the tag (which we also
           # strip the leading `v` from). Both 2>&1 + the un-stripped `v` would make
           # the equality below NEVER hold — failing every real release at this gate.
-          REPORTED="$("$BIN" --version 2>/dev/null | head -1 | tr -d '[:space:]')"
+          if [[ "${{ matrix.platform }}" == linux-* ]]; then
+            chmod +x nub-pkg/bin/nub-resources/bwrap
+            REPORTED="$(__NUB_VALIDATE_RESOURCE_BUNDLE=1 "$BIN" --version 2>/dev/null | head -1 | tr -d '[:space:]')"
+          else
+            REPORTED="$("$BIN" --version 2>/dev/null | head -1 | tr -d '[:space:]')"
+          fi
           REPORTED="${REPORTED#v}"
           echo "${{ matrix.platform }} binary reports: '$REPORTED'"
           # On a tag push the expected version is the tag (minus the leading v); on a
@@ -792,18 +840,19 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Package release archives (single binary)
+      - name: Package release archives
         run: |
-          # Per-platform archives containing bin/ plus a VESTIGIAL EMPTY runtime/.
+          # Per-platform archives contain bin/ plus a compatibility runtime/ layout.
           # nub is a single self-contained binary that embeds its runtime and
           # JIT-extracts it on first run, so the new binary needs no runtime/ sidecar.
-          # The empty runtime/ exists SOLELY for transitional back-compat with the
+          # runtime/ exists for transitional back-compat with the
           # sidecar-era (v0.1.x) self-owned upgrader: that already-released, immutable
           # upgrader swaps BOTH ~/.nub/bin AND ~/.nub/runtime by blindly renaming the
           # archive's runtime/ dir into place (no content validation — verified
           # against v0.1.0→v0.1.14). Against a bin-only artifact that rename aborts
           # ("could not install new …/.nub/runtime"), stranding EVERY v0.1.x user on
-          # `nub upgrade`. Shipping an empty runtime/ lets their swap complete; the
+          # `nub upgrade`. Linux exposes the Bubblewrap resource in both layouts as
+          # tar hardlinks; other platforms keep runtime/ empty. The
           # current embed-runtime binary resolves its runtime from the embedded blob
           # (~/.cache/nub) and never reads ~/.nub/runtime, so the empty dir is inert.
           # DO NOT "clean this up" until the sidecar-era upgraders are confirmed
@@ -817,9 +866,15 @@ jobs:
           for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
             PKG="artifacts/nub-$platform"
             [ -d "$PKG" ] || { echo "skip $platform (not built)"; continue; }
-            # The transitional empty runtime/ (see step comment). Created here, not in
-            # the npm package, so only the self-owned upgrade archive carries it.
+            # The compatibility runtime/ layout is created here rather than in the
+            # npm package.
             mkdir -p "$PKG/runtime"
+            if [[ "$platform" == linux-* ]]; then
+              # v0.4.11 swaps bin/, while v0.1.x also swaps runtime/. Keep one
+              # physical resource payload in the tar and expose both layouts as
+              # hardlinks so either released upgrader installs a complete pair.
+              cp -al "$PKG/bin/nub-resources" "$PKG/runtime/nub-resources"
+            fi
             if [[ "$platform" == win32-* ]]; then
               archive="nub-$platform.zip"
               (cd "$PKG" && zip -qr "$GITHUB_WORKSPACE/release-archives/$archive" bin runtime)
@@ -833,6 +888,9 @@ jobs:
               # ("command not found" after upgrade). Ship 0755 in the archive so both
               # the curl|sh installer and `nub upgrade` get an executable binary.
               chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
+              if [[ "$platform" == linux-* ]]; then
+                chmod +x "$PKG/bin/nub-resources/bwrap"
+              fi
               archive="nub-$platform.tar.gz"
               tar -czf "release-archives/$archive" -C "$PKG" bin runtime
             fi
@@ -953,6 +1011,35 @@ jobs:
     with:
       nub_version: ${{ github.ref_name }}
     secrets: inherit
+
+  upgrade-compat:
+    name: Upgrade from v${{ matrix.from }}
+    needs: github-release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        from: [0.1.14, 0.4.11]
+    steps:
+      - name: Install the historical release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.nub"
+          curl -fsSL "https://github.com/nubjs/nub/releases/download/v${{ matrix.from }}/nub-linux-x64.tar.gz" |
+            tar -xzf - -C "$HOME/.nub"
+          chmod +x "$HOME/.nub/bin/nub"
+          touch "$HOME/.nub/.nub-receipt"
+      - name: Upgrade through the historical updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          "$HOME/.nub/bin/nub" upgrade --version "$VERSION" --yes
+          test -x "$HOME/.nub/bin/nub-resources/bwrap"
+          REPORTED="$(__NUB_VALIDATE_RESOURCE_BUNDLE=1 "$HOME/.nub/bin/nub" --version 2>/dev/null | head -1)"
+          test "$REPORTED" = "v$VERSION"
 
   test-install:
     name: Test install (${{ matrix.os }})

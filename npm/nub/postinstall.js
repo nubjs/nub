@@ -57,6 +57,14 @@ function chmodExecutable(pkg) {
       // Not the owner, read-only store, etc. — the launcher chmod is the fallback.
     }
   }
+  if (process.platform === "linux") {
+    try {
+      const bin = require.resolve(`${pkg}/bin/nub`);
+      const bwrap = path.join(path.dirname(bin), "nub-resources", "bwrap");
+      const mode = fs.statSync(bwrap).mode;
+      fs.chmodSync(bwrap, mode | 0o111);
+    } catch {}
+  }
 }
 
 // Re-link existing PM shims to the freshly-installed binary.

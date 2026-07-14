@@ -11,7 +11,7 @@ case "$PLATFORM" in darwin) ;; linux) ;; *) echo "Unsupported: $PLATFORM"; exit 
 case "$ARCH" in arm64|aarch64) ARCH="arm64" ;; x86_64|amd64) ARCH="x64" ;; *) echo "Unsupported: $ARCH"; exit 1 ;; esac
 
 PKG_DIR="$REPO_ROOT/npm/nub-${PLATFORM}-${ARCH}"
-echo "Building for ${PLATFORM}-${ARCH} → $PKG_DIR (single binary, embedded runtime)"
+echo "Building for ${PLATFORM}-${ARCH} → $PKG_DIR (embedded runtime)"
 
 # Single-binary build: the runtime is EMBEDDED in the binary, so we stage it into
 # the repo's runtime/ FIRST, then build nub-cli with --features embed-runtime so
@@ -31,16 +31,27 @@ cp -RL "$REPO_ROOT/node_modules/@js-temporal/polyfill" "$REPO_ROOT/runtime/node_
 cp -RL "$REPO_ROOT/node_modules/jsbi" "$REPO_ROOT/runtime/node_modules/"
 cp -RL "$REPO_ROOT/node_modules/@petamoriken/float16" "$REPO_ROOT/runtime/node_modules/@petamoriken/"
 
-# 2. Build the release binary with the runtime embedded.
+# 2. Build the Linux fallback once, then compile its identity into the binary.
+if [[ "$PLATFORM" == linux ]]; then
+  "$REPO_ROOT/scripts/build-bwrap-resource.sh" "$PKG_DIR/bin/nub-resources"
+  export NUB_BWRAP_VERSION=0.11.2
+  NUB_BWRAP_SHA256=$(awk '{print $1}' "$PKG_DIR/bin/nub-resources/bwrap.sha256")
+  export NUB_BWRAP_SHA256
+fi
+
+# 3. Build the release binary with the runtime embedded.
 cargo build --release -p nub-cli --features embed-runtime
 
-# 3. Copy ONLY the binary — under BOTH names (nub, nubx). The verb is the binary's
+# 4. Copy the binary under BOTH names. The verb is the binary's
 #    own argv[0] basename, so nubx must be a real second copy. No runtime/ sidecar.
 rm -rf "$PKG_DIR/runtime"
 mkdir -p "$PKG_DIR/bin"
 cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nub"
 cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nubx"
 chmod +x "$PKG_DIR/bin/nub" "$PKG_DIR/bin/nubx"
+if [[ "$PLATFORM" == linux ]]; then
+  __NUB_VALIDATE_RESOURCE_BUNDLE=1 "$PKG_DIR/bin/nub" --version >/dev/null
+fi
 
 echo ""
 echo "✓ Platform package ready: $PKG_DIR ($(du -sh "$PKG_DIR" | cut -f1))"
