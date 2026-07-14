@@ -135,6 +135,36 @@ pub(super) const NUB_PROJECT_CONTEXT_EJECT: &[&str] = &[
     "storage-engine",
 ];
 
+/// Stable, order-independent fingerprint token for the curated eject list, folded
+/// into the install-state settings hash via [`crate::dynamic_phantom::settings_token`]
+/// (the `extra_settings_fingerprint` embedder hook). Load-bearing for warm/upgrade
+/// trees (nub#457): the curated seed is injected INSIDE the expand hook, after
+/// aube's `disk_materialize_packages` settings fold, so without this token an
+/// existing install — one from a nub predating the list, or after any FUTURE list
+/// edit — keeps an identical `settings_hash`, and aube's existence-gated fast path
+/// accepts the stale symlinked tree and skips the relink, leaving #457 unfixed.
+/// Folding this token forces the relink that converts the stale symlink to an
+/// ejected dir. Hashing the SORTED names makes the token move on any add/remove and
+/// hold steady on a pure reorder; FNV-1a keeps it dependency-free and stable across
+/// platforms/releases (std's `DefaultHasher` is not guaranteed stable across Rust
+/// versions).
+pub(crate) fn project_context_eject_token() -> String {
+    eject_list_token(NUB_PROJECT_CONTEXT_EJECT)
+}
+
+fn eject_list_token(names: &[&str]) -> String {
+    let mut sorted: Vec<&str> = names.to_vec();
+    sorted.sort_unstable();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for name in sorted {
+        for byte in name.bytes().chain(std::iter::once(0x1f)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
 /// Keep only nub's own embedder-default seed names, dropping every user-source
 /// entry — the mechanism that retires the user-facing `diskMaterializePackages`
 /// knob under nub while leaving standalone aube's byte-for-byte.
@@ -678,6 +708,29 @@ mod tests {
             plan.names.is_empty(),
             "a self-contained build is not ejected: {:?}",
             plan.names
+        );
+    }
+
+    #[test]
+    fn eject_list_token_is_order_independent_and_edit_sensitive() {
+        // The token feeds the install-state fingerprint (#457 warm-tree fix): a pure
+        // reorder is a no-op (it's a set), while any add/remove MUST move it so an
+        // existing install relinks. And it is deterministic — a stable fingerprint,
+        // not a per-run value.
+        assert_eq!(
+            eject_list_token(&["a", "b", "c"]),
+            eject_list_token(&["c", "a", "b"]),
+            "a pure reorder does not change the token"
+        );
+        assert_ne!(
+            eject_list_token(&["a", "b"]),
+            eject_list_token(&["a", "b", "c"]),
+            "an added name changes the token"
+        );
+        assert_eq!(
+            project_context_eject_token(),
+            project_context_eject_token(),
+            "deterministic across calls"
         );
     }
 

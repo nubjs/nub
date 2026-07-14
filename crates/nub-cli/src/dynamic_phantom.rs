@@ -82,11 +82,17 @@ fn eject_disabled(raw: Option<&str>) -> bool {
 /// hash — this seam is what makes it invalidate the warm tree.
 ///
 /// For users the token is CONSTANT-ON: the dead on/off toggle is gone, so it folds
-/// only [`PHANTOM_SCANNER_VERSION`]. That fold is what makes a scanner-logic bump
-/// COMPLETE rather than a half-fix — the bump re-scans content into a new sidecar
-/// path, but on a warm tree with an unchanged lockfile aube would SKIP the link
-/// phase and never apply the improved verdict; changing this token forces the link
-/// to re-run so the consumer picks up the new-version sidecars.
+/// [`PHANTOM_SCANNER_VERSION`] plus the curated-eject list token
+/// ([`crate::pm_engine::phantom_closure::project_context_eject_token`]). The scanner
+/// fold makes a scanner-logic bump COMPLETE rather than a half-fix — the bump
+/// re-scans content into a new sidecar path, but on a warm tree with an unchanged
+/// lockfile aube would SKIP the link phase and never apply the improved verdict;
+/// changing this token forces the link to re-run so the consumer picks up the
+/// new-version sidecars. The curated-eject fold does the same for the #457 list: its
+/// members are injected inside the expand hook, past aube's `disk_materialize_packages`
+/// settings fold, so folding the list token here is what invalidates a warm tree on
+/// the initial ship AND on any future list edit (else the stale symlinked shape is
+/// accepted and #457 stays unfixed on existing installs).
 ///
 /// The token still branches on [`enabled`] SOLELY for the internal A/B seam: when
 /// an agent flips [`INTERNAL_EJECT_DISABLE_VAR`] the token changes, so a warm tree
@@ -100,7 +106,10 @@ pub(crate) fn settings_fingerprint() -> String {
 /// testable without mutating the process-global `enabled()` env.
 fn settings_token(enabled: bool) -> String {
     if enabled {
-        format!("phantom_scanner={PHANTOM_SCANNER_VERSION}")
+        format!(
+            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
+            crate::pm_engine::phantom_closure::project_context_eject_token()
+        )
     } else {
         "phantom_eject=disabled".to_string()
     }
@@ -332,16 +341,20 @@ mod tests {
         );
     }
 
-    /// The user (enabled) token folds the scanner version so a bump invalidates a
-    /// warm tree and forces a re-scan/relink; the dead on/off toggle is gone, so the
-    /// token is just the scanner segment. The disabled token (reachable only via the
-    /// internal A/B seam) is version-free and distinct, so flipping the seam still
-    /// re-links to the pure-symlink shape. Pins both against a future refactor.
+    /// The user (enabled) token folds the scanner version AND the curated-eject list
+    /// token, so a scanner bump or a #457 list edit invalidates a warm tree and forces
+    /// a re-scan/relink; the dead on/off toggle is gone. The disabled token (reachable
+    /// only via the internal A/B seam) is version-free and distinct, so flipping the
+    /// seam still re-links to the pure-symlink shape. Pins both against a future
+    /// refactor.
     #[test]
     fn enabled_token_folds_version_disabled_seam_token_is_distinct() {
         assert_eq!(
             settings_token(true),
-            format!("phantom_scanner={PHANTOM_SCANNER_VERSION}")
+            format!(
+                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
+                crate::pm_engine::phantom_closure::project_context_eject_token()
+            )
         );
         assert_eq!(settings_token(false), "phantom_eject=disabled");
         assert_ne!(settings_token(true), settings_token(false));
