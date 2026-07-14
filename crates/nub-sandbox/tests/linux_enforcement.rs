@@ -887,6 +887,61 @@ fn env_scrub_strips_secret_keeps_baseline() {
 }
 
 #[test]
+fn withheld_environment_hardens_keyrings_without_restricting_full_network() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let Some(probe) = probe_bin(&f.proj) else {
+        return;
+    };
+    let probe = s(&probe);
+    let ambient = &[("MY_SECRET_TOKEN", "leaked")];
+    let protected = serde_json::json!({ "env": false, "fs": true, "net": true });
+    assert_eq!(
+        f.run(protected.clone(), ambient, &probe, &["keyring"]).0,
+        0,
+        "all three keyring-management syscalls are denied"
+    );
+    assert_eq!(
+        f.run(protected.clone(), ambient, &probe, &["keyproc"]).0,
+        0,
+        "keyring procfs entries are unreadable"
+    );
+    assert_eq!(
+        f.run(protected, ambient, &probe, &["unixsocket"]).0,
+        0,
+        "keyring-only hardening preserves Unix sockets under full networking"
+    );
+    let socket_path = f.root.join("container-engine.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+    assert_eq!(
+        f.run(
+            serde_json::json!({ "env": false, "fs": true, "net": true }),
+            ambient,
+            &probe,
+            &["unixconnect", &s(&socket_path)],
+        )
+        .0,
+        0,
+        "keyring-only hardening preserves Docker/Podman-style Unix socket access"
+    );
+
+    let passthrough = serde_json::json!({ "env": true, "fs": ["...", "./"], "net": true });
+    assert_eq!(
+        f.run(passthrough.clone(), ambient, &probe, &["keyprocopen"])
+            .0,
+        0,
+        "environment passthrough does not mask keyring procfs entries"
+    );
+    assert_eq!(
+        f.run(passthrough, ambient, &probe, &["unixsocket"]).0,
+        0,
+        "environment passthrough preserves full-network Unix sockets"
+    );
+}
+
+#[test]
 fn target_path_resolves_relative_to_child_cwd_and_mounts_the_entry() {
     if skip_without_bwrap() {
         return;
@@ -1228,7 +1283,8 @@ fn probe_bin(dir: &Path) -> Option<PathBuf> {
 
 /// Probe: `probe <cmd>` exits 42 when an operation was denied, 0 when it went through
 /// (43 = an over-deny the test flags). Commands:
-///   socket/vmread/ptrace — harmless self-scoped syscalls that remain available.
+///   socket/unixsocket/unixconnect/vmread/ptrace — harmless syscalls checked per policy.
+///   keyring/keyproc/keyprocopen — keyring syscall and procfs hardening probes.
 ///   connect PORT — connect to a host loopback listener (hidden by the net namespace).
 ///   unshare/clone3/clonens — prove nested namespace creation remains available.
 ///   mount — prove the target has no mount capability in its current namespace.
@@ -1246,6 +1302,7 @@ const PROBE_C: &str = r#"
 #include <sched.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <sys/ptrace.h>
 #include <sys/mount.h>
@@ -1277,6 +1334,46 @@ int main(int argc, char** argv) {
     if (!strcmp(argv[1], "socket")) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0 && errno == EPERM) return 42;
+        return 0;
+    }
+    if (!strcmp(argv[1], "unixsocket")) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return 43;
+        close(fd);
+        return 0;
+    }
+    if (!strcmp(argv[1], "unixconnect")) {
+        if (argc < 3 || strlen(argv[2]) >= sizeof(((struct sockaddr_un*)0)->sun_path)) return 2;
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return errno == EPERM ? 42 : 43;
+        struct sockaddr_un addr; memset(&addr, 0, sizeof addr);
+        addr.sun_family = AF_UNIX;
+        strcpy(addr.sun_path, argv[2]);
+        return connect(fd, (struct sockaddr*)&addr, sizeof addr) == 0 ? 0 : 44;
+    }
+    if (!strcmp(argv[1], "keyring")) {
+        errno = 0;
+        if (syscall(SYS_keyctl, 0, 0, 0, 0, 0) != -1 || errno != EPERM) return 43;
+        errno = 0;
+        if (syscall(SYS_add_key, 0, 0, 0, 0, 0) != -1 || errno != EPERM) return 44;
+        errno = 0;
+        if (syscall(SYS_request_key, 0, 0, 0, 0) != -1 || errno != EPERM) return 45;
+        return 0;
+    }
+    if (!strcmp(argv[1], "keyproc") || !strcmp(argv[1], "keyprocopen")) {
+        const char *paths[] = { "/proc/keys", "/proc/key-users" };
+        int should_open = !strcmp(argv[1], "keyprocopen");
+        for (int i = 0; i < 2; i++) {
+            errno = 0;
+            int fd = open(paths[i], O_RDONLY);
+            if (should_open) {
+                if (fd < 0) return 43 + i;
+                close(fd);
+            } else {
+                if (fd >= 0) { close(fd); return 45 + i; }
+                if (errno != EACCES && errno != EPERM) return 47 + i;
+            }
+        }
         return 0;
     }
 #ifdef __x86_64__
@@ -1657,32 +1754,45 @@ fn enforcement_is_full_when_bubblewrap_is_available() {
     );
 }
 
-// ── documented, bounded residuals — CAPTURED so they are no longer reasoned-only ──
-// These assert the CURRENT (bounded) behavior of a residual recorded in
-// LIMITATIONS.md. If a future mechanism closes one, its assertion flips and flags the
-// change — that is the point (a residual is a known bound, not a silent gap).
-
 #[test]
-fn hardlink_to_denied_secret_leaks_via_alias() {
+fn hardlink_alias_of_denied_secret_fails_setup_without_rejecting_unrelated_aliases() {
     if skip_without_bwrap() {
         return;
     }
-    // The boundary protects configured paths, not every alias to the same inode. A
-    // pre-existing hardlink under an unprotected name can still read those bytes.
     let f = fixture();
     let secret = f.proj.join("secret.txt");
     std::fs::write(&secret, "REALSECRET").unwrap();
     let alias = f.proj.join("alias.txt");
     std::fs::hard_link(&secret, &alias).unwrap();
     let surface = serde_json::json!({ "fs": [s(&f.proj), format!("!{}", s(&secret))] });
-    // Residual: the alias (un-denied name) reads the secret's inode.
-    let (_c, out) = f.run(surface.clone(), &[], CAT, &[&s(&alias)]);
+    let policy = compile(&surface, &f.ctx(&[])).unwrap();
+    let error = apply(
+        &policy,
+        CommandSpec::new(CAT)
+            .args([s(&alias)])
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    )
+    .err()
+    .expect("denied hardlink aliases must fail setup");
+    let reason = error.reason.unwrap_or_default();
+    assert!(reason.contains(&s(&secret)), "{reason}");
+    assert!(reason.contains("2 hard links"), "{reason}");
+
+    let unrelated = fixture();
+    let package = unrelated.proj.join("package-store-file");
+    std::fs::write(&package, "PACKAGE").unwrap();
+    std::fs::hard_link(&package, unrelated.proj.join("package-store-alias")).unwrap();
+    let unrelated_secret = unrelated.proj.join("single-link-secret.txt");
+    std::fs::write(&unrelated_secret, "REALSECRET").unwrap();
+    let unrelated_surface = serde_json::json!({
+        "fs": [s(&unrelated.proj), format!("!{}", s(&unrelated_secret))]
+    });
     assert!(
-        out.contains("REALSECRET"),
-        "hardlink residual: an alias to the denied inode reads the secret"
+        unrelated.ok(unrelated_surface, CAT, &[&s(&package)]),
+        "unrelated package-store-style hardlinks remain usable"
     );
-    // Control: WITHOUT any hardlink, the same path-deny holds (proving the alias, not
-    // a broken carve, is the escape).
+
     let f2 = fixture();
     let secret2 = f2.proj.join("secret.txt");
     std::fs::write(&secret2, "REALSECRET").unwrap();

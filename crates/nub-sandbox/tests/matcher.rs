@@ -100,6 +100,23 @@ fn path_matcher_last_match_wins_over_default() {
 }
 
 #[test]
+fn descendant_glob_excludes_the_directory_node() {
+    use nub_sandbox::compiler::compile;
+    use serde_json::json;
+
+    let ctx = common::ctx(true, &[]);
+    let policy = compile(&json!({ "fs": ["~", "!~/.ssh/**"] }), &ctx).unwrap();
+    let matcher = PathMatcher::new(&policy.fs.rules);
+    let ssh = common::homes().home.join(".ssh");
+
+    assert!(matches!(matcher.decide(&ssh).effect, Effect::Allow));
+    assert!(matches!(
+        matcher.decide(&ssh.join("id_rsa")).effect,
+        Effect::Deny
+    ));
+}
+
+#[test]
 fn fs_rw_grant_is_writable_read_only_grant_is_not() {
     use nub_sandbox::compiler::compile;
     use serde_json::json;
