@@ -1030,6 +1030,13 @@ struct TrustedSessionIdentity {
     namespace_init_pid: libc::pid_t,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockedNamespaceInitIdentity {
+    pid: libc::pid_t,
+    outer_pid: libc::pid_t,
+    starttime: u64,
+}
+
 #[derive(Default)]
 struct TrustedSessionCleanup {
     startup_released: bool,
@@ -1294,6 +1301,75 @@ fn verify_blocked_namespace_init(pid: libc::pid_t, outer_pid: libc::pid_t) -> io
     Ok(())
 }
 
+fn validate_blocked_namespace_init_identity(
+    identity: BlockedNamespaceInitIdentity,
+) -> io::Result<()> {
+    verify_blocked_namespace_init(identity.pid, identity.outer_pid)?;
+    if read_host_process_starttime(identity.pid)? != identity.starttime {
+        return Err(invalid_data(
+            "blocked Bubblewrap namespace init changed during identity capture",
+        ));
+    }
+    Ok(())
+}
+
+fn capture_direct_child_identity(
+    pid: libc::pid_t,
+    outer_pid: libc::pid_t,
+) -> io::Result<BlockedNamespaceInitIdentity> {
+    let identity = capture_reported_namespace_init_identity(pid, outer_pid)?;
+    validate_direct_child_identity(identity)?;
+    Ok(identity)
+}
+
+fn capture_reported_namespace_init_identity(
+    pid: libc::pid_t,
+    outer_pid: libc::pid_t,
+) -> io::Result<BlockedNamespaceInitIdentity> {
+    Ok(BlockedNamespaceInitIdentity {
+        pid,
+        outer_pid,
+        starttime: read_host_process_starttime(pid)?,
+    })
+}
+
+fn validate_direct_child_identity(identity: BlockedNamespaceInitIdentity) -> io::Result<()> {
+    verify_direct_child(identity.pid, identity.outer_pid)?;
+    if read_host_process_starttime(identity.pid)? != identity.starttime {
+        return Err(invalid_data(
+            "Bubblewrap child changed during direct-parent validation",
+        ));
+    }
+    verify_direct_child(identity.pid, identity.outer_pid)
+}
+
+fn verify_direct_child(pid: libc::pid_t, outer_pid: libc::pid_t) -> io::Result<()> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let observed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:").map(str::trim));
+    let outer_pid = outer_pid.to_string();
+    if observed != Some(outer_pid.as_str()) {
+        return Err(invalid_data(
+            "Bubblewrap child is not directly owned by the expected outer process",
+        ));
+    }
+    Ok(())
+}
+
+fn read_host_process_starttime(pid: libc::pid_t) -> io::Result<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let close = stat
+        .rfind(')')
+        .ok_or_else(|| invalid_data("host process stat record is malformed"))?;
+    stat[close + 2..]
+        .split_whitespace()
+        .nth(19)
+        .ok_or_else(|| invalid_data("host process stat omits starttime"))?
+        .parse::<u64>()
+        .map_err(|_| invalid_data("host process starttime is invalid"))
+}
+
 fn descriptor_stat(fd: RawFd) -> io::Result<libc::stat> {
     let mut metadata = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } != 0 {
@@ -1331,13 +1407,6 @@ fn openat_owned(
     } else {
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
-}
-
-fn release_bwrap_after_capture<T>(capture: io::Result<T>, mut block: File) -> io::Result<T> {
-    let captured = capture?;
-    block.write_all(&[BWRAP_BLOCK_RELEASE_BYTE])?;
-    drop(block);
-    Ok(captured)
 }
 
 fn capture_error(stage: &str, error: io::Error) -> io::Error {
@@ -1587,6 +1656,8 @@ impl RetainedMonitorLaunch {
         drop(self.signal_reader.take());
         drop(self.info_writer.take());
         drop(self.block_reader.take());
+        let mut reported_namespace_init_pid = None;
+        let mut blocked_namespace_init = None;
         let result = (|| {
             let mut info = self
                 .info_reader
@@ -1596,16 +1667,24 @@ impl RetainedMonitorLaunch {
                 Some(deadline) => read_bwrap_child_pid_until(&mut info, &mut outer, deadline)?,
                 None => read_bwrap_child_pid(&mut info, &mut outer)?,
             };
-            let block = self
-                .block_writer
-                .take()
-                .ok_or_else(|| invalid_input("sandbox Bubblewrap block capability is absent"))?;
+            reported_namespace_init_pid = Some(monitor_pid);
+            let outer_pid = libc::pid_t::try_from(outer.id())
+                .map_err(|_| invalid_data("Bubblewrap process ID does not fit pid_t"))?;
+            let identity = capture_reported_namespace_init_identity(monitor_pid, outer_pid)?;
+            blocked_namespace_init = Some(identity);
+            validate_direct_child_identity(identity)?;
+            validate_blocked_namespace_init_identity(identity)?;
             let restrictions = ProcessRestrictionCeiling::from_spec(&self.spec);
             let capture_deadline = deadline.unwrap_or_else(|| Instant::now() + DESCRIBE_TIMEOUT);
-            let mut trusted = release_bwrap_after_capture(
-                capture_trusted_session(monitor_pid, &mut outer, restrictions, capture_deadline),
-                block,
-            )?;
+            let mut trusted =
+                capture_trusted_session(monitor_pid, &mut outer, restrictions, capture_deadline)?;
+            self.block_writer
+                .as_mut()
+                .ok_or_else(|| invalid_input("sandbox Bubblewrap block capability is absent"))?
+                .write_all(&[BWRAP_BLOCK_RELEASE_BYTE])?;
+            drop(self.block_writer.take());
+            blocked_namespace_init = None;
+            reported_namespace_init_pid = None;
             trusted.cleanup.startup_released = true;
             let control_parent = self
                 .control_parent
@@ -1676,9 +1755,9 @@ impl RetainedMonitorLaunch {
         match result {
             Ok(session) => Ok((outer, session)),
             Err(error) => {
-                // Close every surviving launch capability before terminating the
-                // exact outer process. This makes EOF part of the fail-closed path
-                // instead of relying on the launch value's eventual field drops.
+                // Stock Bubblewrap treats block-fd EOF as release. Retain that
+                // capability until the exact blocked namespace init is dead and
+                // gone, then close the remaining launch capabilities.
                 drop(self.control_parent.take());
                 drop(self.control_child.take());
                 drop(self.release_reader.take());
@@ -1688,8 +1767,12 @@ impl RetainedMonitorLaunch {
                 drop(self.info_reader.take());
                 drop(self.info_writer.take());
                 drop(self.block_reader.take());
-                drop(self.block_writer.take());
-                match fail_closed_outer(&mut outer) {
+                match fail_closed_outer_holding_block(
+                    &mut outer,
+                    self.block_writer.take(),
+                    blocked_namespace_init,
+                    reported_namespace_init_pid,
+                ) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(io::Error::new(
                         error.kind(),
@@ -1698,6 +1781,124 @@ impl RetainedMonitorLaunch {
                 }
             }
         }
+    }
+}
+
+fn fail_closed_outer_holding_block(
+    outer: &mut Child,
+    block_writer: Option<File>,
+    blocked_namespace_init: Option<BlockedNamespaceInitIdentity>,
+    reported_namespace_init_pid: Option<libc::pid_t>,
+) -> io::Result<()> {
+    if block_writer.is_none() {
+        return fail_closed_outer(outer);
+    }
+
+    let mut first_error = None;
+    let mut identities = blocked_namespace_init.into_iter().collect::<Vec<_>>();
+    if identities.is_empty() {
+        match stop_outer_and_capture_direct_children(outer, reported_namespace_init_pid) {
+            Ok(children) => identities = children,
+            Err(error) => first_error = Some(error),
+        }
+    }
+
+    for identity in &identities {
+        if let Err(error) = terminate_exact_blocked_child(*identity) {
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Err(error) = fail_closed_outer(outer) {
+        first_error.get_or_insert(error);
+    }
+    for identity in &identities {
+        if let Err(error) =
+            wait_for_host_target_exit(identity.pid, identity.starttime, DESCRIBE_TIMEOUT)
+        {
+            first_error.get_or_insert(error);
+        }
+    }
+    drop(block_writer);
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn stop_outer_and_capture_direct_children(
+    outer: &mut Child,
+    reported_namespace_init_pid: Option<libc::pid_t>,
+) -> io::Result<Vec<BlockedNamespaceInitIdentity>> {
+    let outer_pid = libc::pid_t::try_from(outer.id())
+        .map_err(|_| invalid_data("Bubblewrap process ID does not fit pid_t"))?;
+    if outer.try_wait()?.is_some() {
+        return capture_reported_child_after_outer_exit(outer_pid, reported_namespace_init_pid);
+    }
+    if unsafe { libc::kill(outer_pid, libc::SIGSTOP) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) && outer.try_wait()?.is_some() {
+            return capture_reported_child_after_outer_exit(outer_pid, reported_namespace_init_pid);
+        }
+        return Err(error);
+    }
+    wait_for_host_process_state(outer_pid, b'T', DESCRIBE_TIMEOUT)?;
+
+    let mut children = fs::read_to_string(format!("/proc/{outer_pid}/task/{outer_pid}/children"))?
+        .split_ascii_whitespace()
+        .map(|value| {
+            value
+                .parse::<libc::pid_t>()
+                .map_err(|_| invalid_data("Bubblewrap child list contains an invalid PID"))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    if let Some(reported) = reported_namespace_init_pid {
+        children.sort_by_key(|child| *child != reported);
+    }
+    children
+        .into_iter()
+        .map(|pid| capture_direct_child_identity(pid, outer_pid))
+        .collect()
+}
+
+fn capture_reported_child_after_outer_exit(
+    outer_pid: libc::pid_t,
+    reported_namespace_init_pid: Option<libc::pid_t>,
+) -> io::Result<Vec<BlockedNamespaceInitIdentity>> {
+    let Some(pid) = reported_namespace_init_pid else {
+        return Ok(Vec::new());
+    };
+    match read_host_process_starttime(pid) {
+        Ok(starttime) => Ok(vec![BlockedNamespaceInitIdentity {
+            pid,
+            outer_pid,
+            starttime,
+        }]),
+        Err(error) if process_disappeared(&error) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn terminate_exact_blocked_child(identity: BlockedNamespaceInitIdentity) -> io::Result<()> {
+    if identity.pid <= 0 || identity.outer_pid <= 0 {
+        return Err(invalid_data(
+            "blocked Bubblewrap process identity is invalid",
+        ));
+    }
+    match read_host_process_starttime(identity.pid) {
+        Err(error) if process_disappeared(&error) => return Ok(()),
+        Err(error) => return Err(error),
+        Ok(observed) if observed != identity.starttime => return Ok(()),
+        Ok(_) => {}
+    }
+    let killed = unsafe { libc::kill(identity.pid, libc::SIGKILL) };
+    if killed == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
     }
 }
 
@@ -9466,19 +9667,186 @@ mod tests {
     }
 
     #[test]
-    fn bubblewrap_block_gate_releases_only_after_successful_capture() {
-        let (mut failed_reader, failed_writer) = pipe_files(true).unwrap();
-        let error =
-            release_bwrap_after_capture::<()>(Err(invalid_data("capture rejected")), failed_writer)
-                .unwrap_err();
-        assert_eq!(error.to_string(), "capture rejected");
-        let mut byte = [0u8; 1];
-        assert_eq!(failed_reader.read(&mut byte).unwrap(), 0);
+    fn pre_info_outer_exit_closes_block_capability() {
+        for _ in 0..32 {
+            let (mut block_reader, block_writer) = pipe_files(true).unwrap();
+            let mut outer = Command::new("/bin/false").spawn().unwrap();
+            assert!(!outer.wait().unwrap().success());
+            fail_closed_outer_holding_block(&mut outer, Some(block_writer), None, None).unwrap();
+            let mut byte = [0u8; 1];
+            assert_eq!(block_reader.read(&mut byte).unwrap(), 0);
+        }
+    }
 
-        let (mut released_reader, released_writer) = pipe_files(true).unwrap();
-        release_bwrap_after_capture(Ok(()), released_writer).unwrap();
-        assert_eq!(released_reader.read(&mut byte).unwrap(), 1);
-        assert_eq!(byte, [BWRAP_BLOCK_RELEASE_BYTE]);
+    #[test]
+    fn capture_failure_kills_bwrap_before_block_eof_can_execute_target() {
+        let Some(bwrap) = usable_stock_bwrap() else {
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let blocked_marker = directory.path().join("blocked-target-executed");
+        let (mut blocked, block_writer, blocked_identity) =
+            spawn_blocked_bwrap_target(bwrap, directory.path(), &blocked_marker).unwrap();
+        fail_closed_outer_holding_block(
+            &mut blocked,
+            Some(block_writer),
+            Some(blocked_identity),
+            Some(blocked_identity.pid),
+        )
+        .unwrap();
+        wait_for_host_target_exit(
+            blocked_identity.pid,
+            blocked_identity.starttime,
+            DESCRIBE_TIMEOUT,
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            !blocked_marker.exists(),
+            "capture failure released Bubblewrap's target before fail-closed cleanup"
+        );
+
+        let early_marker = directory.path().join("pre-identity-target-executed");
+        let (mut early, block_writer, early_identity) =
+            spawn_blocked_bwrap_target(bwrap, directory.path(), &early_marker).unwrap();
+        fail_closed_outer_holding_block(
+            &mut early,
+            Some(block_writer),
+            None,
+            Some(early_identity.pid),
+        )
+        .unwrap();
+        wait_for_host_target_exit(
+            early_identity.pid,
+            early_identity.starttime,
+            DESCRIBE_TIMEOUT,
+        )
+        .unwrap();
+        assert!(
+            !early_marker.exists(),
+            "pre-identity cleanup released Bubblewrap's target through block-fd EOF"
+        );
+
+        let eof_marker = directory.path().join("eof-target-executed");
+        let (mut released, block_writer, released_identity) =
+            spawn_blocked_bwrap_target(bwrap, directory.path(), &eof_marker).unwrap();
+        drop(block_writer);
+        assert!(
+            wait_for_child_status(&mut released, DESCRIBE_TIMEOUT)
+                .unwrap()
+                .success()
+        );
+        wait_for_host_target_exit(
+            released_identity.pid,
+            released_identity.starttime,
+            DESCRIBE_TIMEOUT,
+        )
+        .unwrap();
+        assert!(
+            eof_marker.exists(),
+            "the stock-Bubblewrap control did not execute after block-fd EOF"
+        );
+    }
+
+    fn usable_stock_bwrap() -> Option<&'static Path> {
+        let candidate = ["/usr/bin/bwrap", "/bin/bwrap"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.is_file());
+        let Some(candidate) = candidate else {
+            require_bwrap_or_skip("stock Bubblewrap is unavailable");
+            return None;
+        };
+        let usable = Command::new(candidate)
+            .args([
+                "--die-with-parent",
+                "--unshare-user",
+                "--ro-bind",
+                "/",
+                "/",
+                "--",
+                "/bin/true",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !usable {
+            require_bwrap_or_skip("stock Bubblewrap cannot create the required user namespace");
+            return None;
+        }
+        Some(candidate)
+    }
+
+    fn require_bwrap_or_skip(reason: &str) {
+        let required = matches!(
+            std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        );
+        assert!(!required, "NUB_SANDBOX_REQUIRE_BWRAP set but {reason}");
+    }
+
+    fn spawn_blocked_bwrap_target(
+        bwrap: &Path,
+        writable_directory: &Path,
+        marker: &Path,
+    ) -> io::Result<(Child, File, BlockedNamespaceInitIdentity)> {
+        let (mut info_reader, info_writer) = pipe_files(true)?;
+        let (block_reader, block_writer) = pipe_files(false)?;
+        let info_fd = info_writer.as_raw_fd();
+        let block_fd = block_reader.as_raw_fd();
+        let mut command = Command::new(bwrap);
+        command
+            .env_clear()
+            .args([
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-user",
+                "--unshare-pid",
+                "--as-pid-1",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--bind",
+            ])
+            .arg(writable_directory)
+            .arg(writable_directory)
+            .arg("--info-fd")
+            .arg(info_fd.to_string())
+            .arg("--block-fd")
+            .arg(block_fd.to_string())
+            .arg("--")
+            .arg("/usr/bin/touch")
+            .arg(marker)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                clear_cloexec(info_fd)?;
+                clear_cloexec(block_fd)
+            });
+        }
+        let mut outer = command.spawn()?;
+        drop(info_writer);
+        drop(block_reader);
+        let namespace_init_pid = read_bwrap_child_pid(&mut info_reader, &mut outer)?;
+        let outer_pid = libc::pid_t::try_from(outer.id())
+            .map_err(|_| invalid_data("Bubblewrap process ID does not fit pid_t"))?;
+        let identity = capture_direct_child_identity(namespace_init_pid, outer_pid)?;
+        validate_blocked_namespace_init_identity(identity)?;
+        let process = open_absolute_owned(
+            &format!("/proc/{namespace_init_pid}"),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )?;
+        let _root = wait_for_sandbox_root(&process, &mut outer, Instant::now() + DESCRIBE_TIMEOUT)?;
+        Ok((outer, block_writer, identity))
     }
 
     #[test]
