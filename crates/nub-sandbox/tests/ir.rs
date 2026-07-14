@@ -188,8 +188,9 @@ fn apply_degradation_reflects_backend_capability() {
         #[cfg(target_os = "windows")]
         Err(degradation) => {
             assert!(
-                degradation.lost.contains(&"fs-root".to_string()),
-                "an ordinary checkout must fail the AppContainer clean-root precondition"
+                degradation.lost.contains(&"fs-root".to_string())
+                    || degradation.lost.contains(&"fs-read-deny".to_string()),
+                "Windows must fail either the clean-root precondition or the nested read deny"
             );
             return;
         }
@@ -207,25 +208,6 @@ fn apply_degradation_reflects_backend_capability() {
         d.is_full(),
         "Linux enforces fs + deny-all net with Bubblewrap"
     );
-    // Windows (AppContainer) enforces the literal read-confine grant (`./x`) + coarse
-    // deny-all net fully — BUT the default `.env*` READ-deny is now injected on every
-    // read-granting policy, and a deny landing INSIDE a granted read subtree can't be
-    // carved under the AppContainer allowlist model (an inheritable read-allow defeats
-    // it — the AAP-class trap). So the backend honestly reports `fs-read-deny` (the
-    // `.env*`-inside-grant residual), never silently leaving it unenforced. Net stays
-    // fully enforced. (A future DACL inheritance-break mechanism would carve it and
-    // remove this degradation.)
-    #[cfg(target_os = "windows")]
-    {
-        assert!(
-            d.lost.contains(&"fs-read-deny".to_string()),
-            "Windows honestly reports the un-carvable `.env*`-inside-grant deny"
-        );
-        assert!(
-            !d.lost.iter().any(|l| l.starts_with("net")),
-            "coarse deny-all net is still fully enforced"
-        );
-    }
     // Any OS with no wired backend still runs the env-scrub skeleton, which honestly
     // reports fs + net as not-enforced.
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

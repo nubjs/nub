@@ -92,8 +92,8 @@ struct FsDegrade {
 /// be expressed as an inheritable ACE; the read-confine (`default_effect == Deny`)
 /// posture maps faithfully, while a generous-read base or an embedded-glob allow can't
 /// and is reported via [`FsDegrade`] (fail-safe: over-confine + name it, never widen).
-/// (The deny-shadowing check is done by [`deny_shadows_grant`] in `apply`, AFTER the
-/// program-dir grant is folded into the read set.)
+/// The deny-shadowing check runs against these policy-derived subtree grants before the
+/// program-file grant is added; an unrepresentable nested deny is rejected, not degraded.
 fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
     let mut read = Vec::new();
     let mut write = Vec::new();
@@ -134,7 +134,7 @@ fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
 
 /// Whether any read DENY could match a path inside a granted read subtree — an
 /// inheritable read-allow on the grant DEFEATS such a deny on Windows (the same class
-/// of trap the AAP denylist hits), so it cannot be carved and must be reported. The
+/// of trap the AAP denylist hits), so it cannot be carved and must be rejected. The
 /// rule is sound and conservative: a depth-independent glob deny (`**/.env`) shadows
 /// EVERY grant, and a deny whose literal prefix is inside a grant (or vice-versa)
 /// shadows it. Matching is case-insensitive (Windows paths are). Run against the
@@ -326,6 +326,8 @@ pub(crate) fn apply(
 ) -> Result<super::Prepared, super::Degradation> {
     use super::{Degradation, Prepared};
 
+    let mut spec = spec;
+
     let confine_fs = fs_confines(&policy.fs);
     let sandboxing = confine_fs || policy.net.enforce;
     let tmp_lost = super::tmp_lost_axis(policy);
@@ -357,7 +359,18 @@ pub(crate) fn apply(
                 ),
             });
         };
-        if let Err(error) = launch::verify_clean_root(cwd) {
+        // Resolve once against the apply-time parent cwd, then use the same absolute
+        // directory for both DACL preflight and the eventual CreateProcessW launch.
+        // Otherwise `work` is inspected as a one-component lexical path (never reaching
+        // its protected ancestor), and a later ambient-cwd change can launch elsewhere.
+        let effective_cwd = std::fs::canonicalize(cwd).map_err(|error| Degradation {
+            lost: vec!["process-cwd".to_string()],
+            reason: Some(format!(
+                "resolving sandbox working directory {}: {error}",
+                cwd.display()
+            )),
+        })?;
+        if let Err(error) = launch::verify_clean_root(&effective_cwd) {
             return Err(Degradation {
                 lost: vec!["fs-root".to_string()],
                 reason: Some(format!(
@@ -366,6 +379,7 @@ pub(crate) fn apply(
                 )),
             });
         }
+        spec.cwd = Some(effective_cwd);
     }
 
     // Nothing needs the AppContainer: only env-scrub (or nothing). Use the plain
@@ -400,12 +414,27 @@ pub(crate) fn apply(
 
     let (read_grants, write_grants, fs_degrade) = derive_grants(&policy.fs);
 
-    // The deny-shadow degradation is judged against the POLICY-derived subtree grants
+    // The deny-shadow rejection is judged against the POLICY-derived subtree grants
     // ONLY — captured before the program file is folded in below. The program-file grant
     // is a single leaf with no subtree and is an exec necessity, so no user data-policy
     // deny can "land inside" it; including it would spuriously flag `fs-read-deny` whenever
     // the program merely lives under a deny'd dir.
     let policy_read_grants = read_grants.clone();
+
+    // An inheritable read allow wins over a deny nested beneath it. This is not a
+    // reduced-mode policy: returning Prepared would hand direct embedders a launchable
+    // plan with broader read access than requested, so reject it before any launch plan
+    // or filesystem ACE can be produced.
+    if deny_shadows_grant(&policy.fs.rules.entries, &policy_read_grants) {
+        return Err(Degradation {
+            lost: vec!["fs-read-deny".to_string()],
+            reason: Some(
+                "a read deny landing inside a granted subtree can't be carved on Windows \
+                 (inheritable allow wins); the policy was rejected before launch"
+                    .to_string(),
+            ),
+        });
+    }
 
     // Auto-grant read+execute on the program FILE ITSELF (not its parent dir) so the
     // LowBox child can exec — with traverse-bypass the leaf-object ACL is what gates the
@@ -440,17 +469,6 @@ pub(crate) fn apply(
         reason.get_or_insert_with(|| {
             "an embedded-glob read allow can't be an inheritable ACE — that path is \
              not read-granted (over-confined)"
-                .to_string()
-        });
-    }
-    // A read deny landing inside a granted subtree can't be carved on Windows — the
-    // inheritable read-allow defeats it. Checked against the policy-derived subtree grants
-    // only (the program-file grant is excluded — see `policy_read_grants` above).
-    if deny_shadows_grant(&policy.fs.rules.entries, &policy_read_grants) {
-        deg.lost.push("fs-read-deny".to_string());
-        reason.get_or_insert_with(|| {
-            "a read deny landing inside a granted subtree can't be carved on Windows \
-             (inheritable allow wins) — deny not enforced"
                 .to_string()
         });
     }

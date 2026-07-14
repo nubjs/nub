@@ -249,19 +249,7 @@ responsibility, not an engine mechanism nub supplies.
   loads SIBLING DLLs from its own dir needs the front-end to supply that toolchain dir in
   the read allow-set — the engine no longer auto-widens. A self-contained build-jail
   toolchain (`node.exe`) needs nothing more. (`backend/windows.rs` `apply`.)
-- **Windows `.env*` read-deny inside a granted read subtree — REPORTED, not enforced.**
-  The default `.env*` READ-deny (injected on every read-granting fs policy — see
-  `compiler::fold::finalize_env_deny`) is a deny that lands INSIDE the granted read
-  subtree, which the AppContainer allowlist model cannot carve (an inheritable read-allow
-  ACE on the grant defeats a nested deny — the same AAP-class trap). So a `.env*` file
-  under a granted dir stays readable on Windows, and the backend HONESTLY reports it via
-  the `fs-read-deny` `Degradation` (`deny_shadows_grant` in `backend/windows.rs`), never
-  silently. macOS (Seatbelt deny-regex) and Linux (Bubblewrap masks) enforce
-  it fully. Fix (future): the DACL inheritance-break mechanism (a PROTECTED DACL on the
-  confined root that strips inherited ACEs and re-grants only intended principals) can
-  carve the deny and remove this degradation — not yet built. Consequence today: every
-  read-granting Windows policy reports reduced mode for the `.env*` carve while the
-  read-CONFINE itself (deny everything outside the allow-set) is fully enforced.
+- **Windows `.env*` read-deny inside a granted read subtree — REJECTED before launch.** The compiler injects a default `.env*` read deny into every read-granting filesystem policy (`compiler::fold::finalize_env_deny`). The AppContainer allowlist cannot carve that deny from an inheritable read grant, so the backend returns an `fs-read-deny` `Degradation` error before producing a launchable `Prepared` (`deny_shadows_grant` in `backend/windows.rs`). Direct embedders and the Nub CLI fail closed identically. The macOS Seatbelt and Linux Bubblewrap backends enforce the deny. A future DACL inheritance-break mechanism could make the policy enforceable on Windows; until then, Windows read confinement works only when no deny is nested inside a granted subtree.
 
 ### Private tmp (`<tmp>: "rw"`/`false`) — macOS/Linux enforced; Windows reported
 

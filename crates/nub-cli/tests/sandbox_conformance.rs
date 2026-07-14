@@ -415,7 +415,8 @@ fn fs_read_confine() {
 }
 
 /// Windows cannot carve the compiler's `.env*` read deny out of a granted project
-/// subtree. The CLI must reject that degradation before the child creates a marker.
+/// subtree. The backend rejection must surface through the CLI before the child creates
+/// a marker.
 #[test]
 #[cfg(target_os = "windows")]
 fn windows_read_deny_inside_grant_fails_closed() {
