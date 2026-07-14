@@ -2667,6 +2667,7 @@ dependencies = [
  "aube-lockfile",
  "aube-manifest",
  "aube-registry",
+ "aube-resolver",
  "aube-scripts",
  "aube-settings",
  "aube-store",

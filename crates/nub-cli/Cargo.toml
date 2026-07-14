@@ -40,6 +40,11 @@ aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
 # materialization) via `aube_linker::set_disk_materialize_expand_hook`; a pure
 # library crate (no CLI/tokio surface), same lean-graph rationale as aube-lockfile.
 aube-linker = { path = "../../vendor/aube/crates/aube-linker" }
+# aube-resolver: `nub import` runs the peer-context pass (hoist_auto_installed_peers
+# + apply_peer_contexts) on a bun/npm-parsed graph before writing pnpm-lock, so the
+# imported lockfile carries peer suffixes the install path assumes pnpm-locks have
+# (#453). Pure offline graph transforms; a lean library crate already in the graph.
+aube-resolver = { path = "../../vendor/aube/crates/aube-resolver" }
 aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
 # default-features = false drops aube's default set (`mimalloc`, `config-tui`),
 # neither of which nub uses: aube's `config-tui` (ratatui/crossterm) only feeds
