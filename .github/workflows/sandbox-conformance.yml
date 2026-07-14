@@ -17,7 +17,7 @@ name: sandbox-conformance
 on:
   workflow_dispatch:
   push:
-    branches: [sandbox-primitives]
+    branches: [sandbox-primitives, sandbox-cross-platform-corrections]
     paths:
       - "crates/nub-sandbox/**"
       - "crates/nub-cli/**"
