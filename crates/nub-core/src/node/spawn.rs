@@ -1117,14 +1117,26 @@ impl PathShimManager {
         // This matters on Windows, where a delete-pending hardlink keeps its
         // directory entry until the last file handle closes.
         let mut pending = None;
+        let mut cached_validation_error = None;
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(record) = state.as_ref() {
-            validate_shim_record(record)?;
-            return shim_dir_utf8(record.dir.clone());
+            match validate_shim_record(record) {
+                Ok(()) => return shim_dir_utf8(record.dir.clone()),
+                Err(error) => {
+                    cached_validation_error = Some(format!("{error:#}"));
+                    // Keep the manager lock held while retiring the invalid
+                    // record and publishing its replacement. Concurrent callers
+                    // can then observe only the old record before validation or
+                    // the fully validated replacement, never an empty window.
+                    // Do not clean the invalid path here: validation failed, so
+                    // pathname-based cleanup can no longer prove its identity.
+                    drop(state.take().expect("cached PATH shim record is present"));
+                }
+            }
         }
 
         let nub_binary = fs::canonicalize(nub_binary)
@@ -1174,6 +1186,13 @@ impl PathShimManager {
             node_identity: published,
         };
         *state = Some(record);
+        drop(state);
+        if let Some(error) = cached_validation_error {
+            tracing::warn!(
+                error = %error,
+                "cached Node PATH shim failed validation; created a replacement"
+            );
+        }
         Ok(utf8_dir)
     }
 
@@ -1461,8 +1480,10 @@ fn shim_dir_utf8(path: PathBuf) -> Result<Utf8PathBuf> {
 /// Returns `None` if already re-entrant (parent nub already set up augmentation)
 /// or if compat mode is active.
 ///
-/// The PATH shim temp dir created here is process-wide and reclaimed exactly
-/// once on process exit via [`cleanup_shim`]; it is
+/// The active PATH shim temp dir is process-wide and reclaimed exactly once on
+/// process exit via [`cleanup_shim`]. A record that fails validation is retired
+/// without pathname-based cleanup and replaced; a later dead-process reaper
+/// handles its old directory. The active shim is
 /// deliberately NOT returned as a per-call RAII guard, because concurrent
 /// workspace scripts share the one dir and a per-call drop would `rm -rf` it
 /// out from under sibling scripts still running.
@@ -2142,7 +2163,7 @@ pub fn exit_code(result: &SpawnResult) -> i32 {
     exit_code_from_status(&result.status)
 }
 
-/// Clean up the exact PATH shim directory created by this process.
+/// Clean up this process's active validated PATH shim directory.
 pub fn cleanup_shim() {
     PATH_SHIM_MANAGER.cleanup();
 }
@@ -3590,7 +3611,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_cached_shim_fails_closed_for_concurrent_callers() {
+    fn invalid_cached_shim_is_replaced_once_for_concurrent_callers() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let root = shim_test_root("cached-invalid");
@@ -3614,39 +3635,118 @@ mod tests {
         fs::copy(&replacement, &node).unwrap();
 
         let nonce_calls = AtomicUsize::new(0);
-        let errors: Vec<_> = std::thread::scope(|scope| {
+        let replacements: Vec<_> = std::thread::scope(|scope| {
             (0..8)
                 .map(|_| {
                     scope.spawn(|| {
-                        manager.setup_in(
-                            &nub_binary,
-                            &root,
-                            7171,
-                            || {
-                                nonce_calls.fetch_add(1, Ordering::Relaxed);
-                                Ok([0x55; 16])
-                            },
-                            ShimSetupOptions::default(),
-                        )
+                        manager
+                            .setup_in(
+                                &nub_binary,
+                                &root,
+                                7171,
+                                || {
+                                    nonce_calls.fetch_add(1, Ordering::Relaxed);
+                                    Ok([0x55; 16])
+                                },
+                                ShimSetupOptions::default(),
+                            )
+                            .unwrap()
                     })
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
-                .map(|thread| thread.join().unwrap().unwrap_err().to_string())
+                .map(|thread| thread.join().unwrap())
                 .collect()
         });
-        assert_eq!(nonce_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(nonce_calls.load(Ordering::Relaxed), 1);
         assert!(
-            errors.iter().all(|error| error.contains("node shim")),
-            "cached validation errors were not preserved: {errors:?}"
+            replacements.windows(2).all(|pair| pair[0] == pair[1]),
+            "concurrent callers published different replacements: {replacements:?}"
         );
-        assert!(manager.state.lock().unwrap().is_some());
+        assert_ne!(replacements[0], dir);
+        let replacement_dir = PathBuf::from(replacements[0].as_str());
+        assert!(replacement_dir.exists());
 
         manager.cleanup();
+        assert!(!replacement_dir.exists());
         assert!(
             Path::new(dir.as_str()).exists(),
             "cleanup removed a directory whose node entry changed identity"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_cached_shim_replacement_can_retry_later() {
+        let root = shim_test_root("cached-retry");
+        let nub_binary = shim_test_binary(&root, "nub-bin", b"current nub");
+        let replacement = shim_test_binary(&root, "replacement-bin", b"not nub");
+        let manager = PathShimManager::new();
+        let original = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                7272,
+                || Ok([0x66; 16]),
+                ShimSetupOptions::default(),
+            )
+            .unwrap();
+        let node = node_shim_path(Path::new(original.as_str()));
+        fs::rename(&node, node.with_extension("old")).unwrap();
+        #[cfg(unix)]
+        unix_fs::symlink(&replacement, &node).unwrap();
+        #[cfg(windows)]
+        fs::copy(&replacement, &node).unwrap();
+
+        let failed_nonce = [0x77; 16];
+        let failed_dir = root.join(format!(
+            "{PATH_SHIM_PREFIX}{}-{}",
+            7272,
+            nonce_hex(failed_nonce)
+        ));
+        let error = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                7272,
+                || Ok(failed_nonce),
+                ShimSetupOptions {
+                    #[cfg(windows)]
+                    force_copy: false,
+                    fail_before_commit: true,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected PATH shim commit failure")
+        );
+        assert!(manager.state.lock().unwrap().is_none());
+        assert!(!failed_dir.exists());
+
+        let retry_nonce = [0x88; 16];
+        let retried = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                7272,
+                || Ok(retry_nonce),
+                ShimSetupOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            Path::new(retried.as_str()),
+            root.join(format!(
+                "{PATH_SHIM_PREFIX}{}-{}",
+                7272,
+                nonce_hex(retry_nonce)
+            ))
+        );
+
+        manager.cleanup();
+        assert!(!Path::new(retried.as_str()).exists());
+        assert!(Path::new(original.as_str()).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3899,7 +3999,7 @@ mod tests {
                         panic!("creating directory reparse point: {error}");
                     }
                 } else {
-                    let error = dir_manager
+                    let replacement = dir_manager
                         .setup_in(
                             &source,
                             &root,
@@ -3907,12 +4007,11 @@ mod tests {
                             || Ok([0xac; 16]),
                             ShimSetupOptions::default(),
                         )
-                        .unwrap_err();
-                    assert!(
-                        error.to_string().contains("not a real directory"),
-                        "directory reparse point was not rejected: {error:#}"
-                    );
+                        .unwrap();
+                    assert_ne!(Path::new(replacement.as_str()), dir);
+                    assert!(Path::new(replacement.as_str()).exists());
                     dir_manager.cleanup();
+                    assert!(!Path::new(replacement.as_str()).exists());
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -3969,7 +4068,7 @@ mod tests {
             }
             panic!("creating file reparse point: {error}");
         }
-        let error = node_manager
+        let replacement = node_manager
             .setup_in(
                 &source,
                 &root,
@@ -3977,12 +4076,11 @@ mod tests {
                 || Ok([0xae; 16]),
                 ShimSetupOptions::default(),
             )
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("regular non-reparse file"),
-            "node reparse point was not rejected: {error:#}"
-        );
+            .unwrap();
+        assert_ne!(Path::new(replacement.as_str()), Path::new(dir.as_str()));
+        assert!(Path::new(replacement.as_str()).exists());
         node_manager.cleanup();
+        assert!(!Path::new(replacement.as_str()).exists());
 
         fs::remove_dir_all(root).unwrap();
     }
