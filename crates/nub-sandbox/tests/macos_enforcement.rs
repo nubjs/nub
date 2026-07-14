@@ -154,6 +154,29 @@ fn system_sandbox_launcher_ignores_the_child_path() {
     );
 }
 
+#[test]
+fn bare_entry_program_is_granted_from_the_child_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = fixture();
+    let child_bin = f.root.join("child-bin");
+    let tool = child_bin.join("child-path-tool");
+    fs::create_dir(&child_bin).unwrap();
+    fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:/usr/bin:/bin", s(&child_bin));
+    assert!(
+        f.allowed_env(
+            serde_json::json!({ "fs": [], "net": false, "env": true }),
+            &[("PATH", path.as_str())],
+            "child-path-tool",
+            &[],
+        ),
+        "the entry resolved by the constructed child PATH must be readable and executable"
+    );
+}
+
 // ── fs read-confine (array form = allowlist: project + toolchain only) ─────────
 
 #[test]

@@ -2823,14 +2823,27 @@ fn run_sandboxed(
         spec
     };
     let prepared = nub_sandbox::apply_with_runtime(&policy, spec, runtime).map_err(|d| {
-        // Surface the fail-closed reason cleanly (e.g. Windows per-host/MITM needing
-        // elevation), not a Debug dump — this is the user-facing error.
+        // Surface the fail-closed reason cleanly, not a Debug dump — this is the
+        // user-facing error.
         let detail = d
             .reason
             .clone()
             .unwrap_or_else(|| format!("could not enforce {}", d.lost.join(", ")));
         anyhow::anyhow!("sandbox could not be applied (fail-closed): {detail}")
     })?;
+    #[cfg(target_os = "windows")]
+    if prepared
+        .degradation
+        .lost
+        .iter()
+        .any(|axis| axis == "fs-read-deny")
+    {
+        let detail =
+            prepared.degradation.reason.as_deref().unwrap_or(
+                "Windows cannot enforce a read deny inside a granted filesystem subtree",
+            );
+        bail!("sandbox could not be applied (fail-closed): {detail}");
+    }
     if let Some(warning) = prepared.degradation.warning() {
         eprintln!("warning: {warning}");
     }

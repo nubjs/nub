@@ -79,50 +79,9 @@ namespace for deny/restricted policy. The authenticated proxy/control plane requ
 per-host egress is deferred. A per-host policy therefore tightens to no network and is
 reported as `net-per-host`; it never silently widens to unrestricted egress.
 
-### Windows per-host egress + MITM: opt-in elevated "strict Windows" tier
+### Windows per-host egress and MITM are unavailable
 
-Per-host net (Q21) and the MITM/credential-brokering tier (Q22) enforce on Windows the
-same way as macOS/Linux — the confined child's sole egress is nub's loopback proxy — but
-reaching that proxy needs a step the other platforms don't. An AppContainer child is
-WFP-blocked from ALL loopback regardless of capability, and the only lift
-(`NetworkIsolationSetAppContainerConfig`, a per-run AC-SID loopback exemption) requires
-administrator. So per-host/MITM on Windows is an **opt-in elevated tier**; coarse on/off
-(allow-all or deny-all, which need no proxy) stays the unprivileged default, unchanged.
-
-- **How it enforces (elevated):** before spawn the backend registers the per-run unique AC
-  SID in the machine-wide loopback-exemption list (a read-modify-write that never clobbers
-  other apps' entries), keeps `internetClient` WITHHELD so the exemption opens loopback
-  ONLY — nub's proxy is the child's sole egress — and tears the exemption down when the
-  child exits (RAII, alongside the ACE/profile teardown). MITM rides the same proxy: the
-  ephemeral CA reaches the child through the CA-env bundle, exactly as on mac/Linux.
-- **The widening tradeoff (bounded).** A loopback exemption is not scoped to the proxy
-  port — for the run's lifetime the exempted child can reach EVERY loopback listener (a
-  local DB on `127.0.0.1:5432`, a Docker daemon, an SSH-agent pipe, …), not just nub's
-  proxy. Narrowing it to only the proxy port would need admin WFP filters, which nub does
-  not install. The widening is BOUNDED to the ephemeral per-run AC SID and removed on exit,
-  so it never persists past the sandboxed child's own lifetime. One consequence to note:
-  if a loopback listener is itself an OPEN FORWARDER with external reach (a user's own
-  local proxy, an SSRF-able localhost service), a hostile child could relay egress through
-  it and sidestep the per-host allowlist — the same local-forwarder caveat that applies to
-  any localhost-reachable sandbox, now in scope on the elevated Windows tier because the
-  child can reach all of loopback (macOS/Linux keep loopback closed except the proxy port).
-- **Fail-CLOSED, never silent.** A policy that REQUIRES the proxy (any per-host rule, or a
-  MITM/`inject` broker) on a host where the exemption cannot be registered — nub not
-  elevated, or the write fails — surfaces a clear error naming the elevation requirement
-  and does NOT coarse-degrade an allow-list into a deny-all. A coarse-only policy needs no
-  elevation and is unaffected.
-- **Crash-leak (bounded).** A nub that dies without running teardown — including a hard
-  kill via `TerminateProcess`, where the `ProfileGuard` RAII `Drop` also doesn't run, so
-  the AppContainer profile leaks alongside it — leaks one orphaned exemption entry for its
-  per-run AC SID. The SID is unique per run (`nub_sbx_{pid}_{nonce}_{ctr}`), so no future
-  child is ever created under the orphaned exemption — the stale entry exempts no live
-  process, it only accretes an unused list row. (A subsequent nub run re-reads the list
-  and would preserve, not reuse, the orphan; it is inert until the machine's exemption list
-  is manually pruned.)
-- **Prior art:** Codex and SRT hit the same wall and answer it the same way — per-host net
-  on Windows is an elevated setup with unprivileged reuse, never unprivileged outright.
-  (`backend/windows.rs` `plan_net` / `WindowsLaunch::run`; `tests/windows_enforcement.rs`
-  `net_tier`.)
+An AppContainer child is blocked from loopback by default. The package-wide loopback exemption needed to reach a proxy exposes every local listener, not just the proxy port. The backend therefore rejects per-host and MITM policies before launch, rather than installing the exemption. Coarse `net: true` permits public outbound connections but not loopback, private-LAN, or listener/server access; coarse deny remains available without elevation.
 
 ### MITM tier: credential-brokering residuals (INFO, doc-only)
 

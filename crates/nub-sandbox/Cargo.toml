@@ -73,9 +73,6 @@ seccompiler = "0.5"
 # (CreateProcessW + STARTUPINFOEX + SECURITY_CAPABILITIES), per-run inheritable
 # allow-ACE grants (Get/SetNamedSecurityInfoW + SetEntriesInAclW), the
 # CreateAppContainerProfile identity, and the Job-Object KILL_ON_JOB_CLOSE reap.
-# The strict-Windows net tier adds the loopback-exemption RMW
-# (NetworkIsolationGet/SetAppContainerConfig, WindowsFirewall) + the elevation query
-# (OpenProcessToken/GetTokenInformation, Threading/Security).
 # 0.61 is already in the workspace lockfile (transitive via clap/anstyle) — no
 # new supply-chain surface. Raw FFI (no COM), gated `#[cfg(target_os = "windows")]`.
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
@@ -87,8 +84,6 @@ features = [
   "Win32_Security_Isolation",
   "Win32_System_Threading",
   "Win32_System_JobObjects",
-  "Win32_System_Memory",
-  "Win32_NetworkManagement_WindowsFirewall",
 ]
 
 [dev-dependencies]
@@ -100,7 +95,7 @@ base64 = "0.22"
 # needs a little FFI (token-query + process-liveness) beyond what the lib exposes.
 [target.'cfg(target_os = "windows")'.dev-dependencies.windows-sys]
 version = "0.61"
-features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_NetworkManagement_WindowsFirewall"]
+features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem"]
 
 # The Windows enforcement probe self-reexecs as the AppContainer child, so it owns
 # `main` (dispatch on argv) rather than the libtest harness. windows-latest CI only; a

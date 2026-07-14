@@ -103,7 +103,7 @@ fn conformance_reports_a_mismatch() {
 #[test]
 fn apply_scrubs_env_when_enforced() {
     let ctx = common::ctx(true, &[("KEEP", "1"), ("SECRET_TOKEN", "s")]);
-    let policy = compile(&json!({ "fs": true, "net": true, "env": ["KEEP"] }), &ctx).unwrap();
+    let policy = compile(&json!({ "env": ["KEEP"] }), &ctx).unwrap();
     let _prepared = apply(&policy, CommandSpec::new(TRUE_PROGRAM)).unwrap();
     assert_eq!(
         policy.env.constructed.get("KEEP").map(String::as_str),
@@ -185,7 +185,15 @@ fn apply_degradation_reflects_backend_capability() {
             );
             return;
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        Err(degradation) => {
+            assert!(
+                degradation.lost.contains(&"fs-root".to_string()),
+                "an ordinary checkout must fail the AppContainer clean-root precondition"
+            );
+            return;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         Err(degradation) => panic!("backend setup failed unexpectedly: {degradation:?}"),
     };
     let d = &prepared.degradation;

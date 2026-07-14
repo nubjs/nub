@@ -168,12 +168,7 @@ engine defects — they define the seam. Full detail + bounds:
    launcher must not hold ambient secrets in nub's environ at spawn (scrub pre-spawn
    or clean-env re-exec).
 
-3. **Windows loopback exemption + per-host proxy wiring.** An AppContainer child
-   cannot reach the loopback egress proxy without a registered loopback exemption
-   (`NetworkIsolationSetAppContainerConfig`); this engine phase does not wire it, so
-   per-host net degrades to coarse **deny** (fail-safe). The launcher registers the
-   exemption and provisions the proxy path. This is also the prerequisite for the
-   MITM tier.
+3. **Windows per-host egress and MITM.** An AppContainer child cannot reach a loopback egress proxy without a package-wide exemption. That exemption exposes every loopback listener, not just the proxy port, so the engine rejects per-host and per-request policies before launch. It reports `net-per-host` and, when applicable, `net-per-request`.
 
 4. **Windows clean-DACL work root.** A confined work dir must sit under a CLEAN-DACL
    root — no inherited `ALL APPLICATION PACKAGES` allow-ACE (an AAP grant satisfies
@@ -204,7 +199,7 @@ through the same seam without touching the proxy.
 A capability-derived **MITM tier** (credential brokering — an ephemeral CA passed to
 the child via an env bundle so the proxy can inject auth into allowed upstreams) is a
 landed-but-held extension to the net/apply surface, PR #414. It rides the same
-`GrantDecider` seam and the Windows loopback exemption above; the core
+`GrantDecider` seam and platform-specific proxy routing; the core
 compile/apply data seam is unchanged by it. Treat it as a forward reference until
 it merges.
 

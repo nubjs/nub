@@ -354,7 +354,9 @@ mod win {
     }
 
     fn code(policy: &SandboxPolicy, program: &Path, args: &[&str]) -> i32 {
-        let spec = CommandSpec::new(program.as_os_str()).args(args.iter().copied());
+        let spec = CommandSpec::new(program.as_os_str())
+            .args(args.iter().copied())
+            .cwd(program.parent().expect("fixture child has a parent"));
         let prepared = match apply(policy, spec) {
             Ok(p) => p,
             Err(d) => {
