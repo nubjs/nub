@@ -25,6 +25,7 @@ dirs-next.workspace = true
 dotenvy = "0.15"
 flate2.workspace = true
 glob-match = "0.2"
+getrandom = "0.3"
 liblzma.workspace = true
 reqwest.workspace = true
 # Regex-literal script selectors (`nub run "/^build:/"`) — pnpm's `run /regexp/`
@@ -64,6 +65,12 @@ ruzstd = { version = "0.8", optional = true }
 # (`sha2` stays for the 32-bit cache KEY, which is not on the hot path.)
 blake3 = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 # Build-time only (embed-runtime): tar + zstd-compress the staged runtime tree
 # into `$OUT_DIR/runtime.tar.zst` and hash it for the cache key. Build-deps never
 # reach the shipped binary, so libzstd's C build lives here, not in the product.
@@ -78,6 +85,7 @@ blake3 = { version = "1", optional = true }
 # Unix-only: terminating-signal forwarding to the child (SIGINT/SIGTERM/SIGHUP).
 # Gated so the Windows build (which uses a different ctrl_c path) doesn't pull it.
 [target.'cfg(unix)'.dependencies]
+same-file = "1"
 signal-hook = "0.3"
 
 [dev-dependencies]

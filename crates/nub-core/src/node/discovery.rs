@@ -823,7 +823,8 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
 /// body. Two recursion guards: the per-invocation temp dirs (skipped by their
-/// `nub-node-shim-<pid>` name prefix) and the persistent global shim dir
+/// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names)
+/// and the persistent global shim dir
 /// (skipped by CANONICAL-PATH equality, since it's a fixed possibly-symlinked
 /// path a name prefix can't catch).
 fn which_node_in(

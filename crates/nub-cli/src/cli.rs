@@ -993,8 +993,8 @@ pub enum ColorWhen {
 /// Top-level entry point. Returns the process exit code.
 pub fn run() -> Result<i32> {
     // Reclaim the PATH shim temp dir exactly once, on return. The shim is
-    // created lazily/idempotently by the spawn paths and is process-wide
-    // (PID-keyed); it must outlive every — possibly parallel — child, so
+    // created lazily/idempotently by the spawn paths and is process-wide; it
+    // must outlive every — possibly parallel — child, so
     // cleanup belongs here at the top level, not per-spawn (which would race
     // concurrent workspace scripts). Drop runs on every return path, including
     // errors, because `run()` returns to `main` rather than calling `exit`.

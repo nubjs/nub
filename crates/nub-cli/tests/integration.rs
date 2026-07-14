@@ -1392,6 +1392,73 @@ fn concurrent_nub_processes_no_shim_collision() {
     assert_eq!(unique.len(), 5, "PIDs should be unique: {pids:?}");
 }
 
+#[test]
+#[cfg(windows)]
+fn running_windows_nub_cleans_hardlinked_path_shim() {
+    let nub = nub_binary();
+    let root = nub.parent().unwrap().join(format!(
+        "nub-running-hardlink-cleanup-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir(&root).unwrap();
+
+    // Keep TEMP on the executable's volume and verify this filesystem actually
+    // supports hardlinks, so the child exercises publication from its mapped
+    // nub.exe rather than the cross-volume copy fallback.
+    let probe = root.join("hardlink-probe.exe");
+    if let Err(error) = std::fs::hard_link(&nub, &probe) {
+        eprintln!("skipping mapped-executable cleanup: hardlinks unavailable: {error}");
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    std::fs::remove_file(probe).unwrap();
+
+    let script = root.join("probe.cjs");
+    std::fs::write(
+        &script,
+        r#"const fs = require('node:fs');
+const path = require('node:path');
+const shim = path.join(process.env.PATH.split(path.delimiter)[0], 'node.exe');
+const shimStat = fs.statSync(shim, { bigint: true });
+const sourceStat = fs.statSync(process.env.TEST_SOURCE_EXE, { bigint: true });
+console.log(`shim-hardlink:${shimStat.dev === sourceStat.dev && shimStat.ino === sourceStat.ino}`);
+"#,
+    )
+    .unwrap();
+    let output = Command::new(&nub)
+        .arg(&script)
+        .current_dir(&root)
+        .env("TEMP", &root)
+        .env("TMP", &root)
+        .env("TEST_SOURCE_EXE", &nub)
+        .output()
+        .expect("spawn Nub from a same-volume TEMP");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "mapped-executable probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("shim-hardlink:true"),
+        "mapped-executable probe did not use a hardlinked PATH shim: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let leaked: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().starts_with("nub-node-shim-"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "running nub.exe leaked PATH shim directories: {leaked:?}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// Nub must not inject a `nub` global or any `NUB_*` environment
 /// variables — the brand stops at the binary boundary.
 #[test]

@@ -2714,6 +2714,7 @@ dependencies = [
  "dirs-next",
  "dotenvy",
  "flate2",
+ "getrandom 0.3.4",
  "glob-match",
  "libc",
  "liblzma",
@@ -2721,6 +2722,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rustc-hash",
  "ruzstd",
+ "same-file",
  "semver",
  "serde",
  "serde_json",
@@ -2730,6 +2732,7 @@ dependencies = [
  "tar",
  "thiserror 2.0.18",
  "tracing",
+ "windows-sys 0.61.2",
  "zip",
  "zstd",
 ]
