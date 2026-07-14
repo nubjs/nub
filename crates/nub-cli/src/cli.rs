@@ -2696,7 +2696,13 @@ fn run_sandboxed(
     #[cfg(unix)]
     let mut child = prepared
         .spawn_with_signal_target(|target| {
-            forwarding.set_target(target);
+            match target {
+                nub_sandbox::PreparedSignalTarget::Direct(target) => forwarding.set_target(target),
+                #[cfg(target_os = "linux")]
+                nub_sandbox::PreparedSignalTarget::Callback(callback) => {
+                    forwarding.set_callback(callback)
+                }
+            }
             Ok(())
         })
         .with_context(|| format!("spawning `{program}` under the sandbox"))?;

@@ -92,6 +92,11 @@ impl MitmEngine {
         self.ca.bundle_path()
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn bundle_file(&self) -> std::io::Result<std::fs::File> {
+        self.ca.bundle_file()
+    }
+
     /// Whether `host` should be TLS-terminated (a broker demands it, or terminate-all).
     pub(super) fn should_terminate(&self, host: &str) -> bool {
         self.terminate_all || self.broker_for(host).is_some()

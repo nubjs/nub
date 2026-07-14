@@ -13,12 +13,29 @@
 
 use nub_sandbox::compiler::{CompileCtx, ShellRunner};
 use nub_sandbox::matcher::Homes;
-use nub_sandbox::{CommandSpec, RuntimeCapability, apply_with_runtime, compile};
+use nub_sandbox::{
+    CommandSpec, PreparedSignalTarget, RuntimeCapability, apply_with_runtime, compile,
+};
 use serde_json::Value;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 fn apply(
+    policy: &nub_sandbox::policy::SandboxPolicy,
+    spec: CommandSpec,
+) -> Result<nub_sandbox::Prepared, nub_sandbox::Degradation> {
+    // Every ordinary launch shares the test-only topology lock. Only the test
+    // that temporarily changes the host mount table calls the explicit unlocked
+    // helper while holding the exclusive side, so Bubblewrap can never inventory
+    // another fixture's transient mount.
+    let _mount_topology = host_mount_topology_lock()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    apply_without_mount_topology_lock(policy, spec)
+}
+
+fn apply_without_mount_topology_lock(
     policy: &nub_sandbox::policy::SandboxPolicy,
     spec: CommandSpec,
 ) -> Result<nub_sandbox::Prepared, nub_sandbox::Degradation> {
@@ -67,6 +84,11 @@ fn skip_without_bwrap() -> bool {
         "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
     );
     true
+}
+
+fn host_mount_topology_lock() -> &'static std::sync::RwLock<()> {
+    static LOCK: std::sync::OnceLock<std::sync::RwLock<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::RwLock::new(()))
 }
 
 struct Fixture {
@@ -129,6 +151,27 @@ impl Fixture {
         program: &str,
         args: &[&str],
     ) -> (i32, String) {
+        self.run_inner(surface, env, program, args, false)
+    }
+
+    fn run_without_mount_topology_lock(
+        &self,
+        surface: Value,
+        env: &[(&str, &str)],
+        program: &str,
+        args: &[&str],
+    ) -> (i32, String) {
+        self.run_inner(surface, env, program, args, true)
+    }
+
+    fn run_inner(
+        &self,
+        surface: Value,
+        env: &[(&str, &str)],
+        program: &str,
+        args: &[&str],
+        mount_topology_already_locked: bool,
+    ) -> (i32, String) {
         let policy = compile(&surface, &self.ctx(env)).expect("compiles");
         let spec = CommandSpec::new(program)
             .args(args.iter().copied())
@@ -140,10 +183,12 @@ impl Fixture {
                 self.proj.join("sub"),
                 self.proj.join("nested"),
             ]);
-        let out = apply(&policy, spec)
-            .expect("apply")
-            .output()
-            .expect("spawn");
+        let prepared = if mount_topology_already_locked {
+            apply_without_mount_topology_lock(&policy, spec)
+        } else {
+            apply(&policy, spec)
+        };
+        let out = prepared.expect("apply").output().expect("spawn");
         if !out.status.success() && !out.stderr.is_empty() {
             eprintln!(
                 "sandbox child stderr: {}",
@@ -228,6 +273,39 @@ fn generous_read_denies_dotenv() {
         ),
         "neg-control: relaxed fs reads .env"
     );
+}
+
+#[test]
+fn concurrent_launches_keep_argument_fds_bound_to_their_own_mount_views() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let left = fixture();
+    let right = fixture();
+    std::fs::write(left.proj.join("pub.txt"), "LEFT-SENTINEL").unwrap();
+    std::fs::write(right.proj.join("pub.txt"), "RIGHT-SENTINEL").unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let launch =
+        |fixture: Fixture, expected: &'static str, barrier: std::sync::Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..8 {
+                    let (code, output) = fixture.run(
+                        serde_json::json!({ "fs": [s(&fixture.root)] }),
+                        &[],
+                        CAT,
+                        &[&s(&fixture.proj.join("pub.txt"))],
+                    );
+                    assert_eq!(code, 0);
+                    assert_eq!(output, expected);
+                }
+            })
+        };
+    let left = launch(left, "LEFT-SENTINEL", std::sync::Arc::clone(&barrier));
+    let right = launch(right, "RIGHT-SENTINEL", std::sync::Arc::clone(&barrier));
+    barrier.wait();
+    left.join().unwrap();
+    right.join().unwrap();
 }
 
 #[test]
@@ -605,7 +683,7 @@ fn every_sandboxed_process_gets_a_private_proc_view() {
     }
     let f = fixture();
     // Even with env passthrough, a sandboxed process gets a fresh procfs. It may see
-    // itself and its in-namespace supervisor, never Nub's host-side parent environ.
+    // itself and its in-namespace PID-1 monitor, never Nub's host-side parent environ.
     let read_environ = format!(
         "/bin/cat /proc/{}/environ 2>/dev/null || true",
         std::process::id()
@@ -687,6 +765,9 @@ fn bind_mounted_procfs_at_nonstandard_path_is_masked() {
     if skip_without_bwrap() {
         return;
     }
+    let _mount_topology = host_mount_topology_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let f = fixture();
     // A host procfs bind-mounted outside `/proc` would otherwise be carried through a
     // broad root bind. The backend reads mountinfo before launch and masks every such
@@ -739,7 +820,8 @@ fn bind_mounted_procfs_at_nonstandard_path_is_masked() {
     // Canonical `/proc` is a fresh procfs for the child PID namespace. The alternate
     // host procfs is masked even though its regular parent is readable.
     let alt_version = s(&altproc.join("version"));
-    let (_c, altver) = f.run(broad_read.clone(), &[], CAT, &[&alt_version]);
+    let (_c, altver) =
+        f.run_without_mount_topology_lock(broad_read.clone(), &[], CAT, &[&alt_version]);
     assert!(
         !altver.contains("Linux"),
         "procfs bind-mounted outside `/proc` must be masked (got {altver:?})"
@@ -747,8 +829,14 @@ fn bind_mounted_procfs_at_nonstandard_path_is_masked() {
 
     // The ancestor's environment is likewise unavailable through the alternate path.
     let read_environ = format!("/bin/cat {}/$PPID/environ 2>/dev/null || true", s(&altproc));
-    let (_c, env_confined) = f.run(broad_read, &[], SH, &["-c", &read_environ]);
-    let (_c, env_control) = f.run(serde_json::json!(false), &[], SH, &["-c", &read_environ]);
+    let (_c, env_confined) =
+        f.run_without_mount_topology_lock(broad_read, &[], SH, &["-c", &read_environ]);
+    let (_c, env_control) = f.run_without_mount_topology_lock(
+        serde_json::json!(false),
+        &[],
+        SH,
+        &["-c", &read_environ],
+    );
     if env_control.contains("PATH=") {
         assert!(
             !env_confined.contains("PATH="),
@@ -910,7 +998,7 @@ __attribute__((constructor)) static void mark(void) {
 }
 
 #[test]
-fn dropping_prepared_child_kills_and_reaps_the_supervised_group() {
+fn dropping_prepared_child_tears_down_the_pid_namespace() {
     if skip_without_bwrap() {
         return;
     }
@@ -930,15 +1018,195 @@ fn dropping_prepared_child_kills_and_reaps_the_supervised_group() {
     .unwrap()
     .spawn()
     .unwrap();
-    let target = child.unix_signal_target();
-    assert!(target < 0, "a live Bubblewrap target is a supervised group");
+    let target = child.id() as i32;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let descendant = loop {
+        let children = std::fs::read_to_string(format!("/proc/{target}/task/{target}/children"))
+            .unwrap_or_default();
+        if let Some(pid) = children
+            .split_ascii_whitespace()
+            .next()
+            .and_then(|pid| pid.parse::<i32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sandbox target did not create its sleep descendant"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
     drop(child);
-    assert_eq!(unsafe { libc::kill(target, 0) }, -1);
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH),
-        "the supervised group is gone before resources are released"
-    );
+    for (pid, label) in [(target, "target"), (descendant, "descendant")] {
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "{label} remained alive");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "the retained namespace {label} is gone before resources are released"
+        );
+    }
+}
+
+#[test]
+fn abrupt_parent_helper_holds_pid_namespace() {
+    let Some(report) = std::env::var_os("NUB_SANDBOX_ABRUPT_PARENT_REPORT") else {
+        return;
+    };
+    let f = fixture();
+    let policy = compile(
+        &serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        &f.ctx(&[("PATH", "/usr/bin:/bin")]),
+    )
+    .unwrap();
+    let child = apply(
+        &policy,
+        CommandSpec::new(SH)
+            .args(["-c", "sleep 30"])
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    )
+    .unwrap()
+    .spawn()
+    .unwrap();
+    let target = child.id() as i32;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let descendant = loop {
+        let children = std::fs::read_to_string(format!("/proc/{target}/task/{target}/children"))
+            .unwrap_or_default();
+        if let Some(pid) = children
+            .split_ascii_whitespace()
+            .next()
+            .and_then(|pid| pid.parse::<i32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sandbox target did not create its sleep descendant"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    std::fs::write(
+        report,
+        format!("{target}\n{descendant}\n{}\n", f._tmp.path().display()),
+    )
+    .unwrap();
+    std::mem::forget(f);
+    std::mem::forget(child);
+    loop {
+        std::thread::park();
+    }
+}
+
+#[test]
+fn abrupt_parent_death_tears_down_the_pid_namespace() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let report_dir = tempfile::tempdir().unwrap();
+    let report = report_dir.path().join("pids");
+    let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "abrupt_parent_helper_holds_pid_namespace"])
+        .env("NUB_SANDBOX_ABRUPT_PARENT_REPORT", &report)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let contents = loop {
+        if let Ok(contents) = std::fs::read_to_string(&report) {
+            break contents;
+        }
+        assert!(
+            helper.try_wait().unwrap().is_none(),
+            "abrupt-parent helper exited before publishing its target"
+        );
+        if std::time::Instant::now() >= deadline {
+            let _ = helper.kill();
+            let _ = helper.wait();
+            panic!("abrupt-parent helper did not publish its target");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    let mut lines = contents.lines();
+    let target = lines.next().unwrap().parse::<i32>().unwrap();
+    let descendant = lines.next().unwrap().parse::<i32>().unwrap();
+    let fixture_root = lines.next().unwrap().to_owned();
+    helper.kill().unwrap();
+    helper.wait().unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    for (pid, label) in [(target, "target"), (descendant, "descendant")] {
+        loop {
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "abrupt launcher death left the sandbox {label} alive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    let _ = std::fs::remove_dir_all(fixture_root);
+}
+
+#[test]
+fn retained_launch_publishes_an_authenticated_signal_callback() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let policy = compile(
+        &serde_json::json!({ "fs": ["...", "./writable"], "net": true, "env": true }),
+        &f.ctx(&[("PATH", "/usr/bin:/bin")]),
+    )
+    .unwrap();
+    let callback = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let observed = std::sync::Arc::clone(&callback);
+    let mut child = apply(
+        &policy,
+        CommandSpec::new(SH)
+            .args(["-c", "sleep 30"])
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    )
+    .unwrap()
+    .spawn_with_signal_target(move |target| {
+        let PreparedSignalTarget::Callback(target) = target else {
+            panic!("retained Linux launch exposed a numeric signal target");
+        };
+        *observed.lock().unwrap() = Some(target);
+        Ok(())
+    })
+    .expect("spawn retained launch");
+    let callback = callback.lock().unwrap().take().expect("callback published");
+    callback(libc::SIGTERM).expect("relay SIGTERM");
+    let status = child.wait().expect("wait for signaled target");
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+}
+
+#[test]
+fn delayed_wait_preserves_authenticated_target_status() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let policy =
+        compile(&serde_json::json!({ "fs": ["...", "./"] }), &f.ctx(&[])).expect("compiles");
+    let mut child = apply(
+        &policy,
+        CommandSpec::new("/bin/sh")
+            .args(["-c", "exit 23"])
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    )
+    .expect("prepare delayed-wait sandbox")
+    .spawn()
+    .expect("spawn delayed-wait sandbox");
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let status = child.wait().expect("authenticate delayed target status");
+    assert_eq!(status.code(), Some(23));
 }
 
 // ── namespace and capability probes ────────────────────────────────────────────

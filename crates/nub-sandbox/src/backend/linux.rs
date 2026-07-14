@@ -5,7 +5,7 @@
 //! Exact deny paths are layered last so a writable project cannot re-expose them.
 #![cfg(target_os = "linux")]
 
-use crate::backend::linux_grants::{self, MountAccess, fs_confines};
+use crate::backend::linux_grants::{self, MountAccess, MountGrant, fs_confines};
 use crate::backend::{CommandSpec, Degradation, Prepared};
 use crate::matcher::path::{PathMatcher, canonicalize_including_nonexistent};
 use crate::policy::{Effect, FsAccess, SandboxPolicy, TmpMode};
@@ -21,10 +21,11 @@ use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
+#[cfg(test)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 const ESSENTIAL_READ_DIRS: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt",
@@ -51,355 +52,74 @@ struct Mask {
     directory: bool,
 }
 
-struct BubblewrapLaunch {
-    program: PathBuf,
-    visible_path: PathBuf,
-    executable: Option<File>,
+const FIRST_LAUNCH_DATA_FD: RawFd = super::linux_monitor::SIGNAL_RELAY_FD + 1;
+const MAX_BUNDLED_BWRAP_BYTES: u64 = 16 * 1024 * 1024;
+const REQUIRED_EXECUTABLE_SNAPSHOT_SEALS: libc::c_int =
+    libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BubblewrapOrigin {
+    System,
+    Bundled,
 }
 
-pub(crate) struct LinuxSupervision {
-    info_read: File,
-    info_write: Option<File>,
-    block_read: Option<File>,
-    block_write: File,
-    expected: ExpectedView,
+/// One opened Bubblewrap inode.  Selection, admission, and the real launch all
+/// execute this descriptor through `/proc/self/fd`; the pathname is diagnostic
+/// and nested-sandbox inventory only, never execution authority.
+struct PinnedBubblewrapCandidate {
+    executable: File,
+    source_path: PathBuf,
+    source_identity: (u64, u64),
 }
 
-struct ExpectedView {
-    user: PathBuf,
-    mount: PathBuf,
-    pid: PathBuf,
-    ipc: PathBuf,
-    net: Option<PathBuf>,
-    require_seccomp: bool,
-}
-
-#[derive(serde::Deserialize)]
-struct BubblewrapInfo {
-    #[serde(rename = "child-pid")]
-    child_pid: i32,
-}
-
-impl ExpectedView {
-    fn capture(require_net: bool, require_seccomp: bool) -> std::io::Result<Self> {
-        let namespace = |name: &str| fs::read_link(format!("/proc/self/ns/{name}"));
-        Ok(Self {
-            user: namespace("user")?,
-            mount: namespace("mnt")?,
-            pid: namespace("pid")?,
-            ipc: namespace("ipc")?,
-            net: require_net.then(|| namespace("net")).transpose()?,
-            require_seccomp,
-        })
+impl PinnedBubblewrapCandidate {
+    fn program(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.executable.as_raw_fd()))
     }
 }
 
-impl LinuxSupervision {
-    fn new(require_net: bool, require_seccomp: bool) -> std::io::Result<Self> {
-        let (info_read, info_write) = pipe_pair()?;
-        set_nonblocking(&info_read)?;
-        let (block_read, block_write) = pipe_pair()?;
-        Ok(Self {
-            info_read,
-            info_write: Some(info_write),
-            block_read: Some(block_read),
-            block_write,
-            expected: ExpectedView::capture(require_net, require_seccomp)?,
-        })
-    }
-
-    fn append_args(&self, setup: &mut Command) {
-        setup
-            .arg("--info-fd")
-            .arg(
-                self.info_write
-                    .as_ref()
-                    .expect("supervision info writer available")
-                    .as_raw_fd()
-                    .to_string(),
-            )
-            .arg("--block-fd")
-            .arg(
-                self.block_read
-                    .as_ref()
-                    .expect("supervision block reader available")
-                    .as_raw_fd()
-                    .to_string(),
-            );
-    }
-
-    fn child_fds(&self) -> [RawFd; 2] {
-        [
-            self.info_write
-                .as_ref()
-                .expect("supervision info writer available")
-                .as_raw_fd(),
-            self.block_read
-                .as_ref()
-                .expect("supervision block reader available")
-                .as_raw_fd(),
-        ]
-    }
-
-    pub(crate) fn verify_and_release(mut self, child: &mut Child) -> std::io::Result<i32> {
-        let reaper_pid = self.verify(child)?;
-        let target_pid = self.release_and_verify(child, reaper_pid)?;
-        self.resume(target_pid)?;
-        Ok(target_pid)
-    }
-
-    pub(crate) fn verify(&mut self, child: &mut Child) -> std::io::Result<i32> {
-        self.info_write.take();
-        self.block_read.take();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut bytes = Vec::with_capacity(512);
-        let info = loop {
-            let mut chunk = [0u8; 512];
-            match self.info_read.read(&mut chunk) {
-                Ok(0) => {
-                    if let Ok(info) = serde_json::from_slice::<BubblewrapInfo>(&bytes) {
-                        break info;
-                    }
-                    return Err(std::io::Error::other(
-                        "Bubblewrap closed its info channel before a complete status record",
-                    ));
-                }
-                Ok(count) => {
-                    bytes.extend_from_slice(&chunk[..count]);
-                    if bytes.len() > 64 * 1024 {
-                        return Err(std::io::Error::other(
-                            "Bubblewrap returned an oversized status record",
-                        ));
-                    }
-                    if let Ok(info) = serde_json::from_slice::<BubblewrapInfo>(&bytes) {
-                        break info;
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            }
-            if let Some(status) = child.try_wait()? {
-                return Err(std::io::Error::other(format!(
-                    "Bubblewrap exited before its supervised child was ready: {status}"
-                )));
-            }
-            if Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "timed out waiting for Bubblewrap's supervised child",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
-        verify_child_view(info.child_pid, child.id(), &self.expected)?;
-        Ok(info.child_pid)
-    }
-
-    pub(crate) fn release(&mut self) -> std::io::Result<()> {
-        self.block_write.write_all(b"1")?;
-        Ok(())
-    }
-
-    pub(crate) fn release_and_verify(
-        &mut self,
-        child: &mut Child,
-        reaper_pid: i32,
-    ) -> std::io::Result<i32> {
-        self.release()?;
-        await_hardened_child(reaper_pid, child, &self.expected)
-    }
-
-    pub(crate) fn resume(&self, target_pid: i32) -> std::io::Result<()> {
-        if unsafe { libc::kill(target_pid, libc::SIGCONT) } == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
+pub(crate) struct LinuxPreflight {
+    confined: Option<ConfinedPreflight>,
 }
 
-fn set_nonblocking(file: &File) -> std::io::Result<()> {
-    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn pipe_pair() -> std::io::Result<(File, File)> {
-    let mut fds = [-1; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let first = file_above_stdio(unsafe { File::from_raw_fd(fds[0]) })?;
-    let second = file_above_stdio(unsafe { File::from_raw_fd(fds[1]) })?;
-    Ok((first, second))
-}
-
-fn verify_child_view(pid: i32, outer_pid: u32, expected: &ExpectedView) -> std::io::Result<()> {
-    if pid <= 0 {
-        return Err(std::io::Error::other(
-            "Bubblewrap reported an invalid supervised child PID",
-        ));
-    }
-    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
-    let field = |name: &str| {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(name).map(str::trim))
-    };
-    let parent = field("PPid:")
-        .and_then(|value| value.parse::<u32>().ok())
-        .ok_or_else(|| std::io::Error::other("supervised child status omitted PPid"))?;
-    if parent != outer_pid {
-        return Err(std::io::Error::other(
-            "Bubblewrap status identified a process outside its launcher tree",
-        ));
-    }
-    let current = |name: &str| fs::read_link(format!("/proc/{pid}/ns/{name}"));
-    for (name, outer) in [
-        ("user", &expected.user),
-        ("mnt", &expected.mount),
-        ("pid", &expected.pid),
-        ("ipc", &expected.ipc),
-    ] {
-        if current(name)? == *outer {
-            return Err(std::io::Error::other(format!(
-                "supervised child did not enter a distinct {name} namespace"
-            )));
-        }
-    }
-    if let Some(outer_net) = &expected.net
-        && current("net")? == *outer_net
-    {
-        return Err(std::io::Error::other(
-            "supervised child did not enter the requested network namespace",
-        ));
-    }
-    Ok(())
-}
-
-fn await_hardened_child(
-    reaper_pid: i32,
-    child: &mut Child,
-    expected: &ExpectedView,
-) -> std::io::Result<i32> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(target_pid) = single_child_pid(reaper_pid)? {
-            let status = fs::read_to_string(format!("/proc/{target_pid}/status"));
-            if status.as_deref().is_ok_and(|status| {
-                status.lines().any(|line| {
-                    line.strip_prefix("State:")
-                        .is_some_and(|state| state.trim().starts_with(['T', 't']))
-                })
-            }) {
-                verify_hardened_child(target_pid, reaper_pid, expected)?;
-                return Ok(target_pid);
-            }
-        }
-        if let Some(status) = child.try_wait()? {
-            return Err(std::io::Error::other(format!(
-                "Bubblewrap exited before its target hardening was verified: {status}"
-            )));
-        }
-        if Instant::now() >= deadline {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "timed out waiting for the sandbox target verification stop",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn single_child_pid(reaper_pid: i32) -> std::io::Result<Option<i32>> {
-    let children = fs::read_to_string(format!("/proc/{reaper_pid}/task/{reaper_pid}/children"))?;
-    let children = children
-        .split_whitespace()
-        .map(str::parse::<i32>)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| std::io::Error::other("Bubblewrap reported an invalid target PID"))?;
-    match children.as_slice() {
-        [] => Ok(None),
-        [pid] if *pid > 0 => Ok(Some(*pid)),
-        _ => Err(std::io::Error::other(format!(
-            "Bubblewrap's namespace reaper had {} children at the verification gate",
-            children.len()
-        ))),
-    }
-}
-
-fn verify_hardened_child(
-    pid: i32,
-    reaper_pid: i32,
-    expected: &ExpectedView,
-) -> std::io::Result<()> {
-    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
-    let field = |name: &str| {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(name).map(str::trim))
-    };
-    if !field("State:").is_some_and(|state| state.starts_with(['T', 't'])) {
-        return Err(std::io::Error::other(
-            "sandbox target did not stop at its verification gate",
-        ));
-    }
-    if field("PPid:").and_then(|value| value.parse().ok()) != Some(reaper_pid) {
-        return Err(std::io::Error::other(
-            "the sandbox target was not owned by Bubblewrap's namespace reaper",
-        ));
-    }
-    for capability in ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"] {
-        if field(capability) != Some("0000000000000000") {
-            return Err(std::io::Error::other(format!(
-                "sandbox target retained Linux capabilities in {capability}"
-            )));
-        }
-    }
-    if expected.require_seccomp && field("Seccomp:") != Some("2") {
-        return Err(std::io::Error::other(
-            "sandbox target did not enter seccomp filter mode",
-        ));
-    }
-    let sid = unsafe { libc::getsid(pid) };
-    let pgid = unsafe { libc::getpgid(pid) };
-    if sid != pid || pgid != pid {
-        return Err(std::io::Error::other(format!(
-            "sandbox target is not its verified session-group leader (pid={pid}, sid={sid}, pgid={pgid})"
-        )));
-    }
-    for name in ["user", "mnt", "pid", "ipc"] {
-        if fs::read_link(format!("/proc/{pid}/ns/{name}"))?
-            != fs::read_link(format!("/proc/{reaper_pid}/ns/{name}"))?
-        {
-            return Err(std::io::Error::other(format!(
-                "sandbox target escaped Bubblewrap's {name} namespace"
-            )));
-        }
-    }
-    if expected.net.is_some()
-        && fs::read_link(format!("/proc/{pid}/ns/net"))?
-            != fs::read_link(format!("/proc/{reaper_pid}/ns/net"))?
-    {
-        return Err(std::io::Error::other(
-            "sandbox target escaped Bubblewrap's network namespace",
-        ));
-    }
-    Ok(())
+struct ConfinedPreflight {
+    root_view: RootView,
+    cwd: PathBuf,
+    entry_program: PathBuf,
+    mount_plan: Vec<MountGrant>,
+    masks: Vec<Mask>,
+    bwrap: PinnedBubblewrapCandidate,
+    ca_placeholder: Option<File>,
 }
 
 /// Apply a resolved policy using Bubblewrap. The exact same operation can be nested:
 /// an outer mount/PID view remains in force and the child adds a stricter view inside it.
-pub(crate) fn preflight_process(
+pub(crate) fn preflight(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
-) -> Result<(), Degradation> {
+    runtime: Option<&super::linux_monitor::RuntimeCapability>,
+) -> Result<LinuxPreflight, Degradation> {
+    validate_process_inputs(spec).map_err(|reason| Degradation {
+        lost: vec!["process-input".to_string()],
+        reason: Some(reason),
+    })?;
+    let confine_fs = fs_confines(&policy.fs);
+    let sandboxing =
+        confine_fs || policy.net.enforce || policy.env.enforce || policy.fs.tmp != TmpMode::Shared;
+    if !sandboxing {
+        return Ok(LinuxPreflight { confined: None });
+    }
+    let runtime = runtime.ok_or_else(|| Degradation {
+        lost: vec!["runtime-capability-missing".to_string()],
+        reason: Some(
+            "Linux sandbox confinement requires the embedder's earliest bootstrap capability"
+                .to_string(),
+        ),
+    })?;
+    let runtime_image = runtime
+        .materialize()
+        .map_err(super::linux_monitor::runtime_degradation)?;
+    let root_view = root_view(policy);
     let cwd = spec
         .cwd
         .clone()
@@ -412,74 +132,6 @@ pub(crate) fn preflight_process(
         lost: vec!["process-cwd".to_string()],
         reason: Some(format!(
             "resolving sandbox working directory {}: {error}",
-            cwd.display()
-        )),
-    })?;
-    resolve_program(&spec.program, &cwd, target_path(policy).as_deref()).ok_or_else(|| {
-        Degradation {
-            lost: vec!["process-entry".to_string()],
-            reason: Some(format!(
-                "sandbox entry program could not be resolved in the target environment: {}",
-                Path::new(&spec.program).display()
-            )),
-        }
-    })?;
-    Ok(())
-}
-
-pub fn apply(
-    policy: &SandboxPolicy,
-    spec: CommandSpec,
-    proxy_port: Option<u16>,
-    proxy_token: Option<&str>,
-    ca_bundle: Option<&Path>,
-    tmp_dir: Option<&Path>,
-    runtime: Option<&super::linux_monitor::RuntimeCapability>,
-) -> Result<Prepared, Degradation> {
-    validate_process_inputs(&spec).map_err(|reason| Degradation {
-        lost: vec!["process-input".to_string()],
-        reason: Some(reason),
-    })?;
-    let confine_fs = fs_confines(&policy.fs);
-    let sandboxing =
-        confine_fs || policy.net.enforce || policy.env.enforce || policy.fs.tmp != TmpMode::Shared;
-
-    if !sandboxing {
-        return Ok(Prepared {
-            command: base_command(&spec, policy),
-            degradation: Degradation::full(),
-            proxy: None,
-            _inherited_files: Vec::new(),
-            supervision: None,
-            _private_tmp: None,
-        });
-    }
-
-    let runtime = runtime.ok_or_else(|| Degradation {
-        lost: vec!["runtime-capability-missing".to_string()],
-        reason: Some(
-            "Linux sandbox confinement requires the embedder's earliest bootstrap capability"
-                .to_string(),
-        ),
-    })?;
-    let _runtime = runtime
-        .materialize()
-        .map_err(super::linux_monitor::runtime_degradation)?;
-
-    let (bwrap, setsid_program) = find_bwrap(policy.net.enforce).map_err(|reason| Degradation {
-        lost: vec!["fs".to_string()],
-        reason: Some(reason),
-    })?;
-    let root_view = root_view(policy);
-    let cwd = spec
-        .cwd
-        .clone()
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"));
-    let cwd = fs::canonicalize(&cwd).map_err(|e| Degradation {
-        lost: vec!["fs".to_string()],
-        reason: Some(format!(
-            "resolving sandbox working directory {}: {e}",
             cwd.display()
         )),
     })?;
@@ -505,11 +157,7 @@ pub fn apply(
             lost: vec!["fs-partial".to_string()],
             reason: Some(reason),
         })?;
-    // Rebinding an inherited read-only filesystem as writable cannot widen it on
-    // Linux, but recording the effective cap makes the argv plan explicit and
-    // prevents later launcher changes from accidentally claiming otherwise.
     cap_inherited_read_only(&mut mount_plan);
-
     if crate::requires_deny_search_roots(policy) && spec.deny_search_roots.is_empty() {
         return Err(Degradation {
             lost: vec!["fs-read-deny".to_string()],
@@ -528,6 +176,12 @@ pub fn apply(
         reason: Some(reason),
     })?);
     masks = merge_masks(masks);
+    validate_reserved_runtime_view(&cwd, &entry_program, &mount_plan, &masks).map_err(
+        |reason| Degradation {
+            lost: vec!["process-isolation".to_string()],
+            reason: Some(reason),
+        },
+    )?;
     validate_masks_against_mount_plan(policy, &masks, &mount_plan).map_err(|reason| {
         Degradation {
             lost: vec!["fs-read-deny".to_string()],
@@ -546,17 +200,172 @@ pub fn apply(
             reason: Some(reason),
         },
     )?;
+    validate_dynamic_preload_view(runtime_image, &masks).map_err(|reason| Degradation {
+        lost: vec!["runtime-closure".to_string()],
+        reason: Some(reason),
+    })?;
     let masks = masks
         .into_iter()
         .filter(|mask| !mask_already_enforced(mask))
         .collect::<Vec<_>>();
+    // Open every executable candidate before any real proxy/tmp/CA support
+    // resource exists. The admitted descriptor remains the launch authority.
+    let bwrap_candidates = open_bwrap_candidate_inventory();
+    if bwrap_candidates.candidates.is_empty() {
+        return Err(Degradation {
+            lost: vec!["fs".to_string()],
+            reason: Some(classify_bwrap_failures(&bwrap_candidates.failures)),
+        });
+    }
+    let (bwrap, ca_placeholder) = admit_bwrap_candidate(
+        policy,
+        runtime,
+        root_view,
+        &entry_program,
+        &mount_plan,
+        &masks,
+        bwrap_candidates,
+    )?;
+    Ok(LinuxPreflight {
+        confined: Some(ConfinedPreflight {
+            root_view,
+            cwd,
+            entry_program,
+            mount_plan,
+            masks,
+            bwrap,
+            ca_placeholder,
+        }),
+    })
+}
 
+pub fn apply(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+    proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
+    ca_bundle: Option<File>,
+    tmp_dir: Option<&Path>,
+    runtime: Option<&super::linux_monitor::RuntimeCapability>,
+    preflight: LinuxPreflight,
+) -> Result<Prepared, Degradation> {
+    let Some(confined) = preflight.confined else {
+        return Ok(Prepared {
+            command: base_command(&spec, policy),
+            degradation: Degradation::full(),
+            proxy: None,
+            _inherited_files: Vec::new(),
+            retained_monitor: None,
+            _private_tmp: None,
+        });
+    };
+
+    let runtime = runtime.ok_or_else(|| Degradation {
+        lost: vec!["runtime-capability-missing".to_string()],
+        reason: Some(
+            "Linux sandbox confinement requires the embedder's earliest bootstrap capability"
+                .to_string(),
+        ),
+    })?;
+    let _runtime = runtime;
+    let ConfinedPreflight {
+        root_view,
+        cwd,
+        entry_program,
+        mount_plan,
+        masks,
+        bwrap,
+        ca_placeholder,
+    } = confined;
+    let target_env = target_environment(policy, proxy_port, proxy_token, ca_bundle.is_some());
+    let bootstrap = super::linux_monitor::BootstrapSpec::new(
+        runtime,
+        policy,
+        &spec,
+        entry_program.as_os_str().to_owned(),
+        cwd.clone(),
+        target_env,
+    )
+    .map_err(|error| Degradation {
+        lost: vec!["process-isolation".to_string()],
+        reason: Some(format!("preparing retained monitor bootstrap: {error}")),
+    })?;
+    let retained_monitor = super::linux_monitor::RetainedMonitorLaunch::new(runtime, bootstrap)
+        .map_err(|error| Degradation {
+            lost: vec!["process-isolation".to_string()],
+            reason: Some(format!("preparing retained monitor launch: {error}")),
+        })?;
+
+    let effective_ca = ca_bundle
+        .or(ca_placeholder)
+        .map(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
+        .transpose()
+        .map_err(|error| Degradation {
+            lost: vec!["net-per-host".to_string()],
+            reason: Some(format!(
+                "relocating immutable CA-bundle descriptor: {error}"
+            )),
+        })?;
+    let RetainedOuterSetup {
+        command,
+        mut setup_files,
+        degradation,
+    } = configure_retained_outer(
+        policy,
+        root_view,
+        &entry_program,
+        &mount_plan,
+        &masks,
+        &bwrap,
+        effective_ca.as_ref(),
+        tmp_dir,
+        proxy_port,
+        &retained_monitor,
+    )?;
+    setup_files.extend(effective_ca);
+    setup_files.push(bwrap.executable);
+
+    Ok(Prepared {
+        command,
+        degradation,
+        proxy: None,
+        _inherited_files: setup_files,
+        retained_monitor: Some(retained_monitor),
+        _private_tmp: None,
+    })
+}
+
+struct RetainedOuterSetup {
+    command: Command,
+    setup_files: Vec<File>,
+    degradation: Degradation,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configure_retained_outer(
+    policy: &SandboxPolicy,
+    root_view: RootView,
+    entry_program: &Path,
+    mount_plan: &[MountGrant],
+    masks: &[Mask],
+    bwrap: &PinnedBubblewrapCandidate,
+    ca_bundle: Option<&File>,
+    tmp_dir: Option<&Path>,
+    proxy_port: Option<u16>,
+    retained_monitor: &super::linux_monitor::RetainedMonitorLaunch,
+) -> Result<RetainedOuterSetup, Degradation> {
     let mut setup = Command::new("");
-    setup.args(["--die-with-parent", "--new-session", "--unshare-user"]);
-    setup.args(["--cap-drop", "ALL"]);
-    // Deliberately do not disable further user namespaces: a sandboxed agent must be
-    // able to invoke Nub again and add a stricter child sandbox.
-    setup.args(["--unshare-pid", "--unshare-ipc"]);
+    setup.args([
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--as-pid-1",
+        "--cap-drop",
+        "ALL",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+    ]);
 
     match root_view {
         RootView::ReadWrite => {
@@ -566,14 +375,12 @@ pub fn apply(
             setup.args(["--ro-bind", "/", "/"]);
         }
         RootView::Minimal => {
-            append_minimal_read_mounts(&mut setup, &entry_program, ca_bundle, &bwrap.visible_path)?;
+            append_minimal_read_mounts(&mut setup, entry_program)?;
         }
     };
-
-    // Replace host devices and host process information immediately after the root
-    // view. Policy masks are layered later, so an explicit deny below `/dev` or the
-    // fresh `/proc` cannot be hidden by these ancestor mounts.
-    setup.args(["--dev", "/dev", "--proc", "/proc"]);
+    setup.args(["--dev", "/dev"]);
+    retained_monitor.append_runtime_mount(&mut setup);
+    setup.args(["--proc", "/proc"]);
 
     match policy.fs.tmp {
         TmpMode::Shared => {}
@@ -587,14 +394,11 @@ pub fn apply(
             setup.arg("--bind").arg(dir).arg("/tmp");
         }
         TmpMode::Deny => {
-            // Traverse-only lets a later explicit project bind under `/tmp` remain
-            // reachable, while the empty read-only tmp itself cannot be listed or
-            // written.
             setup.args(["--perms", "111", "--tmpfs", "/tmp"]);
         }
     }
 
-    for grant in &mount_plan {
+    for grant in mount_plan {
         setup
             .arg(match grant.access {
                 MountAccess::ReadOnly => "--ro-bind",
@@ -603,14 +407,14 @@ pub fn apply(
             .arg(&grant.path)
             .arg(&grant.path);
     }
-
     let mut mask_sources = Vec::new();
-    for mask in masks.iter().filter(|m| !m.directory) {
-        let source = open_inheritable_dev_null().map_err(|e| Degradation {
-            lost: vec!["fs-read-deny".to_string()],
-            reason: Some(format!("opening empty mask source: {e}")),
-        })?;
-        let fd = source.as_raw_fd().to_string();
+    for mask in masks.iter().filter(|mask| !mask.directory) {
+        let source = open_inheritable_dev_null()
+            .and_then(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
+            .map_err(|error| Degradation {
+                lost: vec!["fs-read-deny".to_string()],
+                reason: Some(format!("opening empty mask source: {error}")),
+            })?;
         setup
             .arg("--perms")
             .arg(match mask.kind {
@@ -618,11 +422,11 @@ pub fn apply(
                 MaskKind::Unreadable => "000",
             })
             .arg("--ro-bind-data")
-            .arg(&fd)
+            .arg(source.as_raw_fd().to_string())
             .arg(&mask.path);
         mask_sources.push(source);
     }
-    for mask in masks.iter().filter(|m| m.directory) {
+    for mask in masks.iter().filter(|mask| mask.directory) {
         setup
             .arg("--perms")
             .arg(match mask.kind {
@@ -634,22 +438,27 @@ pub fn apply(
             .arg("--remount-ro")
             .arg(&mask.path);
     }
+    // Nub infrastructure is layered after authored masks at a reserved destination
+    // below the fresh /dev view. The child never receives the host temporary path,
+    // so a Private/Deny /tmp or an ancestor mask cannot hide its trust bundle.
+    if let Some(bundle) = ca_bundle {
+        setup
+            .arg("--ro-bind-fd")
+            .arg(bundle.as_raw_fd().to_string())
+            .arg(super::linux_monitor::PRIVATE_CA_BUNDLE);
+    }
+    setup
+        .arg("--remount-ro")
+        .arg(super::linux_monitor::PRIVATE_SUPPORT_ROOT);
     if policy.fs.tmp == TmpMode::Deny {
-        // Delay this until child mounts under `/tmp` have been installed; otherwise
-        // Bubblewrap cannot create their destination mountpoints.
         setup.args(["--remount-ro", "/tmp"]);
     }
     if root_view == RootView::Minimal {
-        // Bubblewrap creates destination ancestors in its synthetic root. Freeze
-        // them after every authored mount and mask has landed so they do not become
-        // accidental write grants; explicit writable submounts retain their flags.
         setup.args(["--remount-ro", "/"]);
     }
 
     let mut degradation = Degradation::full();
     if policy.net.enforce {
-        // A route-less network namespace is the fail-safe floor. The follow-up bridge
-        // will reconnect only the already-running, host-side filtered proxy.
         setup.arg("--unshare-net");
         if proxy_port.is_some() {
             degradation.lost.push("net-per-host".to_string());
@@ -659,31 +468,164 @@ pub fn apply(
         }
     }
 
-    let seccomp_source = if policy.net.enforce {
-        let source =
-            write_seccomp_program(build_network_seccomp().map_err(|reason| Degradation {
-                lost: vec!["net".to_string()],
-                reason: Some(reason),
-            })?)
-            .map_err(|e| Degradation {
-                lost: vec!["net".to_string()],
-                reason: Some(format!("writing network filter: {e}")),
-            })?;
-        setup.arg("--seccomp").arg(source.as_raw_fd().to_string());
-        Some(source)
+    retained_monitor
+        .append_monitor_options(&mut setup)
+        .map_err(|error| Degradation {
+            lost: vec!["process-isolation".to_string()],
+            reason: Some(format!("building retained monitor command: {error}")),
+        })?;
+    let arguments = write_bwrap_arguments(setup.get_args())
+        .and_then(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
+        .map_err(|error| Degradation {
+            lost: vec!["process-entry".to_string()],
+            reason: Some(format!("serializing Bubblewrap launch arguments: {error}")),
+        })?;
+    let mut command = Command::new(bwrap.program());
+    command
+        .env_clear()
+        .arg("--args")
+        .arg(arguments.as_raw_fd().to_string());
+    retained_monitor.append_monitor_command(&mut command);
+    let inherited_fds = mask_sources
+        .iter()
+        .chain(std::iter::once(&arguments))
+        .map(AsRawFd::as_raw_fd)
+        .chain(std::iter::once(bwrap.executable.as_raw_fd()))
+        .chain(ca_bundle.into_iter().map(AsRawFd::as_raw_fd))
+        .collect::<Vec<_>>();
+    retained_monitor
+        .install_pre_exec(&mut command, &inherited_fds)
+        .map_err(|error| Degradation {
+            lost: vec!["process-isolation".to_string()],
+            reason: Some(format!("sealing retained monitor descriptors: {error}")),
+        })?;
+    mask_sources.push(arguments);
+    Ok(RetainedOuterSetup {
+        command,
+        setup_files: mask_sources,
+        degradation,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_bwrap_candidate(
+    policy: &SandboxPolicy,
+    runtime: &super::linux_monitor::RuntimeCapability,
+    root_view: RootView,
+    entry_program: &Path,
+    mount_plan: &[MountGrant],
+    masks: &[Mask],
+    inventory: PinnedCandidateInventory,
+) -> Result<(PinnedBubblewrapCandidate, Option<File>), Degradation> {
+    // Candidate admission runs before the real per-launch proxy, CA, or private
+    // temporary directory exists. These owned substitutes exercise the same
+    // late-bound mount slots without exposing a real child resource to a rejected
+    // executable candidate.
+    let probe_tmp = if policy.fs.tmp == TmpMode::Private {
+        Some(
+            tempfile::Builder::new()
+                .prefix("nub-bwrap-probe-tmp-")
+                .tempdir()
+                .map_err(|error| Degradation {
+                    lost: vec!["tmp-private".to_string()],
+                    reason: Some(format!(
+                        "creating private temporary-directory probe slot: {error}"
+                    )),
+                })?,
+        )
+    } else {
+        None
+    };
+    let probe_ca = if matches!(policy.net.inspection, crate::policy::Inspection::TlsInspect) {
+        Some(
+            sealed_support_file("nub-bwrap-probe-ca", &[])
+                .and_then(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
+                .map_err(|error| Degradation {
+                    lost: vec!["net-per-host".to_string()],
+                    reason: Some(format!("creating CA-bundle probe slot: {error}")),
+                })?,
+        )
     } else {
         None
     };
 
-    let supervision =
-        LinuxSupervision::new(policy.net.enforce, seccomp_source.is_some()).map_err(|error| {
-            Degradation {
+    let mut failures = inventory.failures;
+    for candidate in inventory.candidates {
+        let bootstrap =
+            super::linux_monitor::BootstrapSpec::candidate_probe(runtime, policy.net.enforce)
+                .map_err(|error| Degradation {
+                    lost: vec!["process-isolation".to_string()],
+                    reason: Some(format!("preparing Bubblewrap candidate probe: {error}")),
+                })?;
+        let retained_monitor = super::linux_monitor::RetainedMonitorLaunch::new(runtime, bootstrap)
+            .map_err(|error| Degradation {
                 lost: vec!["process-isolation".to_string()],
-                reason: Some(format!("preparing Bubblewrap supervision: {error}")),
+                reason: Some(format!("preparing Bubblewrap candidate monitor: {error}")),
+            })?;
+        let RetainedOuterSetup {
+            mut command,
+            setup_files,
+            degradation: _,
+        } = configure_retained_outer(
+            policy,
+            root_view,
+            entry_program,
+            mount_plan,
+            masks,
+            &candidate,
+            probe_ca.as_ref(),
+            probe_tmp.as_ref().map(tempfile::TempDir::path),
+            None,
+            &retained_monitor,
+        )?;
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut outer = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                failures.push(format!(
+                    "{}: candidate probe could not start: {error}",
+                    candidate.source_path.display()
+                ));
+                continue;
             }
-        })?;
-    supervision.append_args(&mut setup);
+        };
+        let mut stderr = outer.stderr.take();
+        drop(setup_files);
+        match retained_monitor.run_candidate_probe(outer, Duration::from_secs(5)) {
+            Ok(()) => return Ok((candidate, probe_ca)),
+            Err(error) => {
+                let mut diagnostic_bytes = Vec::new();
+                if let Some(stderr) = stderr.as_mut() {
+                    let _ = stderr.read_to_end(&mut diagnostic_bytes);
+                }
+                let stderr = String::from_utf8_lossy(&diagnostic_bytes);
+                let diagnostic = if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                };
+                failures.push(format!(
+                    "{}: candidate probe failed: {error}{diagnostic}",
+                    candidate.source_path.display(),
+                ));
+            }
+        }
+    }
+    Err(Degradation {
+        lost: vec!["fs".to_string()],
+        reason: Some(classify_bwrap_failures(&failures)),
+    })
+}
 
+fn target_environment(
+    policy: &SandboxPolicy,
+    proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
+    ca_bundle: bool,
+) -> BTreeMap<OsString, OsString> {
     let mut target_env = policy
         .env
         .constructed
@@ -693,57 +635,16 @@ pub fn apply(
     if let Some(port) = proxy_port {
         super::insert_proxy_env(&mut target_env, port, proxy_token);
     }
-    if let Some(bundle) = ca_bundle {
-        super::insert_ca_env(&mut target_env, bundle);
+    if ca_bundle {
+        super::insert_ca_env(
+            &mut target_env,
+            Path::new(super::linux_monitor::PRIVATE_CA_BUNDLE),
+        );
     }
     if policy.fs.tmp == TmpMode::Private {
         super::insert_tmp_env(&mut target_env, Path::new("/tmp"));
     }
-    append_target_environment(&mut setup, &target_env).map_err(|reason| Degradation {
-        lost: vec!["env".to_string()],
-        reason: Some(reason),
-    })?;
-    setup.arg("--chdir").arg(&cwd);
-
-    let arguments = write_bwrap_arguments(setup.get_args()).map_err(|e| Degradation {
-        lost: vec!["process-entry".to_string()],
-        reason: Some(format!("serializing Bubblewrap launch arguments: {e}")),
-    })?;
-    let mut command = Command::new(&bwrap.program);
-    command.env_clear();
-    command
-        .arg("--args")
-        .arg(arguments.as_raw_fd().to_string())
-        .arg("--")
-        .arg(&setsid_program)
-        .arg("/bin/sh")
-        .args(["-c", TARGET_GATE_SCRIPT, "nub-sandbox-target"])
-        .arg(&entry_program)
-        .args(&spec.args);
-    let inherited_fds = mask_sources
-        .iter()
-        .chain(seccomp_source.iter())
-        .chain(std::iter::once(&arguments))
-        .chain(bwrap.executable.iter())
-        .map(AsRawFd::as_raw_fd)
-        .chain(supervision.child_fds())
-        .collect::<Vec<_>>();
-    seal_inherited_fds(&mut command, inherited_fds);
-
-    let mut inherited_files = Vec::with_capacity(2);
-    inherited_files.extend(mask_sources);
-    inherited_files.extend(seccomp_source);
-    inherited_files.push(arguments);
-    inherited_files.extend(bwrap.executable);
-
-    Ok(Prepared {
-        command,
-        degradation,
-        proxy: None,
-        _inherited_files: inherited_files,
-        supervision: Some(supervision),
-        _private_tmp: None,
-    })
+    target_env
 }
 
 fn root_view(policy: &SandboxPolicy) -> RootView {
@@ -766,23 +667,98 @@ fn root_view(policy: &SandboxPolicy) -> RootView {
     }
 }
 
+fn validate_reserved_runtime_view(
+    cwd: &Path,
+    entry_program: &Path,
+    mount_plan: &[MountGrant],
+    masks: &[Mask],
+) -> Result<(), String> {
+    let reserved = Path::new("/dev/.nub-sandbox");
+    for (label, path) in [("working directory", cwd), ("entry program", entry_program)] {
+        if path == reserved || path.starts_with(reserved) {
+            return Err(format!(
+                "sandbox {label} overlaps the reserved monitor runtime at {}",
+                super::linux_monitor::PRIVATE_RUNTIME_ROOT
+            ));
+        }
+    }
+    for grant in mount_plan {
+        if paths_overlap(&grant.path, reserved) {
+            return Err(format!(
+                "filesystem grant {} overlaps the reserved monitor runtime at {}",
+                grant.path.display(),
+                super::linux_monitor::PRIVATE_RUNTIME_ROOT
+            ));
+        }
+    }
+    for mask in masks {
+        if paths_overlap(&mask.path, reserved) {
+            return Err(format!(
+                "filesystem deny {} overlaps the reserved monitor runtime at {}",
+                mask.path.display(),
+                super::linux_monitor::PRIVATE_RUNTIME_ROOT
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn validate_dynamic_preload_view(
+    runtime: &super::linux_monitor::RuntimeImage,
+    masks: &[Mask],
+) -> Result<(), String> {
+    if !matches!(
+        &runtime.kind,
+        super::linux_monitor::RuntimeKind::Dynamic {
+            family: super::linux_monitor::LoaderFamily::Glibc,
+            ..
+        }
+    ) {
+        return Ok(());
+    }
+    let logical = Path::new("/etc/ld.so.preload");
+    let metadata = match fs::symlink_metadata(logical) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "inspecting the dynamic-loader preload file: {error}"
+            ));
+        }
+    };
+    let resolved = fs::canonicalize(logical).unwrap_or_else(|_| logical.to_path_buf());
+    let hidden = masks.iter().any(|mask| {
+        mask.path == logical
+            || mask.path == resolved
+            || (mask.directory
+                && (logical.starts_with(&mask.path) || resolved.starts_with(&mask.path)))
+    });
+    if hidden {
+        return Ok(());
+    }
+    Err(format!(
+        "dynamic monitor startup refuses the visible {} at /etc/ld.so.preload; deny that path so the final sandbox view masks it",
+        if metadata.file_type().is_symlink() {
+            "symlink"
+        } else {
+            "file"
+        }
+    ))
+}
+
 fn append_minimal_read_mounts(
     command: &mut Command,
     entry_program: &Path,
-    ca_bundle: Option<&Path>,
-    bwrap: &Path,
 ) -> Result<(), Degradation> {
     let mut mounted = BTreeSet::new();
     for dir in ESSENTIAL_READ_DIRS {
         append_ro_mount(command, Path::new(dir), &mut mounted);
     }
     append_ro_mount(command, entry_program, &mut mounted);
-    if let Some(bundle) = ca_bundle {
-        append_ro_mount(command, bundle, &mut mounted);
-    }
-    // A bundled helper can live outside the platform defaults. Keeping it visible
-    // lets a Nub process inside this restrictive view create a stricter child view.
-    append_ro_mount(command, bwrap, &mut mounted);
     Ok(())
 }
 
@@ -1247,114 +1223,235 @@ fn validate_process_inputs(spec: &CommandSpec) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone)]
-enum BubblewrapCandidate {
-    System(PathBuf),
-    Bundled(PathBuf),
+struct PinnedCandidateInventory {
+    candidates: Vec<PinnedBubblewrapCandidate>,
+    failures: Vec<String>,
 }
 
-fn find_bwrap(require_net: bool) -> Result<(BubblewrapLaunch, PathBuf), String> {
-    let setsid_program = find_setsid()?;
-    let candidate = choose_bwrap(require_net, &setsid_program)?;
-    Ok((launch_bwrap(&candidate)?, setsid_program))
+fn open_bwrap_candidate_inventory() -> PinnedCandidateInventory {
+    let system = [PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")];
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+        .map(|directory| {
+            vec![
+                directory.join("nub-resources/bwrap"),
+                directory.join("../nub-resources/bwrap"),
+            ]
+        })
+        .unwrap_or_default();
+    open_bwrap_candidate_inventory_from(system, bundled)
 }
 
-fn choose_bwrap(require_net: bool, setsid_program: &Path) -> Result<BubblewrapCandidate, String> {
+fn open_bwrap_candidate_inventory_from(
+    system: impl IntoIterator<Item = PathBuf>,
+    bundled: impl IntoIterator<Item = PathBuf>,
+) -> PinnedCandidateInventory {
     let mut candidates = Vec::new();
+    let mut failures = Vec::new();
     let mut seen = BTreeSet::new();
-    for path in [PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")] {
-        if executable(&path)
-            && let Ok(canonical) = fs::canonicalize(path)
-            && seen.insert(canonical.clone())
-        {
-            candidates.push(BubblewrapCandidate::System(canonical));
-        }
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        for path in [
-            dir.join("nub-resources/bwrap"),
-            dir.join("../nub-resources/bwrap"),
-            dir.join("bwrap"),
-        ] {
-            if executable(&path)
-                && let Ok(canonical) = fs::canonicalize(path)
-                && seen.insert(canonical.clone())
-            {
-                candidates.push(BubblewrapCandidate::Bundled(canonical));
+    for (origin, paths) in [
+        (
+            BubblewrapOrigin::System,
+            system.into_iter().collect::<Vec<_>>(),
+        ),
+        (
+            BubblewrapOrigin::Bundled,
+            bundled.into_iter().collect::<Vec<_>>(),
+        ),
+    ] {
+        for path in paths {
+            match open_pinned_bwrap_candidate(&path, origin) {
+                Ok(candidate) => {
+                    if seen.insert(candidate.source_identity) {
+                        candidates.push(candidate);
+                    }
+                }
+                Err(error) => failures.push(format!("{}: {error}", path.display())),
             }
         }
     }
-    if candidates.is_empty() {
-        return Err("Bubblewrap helper not found (system and bundled paths checked)".to_string());
+    PinnedCandidateInventory {
+        candidates,
+        failures,
     }
-    let mut failures = Vec::new();
-    for candidate in candidates {
-        match launch_bwrap(&candidate).and_then(|launch| {
-            probe_bwrap(&launch, setsid_program, require_net)?;
-            Ok(launch)
-        }) {
-            Ok(_) => return Ok(candidate),
-            Err(reason) => failures.push(format!("{}: {reason}", candidate.path().display())),
+}
+
+fn open_pinned_bwrap_candidate(
+    path: &Path,
+    origin: BubblewrapOrigin,
+) -> Result<PinnedBubblewrapCandidate, String> {
+    let path_c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| "candidate path contains a NUL byte".to_string())?;
+    let fd = unsafe {
+        libc::open(
+            path_c.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "opening candidate: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let source = unsafe { File::from_raw_fd(fd) };
+    let metadata = source
+        .metadata()
+        .map_err(|error| format!("statting opened candidate: {error}"))?;
+    if !metadata.is_file() {
+        return Err("opened candidate is not a regular file".to_string());
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err("opened candidate is not executable".to_string());
+    }
+    if origin == BubblewrapOrigin::System
+        && (metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0)
+    {
+        return Err(format!(
+            "system candidate is not root-owned and protected from group/other writes (uid={}, mode={:o})",
+            metadata.uid(),
+            metadata.permissions().mode() & 0o7777
+        ));
+    }
+    let source_identity = (metadata.dev(), metadata.ino());
+    // This path is used only to preserve bundled-helper visibility for nested
+    // sandboxes under a minimal root. Execution remains pinned to `executable`.
+    let source_path = fs::canonicalize(path)
+        .map_err(|error| format!("resolving opened candidate path: {error}"))?;
+    let executable = match origin {
+        BubblewrapOrigin::System => relocate_file_at_least(source, FIRST_LAUNCH_DATA_FD)
+            .map_err(|error| format!("pinning system candidate descriptor: {error}"))?,
+        BubblewrapOrigin::Bundled => executable_snapshot(&source, path)?,
+    };
+    Ok(PinnedBubblewrapCandidate {
+        executable,
+        source_path,
+        source_identity,
+    })
+}
+
+fn executable_snapshot(source: &File, path: &Path) -> Result<File, String> {
+    let Some(expected) = option_env!("NUB_BWRAP_SHA256") else {
+        return Err(format!(
+            "bundled Bubblewrap has no build-pinned digest: {}",
+            path.display()
+        ));
+    };
+    executable_snapshot_with_digest(source, path, expected)
+}
+
+fn executable_snapshot_with_digest(
+    source: &File,
+    path: &Path,
+    expected: &str,
+) -> Result<File, String> {
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("build-pinned Bubblewrap digest is malformed".to_string());
+    }
+    let source_size = source
+        .metadata()
+        .map_err(|error| format!("statting bundled Bubblewrap: {error}"))?
+        .len();
+    if source_size > MAX_BUNDLED_BWRAP_BYTES {
+        return Err(format!(
+            "bundled Bubblewrap is unexpectedly large: {}",
+            path.display()
+        ));
+    }
+    let snapshot_fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            c"nub-bwrap-snapshot".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as RawFd
+    };
+    if snapshot_fd < 0 {
+        return Err(format!(
+            "creating immutable bundled Bubblewrap snapshot: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut snapshot = unsafe { File::from_raw_fd(snapshot_fd) };
+    let mut offset = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    while offset < source_size {
+        let wanted = usize::try_from((source_size - offset).min(buffer.len() as u64))
+            .expect("bounded copy chunk fits usize");
+        let read = source
+            .read_at(&mut buffer[..wanted], offset)
+            .map_err(|error| format!("reading bundled Bubblewrap snapshot source: {error}"))?;
+        if read == 0 {
+            return Err("bundled Bubblewrap changed while it was being snapshotted".to_string());
         }
+        snapshot
+            .write_all(&buffer[..read])
+            .map_err(|error| format!("writing bundled Bubblewrap snapshot: {error}"))?;
+        offset += read as u64;
     }
-    Err(classify_bwrap_failures(&failures))
-}
-
-fn find_setsid() -> Result<PathBuf, String> {
-    find_setsid_in([
-        PathBuf::from("/usr/bin/setsid"),
-        PathBuf::from("/bin/setsid"),
-    ])
-}
-
-fn find_setsid_in(paths: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf, String> {
-    paths
-        .into_iter()
-        .find_map(|path| {
-            executable(&path)
-                .then(|| fs::canonicalize(path).ok())
-                .flatten()
-        })
-        .ok_or_else(|| {
-            "the stock setsid launcher required for supervised sessions was not found".to_string()
-        })
-}
-
-impl BubblewrapCandidate {
-    fn path(&self) -> &Path {
-        match self {
-            Self::System(path) | Self::Bundled(path) => path,
-        }
+    if unsafe { libc::fchmod(snapshot.as_raw_fd(), 0o500) } != 0 {
+        return Err(format!(
+            "marking bundled Bubblewrap snapshot executable: {}",
+            std::io::Error::last_os_error()
+        ));
     }
+    if unsafe {
+        libc::fcntl(
+            snapshot.as_raw_fd(),
+            libc::F_ADD_SEALS,
+            REQUIRED_EXECUTABLE_SNAPSHOT_SEALS,
+        )
+    } != 0
+    {
+        return Err(format!(
+            "sealing bundled Bubblewrap snapshot: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let seals = unsafe { libc::fcntl(snapshot.as_raw_fd(), libc::F_GET_SEALS) };
+    if seals < 0 || seals & REQUIRED_EXECUTABLE_SNAPSHOT_SEALS != REQUIRED_EXECUTABLE_SNAPSHOT_SEALS
+    {
+        return Err("bundled Bubblewrap snapshot did not retain every required seal".to_string());
+    }
+    let snapshot_size = snapshot
+        .metadata()
+        .map_err(|error| format!("statting bundled Bubblewrap snapshot: {error}"))?
+        .len();
+    if snapshot_size != source_size {
+        return Err("bundled Bubblewrap snapshot has the wrong size".to_string());
+    }
+    let mut bytes = vec![0u8; snapshot_size as usize];
+    snapshot
+        .read_exact_at(&mut bytes, 0)
+        .map_err(|error| format!("hashing bundled Bubblewrap snapshot: {error}"))?;
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(format!(
+            "bundled Bubblewrap digest mismatch for {}",
+            path.display()
+        ));
+    }
+    relocate_file_at_least(snapshot, FIRST_LAUNCH_DATA_FD)
+        .map_err(|error| format!("pinning bundled Bubblewrap snapshot descriptor: {error}"))
 }
 
-fn launch_bwrap(candidate: &BubblewrapCandidate) -> Result<BubblewrapLaunch, String> {
-    match candidate {
-        BubblewrapCandidate::System(path) => Ok(BubblewrapLaunch {
-            program: path.clone(),
-            visible_path: path.clone(),
-            executable: None,
-        }),
-        BubblewrapCandidate::Bundled(path) => {
-            let executable = file_above_stdio(
-                File::open(path).map_err(|error| format!("opening bundled Bubblewrap: {error}"))?,
-            )
-            .map_err(|error| format!("duplicating bundled Bubblewrap: {error}"))?;
-            verify_bundled_bwrap(&executable, path)?;
-            Ok(BubblewrapLaunch {
-                program: PathBuf::from(format!("/proc/self/fd/{}", executable.as_raw_fd())),
-                visible_path: path.clone(),
-                executable: Some(executable),
-            })
-        }
+fn relocate_file_at_least(file: File, minimum: RawFd) -> std::io::Result<File> {
+    if file.as_raw_fd() >= minimum {
+        return Ok(file);
     }
+    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, minimum) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 fn classify_bwrap_failures(failures: &[String]) -> String {
     let detail = failures.join("; ");
     let lower = detail.to_ascii_lowercase();
+    if lower.contains("unknown option") || lower.contains("invalid option") {
+        return format!("installed Bubblewrap lacks required stock options ({detail})");
+    }
     if fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
         .is_ok_and(|value| value.trim() == "1")
         && (lower.contains("permission denied") || lower.contains("uid map"))
@@ -1383,204 +1480,8 @@ fn classify_bwrap_failures(failures: &[String]) -> String {
     {
         return format!("the container policy blocks required Bubblewrap behavior ({detail})");
     }
-    if lower.contains("unknown option") || lower.contains("invalid option") {
-        return format!("installed Bubblewrap lacks required stock options ({detail})");
-    }
     format!("Bubblewrap cannot enforce the required process view ({detail})")
 }
-
-fn verify_bundled_bwrap(file: &File, path: &Path) -> Result<(), String> {
-    let Some(expected) = option_env!("NUB_BWRAP_SHA256") else {
-        return Err(format!(
-            "bundled Bubblewrap has no build-pinned digest: {}",
-            path.display()
-        ));
-    };
-    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("build-pinned Bubblewrap digest is malformed".to_string());
-    }
-    let len = file
-        .metadata()
-        .map_err(|e| format!("statting bundled Bubblewrap {}: {e}", path.display()))?
-        .len();
-    if len > 16 * 1024 * 1024 {
-        return Err(format!(
-            "bundled Bubblewrap is unexpectedly large: {}",
-            path.display()
-        ));
-    }
-    let mut bytes = vec![0; len as usize];
-    file.read_exact_at(&mut bytes, 0)
-        .map_err(|e| format!("reading bundled Bubblewrap {}: {e}", path.display()))?;
-    let actual = format!("{:x}", Sha256::digest(bytes));
-    if actual.eq_ignore_ascii_case(expected) {
-        Ok(())
-    } else {
-        Err(format!(
-            "bundled Bubblewrap digest mismatch for {}",
-            path.display()
-        ))
-    }
-}
-
-fn probe_bwrap(
-    launch: &BubblewrapLaunch,
-    setsid_program: &Path,
-    require_net: bool,
-) -> Result<(), String> {
-    let destination = tempfile::Builder::new()
-        .prefix("nub-bwrap-probe-mask-")
-        .tempfile_in("/var/tmp")
-        .map_err(|error| format!("creating mask destination: {error}"))?;
-    fs::write(destination.path(), b"host-bytes")
-        .map_err(|error| format!("seeding mask destination: {error}"))?;
-    let source = open_inheritable_dev_null()
-        .map_err(|error| format!("opening probe mask source: {error}"))?;
-    let seccomp = if require_net {
-        Some(
-            write_seccomp_program(build_probe_seccomp()?)
-                .map_err(|error| format!("writing probe seccomp program: {error}"))?,
-        )
-    } else {
-        None
-    };
-    let supervision = LinuxSupervision::new(require_net, require_net)
-        .map_err(|error| format!("preparing probe supervision: {error}"))?;
-
-    let mut setup = Command::new("");
-    setup.args([
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-user",
-        "--cap-drop",
-        "ALL",
-        "--unshare-pid",
-        "--unshare-ipc",
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-        "--remount-ro",
-        "/tmp",
-        "--perms",
-        "000",
-        "--ro-bind-data",
-    ]);
-    setup
-        .arg(source.as_raw_fd().to_string())
-        .arg(destination.path());
-    if require_net {
-        setup.arg("--unshare-net");
-        setup
-            .arg("--seccomp")
-            .arg(seccomp.as_ref().unwrap().as_raw_fd().to_string());
-    }
-    supervision.append_args(&mut setup);
-    setup.args(["--clearenv", "--setenv", "PATH", "/usr/bin:/bin"]);
-    let arguments = write_bwrap_arguments(setup.get_args())
-        .map_err(|error| format!("serializing probe arguments: {error}"))?;
-    let mut command = Command::new(&launch.program);
-    command
-        .env_clear()
-        .arg("--args")
-        .arg(arguments.as_raw_fd().to_string())
-        .arg("--")
-        .arg(setsid_program)
-        .arg("/bin/sh")
-        .args(["-c", TARGET_GATE_SCRIPT, "nub-bwrap-target"])
-        .arg("/bin/sh")
-        .args(["-c", BWRAP_PROBE_SCRIPT, "nub-bwrap-probe"])
-        .arg(destination.path())
-        .arg(if require_net { "1" } else { "0" })
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
-    let child_fds = [source.as_raw_fd(), arguments.as_raw_fd()]
-        .into_iter()
-        .chain(seccomp.iter().map(AsRawFd::as_raw_fd))
-        .chain(launch.executable.iter().map(AsRawFd::as_raw_fd))
-        .chain(supervision.child_fds())
-        .collect::<Vec<_>>();
-    seal_inherited_fds(&mut command, child_fds);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("probe could not start: {error}"))?;
-    let pgid = match supervision.verify_and_release(&mut child) {
-        Ok(pgid) => pgid,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            return Err(format!(
-                "probe supervision failed: {error}{}",
-                if stderr.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", stderr.trim())
-                }
-            ));
-        }
-    };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("waiting for probe: {error}"))?
-        {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            unsafe { libc::kill(-pgid, libc::SIGKILL) };
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("probe timed out".to_string());
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    if status.success() {
-        return Ok(());
-    }
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_string(&mut stderr);
-    }
-    let stderr = stderr.trim();
-    if stderr.is_empty() {
-        Err(format!("behavior probe exited with {status}"))
-    } else {
-        Err(format!("behavior probe exited with {status}: {stderr}"))
-    }
-}
-
-const BWRAP_PROBE_SCRIPT: &str = r#"
-set -eu
-[ ! -s "$1" ]
-[ "$(stat -c %a "$1")" = 0 ]
-if (printf x > "$1") 2>/dev/null; then exit 21; fi
-if (printf x > /tmp/nub-bwrap-probe-write) 2>/dev/null; then exit 22; fi
-[ -c /dev/null ]
-[ -r /proc/self/status ]
-if [ "$2" = 1 ]; then
-  routes=0
-  while read -r line; do
-    case "$line" in Iface*) continue ;; '') continue ;; *) routes=1 ;; esac
-  done < /proc/net/route
-  [ "$routes" = 0 ]
-  if /usr/bin/uname >/dev/null 2>&1; then exit 23; fi
-fi
-"#;
-
-const TARGET_GATE_SCRIPT: &str = r#"kill -STOP $$ || exit 125
-exec "$@"
-"#;
 
 fn executable(path: &Path) -> bool {
     path.metadata()
@@ -1602,28 +1503,8 @@ fn file_above_stdio(file: File) -> std::io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn append_target_environment(
-    setup: &mut Command,
-    env: &BTreeMap<OsString, OsString>,
-) -> Result<(), String> {
-    setup.arg("--clearenv");
-    for (key, value) in env {
-        let key_bytes = key.as_bytes();
-        if key_bytes.is_empty() || key_bytes.contains(&b'=') || key_bytes.contains(&0) {
-            return Err(format!("invalid target environment key: {key:?}"));
-        }
-        if value.as_bytes().contains(&0) {
-            return Err(format!(
-                "target environment variable {key:?} contains a NUL byte"
-            ));
-        }
-        setup.arg("--setenv").arg(key).arg(value);
-    }
-    Ok(())
-}
-
 fn write_bwrap_arguments<'a>(args: impl Iterator<Item = &'a OsStr>) -> std::io::Result<File> {
-    let mut file = file_above_stdio(tempfile::tempfile()?)?;
+    let mut bytes = Vec::new();
     for arg in args {
         if arg.as_bytes().contains(&0) {
             return Err(std::io::Error::new(
@@ -1631,10 +1512,39 @@ fn write_bwrap_arguments<'a>(args: impl Iterator<Item = &'a OsStr>) -> std::io::
                 "a Bubblewrap argument contains a NUL byte",
             ));
         }
-        file.write_all(arg.as_bytes())?;
-        file.write_all(&[0])?;
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
     }
+    sealed_support_file("nub-bwrap-arguments", &bytes)
+}
+
+fn sealed_support_file(name: &str, bytes: &[u8]) -> std::io::Result<File> {
+    let name = std::ffi::CString::new(name).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "memfd name contains NUL")
+    })?;
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as RawFd
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut file = file_above_stdio(unsafe { File::from_raw_fd(fd) })?;
+    file.write_all(bytes)?;
     file.rewind()?;
+    if unsafe {
+        libc::fcntl(
+            file.as_raw_fd(),
+            libc::F_ADD_SEALS,
+            REQUIRED_EXECUTABLE_SNAPSHOT_SEALS,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(file)
 }
 
@@ -1777,54 +1687,7 @@ fn prepend_x86_64_unsupported_abi_guard(mut program: BpfProgram) -> Result<BpfPr
     Ok(guarded)
 }
 
-fn build_probe_seccomp() -> Result<BpfProgram, String> {
-    let arch = TargetArch::try_from(std::env::consts::ARCH)
-        .map_err(|error| format!("unsupported architecture for probe filter: {error}"))?;
-    let mut rules = BTreeMap::new();
-    rules.insert(libc::SYS_uname, Vec::new());
-    SeccompFilter::new(
-        rules,
-        SeccompAction::Allow,
-        SeccompAction::Errno(libc::EPERM as u32),
-        arch,
-    )
-    .map_err(|error| format!("building probe filter: {error}"))?
-    .try_into()
-    .map_err(|error| format!("compiling probe filter: {error}"))
-}
-
-fn write_seccomp_program(program: BpfProgram) -> std::io::Result<File> {
-    let mut file = file_above_stdio(tempfile::tempfile()?)?;
-    let byte_len = program.len() * std::mem::size_of::<libc::sock_filter>();
-    let bytes = unsafe { std::slice::from_raw_parts(program.as_ptr().cast::<u8>(), byte_len) };
-    file.write_all(bytes)?;
-    file.rewind()?;
-    Ok(file)
-}
-
-fn seal_inherited_fds(command: &mut Command, bubblewrap_data_fds: Vec<i32>) {
-    // Keep only stdio and Bubblewrap's harmless setup-data descriptors. This closes
-    // the inherited-open-file escape from path denial while retaining Rust's exec
-    // error pipe until exec succeeds. Linux 5.11+ marks the whole range atomically;
-    // older kernels use a raw procfs descriptor walk that performs no allocation.
-    unsafe {
-        command.pre_exec(move || {
-            const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
-            let result = libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC);
-            if result < 0 {
-                cloexec_open_fds_from_proc()?;
-            }
-            for &fd in &bubblewrap_data_fds {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
-}
-
+#[cfg(test)]
 unsafe fn cloexec_open_fds_from_proc() -> std::io::Result<()> {
     const PROC_SUPER_MAGIC: libc::c_long = 0x9fa0;
     const DIRENT_HEADER: usize = 19;
@@ -2556,20 +2419,6 @@ mod tests {
     }
 
     #[test]
-    fn target_environment_rejects_invalid_keys_and_nuls() {
-        let mut setup = Command::new("");
-        let mut env = BTreeMap::new();
-        env.insert(OsString::from("BAD=KEY"), OsString::from("value"));
-        assert!(append_target_environment(&mut setup, &env).is_err());
-        env.clear();
-        env.insert(
-            OsString::from("GOOD"),
-            OsString::from_vec(b"bad\0value".to_vec()),
-        );
-        assert!(append_target_environment(&mut setup, &env).is_err());
-    }
-
-    #[test]
     fn process_inputs_reject_nuls_before_launch_setup() {
         let valid = CommandSpec::new("/bin/true").arg("ok").cwd("/");
         assert!(validate_process_inputs(&valid).is_ok());
@@ -2634,25 +2483,87 @@ mod tests {
     }
 
     #[test]
+    fn bundled_candidate_executes_an_immutable_verified_snapshot() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("bwrap");
+        let original = b"verified bubblewrap bytes";
+        fs::write(&path, original).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let source = File::open(&path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(original));
+        let snapshot = executable_snapshot_with_digest(&source, &path, &digest).unwrap();
+
+        // A retained descriptor to an ordinary inode observes in-place writes. The
+        // executable authority must instead remain the sealed bytes we admitted.
+        fs::write(&path, b"attacker replaced the opened source in place").unwrap();
+        let mut observed = vec![0; original.len()];
+        snapshot.read_exact_at(&mut observed, 0).unwrap();
+        assert_eq!(observed, original);
+        assert_eq!(snapshot.metadata().unwrap().len(), original.len() as u64);
+        let seals = unsafe { libc::fcntl(snapshot.as_raw_fd(), libc::F_GET_SEALS) };
+        assert_eq!(
+            seals & REQUIRED_EXECUTABLE_SNAPSHOT_SEALS,
+            REQUIRED_EXECUTABLE_SNAPSHOT_SEALS
+        );
+        assert!(snapshot.as_raw_fd() >= FIRST_LAUNCH_DATA_FD);
+    }
+
+    #[test]
+    fn system_candidate_trust_is_decided_from_the_opened_inode() {
+        let trusted = open_pinned_bwrap_candidate(Path::new("/bin/true"), BubblewrapOrigin::System)
+            .expect("the platform /bin/true should be root-owned and non-writable");
+        assert!(trusted.program().starts_with("/proc/self/fd/"));
+
+        let directory = tempdir().unwrap();
+        let writable = directory.path().join("bwrap");
+        fs::write(&writable, b"not trusted").unwrap();
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o777)).unwrap();
+        let error = open_pinned_bwrap_candidate(&writable, BubblewrapOrigin::System)
+            .err()
+            .expect("group/other-writable helper was accepted");
+        assert!(error.contains("root-owned"), "{error}");
+    }
+
+    #[test]
+    fn candidate_open_rejects_a_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("target");
+        let alias = directory.path().join("bwrap");
+        fs::write(&target, b"candidate").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&target, &alias).unwrap();
+        let error = open_pinned_bwrap_candidate(&alias, BubblewrapOrigin::Bundled)
+            .err()
+            .expect("symlink candidate was accepted");
+        assert!(error.contains("opening candidate"), "{error}");
+    }
+
+    #[test]
+    fn reserved_monitor_runtime_rejects_every_authored_overlap() {
+        let root = Path::new(crate::backend::linux_monitor::PRIVATE_RUNTIME_ROOT);
+        let entry = Path::new("/bin/true");
+        assert!(validate_reserved_runtime_view(Path::new("/"), entry, &[], &[]).is_ok());
+        assert!(validate_reserved_runtime_view(root, entry, &[], &[]).is_err());
+        let grant = MountGrant {
+            path: PathBuf::from("/dev"),
+            access: MountAccess::ReadOnly,
+        };
+        assert!(validate_reserved_runtime_view(Path::new("/"), entry, &[grant], &[]).is_err());
+        let mask = Mask {
+            path: root.join("lib"),
+            kind: MaskKind::Unreadable,
+            directory: true,
+        };
+        assert!(validate_reserved_runtime_view(Path::new("/"), entry, &[], &[mask]).is_err());
+    }
+
+    #[test]
     fn bwrap_failure_diagnostics_are_host_specific_without_admin_advice() {
         let message = classify_bwrap_failures(&["candidate: unknown option --info-fd".into()]);
         assert!(message.contains("required stock options"), "{message}");
         for banned in ["sudo", "sysctl", "disable AppArmor", "apparmor_parser"] {
-            assert!(!message.contains(banned), "{message}");
-        }
-    }
-
-    #[test]
-    fn setsid_discovery_is_absolute_and_missing_helper_fails_without_admin_advice() {
-        let temp = tempfile::tempdir().unwrap();
-        let helper = temp.path().join("setsid");
-        fs::write(&helper, b"#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(find_setsid_in([helper.clone()]).unwrap(), helper);
-
-        let message = find_setsid_in([temp.path().join("missing")]).unwrap_err();
-        assert!(message.contains("setsid launcher"), "{message}");
-        for banned in ["sudo", "install", "administrator"] {
             assert!(!message.contains(banned), "{message}");
         }
     }

@@ -22,8 +22,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
-use std::sync::OnceLock;
+use std::process::{Child, Command, ExitStatus};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,7 +41,10 @@ const MAX_MAPPED_CANDIDATES: usize = 1024;
 const MAX_MAPS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RUNTIME_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
 const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
-const PRIVATE_RUNTIME_ROOT: &str = "/run/nub-sandbox/runtime";
+pub(crate) const PRIVATE_RUNTIME_ROOT: &str = "/dev/.nub-sandbox/runtime";
+pub(crate) const PRIVATE_SUPPORT_ROOT: &str = "/dev/.nub-sandbox/support";
+pub(crate) const PRIVATE_CA_BUNDLE: &str = "/dev/.nub-sandbox/support/ca-bundle.pem";
+pub(crate) const CANDIDATE_PROBE_SENTINEL: &str = "__nub-sandbox-candidate-probe-v1";
 const LINUX_NSIG: libc::c_int = 65;
 const REQUIRED_BOOTSTRAP_SEALS: libc::c_int =
     libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
@@ -358,10 +361,186 @@ pub fn earliest_bootstrap() -> io::Result<RuntimeCapability> {
                 });
             std::process::exit(code);
         }
+        Some(value) if value == OsStr::new(CANDIDATE_PROBE_SENTINEL) => {
+            let code = candidate_probe_main().map(|_| 0).unwrap_or_else(|error| {
+                eprintln!("sandbox candidate probe failed: {error}");
+                125
+            });
+            std::process::exit(code);
+        }
         Some(value) if value.as_bytes().starts_with(b"__nub-sandbox-") => Err(invalid_data(
             "invalid or unsupported sandbox monitor bootstrap sentinel",
         )),
         _ => RuntimeCapability::current_process(),
+    }
+}
+
+fn candidate_probe_main() -> io::Result<()> {
+    const PROC_SUPER_MAGIC: libc::c_long = 0x9fa0;
+    const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
+
+    let mut arguments = std::env::args_os();
+    let _program = arguments.next();
+    if arguments.next().as_deref() != Some(OsStr::new(CANDIDATE_PROBE_SENTINEL)) {
+        return Err(invalid_data("candidate probe sentinel mismatch"));
+    }
+    let restricted = match arguments.next().as_deref() {
+        Some(value) if value == OsStr::new("restricted") => true,
+        Some(value) if value == OsStr::new("full") => false,
+        _ => return Err(invalid_data("candidate probe network mode is invalid")),
+    };
+    if arguments.next().is_some() {
+        return Err(invalid_data("candidate probe received trailing arguments"));
+    }
+    if std::env::vars_os().next().is_some() {
+        return Err(invalid_data("candidate probe environment is not empty"));
+    }
+    if std::env::current_dir()? != Path::new("/") {
+        return Err(invalid_data(
+            "candidate probe working directory is not root",
+        ));
+    }
+    if unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) } != 1 {
+        return Err(invalid_data("candidate probe omitted no-new-privileges"));
+    }
+    verify_zero_capabilities()?;
+    require_filesystem_type(Path::new("/proc"), PROC_SUPER_MAGIC, "procfs")?;
+    require_filesystem_type(Path::new("/dev"), TMPFS_MAGIC, "device tmpfs")?;
+    if unsafe { libc::getpid() } <= 1
+        || unsafe { libc::getppid() } != 1
+        || unsafe { libc::getsid(0) } != 1
+    {
+        return Err(invalid_data(
+            "candidate probe did not run below the PID-1 monitor",
+        ));
+    }
+    let null = fs::metadata("/dev/null")?;
+    let canonical_null = null.mode() & libc::S_IFMT == libc::S_IFCHR
+        && libc::major(null.rdev()) == 1
+        && libc::minor(null.rdev()) == 3;
+    if !canonical_null {
+        match File::open("/dev/null") {
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+            _ => {
+                return Err(invalid_data(
+                    "candidate probe device tmpfs omitted the canonical null device",
+                ));
+            }
+        }
+    }
+    match fs::read("/etc/ld.so.preload") {
+        Ok(contents) if contents.iter().all(u8::is_ascii_whitespace) => {}
+        Ok(_) => {
+            return Err(invalid_data(
+                "candidate probe final view exposes a nonempty /etc/ld.so.preload",
+            ));
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) => {}
+        Err(error) => return Err(error),
+    }
+
+    let open_socket = |family| {
+        let fd = unsafe { libc::socket(family, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(fd)
+        }
+    };
+    let unix = open_socket(libc::AF_UNIX);
+    let inet = open_socket(libc::AF_INET);
+    if restricted {
+        for (result, family) in [(unix, "AF_UNIX"), (inet, "AF_INET")] {
+            match result {
+                Ok(fd) => {
+                    unsafe { libc::close(fd) };
+                    return Err(invalid_data(format!(
+                        "candidate probe restricted target created an {family} socket"
+                    )));
+                }
+                Err(error)
+                    if matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES)) => {}
+                Err(error) => {
+                    return Err(io::Error::other(format!(
+                        "candidate probe restricted {family} denial was unexpected: {error}"
+                    )));
+                }
+            }
+        }
+        if unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) } != 2 {
+            return Err(invalid_data(
+                "candidate probe restricted target omitted its seccomp filter",
+            ));
+        }
+    } else {
+        for (result, family) in [(unix, "AF_UNIX"), (inet, "AF_INET")] {
+            match result {
+                Ok(fd) => unsafe {
+                    libc::close(fd);
+                },
+                Err(error) => {
+                    return Err(io::Error::other(format!(
+                        "candidate probe full-network target could not create an {family} socket: {error}"
+                    )));
+                }
+            }
+        }
+    }
+
+    spawn_candidate_probe_tree()?;
+    let name = CString::new("nub-probe-ready").expect("static probe name has no NUL");
+    if unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr(), 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    loop {
+        unsafe { libc::pause() };
+    }
+}
+
+fn require_filesystem_type(path: &Path, expected: libc::c_long, label: &str) -> io::Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| invalid_input("filesystem probe path contains NUL"))?;
+    let mut status = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(path.as_ptr(), status.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { status.assume_init() }.f_type != expected {
+        return Err(invalid_data(format!(
+            "candidate probe {label} has the wrong filesystem type"
+        )));
+    }
+    Ok(())
+}
+
+fn spawn_candidate_probe_tree() -> io::Result<()> {
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if child == 0 {
+        let grandchild = unsafe { libc::fork() };
+        if grandchild < 0 {
+            unsafe { libc::_exit(126) };
+        }
+        loop {
+            unsafe { libc::pause() };
+        }
+    }
+
+    let deadline = Instant::now() + DESCRIBE_TIMEOUT;
+    loop {
+        match fs::read_to_string(format!("/proc/{child}/task/{child}/children")) {
+            Ok(children) if children.split_ascii_whitespace().count() == 1 => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        ensure_before_deadline(deadline, "candidate probe descendants did not become ready")?;
+        thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -396,6 +575,9 @@ pub(crate) struct BootstrapSpec {
     // a nonzero status so the parent must reject an otherwise valid protocol.
     // Production and the sealed state-5/6/7 harness modes always leave it false.
     fail_outer_status_after_cleanup_for_harness: bool,
+    // Deterministically delay after accepting CompleteSession and starting its
+    // deadline. Sealed harness input; production always leaves it false.
+    hold_after_completion_request_for_harness: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,7 +587,6 @@ struct RuntimeObject {
 }
 
 impl BootstrapSpec {
-    #[allow(dead_code)] // consumed when the production launcher switches after the retained monitor is complete
     pub(crate) fn new(
         runtime: &RuntimeCapability,
         policy: &SandboxPolicy,
@@ -440,6 +621,45 @@ impl BootstrapSpec {
             hold_after_runtime_cleanup_for_harness: false,
             hold_after_target_exited_for_harness: false,
             fail_outer_status_after_cleanup_for_harness: false,
+            hold_after_completion_request_for_harness: false,
+        })
+    }
+
+    pub(crate) fn candidate_probe(
+        runtime: &RuntimeCapability,
+        network_filter: bool,
+    ) -> io::Result<Self> {
+        let image = runtime.materialize()?;
+        let (program, mut args) = target_probe_command(image, CANDIDATE_PROBE_SENTINEL);
+        args.push(OsString::from(if network_filter {
+            "restricted"
+        } else {
+            "full"
+        }));
+        let mut session = [0u8; 32];
+        let mut release = [0u8; 32];
+        getrandom::getrandom(&mut session)
+            .map_err(|error| io::Error::other(format!("generating probe session: {error}")))?;
+        getrandom::getrandom(&mut release)
+            .map_err(|error| io::Error::other(format!("generating probe release gate: {error}")))?;
+        Ok(Self {
+            session,
+            release,
+            executable: image.executable.identity,
+            build_marker: image.build_marker,
+            runtime_objects: runtime_objects(image)?,
+            program,
+            args,
+            cwd: PathBuf::from("/"),
+            env: BTreeMap::new(),
+            network_filter,
+            hold_before_initial_stop_for_harness: false,
+            hold_after_exec_for_harness: false,
+            hold_before_runtime_cleanup_for_harness: false,
+            hold_after_runtime_cleanup_for_harness: false,
+            hold_after_target_exited_for_harness: false,
+            fail_outer_status_after_cleanup_for_harness: false,
+            hold_after_completion_request_for_harness: false,
         })
     }
 
@@ -457,7 +677,8 @@ impl BootstrapSpec {
             | (u16::from(self.hold_before_runtime_cleanup_for_harness) << 3)
             | (u16::from(self.hold_after_runtime_cleanup_for_harness) << 4)
             | (u16::from(self.hold_after_target_exited_for_harness) << 5)
-            | (u16::from(self.fail_outer_status_after_cleanup_for_harness) << 6);
+            | (u16::from(self.fail_outer_status_after_cleanup_for_harness) << 6)
+            | (u16::from(self.hold_after_completion_request_for_harness) << 8);
         put_u16(&mut out, flags);
         out.extend_from_slice(&self.session);
         out.extend_from_slice(&self.release);
@@ -493,7 +714,7 @@ impl BootstrapSpec {
             return Err(invalid_data("unsupported sandbox bootstrap version"));
         }
         let flags = cursor.u16()?;
-        if flags & !0b111_1111 != 0 {
+        if flags & !0b1_0111_1111 != 0 {
             return Err(invalid_data("unknown sandbox bootstrap flags"));
         }
         let session = cursor.array::<32>()?;
@@ -544,6 +765,7 @@ impl BootstrapSpec {
             hold_after_runtime_cleanup_for_harness: flags & 16 != 0,
             hold_after_target_exited_for_harness: flags & 32 != 0,
             fail_outer_status_after_cleanup_for_harness: flags & 64 != 0,
+            hold_after_completion_request_for_harness: flags & 256 != 0,
         })
     }
 }
@@ -631,6 +853,751 @@ fn runtime_objects_from_parts(
         ));
     }
     Ok(objects)
+}
+
+/// Prepared, one-shot authority for starting the retained PID-1 monitor.
+/// Every child-side descriptor is relocated above the protocol's reserved range
+/// before this value is returned.
+pub(crate) struct RetainedMonitorLaunch {
+    spec: BootstrapSpec,
+    bootstrap: OwnedFd,
+    control_parent: Option<OwnedFd>,
+    control_child: Option<OwnedFd>,
+    release_reader: Option<File>,
+    release_writer: Option<File>,
+    signal_reader: Option<File>,
+    signal_writer: Option<File>,
+    info_reader: Option<File>,
+    info_writer: Option<File>,
+    bindings: Vec<File>,
+    runtime_objects: Vec<RuntimeObject>,
+    monitor_program: OsString,
+    monitor_args: Vec<OsString>,
+}
+
+impl RetainedMonitorLaunch {
+    pub(crate) fn new(runtime: &RuntimeCapability, spec: BootstrapSpec) -> io::Result<Self> {
+        let image = runtime.materialize()?;
+        if spec.executable != image.executable.identity || spec.build_marker != image.build_marker {
+            return Err(invalid_input(
+                "sandbox bootstrap does not match the retained runtime image",
+            ));
+        }
+        let runtime_objects = runtime_objects(image)?;
+        if spec.runtime_objects != runtime_objects {
+            return Err(invalid_input(
+                "sandbox bootstrap runtime manifest does not match its bindings",
+            ));
+        }
+        let bootstrap =
+            relocate_fd_at_least(sealed_memfd(&spec.encode()?)?, FIRST_UNRESERVED_MONITOR_FD)?;
+        let (control_parent, control_child) = seqpacket_pair()?;
+        set_passcred(control_parent.as_raw_fd())?;
+        let (release_reader, release_writer) = pipe_files(false)?;
+        let (signal_reader, signal_writer) = signal_relay_pipe_files()?;
+        let (info_reader, info_writer) = pipe_files(true)?;
+        let bindings = runtime_bindings(image)?
+            .into_iter()
+            .map(|file| duplicate_file_at_least(&file, FIRST_UNRESERVED_MONITOR_FD))
+            .collect::<io::Result<Vec<_>>>()?;
+        if bindings.len() != runtime_objects.len() {
+            return Err(invalid_data(
+                "sandbox runtime binding and manifest counts differ",
+            ));
+        }
+        let (monitor_program, monitor_args) = private_monitor_command(image);
+        Ok(Self {
+            spec,
+            bootstrap,
+            control_parent: Some(control_parent),
+            control_child: Some(relocate_fd_at_least(
+                control_child,
+                FIRST_UNRESERVED_MONITOR_FD,
+            )?),
+            release_reader: Some(relocate_file_at_least(
+                release_reader,
+                FIRST_UNRESERVED_MONITOR_FD,
+            )?),
+            release_writer: Some(release_writer),
+            signal_reader: Some(relocate_file_at_least(
+                signal_reader,
+                FIRST_UNRESERVED_MONITOR_FD,
+            )?),
+            signal_writer: Some(signal_writer),
+            info_reader: Some(info_reader),
+            info_writer: Some(relocate_file_at_least(
+                info_writer,
+                FIRST_UNRESERVED_MONITOR_FD,
+            )?),
+            bindings,
+            runtime_objects,
+            monitor_program,
+            monitor_args,
+        })
+    }
+
+    /// Relocate a caller-owned Bubblewrap setup file before its descriptor is
+    /// serialized into Bubblewrap arguments.
+    pub(crate) fn relocate_setup_file(file: File) -> io::Result<File> {
+        relocate_file_at_least(file, FIRST_UNRESERVED_MONITOR_FD)
+    }
+
+    /// Append the private runtime mount immediately after Bubblewrap's `/dev`
+    /// construction. Other filesystem grants may follow this method.
+    pub(crate) fn append_runtime_mount(&self, command: &mut Command) {
+        let root = Path::new(PRIVATE_RUNTIME_ROOT);
+        command
+            .arg("--dir")
+            .arg("/dev/.nub-sandbox")
+            .arg("--tmpfs")
+            .arg(PRIVATE_SUPPORT_ROOT)
+            .arg("--tmpfs")
+            .arg(root)
+            .arg("--dir")
+            .arg(root.join("lib"));
+        for (binding, object) in self.bindings.iter().zip(&self.runtime_objects) {
+            command
+                .arg("--ro-bind-fd")
+                .arg(binding.as_raw_fd().to_string())
+                .arg(&object.path);
+        }
+        command.arg("--remount-ro").arg(root);
+    }
+
+    /// Append final Bubblewrap options after all policy mounts are complete.
+    /// The command itself must stay outside `--args`: stock Bubblewrap parses
+    /// only options from an argument file and requires COMMAND in the outer argv.
+    pub(crate) fn append_monitor_options(&self, command: &mut Command) -> io::Result<()> {
+        let info = self
+            .info_writer
+            .as_ref()
+            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
+        command
+            .arg("--info-fd")
+            .arg(info.as_raw_fd().to_string())
+            // The retained monitor owns the namespace root and must not inherit
+            // an outer cwd that happens to remain reachable through the mount
+            // plan. Bubblewrap also derives its implementation-added PWD from
+            // this directory after --clearenv.
+            .arg("--chdir")
+            .arg("/")
+            .arg("--clearenv");
+        Ok(())
+    }
+
+    pub(crate) fn append_monitor_command(&self, command: &mut Command) {
+        command
+            .arg("--")
+            .arg(&self.monitor_program)
+            .args(&self.monitor_args)
+            .arg(MONITOR_SENTINEL);
+    }
+
+    /// Install the only child-side descriptor hook. The whole inherited range
+    /// is CLOEXEC by default; only Bubblewrap setup data and the four exact
+    /// monitor protocol destinations survive exec.
+    pub(crate) fn install_pre_exec(
+        &self,
+        command: &mut Command,
+        caller_setup_fds: &[RawFd],
+    ) -> io::Result<()> {
+        let control_child = self
+            .control_child
+            .as_ref()
+            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
+        let release_reader = self
+            .release_reader
+            .as_ref()
+            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
+        let signal_reader = self
+            .signal_reader
+            .as_ref()
+            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
+        let info_writer = self
+            .info_writer
+            .as_ref()
+            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
+        let remaps = vec![
+            (self.bootstrap.as_raw_fd(), BOOTSTRAP_FD),
+            (control_child.as_raw_fd(), CONTROL_FD),
+            (release_reader.as_raw_fd(), RELEASE_FD),
+            (signal_reader.as_raw_fd(), SIGNAL_RELAY_FD),
+        ];
+        let inherited = self
+            .bindings
+            .iter()
+            .map(AsRawFd::as_raw_fd)
+            .chain(std::iter::once(info_writer.as_raw_fd()))
+            .chain(caller_setup_fds.iter().copied())
+            .collect::<BTreeSet<_>>();
+        if inherited.iter().any(|fd| *fd < FIRST_UNRESERVED_MONITOR_FD) {
+            return Err(invalid_input(
+                "Bubblewrap setup descriptor overlaps the monitor protocol range",
+            ));
+        }
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                mark_inherited_fds_cloexec()?;
+                for &(source, destination) in &remaps {
+                    if source == destination {
+                        clear_cloexec(destination)?;
+                    } else if libc::dup2(source, destination) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                for &fd in &inherited {
+                    clear_cloexec(fd)?;
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn start(self, outer: Child) -> io::Result<(Child, RetainedMonitorSession)> {
+        self.start_until(outer, None)
+    }
+
+    pub(crate) fn run_candidate_probe(self, outer: Child, timeout: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let (mut outer, mut session) = self.start_until(outer, Some(deadline))?;
+        session.wait_probe_until(&mut outer, deadline)
+    }
+
+    fn start_until(
+        mut self,
+        mut outer: Child,
+        deadline: Option<Instant>,
+    ) -> io::Result<(Child, RetainedMonitorSession)> {
+        drop(self.control_child.take());
+        drop(self.release_reader.take());
+        drop(self.signal_reader.take());
+        drop(self.info_writer.take());
+        let result = (|| {
+            let mut info = self
+                .info_reader
+                .take()
+                .ok_or_else(|| invalid_input("sandbox monitor info channel is absent"))?;
+            let monitor_pid = match deadline {
+                Some(deadline) => read_bwrap_child_pid_until(&mut info, &mut outer, deadline)?,
+                None => read_bwrap_child_pid(&mut info, &mut outer)?,
+            };
+            let control_parent = self
+                .control_parent
+                .take()
+                .ok_or_else(|| invalid_input("sandbox monitor control channel is absent"))?;
+            set_control_timeouts(control_parent.as_raw_fd(), DESCRIBE_TIMEOUT)?;
+            let mut control = ControlChannel::new(
+                control_parent,
+                self.spec.session,
+                ExpectedPeer {
+                    pid: Some(monitor_pid),
+                    uid: unsafe { libc::getuid() },
+                },
+            )?;
+            let ready = receive_launch_frame(&mut control, deadline)?;
+            require_monitor_ready(&ready, self.spec.executable, self.spec.build_marker)?;
+            verify_monitor_host_state(monitor_pid, outer.id())?;
+            verify_production_monitor_namespaces(monitor_pid, self.spec.network_filter)?;
+
+            let mut release = self
+                .release_writer
+                .take()
+                .ok_or_else(|| invalid_input("sandbox monitor release capability is absent"))?;
+            if let Some(deadline) = deadline {
+                ensure_before_deadline(deadline, "candidate probe release deadline elapsed")?;
+            }
+            release.write_all(&self.spec.release)?;
+            drop(release);
+            let stopped = receive_launch_frame(&mut control, deadline)?;
+            if stopped.kind != FrameKind::TargetStopped {
+                return Err(unexpected_monitor_frame("TargetStopped", &stopped));
+            }
+            let attestation = TargetStoppedAttestation::decode(&stopped.payload)?;
+            let target_pid = read_unique_monitor_child(monitor_pid)?;
+            verify_target_host_state(
+                target_pid,
+                monitor_pid,
+                attestation,
+                ExpectedTargetState::Stopped,
+                self.spec.network_filter,
+            )?;
+            control.send_with_deadline(FrameKind::StartTarget, attestation.encode(), deadline)?;
+            let accepted = receive_launch_frame(&mut control, deadline)?;
+            match accepted.kind {
+                FrameKind::ExecAccepted if accepted.payload.is_empty() => {}
+                FrameKind::ExecFailed => {
+                    let failure = TargetExecFailure::decode(&accepted.payload)?;
+                    return Err(io::Error::other(format!(
+                        "sandbox target exec failed: {}",
+                        io::Error::from_raw_os_error(failure.errno)
+                    )));
+                }
+                _ => return Err(unexpected_monitor_frame("ExecAccepted", &accepted)),
+            }
+            set_control_timeouts(control.fd.as_raw_fd(), Duration::ZERO)?;
+            let signal = SignalRelay::new(
+                self.signal_writer
+                    .take()
+                    .ok_or_else(|| invalid_input("sandbox signal relay is absent"))?,
+            );
+            Ok(RetainedMonitorSession {
+                control,
+                signal,
+                target_pid,
+                authenticated_cleanup: false,
+                outer_reaped: false,
+            })
+        })();
+        match result {
+            Ok(session) => Ok((outer, session)),
+            Err(error) => {
+                // Close every surviving launch capability before terminating the
+                // exact outer process. This makes EOF part of the fail-closed path
+                // instead of relying on the launch value's eventual field drops.
+                drop(self.control_parent.take());
+                drop(self.control_child.take());
+                drop(self.release_reader.take());
+                drop(self.release_writer.take());
+                drop(self.signal_reader.take());
+                drop(self.signal_writer.take());
+                drop(self.info_reader.take());
+                drop(self.info_writer.take());
+                match fail_closed_outer(&mut outer) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(io::Error::new(
+                        error.kind(),
+                        format!("{error}; Bubblewrap cleanup also failed: {cleanup}"),
+                    )),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SignalRelay {
+    state: Arc<Mutex<SignalRelayState>>,
+}
+
+struct SignalRelayState {
+    writer: Option<File>,
+    sequence: u64,
+    poisoned: Option<String>,
+    disarmed: bool,
+}
+
+pub(crate) type SignalRelayCallback = super::PreparedSignalCallback;
+
+impl SignalRelay {
+    fn new(writer: File) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SignalRelayState {
+                writer: Some(writer),
+                sequence: 0,
+                poisoned: None,
+                disarmed: false,
+            })),
+        }
+    }
+
+    pub(crate) fn callback(&self) -> SignalRelayCallback {
+        let relay = self.clone();
+        Arc::new(move |signal| relay.forward(signal))
+    }
+
+    pub(crate) fn forward(&self, signal: libc::c_int) -> io::Result<()> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.writer.take();
+                let message = "sandbox signal relay failed permanently: relay lock poisoned";
+                state.poisoned = Some(message.to_string());
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, message));
+            }
+        };
+        if state.disarmed {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "sandbox signal relay is retired",
+            ));
+        }
+        if let Some(error) = &state.poisoned {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, error.clone()));
+        }
+        let next = match state.sequence.checked_add(1) {
+            Some(next) => next,
+            None => return poison_signal_relay(&mut state, "signal sequence overflow"),
+        };
+        let packet = match (SignalRelayRecord {
+            sequence: state.sequence,
+            signal,
+        })
+        .encode()
+        {
+            Ok(packet) => packet,
+            Err(error) => return poison_signal_relay(&mut state, &error.to_string()),
+        };
+        let Some(writer) = state.writer.as_ref() else {
+            return poison_signal_relay(&mut state, "signal writer is closed");
+        };
+        let written =
+            unsafe { libc::write(writer.as_raw_fd(), packet.as_ptr().cast(), packet.len()) };
+        if written != packet.len() as isize {
+            let detail = if written < 0 {
+                io::Error::last_os_error().to_string()
+            } else {
+                "partial packet write".to_string()
+            };
+            return poison_signal_relay(&mut state, &detail);
+        }
+        state.sequence = next;
+        Ok(())
+    }
+
+    fn disarm(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.disarmed = true;
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.disarmed = true;
+        state.writer.take();
+    }
+}
+
+fn poison_signal_relay(state: &mut SignalRelayState, detail: &str) -> io::Result<()> {
+    let message = format!("sandbox signal relay failed permanently: {detail}");
+    state.writer.take();
+    state.poisoned = Some(message.clone());
+    Err(io::Error::new(io::ErrorKind::BrokenPipe, message))
+}
+
+pub(crate) struct RetainedMonitorSession {
+    control: ControlChannel,
+    signal: SignalRelay,
+    target_pid: libc::pid_t,
+    authenticated_cleanup: bool,
+    outer_reaped: bool,
+}
+
+impl RetainedMonitorSession {
+    pub(crate) fn target_pid(&self) -> libc::pid_t {
+        self.target_pid
+    }
+
+    pub(crate) fn signal_callback(&self) -> SignalRelayCallback {
+        self.signal.callback()
+    }
+
+    pub(crate) fn cleanup_complete(&self) -> bool {
+        self.outer_reaped
+    }
+
+    pub(crate) fn wait(&mut self, outer: &mut Child) -> io::Result<ExitStatus> {
+        let outcome = (|| {
+            let attestation = self.receive_target_exited(outer, None)?;
+            self.signal.disarm();
+            let deadline = Instant::now() + DESCRIBE_TIMEOUT;
+            let result = self.complete(outer, attestation, deadline)?;
+            Ok(result.status)
+        })();
+        self.finish_or_fail_closed(outer, outcome)
+    }
+
+    fn wait_probe_until(&mut self, outer: &mut Child, deadline: Instant) -> io::Result<()> {
+        let outcome = (|| {
+            self.wait_for_candidate_probe_ready(outer, deadline)?;
+            self.signal.forward(libc::SIGTERM)?;
+            let attestation = self.receive_target_exited(outer, Some(deadline))?;
+            self.signal.disarm();
+            ExpectedTargetExit::Signaled(libc::SIGTERM).verify(attestation.report.raw_status)?;
+            if attestation.report.descendants_reaped != 2 {
+                return Err(invalid_data(format!(
+                    "candidate probe reported {} descendant reaps, expected 2",
+                    attestation.report.descendants_reaped
+                )));
+            }
+            let completion_deadline = deadline.min(Instant::now() + DESCRIBE_TIMEOUT);
+            self.complete(outer, attestation, completion_deadline)?;
+            Ok(())
+        })();
+        self.finish_or_fail_closed(outer, outcome)
+    }
+
+    pub(crate) fn fail_closed(&mut self, outer: &mut Child) -> io::Result<()> {
+        self.signal.close();
+        let _ = unsafe { libc::shutdown(self.control.fd.as_raw_fd(), libc::SHUT_RDWR) };
+        let result = fail_closed_outer(outer);
+        if result.is_ok() {
+            self.outer_reaped = true;
+        }
+        result
+    }
+
+    fn finish_or_fail_closed<T>(
+        &mut self,
+        outer: &mut Child,
+        result: io::Result<T>,
+    ) -> io::Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) if self.outer_reaped => Err(error),
+            Err(error) => match self.fail_closed(outer) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(io::Error::other(format!(
+                    "{error}; retained-monitor fail-closed cleanup failed: {cleanup}"
+                ))),
+            },
+        }
+    }
+
+    fn receive_target_exited(
+        &mut self,
+        outer: &mut Child,
+        deadline: Option<Instant>,
+    ) -> io::Result<CompletionAttestation> {
+        loop {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "candidate probe session deadline elapsed",
+                ));
+            }
+            if control_packet_available(self.control.fd.as_raw_fd())? {
+                let frame = match deadline {
+                    Some(deadline) => self.control.receive_with_deadline(Some(deadline))?,
+                    None => self.control.receive()?,
+                };
+                if frame.kind != FrameKind::TargetExited {
+                    return Err(unexpected_monitor_frame("TargetExited", &frame));
+                }
+                return CompletionAttestation::decode(&frame.payload);
+            }
+            if let Some(status) = outer.try_wait()? {
+                return Err(invalid_data(format!(
+                    "Bubblewrap exited before authenticated target completion: {status}"
+                )));
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_candidate_probe_ready(
+        &mut self,
+        outer: &mut Child,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        loop {
+            ensure_before_deadline(deadline, "candidate probe readiness deadline elapsed")?;
+            if control_packet_available(self.control.fd.as_raw_fd())? {
+                let frame = self.control.receive_with_deadline(Some(deadline))?;
+                return Err(unexpected_monitor_frame("probe readiness", &frame));
+            }
+            if let Some(status) = outer.try_wait()? {
+                return Err(invalid_data(format!(
+                    "Bubblewrap exited before candidate probe readiness: {status}"
+                )));
+            }
+            match fs::read_to_string(format!("/proc/{}/comm", self.target_pid)) {
+                Ok(name) if name.trim_end() == "nub-probe-ready" => return Ok(()),
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn complete(
+        &mut self,
+        outer: &mut Child,
+        original: CompletionAttestation,
+        deadline: Instant,
+    ) -> io::Result<ParentCompletionResult> {
+        self.control.send_with_deadline(
+            FrameKind::CompleteSession,
+            original.encode()?,
+            Some(deadline),
+        )?;
+        shutdown_control_write(&mut self.control)?;
+        let cleanup = receive_control_until(&mut self.control, deadline)?;
+        if cleanup.kind != FrameKind::CleanupComplete {
+            return Err(unexpected_monitor_frame("CleanupComplete", &cleanup));
+        }
+        original.require_exact_echo(&cleanup.payload)?;
+        self.authenticated_cleanup = true;
+        match receive_control_until(&mut self.control, deadline) {
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+            Err(error) => return Err(error),
+            Ok(frame) => {
+                return Err(invalid_data(format!(
+                    "received unexpected post-completion {:?} frame",
+                    frame.kind
+                )));
+            }
+        }
+        let outer_status = wait_for_child_status_until(outer, deadline)?;
+        self.outer_reaped = true;
+        self.signal.close();
+        debug_assert!(self.authenticated_cleanup);
+        if outer_status.code() != Some(0) {
+            return Err(invalid_data(format!(
+                "retained-monitor outer process exited with {outer_status}, expected code 0"
+            )));
+        }
+        ensure_before_deadline(deadline, "retained-monitor completion deadline elapsed")?;
+        Ok(ParentCompletionResult {
+            status: ExitStatus::from_raw(original.report.raw_status),
+            report: original.report,
+        })
+    }
+}
+
+fn receive_launch_frame(
+    control: &mut ControlChannel,
+    deadline: Option<Instant>,
+) -> io::Result<Frame> {
+    match deadline {
+        Some(deadline) => receive_control_until(control, deadline),
+        None => control.receive(),
+    }
+}
+
+impl Drop for RetainedMonitorSession {
+    fn drop(&mut self) {
+        if !self.outer_reaped {
+            self.signal.close();
+            let _ = unsafe { libc::shutdown(self.control.fd.as_raw_fd(), libc::SHUT_RDWR) };
+        }
+    }
+}
+
+fn fail_closed_outer(outer: &mut Child) -> io::Result<()> {
+    // Closing the authenticated control endpoint asks the PID-1 monitor to kill
+    // and reap its namespace before Bubblewrap exits. Give that exact child a
+    // short bounded chance to finish; killing Bubblewrap immediately can orphan
+    // the namespace target before PID 1 observes the control EOF.
+    let graceful_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match outer.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() < graceful_deadline => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Ok(None) => break,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+    match outer.kill() {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == io::ErrorKind::InvalidInput
+                || error.raw_os_error() == Some(libc::ESRCH) => {}
+        Err(error) => return Err(error),
+    }
+    loop {
+        match outer.wait() {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn require_monitor_ready(
+    ready: &Frame,
+    executable: FileIdentity,
+    build_marker: [u8; 32],
+) -> io::Result<()> {
+    if ready.kind != FrameKind::MonitorReady || ready.payload.len() != 56 {
+        return Err(unexpected_monitor_frame("MonitorReady", ready));
+    }
+    let mut cursor = Cursor::new(&ready.payload);
+    if cursor.identity()? != executable || cursor.array::<32>()? != build_marker {
+        return Err(invalid_data("monitor ready attestation identity mismatch"));
+    }
+    cursor.finish()
+}
+
+fn unexpected_monitor_frame(expected: &str, frame: &Frame) -> io::Error {
+    if frame.kind == FrameKind::Fatal {
+        invalid_data(format!(
+            "sandbox monitor reported fatal failure while awaiting {expected}: {}",
+            String::from_utf8_lossy(&frame.payload)
+        ))
+    } else {
+        invalid_data(format!(
+            "expected sandbox monitor {expected}, received {:?}",
+            frame.kind
+        ))
+    }
+}
+
+fn verify_production_monitor_namespaces(
+    monitor_pid: libc::pid_t,
+    require_private_network: bool,
+) -> io::Result<()> {
+    for namespace in ["user", "mnt", "pid", "ipc", "uts"] {
+        let parent = fs::read_link(format!("/proc/self/ns/{namespace}"))?;
+        let monitor = fs::read_link(format!("/proc/{monitor_pid}/ns/{namespace}"))?;
+        if monitor == parent {
+            return Err(invalid_data(format!(
+                "retained monitor did not enter a distinct {namespace} namespace"
+            )));
+        }
+    }
+    let parent_network = fs::read_link("/proc/self/ns/net")?;
+    let monitor_network = fs::read_link(format!("/proc/{monitor_pid}/ns/net"))?;
+    if require_private_network {
+        if monitor_network == parent_network {
+            return Err(invalid_data(
+                "retained monitor did not enter the required private network namespace",
+            ));
+        }
+    } else if monitor_network != parent_network {
+        return Err(invalid_data(
+            "retained monitor unexpectedly changed the full-network namespace",
+        ));
+    }
+    Ok(())
+}
+
+fn private_monitor_command(image: &RuntimeImage) -> (OsString, Vec<OsString>) {
+    let root = Path::new(PRIVATE_RUNTIME_ROOT);
+    match &image.kind {
+        RuntimeKind::Static => (root.join("nub-monitor").into_os_string(), Vec::new()),
+        RuntimeKind::Dynamic {
+            family,
+            inhibit_rpath,
+            ..
+        } => {
+            let mut args = Vec::new();
+            if *family == LoaderFamily::Glibc {
+                args.push(OsString::from("--inhibit-cache"));
+            }
+            args.push(OsString::from("--library-path"));
+            args.push(root.join("lib").into_os_string());
+            if *family == LoaderFamily::Glibc {
+                args.push(OsString::from("--inhibit-rpath"));
+                args.push(inhibit_rpath.clone());
+            }
+            args.push(root.join("nub-monitor").into_os_string());
+            (root.join("ld.so").into_os_string(), args)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1582,13 +2549,15 @@ fn resolve_needed_closure(
     }
     let mut objects = Vec::with_capacity(selected.len());
     let mut inhibit = BTreeSet::<OsString>::new();
-    inhibit.insert(OsString::from("/run/nub-sandbox/runtime/nub-monitor"));
+    let private_root = Path::new(PRIVATE_RUNTIME_ROOT);
+    inhibit.insert(private_root.join("nub-monitor").into_os_string());
     inhibit.insert(OsString::from("nub-monitor"));
     for (object, aliases) in selected.into_values() {
         for private_name in aliases {
             inhibit.insert(private_name.clone());
             inhibit.insert(
-                Path::new("/run/nub-sandbox/runtime/lib")
+                private_root
+                    .join("lib")
                     .join(&private_name)
                     .into_os_string(),
             );
@@ -2474,6 +3443,7 @@ enum TargetSetupStage {
     StartGate = 7,
     Dumpable = 8,
     Execve = 9,
+    ParentDeath = 10,
 }
 
 impl TargetSetupStage {
@@ -2488,6 +3458,7 @@ impl TargetSetupStage {
             Self::StartGate => "private-start-gate",
             Self::Dumpable => "target-dumpability",
             Self::Execve => "execve",
+            Self::ParentDeath => "parent-death",
         }
     }
 
@@ -2502,6 +3473,7 @@ impl TargetSetupStage {
             7 => Some(Self::StartGate),
             8 => Some(Self::Dumpable),
             9 => Some(Self::Execve),
+            10 => Some(Self::ParentDeath),
             _ => None,
         }
     }
@@ -2798,16 +3770,10 @@ impl StoppedTarget {
 
             if error_eof {
                 if record_len == 0 {
-                    // CLOEXEC EOF proves that execve closed the writer, but it
-                    // does not by itself prove that the new image is still live.
-                    // Recheck both concurrent authorities after observing EOF so
-                    // a terminal/stopped target or queued control frame cannot be
-                    // reported as an accepted transition.
-                    if terminal_status.is_some() || self.poll_target_wait()?.is_some() {
-                        return Err(invalid_data(
-                            "target terminated without an exec-error record",
-                        ));
-                    }
+                    // The conventional exec-error pipe: successful exec closes the
+                    // CLOEXEC writer. That zero-byte EOF remains authoritative when
+                    // a fast target has already exited; poll_target_wait retained its
+                    // status for the authenticated running-state transition.
                     ensure_before_deadline(deadline, "timed out awaiting target exec acceptance")?;
                     require_quiet_exec_control(control, deadline)?;
                     return Ok(TargetExecOutcome::Accepted);
@@ -2950,6 +3916,7 @@ struct RunningHarnessBehavior {
     hold_after_cleanup: bool,
     hold_after_target_exited: bool,
     fail_outer_status_after_cleanup: bool,
+    hold_after_completion_request: bool,
 }
 
 fn run_running_state(
@@ -3171,6 +4138,10 @@ fn finish_running_target_until(
     })?;
     let attestation = CompletionAttestation { report, challenge };
     let payload = attestation.encode()?;
+    // State 7 may legitimately outlive the launch handshake timeout when the
+    // caller delays `wait()`. Parent death is still observed by poll/EOF; the
+    // bounded deadline is installed only after CompleteSession arrives.
+    set_control_timeouts(control.fd.as_raw_fd(), Duration::ZERO)?;
     control.send_with_deadline(FrameKind::TargetExited, payload, Some(deadline))?;
     // As above, successful SOCK_SEQPACKET publication commits the transition.
     *state = MonitorState::TargetExitedAwaitingCompletion;
@@ -3178,7 +4149,9 @@ fn finish_running_target_until(
         control,
         state,
         attestation,
+        &mut inputs.signal_sequence,
         harness.fail_outer_status_after_cleanup,
+        harness.hold_after_completion_request,
     )
 }
 
@@ -3192,18 +4165,25 @@ fn run_session_completion_state(
     control: &mut ControlChannel,
     state: &mut MonitorState,
     attestation: CompletionAttestation,
+    signal_sequence: &mut u64,
     fail_outer_status_after_cleanup_for_harness: bool,
+    hold_after_completion_request_for_harness: bool,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + DESCRIBE_TIMEOUT;
+    let mut deadline = None;
     let mut phase = CompletionInputPhase::AwaitingRequest;
+    let mut signal_eof = false;
     loop {
-        ensure_before_deadline(deadline, "sandbox completion deadline elapsed")?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let timeout = remaining
-            .as_nanos()
-            .saturating_add(999_999)
-            .div_euclid(1_000_000)
-            .clamp(1, libc::c_int::MAX as u128) as libc::c_int;
+        if let Some(deadline) = deadline {
+            ensure_before_deadline(deadline, "sandbox completion deadline elapsed")?;
+        }
+        let timeout = deadline.map_or(-1, |deadline| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            remaining
+                .as_nanos()
+                .saturating_add(999_999)
+                .div_euclid(1_000_000)
+                .clamp(1, libc::c_int::MAX as u128) as libc::c_int
+        });
         let mut pollfds = [
             libc::pollfd {
                 fd: control.fd.as_raw_fd(),
@@ -3211,7 +4191,7 @@ fn run_session_completion_state(
                 revents: 0,
             },
             libc::pollfd {
-                fd: SIGNAL_RELAY_FD,
+                fd: if signal_eof { -1 } else { SIGNAL_RELAY_FD },
                 events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
                 revents: 0,
             },
@@ -3224,17 +4204,18 @@ fn run_session_completion_state(
             }
             return Err(error);
         }
-        ensure_before_deadline(deadline, "sandbox completion deadline elapsed")?;
-        if pollfds[1].revents != 0 {
-            return Err(invalid_data(
-                "sandbox completion received unexpected signal relay input",
-            ));
+        if let Some(deadline) = deadline {
+            ensure_before_deadline(deadline, "sandbox completion deadline elapsed")?;
+        }
+        if pollfds[1].revents != 0 && !signal_eof {
+            let signal_deadline = deadline.unwrap_or_else(|| Instant::now() + DESCRIBE_TIMEOUT);
+            drain_completion_signal_records(signal_sequence, &mut signal_eof, signal_deadline)?;
         }
         if pollfds[0].revents == 0 {
             continue;
         }
 
-        match control.receive_with_deadline(Some(deadline)) {
+        match control.receive_with_deadline(deadline) {
             Ok(frame) => match phase {
                 CompletionInputPhase::AwaitingRequest => {
                     if frame.kind != FrameKind::CompleteSession {
@@ -3245,6 +4226,10 @@ fn run_session_completion_state(
                     }
                     attestation.require_exact_echo(&frame.payload)?;
                     phase = CompletionInputPhase::AwaitingWriteEof;
+                    deadline = Some(Instant::now() + DESCRIBE_TIMEOUT);
+                    if hold_after_completion_request_for_harness {
+                        thread::sleep(DESCRIBE_TIMEOUT + Duration::from_millis(250));
+                    }
                 }
                 CompletionInputPhase::AwaitingWriteEof => {
                     return Err(invalid_data(format!(
@@ -3273,11 +4258,11 @@ fn run_session_completion_state(
 
     // There is no cross-descriptor atomic primitive. Input already observable
     // here wins; successful CleanupComplete publication below is terminal.
-    if signal_relay_packet_available(SIGNAL_RELAY_FD)? {
-        return Err(invalid_data(
-            "sandbox completion received unexpected signal relay input",
-        ));
+    if !signal_eof && signal_relay_packet_available(SIGNAL_RELAY_FD)? {
+        let deadline = deadline.expect("completion request established its deadline");
+        drain_completion_signal_records(signal_sequence, &mut signal_eof, deadline)?;
     }
+    let deadline = deadline.expect("completion request established its deadline");
     ensure_before_deadline(deadline, "sandbox completion deadline elapsed")?;
     let payload = attestation.encode()?;
     if *state != MonitorState::TargetExitedAwaitingCompletion {
@@ -3294,6 +4279,38 @@ fn run_session_completion_state(
         unsafe { libc::_exit(23) }
     }
     Ok(())
+}
+
+/// A signal callback can already hold its serialized writer lock when the
+/// monitor publishes TargetExited. The parent disarms the relay before
+/// authorizing completion, so accept only the remaining valid sequence and
+/// deliberately ignore those now-obsolete signals.
+fn drain_completion_signal_records(
+    expected_sequence: &mut u64,
+    eof: &mut bool,
+    deadline: Instant,
+) -> io::Result<()> {
+    for _ in 0..MAX_RUNNING_EVENTS_PER_TURN {
+        match receive_signal_relay_record(SIGNAL_RELAY_FD, *expected_sequence, deadline) {
+            Ok(Some(_)) => {
+                *expected_sequence = expected_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_data("sandbox signal relay sequence overflow"))?;
+            }
+            Ok(None) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                *eof = true;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+        if !signal_relay_packet_available(SIGNAL_RELAY_FD)? {
+            return Ok(());
+        }
+    }
+    Err(invalid_data(
+        "sandbox completion signal relay budget was exceeded",
+    ))
 }
 
 fn hold_state_7_boundary(control: &mut ControlChannel) -> io::Result<()> {
@@ -3428,6 +4445,8 @@ fn run_target_stopped_state(
                             hold_after_target_exited: spec.hold_after_target_exited_for_harness,
                             fail_outer_status_after_cleanup: spec
                                 .fail_outer_status_after_cleanup_for_harness,
+                            hold_after_completion_request: spec
+                                .hold_after_completion_request_for_harness,
                         },
                     )
                 }
@@ -3526,6 +4545,7 @@ fn verify_stopped_target(
                 .next_back()
                 .is_some_and(|value| value == pid_text.as_str())
         })
+        || field("TracerPid:") != Some("0")
         || !valid_no_new_privs_status(field("NoNewPrivs:"))
     {
         return Err(invalid_data("stopped target namespace identity is invalid"));
@@ -3703,6 +4723,16 @@ fn target_child_main(
             TargetSetupStage::NoNewPrivileges,
             child_errno(),
         );
+    }
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+        target_child_fail(
+            error_writer_fd,
+            TargetSetupStage::ParentDeath,
+            child_errno(),
+        );
+    }
+    if unsafe { libc::getppid() } != 1 {
+        target_child_fail(error_writer_fd, TargetSetupStage::ParentDeath, libc::ECHILD);
     }
     if let Some(program) = network_filter {
         if let Err(error) = install_target_seccomp(program) {
@@ -4038,15 +5068,72 @@ fn normalize_signal_dispositions() -> io::Result<()> {
 }
 
 fn verify_zero_capabilities() -> io::Result<()> {
-    let status = fs::read_to_string("/proc/self/status")?;
-    let field = |name: &str| {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(name).map(str::trim))
+    #[repr(C)]
+    struct CapabilityHeader {
+        version: u32,
+        pid: libc::c_int,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapabilityData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+    let mut header = CapabilityHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
     };
-    for capability in ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"] {
-        if field(capability) != Some("0000000000000000") {
-            return Err(invalid_data("sandbox monitor retained Linux capabilities"));
+    let mut data = [CapabilityData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    if unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if data
+        .iter()
+        .any(|word| word.effective != 0 || word.permitted != 0 || word.inheritable != 0)
+    {
+        return Err(invalid_data("sandbox monitor retained Linux capabilities"));
+    }
+    for capability in 0..64 {
+        let bounded = unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) };
+        if bounded < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                break;
+            }
+            return Err(error);
+        }
+        if bounded != 0 {
+            return Err(invalid_data(
+                "sandbox monitor retained a bounding-set capability",
+            ));
+        }
+        let ambient = unsafe {
+            libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_IS_SET,
+                capability,
+                0,
+                0,
+            )
+        };
+        if ambient < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                continue;
+            }
+            return Err(error);
+        }
+        if ambient != 0 {
+            return Err(invalid_data(
+                "sandbox monitor retained an ambient capability",
+            ));
         }
     }
     Ok(())
@@ -4497,14 +5584,13 @@ pub fn exercise_monitor_states_1_to_5(
         State5HarnessCase::SignalRace,
         State5HarnessCase::StopRace,
     ] {
-        exercise_monitor_harness_case(runtime, bwrap, case, None).map_err(|error| {
+        exercise_monitor_harness_case(runtime, bwrap, case).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("state-5 harness case {case:?}: {error}"),
             )
         })?;
     }
-    exercise_monitor_outer_parent_death(runtime, bwrap)?;
     Ok(())
 }
 
@@ -4538,17 +5624,16 @@ pub fn exercise_monitor_state_6(
         State5HarnessCase::RuntimeCleanupFaultPrecedence,
         State5HarnessCase::RuntimeState7SignalInput,
         State5HarnessCase::RuntimeHeldDeadline,
-        State5HarnessCase::RuntimeNoPidfd,
         State5HarnessCase::RuntimeHighDescriptorPressure,
     ] {
-        exercise_monitor_harness_case(runtime, bwrap, case, None).map_err(|error| {
+        exercise_monitor_harness_case(runtime, bwrap, case).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("state-6 harness case {case:?}: {error}"),
             )
         })?;
     }
-    exercise_monitor_outer_parent_death_state_6(runtime, bwrap)
+    Ok(())
 }
 
 /// Harness-only real-kernel exercise for the one-shot retained-monitor state-7
@@ -4571,19 +5656,19 @@ pub fn exercise_monitor_state_7(
         State5HarnessCase::CompletionReplay,
         State5HarnessCase::CompletionEofBeforeRequest,
         State5HarnessCase::CompletionRelayInput,
-        State5HarnessCase::CompletionDeadline,
+        State5HarnessCase::CompletionRequestMayWait,
         State5HarnessCase::CompletionDeadlineAfterRequest,
         State5HarnessCase::CompletionSendFailure,
         State5HarnessCase::CompletionEarlyRequest,
     ] {
-        exercise_monitor_harness_case(runtime, bwrap, case, None).map_err(|error| {
+        exercise_monitor_harness_case(runtime, bwrap, case).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("state-7 harness case {case:?}: {error}"),
             )
         })?;
     }
-    exercise_monitor_state_7_parent_death(runtime, bwrap)
+    Ok(())
 }
 
 /// Harness-only proof for the trusted parent side of the state-7 completion
@@ -4602,7 +5687,7 @@ pub fn exercise_monitor_state_8(
         State5HarnessCase::SessionCancellation,
         State5HarnessCase::SessionOuterStatusMismatch,
     ] {
-        exercise_monitor_harness_case(runtime, bwrap, case, None).map_err(|error| {
+        exercise_monitor_harness_case(runtime, bwrap, case).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("state-8 harness case {case:?}: {error}"),
@@ -4610,92 +5695,7 @@ pub fn exercise_monitor_state_8(
         })?;
     }
     exercise_state_8_protocol_adversaries()?;
-    // The abrupt-parent windows exercise the same descriptor capability and
-    // PDEATHSIG boundary State 8 relies on; keep their sealed State-7 driver.
-    exercise_monitor_state_7_parent_death(runtime, bwrap)
-}
-
-/// Harness-only focused proof for both state-7 ancestor-death windows.
-#[doc(hidden)]
-pub fn exercise_monitor_state_7_parent_death(
-    runtime: &RuntimeCapability,
-    bwrap: impl AsRef<Path>,
-) -> io::Result<()> {
-    let bwrap = bwrap.as_ref();
-    exercise_monitor_outer_parent_death_state_7(
-        runtime,
-        bwrap,
-        "exercise-outer-parent-death-state-7-before-child",
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("state-7 parent death before completion request: {error}"),
-        )
-    })?;
-    exercise_monitor_outer_parent_death_state_7(
-        runtime,
-        bwrap,
-        "exercise-outer-parent-death-state-7-after-child",
-    )
-    .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("state-7 parent death after completion request: {error}"),
-        )
-    })
-}
-
-/// Harness child used to prove that Bubblewrap's outer-parent death contract
-/// tears down a live accepted target and its detached descendants. On success
-/// this process exits abruptly without running Rust destructors.
-#[doc(hidden)]
-pub fn exercise_monitor_outer_parent_death_child(
-    runtime: &RuntimeCapability,
-    bwrap: impl AsRef<Path>,
-    report_path: impl AsRef<Path>,
-) -> io::Result<()> {
-    exercise_monitor_harness_case(
-        runtime,
-        bwrap.as_ref(),
-        State5HarnessCase::OuterParentDeath,
-        Some(report_path.as_ref()),
-    )
-}
-
-/// Harness child for the state-6 outer-parent-death proof.
-#[doc(hidden)]
-pub fn exercise_monitor_outer_parent_death_state_6_child(
-    runtime: &RuntimeCapability,
-    bwrap: impl AsRef<Path>,
-    report_path: impl AsRef<Path>,
-) -> io::Result<()> {
-    exercise_monitor_harness_case(
-        runtime,
-        bwrap.as_ref(),
-        State5HarnessCase::RuntimeOuterParentDeath,
-        Some(report_path.as_ref()),
-    )
-}
-
-/// Harness children for the two state-7 ancestor-death proof windows.
-#[doc(hidden)]
-pub fn exercise_monitor_outer_parent_death_state_7_child(
-    runtime: &RuntimeCapability,
-    bwrap: impl AsRef<Path>,
-    report_path: impl AsRef<Path>,
-    after_request: bool,
-) -> io::Result<()> {
-    exercise_monitor_harness_case(
-        runtime,
-        bwrap.as_ref(),
-        if after_request {
-            State5HarnessCase::CompletionOuterParentDeathAfterRequest
-        } else {
-            State5HarnessCase::CompletionOuterParentDeathBeforeRequest
-        },
-        Some(report_path.as_ref()),
-    )
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4725,7 +5725,6 @@ enum State5HarnessCase {
     ExitRace,
     SignalRace,
     StopRace,
-    OuterParentDeath,
     RuntimeLiteralExit143,
     RuntimeDefaultTerm,
     RuntimeCountInt,
@@ -4747,9 +5746,7 @@ enum State5HarnessCase {
     RuntimeCleanupFaultPrecedence,
     RuntimeState7SignalInput,
     RuntimeHeldDeadline,
-    RuntimeNoPidfd,
     RuntimeHighDescriptorPressure,
-    RuntimeOuterParentDeath,
     CompletionLiteralExit143,
     CompletionDefaultTerm,
     CompletionDescendants,
@@ -4760,12 +5757,10 @@ enum State5HarnessCase {
     CompletionReplay,
     CompletionEofBeforeRequest,
     CompletionRelayInput,
-    CompletionDeadline,
+    CompletionRequestMayWait,
     CompletionDeadlineAfterRequest,
     CompletionSendFailure,
     CompletionEarlyRequest,
-    CompletionOuterParentDeathBeforeRequest,
-    CompletionOuterParentDeathAfterRequest,
     SessionLiteralExit143,
     SessionDefaultTerm,
     SessionDescendants,
@@ -4785,10 +5780,8 @@ impl State5HarnessCase {
 
     fn target_probe_verb(self) -> &'static str {
         match self {
-            Self::ExecAcceptedDescendants | Self::OuterParentDeath => "target-exec-descendants",
-            Self::RuntimeDescendants
-            | Self::RuntimeOuterParentDeath
-            | Self::CompletionDescendants => "target-exec-descendants",
+            Self::ExecAcceptedDescendants => "target-exec-descendants",
+            Self::RuntimeDescendants | Self::CompletionDescendants => "target-exec-descendants",
             Self::RuntimeLiteralExit143
             | Self::RuntimeExitTerminateRace
             | Self::RuntimeTerminalFaultPrecedence
@@ -4800,12 +5793,10 @@ impl State5HarnessCase {
             | Self::CompletionReplay
             | Self::CompletionEofBeforeRequest
             | Self::CompletionRelayInput
-            | Self::CompletionDeadline
+            | Self::CompletionRequestMayWait
             | Self::CompletionDeadlineAfterRequest
             | Self::CompletionSendFailure
             | Self::CompletionEarlyRequest
-            | Self::CompletionOuterParentDeathBeforeRequest
-            | Self::CompletionOuterParentDeathAfterRequest
             | Self::SessionLiteralExit143
             | Self::SessionCancellation
             | Self::SessionOuterStatusMismatch => "target-runtime-exit-143",
@@ -4844,9 +5835,7 @@ impl State5HarnessCase {
                 | Self::RuntimeCleanupFaultPrecedence
                 | Self::RuntimeState7SignalInput
                 | Self::RuntimeHeldDeadline
-                | Self::RuntimeNoPidfd
                 | Self::RuntimeHighDescriptorPressure
-                | Self::RuntimeOuterParentDeath
         )
     }
 
@@ -4863,12 +5852,10 @@ impl State5HarnessCase {
                 | Self::CompletionReplay
                 | Self::CompletionEofBeforeRequest
                 | Self::CompletionRelayInput
-                | Self::CompletionDeadline
+                | Self::CompletionRequestMayWait
                 | Self::CompletionDeadlineAfterRequest
                 | Self::CompletionSendFailure
                 | Self::CompletionEarlyRequest
-                | Self::CompletionOuterParentDeathBeforeRequest
-                | Self::CompletionOuterParentDeathAfterRequest
         )
     }
 
@@ -4892,7 +5879,6 @@ fn exercise_monitor_harness_case(
     runtime: &RuntimeCapability,
     bwrap: &Path,
     case: State5HarnessCase,
-    parent_death_report: Option<&Path>,
 ) -> io::Result<()> {
     use std::process::{Command, Stdio};
 
@@ -4945,6 +5931,10 @@ fn exercise_monitor_harness_case(
             case,
             State5HarnessCase::SessionOuterStatusMismatch
         ),
+        hold_after_completion_request_for_harness: matches!(
+            case,
+            State5HarnessCase::CompletionDeadlineAfterRequest
+        ),
     };
     let _descriptor_pressure = if matches!(case, State5HarnessCase::RuntimeHighDescriptorPressure) {
         Some(open_descriptor_pressure_through(BOOTSTRAP_FD - 1)?)
@@ -4990,13 +5980,13 @@ fn exercise_monitor_harness_case(
             "--dir",
             "/run",
             "--dir",
-            "/run/nub-sandbox",
-            "--dir",
+            "/dev/.nub-sandbox",
+            "--tmpfs",
             PRIVATE_RUNTIME_ROOT,
-            "--dir",
-            "/run/nub-sandbox/runtime/lib",
-            "--info-fd",
         ])
+        .arg("--dir")
+        .arg(Path::new(PRIVATE_RUNTIME_ROOT).join("lib"))
+        .arg("--info-fd")
         .arg(info_writer.as_raw_fd().to_string());
     let bindings = runtime_bindings(image)?
         .into_iter()
@@ -5008,7 +5998,8 @@ fn exercise_monitor_harness_case(
             .arg(file.as_raw_fd().to_string())
             .arg(&object.path);
     }
-    command.arg("--clearenv").arg("--");
+    command.arg("--remount-ro").arg(PRIVATE_RUNTIME_ROOT);
+    command.args(["--chdir", "/", "--clearenv", "--"]);
     append_monitor_command(&mut command, image);
     command
         .arg(MONITOR_SENTINEL)
@@ -5119,28 +6110,15 @@ fn exercise_monitor_harness_case(
         let attestation = TargetStoppedAttestation::decode(&stopped.payload)?;
 
         // A queued pre-attestation start request is intentionally consumed as
-        // soon as TargetStopped is emitted. The target may therefore already be
-        // fully reaped by the time the ancestor receives that attestation. The
-        // oracle is the authenticated Fatal plus complete teardown; when the
-        // child is still observable, retain its process identity and prove its
-        // eventual disappearance too.
+        // soon as TargetStopped is emitted. The authenticated Fatal plus exact
+        // outer-child reap is the teardown oracle.
         if matches!(case, State5HarnessCase::EarlyStart) {
-            let target_pin = pin_optional_monitor_child(monitor_pid, attestation.starttime)?;
             expect_fatal_contains(&mut control, "exact authenticated start attestation")?;
-            if let Some(pin) = target_pin.as_ref() {
-                wait_for_host_process_pin_exit(pin, DESCRIBE_TIMEOUT)?;
-            }
             wait_for_child_exit(&mut child, DESCRIBE_TIMEOUT)?;
             return Ok(());
         }
 
         let target_pid = read_unique_monitor_child(monitor_pid)?;
-        let pidfd = if matches!(case, State5HarnessCase::RuntimeNoPidfd) {
-            None
-        } else {
-            open_pidfd_if_supported(target_pid)?
-        };
-
         verify_target_host_state(
             target_pid,
             monitor_pid,
@@ -5149,27 +6127,12 @@ fn exercise_monitor_harness_case(
             case.network_filter(),
         )?;
 
-        for _ in 0..3 {
-            if unsafe { libc::kill(target_pid, libc::SIGCONT) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        wait_for_host_process_not_state(target_pid, b'T', DESCRIBE_TIMEOUT)?;
-        thread::sleep(Duration::from_millis(100));
-        verify_target_host_state(
-            target_pid,
-            monitor_pid,
-            attestation,
-            ExpectedTargetState::Sleeping,
-            case.network_filter(),
-        )?;
         if child.try_wait()?.is_some() || control_packet_available(control.fd.as_raw_fd())? {
             return Err(invalid_data(
-                "hostile SIGCONT bypassed the target's private start gate",
+                "stopped target changed state before authenticated release",
             ));
         }
 
-        let mut descendant_pins = Vec::new();
         match case {
             State5HarnessCase::CloseAtTargetStop => {
                 drop(control);
@@ -5246,30 +6209,36 @@ fn exercise_monitor_harness_case(
                 let (bytes, expected) = match case {
                     State5HarnessCase::ExecRecordBadMagic => {
                         record[0] ^= 0xff;
-                        (record.as_slice(), "target setup error record is malformed")
+                        (
+                            record.as_slice(),
+                            &["target setup error record is malformed"] as &[&str],
+                        )
                     }
                     State5HarnessCase::ExecRecordTruncated => (
                         &record[..TARGET_SETUP_ERROR_LEN - 1],
-                        "record was truncated",
+                        &["target exec-error record was truncated"] as &[&str],
                     ),
                     State5HarnessCase::ExecRecordTrailing => {
                         writer.write_all(&record)?;
                         writer.write_all(&[0])?;
-                        (&[][..], "record exceeded its fixed budget")
+                        (&[][..], &["record exceeded its fixed budget"] as &[&str])
                     }
                     State5HarnessCase::ExecRecordWrongStage => {
                         record = encode_target_setup_record(
                             TargetSetupStage::DescriptorSweep,
                             libc::EIO,
                         );
-                        (record.as_slice(), "non-exec setup failure")
+                        (
+                            record.as_slice(),
+                            &["target reported a non-exec setup failure"] as &[&str],
+                        )
                     }
                     _ => unreachable!("record-fault cases are matched above"),
                 };
                 writer.write_all(bytes)?;
                 drop(writer);
                 control.send(FrameKind::StartTarget, attestation.encode())?;
-                expect_fatal_contains(&mut control, expected)?;
+                expect_fatal_contains_any(&mut control, expected)?;
             }
             State5HarnessCase::ExecAcceptanceDeadline => {
                 let writer = duplicate_target_exec_error_writer(target_pid)?;
@@ -5295,8 +6264,7 @@ fn exercise_monitor_harness_case(
             }
             State5HarnessCase::ExecAccepted { .. }
             | State5HarnessCase::ExecAcceptedDescendants
-            | State5HarnessCase::AcceptedDeadline
-            | State5HarnessCase::OuterParentDeath => {
+            | State5HarnessCase::AcceptedDeadline => {
                 control.send(FrameKind::StartTarget, attestation.encode())?;
                 let accepted = control.receive()?;
                 if accepted.kind != FrameKind::ExecAccepted || !accepted.payload.is_empty() {
@@ -5312,12 +6280,8 @@ fn exercise_monitor_harness_case(
                     &spec.program,
                     &spec.args,
                 )?;
-                if matches!(
-                    case,
-                    State5HarnessCase::ExecAcceptedDescendants
-                        | State5HarnessCase::OuterParentDeath
-                ) {
-                    descendant_pins = wait_for_detached_descendants(target_pid)?;
+                if matches!(case, State5HarnessCase::ExecAcceptedDescendants) {
+                    wait_for_runtime_ready_name(target_pid)?;
                 }
                 match case {
                     State5HarnessCase::AcceptedDeadline => {
@@ -5334,25 +6298,6 @@ fn exercise_monitor_harness_case(
                                 "accepted-target hold expired before its monotonic deadline",
                             ));
                         }
-                    }
-                    State5HarnessCase::OuterParentDeath => {
-                        let report_path = parent_death_report.ok_or_else(|| {
-                            invalid_input("outer-parent-death case omitted its report path")
-                        })?;
-                        let mut identities = vec![
-                            host_process_identity(child.id() as libc::pid_t)?,
-                            host_process_identity(monitor_pid)?,
-                            HostProcessIdentity {
-                                pid: target_pid,
-                                starttime: attestation.starttime,
-                            },
-                        ];
-                        identities.extend(descendant_pins.iter().map(|pin| pin.identity));
-                        write_parent_death_report(report_path, &identities)?;
-                        // Do not close the control endpoint, kill Bubblewrap, or
-                        // run any Rust destructor. --die-with-parent must own the
-                        // ensuing namespace teardown.
-                        unsafe { libc::_exit(0) }
                     }
                     _ => {
                         if unsafe { libc::shutdown(control.fd.as_raw_fd(), libc::SHUT_WR) } != 0 {
@@ -5372,28 +6317,81 @@ fn exercise_monitor_harness_case(
                     monitor_pid,
                     attestation,
                     &spec,
-                    parent_death_report,
-                    &mut descendant_pins,
                 )?;
             }
-            State5HarnessCase::ExitRace
-            | State5HarnessCase::SignalRace
-            | State5HarnessCase::StopRace => {
+            State5HarnessCase::ExitRace | State5HarnessCase::SignalRace => {
                 control.send(FrameKind::StartTarget, attestation.encode())?;
-                let first = control.receive()?;
-                match first.kind {
-                    FrameKind::Fatal => {}
-                    FrameKind::ExecAccepted if first.payload.is_empty() => {
+                match control.receive_with_deadline(Some(Instant::now() + DESCRIBE_TIMEOUT)) {
+                    Ok(frame)
+                        if frame.kind == FrameKind::ExecAccepted && frame.payload.is_empty() =>
+                    {
                         if unsafe { libc::shutdown(control.fd.as_raw_fd(), libc::SHUT_WR) } != 0 {
                             return Err(io::Error::last_os_error());
                         }
                         expect_fatal_contains(&mut control, "running-state-not-installed")?;
                     }
-                    _ => {
-                        return Err(invalid_data(
-                            "target terminal/stop race produced an invalid transition",
-                        ));
+                    Ok(frame) if frame.kind == FrameKind::Fatal => {
+                        let message = String::from_utf8_lossy(&frame.payload);
+                        if !message.contains("target terminated without an exec-error record") {
+                            return Err(invalid_data(format!(
+                                "terminal exec race returned the wrong fatal result: {message}"
+                            )));
+                        }
                     }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::BrokenPipe
+                        ) => {}
+                    Ok(frame) => {
+                        return Err(invalid_data(format!(
+                            "terminal exec race returned unexpected {:?}",
+                            frame.kind
+                        )));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            State5HarnessCase::StopRace => {
+                control.send(FrameKind::StartTarget, attestation.encode())?;
+                match control.receive_with_deadline(Some(Instant::now() + DESCRIBE_TIMEOUT)) {
+                    Ok(frame)
+                        if frame.kind == FrameKind::ExecAccepted && frame.payload.is_empty() =>
+                    {
+                        expect_fatal_contains_any(
+                            &mut control,
+                            &[
+                                "target stopped again during the exec transition",
+                                "running-state-not-installed",
+                            ],
+                        )?;
+                    }
+                    Ok(frame) if frame.kind == FrameKind::Fatal => {
+                        let message = String::from_utf8_lossy(&frame.payload);
+                        if !message.contains("target stopped again during the exec transition")
+                            && !message.contains("running-state-not-installed")
+                        {
+                            return Err(invalid_data(format!(
+                                "stop race returned the wrong fatal result: {message}"
+                            )));
+                        }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::BrokenPipe
+                        ) => {}
+                    Ok(frame) => {
+                        return Err(invalid_data(format!(
+                            "stop race returned unexpected {:?}",
+                            frame.kind
+                        )));
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             State5HarnessCase::EarlyStart | State5HarnessCase::InitialStopDeadline => {
@@ -5401,15 +6399,7 @@ fn exercise_monitor_harness_case(
             }
             _ => unreachable!("runtime cases are handled by the guarded arm"),
         }
-        wait_for_host_target_exit(
-            target_pid,
-            attestation.starttime,
-            pidfd.as_ref(),
-            DESCRIBE_TIMEOUT,
-        )?;
-        for pin in &descendant_pins {
-            wait_for_host_process_pin_exit(pin, DESCRIBE_TIMEOUT)?;
-        }
+        wait_for_host_target_exit(target_pid, attestation.starttime, DESCRIBE_TIMEOUT)?;
         wait_for_child_exit(&mut child, DESCRIBE_TIMEOUT)?;
         Ok(())
     })();
@@ -5420,7 +6410,6 @@ fn exercise_monitor_harness_case(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 fn exercise_monitor_runtime_case(
     case: State5HarnessCase,
     control: &mut ControlChannel,
@@ -5430,8 +6419,6 @@ fn exercise_monitor_runtime_case(
     monitor_pid: libc::pid_t,
     attestation: TargetStoppedAttestation,
     spec: &BootstrapSpec,
-    parent_death_report: Option<&Path>,
-    descendant_pins: &mut Vec<HostProcessPin>,
 ) -> io::Result<()> {
     control.send(FrameKind::StartTarget, attestation.encode())?;
     let accepted = control.receive()?;
@@ -5449,33 +6436,6 @@ fn exercise_monitor_runtime_case(
         &spec.args,
     )?;
     wait_for_runtime_ready_name(target_pid)?;
-    if matches!(
-        case,
-        State5HarnessCase::RuntimeDescendants
-            | State5HarnessCase::RuntimeOuterParentDeath
-            | State5HarnessCase::CompletionDescendants
-            | State5HarnessCase::SessionDescendants
-    ) {
-        *descendant_pins = wait_for_detached_descendants(target_pid)?;
-    }
-
-    if matches!(case, State5HarnessCase::RuntimeOuterParentDeath) {
-        let report_path = parent_death_report
-            .ok_or_else(|| invalid_input("state-6 parent-death case omitted its report path"))?;
-        let mut identities = vec![
-            host_process_identity(child.id() as libc::pid_t)?,
-            host_process_identity(monitor_pid)?,
-            HostProcessIdentity {
-                pid: target_pid,
-                starttime: attestation.starttime,
-            },
-        ];
-        identities.extend(descendant_pins.iter().map(|pin| pin.identity));
-        write_parent_death_report(report_path, &identities)?;
-        // Preserve the real --die-with-parent oracle: do not run any Rust
-        // destructor or explicitly close/kill any member of the process tree.
-        unsafe { libc::_exit(0) }
-    }
 
     if case.is_state_7() {
         return exercise_monitor_completion_case(
@@ -5484,23 +6444,11 @@ fn exercise_monitor_runtime_case(
             signal_writer,
             child,
             target_pid,
-            monitor_pid,
             attestation,
-            parent_death_report,
-            descendant_pins,
         );
     }
     if case.is_state_8() {
-        return exercise_monitor_parent_session_case(
-            case,
-            control,
-            signal_writer,
-            child,
-            target_pid,
-            monitor_pid,
-            attestation,
-            descendant_pins,
-        );
+        return exercise_monitor_parent_session_case(case, control, signal_writer, child);
     }
 
     let mut signal_sequence = 0u64;
@@ -5641,7 +6589,7 @@ fn exercise_monitor_runtime_case(
                 .map_err(|error| {
                     io::Error::new(error.kind(), format!("sending cleanup terminate: {error}"))
                 })?;
-            wait_for_host_target_exit(target_pid, attestation.starttime, None, DESCRIBE_TIMEOUT)
+            wait_for_host_target_exit(target_pid, attestation.starttime, DESCRIBE_TIMEOUT)
                 .map_err(|error| {
                     io::Error::new(
                         error.kind(),
@@ -5666,10 +6614,6 @@ fn exercise_monitor_runtime_case(
             control.send(FrameKind::Terminate, Vec::new())?;
             expected_report = Some(ExpectedTargetExit::Signaled(libc::SIGKILL));
         }
-        State5HarnessCase::RuntimeNoPidfd => {
-            send_signal_relay_record(signal_writer, &mut signal_sequence, libc::SIGTERM)?;
-            expected_report = Some(ExpectedTargetExit::Signaled(libc::SIGTERM));
-        }
         _ => unreachable!("non-runtime case passed to state-6 harness"),
     }
 
@@ -5682,11 +6626,7 @@ fn exercise_monitor_runtime_case(
     expected_report
         .ok_or_else(|| invalid_data("state-6 case omitted its expected target result"))?
         .verify(report.raw_status)?;
-    let expected_descendants = if matches!(case, State5HarnessCase::RuntimeDescendants) {
-        descendant_pins.len() as u32
-    } else {
-        0
-    };
+    let expected_descendants = u32::from(matches!(case, State5HarnessCase::RuntimeDescendants)) * 2;
     if report.descendants_reaped != expected_descendants {
         return Err(invalid_data(format!(
             "monitor reported {} descendant reaps, expected {expected_descendants}",
@@ -5752,7 +6692,6 @@ enum State8PeerCase {
     MissingCleanupDeadline,
     LateCleanup,
     LateOuterExit,
-    LateProcessPin,
     OuterNonzero,
     OuterSignaled,
 }
@@ -5765,18 +6704,14 @@ impl State8PeerCase {
     fn completion_timeout(self) -> Duration {
         match self {
             Self::MissingCleanupDeadline => DESCRIBE_TIMEOUT,
-            Self::LateCleanup | Self::LateOuterExit | Self::LateProcessPin => {
-                Duration::from_millis(150)
-            }
+            Self::LateCleanup | Self::LateOuterExit => Duration::from_millis(150),
             _ => Duration::from_secs(1),
         }
     }
 
     fn outer_verb(self) -> &'static str {
         match self {
-            Self::SuccessLiteral143 | Self::SuccessSignal | Self::LateProcessPin => {
-                "state-8-outer-zero"
-            }
+            Self::SuccessLiteral143 | Self::SuccessSignal => "state-8-outer-zero",
             Self::CancellationBeforeCommit => "state-8-outer-zero",
             Self::LateOuterExit => "state-8-outer-late-zero",
             Self::OuterNonzero => "state-8-outer-23",
@@ -5828,10 +6763,6 @@ impl State8PeerCase {
                 io::ErrorKind::TimedOut,
                 "timed out waiting for held monitor probe to exit",
             ),
-            Self::LateProcessPin => (
-                io::ErrorKind::TimedOut,
-                "state-8 process cleanup deadline elapsed",
-            ),
             Self::OuterNonzero | Self::OuterSignaled => {
                 (io::ErrorKind::InvalidData, "outer process exited")
             }
@@ -5859,7 +6790,6 @@ fn exercise_state_8_protocol_adversaries() -> io::Result<()> {
         State8PeerCase::MissingCleanupDeadline,
         State8PeerCase::LateCleanup,
         State8PeerCase::LateOuterExit,
-        State8PeerCase::LateProcessPin,
         State8PeerCase::OuterNonzero,
         State8PeerCase::OuterSignaled,
     ] {
@@ -5900,7 +6830,6 @@ fn exercise_state_8_protocol_adversary(case: State8PeerCase) -> io::Result<()> {
     drop(peer_fd);
 
     let mut outer = None;
-    let mut late_pin_reaper = None;
     let execution = (|| -> io::Result<(io::Result<ParentCompletionResult>, libc::c_int)> {
         outer = Some(
             Command::new(&executable)
@@ -5910,25 +6839,6 @@ fn exercise_state_8_protocol_adversary(case: State8PeerCase) -> io::Result<()> {
                 .stderr(Stdio::null())
                 .spawn()?,
         );
-        let mut process_pins = Vec::new();
-        if matches!(case, State8PeerCase::LateProcessPin) {
-            let mut late_pin = Command::new(&executable)
-                .arg("state-8-outer-late-zero")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-            let identity = match host_process_identity(late_pin.id() as libc::pid_t) {
-                Ok(identity) => identity,
-                Err(error) => {
-                    let _ = late_pin.kill();
-                    let _ = late_pin.wait();
-                    return Err(error);
-                }
-            };
-            process_pins.push(identity);
-            late_pin_reaper = Some(thread::spawn(move || late_pin.wait()));
-        }
         let mut control = ControlChannel::new(
             parent_fd,
             session,
@@ -5946,7 +6856,6 @@ fn exercise_state_8_protocol_adversary(case: State8PeerCase) -> io::Result<()> {
         let result = drive_parent_completion_session(
             &mut control,
             outer.as_mut().expect("state-8 outer child is initialized"),
-            &process_pins,
             action,
             case.completion_timeout(),
         );
@@ -5973,27 +6882,12 @@ fn exercise_state_8_protocol_adversary(case: State8PeerCase) -> io::Result<()> {
         Ok(value) => value,
         Err(error) => {
             if let Some(outer) = outer.as_mut() {
-                let _ = fail_closed_parent_completion(outer, &[]);
+                let _ = fail_closed_outer(outer);
             }
             terminate_and_reap_raw_child(peer_pid);
-            if let Some(reaper) = late_pin_reaper.take() {
-                let _ = reaper.join();
-            }
             return Err(error);
         }
     };
-    if let Some(reaper) = late_pin_reaper.take() {
-        match reaper.join() {
-            Ok(Ok(status)) if status.success() => {}
-            Ok(Ok(status)) => {
-                return Err(invalid_data(format!(
-                    "state-8 late process pin exited with {status}"
-                )));
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Err(io::Error::other("state-8 late process reaper panicked")),
-        }
-    }
     if !libc::WIFEXITED(peer_status) || libc::WEXITSTATUS(peer_status) != 0 {
         return Err(invalid_data(format!(
             "state-8 protocol peer exited with raw status {peer_status:#x}"
@@ -6161,7 +7055,6 @@ fn run_state_8_protocol_peer(case: State8PeerCase, peer: &mut ControlChannel) ->
         | State8PeerCase::SuccessSignal
         | State8PeerCase::CancellationBeforeCommit
         | State8PeerCase::LateOuterExit
-        | State8PeerCase::LateProcessPin
         | State8PeerCase::OuterNonzero
         | State8PeerCase::OuterSignaled => {
             peer.send(FrameKind::CleanupComplete, original.encode()?)?;
@@ -6210,10 +7103,6 @@ fn exercise_monitor_parent_session_case(
     control: &mut ControlChannel,
     signal_writer: &mut Option<File>,
     child: &mut Child,
-    target_pid: libc::pid_t,
-    monitor_pid: libc::pid_t,
-    target_attestation: TargetStoppedAttestation,
-    descendant_pins: &[HostProcessPin],
 ) -> io::Result<()> {
     let mut signal_sequence = 0u64;
     let expected_exit = match case {
@@ -6230,20 +7119,12 @@ fn exercise_monitor_parent_session_case(
         _ => unreachable!("non-state-8 case passed to parent session harness"),
     };
 
-    let mut process_pins = Vec::with_capacity(descendant_pins.len() + 2);
-    process_pins.push(host_process_identity(monitor_pid)?);
-    process_pins.push(HostProcessIdentity {
-        pid: target_pid,
-        starttime: target_attestation.starttime,
-    });
-    process_pins.extend(descendant_pins.iter().map(|pin| pin.identity));
     let action = if matches!(case, State5HarnessCase::SessionCancellation) {
         ParentCompletionAction::CancelBeforeRequest
     } else {
         ParentCompletionAction::Complete
     };
-    let completion =
-        drive_parent_completion_session(control, child, &process_pins, action, DESCRIBE_TIMEOUT);
+    let completion = drive_parent_completion_session(control, child, action, DESCRIBE_TIMEOUT);
 
     match case {
         State5HarnessCase::SessionCancellation => {
@@ -6274,11 +7155,7 @@ fn exercise_monitor_parent_session_case(
 
     let completion = completion?;
     expected_exit.verify(completion.report.raw_status)?;
-    let expected_descendants = if matches!(case, State5HarnessCase::SessionDescendants) {
-        descendant_pins.len() as u32
-    } else {
-        0
-    };
+    let expected_descendants = u32::from(matches!(case, State5HarnessCase::SessionDescendants)) * 2;
     if completion.report.descendants_reaped != expected_descendants {
         return Err(invalid_data(format!(
             "state-8 completion reported {} descendant reaps, expected {expected_descendants}",
@@ -6296,7 +7173,6 @@ fn exercise_monitor_parent_session_case(
 fn drive_parent_completion_session(
     control: &mut ControlChannel,
     outer: &mut Child,
-    process_pins: &[HostProcessIdentity],
     action: ParentCompletionAction,
     completion_timeout: Duration,
 ) -> io::Result<ParentCompletionResult> {
@@ -6308,19 +7184,18 @@ fn drive_parent_completion_session(
             ParentCompletionAction::Complete => false,
             ParentCompletionAction::CancelBeforeRequest => check == 0,
             ParentCompletionAction::CancelAfterRequest => check == 1,
-            ParentCompletionAction::CancelBeforeCommit => check == 6,
+            ParentCompletionAction::CancelBeforeCommit => check == 5,
         }
     };
     let outcome = drive_parent_completion_session_inner(
         control,
         outer,
-        process_pins,
         &mut cancellation,
         completion_timeout,
     );
     match outcome {
         Ok(result) => Ok(result),
-        Err(error) => match fail_closed_parent_completion(outer, process_pins) {
+        Err(error) => match fail_closed_outer(outer) {
             Ok(()) => Err(error),
             Err(cleanup) => Err(io::Error::other(format!(
                 "{error}; state-8 fail-closed cleanup failed: {cleanup}"
@@ -6332,7 +7207,6 @@ fn drive_parent_completion_session(
 fn drive_parent_completion_session_inner(
     control: &mut ControlChannel,
     outer: &mut Child,
-    process_pins: &[HostProcessIdentity],
     cancellation: &mut impl FnMut() -> bool,
     completion_timeout: Duration,
 ) -> io::Result<ParentCompletionResult> {
@@ -6384,8 +7258,6 @@ fn drive_parent_completion_session_inner(
         )));
     }
     reject_parent_completion_cancellation(cancellation)?;
-    wait_for_completion_processes_exit_until(process_pins, deadline)?;
-    reject_parent_completion_cancellation(cancellation)?;
     ensure_before_deadline(deadline, "state-8 completion deadline elapsed")?;
     // This observation is the result-commit linearization point. Cancellation
     // observed before it wins; after the result is returned it is irrelevant.
@@ -6413,84 +7285,13 @@ fn reject_parent_completion_cancellation(
     }
 }
 
-fn fail_closed_parent_completion(
-    outer: &mut Child,
-    process_pins: &[HostProcessIdentity],
-) -> io::Result<()> {
-    let deadline = Instant::now() + DESCRIBE_TIMEOUT;
-    let mut failures = Vec::new();
-    let should_kill = match outer.try_wait() {
-        Ok(Some(_)) => false,
-        Ok(None) => true,
-        Err(error) => {
-            failures.push(format!("observing outer process: {error}"));
-            true
-        }
-    };
-    if should_kill {
-        if let Err(error) = outer.kill()
-            && error.kind() != io::ErrorKind::InvalidInput
-            && error.raw_os_error() != Some(libc::ESRCH)
-        {
-            failures.push(format!("killing outer process: {error}"));
-        }
-    }
-    if let Err(error) = wait_for_child_status_until(outer, deadline) {
-        failures.push(format!("reaping outer process: {error}"));
-    }
-    if let Err(error) = wait_for_completion_processes_exit_until(process_pins, deadline) {
-        failures.push(format!("verifying session process cleanup: {error}"));
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(io::Error::other(failures.join("; ")))
-    }
-}
-
-fn wait_for_completion_processes_exit_until(
-    process_pins: &[HostProcessIdentity],
-    deadline: Instant,
-) -> io::Result<()> {
-    for identity in process_pins {
-        wait_for_host_process_identity_exit_until(*identity, deadline)?;
-    }
-    Ok(())
-}
-
-fn wait_for_host_process_identity_exit_until(
-    identity: HostProcessIdentity,
-    deadline: Instant,
-) -> io::Result<()> {
-    loop {
-        ensure_before_deadline(deadline, "state-8 process cleanup deadline elapsed")?;
-        match host_process_identity(identity.pid) {
-            Err(error) if process_disappeared(&error) => {
-                ensure_before_deadline(deadline, "state-8 process cleanup deadline elapsed")?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-            Ok(observed) if observed != identity => {
-                ensure_before_deadline(deadline, "state-8 process cleanup deadline elapsed")?;
-                return Ok(());
-            }
-            Ok(_) => {}
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 fn exercise_monitor_completion_case(
     case: State5HarnessCase,
     control: &mut ControlChannel,
     signal_writer: &mut Option<File>,
     child: &mut std::process::Child,
     target_pid: libc::pid_t,
-    monitor_pid: libc::pid_t,
     attestation: TargetStoppedAttestation,
-    parent_death_report: Option<&Path>,
-    descendant_pins: &[HostProcessPin],
 ) -> io::Result<()> {
     if matches!(case, State5HarnessCase::CompletionEarlyRequest) {
         let early = CompletionAttestation {
@@ -6521,83 +7322,13 @@ fn exercise_monitor_completion_case(
 
     let completion = expect_completion_attestation(control)?;
     expected_exit.verify(completion.report.raw_status)?;
-    let expected_descendants = if matches!(case, State5HarnessCase::CompletionDescendants) {
-        descendant_pins.len() as u32
-    } else {
-        0
-    };
+    let expected_descendants =
+        u32::from(matches!(case, State5HarnessCase::CompletionDescendants)) * 2;
     if completion.report.descendants_reaped != expected_descendants {
         return Err(invalid_data(format!(
             "completion attestation reported {} descendant reaps, expected {expected_descendants}",
             completion.report.descendants_reaped
         )));
-    }
-
-    if matches!(
-        case,
-        State5HarnessCase::CompletionOuterParentDeathBeforeRequest
-            | State5HarnessCase::CompletionOuterParentDeathAfterRequest
-    ) {
-        if matches!(
-            case,
-            State5HarnessCase::CompletionOuterParentDeathAfterRequest
-        ) {
-            if unsafe { libc::kill(monitor_pid, libc::SIGSTOP) } != 0 {
-                let error = io::Error::last_os_error();
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!("stopping state-7 monitor before parent death: {error}"),
-                ));
-            }
-            wait_for_host_process_state(monitor_pid, b'T', DESCRIBE_TIMEOUT).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("observing stopped state-7 monitor before parent death: {error}"),
-                )
-            })?;
-            control
-                .send(FrameKind::CompleteSession, completion.encode()?)
-                .map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!("queueing state-7 completion before parent death: {error}"),
-                    )
-                })?;
-            shutdown_control_write(control).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("closing state-7 completion writer before parent death: {error}"),
-                )
-            })?;
-        }
-        let report_path = parent_death_report
-            .ok_or_else(|| invalid_input("state-7 parent-death case omitted its report path"))?;
-        write_parent_death_report(
-            report_path,
-            &[
-                host_process_identity(child.id() as libc::pid_t).map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!("pinning Bubblewrap identity before parent death: {error}"),
-                    )
-                })?,
-                host_process_identity(monitor_pid).map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!("pinning monitor identity before parent death: {error}"),
-                    )
-                })?,
-            ],
-        )
-        .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("publishing state-7 parent-death identities: {error}"),
-            )
-        })?;
-        // Do not close descriptors, resume the monitor, or run destructors.
-        // Bubblewrap's real --die-with-parent contract owns teardown.
-        unsafe { libc::_exit(0) }
     }
 
     match case {
@@ -6665,31 +7396,39 @@ fn exercise_monitor_completion_case(
         }
         State5HarnessCase::CompletionRelayInput => {
             send_signal_relay_record(signal_writer, &mut signal_sequence, libc::SIGCONT)?;
-            expect_fatal_contains(control, "unexpected signal relay input")?;
-            require_outer_status(child, Some(125))?;
-        }
-        State5HarnessCase::CompletionDeadline => {
-            set_control_timeouts(control.fd.as_raw_fd(), DESCRIBE_TIMEOUT.saturating_mul(2))?;
-            let started = Instant::now();
-            expect_fatal_contains(control, "sandbox completion deadline elapsed")?;
-            if started.elapsed() < DESCRIBE_TIMEOUT.saturating_sub(Duration::from_millis(250)) {
-                return Err(invalid_data(
-                    "completion request deadline failed before its monotonic deadline",
-                ));
-            }
-            require_outer_status(child, Some(125))?;
-        }
-        State5HarnessCase::CompletionDeadlineAfterRequest => {
-            if unsafe { libc::kill(monitor_pid, libc::SIGSTOP) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            wait_for_host_process_state(monitor_pid, b'T', DESCRIBE_TIMEOUT)?;
+            // Once TargetExited is authenticated the parent disarms its relay.
+            // A record already queued before that disarm is obsolete input, not a
+            // new signal authority, and the monitor must drain it without turning a
+            // valid completion into a protocol failure.
             control.send(FrameKind::CompleteSession, completion.encode()?)?;
             shutdown_control_write(control)?;
+            let cleanup = expect_cleanup_complete(control)?;
+            completion.require_exact_echo(&cleanup.encode()?)?;
+            expect_control_eof(control)?;
+            require_outer_status(child, Some(0))?;
+        }
+        State5HarnessCase::CompletionRequestMayWait => {
+            // TargetExited can precede the caller's eventual wait() by an arbitrary
+            // amount of time. No completion deadline exists until CompleteSession
+            // is received; prove the monitor neither exits nor invents a packet at
+            // the former handshake timeout, then finish the exact protocol.
             thread::sleep(DESCRIBE_TIMEOUT + Duration::from_millis(250));
-            if unsafe { libc::kill(monitor_pid, libc::SIGCONT) } != 0 {
-                return Err(io::Error::last_os_error());
+            if child.try_wait()?.is_some() || control_packet_available(control.fd.as_raw_fd())? {
+                return Err(invalid_data(
+                    "completion monitor timed out before the parent's request",
+                ));
             }
+            control.send(FrameKind::CompleteSession, completion.encode()?)?;
+            shutdown_control_write(control)?;
+            let cleanup = expect_cleanup_complete(control)?;
+            completion.require_exact_echo(&cleanup.encode()?)?;
+            expect_control_eof(control)?;
+            require_outer_status(child, Some(0))?;
+        }
+        State5HarnessCase::CompletionDeadlineAfterRequest => {
+            set_control_timeouts(control.fd.as_raw_fd(), DESCRIBE_TIMEOUT.saturating_mul(2))?;
+            control.send(FrameKind::CompleteSession, completion.encode()?)?;
+            shutdown_control_write(control)?;
             expect_fatal_or_closed(control, "sandbox completion deadline elapsed")?;
             require_outer_status(child, Some(125))?;
         }
@@ -6703,13 +7442,11 @@ fn exercise_monitor_completion_case(
             // undeliverable. The outer status and empty process tree are the oracle.
             require_outer_status(child, Some(125))?;
         }
-        State5HarnessCase::CompletionEarlyRequest
-        | State5HarnessCase::CompletionOuterParentDeathBeforeRequest
-        | State5HarnessCase::CompletionOuterParentDeathAfterRequest => unreachable!(),
+        State5HarnessCase::CompletionEarlyRequest => unreachable!(),
         _ => unreachable!("non-state-7 case passed to completion harness"),
     }
 
-    wait_for_host_target_exit(target_pid, attestation.starttime, None, DESCRIBE_TIMEOUT)?;
+    wait_for_host_target_exit(target_pid, attestation.starttime, DESCRIBE_TIMEOUT)?;
     Ok(())
 }
 
@@ -6754,7 +7491,7 @@ fn expect_control_eof(control: &mut ControlChannel) -> io::Result<()> {
 }
 
 fn expect_fatal_or_closed(control: &mut ControlChannel, needle: &str) -> io::Result<()> {
-    match control.receive_with_deadline(Some(Instant::now() + DESCRIBE_TIMEOUT)) {
+    match control.receive_with_deadline(Some(Instant::now() + DESCRIBE_TIMEOUT.saturating_mul(2))) {
         Ok(frame) if frame.kind == FrameKind::Fatal => {
             let message = String::from_utf8_lossy(&frame.payload);
             if message.contains(needle) {
@@ -6944,281 +7681,6 @@ fn open_descriptor_pressure_through(minimum_last_fd: RawFd) -> io::Result<Vec<Fi
     Ok(files)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HostProcessIdentity {
-    pid: libc::pid_t,
-    starttime: u64,
-}
-
-struct HostProcessPin {
-    identity: HostProcessIdentity,
-    pidfd: Option<OwnedFd>,
-}
-
-fn exercise_monitor_outer_parent_death(
-    _runtime: &RuntimeCapability,
-    bwrap: &Path,
-) -> io::Result<()> {
-    exercise_monitor_outer_parent_death_with_verb(bwrap, "exercise-outer-parent-death-child", 5)
-}
-
-fn exercise_monitor_outer_parent_death_state_6(
-    _runtime: &RuntimeCapability,
-    bwrap: &Path,
-) -> io::Result<()> {
-    exercise_monitor_outer_parent_death_with_verb(
-        bwrap,
-        "exercise-outer-parent-death-state-6-child",
-        5,
-    )
-}
-
-fn exercise_monitor_outer_parent_death_state_7(
-    _runtime: &RuntimeCapability,
-    bwrap: &Path,
-    child_verb: &str,
-) -> io::Result<()> {
-    // State 7 has already reaped the target tree to ECHILD. Only the outer
-    // Bubblewrap process and its PID-1 monitor remain to be pinned.
-    exercise_monitor_outer_parent_death_with_verb(bwrap, child_verb, 2)
-}
-
-fn exercise_monitor_outer_parent_death_with_verb(
-    bwrap: &Path,
-    child_verb: &str,
-    minimum_identities: usize,
-) -> io::Result<()> {
-    use std::process::{Command, Stdio};
-
-    let mut nonce = [0u8; 16];
-    getrandom::getrandom(&mut nonce)
-        .map_err(|error| io::Error::other(format!("generating parent-death nonce: {error}")))?;
-    let nonce = nonce
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let report_path = std::env::temp_dir().join(format!(
-        "nub-sandbox-parent-death-{}-{nonce}",
-        std::process::id()
-    ));
-    let mut driver = Command::new(std::env::current_exe()?)
-        .env_clear()
-        .arg(child_verb)
-        .arg(bwrap)
-        .arg(&report_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-
-    let result = (|| {
-        let identities =
-            wait_for_parent_death_report(&report_path, &mut driver, minimum_identities)?;
-        let pins = identities
-            .into_iter()
-            .map(pin_host_process_if_same)
-            .collect::<io::Result<Vec<_>>>()?;
-        wait_for_child_exit(&mut driver, DESCRIBE_TIMEOUT)?;
-        if !driver.try_wait()?.is_some_and(|status| status.success()) {
-            return Err(io::Error::other(
-                "outer-parent-death driver did not exit successfully",
-            ));
-        }
-        for pin in &pins {
-            wait_for_host_process_pin_exit(pin, DESCRIBE_TIMEOUT)?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = driver.kill();
-        let _ = wait_for_child_exit(&mut driver, DESCRIBE_TIMEOUT);
-    }
-    let _ = fs::remove_file(&report_path);
-    result
-}
-
-fn wait_for_parent_death_report(
-    path: &Path,
-    driver: &mut std::process::Child,
-    minimum_identities: usize,
-) -> io::Result<Vec<HostProcessIdentity>> {
-    let deadline = Instant::now() + DESCRIBE_TIMEOUT;
-    loop {
-        match fs::read_to_string(path) {
-            Ok(report) if !report.is_empty() => {
-                return parse_parent_death_report(&report, minimum_identities);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        if let Some(status) = driver.try_wait()? {
-            return Err(io::Error::other(format!(
-                "outer-parent-death driver exited before reporting its process tree: {status}"
-            )));
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "timed out waiting for the outer-parent-death process report",
-            ));
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn write_parent_death_report(path: &Path, identities: &[HostProcessIdentity]) -> io::Result<()> {
-    let report = identities
-        .iter()
-        .map(|identity| format!("{}:{}", identity.pid, identity.starttime))
-        .collect::<Vec<_>>()
-        .join(",");
-    let temporary = path.with_extension(format!("tmp-{}", unsafe { libc::getpid() }));
-    fs::write(&temporary, report)?;
-    fs::rename(temporary, path)
-}
-
-fn parse_parent_death_report(
-    report: &str,
-    minimum_identities: usize,
-) -> io::Result<Vec<HostProcessIdentity>> {
-    let identities = report
-        .split(',')
-        .map(|record| {
-            let (pid, starttime) = record
-                .split_once(':')
-                .ok_or_else(|| invalid_data("malformed outer-parent-death process report"))?;
-            let pid = pid
-                .parse::<libc::pid_t>()
-                .map_err(|_| invalid_data("invalid outer-parent-death PID"))?;
-            let starttime = starttime
-                .parse::<u64>()
-                .map_err(|_| invalid_data("invalid outer-parent-death starttime"))?;
-            if pid <= 0 || starttime == 0 {
-                return Err(invalid_data("invalid outer-parent-death process identity"));
-            }
-            Ok(HostProcessIdentity { pid, starttime })
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    if identities.len() < minimum_identities {
-        return Err(invalid_data(
-            "outer-parent-death report omitted required process identities",
-        ));
-    }
-    Ok(identities)
-}
-
-fn wait_for_detached_descendants(target_pid: libc::pid_t) -> io::Result<Vec<HostProcessPin>> {
-    let deadline = Instant::now() + DESCRIBE_TIMEOUT;
-    loop {
-        match collect_host_descendants(target_pid) {
-            Ok(descendants) if descendants.len() >= 2 => {
-                let mut pins = descendants
-                    .into_iter()
-                    .map(pin_host_process_if_same)
-                    .collect::<io::Result<Vec<_>>>()?;
-                pins.sort_by_key(|pin| pin.identity.pid);
-                if pins.iter().any(|pin| {
-                    host_process_session(pin.identity.pid)
-                        .is_ok_and(|session| session == pin.identity.pid)
-                }) {
-                    return Ok(pins);
-                }
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "timed out waiting for detached target descendants",
-            ));
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn collect_host_descendants(root: libc::pid_t) -> io::Result<Vec<HostProcessIdentity>> {
-    let mut pending = VecDeque::from([root]);
-    let mut seen = BTreeSet::new();
-    let mut descendants = Vec::new();
-    while let Some(parent) = pending.pop_front() {
-        let children = fs::read_to_string(format!("/proc/{parent}/task/{parent}/children"))?;
-        for child in children.split_ascii_whitespace() {
-            let pid = child
-                .parse::<libc::pid_t>()
-                .map_err(|_| invalid_data("target descendant list contains an invalid PID"))?;
-            if !seen.insert(pid) {
-                return Err(invalid_data("target descendant tree contains a cycle"));
-            }
-            descendants.push(host_process_identity(pid)?);
-            pending.push_back(pid);
-        }
-    }
-    Ok(descendants)
-}
-
-fn host_process_identity(pid: libc::pid_t) -> io::Result<HostProcessIdentity> {
-    let (_, starttime) = host_process_session_and_starttime(pid)?;
-    Ok(HostProcessIdentity { pid, starttime })
-}
-
-fn host_process_session(pid: libc::pid_t) -> io::Result<libc::pid_t> {
-    host_process_session_and_starttime(pid).map(|(session, _)| session)
-}
-
-fn host_process_session_and_starttime(pid: libc::pid_t) -> io::Result<(libc::pid_t, u64)> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let close = stat
-        .rfind(')')
-        .ok_or_else(|| invalid_data("host process stat record is malformed"))?;
-    let fields = stat[close + 2..].split_whitespace().collect::<Vec<_>>();
-    let session = fields
-        .get(3)
-        .ok_or_else(|| invalid_data("host process stat omits session"))?
-        .parse::<libc::pid_t>()
-        .map_err(|_| invalid_data("host process session is invalid"))?;
-    let starttime = fields
-        .get(19)
-        .ok_or_else(|| invalid_data("host process stat omits starttime"))?
-        .parse::<u64>()
-        .map_err(|_| invalid_data("host process starttime is invalid"))?;
-    if starttime == 0 {
-        return Err(invalid_data("host process starttime is zero"));
-    }
-    Ok((session, starttime))
-}
-
-fn pin_host_process_if_same(identity: HostProcessIdentity) -> io::Result<HostProcessPin> {
-    let pidfd = match open_pidfd_if_supported(identity.pid) {
-        Ok(pidfd) => pidfd,
-        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => None,
-        Err(error) => return Err(error),
-    };
-    match host_process_identity(identity.pid) {
-        Ok(observed) if observed == identity => Ok(HostProcessPin { identity, pidfd }),
-        Ok(_) => Ok(HostProcessPin {
-            identity,
-            pidfd: None,
-        }),
-        Err(error) if process_disappeared(&error) => Ok(HostProcessPin {
-            identity,
-            pidfd: None,
-        }),
-        Err(error) => Err(error),
-    }
-}
-
-fn wait_for_host_process_pin_exit(pin: &HostProcessPin, timeout: Duration) -> io::Result<()> {
-    wait_for_host_target_exit(
-        pin.identity.pid,
-        pin.identity.starttime,
-        pin.pidfd.as_ref(),
-        timeout,
-    )
-}
-
 fn target_probe_command(image: &RuntimeImage, verb: &str) -> (OsString, Vec<OsString>) {
     let root = Path::new(PRIVATE_RUNTIME_ROOT);
     match &image.kind {
@@ -7291,8 +7753,13 @@ fn verify_accepted_target(
 }
 
 fn expect_fatal_contains(control: &mut ControlChannel, needle: &str) -> io::Result<()> {
+    expect_fatal_contains_any(control, &[needle])
+}
+
+fn expect_fatal_contains_any(control: &mut ControlChannel, needles: &[&str]) -> io::Result<()> {
     let fatal = control.receive()?;
-    if fatal.kind != FrameKind::Fatal || !String::from_utf8_lossy(&fatal.payload).contains(needle) {
+    let payload = String::from_utf8_lossy(&fatal.payload);
+    if fatal.kind != FrameKind::Fatal || !needles.iter().any(|needle| payload.contains(needle)) {
         return Err(invalid_data(
             "monitor did not send the expected fatal result",
         ));
@@ -7416,16 +7883,147 @@ fn clear_cloexec(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+fn mark_inherited_fds_cloexec() -> io::Result<()> {
+    const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+    let result =
+        unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC) };
+    if result >= 0 {
+        return Ok(());
+    }
+    unsafe { mark_open_fds_cloexec_from_proc() }
+}
+
+unsafe fn mark_open_fds_cloexec_from_proc() -> io::Result<()> {
+    const PROC_SUPER_MAGIC: libc::c_long = 0x9fa0;
+    const DIRENT_HEADER: usize = 19;
+    let directory = unsafe {
+        libc::syscall(
+            libc::SYS_openat,
+            libc::AT_FDCWD,
+            c"/proc/self/fd".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0,
+        ) as RawFd
+    };
+    if directory < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut stat = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(directory, stat.as_mut_ptr()) } != 0
+        || unsafe { stat.assume_init() }.f_type != PROC_SUPER_MAGIC
+    {
+        unsafe { libc::close(directory) };
+        return Err(io::Error::other(
+            "/proc/self/fd is not a procfs descriptor directory",
+        ));
+    }
+    let mut buffer = [0u8; 8192];
+    let mut saw_directory = false;
+    loop {
+        let count = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                directory,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            ) as isize
+        };
+        if count < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            unsafe { libc::close(directory) };
+            return Err(error);
+        }
+        if count == 0 {
+            break;
+        }
+        let count = count as usize;
+        let mut offset = 0usize;
+        while offset < count {
+            if count - offset < DIRENT_HEADER {
+                unsafe { libc::close(directory) };
+                return Err(io::Error::other(
+                    "procfs descriptor enumeration returned a truncated record",
+                ));
+            }
+            let record = &buffer[offset..count];
+            let reclen = u16::from_ne_bytes([record[16], record[17]]) as usize;
+            if reclen < DIRENT_HEADER || offset + reclen > count {
+                unsafe { libc::close(directory) };
+                return Err(io::Error::other(
+                    "procfs descriptor enumeration returned a malformed record",
+                ));
+            }
+            let name = &record[DIRENT_HEADER..reclen];
+            let Some(end) = name.iter().position(|byte| *byte == 0) else {
+                unsafe { libc::close(directory) };
+                return Err(io::Error::other(
+                    "procfs descriptor enumeration returned an unterminated name",
+                ));
+            };
+            let name = &name[..end];
+            if name != b"." && name != b".." {
+                if name.is_empty() || !name.iter().all(u8::is_ascii_digit) {
+                    unsafe { libc::close(directory) };
+                    return Err(io::Error::other(
+                        "procfs descriptor enumeration returned a nonnumeric name",
+                    ));
+                }
+                let mut fd: RawFd = 0;
+                for byte in name {
+                    fd = fd
+                        .checked_mul(10)
+                        .and_then(|value| value.checked_add(i32::from(*byte - b'0')))
+                        .ok_or_else(|| {
+                            io::Error::other(
+                                "procfs descriptor enumeration overflowed a descriptor number",
+                            )
+                        })?;
+                }
+                if fd == directory {
+                    saw_directory = true;
+                } else if fd >= 3 {
+                    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+                    if flags < 0
+                        || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+                    {
+                        let error = io::Error::last_os_error();
+                        unsafe { libc::close(directory) };
+                        return Err(error);
+                    }
+                }
+            }
+            offset += reclen;
+        }
+    }
+    unsafe { libc::close(directory) };
+    if !saw_directory {
+        return Err(io::Error::other(
+            "procfs descriptor enumeration omitted its own descriptor",
+        ));
+    }
+    Ok(())
+}
+
 fn read_bwrap_child_pid(
     reader: &mut File,
     child: &mut std::process::Child,
+) -> io::Result<libc::pid_t> {
+    read_bwrap_child_pid_until(reader, child, Instant::now() + DESCRIBE_TIMEOUT)
+}
+
+fn read_bwrap_child_pid_until(
+    reader: &mut File,
+    child: &mut std::process::Child,
+    deadline: Instant,
 ) -> io::Result<libc::pid_t> {
     #[derive(serde::Deserialize)]
     struct Info {
         #[serde(rename = "child-pid")]
         child_pid: libc::pid_t,
     }
-    let deadline = Instant::now() + DESCRIBE_TIMEOUT;
     let mut bytes = Vec::new();
     loop {
         let mut chunk = [0u8; 512];
@@ -7479,16 +8077,42 @@ fn verify_monitor_host_state(pid: libc::pid_t, bwrap_pid: u32) -> io::Result<()>
         }
     }
     match fs::read(format!("/proc/{pid}/environ")) {
-        Ok(environment) if environment.is_empty() => {}
+        // `/proc/<pid>/environ` exposes the exec-time environment memory, not
+        // libc's later `clearenv()` state. Stock Bubblewrap adds only this PWD
+        // value after `--clearenv`; the authenticated monitor clears it and
+        // verifies the live libc environment before emitting MonitorReady.
+        Ok(environment) if valid_monitor_exec_environment(&environment) => {}
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             // PR_SET_DUMPABLE=0 commonly makes this unreadable even to the
             // same-UID ancestor. MonitorReady is emitted only after the monitor
             // itself has cleared and verified the environment.
         }
-        Ok(_) => {
-            return Err(invalid_data(
-                "monitor host process environment is not empty",
-            ));
+        Ok(environment) => {
+            let entries = environment
+                .split(|byte| *byte == 0)
+                .filter(|entry| !entry.is_empty())
+                .count();
+            let first = environment
+                .split(|byte| *byte == 0)
+                .find(|entry| !entry.is_empty())
+                .unwrap_or_default();
+            let key_bytes = first
+                .iter()
+                .position(|byte| *byte == b'=')
+                .map_or(first, |equals| &first[..equals]);
+            let pwd_prefix = environment.starts_with(b"PWD=/\0");
+            let zero_suffix = pwd_prefix && environment[b"PWD=/\0".len()..].iter().all(|b| *b == 0);
+            return Err(invalid_data(format!(
+                "monitor host process environment is not empty (bytes={}, entries={entries}, key-bytes={}, pwd-key={}, path-key={}, glibc-key={}, ld-library-key={}, bwrap-key={}, nub-key={}, pwd-prefix={pwd_prefix}, zero-suffix={zero_suffix})",
+                environment.len(),
+                key_bytes.len(),
+                key_bytes == b"PWD",
+                key_bytes == b"PATH",
+                key_bytes == b"GLIBC_TUNABLES",
+                key_bytes == b"LD_LIBRARY_PATH",
+                key_bytes.starts_with(b"BWRAP"),
+                key_bytes.starts_with(b"NUB"),
+            )));
         }
         Err(error) => return Err(error),
     }
@@ -7505,6 +8129,10 @@ fn verify_monitor_host_state(pid: libc::pid_t, bwrap_pid: u32) -> io::Result<()>
     Ok(())
 }
 
+fn valid_monitor_exec_environment(environment: &[u8]) -> bool {
+    environment.is_empty() || environment == b"PWD=/\0"
+}
+
 fn read_unique_monitor_child(monitor_pid: libc::pid_t) -> io::Result<libc::pid_t> {
     let children = fs::read_to_string(format!("/proc/{monitor_pid}/task/{monitor_pid}/children"))?;
     let children = children
@@ -7519,37 +8147,6 @@ fn read_unique_monitor_child(monitor_pid: libc::pid_t) -> io::Result<libc::pid_t
         [pid] if *pid > 0 => Ok(*pid),
         _ => Err(invalid_data(
             "monitor does not have exactly one stopped target child",
-        )),
-    }
-}
-
-fn pin_optional_monitor_child(
-    monitor_pid: libc::pid_t,
-    expected_starttime: u64,
-) -> io::Result<Option<HostProcessPin>> {
-    let children =
-        match fs::read_to_string(format!("/proc/{monitor_pid}/task/{monitor_pid}/children")) {
-            Ok(children) => children,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-    let children = children
-        .split_ascii_whitespace()
-        .map(|value| {
-            value
-                .parse::<libc::pid_t>()
-                .map_err(|_| invalid_data("monitor child list contains an invalid PID"))
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    match children.as_slice() {
-        [] => Ok(None),
-        [pid] if *pid > 0 => pin_host_process_if_same(HostProcessIdentity {
-            pid: *pid,
-            starttime: expected_starttime,
-        })
-        .map(Some),
-        _ => Err(invalid_data(
-            "monitor has more than one target child during teardown",
         )),
     }
 }
@@ -7590,7 +8187,6 @@ fn duplicate_target_exec_error_writer(pid: libc::pid_t) -> io::Result<File> {
 #[derive(Debug, Clone, Copy)]
 enum ExpectedTargetState {
     Stopped,
-    Sleeping,
     Live,
 }
 
@@ -7638,9 +8234,7 @@ fn verify_target_host_state(
     let fields = stat[close + 2..].split_whitespace().collect::<Vec<_>>();
     let pid_text = pid.to_string();
     let state_valid = match (expected_state, fields.first().copied()) {
-        (ExpectedTargetState::Stopped, Some("T")) | (ExpectedTargetState::Sleeping, Some("S")) => {
-            true
-        }
+        (ExpectedTargetState::Stopped, Some("T" | "t")) => true,
         (ExpectedTargetState::Live, Some(state)) => !matches!(state, "T" | "t" | "Z" | "X"),
         _ => false,
     };
@@ -7665,38 +8259,13 @@ fn verify_target_host_state(
     Ok(())
 }
 
-fn open_pidfd_if_supported(pid: libc::pid_t) -> io::Result<Option<OwnedFd>> {
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) as RawFd };
-    if fd >= 0 {
-        return Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }));
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ENOSYS) {
-        Ok(None)
-    } else {
-        Err(error)
-    }
-}
-
 fn wait_for_host_target_exit(
     pid: libc::pid_t,
     starttime: u64,
-    pidfd: Option<&OwnedFd>,
     timeout: Duration,
 ) -> io::Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(pidfd) = pidfd {
-            let mut pollfd = libc::pollfd {
-                fd: pidfd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
-            if result < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
         match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Err(error) if process_disappeared(&error) => return Ok(()),
             Err(error) => return Err(error),
@@ -8050,7 +8619,7 @@ mod tests {
             },
             build_marker: [11; 32],
             runtime_objects: vec![RuntimeObject {
-                path: PathBuf::from("/run/nub-sandbox/runtime/nub-monitor"),
+                path: PathBuf::from("/dev/.nub-sandbox/runtime/nub-monitor"),
                 identity: FileIdentity {
                     dev: 1,
                     ino: 2,
@@ -8071,6 +8640,7 @@ mod tests {
             hold_after_runtime_cleanup_for_harness: false,
             hold_after_target_exited_for_harness: false,
             fail_outer_status_after_cleanup_for_harness: false,
+            hold_after_completion_request_for_harness: false,
         }
     }
 
@@ -8110,6 +8680,7 @@ mod tests {
         value.hold_after_runtime_cleanup_for_harness = true;
         value.hold_after_target_exited_for_harness = true;
         value.fail_outer_status_after_cleanup_for_harness = true;
+        value.hold_after_completion_request_for_harness = true;
         assert_eq!(
             BootstrapSpec::decode(&value.encode().unwrap()).unwrap(),
             value
@@ -8248,6 +8819,80 @@ mod tests {
             receive_signal_relay_record(reader.as_raw_fd(), 0, Instant::now() + DESCRIBE_TIMEOUT,)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn production_signal_relay_serializes_callbacks_and_poison_is_permanent() {
+        let (reader, writer) = signal_relay_pipe_files().unwrap();
+        let relay = SignalRelay::new(writer);
+        let callback = relay.callback();
+        callback(libc::SIGINT).unwrap();
+        callback(libc::SIGTERM).unwrap();
+        assert_eq!(
+            receive_signal_relay_record(reader.as_raw_fd(), 0, Instant::now() + DESCRIBE_TIMEOUT,)
+                .unwrap()
+                .unwrap(),
+            SignalRelayRecord {
+                sequence: 0,
+                signal: libc::SIGINT,
+            }
+        );
+        assert_eq!(
+            receive_signal_relay_record(reader.as_raw_fd(), 1, Instant::now() + DESCRIBE_TIMEOUT,)
+                .unwrap()
+                .unwrap(),
+            SignalRelayRecord {
+                sequence: 1,
+                signal: libc::SIGTERM,
+            }
+        );
+
+        let first = relay.forward(libc::SIGKILL).unwrap_err();
+        assert_eq!(first.kind(), io::ErrorKind::BrokenPipe);
+        assert!(first.to_string().contains("failed permanently"));
+        let second = relay.forward(libc::SIGCONT).unwrap_err();
+        assert_eq!(second.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(first.to_string(), second.to_string());
+    }
+
+    #[test]
+    fn production_signal_relay_disarm_keeps_writer_until_terminal_close() {
+        let (reader, writer) = signal_relay_pipe_files().unwrap();
+        let relay = SignalRelay::new(writer);
+        relay.disarm();
+        let retired = relay.forward(libc::SIGTERM).unwrap_err();
+        assert_eq!(retired.kind(), io::ErrorKind::NotConnected);
+        assert_eq!(retired.to_string(), "sandbox signal relay is retired");
+        assert_eq!(
+            receive_signal_relay_record(reader.as_raw_fd(), 0, Instant::now() + DESCRIBE_TIMEOUT,)
+                .unwrap(),
+            None
+        );
+        relay.close();
+        assert!(
+            receive_signal_relay_record(reader.as_raw_fd(), 0, Instant::now() + DESCRIBE_TIMEOUT,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn private_runtime_root_is_reserved_below_fresh_dev() {
+        assert_eq!(PRIVATE_RUNTIME_ROOT, "/dev/.nub-sandbox/runtime");
+        assert!(valid_private_runtime_path(Path::new(
+            "/dev/.nub-sandbox/runtime/nub-monitor"
+        )));
+        assert!(!valid_private_runtime_path(Path::new(
+            "/run/other/nub-monitor"
+        )));
+    }
+
+    #[test]
+    fn monitor_exec_environment_accepts_only_stock_bwrap_pwd() {
+        assert!(valid_monitor_exec_environment(b""));
+        assert!(valid_monitor_exec_environment(b"PWD=/\0"));
+        assert!(!valid_monitor_exec_environment(b"PWD=/tmp\0"));
+        assert!(!valid_monitor_exec_environment(b"PWD=/\0PATH=/bin\0"));
+        assert!(!valid_monitor_exec_environment(b"PWD=/\0\0"));
     }
 
     #[test]
@@ -8847,7 +9492,7 @@ mod tests {
     #[test]
     fn runtime_marker_is_order_independent_and_detects_manifest_tampering() {
         let first = RuntimeObject {
-            path: PathBuf::from("/run/nub-sandbox/runtime/nub-monitor"),
+            path: PathBuf::from("/dev/.nub-sandbox/runtime/nub-monitor"),
             identity: FileIdentity {
                 dev: 1,
                 ino: 2,
@@ -8855,7 +9500,7 @@ mod tests {
             },
         };
         let second = RuntimeObject {
-            path: PathBuf::from("/run/nub-sandbox/runtime/ld.so"),
+            path: PathBuf::from("/dev/.nub-sandbox/runtime/ld.so"),
             identity: FileIdentity {
                 dev: 4,
                 ino: 5,

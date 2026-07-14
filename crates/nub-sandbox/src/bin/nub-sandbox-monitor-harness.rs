@@ -150,81 +150,6 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("exercise-state-7-parent-death") => {
-            let bwrap = std::env::args_os()
-                .nth(2)
-                .unwrap_or_else(|| "/usr/bin/bwrap".into());
-            match nub_sandbox::exercise_monitor_state_7_parent_death(&runtime, bwrap) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => {
-                    eprintln!("sandbox monitor state-7 parent-death proof failed: {error}");
-                    ExitCode::from(125)
-                }
-            }
-        }
-        Some("exercise-outer-parent-death-child") => {
-            let bwrap = std::env::args_os()
-                .nth(2)
-                .unwrap_or_else(|| "/usr/bin/bwrap".into());
-            let Some(report_path) = std::env::args_os().nth(3) else {
-                return ExitCode::from(2);
-            };
-            match nub_sandbox::exercise_monitor_outer_parent_death_child(
-                &runtime,
-                bwrap,
-                report_path,
-            ) {
-                Ok(()) => ExitCode::from(124),
-                Err(error) => {
-                    eprintln!("sandbox monitor parent-death child failed: {error}");
-                    ExitCode::from(125)
-                }
-            }
-        }
-        Some("exercise-outer-parent-death-state-6-child") => {
-            let bwrap = std::env::args_os()
-                .nth(2)
-                .unwrap_or_else(|| "/usr/bin/bwrap".into());
-            let Some(report_path) = std::env::args_os().nth(3) else {
-                return ExitCode::from(2);
-            };
-            match nub_sandbox::exercise_monitor_outer_parent_death_state_6_child(
-                &runtime,
-                bwrap,
-                report_path,
-            ) {
-                Ok(()) => ExitCode::from(124),
-                Err(error) => {
-                    eprintln!("sandbox monitor state-6 parent-death child failed: {error}");
-                    ExitCode::from(125)
-                }
-            }
-        }
-        Some("exercise-outer-parent-death-state-7-before-child")
-        | Some("exercise-outer-parent-death-state-7-after-child") => {
-            let after_request = matches!(
-                verb.as_deref(),
-                Some("exercise-outer-parent-death-state-7-after-child")
-            );
-            let bwrap = std::env::args_os()
-                .nth(2)
-                .unwrap_or_else(|| "/usr/bin/bwrap".into());
-            let Some(report_path) = std::env::args_os().nth(3) else {
-                return ExitCode::from(2);
-            };
-            match nub_sandbox::exercise_monitor_outer_parent_death_state_7_child(
-                &runtime,
-                bwrap,
-                report_path,
-                after_request,
-            ) {
-                Ok(()) => ExitCode::from(124),
-                Err(error) => {
-                    eprintln!("sandbox monitor state-7 parent-death child failed: {error}");
-                    ExitCode::from(125)
-                }
-            }
-        }
         _ => ExitCode::from(2),
     }
 }
@@ -244,15 +169,21 @@ fn target_exec_descendants() -> ExitCode {
     if !target_exec_context_is_exact("target-exec-descendants") {
         return ExitCode::from(124);
     }
-    if !mark_runtime_ready() {
-        return ExitCode::from(120);
+    let mut ready = [-1; 2];
+    if unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return ExitCode::from(123);
     }
     let child = unsafe { libc::fork() };
     if child < 0 {
+        unsafe {
+            libc::close(ready[0]);
+            libc::close(ready[1]);
+        }
         return ExitCode::from(123);
     }
     if child == 0 {
         unsafe {
+            libc::close(ready[0]);
             if libc::setsid() < 0 {
                 libc::_exit(122);
             }
@@ -261,10 +192,27 @@ fn target_exec_descendants() -> ExitCode {
                 libc::_exit(121);
             }
             if grandchild == 0 {
+                libc::close(ready[1]);
                 park_raw();
             }
+            let marker = [1_u8];
+            if libc::write(ready[1], marker.as_ptr().cast(), marker.len()) != 1 {
+                libc::_exit(119);
+            }
+            libc::close(ready[1]);
             park_raw();
         }
+    }
+    unsafe {
+        libc::close(ready[1]);
+    }
+    let mut marker = [0_u8];
+    let observed = unsafe { libc::read(ready[0], marker.as_mut_ptr().cast(), marker.len()) };
+    unsafe {
+        libc::close(ready[0]);
+    }
+    if observed != 1 || marker != [1] || !mark_runtime_ready() {
+        return ExitCode::from(120);
     }
     loop {
         std::thread::park();
@@ -403,7 +351,7 @@ fn target_exec_context_is_exact(verb: &str) -> bool {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     let environment = std::env::vars_os().collect::<Vec<_>>();
     arguments.len() == 2
-        && arguments[0] == "/run/nub-sandbox/runtime/nub-monitor"
+        && arguments[0] == "/dev/.nub-sandbox/runtime/nub-monitor"
         && arguments[1] == verb
         && std::env::current_dir().is_ok_and(|path| path == std::path::Path::new("/"))
         && environment

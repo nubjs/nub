@@ -89,9 +89,14 @@ fn libc_enomem() -> i32 {
 /// e.g. `kill -USR2 <nub>` writes a diagnostic report in the child and both
 /// processes stay alive — exactly as if `node` had received the signal directly.
 #[cfg(unix)]
+pub type SignalForwardCallback =
+    std::sync::Arc<dyn Fn(i32) -> std::io::Result<()> + Send + Sync + 'static>;
+
+#[cfg(unix)]
 mod ctrl_c {
-    use std::sync::Once;
-    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+    use super::SignalForwardCallback;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Mutex, Once, OnceLock};
 
     // The forward TARGET, as the argument to `kill(2)`: a POSITIVE pid signals one
     // process (the file-run path's `node`, which IS the leaf); a NEGATIVE value
@@ -100,7 +105,14 @@ mod ctrl_c {
     // it forks — a non-interactive `sh -c` does NOT relay signals to a forked
     // child, so single-pid delivery left the workload orphaned under dash). 0 = no
     // child tracked.
-    static CURRENT_TARGET: AtomicI32 = AtomicI32::new(0);
+    #[derive(Clone)]
+    enum SignalDestination {
+        None,
+        Direct(i32),
+        Callback(SignalForwardCallback),
+    }
+
+    static CURRENT_DESTINATION: OnceLock<Mutex<SignalDestination>> = OnceLock::new();
     static REGISTERED: Once = Once::new();
     static QUEUE_WITHOUT_TARGET: AtomicBool = AtomicBool::new(false);
     static PENDING_SIGNALS: AtomicU64 = AtomicU64::new(0);
@@ -118,6 +130,23 @@ mod ctrl_c {
     // its own SIGINT isn't relayed to the job). SIGTERM/SIGHUP and the diagnostic
     // signals are unaffected and always forward. Reset on child exit.
     static SUPPRESS_SIGINT_FORWARD: AtomicBool = AtomicBool::new(false);
+
+    fn destination_slot() -> &'static Mutex<SignalDestination> {
+        CURRENT_DESTINATION.get_or_init(|| Mutex::new(SignalDestination::None))
+    }
+
+    fn destination() -> SignalDestination {
+        destination_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn replace_destination(destination: SignalDestination) {
+        *destination_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = destination;
+    }
 
     /// Suppress (or re-enable) forwarding of SIGINT specifically — used while the
     /// child owns the terminal foreground, where the TTY already delivers Ctrl-C to
@@ -171,24 +200,18 @@ mod ctrl_c {
                             if signo == SIGINT && SUPPRESS_SIGINT_FORWARD.load(Ordering::SeqCst) {
                                 continue;
                             }
-                            let target = CURRENT_TARGET.load(Ordering::SeqCst);
-                            if target != 0 {
-                                // SAFETY: kill(2) with a stored-live target + the received
-                                // signal. A positive target signals one process; a negative
-                                // one signals process group `-target`. Benign if the
-                                // child/group already exited (ESRCH); cleared to 0 on exit.
-                                unsafe {
-                                    libc::kill(target, signo);
-                                }
-                            } else if QUEUE_WITHOUT_TARGET.load(Ordering::SeqCst) {
+                            if deliver(signo) {
+                                continue;
+                            }
+                            if QUEUE_WITHOUT_TARGET.load(Ordering::SeqCst) {
                                 PENDING_SIGNALS.fetch_or(1u64 << signo, Ordering::SeqCst);
-                                // Close the install race: `track` may have stored the
-                                // target after this thread observed zero but before
-                                // the pending bit was published.
-                                let installed = CURRENT_TARGET.load(Ordering::SeqCst);
-                                if installed != 0 {
-                                    forward_pending(installed);
+                                // Close the publication race: a destination may have
+                                // appeared after the first lookup but before this bit.
+                                if has_destination() {
+                                    forward_pending();
                                 }
+                            } else {
+                                let _ = signal_hook::low_level::emulate_default_handler(signo);
                             }
                         }
                     });
@@ -196,24 +219,57 @@ mod ctrl_c {
         });
     }
 
-    /// Record the `kill(2)` target (see [`CURRENT_TARGET`]), registering the signal
+    /// Record the `kill(2)` target, registering the signal
     /// handler on the first call for legacy callers that did not call [`prepare`].
     /// Later calls just update the target.
     pub(super) fn track(target: i32) {
-        CURRENT_TARGET.store(target, Ordering::SeqCst);
+        replace_destination(if target == 0 {
+            SignalDestination::None
+        } else {
+            SignalDestination::Direct(target)
+        });
         install_handlers();
         if target != 0 && QUEUE_WITHOUT_TARGET.load(Ordering::SeqCst) {
-            forward_pending(target);
+            forward_pending();
         }
     }
 
-    fn forward_pending(target: i32) {
+    pub(super) fn track_callback(callback: SignalForwardCallback) {
+        replace_destination(SignalDestination::Callback(callback));
+        install_handlers();
+        if QUEUE_WITHOUT_TARGET.load(Ordering::SeqCst) {
+            forward_pending();
+        }
+    }
+
+    fn has_destination() -> bool {
+        !matches!(destination(), SignalDestination::None)
+    }
+
+    fn deliver(signo: i32) -> bool {
+        match destination() {
+            SignalDestination::Direct(target) => {
+                // A positive target signals one process; a negative target signals
+                // one process group. Preserve the legacy numeric-target contract:
+                // once selected, a concurrent child exit (ESRCH) does not make Nub
+                // take the signal's default action after its child is already gone.
+                unsafe {
+                    libc::kill(target, signo);
+                }
+                true
+            }
+            SignalDestination::Callback(callback) => callback(signo).is_ok(),
+            SignalDestination::None => false,
+        }
+    }
+
+    fn forward_pending() {
         use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2};
         let pending = PENDING_SIGNALS.swap(0, Ordering::SeqCst);
         for signo in [SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGQUIT] {
             if pending & (1u64 << signo) != 0 {
-                unsafe {
-                    libc::kill(target, signo);
+                if !deliver(signo) {
+                    let _ = signal_hook::low_level::emulate_default_handler(signo);
                 }
             }
         }
@@ -226,21 +282,24 @@ mod ctrl_c {
         // Install the handlers before the forwarding guard is returned: a signal
         // received during sandbox startup must queue here instead of taking its
         // default action and killing nub before the child target exists.
-        debug_assert_eq!(CURRENT_TARGET.load(Ordering::SeqCst), 0);
         QUEUE_WITHOUT_TARGET.store(true, Ordering::SeqCst);
+        debug_assert!(matches!(destination(), SignalDestination::None));
         install_handlers();
     }
 
     /// Clear the current target after the child exits.
     pub(super) fn untrack() {
-        CURRENT_TARGET.store(0, Ordering::SeqCst);
-        QUEUE_WITHOUT_TARGET.store(false, Ordering::SeqCst);
+        replace_destination(SignalDestination::None);
         PENDING_SIGNALS.store(0, Ordering::SeqCst);
+        QUEUE_WITHOUT_TARGET.store(false, Ordering::SeqCst);
     }
 
     #[cfg(test)]
     pub(super) fn current() -> i32 {
-        CURRENT_TARGET.load(Ordering::SeqCst)
+        match destination() {
+            SignalDestination::Direct(target) => target,
+            SignalDestination::None | SignalDestination::Callback(_) => 0,
+        }
     }
 
     #[cfg(test)]
@@ -252,6 +311,11 @@ mod ctrl_c {
     #[cfg(test)]
     pub(super) fn pending_for_test(signo: i32) -> bool {
         PENDING_SIGNALS.load(Ordering::SeqCst) & (1u64 << signo) != 0
+    }
+
+    #[cfg(test)]
+    pub(super) fn deliver_for_test(signo: i32) -> bool {
+        deliver(signo)
     }
 }
 
@@ -286,6 +350,11 @@ impl SignalForwardingGuard {
         ctrl_c::track(target);
         #[cfg(not(unix))]
         let _ = target;
+    }
+
+    #[cfg(unix)]
+    pub fn set_callback(&self, callback: SignalForwardCallback) {
+        ctrl_c::track_callback(callback);
     }
 }
 
@@ -2255,6 +2324,44 @@ mod tests {
         assert_eq!(ctrl_c::current(), -4321, "group target is the negated pid");
         untrack_child();
         assert_eq!(ctrl_c::current(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn callback_target_runs_outside_the_destination_lock() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ctrl_c::untrack();
+        let forwarding = SignalForwardingGuard::new();
+        let called = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&called);
+        forwarding.set_callback(Arc::new(move |signal| {
+            assert_eq!(signal, libc::SIGTERM);
+            observed.store(true, Ordering::SeqCst);
+            // Replacing the destination from inside the callback would deadlock if
+            // delivery invoked it while holding the callback-slot mutex.
+            ctrl_c::track(0);
+            Ok(())
+        }));
+        assert!(ctrl_c::deliver_for_test(libc::SIGTERM));
+        assert!(called.load(Ordering::SeqCst));
+        drop(forwarding);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_or_missing_callback_is_not_reported_as_delivered() {
+        use std::sync::Arc;
+
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ctrl_c::untrack();
+        let forwarding = SignalForwardingGuard::new();
+        assert!(!ctrl_c::deliver_for_test(libc::SIGTERM));
+        forwarding.set_callback(Arc::new(|_| Err(std::io::Error::other("relay closed"))));
+        assert!(!ctrl_c::deliver_for_test(libc::SIGTERM));
+        drop(forwarding);
     }
 
     #[cfg(unix)]

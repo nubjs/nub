@@ -102,16 +102,14 @@ pub mod policy;
 pub mod proxy;
 
 pub use backend::{
-    CommandSpec, Degradation, Prepared, PreparedChild, RuntimeCapability, apply,
-    apply_with_runtime, earliest_bootstrap,
+    CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget, RuntimeCapability,
+    apply, apply_with_runtime, earliest_bootstrap,
 };
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub use backend::{
-    exercise_monitor_outer_parent_death_child, exercise_monitor_outer_parent_death_state_6_child,
-    exercise_monitor_outer_parent_death_state_7_child, exercise_monitor_state_6,
-    exercise_monitor_state_7, exercise_monitor_state_7_parent_death, exercise_monitor_state_8,
-    exercise_monitor_states_1_to_5,
+    PreparedSignalCallback, exercise_monitor_state_6, exercise_monitor_state_7,
+    exercise_monitor_state_8, exercise_monitor_states_1_to_5,
 };
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, compile, compile_with_warnings,

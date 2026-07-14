@@ -42,11 +42,8 @@ mod linux_monitor;
 
 #[cfg(target_os = "linux")]
 pub use linux_monitor::{
-    RuntimeCapability, earliest_bootstrap, exercise_monitor_outer_parent_death_child,
-    exercise_monitor_outer_parent_death_state_6_child,
-    exercise_monitor_outer_parent_death_state_7_child, exercise_monitor_state_6,
-    exercise_monitor_state_7, exercise_monitor_state_7_parent_death, exercise_monitor_state_8,
-    exercise_monitor_states_1_to_5,
+    RuntimeCapability, earliest_bootstrap, exercise_monitor_state_6, exercise_monitor_state_7,
+    exercise_monitor_state_8, exercise_monitor_states_1_to_5,
 };
 
 /// Non-Linux embedders keep the same explicit startup/apply seam without carrying
@@ -179,9 +176,9 @@ pub struct Prepared {
     /// Keeping them here guarantees they remain open until `command` is spawned.
     #[cfg(target_os = "linux")]
     pub(crate) _inherited_files: Vec<std::fs::File>,
-    /// Stock-Bubblewrap startup handshake and the expected inner process view.
+    /// One-shot authority for the authenticated Linux PID-1 monitor launch.
     #[cfg(target_os = "linux")]
-    pub(crate) supervision: Option<linux::LinuxSupervision>,
+    pub(crate) retained_monitor: Option<linux_monitor::RetainedMonitorLaunch>,
     /// Windows AppContainer launch plan — the backend owns spawn+wait+teardown when
     /// this is `Some`. Absent (or on other OSes) → [`Prepared::status`] spawns
     /// `command`.
@@ -200,40 +197,98 @@ pub struct PreparedChild {
     child: Option<std::process::Child>,
     child_id: u32,
     #[cfg(unix)]
-    signal_target: i32,
+    signal_target: Option<i32>,
+    #[cfg(target_os = "linux")]
+    retained_monitor: Option<linux_monitor::RetainedMonitorSession>,
     _proxy: Option<EgressProxy>,
     _private_tmp: Option<tempfile::TempDir>,
 }
+
+/// The signal destination authenticated during [`Prepared::spawn_with_signal_target`].
+#[doc(hidden)]
+pub enum PreparedSignalTarget {
+    Direct(i32),
+    #[cfg(target_os = "linux")]
+    Callback(PreparedSignalCallback),
+}
+
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub type PreparedSignalCallback =
+    Arc<dyn Fn(libc::c_int) -> std::io::Result<()> + Send + Sync + 'static>;
 
 impl PreparedChild {
     pub fn id(&self) -> u32 {
         self.child_id
     }
 
-    /// The exact `kill(2)` target: a positive process or a negative process group.
-    #[cfg(unix)]
-    #[doc(hidden)]
-    pub fn unix_signal_target(&self) -> i32 {
-        self.signal_target
-    }
-
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        let status = self
+        let child = self
             .child
             .as_mut()
-            .ok_or_else(|| prepared_child_reaped_error("wait"))?
-            .wait()?;
-        self.child.take();
-        self.release_resources();
-        Ok(status)
+            .ok_or_else(|| prepared_child_reaped_error("wait"))?;
+        #[cfg(target_os = "linux")]
+        let result = match self.retained_monitor.as_mut() {
+            Some(session) => session.wait(child),
+            None => wait_child_eintr(child),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let result = wait_child_eintr(child);
+        #[cfg(target_os = "linux")]
+        let cleanup_complete = self
+            .retained_monitor
+            .as_ref()
+            .is_some_and(linux_monitor::RetainedMonitorSession::cleanup_complete);
+        #[cfg(not(target_os = "linux"))]
+        let cleanup_complete = false;
+        if result.is_ok() || cleanup_complete {
+            self.child.take();
+            #[cfg(target_os = "linux")]
+            self.retained_monitor.take();
+            self.release_resources();
+        }
+        result
     }
 
     pub fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
+        use std::io::Read;
+
         let child = self
             .child
-            .take()
+            .as_mut()
             .ok_or_else(|| prepared_child_reaped_error("capture output from"))?;
-        child.wait_with_output()
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout = std::thread::Builder::new()
+            .name("nub-sandbox-stdout".into())
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = stdout {
+                    pipe.read_to_end(&mut bytes)?;
+                }
+                Ok::<_, std::io::Error>(bytes)
+            })?;
+        let stderr = std::thread::Builder::new()
+            .name("nub-sandbox-stderr".into())
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = stderr {
+                    pipe.read_to_end(&mut bytes)?;
+                }
+                Ok::<_, std::io::Error>(bytes)
+            })?;
+        let status = self.wait();
+        let stdout = stdout
+            .join()
+            .map_err(|_| std::io::Error::other("sandbox stdout drain thread panicked"))??;
+        let stderr = stderr
+            .join()
+            .map_err(|_| std::io::Error::other("sandbox stderr drain thread panicked"))??;
+        Ok(std::process::Output {
+            status: status?,
+            stdout,
+            stderr,
+        })
     }
 
     fn release_resources(&mut self) {
@@ -251,22 +306,30 @@ fn prepared_child_reaped_error(operation: &str) -> std::io::Error {
 
 impl Drop for PreparedChild {
     fn drop(&mut self) {
-        let Some(child) = self.child.take() else {
+        let Some(mut child) = self.child.take() else {
             return;
         };
+        #[cfg(target_os = "linux")]
+        if let Some(mut session) = self.retained_monitor.take() {
+            if let Err(error) = session.fail_closed(&mut child) {
+                eprintln!("fatal: retained sandbox cleanup failed: {error}");
+                std::process::abort();
+            }
+            return;
+        }
         #[cfg(unix)]
-        kill_and_reap(child, self.signal_target);
+        kill_and_reap(&mut child, self.signal_target);
         #[cfg(not(unix))]
-        kill_and_reap(child);
+        kill_and_reap(&mut child);
     }
 }
 
 #[cfg(unix)]
-fn kill_and_reap(mut child: std::process::Child, signal_target: i32) {
-    if child.try_wait().ok().flatten().is_some() {
+fn kill_and_reap(child: &mut std::process::Child, signal_target: Option<i32>) {
+    if try_wait_child_eintr(child).ok().flatten().is_some() {
         return;
     }
-    if signal_target != 0 {
+    if let Some(signal_target) = signal_target.filter(|target| *target != 0) {
         unsafe {
             libc::kill(signal_target, libc::SIGKILL);
         }
@@ -274,7 +337,7 @@ fn kill_and_reap(mut child: std::process::Child, signal_target: i32) {
         // launcher immediately can orphan the target as a host-visible zombie.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            if child.try_wait().ok().flatten().is_some() {
+            if try_wait_child_eintr(child).ok().flatten().is_some() {
                 return;
             }
             if std::time::Instant::now() >= deadline {
@@ -284,15 +347,35 @@ fn kill_and_reap(mut child: std::process::Child, signal_target: i32) {
         }
     }
     let _ = child.kill();
-    let _ = child.wait();
+    let _ = wait_child_eintr(child);
 }
 
 #[cfg(not(unix))]
-fn kill_and_reap(mut child: std::process::Child) {
-    if child.try_wait().ok().flatten().is_none() {
+fn kill_and_reap(child: &mut std::process::Child) {
+    if try_wait_child_eintr(child).ok().flatten().is_none() {
         let _ = child.kill();
     }
-    let _ = child.wait();
+    let _ = wait_child_eintr(child);
+}
+
+fn wait_child_eintr(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    loop {
+        match child.wait() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
+fn try_wait_child_eintr(
+    child: &mut std::process::Child,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    loop {
+        match child.try_wait() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
 }
 
 impl Prepared {
@@ -306,7 +389,7 @@ impl Prepared {
     #[doc(hidden)]
     pub fn spawn_with_signal_target(
         mut self,
-        ready: impl FnOnce(i32) -> std::io::Result<()>,
+        ready: impl FnOnce(PreparedSignalTarget) -> std::io::Result<()>,
     ) -> std::io::Result<PreparedChild> {
         #[cfg(target_os = "windows")]
         if self.launch.is_some() {
@@ -323,59 +406,56 @@ impl Prepared {
         #[cfg(target_os = "linux")]
         self._inherited_files.clear();
         #[cfg(target_os = "linux")]
-        let signal_target = match self.supervision.take() {
-            Some(mut supervision) => match supervision.verify(&mut child) {
-                Ok(reaper_pid) => {
-                    let target_pid = match supervision.release_and_verify(&mut child, reaper_pid) {
-                        Ok(target_pid) => target_pid,
-                        Err(error) => {
-                            kill_and_reap(child, -reaper_pid);
-                            return Err(error);
-                        }
-                    };
-                    let target = -target_pid;
-                    if let Err(error) = ready(target) {
-                        kill_and_reap(child, target);
+        let (launched_child, child_id, signal_target, retained_monitor) =
+            match self.retained_monitor.take() {
+                Some(launch) => {
+                    let (mut outer, mut session) = launch.start(child)?;
+                    let child_id = session.target_pid() as u32;
+                    if let Err(error) =
+                        ready(PreparedSignalTarget::Callback(session.signal_callback()))
+                    {
+                        return match session.fail_closed(&mut outer) {
+                            Ok(()) => Err(error),
+                            Err(cleanup) => Err(std::io::Error::new(
+                                error.kind(),
+                                format!("{error}; retained sandbox cleanup also failed: {cleanup}"),
+                            )),
+                        };
+                    }
+                    (outer, child_id, None, Some(session))
+                }
+                None => {
+                    let target = child.id() as i32;
+                    if let Err(error) = ready(PreparedSignalTarget::Direct(target)) {
+                        kill_and_reap(&mut child, Some(target));
                         return Err(error);
                     }
-                    if let Err(error) = supervision.resume(target_pid) {
-                        kill_and_reap(child, target);
-                        return Err(error);
-                    }
-                    target
+                    let child_id = child.id();
+                    (child, child_id, Some(target), None)
                 }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
-            },
-            None => {
-                let target = child.id() as i32;
-                if let Err(error) = ready(target) {
-                    kill_and_reap(child, target);
-                    return Err(error);
-                }
-                target
-            }
-        };
+            };
+        #[cfg(target_os = "linux")]
+        let child = launched_child;
         #[cfg(all(unix, not(target_os = "linux")))]
         let signal_target = {
             let target = child.id() as i32;
-            if let Err(error) = ready(target) {
-                kill_and_reap(child, target);
+            if let Err(error) = ready(PreparedSignalTarget::Direct(target)) {
+                kill_and_reap(&mut child, Some(target));
                 return Err(error);
             }
-            target
+            Some(target)
         };
         #[cfg(not(unix))]
         let _ = ready;
+        #[cfg(not(target_os = "linux"))]
         let child_id = child.id();
         Ok(PreparedChild {
             child: Some(child),
             child_id,
             #[cfg(unix)]
             signal_target,
+            #[cfg(target_os = "linux")]
+            retained_monitor,
             _proxy: self.proxy.take(),
             _private_tmp: self._private_tmp.take(),
         })
@@ -606,7 +686,7 @@ fn apply_inner(
     }
     validate_apply_inputs(policy, &spec)?;
     #[cfg(target_os = "linux")]
-    linux::preflight_process(policy, &spec)?;
+    let linux_preflight = linux::preflight(policy, &spec, runtime)?;
     // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
     // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
     // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`
@@ -617,10 +697,21 @@ fn apply_inner(
     // presence as `proxy_port` (both derive from `proxy`), threaded into each backend so
     // the child authenticates to the loopback proxy.
     let proxy_token = proxy.as_ref().map(EgressProxy::token);
-    // The child CA-bundle path, when TLS termination engaged. Threaded into each backend
-    // so the child both TRUSTS the minted leaves (CA-env) and can READ the bundle even
-    // under a confining fs policy (an explicit read grant — nub infra, not user config).
+    // The child CA bundle, when TLS termination engaged. Linux receives the proxy's
+    // sealed descriptor; other backends receive its ephemeral path.
+    #[cfg(not(target_os = "linux"))]
     let ca_bundle = proxy.as_ref().and_then(|p| p.ca_bundle_path());
+    #[cfg(target_os = "linux")]
+    let ca_bundle = proxy
+        .as_ref()
+        .map(EgressProxy::ca_bundle_file)
+        .transpose()
+        .map_err(|error| Degradation {
+            lost: vec!["net-per-host".to_string()],
+            reason: Some(format!("cloning sealed CA bundle: {error}")),
+        })?
+        .flatten();
+    let ca_bundle_present = ca_bundle.is_some();
 
     // Create the fresh per-run PRIVATE tmp dir up front (when the policy asks), so its
     // path is threaded into the backend BEFORE the child profile is built — the backend
@@ -641,6 +732,7 @@ fn apply_inner(
         ca_bundle,
         tmp_dir,
         runtime,
+        linux_preflight,
     )?;
     #[cfg(target_os = "windows")]
     let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
@@ -651,7 +743,7 @@ fn apply_inner(
     // never MISLEADING either: suppress it where the backend degraded net (e.g. Windows,
     // whose AppContainer child can't reach the loopback proxy, so termination never
     // happens and the request is fail-safe denied — announcing it would be a false claim).
-    if ca_bundle.is_some()
+    if ca_bundle_present
         && !prepared
             .degradation
             .lost

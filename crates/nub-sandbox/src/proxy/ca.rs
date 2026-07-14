@@ -27,6 +27,8 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::{fs::File, os::fd::FromRawFd, os::fd::RawFd};
 
 /// The per-run ephemeral CA plus the child trust bundle it anchors.
 pub(super) struct MitmCa {
@@ -41,6 +43,10 @@ pub(super) struct MitmCa {
     /// certs — never the CA key.
     _bundle: tempfile::NamedTempFile,
     bundle_path: PathBuf,
+    /// Linux launches consume an immutable descriptor instead of reopening the
+    /// same-user-writable temporary pathname during Bubblewrap setup.
+    #[cfg(target_os = "linux")]
+    bundle_file: File,
 }
 
 impl MitmCa {
@@ -67,20 +73,30 @@ impl MitmCa {
             ));
         }
 
-        let bundle = write_bundle(&ca_cert, &native_roots)?;
+        let bytes = bundle_bytes(&ca_cert, &native_roots);
+        let bundle = write_bundle(&bytes)?;
         let bundle_path = bundle.path().to_path_buf();
+        #[cfg(target_os = "linux")]
+        let bundle_file = sealed_bundle_file(&bytes)?;
         Ok(MitmCa {
             ca_cert,
             ca_key,
             native_roots,
             _bundle: bundle,
             bundle_path,
+            #[cfg(target_os = "linux")]
+            bundle_file,
         })
     }
 
     /// The child-scoped CA-bundle path (what the CA-env vars point at).
     pub(super) fn bundle_path(&self) -> &Path {
         &self.bundle_path
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn bundle_file(&self) -> io::Result<File> {
+        self.bundle_file.try_clone()
     }
 
     /// The real platform roots — the proxy's upstream leg verifies against these.
@@ -112,24 +128,51 @@ impl MitmCa {
 
 /// Write the child trust bundle (CA cert + real roots, all PUBLIC) to a temp file the
 /// `NamedTempFile` owns. On Unix the file is 0600 (mkstemp); it is removed on drop.
-fn write_bundle(
-    ca_cert: &Certificate,
-    roots: &[CertificateDer<'static>],
-) -> io::Result<tempfile::NamedTempFile> {
+fn bundle_bytes(ca_cert: &Certificate, roots: &[CertificateDer<'static>]) -> Vec<u8> {
+    let mut bytes = ca_cert.pem().into_bytes();
+    bytes.push(b'\n');
+    for der in roots {
+        let block = pem::encode(&pem::Pem::new("CERTIFICATE", der.as_ref().to_vec()));
+        bytes.extend_from_slice(block.as_bytes());
+        bytes.push(b'\n');
+    }
+    bytes
+}
+
+fn write_bundle(bytes: &[u8]) -> io::Result<tempfile::NamedTempFile> {
     use std::io::Write;
     let mut f = tempfile::Builder::new()
         .prefix("nub-mitm-ca-")
         .suffix(".pem")
         .tempfile()?;
-    f.write_all(ca_cert.pem().as_bytes())?;
-    f.write_all(b"\n")?;
-    for der in roots {
-        let block = pem::encode(&pem::Pem::new("CERTIFICATE", der.as_ref().to_vec()));
-        f.write_all(block.as_bytes())?;
-        f.write_all(b"\n")?;
-    }
+    f.write_all(bytes)?;
     f.flush()?;
     Ok(f)
+}
+
+#[cfg(target_os = "linux")]
+fn sealed_bundle_file(bytes: &[u8]) -> io::Result<File> {
+    use std::io::{Seek, Write};
+    use std::os::fd::AsRawFd;
+
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            c"nub-ca-bundle".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as RawFd
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(bytes)?;
+    file.rewind()?;
+    let required = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, required) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
 }
 
 fn mint_err(e: rcgen::Error) -> io::Error {
@@ -170,6 +213,23 @@ mod tests {
             !path.exists(),
             "the ephemeral CA bundle must not outlive the run"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_bundle_descriptor_is_sealed_and_matches_the_bundle() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+
+        let ca = MitmCa::generate().expect("CA generates");
+        let mut sealed = ca.bundle_file().expect("sealed descriptor clones");
+        let seals = unsafe { libc::fcntl(sealed.as_raw_fd(), libc::F_GET_SEALS) };
+        let required =
+            libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+        assert_eq!(seals & required, required);
+        let mut bytes = Vec::new();
+        sealed.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, std::fs::read(ca.bundle_path()).unwrap());
     }
 
     #[test]
