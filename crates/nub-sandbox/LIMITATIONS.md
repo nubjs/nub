@@ -6,16 +6,14 @@
 > only after a behavior probe, and each target is released only after its namespaces,
 > zero capability sets, seccomp posture, and session group are verified; per-host proxy
 > bridging is not wired and therefore fails safe to no network; denied globs are expanded
-> only across declared project/workspace/package roots at startup; and pre-existing
-> hardlink aliases remain an open research item.
+> only across declared project/workspace/package roots at startup; and an existing denied regular file with multiple hard links fails setup.
 
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
 policy reaches (a per-host net policy with no proxy → coarse deny; per-host Windows egress
 without elevation → a fail-CLOSED `Degradation` error, never a silent coarse-degrade) is
 surfaced via `Degradation`. The **within-axis over-grant**
-residuals below are a different class — documented here, NOT signalled: hardlink-to-secret,
-derive→mount TOCTOU, the macOS floating-name move-block shapes, and NAT64/6to4.
+residuals below are a different class — documented here, NOT signalled: derive→mount TOCTOU, the macOS floating-name move-block shapes, and NAT64/6to4.
 This file is the durable "what's-not-covered" record the final PR and the build-jail thread
 depend on.
 
@@ -255,10 +253,7 @@ responsibility, not an engine mechanism nub supplies.
 - **Linux deny-glob inventory is bounded.** Only current cwd, the nearest project,
   the containing workspace, and declared current-existing package roots are enumerated.
   Enumeration is immediate per root; project contents are never recursively scanned.
-- **Linux hardlink-to-secret remains under separate review.** A pre-existing hardlink
-  alias is another pathname to the same object and may remain readable when only the
-  denied pathname is masked. The production rule is deliberately deferred to the
-  dedicated hardlink decision rather than guessed here.
+- **Linux denied hardlinks fail setup.** A currently existing denied regular file with more than one hard link aborts setup rather than masking one pathname while an allowed alias can read the same bytes. The check only examines denied startup objects; it does not scan for aliases or reject unrelated dependency-store hardlinks.
 - **Linux derive→mount TOCTOU.** Mount and mask planning canonicalizes paths before
   Bubblewrap installs the view. A same-uid local process that can replace a path during
   setup could shift a target. This is bounded to a local race and is not silently claimed

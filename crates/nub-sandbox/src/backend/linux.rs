@@ -171,6 +171,12 @@ pub(crate) fn preflight(
             lost: vec!["fs-read-deny".to_string()],
             reason: Some(reason),
         })?;
+    if protects_ambient_credentials(policy) {
+        masks.extend(keyring_procfs_masks().map_err(|reason| Degradation {
+            lost: vec!["env".to_string()],
+            reason: Some(reason),
+        })?);
+    }
     masks.extend(alternate_procfs_masks().map_err(|reason| Degradation {
         lost: vec!["proc".to_string()],
         reason: Some(reason),
@@ -551,12 +557,15 @@ fn admit_bwrap_candidate(
 
     let mut failures = inventory.failures;
     for candidate in inventory.candidates {
-        let bootstrap =
-            super::linux_monitor::BootstrapSpec::candidate_probe(runtime, policy.net.enforce)
-                .map_err(|error| Degradation {
-                    lost: vec!["process-isolation".to_string()],
-                    reason: Some(format!("preparing Bubblewrap candidate probe: {error}")),
-                })?;
+        let bootstrap = super::linux_monitor::BootstrapSpec::candidate_probe(
+            runtime,
+            policy.net.enforce,
+            protects_ambient_credentials(policy),
+        )
+        .map_err(|error| Degradation {
+            lost: vec!["process-isolation".to_string()],
+            reason: Some(format!("preparing Bubblewrap candidate probe: {error}")),
+        })?;
         let retained_monitor = super::linux_monitor::RetainedMonitorLaunch::new(runtime, bootstrap)
             .map_err(|error| Degradation {
                 lost: vec!["process-isolation".to_string()],
@@ -825,6 +834,7 @@ fn collect_masks(
             ));
         }
         if verdict.effect == Effect::Deny || masks_subtree {
+            reject_denied_hardlink(&logical, &path, &metadata)?;
             masks.push(Mask {
                 path,
                 kind,
@@ -833,6 +843,29 @@ fn collect_masks(
         }
     }
     Ok(merge_masks(masks))
+}
+
+fn reject_denied_hardlink(
+    logical: &Path,
+    resolved: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), String> {
+    if !metadata.is_file() || metadata.nlink() <= 1 {
+        return Ok(());
+    }
+    let aliases = metadata.nlink();
+    if logical == resolved {
+        Err(format!(
+            "denied regular file {} has {aliases} hard links; stock Bubblewrap cannot hide its aliases",
+            logical.display()
+        ))
+    } else {
+        Err(format!(
+            "denied regular file {} resolves to {} with {aliases} hard links; stock Bubblewrap cannot hide its aliases",
+            logical.display(),
+            resolved.display()
+        ))
+    }
 }
 
 fn collect_direct_denied_candidates(
@@ -1073,6 +1106,33 @@ fn alternate_procfs_masks() -> Result<Vec<Mask>, String> {
         }
     }
     Ok(masks)
+}
+
+fn keyring_procfs_masks() -> Result<Vec<Mask>, String> {
+    ["/proc/keys", "/proc/key-users"]
+        .into_iter()
+        .map(|path| {
+            let path = PathBuf::from(path);
+            let metadata = fs::metadata(&path).map_err(|error| {
+                format!("statting keyring procfs entry {}: {error}", path.display())
+            })?;
+            if !metadata.is_file() {
+                return Err(format!(
+                    "keyring procfs entry is not a regular file: {}",
+                    path.display()
+                ));
+            }
+            Ok(Mask {
+                path,
+                kind: MaskKind::Unreadable,
+                directory: false,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn protects_ambient_credentials(policy: &SandboxPolicy) -> bool {
+    policy.env.resolved && policy.env.enforce && !policy.env.withheld.is_empty()
 }
 
 fn unescape_mountinfo_path(encoded: &str) -> Result<OsString, String> {
@@ -1551,52 +1611,91 @@ fn sealed_support_file(name: &str, bytes: &[u8]) -> std::io::Result<File> {
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 
-pub(super) fn build_network_seccomp() -> Result<BpfProgram, String> {
-    let arch = TargetArch::try_from(std::env::consts::ARCH)
-        .map_err(|e| format!("unsupported architecture for network filter: {e}"))?;
-    build_network_seccomp_for(arch, libc::SYS_socket, libc::SYS_io_uring_setup)
+struct SandboxSyscalls {
+    socket: i64,
+    io_uring_setup: i64,
+    keyctl: i64,
+    add_key: i64,
+    request_key: i64,
 }
 
-fn build_network_seccomp_for(
+pub(super) fn build_seccomp(
+    restrict_network: bool,
+    deny_keyring: bool,
+) -> Result<Option<BpfProgram>, String> {
+    if !restrict_network && !deny_keyring {
+        return Ok(None);
+    }
+    let arch = TargetArch::try_from(std::env::consts::ARCH)
+        .map_err(|e| format!("unsupported architecture for sandbox filter: {e}"))?;
+    build_seccomp_for(
+        arch,
+        restrict_network,
+        deny_keyring,
+        SandboxSyscalls {
+            socket: libc::SYS_socket,
+            io_uring_setup: libc::SYS_io_uring_setup,
+            keyctl: libc::SYS_keyctl,
+            add_key: libc::SYS_add_key,
+            request_key: libc::SYS_request_key,
+        },
+    )
+    .map(Some)
+}
+
+fn build_seccomp_for(
     arch: TargetArch,
-    socket_syscall: i64,
-    io_uring_setup_syscall: i64,
+    restrict_network: bool,
+    deny_keyring: bool,
+    syscalls: SandboxSyscalls,
 ) -> Result<BpfProgram, String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 
-    // The private network namespace handles ordinary IP traffic. AF_UNIX is listed
-    // separately because filesystem and abstract Unix sockets cross that boundary.
-    // AF_NETLINK remains available so a nested Bubblewrap can configure its own
-    // private network namespace; it cannot reach the host network from inside this one.
-    let denied_families = [
-        libc::AF_UNIX,
-        libc::AF_INET,
-        libc::AF_INET6,
-        libc::AF_PACKET,
-        libc::AF_VSOCK,
-        libc::AF_XDP,
-        libc::AF_BLUETOOTH,
-        libc::AF_RDS,
-        libc::AF_CAN,
-        libc::AF_TIPC,
-        libc::AF_IB,
-        libc::AF_NFC,
-    ];
-    let mut socket_rules = Vec::with_capacity(denied_families.len());
-    for family in denied_families {
-        socket_rules.push(
-            SeccompRule::new(vec![
-                SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, family as u64)
+    if restrict_network {
+        // The private network namespace handles ordinary IP traffic. AF_UNIX is
+        // included because filesystem and abstract sockets cross that boundary.
+        // AF_NETLINK remains available so nested Bubblewrap can configure its own
+        // private network namespace without reaching the host network.
+        let denied_families = [
+            libc::AF_UNIX,
+            libc::AF_INET,
+            libc::AF_INET6,
+            libc::AF_PACKET,
+            libc::AF_VSOCK,
+            libc::AF_XDP,
+            libc::AF_BLUETOOTH,
+            libc::AF_RDS,
+            libc::AF_CAN,
+            libc::AF_TIPC,
+            libc::AF_IB,
+            libc::AF_NFC,
+        ];
+        let mut socket_rules = Vec::with_capacity(denied_families.len());
+        for family in denied_families {
+            socket_rules.push(
+                SeccompRule::new(vec![
+                    SeccompCondition::new(
+                        0,
+                        SeccompCmpArgLen::Dword,
+                        SeccompCmpOp::Eq,
+                        family as u64,
+                    )
                     .map_err(|e| format!("network-family condition: {e}"))?,
-            ])
-            .map_err(|e| format!("network-family rule: {e}"))?,
-        );
-    }
-    rules.insert(socket_syscall, socket_rules);
+                ])
+                .map_err(|e| format!("network-family rule: {e}"))?,
+            );
+        }
+        rules.insert(syscalls.socket, socket_rules);
 
-    // io_uring can create sockets without issuing socket(2), so disabling its setup
-    // closes the alternate route whenever network access is denied.
-    rules.insert(io_uring_setup_syscall, Vec::new());
+        // io_uring can create sockets without issuing socket(2).
+        rules.insert(syscalls.io_uring_setup, Vec::new());
+    }
+
+    if deny_keyring {
+        for syscall in [syscalls.keyctl, syscalls.add_key, syscalls.request_key] {
+            rules.insert(syscall, Vec::new());
+        }
+    }
 
     let program = SeccompFilter::new(
         rules,
@@ -1604,9 +1703,9 @@ fn build_network_seccomp_for(
         SeccompAction::Errno(libc::EPERM as u32),
         arch,
     )
-    .map_err(|e| format!("building network filter: {e}"))?
+    .map_err(|e| format!("building sandbox filter: {e}"))?
     .try_into()
-    .map_err(|e| format!("compiling network filter: {e}"))?;
+    .map_err(|e| format!("compiling sandbox filter: {e}"))?;
     if arch == TargetArch::x86_64 {
         prepend_x86_64_unsupported_abi_guard(program)
     } else {
@@ -1678,7 +1777,7 @@ fn prepend_x86_64_unsupported_abi_guard(mut program: BpfProgram) -> Result<BpfPr
     let guarded_len = guard.len() + program.len();
     if guarded_len > MAX_BPF_INSTRUCTIONS {
         return Err(format!(
-            "network filter has {guarded_len} instructions, above the kernel limit of {MAX_BPF_INSTRUCTIONS}"
+            "sandbox filter has {guarded_len} instructions, above the kernel limit of {MAX_BPF_INSTRUCTIONS}"
         ));
     }
     let mut guarded = Vec::with_capacity(guarded_len);
@@ -1941,27 +2040,43 @@ mod tests {
     }
 
     #[test]
-    fn network_seccomp_rejects_unsupported_x86_abis_before_native_dispatch() {
+    fn composed_seccomp_rejects_unsupported_abis_before_native_dispatch() {
         const AUDIT_ARCH_AARCH64: u32 = 0xc000_00b7;
         const AUDIT_ARCH_RISCV64: u32 = 0xc000_00f3;
         const X86_64_SOCKET: u32 = 41;
         const X86_64_GETPID: u32 = 39;
+        const X86_64_ADD_KEY: u32 = 248;
+        const X86_64_REQUEST_KEY: u32 = 249;
+        const X86_64_KEYCTL: u32 = 250;
         const GENERIC_SOCKET: u32 = 198;
         const GENERIC_GETPID: u32 = 172;
+        const GENERIC_ADD_KEY: u32 = 217;
+        const GENERIC_REQUEST_KEY: u32 = 218;
+        const GENERIC_KEYCTL: u32 = 219;
         const IO_URING_SETUP: u32 = 425;
 
         let denied = u32::from(SeccompAction::Errno(libc::EPERM as u32));
         let allowed = u32::from(SeccompAction::Allow);
         let killed = u32::from(SeccompAction::KillProcess);
-        let x86 = build_network_seccomp_for(
+        let x86 = build_seccomp_for(
             TargetArch::x86_64,
-            i64::from(X86_64_SOCKET),
-            i64::from(IO_URING_SETUP),
+            true,
+            true,
+            SandboxSyscalls {
+                socket: i64::from(X86_64_SOCKET),
+                io_uring_setup: i64::from(IO_URING_SETUP),
+                keyctl: i64::from(X86_64_KEYCTL),
+                add_key: i64::from(X86_64_ADD_KEY),
+                request_key: i64::from(X86_64_REQUEST_KEY),
+            },
         )
         .unwrap();
         for (syscall, family) in [
             (X86_64_SOCKET, libc::AF_INET),
             (IO_URING_SETUP, 0),
+            (X86_64_KEYCTL, 0),
+            (X86_64_ADD_KEY, 0),
+            (X86_64_REQUEST_KEY, 0),
             (X86_64_SOCKET | X32_SYSCALL_BIT, libc::AF_INET),
             (X86_64_SOCKET | X32_SYSCALL_BIT, libc::AF_NETLINK),
             (IO_URING_SETUP | X32_SYSCALL_BIT, 0),
@@ -1974,7 +2089,7 @@ mod tests {
                     &seccomp_data(syscall, AUDIT_ARCH_X86_64, family as u64),
                 ),
                 denied,
-                "x86-64 syscall {syscall:#x} escaped the network filter",
+                "x86-64 syscall {syscall:#x} escaped the sandbox filter",
             );
         }
         for syscall in 512..=547 {
@@ -2007,10 +2122,17 @@ mod tests {
             (TargetArch::aarch64, AUDIT_ARCH_AARCH64),
             (TargetArch::riscv64, AUDIT_ARCH_RISCV64),
         ] {
-            let program = build_network_seccomp_for(
+            let program = build_seccomp_for(
                 arch,
-                i64::from(GENERIC_SOCKET),
-                i64::from(IO_URING_SETUP),
+                true,
+                true,
+                SandboxSyscalls {
+                    socket: i64::from(GENERIC_SOCKET),
+                    io_uring_setup: i64::from(IO_URING_SETUP),
+                    keyctl: i64::from(GENERIC_KEYCTL),
+                    add_key: i64::from(GENERIC_ADD_KEY),
+                    request_key: i64::from(GENERIC_REQUEST_KEY),
+                },
             )
             .unwrap();
             assert_eq!(
@@ -2024,6 +2146,12 @@ mod tests {
                 evaluate_bpf(&program, &seccomp_data(IO_URING_SETUP, audit_arch, 0)),
                 denied,
             );
+            for syscall in [GENERIC_KEYCTL, GENERIC_ADD_KEY, GENERIC_REQUEST_KEY] {
+                assert_eq!(
+                    evaluate_bpf(&program, &seccomp_data(syscall, audit_arch, 0)),
+                    denied,
+                );
+            }
             for syscall in [512, 547, GENERIC_SOCKET | X32_SYSCALL_BIT, u32::MAX] {
                 assert_eq!(
                     evaluate_bpf(&program, &seccomp_data(syscall, audit_arch, 0)),
@@ -2041,6 +2169,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn seccomp_dimensions_are_optional_and_union_without_overreach() {
+        const SOCKET: i64 = 41;
+        const IO_URING_SETUP: i64 = 425;
+        const KEYCTL: i64 = 250;
+        const ADD_KEY: i64 = 248;
+        const REQUEST_KEY: i64 = 249;
+        const GETPID: u32 = 39;
+        let denied = u32::from(SeccompAction::Errno(libc::EPERM as u32));
+        let allowed = u32::from(SeccompAction::Allow);
+        let killed = u32::from(SeccompAction::KillProcess);
+
+        assert!(build_seccomp(false, false).unwrap().is_none());
+        let build = |network, keyring| {
+            build_seccomp_for(
+                TargetArch::x86_64,
+                network,
+                keyring,
+                SandboxSyscalls {
+                    socket: SOCKET,
+                    io_uring_setup: IO_URING_SETUP,
+                    keyctl: KEYCTL,
+                    add_key: ADD_KEY,
+                    request_key: REQUEST_KEY,
+                },
+            )
+            .unwrap()
+        };
+        let network = build(true, false);
+        let keyring = build(false, true);
+        let union = build(true, true);
+
+        for syscall in [KEYCTL as u32, ADD_KEY as u32, REQUEST_KEY as u32] {
+            assert_eq!(
+                evaluate_bpf(&network, &seccomp_data(syscall, AUDIT_ARCH_X86_64, 0)),
+                allowed,
+            );
+            assert_eq!(
+                evaluate_bpf(&keyring, &seccomp_data(syscall, AUDIT_ARCH_X86_64, 0)),
+                denied,
+            );
+            assert_eq!(
+                evaluate_bpf(&union, &seccomp_data(syscall, AUDIT_ARCH_X86_64, 0)),
+                denied,
+            );
+        }
+        for program in [&network, &keyring, &union] {
+            assert_eq!(
+                evaluate_bpf(program, &seccomp_data(GETPID, AUDIT_ARCH_X86_64, 0)),
+                allowed,
+            );
+            assert_eq!(
+                evaluate_bpf(
+                    program,
+                    &seccomp_data(GETPID | X32_SYSCALL_BIT, AUDIT_ARCH_X86_64, 0),
+                ),
+                denied,
+            );
+            assert_eq!(
+                evaluate_bpf(program, &seccomp_data(GETPID, 0xc000_00b7, 0)),
+                killed,
+            );
+        }
+        assert_eq!(
+            evaluate_bpf(
+                &network,
+                &seccomp_data(SOCKET as u32, AUDIT_ARCH_X86_64, libc::AF_UNIX as u64),
+            ),
+            denied,
+        );
+        assert_eq!(
+            evaluate_bpf(
+                &keyring,
+                &seccomp_data(SOCKET as u32, AUDIT_ARCH_X86_64, libc::AF_UNIX as u64),
+            ),
+            allowed,
+        );
+        assert_eq!(
+            evaluate_bpf(
+                &union,
+                &seccomp_data(SOCKET as u32, AUDIT_ARCH_X86_64, libc::AF_UNIX as u64),
+            ),
+            denied,
+        );
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn installed_network_seccomp_denies_raw_x32_syscalls() {
@@ -2052,7 +2266,7 @@ mod tests {
             }
         }
 
-        let program = build_network_seccomp().unwrap();
+        let program = build_seccomp(true, false).unwrap().unwrap();
         let child = unsafe { libc::fork() };
         assert!(
             child >= 0,
@@ -2185,6 +2399,84 @@ mod tests {
         assert_eq!(masks.len(), 1);
         assert_eq!(masks[0].path, fs::canonicalize(&target).unwrap());
         assert_eq!(masks[0].kind, MaskKind::Unreadable);
+    }
+
+    #[test]
+    fn denied_regular_file_with_hardlink_alias_fails_closed() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let denied = project.join("secret.txt");
+        fs::write(&denied, "SECRET").unwrap();
+        fs::hard_link(&denied, project.join("alias.txt")).unwrap();
+        let p = policy(
+            root.path(),
+            json!({"fs": ["...", "./", format!("!{}", denied.display())]}),
+        );
+
+        let error = collect_masks(&p, std::slice::from_ref(&project)).unwrap_err();
+        assert!(error.contains(&denied.display().to_string()), "{error}");
+        assert!(error.contains("2 hard links"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn logical_dotenv_symlink_reports_hardlinked_resolved_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let target = project.join("shared-secret");
+        fs::write(&target, "SECRET").unwrap();
+        fs::hard_link(&target, project.join("shared-secret-alias")).unwrap();
+        let logical = project.join(".env");
+        symlink(&target, &logical).unwrap();
+        let p = policy(root.path(), json!({"fs": ["...", "./"]}));
+
+        let error = collect_masks(&p, std::slice::from_ref(&project)).unwrap_err();
+        assert!(error.contains(&logical.display().to_string()), "{error}");
+        assert!(error.contains(&target.display().to_string()), "{error}");
+        assert!(error.contains("2 hard links"), "{error}");
+    }
+
+    #[test]
+    fn unrelated_hardlinks_do_not_affect_a_single_link_deny() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let package_file = project.join("package-store-file");
+        fs::write(&package_file, "PACKAGE").unwrap();
+        fs::hard_link(&package_file, project.join("package-store-alias")).unwrap();
+        let denied = project.join("secret.txt");
+        fs::write(&denied, "SECRET").unwrap();
+        let p = policy(
+            root.path(),
+            json!({"fs": ["...", "./", format!("!{}", denied.display())]}),
+        );
+
+        let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
+        assert_eq!(masks.len(), 1);
+        assert_eq!(masks[0].path, denied);
+    }
+
+    #[test]
+    fn keyring_hardening_requires_a_resolved_withheld_environment_value() {
+        let mut policy = SandboxPolicy::default();
+        assert!(!protects_ambient_credentials(&policy));
+        policy.env.resolved = true;
+        policy.env.enforce = true;
+        assert!(!protects_ambient_credentials(&policy));
+        policy.env.withheld.push("TOKEN".to_string());
+        assert!(protects_ambient_credentials(&policy));
+
+        let masks = keyring_procfs_masks().unwrap();
+        assert_eq!(masks.len(), 2);
+        assert!(masks.iter().all(|mask| {
+            mask.kind == MaskKind::Unreadable
+                && !mask.directory
+                && matches!(mask.path.to_str(), Some("/proc/keys" | "/proc/key-users"))
+        }));
     }
 
     #[test]

@@ -389,6 +389,11 @@ fn candidate_probe_main() -> io::Result<()> {
         Some(value) if value == OsStr::new("full") => false,
         _ => return Err(invalid_data("candidate probe network mode is invalid")),
     };
+    let keyring_protected = match arguments.next().as_deref() {
+        Some(value) if value == OsStr::new("protected") => true,
+        Some(value) if value == OsStr::new("ambient") => false,
+        _ => return Err(invalid_data("candidate probe keyring mode is invalid")),
+    };
     if arguments.next().is_some() {
         return Err(invalid_data("candidate probe received trailing arguments"));
     }
@@ -471,11 +476,6 @@ fn candidate_probe_main() -> io::Result<()> {
                 }
             }
         }
-        if unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) } != 2 {
-            return Err(invalid_data(
-                "candidate probe restricted target omitted its seccomp filter",
-            ));
-        }
     } else {
         for (result, family) in [(unix, "AF_UNIX"), (inet, "AF_INET")] {
             match result {
@@ -490,6 +490,52 @@ fn candidate_probe_main() -> io::Result<()> {
             }
         }
     }
+    if keyring_protected {
+        for path in ["/proc/keys", "/proc/key-users"] {
+            match fs::read(path) {
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+                Err(error) => {
+                    return Err(io::Error::other(format!(
+                        "candidate probe keyring procfs mask at {path} failed unexpectedly: {error}"
+                    )));
+                }
+                Ok(_) => {
+                    return Err(invalid_data(format!(
+                        "candidate probe could read protected keyring state at {path}"
+                    )));
+                }
+            }
+        }
+        require_syscall_denied("keyctl", unsafe {
+            libc::syscall(libc::SYS_keyctl, 0, 0, 0, 0, 0)
+        })?;
+        require_syscall_denied("add_key", unsafe {
+            libc::syscall(
+                libc::SYS_add_key,
+                std::ptr::null::<libc::c_char>(),
+                std::ptr::null::<libc::c_char>(),
+                std::ptr::null::<libc::c_void>(),
+                0,
+                0,
+            )
+        })?;
+        require_syscall_denied("request_key", unsafe {
+            libc::syscall(
+                libc::SYS_request_key,
+                std::ptr::null::<libc::c_char>(),
+                std::ptr::null::<libc::c_char>(),
+                std::ptr::null::<libc::c_char>(),
+                0,
+            )
+        })?;
+    }
+    if (restricted || keyring_protected)
+        && unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) } != 2
+    {
+        return Err(invalid_data(
+            "candidate probe target omitted its required seccomp filter",
+        ));
+    }
 
     spawn_candidate_probe_tree()?;
     let name = CString::new("nub-probe-ready").expect("static probe name has no NUL");
@@ -498,6 +544,17 @@ fn candidate_probe_main() -> io::Result<()> {
     }
     loop {
         unsafe { libc::pause() };
+    }
+}
+
+fn require_syscall_denied(name: &str, result: libc::c_long) -> io::Result<()> {
+    let error = io::Error::last_os_error();
+    if result == -1 && error.raw_os_error() == Some(libc::EPERM) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "candidate probe {name} denial was unexpected: result={result}, error={error}"
+        )))
     }
 }
 
@@ -556,6 +613,7 @@ pub(crate) struct BootstrapSpec {
     pub(crate) cwd: PathBuf,
     pub(crate) env: BTreeMap<OsString, OsString>,
     pub(crate) network_filter: bool,
+    pub(crate) deny_keyring: bool,
     // A sealed, harness-only fault injection used to prove the monitor's
     // initial-stop deadline and cleanup path against a real child process.
     hold_before_initial_stop_for_harness: bool,
@@ -615,6 +673,7 @@ impl BootstrapSpec {
             cwd,
             env,
             network_filter: policy.net.enforce,
+            deny_keyring: super::linux::protects_ambient_credentials(policy),
             hold_before_initial_stop_for_harness: false,
             hold_after_exec_for_harness: false,
             hold_before_runtime_cleanup_for_harness: false,
@@ -628,6 +687,7 @@ impl BootstrapSpec {
     pub(crate) fn candidate_probe(
         runtime: &RuntimeCapability,
         network_filter: bool,
+        deny_keyring: bool,
     ) -> io::Result<Self> {
         let image = runtime.materialize()?;
         let (program, mut args) = target_probe_command(image, CANDIDATE_PROBE_SENTINEL);
@@ -635,6 +695,11 @@ impl BootstrapSpec {
             "restricted"
         } else {
             "full"
+        }));
+        args.push(OsString::from(if deny_keyring {
+            "protected"
+        } else {
+            "ambient"
         }));
         let mut session = [0u8; 32];
         let mut release = [0u8; 32];
@@ -653,6 +718,7 @@ impl BootstrapSpec {
             cwd: PathBuf::from("/"),
             env: BTreeMap::new(),
             network_filter,
+            deny_keyring,
             hold_before_initial_stop_for_harness: false,
             hold_after_exec_for_harness: false,
             hold_before_runtime_cleanup_for_harness: false,
@@ -678,6 +744,7 @@ impl BootstrapSpec {
             | (u16::from(self.hold_after_runtime_cleanup_for_harness) << 4)
             | (u16::from(self.hold_after_target_exited_for_harness) << 5)
             | (u16::from(self.fail_outer_status_after_cleanup_for_harness) << 6)
+            | (u16::from(self.deny_keyring) << 7)
             | (u16::from(self.hold_after_completion_request_for_harness) << 8);
         put_u16(&mut out, flags);
         out.extend_from_slice(&self.session);
@@ -714,7 +781,7 @@ impl BootstrapSpec {
             return Err(invalid_data("unsupported sandbox bootstrap version"));
         }
         let flags = cursor.u16()?;
-        if flags & !0b1_0111_1111 != 0 {
+        if flags & !0b1_1111_1111 != 0 {
             return Err(invalid_data("unknown sandbox bootstrap flags"));
         }
         let session = cursor.array::<32>()?;
@@ -759,6 +826,7 @@ impl BootstrapSpec {
             cwd,
             env,
             network_filter: flags & 1 != 0,
+            deny_keyring: flags & 128 != 0,
             hold_before_initial_stop_for_harness: flags & 2 != 0,
             hold_after_exec_for_harness: flags & 4 != 0,
             hold_before_runtime_cleanup_for_harness: flags & 8 != 0,
@@ -767,6 +835,10 @@ impl BootstrapSpec {
             fail_outer_status_after_cleanup_for_harness: flags & 64 != 0,
             hold_after_completion_request_for_harness: flags & 256 != 0,
         })
+    }
+
+    fn uses_seccomp(&self) -> bool {
+        self.network_filter || self.deny_keyring
     }
 }
 
@@ -1030,6 +1102,7 @@ impl RetainedMonitorLaunch {
             .chain(std::iter::once(info_writer.as_raw_fd()))
             .chain(caller_setup_fds.iter().copied())
             .collect::<BTreeSet<_>>();
+        let deny_keyring = self.spec.deny_keyring;
         if inherited.iter().any(|fd| *fd < FIRST_UNRESERVED_MONITOR_FD) {
             return Err(invalid_input(
                 "Bubblewrap setup descriptor overlaps the monitor protocol range",
@@ -1038,6 +1111,9 @@ impl RetainedMonitorLaunch {
         unsafe {
             use std::os::unix::process::CommandExt;
             command.pre_exec(move || {
+                if deny_keyring {
+                    join_anonymous_session_keyring()?;
+                }
                 mark_inherited_fds_cloexec()?;
                 for &(source, destination) in &remaps {
                     if source == destination {
@@ -1121,7 +1197,7 @@ impl RetainedMonitorLaunch {
                 monitor_pid,
                 attestation,
                 ExpectedTargetState::Stopped,
-                self.spec.network_filter,
+                self.spec.uses_seccomp(),
             )?;
             control.send_with_deadline(FrameKind::StartTarget, attestation.encode(), deadline)?;
             let accepted = receive_launch_frame(&mut control, deadline)?;
@@ -1173,6 +1249,21 @@ impl RetainedMonitorLaunch {
                 }
             }
         }
+    }
+}
+
+fn join_anonymous_session_keyring() -> io::Result<()> {
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_keyctl,
+            libc::c_long::from(libc::KEYCTL_JOIN_SESSION_KEYRING),
+            std::ptr::null::<libc::c_char>(),
+        )
+    };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -3569,7 +3660,7 @@ impl PreparedTargetExec {
 impl StoppedTarget {
     fn wait_for_initial_stop(
         &mut self,
-        network_filter: bool,
+        uses_seccomp: bool,
         gate_reader_fd: RawFd,
         error_writer_fd: RawFd,
     ) -> io::Result<TargetStoppedAttestation> {
@@ -3609,7 +3700,7 @@ impl StoppedTarget {
         if !libc::WIFSTOPPED(status) || libc::WSTOPSIG(status) != libc::SIGSTOP {
             return Err(invalid_data("target did not enter its initial SIGSTOP"));
         }
-        verify_stopped_target(self.pid, network_filter, gate_reader_fd, error_writer_fd)
+        verify_stopped_target(self.pid, uses_seccomp, gate_reader_fd, error_writer_fd)
     }
 
     fn resume_and_release(&mut self) -> io::Result<()> {
@@ -4469,13 +4560,8 @@ fn create_stopped_target(
     spec: &BootstrapSpec,
 ) -> io::Result<(StoppedTarget, TargetStoppedAttestation)> {
     let prepared_exec = PreparedTargetExec::new(spec)?;
-    let network_filter = spec
-        .network_filter
-        .then(|| {
-            super::linux::build_network_seccomp()
-                .map_err(|error| io::Error::other(format!("building target seccomp: {error}")))
-        })
-        .transpose()?;
+    let seccomp = super::linux::build_seccomp(spec.network_filter, spec.deny_keyring)
+        .map_err(|error| io::Error::other(format!("building target seccomp: {error}")))?;
     let (gate_reader, gate_writer) = pipe_files(false)?;
     let (error_reader, error_writer) = pipe_files(true)?;
     let gate_reader_fd = gate_reader.as_raw_fd();
@@ -4490,7 +4576,7 @@ fn create_stopped_target(
     if pid == 0 {
         target_child_main(
             prepared_exec.pointers(),
-            network_filter.as_deref(),
+            seccomp.as_deref(),
             spec.hold_before_initial_stop_for_harness,
             gate_reader_fd,
             gate_writer_fd,
@@ -4509,7 +4595,7 @@ fn create_stopped_target(
         descendants_reaped: 0,
         all_reaped: false,
     };
-    match target.wait_for_initial_stop(spec.network_filter, gate_reader_fd, error_writer_fd) {
+    match target.wait_for_initial_stop(spec.uses_seccomp(), gate_reader_fd, error_writer_fd) {
         Ok(attestation) => Ok((target, attestation)),
         Err(error) => match target.kill_and_reap_all() {
             Ok(()) => Err(error),
@@ -4522,7 +4608,7 @@ fn create_stopped_target(
 
 fn verify_stopped_target(
     pid: libc::pid_t,
-    network_filter: bool,
+    uses_seccomp: bool,
     gate_reader_fd: RawFd,
     error_writer_fd: RawFd,
 ) -> io::Result<TargetStoppedAttestation> {
@@ -4555,7 +4641,7 @@ fn verify_stopped_target(
             return Err(invalid_data("stopped target retained capabilities"));
         }
     }
-    if network_filter && field("Seccomp:") != Some("2") {
+    if uses_seccomp && field("Seccomp:") != Some("2") {
         return Err(invalid_data(
             "stopped target did not install its required seccomp filter",
         ));
@@ -4684,7 +4770,7 @@ fn decode_target_setup_record(record: &[u8]) -> io::Result<(TargetSetupStage, li
 
 fn target_child_main(
     exec: TargetExecPointers,
-    network_filter: Option<&[seccompiler::sock_filter]>,
+    seccomp: Option<&[seccompiler::sock_filter]>,
     hold_before_initial_stop_for_harness: bool,
     gate_reader_fd: RawFd,
     gate_writer_fd: RawFd,
@@ -4734,10 +4820,8 @@ fn target_child_main(
     if unsafe { libc::getppid() } != 1 {
         target_child_fail(error_writer_fd, TargetSetupStage::ParentDeath, libc::ECHILD);
     }
-    if let Some(program) = network_filter {
-        if let Err(error) = install_target_seccomp(program) {
-            target_child_fail(error_writer_fd, TargetSetupStage::Seccomp, error);
-        }
+    if let Err(error) = seccomp.map(install_target_seccomp).transpose() {
+        target_child_fail(error_writer_fd, TargetSetupStage::Seccomp, error);
     }
     if unsafe { child_close_all_except([gate_reader_fd, error_writer_fd]) }.is_err() {
         target_child_fail(
@@ -5913,6 +5997,7 @@ fn exercise_monitor_harness_case(
         cwd: PathBuf::from("/"),
         env,
         network_filter: case.network_filter(),
+        deny_keyring: false,
         hold_before_initial_stop_for_harness: matches!(
             case,
             State5HarnessCase::InitialStopDeadline
@@ -7714,7 +7799,7 @@ fn verify_accepted_target(
     pid: libc::pid_t,
     monitor_pid: libc::pid_t,
     attestation: TargetStoppedAttestation,
-    network_filter: bool,
+    uses_seccomp: bool,
     expected_program: &OsStr,
     expected_args: &[OsString],
 ) -> io::Result<()> {
@@ -7724,7 +7809,7 @@ fn verify_accepted_target(
         monitor_pid,
         attestation,
         ExpectedTargetState::Live,
-        network_filter,
+        uses_seccomp,
     )?;
     if fs::read_link(format!("/proc/{pid}/cwd"))? != Path::new("/") {
         return Err(invalid_data(
@@ -8195,7 +8280,7 @@ fn verify_target_host_state(
     monitor_pid: libc::pid_t,
     attestation: TargetStoppedAttestation,
     expected_state: ExpectedTargetState,
-    network_filter: bool,
+    uses_seccomp: bool,
 ) -> io::Result<()> {
     let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
     let field = |name: &str| {
@@ -8221,7 +8306,7 @@ fn verify_target_host_state(
             return Err(invalid_data("target host process retained capabilities"));
         }
     }
-    if network_filter && field("Seccomp:") != Some("2") {
+    if uses_seccomp && field("Seccomp:") != Some("2") {
         return Err(invalid_data(
             "target host process omitted its required seccomp filter",
         ));
@@ -8634,6 +8719,7 @@ mod tests {
                 OsString::from_vec(b"VALUE\xfb".to_vec()),
             )]),
             network_filter: true,
+            deny_keyring: true,
             hold_before_initial_stop_for_harness: false,
             hold_after_exec_for_harness: false,
             hold_before_runtime_cleanup_for_harness: false,
