@@ -117,6 +117,43 @@ fn s(path: &Path) -> String {
 const CAT: &str = "/bin/cat";
 const TOUCH: &str = "/usr/bin/touch";
 
+#[test]
+fn system_sandbox_launcher_ignores_the_child_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = fixture();
+    let fake_bin = f.root.join("fake-bin");
+    let fake_launcher = fake_bin.join("sandbox-exec");
+    let marker = f.root.join("fake-sandbox-exec-invoked");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::write(
+        &fake_launcher,
+        "#!/bin/sh\n: > \"$FAKE_SANDBOX_MARKER\"\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_launcher, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:/usr/bin:/bin", s(&fake_bin));
+    let marker_path = s(&marker);
+    let env = &[
+        ("PATH", path.as_str()),
+        ("FAKE_SANDBOX_MARKER", marker_path.as_str()),
+    ];
+    let policy = compile(
+        &serde_json::json!({ "fs": true, "net": false, "env": true }),
+        &f.ctx(env),
+    )
+    .expect("policy compiles");
+    let prepared = apply(&policy, CommandSpec::new("/usr/bin/true").cwd(&f.proj)).expect("apply");
+    let status = prepared.status().expect("spawn system sandbox-exec");
+
+    assert!(status.success(), "the real Seatbelt launch must succeed");
+    assert!(
+        !marker.exists(),
+        "the child PATH must not select an alternate sandbox-exec"
+    );
+}
+
 // ── fs read-confine (array form = allowlist: project + toolchain only) ─────────
 
 #[test]

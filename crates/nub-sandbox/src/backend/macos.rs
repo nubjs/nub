@@ -68,7 +68,7 @@ const NETWORK_SERVICES: &str = "\
 
 /// Apply a resolved policy to a command on macOS. When the policy confines neither
 /// fs nor net, no SBPL wrap is emitted (env-scrub alone is construction, needs no
-/// kernel primitive); otherwise the child is re-homed under `sandbox-exec`.
+/// kernel primitive); otherwise the child is re-homed under `/usr/bin/sandbox-exec`.
 pub fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
@@ -92,7 +92,7 @@ pub fn apply(
     }
 
     let profile = build_profile(policy, &spec, proxy_port, ca_bundle, tmp_dir);
-    let mut wrapped = Command::new("sandbox-exec");
+    let mut wrapped = Command::new("/usr/bin/sandbox-exec");
     wrapped.arg("-p").arg(&profile).arg("--");
     wrapped.arg(&spec.program).args(&spec.args);
     if let Some(cwd) = &spec.cwd {
