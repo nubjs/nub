@@ -1354,6 +1354,7 @@ fn run_nub(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
     // `--no-env-file`: load zero env files. Wins over `--env-file` regardless of
     // order (both are captured, the flag decides at the end of the scan).
     let mut no_env_file = false;
+    let mut no_check = false;
 
     let mut i = 0;
     while i < raw_args.len() {
@@ -1383,7 +1384,10 @@ fn run_nub(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
             // runner (`nub --no-check foo.ts`). Consumed here so it never reaches
             // Node as an unknown flag; after the entry point it forwards to the
             // script (the three-position rule). `--no-install` is the alias.
-            "--no-check" | "--no-install" => crate::verify_deps::disable(),
+            "--no-check" | "--no-install" => {
+                no_check = true;
+                crate::verify_deps::disable();
+            }
             "--silent" | "-s" => silent = true,
             // `--verbose` is the user-facing spelling; `--show-warnings` is its
             // legacy twin. Both raise nub's diagnostic verbosity (e.g. the full
@@ -1612,6 +1616,10 @@ fn run_nub(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
 
     if let Some(ref dir) = cwd {
         env::set_current_dir(dir)?;
+    }
+
+    if !subcommand_found {
+        initialize_config_snapshot(compat, no_check)?;
     }
 
     // `--node` wins over nub's help/version short-circuit: `nub --node -h` and
@@ -1939,6 +1947,7 @@ fn dispatch_subcommand(
     // so `nub node script.ts` yields the exact "use 'nub <file>'" guidance and bare
     // `nub node` prints the verb list instead of a clap usage error.
     if subcommand == "node" {
+        initialize_config_snapshot(false, false)?;
         return run_node(&rest[1..]);
     }
 
@@ -1947,6 +1956,7 @@ fn dispatch_subcommand(
     // than a clap `Command` variant, so its bare-usage / invalid-verb messages
     // read like `nub node`'s and it never reaches clap dispatch.
     if subcommand == "pm" {
+        initialize_config_snapshot(false, false)?;
         return run_pm(&rest[1..]);
     }
 
@@ -1956,6 +1966,7 @@ fn dispatch_subcommand(
     // bare-usage and invalid-verb messages read consistently and it never reaches
     // clap dispatch. Spec: .fray/ai-friendliness.md.
     if subcommand == "agent" {
+        initialize_config_snapshot(false, false)?;
         return crate::agent::run(&rest[1..]);
     }
 
@@ -1964,6 +1975,7 @@ fn dispatch_subcommand(
     // (it's internal plumbing, not a documented verb) and dispatch straight
     // to the engine's bootstrap entry point.
     if subcommand == "__node-gyp-bootstrap" {
+        initialize_config_snapshot(false, false)?;
         return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
     }
 
@@ -1976,6 +1988,7 @@ fn dispatch_subcommand(
     if let Some(add_argv) = install_to_add_args(&rest)
         && let Some(spec) = crate::pm_engine::lookup_verb("add")
     {
+        initialize_config_snapshot(false, false)?;
         let pm = suggest_package_manager(&env::current_dir()?);
         // `add_argv[0]` is the canonical verb ("add"); the engine wants the
         // args after the verb. Report the user's actual typed spelling so
@@ -1990,6 +2003,7 @@ fn dispatch_subcommand(
     // real-PM fallback). `install`/`i`/`ci` are NOT in the registry — they
     // are live clap verbs handled below.
     if let Some(spec) = crate::pm_engine::lookup_verb(&subcommand) {
+        initialize_config_snapshot(false, false)?;
         // The PM hint is only consumed by the unwired-verb stub fallback
         // (`{pm} {verb}`); use the nub-identity-aware suggestion so a fresh /
         // nub-identity project gets a `nub`-flavored hint (the verb *is* a
@@ -2023,6 +2037,8 @@ fn dispatch_subcommand(
     if let Some(ref dir) = cli.cwd {
         env::set_current_dir(dir)?;
     }
+    let (config_node, config_no_check) = command_config_flags(&cli.command);
+    initialize_config_snapshot(config_node, config_no_check)?;
 
     match cli.command {
         Some(Command::Run {
@@ -2479,6 +2495,7 @@ fn run_nubx(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
         // flag (`--inspect`, `--import x`, `-e`) now reaches Node instead of
         // clap-erroring.
         crate::nubx_resolve::NubxRoute::File { compat, argv } => {
+            initialize_config_snapshot(compat, false)?;
             run_file_with_compat(&argv, compat)
         }
         // SCRIPT tier — re-dispatch the original argv through `nub run`, whose full
@@ -2640,11 +2657,65 @@ fn scan_node_compat_flag(args: &[String]) -> (bool, Vec<String>) {
 /// stays ON (compat = no augmentation, not no-pinning), exactly like `--node`.
 /// Truthy = `1`/`true`/`yes` (case-insensitive); empty/`0`/`false`/unset = off.
 /// Brand-clean: `NODE_*` prefix (Node doesn't claim the name), not `NUB_*`/`AUBE_*`.
-fn node_compat_env() -> bool {
-    match env::var("NODE_COMPAT") {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
-        Err(_) => false,
+fn node_compat_env_setting() -> Option<bool> {
+    let value = env::var("NODE_COMPAT").ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Some(true),
+        "0" | "false" | "no" => Some(false),
+        _ => None,
     }
+}
+
+fn node_compat_env() -> bool {
+    node_compat_env_setting().unwrap_or(false)
+}
+
+fn verify_deps_env_setting() -> Option<crate::project_config::VerifyDepsBeforeRun> {
+    use crate::project_config::VerifyDepsBeforeRun;
+
+    let value = env::var("NUB_VERIFY_DEPS_BEFORE_RUN").ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "false" | "0" | "no" | "none" | "skip" => Some(VerifyDepsBeforeRun::Enabled(false)),
+        "true" => Some(VerifyDepsBeforeRun::Enabled(true)),
+        "install" => Some(VerifyDepsBeforeRun::Install),
+        "warn" => Some(VerifyDepsBeforeRun::Warn),
+        "error" => Some(VerifyDepsBeforeRun::Error),
+        "prompt" => Some(VerifyDepsBeforeRun::Prompt),
+        _ => None,
+    }
+}
+
+fn command_config_flags(command: &Option<Command>) -> (bool, bool) {
+    match command {
+        Some(Command::Run { node, no_check, .. })
+        | Some(Command::Exec { node, no_check, .. })
+        | Some(Command::Nubx { node, no_check, .. }) => (*node, *no_check),
+        _ => (false, false),
+    }
+}
+
+fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
+    use crate::project_config::{ConfigOverlays, ProjectConfig, VerifyDepsBeforeRun};
+
+    let cwd = env::current_dir()?;
+    let mut overlays = ConfigOverlays {
+        defaults: ProjectConfig::builtin_defaults(),
+        ..ConfigOverlays::default()
+    };
+    if cli_node {
+        overlays.cli.node_compat = Some(true);
+    }
+    if cli_no_check {
+        overlays.cli.verify_deps_before_run = Some(VerifyDepsBeforeRun::Enabled(false));
+    }
+    overlays.environment = ProjectConfig {
+        node_compat: node_compat_env_setting(),
+        verify_deps_before_run: verify_deps_env_setting(),
+        ..ProjectConfig::default()
+    };
+    crate::project_config::initialize_effective_config(&cwd, overlays)?;
+    debug_assert!(crate::project_config::effective_config().is_some());
+    Ok(())
 }
 
 fn run_file(args: &[String]) -> Result<i32> {
