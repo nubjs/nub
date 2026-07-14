@@ -767,6 +767,7 @@ pub fn fold_env(
 ) -> Result<EnvPolicy, CompileError> {
     // An explicit env axis always enforces (constructs the child env exactly).
     let mut policy = EnvPolicy {
+        resolved: true,
         enforce: true,
         ..Default::default()
     };

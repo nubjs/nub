@@ -296,9 +296,14 @@ pub enum NetTarget {
 /// `constructed` by the compiler.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EnvPolicy {
-    /// When `false` the child INHERITS the ambient env untouched (no confinement —
-    /// the unconfined / absent-axis case). When `true` the child env is EXACTLY
-    /// `constructed` — the scrub is construction, not subtraction.
+    /// Whether a host/compiler has resolved the target environment snapshot.
+    /// Backends reject `false` instead of guessing between ambient inheritance and
+    /// a deliberately empty environment.
+    #[serde(default)]
+    pub resolved: bool,
+    /// Whether the environment axis is confining. `constructed` is the resolved
+    /// target environment in both modes: an unconfined policy snapshots the
+    /// compiler's ambient input instead of consulting process-global state later.
     pub enforce: bool,
     pub constructed: BTreeMap<String, String>,
     pub schema: Vec<EnvRule>,
@@ -306,6 +311,18 @@ pub struct EnvPolicy {
     /// ambient env, denied by policy). Surfaced verbatim in a failure hint — nub
     /// knows exactly what it removed. Deterministic (sorted) for stable output.
     pub withheld: Vec<String>,
+}
+
+impl EnvPolicy {
+    /// Resolve a non-confining policy to an explicit target-environment snapshot.
+    /// Direct IR callers use this instead of relying on apply-time ambient reads.
+    pub fn resolved(constructed: BTreeMap<String, String>) -> Self {
+        Self {
+            resolved: true,
+            constructed,
+            ..Self::default()
+        }
+    }
 }
 
 /// A single env-key rule carried for validation + redaction. Enforcement of the

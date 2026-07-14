@@ -139,7 +139,7 @@ mod win {
                 tmp: TmpMode::Private,
             },
             net: NetPolicy::default(),
-            env: EnvPolicy::default(),
+            env: EnvPolicy::resolved(std::env::vars().collect()),
             pid: PidPolicy::default(),
         }
     }

@@ -18,7 +18,12 @@ fn false_fully_unjails() {
         "fs allow-all"
     );
     assert!(!p.net.enforce, "net not enforcing");
-    assert!(!p.env.enforce, "env inherited");
+    assert!(!p.env.enforce, "env is not confining");
+    assert_eq!(
+        p.env.constructed.get("SECRET").map(String::as_str),
+        Some("x"),
+        "the relaxed target environment is resolved at compile time"
+    );
 }
 
 #[test]

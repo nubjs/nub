@@ -401,11 +401,9 @@ pub(crate) fn apply(
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
-        if policy.env.enforce {
-            command.env_clear();
-            for (k, v) in &policy.env.constructed {
-                command.env(k, v);
-            }
+        command.env_clear();
+        for (k, v) in &policy.env.constructed {
+            command.env(k, v);
         }
         if let Some(port) = proxy_port {
             super::set_proxy_env(&mut command, port, proxy_token);
@@ -537,12 +535,10 @@ pub(crate) fn apply(
     })
 }
 
-/// The child's env block, or `None` to inherit the ambient env untouched.
+/// The child's resolved env block.
 ///
-/// - env enforced ⇒ start from the constructed scrub map; else (Tier 1 only) snapshot the
-///   ambient env so the proxy/CA overrides ride an otherwise-inherited environment — the
-///   Windows launch block is all-or-nothing, unlike a mac/linux `Command`'s inherit+override,
-///   so "inherit + override" must be materialized here (a non-Unicode var is lossily kept).
+/// The compiler snapshots both relaxed and enforced environments into `constructed`.
+/// Apply never re-reads the ambient process environment.
 /// - Tier 1 folds in the cooperative proxy hint (clients route through the loopback proxy)
 ///   and the MITM CA-trust vars (the child trusts the proxy's minted leaves). A non-Tier-1
 ///   enforced env stays the plain scrub — no proxy is running to route to.
@@ -554,21 +550,7 @@ fn build_child_env(
     proxy_token: Option<&str>,
     ca_bundle: Option<&std::path::Path>,
 ) -> Option<BTreeMap<String, String>> {
-    if !env.enforce && !tier1 {
-        return None;
-    }
-    let mut m = if env.enforce {
-        env.constructed.clone()
-    } else {
-        std::env::vars_os()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.to_string_lossy().into_owned(),
-                )
-            })
-            .collect()
-    };
+    let mut m = env.constructed.clone();
     if tier1 {
         if let Some(port) = proxy_port {
             let url = match proxy_token {

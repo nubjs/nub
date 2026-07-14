@@ -50,7 +50,9 @@ jobs:
       - name: Linux Bubblewrap enforcement
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"
-        run: cargo test -p nub-sandbox --test linux_enforcement
+        run: |
+          cargo test -p nub-sandbox --test linux_enforcement
+          cargo test -p nub-sandbox --test linux_monitor_states
       - name: Linux CLI-seam conformance matrix
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"

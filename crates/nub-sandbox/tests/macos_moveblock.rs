@@ -18,7 +18,9 @@
 //! macOS-only; other OSes skip cleanly.
 #![cfg(target_os = "macos")]
 
-use nub_sandbox::policy::{CanonGlob, Effect, FsAccess, FsRule, FsRuleSet, SandboxPolicy};
+use nub_sandbox::policy::{
+    CanonGlob, Effect, EnvPolicy, FsAccess, FsRule, FsRuleSet, SandboxPolicy,
+};
 use nub_sandbox::{CommandSpec, apply};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -30,6 +32,7 @@ const MARKER: &str = "TOPSECRETxMOVExRELOCATExMARKER";
 
 fn fs_policy(entries: Vec<FsRule>) -> SandboxPolicy {
     let mut p = SandboxPolicy::default();
+    p.env = EnvPolicy::resolved(std::env::vars().collect());
     p.fs.rules = FsRuleSet {
         entries,
         default_effect: Effect::Deny,
@@ -50,9 +53,6 @@ fn run_confined(policy: &SandboxPolicy, cwd: &Path, script: &str) -> String {
     let spec = CommandSpec::new("/bin/sh").args(["-c", script]).cwd(cwd);
     let out = apply(policy, spec)
         .expect("apply")
-        .command
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
         .output()
         .expect("spawn confined child");
     String::from_utf8_lossy(&out.stdout).trim().to_string()

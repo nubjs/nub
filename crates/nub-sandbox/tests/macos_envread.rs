@@ -138,6 +138,7 @@ fn env_scrub_policy() -> SandboxPolicy {
     }
     let mut policy = SandboxPolicy {
         env: EnvPolicy {
+            resolved: true,
             enforce: true,
             constructed,
             schema: Vec::new(),
@@ -168,10 +169,8 @@ fn run(policy: &SandboxPolicy, cwd: &Path, program: &Path, args: &[&str]) -> Str
     let spec = CommandSpec::new(program)
         .args(args.iter().copied())
         .cwd(cwd);
-    let mut cmd = apply(policy, spec).expect("apply").command;
-    let out = cmd
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
+    let out = apply(policy, spec)
+        .expect("apply")
         .output()
         .expect("spawn reader");
     String::from_utf8_lossy(&out.stdout).trim().to_string()

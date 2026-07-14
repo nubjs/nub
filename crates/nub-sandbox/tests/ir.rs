@@ -3,11 +3,34 @@
 
 mod common;
 
+use nub_sandbox::CommandSpec;
+#[cfg(not(target_os = "linux"))]
+use nub_sandbox::apply;
 use nub_sandbox::compiler::compile;
 use nub_sandbox::conformance::{Fixture, run_fixture};
 use nub_sandbox::policy::SandboxPolicy;
-use nub_sandbox::{CommandSpec, apply};
 use serde_json::json;
+
+#[cfg(target_os = "linux")]
+const TRUE_PROGRAM: &str = "/usr/bin/true";
+#[cfg(not(target_os = "linux"))]
+const TRUE_PROGRAM: &str = "true";
+
+#[cfg(target_os = "linux")]
+fn apply(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+) -> Result<nub_sandbox::Prepared, nub_sandbox::Degradation> {
+    static RUNTIME: std::sync::OnceLock<nub_sandbox::RuntimeCapability> =
+        std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        nub_sandbox::RuntimeCapability::from_verified_executable(env!(
+            "CARGO_BIN_EXE_nub-sandbox-monitor-harness"
+        ))
+        .expect("verify the purpose-built sandbox monitor harness")
+    });
+    nub_sandbox::apply_with_runtime(policy, spec, runtime)
+}
 
 #[test]
 fn policy_round_trips_through_serde() {
@@ -80,25 +103,61 @@ fn conformance_reports_a_mismatch() {
 #[test]
 fn apply_scrubs_env_when_enforced() {
     let ctx = common::ctx(true, &[("KEEP", "1"), ("SECRET_TOKEN", "s")]);
-    let policy = compile(&json!({ "env": ["KEEP"] }), &ctx).unwrap();
-    let prepared = apply(&policy, CommandSpec::new("true")).unwrap();
-    // The env axis is enforced by construction; fs/net report as not-yet-enforced.
-    let envs: std::collections::BTreeMap<_, _> = prepared
-        .command
-        .get_envs()
-        .filter_map(|(k, v)| {
-            v.map(|v| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.to_string_lossy().into_owned(),
-                )
-            })
-        })
-        .collect();
-    assert_eq!(envs.get("KEEP").map(String::as_str), Some("1"));
+    let policy = compile(&json!({ "fs": true, "net": true, "env": ["KEEP"] }), &ctx).unwrap();
+    let _prepared = apply(&policy, CommandSpec::new(TRUE_PROGRAM)).unwrap();
+    assert_eq!(
+        policy.env.constructed.get("KEEP").map(String::as_str),
+        Some("1")
+    );
     assert!(
-        !envs.contains_key("SECRET_TOKEN"),
+        !policy.env.constructed.contains_key("SECRET_TOKEN"),
         "secret withheld from child env"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_uses_the_compile_time_environment_snapshot() {
+    const KEY: &str = "NUB_SANDBOX_COMPILE_SNAPSHOT_TEST";
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var(KEY, value) },
+                None => unsafe { std::env::remove_var(KEY) },
+            }
+        }
+    }
+
+    let restore = Restore(std::env::var_os(KEY));
+    let ctx = common::ctx(true, &[(KEY, "compiled")]);
+    let policy = compile(&json!(false), &ctx).unwrap();
+    unsafe { std::env::set_var(KEY, "mutated-after-compile") };
+
+    let output = apply(&policy, CommandSpec::new("/usr/bin/env"))
+        .unwrap()
+        .output()
+        .unwrap();
+    drop(restore);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.lines().any(|line| line == format!("{KEY}=compiled")));
+    assert!(!stdout.contains("mutated-after-compile"));
+}
+
+#[test]
+fn apply_rejects_an_unresolved_direct_ir_environment() {
+    let result = apply(&SandboxPolicy::default(), CommandSpec::new("/usr/bin/true"));
+    let degradation = match result {
+        Ok(_) => panic!("unresolved direct IR unexpectedly reached a backend"),
+        Err(degradation) => degradation,
+    };
+    assert_eq!(degradation.lost, vec!["env-unresolved"]);
+    assert!(
+        degradation
+            .reason
+            .as_deref()
+            .is_some_and(|reason| { reason.contains("no resolved target environment") })
     );
 }
 
@@ -113,7 +172,9 @@ fn apply_degradation_reflects_backend_capability() {
     .unwrap();
     let prepared = match apply(
         &policy,
-        CommandSpec::new("true").cwd(&cwd).deny_search_root(&cwd),
+        CommandSpec::new(TRUE_PROGRAM)
+            .cwd(&cwd)
+            .deny_search_root(&cwd),
     ) {
         Ok(prepared) => prepared,
         #[cfg(target_os = "linux")]

@@ -112,6 +112,14 @@ harness = false
 [lints]
 workspace = true
 
+# Purpose-built integration harness: unlike libtest's generated main, this can
+# install the retained-monitor hook before any test/runtime initialization.
+[[bin]]
+name = "nub-sandbox-monitor-harness"
+path = "src/bin/nub-sandbox-monitor-harness.rs"
+test = false
+bench = false
+
 [[test]]
 name = "windows_ascendant_env"
 harness = false

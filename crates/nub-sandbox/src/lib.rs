@@ -4,14 +4,16 @@
 //! reads NO config file, and knows nothing about the package manager. A *front-end*
 //! (the build-jail, a runtime profile, `nub sandbox -- <cmd>`) is the EMBEDDER: it
 //! discovers config, parses it, resolves the host's paths/env, then drives this
-//! engine through the two-call seam below. The companion `EMBEDDER.md` is the full
+//! engine through the two-call data seam below. Linux additionally installs an
+//! earliest process hook. The companion `EMBEDDER.md` is the full
 //! integration guide (usage sketch, boundary tables, launcher-handoff contract);
 //! this module doc is the authoritative summary that lives with the code.
 //!
 //! # The embedder seam — two calls over already-parsed data
 //!
-//! The whole public surface is two functions and the plain-data types they move
-//! (the two boundaries of design.md §2):
+//! The data path has two calls over the plain-data types below (the two boundaries
+//! of design.md §2). On Linux, the embedder also calls [`earliest_bootstrap`] as its
+//! first main action and passes that capability to [`apply_with_runtime`]:
 //!
 //!   - [`compile`]`(surface: &Value, ctx: &`[`CompileCtx`]`) -> Result<`[`SandboxPolicy`]`, `[`CompileError`]`>`
 //!     — **Boundary A**: the surface `sandbox` JSON (a parsed `serde_json::Value`)
@@ -19,16 +21,19 @@
 //!     IR. This is the ONLY code that understands surface syntax (presets, `"..."`
 //!     spread, glob ordering, the env grammar); a backend never sees any of it.
 //!     Use [`compile_with_warnings`] to also surface non-fatal [`CompileWarning`]s.
-//!   - [`apply`]`(policy: &`[`SandboxPolicy`]`, spec: `[`CommandSpec`]`) -> Result<`[`Prepared`]`, `[`Degradation`]`>`
+//!   - [`apply_with_runtime`]`(policy: &`[`SandboxPolicy`]`, spec: `[`CommandSpec`]`, runtime: &`[`RuntimeCapability`]`) -> Result<`[`Prepared`]`, `[`Degradation`]`>`
 //!     — **Boundary B**: a resolved policy plus a host-provided command produce a
 //!     launch-ready child, or a fail-closed [`Degradation`] when a required axis is
 //!     unenforceable. The embedder then surfaces [`Prepared::degradation`] and
-//!     spawns via [`Prepared::status`] — the UNIFORM launch verb (do not call
-//!     `command.status()` directly; Windows enforcement + the egress proxy ride the
-//!     `status` seam, not the `command` field).
+//!     launches through [`Prepared::spawn`], [`Prepared::status`], or
+//!     [`Prepared::output`]. The backend command is private so Linux verification,
+//!     Windows enforcement, and per-launch resource ownership cannot be bypassed.
+//!
+//! Other platforms retain [`apply`], and bare `apply` remains valid for an unconfined
+//! Linux command; Linux confinement fails closed without the early capability.
 //!
 //! The model is COMPILE-THEN-APPLY: the IR is compiled once and consumed in-process
-//! by [`apply`]; it is `serde`-round-trippable for fixtures/debug-dump but is NEVER
+//! by the apply seam; it is `serde`-round-trippable for fixtures/debug-dump but is NEVER
 //! deserialized on the enforcement path (no config re-read between compile and
 //! apply). One policy can drive many [`apply`] calls.
 //!
@@ -96,7 +101,18 @@ pub mod matcher;
 pub mod policy;
 pub mod proxy;
 
-pub use backend::{CommandSpec, Degradation, Prepared, apply};
+pub use backend::{
+    CommandSpec, Degradation, Prepared, PreparedChild, RuntimeCapability, apply,
+    apply_with_runtime, earliest_bootstrap,
+};
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub use backend::{
+    exercise_monitor_outer_parent_death_child, exercise_monitor_outer_parent_death_state_6_child,
+    exercise_monitor_outer_parent_death_state_7_child, exercise_monitor_state_6,
+    exercise_monitor_state_7, exercise_monitor_state_7_parent_death,
+    exercise_monitor_states_1_to_5,
+};
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, compile, compile_with_warnings,
 };

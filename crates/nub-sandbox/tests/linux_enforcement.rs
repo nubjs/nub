@@ -13,11 +13,24 @@
 
 use nub_sandbox::compiler::{CompileCtx, ShellRunner};
 use nub_sandbox::matcher::Homes;
-use nub_sandbox::{CommandSpec, apply, compile};
+use nub_sandbox::{CommandSpec, RuntimeCapability, apply_with_runtime, compile};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use tempfile::TempDir;
+
+fn apply(
+    policy: &nub_sandbox::policy::SandboxPolicy,
+    spec: CommandSpec,
+) -> Result<nub_sandbox::Prepared, nub_sandbox::Degradation> {
+    static RUNTIME: std::sync::OnceLock<RuntimeCapability> = std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        RuntimeCapability::from_verified_executable(env!(
+            "CARGO_BIN_EXE_nub-sandbox-monitor-harness"
+        ))
+        .expect("verify the purpose-built sandbox monitor harness")
+    });
+    apply_with_runtime(policy, spec, runtime)
+}
 
 fn bwrap_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -127,10 +140,10 @@ impl Fixture {
                 self.proj.join("sub"),
                 self.proj.join("nested"),
             ]);
-        let prepared = apply(&policy, spec).expect("apply");
-        let mut cmd = prepared.command;
-        cmd.stderr(Stdio::piped()).stdin(Stdio::null());
-        let out = cmd.output().expect("spawn");
+        let out = apply(&policy, spec)
+            .expect("apply")
+            .output()
+            .expect("spawn");
         if !out.status.success() && !out.stderr.is_empty() {
             eprintln!(
                 "sandbox child stderr: {}",
@@ -654,7 +667,7 @@ fn inherited_secret_file_descriptors_are_closed_before_bubblewrap_exec() {
 
     let policy = compile(&serde_json::json!({ "fs": ["...", "./"] }), &f.ctx(&[])).unwrap();
     let script = format!("cat /proc/self/fd/{fd} 2>/dev/null || true");
-    let mut prepared = apply(
+    let prepared = apply(
         &policy,
         CommandSpec::new(SH)
             .args(["-c", &script])
@@ -662,7 +675,7 @@ fn inherited_secret_file_descriptors_are_closed_before_bubblewrap_exec() {
             .deny_search_root(&f.proj),
     )
     .unwrap();
-    let output = prepared.command.output().unwrap();
+    let output = prepared.output().unwrap();
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("ENVSECRET"),
         "an already-open descriptor must not bypass the path mask"
@@ -811,6 +824,123 @@ fn target_path_resolves_relative_to_child_cwd_and_mounts_the_entry() {
     );
 }
 
+#[test]
+fn launcher_env_is_sterile_while_target_receives_adversarial_preload() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let source = f.proj.join("preload.c");
+    let library = f.proj.join("preload.so");
+    std::fs::write(
+        &source,
+        r#"
+#include <fcntl.h>
+#include <stdlib.h>
+#include <unistd.h>
+__attribute__((constructor)) static void mark(void) {
+  const char *paths[] = { getenv("PRELOAD_OUTSIDE"), getenv("PRELOAD_INSIDE") };
+  for (int i = 0; i < 2; i++) if (paths[i]) {
+    int fd = open(paths[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) { write(fd, "loaded", 6); close(fd); }
+  }
+}
+"#,
+    )
+    .unwrap();
+    if !std::process::Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return;
+    }
+    let outside = f.root.join("preload-outside");
+    let inside = f.proj.join("preload-inside");
+    let library_string = s(&library);
+    let outside_string = s(&outside);
+    let inside_string = s(&inside);
+    let env = [
+        ("PATH", "/usr/bin:/bin"),
+        ("LD_PRELOAD", library_string.as_str()),
+        ("PRELOAD_OUTSIDE", outside_string.as_str()),
+        ("PRELOAD_INSIDE", inside_string.as_str()),
+        ("LAUNCH_SECRET", "not-in-bwrap-argv"),
+    ];
+    let surface = serde_json::json!({
+        "fs": ["...", "./"],
+        "net": true,
+        "env": {
+            "PATH": true,
+            "LD_PRELOAD": true,
+            "PRELOAD_OUTSIDE": true,
+            "PRELOAD_INSIDE": true,
+            "LAUNCH_SECRET": true
+        }
+    });
+    let policy = compile(&surface, &f.ctx(&env)).unwrap();
+    let prepared = apply(
+        &policy,
+        CommandSpec::new(SH)
+            .args([
+                "-c",
+                "test -n \"$LD_PRELOAD\" && test -e \"$PRELOAD_INSIDE\" && sleep 2",
+            ])
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    )
+    .unwrap();
+    let mut child = prepared.spawn().unwrap();
+    let cmdline = std::fs::read(format!("/proc/{}/cmdline", child.id())).unwrap();
+    assert!(
+        !cmdline
+            .windows(b"not-in-bwrap-argv".len())
+            .any(|window| window == b"not-in-bwrap-argv"),
+        "target environment secrets stay in the anonymous argument descriptor"
+    );
+    assert!(child.wait().unwrap().success());
+    assert!(inside.exists(), "the target received LD_PRELOAD");
+    assert!(
+        !outside.exists(),
+        "the Bubblewrap launcher did not execute the target-controlled preload before confinement"
+    );
+}
+
+#[test]
+fn dropping_prepared_child_kills_and_reaps_the_supervised_group() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let policy = compile(
+        &serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        &f.ctx(&[("PATH", "/usr/bin:/bin")]),
+    )
+    .unwrap();
+    let child = apply(
+        &policy,
+        CommandSpec::new(SH)
+            .args(["-c", "sleep 30"])
+            .cwd(&f.proj)
+            .deny_search_root(&f.proj),
+    )
+    .unwrap()
+    .spawn()
+    .unwrap();
+    let target = child.unix_signal_target();
+    assert!(target < 0, "a live Bubblewrap target is a supervised group");
+    drop(child);
+    assert_eq!(unsafe { libc::kill(target, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "the supervised group is gone before resources are released"
+    );
+}
+
 // ── namespace and capability probes ────────────────────────────────────────────
 
 /// Compile the syscall probe once; `None` if `cc` is unavailable (probe tests skip).
@@ -864,6 +994,10 @@ const PROBE_C: &str = r#"
 #ifndef SYS_clone3
 #define SYS_clone3 435
 #endif
+#ifndef SYS_io_uring_setup
+#define SYS_io_uring_setup 425
+#endif
+#define P_X32_SYSCALL_BIT 0x40000000UL
 #define P_CLONE_NEWNS   0x00020000
 #define P_CLONE_NEWUSER 0x10000000
 #define P_CLONE_FILES   0x00000400
@@ -877,6 +1011,19 @@ int main(int argc, char** argv) {
         if (fd < 0 && errno == EPERM) return 42;
         return 0;
     }
+#ifdef __x86_64__
+    if (!strcmp(argv[1], "x32")) {
+        errno = 0;
+        if (syscall(SYS_socket | P_X32_SYSCALL_BIT, AF_INET, SOCK_STREAM, 0) != -1 || errno != EPERM) return 43;
+        errno = 0;
+        if (syscall(SYS_socket | P_X32_SYSCALL_BIT, AF_NETLINK, SOCK_RAW, 0) != -1 || errno != EPERM) return 44;
+        errno = 0;
+        if (syscall(SYS_io_uring_setup | P_X32_SYSCALL_BIT, 1, 0) != -1 || errno != EPERM) return 45;
+        errno = 0;
+        if (syscall(SYS_getpid | P_X32_SYSCALL_BIT) != -1 || errno != EPERM) return 46;
+        return syscall(SYS_getpid) > 0 ? 0 : 47;
+    }
+#endif
     if (!strcmp(argv[1], "connect")) {
         if (argc < 3) return 2;
         int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -986,6 +1133,12 @@ fn network_namespace_and_filter_block_host_egress() {
         42,
         "AF_INET socket creation is denied"
     );
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(
+        f.run(net_deny.clone(), &[], &probe, &["x32"]).0,
+        0,
+        "the unsupported x32 ABI is denied before native syscall dispatch"
+    );
     assert_eq!(
         f.run(net_deny.clone(), &[], &probe, &["ptrace"]).0,
         0,
@@ -1061,28 +1214,27 @@ fn direct_nested_mount_namespace_preserves_mask_when_available() {
 }
 
 #[test]
-fn sandboxed_execution_rejects_uid_zero() {
+fn sandboxed_execution_accepts_uid_zero_only_after_zero_capability_probe() {
     if unsafe { libc::geteuid() } != 0 {
         return;
     }
     let f = fixture();
     let policy =
         compile(&serde_json::json!({ "fs": ["...", "./"] }), &f.ctx(&[])).expect("compiles");
-    let Err(error) = apply(
+    let output = apply(
         &policy,
-        CommandSpec::new("/bin/true")
+        CommandSpec::new("/bin/sh")
+            .args([
+                "-c",
+                "test \"$(awk '/^CapInh:|^CapPrm:|^CapEff:|^CapAmb:/ { if ($2 != \"0000000000000000\") bad=1 } END { print bad+0 }' /proc/self/status)\" = 0",
+            ])
             .cwd(&f.proj)
             .deny_search_root(&f.proj),
-    ) else {
-        panic!("UID 0 must fail before Bubblewrap launch");
-    };
-    assert!(
-        error
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("UID 0")),
-        "{error:?}"
-    );
+    )
+    .expect("the verified zero-capability root view is allowed")
+    .output()
+    .expect("spawn root sandbox");
+    assert!(output.status.success(), "{output:?}");
 }
 
 // ── PID namespace self operations ──────────────────────────────────────────────

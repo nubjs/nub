@@ -91,7 +91,7 @@ fn libc_enomem() -> i32 {
 #[cfg(unix)]
 mod ctrl_c {
     use std::sync::Once;
-    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
     // The forward TARGET, as the argument to `kill(2)`: a POSITIVE pid signals one
     // process (the file-run path's `node`, which IS the leaf); a NEGATIVE value
@@ -102,6 +102,8 @@ mod ctrl_c {
     // child tracked.
     static CURRENT_TARGET: AtomicI32 = AtomicI32::new(0);
     static REGISTERED: Once = Once::new();
+    static QUEUE_WITHOUT_TARGET: AtomicBool = AtomicBool::new(false);
+    static PENDING_SIGNALS: AtomicU64 = AtomicU64::new(0);
 
     // When the controlling terminal's FOREGROUND process group has been handed to
     // the child (the interactive TTY path — see `foreground_child` in spawn.rs),
@@ -130,10 +132,11 @@ mod ctrl_c {
         SUPPRESS_SIGINT_FORWARD.load(Ordering::SeqCst)
     }
 
-    /// Record the `kill(2)` target (see [`CURRENT_TARGET`]), registering the signal
-    /// handler on the first call. Later calls just update the target.
-    pub(super) fn track(target: i32) {
-        CURRENT_TARGET.store(target, Ordering::SeqCst);
+    /// Install the process-wide signal handlers and forwarding thread once.
+    /// `Signals::new` installs the kernel handlers synchronously, so after this
+    /// function returns a signal can no longer take its default terminating action
+    /// merely because no child target has been installed yet.
+    fn install_handlers() {
         REGISTERED.call_once(|| {
             use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2};
             use signal_hook::iterator::Signals;
@@ -177,6 +180,15 @@ mod ctrl_c {
                                 unsafe {
                                     libc::kill(target, signo);
                                 }
+                            } else if QUEUE_WITHOUT_TARGET.load(Ordering::SeqCst) {
+                                PENDING_SIGNALS.fetch_or(1u64 << signo, Ordering::SeqCst);
+                                // Close the install race: `track` may have stored the
+                                // target after this thread observed zero but before
+                                // the pending bit was published.
+                                let installed = CURRENT_TARGET.load(Ordering::SeqCst);
+                                if installed != 0 {
+                                    forward_pending(installed);
+                                }
                             }
                         }
                     });
@@ -184,14 +196,62 @@ mod ctrl_c {
         });
     }
 
+    /// Record the `kill(2)` target (see [`CURRENT_TARGET`]), registering the signal
+    /// handler on the first call for legacy callers that did not call [`prepare`].
+    /// Later calls just update the target.
+    pub(super) fn track(target: i32) {
+        CURRENT_TARGET.store(target, Ordering::SeqCst);
+        install_handlers();
+        if target != 0 && QUEUE_WITHOUT_TARGET.load(Ordering::SeqCst) {
+            forward_pending(target);
+        }
+    }
+
+    fn forward_pending(target: i32) {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2};
+        let pending = PENDING_SIGNALS.swap(0, Ordering::SeqCst);
+        for signo in [SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGQUIT] {
+            if pending & (1u64 << signo) != 0 {
+                unsafe {
+                    libc::kill(target, signo);
+                }
+            }
+        }
+    }
+
+    pub(super) fn prepare() {
+        // `untrack` owns pending-state cleanup. Arming is intentionally one atomic
+        // transition: clearing here first created a window where the persistent
+        // handler observed neither a target nor queueing and swallowed termination.
+        // Install the handlers before the forwarding guard is returned: a signal
+        // received during sandbox startup must queue here instead of taking its
+        // default action and killing nub before the child target exists.
+        debug_assert_eq!(CURRENT_TARGET.load(Ordering::SeqCst), 0);
+        QUEUE_WITHOUT_TARGET.store(true, Ordering::SeqCst);
+        install_handlers();
+    }
+
     /// Clear the current target after the child exits.
     pub(super) fn untrack() {
         CURRENT_TARGET.store(0, Ordering::SeqCst);
+        QUEUE_WITHOUT_TARGET.store(false, Ordering::SeqCst);
+        PENDING_SIGNALS.store(0, Ordering::SeqCst);
     }
 
     #[cfg(test)]
     pub(super) fn current() -> i32 {
         CURRENT_TARGET.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(super) fn queue_for_test(signo: i32) {
+        assert!(QUEUE_WITHOUT_TARGET.load(Ordering::SeqCst));
+        PENDING_SIGNALS.fetch_or(1u64 << signo, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_for_test(signo: i32) -> bool {
+        PENDING_SIGNALS.load(Ordering::SeqCst) & (1u64 << signo) != 0
     }
 }
 
@@ -207,6 +267,39 @@ pub fn track_child_group(pid: u32) {
     ctrl_c::track(-(pid as i32));
     #[cfg(not(unix))]
     let _ = pid;
+}
+
+/// Register signal forwarding before a child starts, then install the exact
+/// positive-process or negative-process-group target once the launcher has it.
+/// Dropping the guard always clears the target.
+pub struct SignalForwardingGuard;
+
+impl SignalForwardingGuard {
+    pub fn new() -> Self {
+        #[cfg(unix)]
+        ctrl_c::prepare();
+        Self
+    }
+
+    pub fn set_target(&self, target: i32) {
+        #[cfg(unix)]
+        ctrl_c::track(target);
+        #[cfg(not(unix))]
+        let _ = target;
+    }
+}
+
+impl Default for SignalForwardingGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SignalForwardingGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        ctrl_c::untrack();
+    }
 }
 
 /// Clear the tracked child/group after it exits — pair with [`track_child_group`].
@@ -2162,6 +2255,85 @@ mod tests {
         assert_eq!(ctrl_c::current(), -4321, "group target is the negated pid");
         untrack_child();
         assert_eq!(ctrl_c::current(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_signal_is_delivered_on_repeated_target_installation() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ctrl_c::untrack();
+        for _ in 0..2 {
+            ctrl_c::prepare();
+            let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+            ctrl_c::queue_for_test(libc::SIGTERM);
+            ctrl_c::track(child.id() as i32);
+            let status = child.wait().unwrap();
+            ctrl_c::untrack();
+            assert_eq!(status.signal(), Some(libc::SIGTERM));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_launch_signal_is_queued_before_target_installation() {
+        use std::os::unix::process::ExitStatusExt;
+
+        const WORKER_ENV: &str = "__NUB_TEST_FIRST_LAUNCH_SIGNAL_WORKER";
+        if std::env::var_os(WORKER_ENV).is_none() {
+            // Run the dangerous stimulus in a fresh test process. Besides keeping
+            // the parent harness alive if this regresses, that guarantees this is
+            // genuinely the process's first handler installation regardless of
+            // which order libtest runs the surrounding signal tests.
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "node::spawn::tests::first_launch_signal_is_queued_before_target_installation",
+                    "--nocapture",
+                ])
+                .env(WORKER_ENV, "1")
+                .output()
+                .expect("spawn first-launch signal worker");
+            assert!(
+                output.status.success(),
+                "first-launch signal worker failed: status={:?}\nstdout={}\nstderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ctrl_c::untrack();
+
+        // Constructing the guard is the first-launch boundary used by the sandbox
+        // frontend. It must synchronously install the process handlers even though
+        // no child target exists yet.
+        let forwarding = SignalForwardingGuard::new();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+
+        // Deliver a real terminating signal to this process before set_target.
+        // The installed handler must keep the test process alive and publish the
+        // pending bit; polling that bit makes the pre-target ordering deterministic.
+        assert_eq!(
+            unsafe { libc::kill(std::process::id() as i32, libc::SIGTERM) },
+            0
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !ctrl_c::pending_for_test(libc::SIGTERM) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "SIGTERM was not queued before target installation"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        forwarding.set_target(child.id() as i32);
+        let status = child.wait().unwrap();
+        drop(forwarding);
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
     }
 
     #[cfg(unix)]

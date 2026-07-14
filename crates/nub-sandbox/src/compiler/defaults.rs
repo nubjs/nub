@@ -396,6 +396,7 @@ pub fn strip_all_env(
         .cloned()
         .collect();
     crate::policy::EnvPolicy {
+        resolved: true,
         enforce: true,
         constructed,
         schema: Vec::new(),

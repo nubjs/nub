@@ -267,6 +267,7 @@ mod win {
         // secret from the child's constructed env.
         let mut policy = read_confine(&[&root]);
         policy.env = EnvPolicy {
+            resolved: true,
             enforce: true,
             constructed: base_env(),
             schema: Vec::new(),
@@ -410,7 +411,7 @@ mod win {
                 tmp: TmpMode::Private,
             },
             net: NetPolicy::default(),
-            env: EnvPolicy::default(),
+            env: EnvPolicy::resolved(base_env()),
             pid: PidPolicy::default(),
         }
     }

@@ -334,7 +334,7 @@ mod win {
                 tmp: TmpMode::Private,
             },
             net: NetPolicy::default(),
-            env: EnvPolicy::default(),
+            env: EnvPolicy::resolved(base_env(&[])),
             pid: PidPolicy::default(),
         }
     }
@@ -698,6 +698,7 @@ mod win {
         unsafe { std::env::set_var("NUB_SBX_SECRET", "sk-leak") };
         let mut scrub = read_confine(&[&f.work], &[]);
         scrub.env = EnvPolicy {
+            resolved: true,
             enforce: true,
             constructed: base_env(&[("NUB_SBX_ALLOWED", "yes")]),
             schema: Vec::new(),

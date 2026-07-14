@@ -26,11 +26,15 @@ use anyhow::Result;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> Result<()> {
+    // Must be the first embedder action: Linux monitor mode is selected from a
+    // private argv/descriptor handshake and never enters logging or CLI setup.
+    let sandbox_runtime = nub_sandbox::earliest_bootstrap()?;
+
     // Engine-aware subscriber: surfaces the embedded engine's warning
     // channel (brand-rewritten) by default; RUST_LOG still owns the
     // filter when set. See pm_engine::log.
     pm_engine::log::init();
 
-    let exit_code = cli::run()?;
+    let exit_code = cli::run(&sandbox_runtime)?;
     std::process::exit(exit_code);
 }

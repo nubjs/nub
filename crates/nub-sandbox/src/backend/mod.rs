@@ -14,19 +14,20 @@
 //! (`apply(policy, spec) -> Result<Prepared, Degradation>`) the future embedder
 //! seam slots into.
 //!
-//! LAUNCH SEAM: a backend either configures [`Prepared::command`] for the caller to
-//! spawn (macOS wraps `sandbox-exec`; Linux wraps Bubblewrap; the skeleton
-//! just scrubs env) OR — Windows only — OWNS the whole spawn lifecycle, because an
-//! AppContainer launch cannot be a pre-built `std::process::Command`: it needs a
-//! custom `CreateProcessW` with `STARTUPINFOEX`/`SECURITY_CAPABILITIES`, a Job Object
-//! assigned at creation, and per-run ACL grants that must be TORN DOWN after the
-//! child exits. [`Prepared::status`] is the uniform verb: mac/linux/skeleton delegate
-//! to `command.status()`; Windows runs its launcher (setup → spawn → wait → RAII
-//! teardown) when a launch plan is attached.
+//! LAUNCH SEAM: every backend returns a [`Prepared`] plan whose command is private.
+//! Callers launch through [`Prepared::spawn`], [`Prepared::status`], or
+//! [`Prepared::output`], preserving startup verification and resource ownership.
+//! Windows owns the full synchronous spawn lifecycle because AppContainer creation
+//! needs `CreateProcessW` with `STARTUPINFOEX`/`SECURITY_CAPABILITIES`, a Job Object,
+//! and per-run ACL grants that are torn down after exit.
 
 use crate::policy::{Effect, Inspection, ProxyMode, SandboxPolicy};
 use crate::proxy::mitm::MitmEngine;
 use crate::proxy::{EgressProxy, StaticDecider};
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::ffi::OsString;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -35,6 +36,29 @@ mod macos;
 
 #[cfg(target_os = "linux")]
 mod linux;
+
+#[cfg(target_os = "linux")]
+mod linux_monitor;
+
+#[cfg(target_os = "linux")]
+pub use linux_monitor::{
+    RuntimeCapability, earliest_bootstrap, exercise_monitor_outer_parent_death_child,
+    exercise_monitor_outer_parent_death_state_6_child,
+    exercise_monitor_outer_parent_death_state_7_child, exercise_monitor_state_6,
+    exercise_monitor_state_7, exercise_monitor_state_7_parent_death,
+    exercise_monitor_states_1_to_5,
+};
+
+/// Non-Linux embedders keep the same explicit startup/apply seam without carrying
+/// a platform runtime image.
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeCapability;
+
+#[cfg(not(target_os = "linux"))]
+pub fn earliest_bootstrap() -> std::io::Result<RuntimeCapability> {
+    Ok(RuntimeCapability)
+}
 
 // The Windows AppContainer backend. Compiled on Windows (its real consumer) and
 // under `test` on any host — so its OS-agnostic IR→plan derivation (grant carve,
@@ -134,16 +158,15 @@ impl CommandSpec {
     }
 }
 
-/// A launch-ready child: a configured [`Command`] plus the [`Degradation`] the
-/// backend achieved. The caller surfaces `degradation`, then launches with
-/// [`Prepared::status`] (NOT `command.status()` directly — Windows enforcement
-/// rides the `status` seam, not the `command` field).
+/// A launch-ready child. The command stays private so backend supervision and
+/// cleanup cannot be bypassed; callers launch through [`Prepared::spawn`],
+/// [`Prepared::status`], or [`Prepared::output`].
 pub struct Prepared {
     /// The configured child for the mac/linux/skeleton path. On Windows this is the
     /// env-scrubbed plain child used ONLY when nothing needs AppContainer confinement
     /// (`launch` is `None`); when confinement applies, `launch` owns the spawn and
     /// this field is unused.
-    pub command: Command,
+    command: Command,
     pub degradation: Degradation,
     /// The running egress proxy (design.md §2.5), when the policy enforces per-host
     /// net. It runs in the nub PARENT and MUST outlive the child, so it is owned here:
@@ -156,6 +179,9 @@ pub struct Prepared {
     /// Keeping them here guarantees they remain open until `command` is spawned.
     #[cfg(target_os = "linux")]
     pub(crate) _inherited_files: Vec<std::fs::File>,
+    /// Stock-Bubblewrap startup handshake and the expected inner process view.
+    #[cfg(target_os = "linux")]
+    pub(crate) supervision: Option<linux::LinuxSupervision>,
     /// Windows AppContainer launch plan — the backend owns spawn+wait+teardown when
     /// this is `Some`. Absent (or on other OSes) → [`Prepared::status`] spawns
     /// `command`.
@@ -168,7 +194,193 @@ pub struct Prepared {
     pub(crate) _private_tmp: Option<tempfile::TempDir>,
 }
 
+/// A running prepared child together with every resource that must outlive it.
+/// Dropping the handle kills and reaps the child before releasing those resources.
+pub struct PreparedChild {
+    child: Option<std::process::Child>,
+    child_id: u32,
+    #[cfg(unix)]
+    signal_target: i32,
+    _proxy: Option<EgressProxy>,
+    _private_tmp: Option<tempfile::TempDir>,
+}
+
+impl PreparedChild {
+    pub fn id(&self) -> u32 {
+        self.child_id
+    }
+
+    /// The exact `kill(2)` target: a positive process or a negative process group.
+    #[cfg(unix)]
+    #[doc(hidden)]
+    pub fn unix_signal_target(&self) -> i32 {
+        self.signal_target
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let status = self
+            .child
+            .as_mut()
+            .ok_or_else(|| prepared_child_reaped_error("wait"))?
+            .wait()?;
+        self.child.take();
+        self.release_resources();
+        Ok(status)
+    }
+
+    pub fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
+        let child = self
+            .child
+            .take()
+            .ok_or_else(|| prepared_child_reaped_error("capture output from"))?;
+        child.wait_with_output()
+    }
+
+    fn release_resources(&mut self) {
+        self._proxy.take();
+        self._private_tmp.take();
+    }
+}
+
+fn prepared_child_reaped_error(operation: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("cannot {operation} a prepared child that has already been reaped"),
+    )
+}
+
+impl Drop for PreparedChild {
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        #[cfg(unix)]
+        kill_and_reap(child, self.signal_target);
+        #[cfg(not(unix))]
+        kill_and_reap(child);
+    }
+}
+
+#[cfg(unix)]
+fn kill_and_reap(mut child: std::process::Child, signal_target: i32) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    if signal_target != 0 {
+        unsafe {
+            libc::kill(signal_target, libc::SIGKILL);
+        }
+        // Let a supervising launcher reap its own target and exit. Killing the
+        // launcher immediately can orphan the target as a host-visible zombie.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn kill_and_reap(mut child: std::process::Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
 impl Prepared {
+    /// Spawn the child without exposing the backend command. The returned handle
+    /// owns every launch resource and kills/reaps on an early drop.
+    pub fn spawn(self) -> std::io::Result<PreparedChild> {
+        self.spawn_with_signal_target(|_| Ok(()))
+    }
+
+    /// Install a signal target while a supervised Linux child is still blocked.
+    #[doc(hidden)]
+    pub fn spawn_with_signal_target(
+        mut self,
+        ready: impl FnOnce(i32) -> std::io::Result<()>,
+    ) -> std::io::Result<PreparedChild> {
+        #[cfg(target_os = "windows")]
+        if self.launch.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "asynchronous confined Windows launches are not available",
+            ));
+        }
+        #[allow(unused_mut)]
+        let mut child = self.command.spawn()?;
+        // Bubblewrap inherited its setup-data descriptors across spawn. The parent
+        // copies can close immediately; in particular, do not retain the serialized
+        // target environment in the long-lived PreparedChild handle.
+        #[cfg(target_os = "linux")]
+        self._inherited_files.clear();
+        #[cfg(target_os = "linux")]
+        let signal_target = match self.supervision.take() {
+            Some(mut supervision) => match supervision.verify(&mut child) {
+                Ok(reaper_pid) => {
+                    let target_pid = match supervision.release_and_verify(&mut child, reaper_pid) {
+                        Ok(target_pid) => target_pid,
+                        Err(error) => {
+                            kill_and_reap(child, -reaper_pid);
+                            return Err(error);
+                        }
+                    };
+                    let target = -target_pid;
+                    if let Err(error) = ready(target) {
+                        kill_and_reap(child, target);
+                        return Err(error);
+                    }
+                    if let Err(error) = supervision.resume(target_pid) {
+                        kill_and_reap(child, target);
+                        return Err(error);
+                    }
+                    target
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            },
+            None => {
+                let target = child.id() as i32;
+                if let Err(error) = ready(target) {
+                    kill_and_reap(child, target);
+                    return Err(error);
+                }
+                target
+            }
+        };
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let signal_target = {
+            let target = child.id() as i32;
+            if let Err(error) = ready(target) {
+                kill_and_reap(child, target);
+                return Err(error);
+            }
+            target
+        };
+        #[cfg(not(unix))]
+        let _ = ready;
+        let child_id = child.id();
+        Ok(PreparedChild {
+            child: Some(child),
+            child_id,
+            #[cfg(unix)]
+            signal_target,
+            _proxy: self.proxy.take(),
+            _private_tmp: self._private_tmp.take(),
+        })
+    }
+
     /// Launch the prepared child and wait for it, returning its exit status. The
     /// UNIFORM launch verb across backends: mac/linux/skeleton spawn `command`;
     /// Windows runs its AppContainer launcher (ACL setup → `CreateProcessW` under a
@@ -177,12 +389,30 @@ impl Prepared {
     /// The egress proxy (`self.proxy`) is held for the child's whole run and dropped
     /// (listener shut down) only after the child exits — `self` owns it until this
     /// method returns.
+    #[allow(unused_mut)]
     pub fn status(mut self) -> std::io::Result<std::process::ExitStatus> {
         #[cfg(target_os = "windows")]
         if let Some(launch) = self.launch.take() {
             return launch.run();
         }
-        self.command.status()
+        let mut child = self.spawn()?;
+        child.wait()
+    }
+
+    /// Launch, wait, and capture stdout/stderr through the supervised seam.
+    pub fn output(mut self) -> std::io::Result<std::process::Output> {
+        #[cfg(target_os = "windows")]
+        if self.launch.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "captured confined Windows output is not available",
+            ));
+        }
+        self.command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        self.spawn()?.wait_with_output()
     }
 }
 
@@ -217,6 +447,7 @@ fn start_proxy_if_needed(policy: &SandboxPolicy) -> Option<EgressProxy> {
 /// keeps its built-in roots); the rest REPLACE the store, which is exactly why the bundle
 /// carries the real roots alongside the CA. Brand-clean: every key is a tool's own
 /// documented convention, none nub's. Set AFTER `env_clear` so it survives the scrub.
+#[cfg(not(target_os = "linux"))]
 fn set_ca_env(command: &mut Command, bundle: &std::path::Path) {
     let path = bundle.as_os_str();
     for key in [
@@ -233,6 +464,25 @@ fn set_ca_env(command: &mut Command, bundle: &std::path::Path) {
         "DENO_CERT",           // deno
     ] {
         command.env(key, path);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn insert_ca_env(env: &mut BTreeMap<OsString, OsString>, bundle: &std::path::Path) {
+    for key in [
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "PIP_CERT",
+        "NPM_CONFIG_CAFILE",
+        "npm_config_cafile",
+        "CARGO_HTTP_CAINFO",
+        "AWS_CA_BUNDLE",
+        "DENO_CERT",
+    ] {
+        env.insert(OsString::from(key), bundle.as_os_str().to_owned());
     }
 }
 
@@ -274,6 +524,7 @@ fn emit_mitm_notice(policy: &SandboxPolicy) {
 /// vars — without it a bare `fetch()` tries a direct connect the deny-layer blocks
 /// (fail-closed but broken), instead of routing through the loopback proxy. Harmless
 /// (ignored) on older Node. Internal nub-set plumbing var — brand-clean.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn set_proxy_env(command: &mut Command, port: u16, token: Option<&str>) {
     let url = match token {
         Some(t) => format!("http://{t}@127.0.0.1:{port}"),
@@ -291,6 +542,24 @@ fn set_proxy_env(command: &mut Command, port: u16, token: Option<&str>) {
     command.env("NODE_USE_ENV_PROXY", "1");
 }
 
+#[cfg(target_os = "linux")]
+fn insert_proxy_env(env: &mut BTreeMap<OsString, OsString>, port: u16, token: Option<&str>) {
+    let url = match token {
+        Some(token) => format!("http://{token}@127.0.0.1:{port}"),
+        None => format!("http://127.0.0.1:{port}"),
+    };
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+    ] {
+        env.insert(OsString::from(key), OsString::from(&url));
+    }
+    env.insert(OsString::from("NODE_USE_ENV_PROXY"), OsString::from("1"));
+}
+
 /// Apply a resolved policy to a command, dispatching to the per-OS backend.
 ///
 /// The env axis is enforced by CONSTRUCTION (not an OS primitive): when the policy
@@ -305,6 +574,39 @@ fn set_proxy_env(command: &mut Command, port: u16, token: Option<&str>) {
 /// enforcement is the backend's job; on an OS whose backend has not landed,
 /// [`generic_apply`] reports them as not-enforced (never silent).
 pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
+    apply_inner(policy, spec, None)
+}
+
+/// Apply with the verified runtime capability returned by [`earliest_bootstrap`].
+/// Linux confinement requires this explicit embedder seam; other platforms accept
+/// the value and retain their existing launch behavior.
+pub fn apply_with_runtime(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+    runtime: &RuntimeCapability,
+) -> Result<Prepared, Degradation> {
+    apply_inner(policy, spec, Some(runtime))
+}
+
+fn apply_inner(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+    runtime: Option<&RuntimeCapability>,
+) -> Result<Prepared, Degradation> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = runtime;
+    if !policy.env.resolved {
+        return Err(Degradation {
+            lost: vec!["env-unresolved".to_string()],
+            reason: Some(
+                "sandbox policy has no resolved target environment; compile it with an ambient snapshot before apply"
+                    .to_string(),
+            ),
+        });
+    }
+    validate_apply_inputs(policy, &spec)?;
+    #[cfg(target_os = "linux")]
+    linux::preflight_process(policy, &spec)?;
     // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
     // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
     // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`
@@ -331,7 +633,15 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     #[cfg(target_os = "macos")]
     let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     #[cfg(target_os = "linux")]
-    let mut prepared = linux::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
+    let mut prepared = linux::apply(
+        policy,
+        spec,
+        proxy_port,
+        proxy_token,
+        ca_bundle,
+        tmp_dir,
+        runtime,
+    )?;
     #[cfg(target_os = "windows")]
     let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -356,6 +666,85 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     Ok(prepared)
 }
 
+fn validate_apply_inputs(policy: &SandboxPolicy, spec: &CommandSpec) -> Result<(), Degradation> {
+    let reject_nul = |label: &str, value: &std::ffi::OsStr| {
+        if os_str_contains_nul(value) {
+            Err(Degradation {
+                lost: vec!["process-input".to_string()],
+                reason: Some(format!("sandbox {label} contains a NUL byte")),
+            })
+        } else {
+            Ok(())
+        }
+    };
+    reject_nul("entry program", &spec.program)?;
+    for (index, argument) in spec.args.iter().enumerate() {
+        reject_nul(&format!("argument {index}"), argument)?;
+    }
+    if let Some(cwd) = &spec.cwd {
+        reject_nul("working directory", cwd.as_os_str())?;
+    }
+    let cwd = match &spec.cwd {
+        Some(cwd) => cwd.clone(),
+        None => std::env::current_dir().map_err(|error| Degradation {
+            lost: vec!["process-cwd".to_string()],
+            reason: Some(format!(
+                "resolving inherited sandbox working directory: {error}"
+            )),
+        })?,
+    };
+    let canonical = std::fs::canonicalize(&cwd).map_err(|error| Degradation {
+        lost: vec!["process-cwd".to_string()],
+        reason: Some(format!(
+            "resolving sandbox working directory {}: {error}",
+            cwd.display()
+        )),
+    })?;
+    if !canonical.metadata().is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(Degradation {
+            lost: vec!["process-cwd".to_string()],
+            reason: Some(format!(
+                "sandbox working directory is not a directory: {}",
+                canonical.display()
+            )),
+        });
+    }
+    for (key, value) in &policy.env.constructed {
+        if key.is_empty() || key.contains(['=', '\0']) {
+            return Err(Degradation {
+                lost: vec!["env".to_string()],
+                reason: Some(format!("invalid target environment key: {key:?}")),
+            });
+        }
+        if value.contains('\0') {
+            return Err(Degradation {
+                lost: vec!["env".to_string()],
+                reason: Some(format!(
+                    "target environment variable {key:?} contains a NUL byte"
+                )),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn os_str_contains_nul(value: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().contains(&0)
+}
+
+#[cfg(windows)]
+fn os_str_contains_nul(value: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().any(|unit| unit == 0)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_str_contains_nul(value: &std::ffi::OsStr) -> bool {
+    value.to_string_lossy().contains('\0')
+}
+
 /// Create the fresh per-run private tmp dir for `TmpMode::Private` (else `None`). A
 /// `tempfile::TempDir` under the OS default temp root, removed when it drops (after the
 /// child exits, since `Prepared` owns it). A creation failure yields `None` — the backend
@@ -371,9 +760,17 @@ fn make_private_tmp(policy: &SandboxPolicy) -> Option<tempfile::TempDir> {
 /// Point a child's temp-dir env at `dir` (all three conventions: POSIX `TMPDIR`, the
 /// `TMP`/`TEMP` pair Windows + many cross-platform tools read). Set AFTER `env_clear` so
 /// it survives an enforced env scrub.
+#[cfg(not(target_os = "linux"))]
 fn set_tmp_env(command: &mut Command, dir: &std::path::Path) {
     for key in ["TMPDIR", "TMP", "TEMP"] {
         command.env(key, dir);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn insert_tmp_env(env: &mut BTreeMap<OsString, OsString>, dir: &std::path::Path) {
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        env.insert(OsString::from(key), dir.as_os_str().to_owned());
     }
 }
 
@@ -395,11 +792,9 @@ fn generic_apply(
     }
 
     // Env axis — construction, not interception.
-    if policy.env.enforce {
-        command.env_clear();
-        for (k, v) in &policy.env.constructed {
-            command.env(k, v);
-        }
+    command.env_clear();
+    for (k, v) in &policy.env.constructed {
+        command.env(k, v);
     }
     if let Some(port) = proxy_port {
         set_proxy_env(&mut command, port, proxy_token);

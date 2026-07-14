@@ -857,7 +857,7 @@ pub enum ColorWhen {
 }
 
 /// Top-level entry point. Returns the process exit code.
-pub fn run() -> Result<i32> {
+pub fn run(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
     // Reclaim the PATH shim temp dir exactly once, on return. The shim is
     // created lazily/idempotently by the spawn paths and is process-wide
     // (PID-keyed); it must outlive every — possibly parallel — child, so
@@ -881,7 +881,7 @@ pub fn run() -> Result<i32> {
     let argv0 = Argv0::detect();
 
     match argv0 {
-        Argv0::Nubx => run_nubx(),
+        Argv0::Nubx => run_nubx(sandbox_runtime),
         Argv0::Node => run_as_node(),
         Argv0::PmShim(name) => {
             // The PM owns its argv — no nub flag parsing, everything after
@@ -899,7 +899,7 @@ pub fn run() -> Result<i32> {
                 let args: Vec<String> = env::args().skip(1).collect();
                 return exec_program(&real, &args, &[]);
             }
-            run_nub()
+            run_nub(sandbox_runtime)
         }
     }
 }
@@ -1173,7 +1173,7 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
     }
 }
 
-fn run_nub() -> Result<i32> {
+fn run_nub(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
     let raw_args: Vec<String> = env::args().skip(1).collect();
     // Accept pnpm's `nub -r run build` order (run-flags before the subcommand).
     let raw_args = normalize_leading_run_flags(&raw_args).unwrap_or(raw_args);
@@ -1514,7 +1514,7 @@ fn run_nub() -> Result<i32> {
 
     // If a subcommand was found, delegate to clap for structured parsing.
     if subcommand_found {
-        return dispatch_subcommand(rest);
+        return dispatch_subcommand(sandbox_runtime, rest);
     }
 
     // No subcommand — check if this is a file path or a bareword.
@@ -1784,7 +1784,10 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
 /// verbatim position-3 suffix first, clap-parsing only the prefix, then
 /// appending the suffix to the parsed `args`. `upgrade`/`help` have no
 /// positional-forwarding semantics and go straight to clap.
-fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
+fn dispatch_subcommand(
+    sandbox_runtime: &nub_sandbox::RuntimeCapability,
+    rest: Vec<String>,
+) -> Result<i32> {
     let subcommand = rest[0].clone();
 
     // `node` is a non-forwarding command group with bespoke bare-usage + invalid-
@@ -1913,7 +1916,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             // sandbox engine. Bypasses the whole script-run/workspace path (this
             // is a frontend-less engine seam, not a package.json script lookup).
             if let Some(policy_file) = sandbox {
-                return run_sandboxed(&policy_file, script.as_deref(), &args);
+                return run_sandboxed(sandbox_runtime, &policy_file, script.as_deref(), &args);
             }
             if no_check {
                 crate::verify_deps::disable();
@@ -2228,7 +2231,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     }
 }
 
-fn run_nubx() -> Result<i32> {
+fn run_nubx(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
     // nubx is a PURE PASS-THROUGH runner: locate the SUBJECT token, decide its TIER
     // by precedence (file > script > bin > registry), then hand the RAW remaining
     // argv to that tier's existing runner unchanged. Subject location is asymmetric
@@ -2341,7 +2344,7 @@ fn run_nubx() -> Result<i32> {
         crate::nubx_resolve::NubxRoute::Script => {
             let mut rest = vec!["run".to_string()];
             rest.extend(args);
-            dispatch_subcommand(rest)
+            dispatch_subcommand(sandbox_runtime, rest)
         }
         // BIN / REGISTRY / workspace-bin tier, a `-p`-forced fetch, or no subject —
         // the existing `Nubx` clap dispatch. Arm the DLX fallback (a local miss
@@ -2355,7 +2358,7 @@ fn run_nubx() -> Result<i32> {
             NUBX_DLX_FALLBACK.store(true, Ordering::Relaxed);
             let mut rest = vec!["nubx".to_string()];
             rest.extend(args);
-            dispatch_subcommand(rest)
+            dispatch_subcommand(sandbox_runtime, rest)
         }
     }
 }
@@ -2624,7 +2627,12 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
 /// The file may be either a bare surface block (`{ "fs": … }`) or a document with
 /// a top-level `"sandbox"` key. Trusted (an explicit user-supplied policy file),
 /// so `$(…)` substitution is permitted.
-fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> Result<i32> {
+fn run_sandboxed(
+    runtime: &nub_sandbox::RuntimeCapability,
+    policy_file: &str,
+    program: Option<&str>,
+    args: &[String],
+) -> Result<i32> {
     use jsonc_parser::ParseOptions;
 
     // clap's `trailing_var_arg` on `args` captures the whole command when no
@@ -2648,7 +2656,12 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
     let block = value.get("sandbox").cloned().unwrap_or(value);
 
     let cwd = std::env::current_dir().context("resolving cwd")?;
-    let ctx = nub_sandbox::CompileCtx::new(sandbox_homes(&cwd), cwd.clone(), true, ambient_env());
+    let ctx = nub_sandbox::CompileCtx::new(
+        sandbox_homes(&cwd),
+        cwd.clone(),
+        true,
+        ambient_env().context("capturing the sandbox target environment")?,
+    );
     let (policy, warnings) = nub_sandbox::compile_with_warnings(&block, &ctx)
         .map_err(|e| anyhow::anyhow!("sandbox policy did not compile: {e}"))?;
     for w in &warnings {
@@ -2666,7 +2679,7 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
     } else {
         spec
     };
-    let prepared = nub_sandbox::apply(&policy, spec).map_err(|d| {
+    let prepared = nub_sandbox::apply_with_runtime(&policy, spec, runtime).map_err(|d| {
         // Surface the fail-closed reason cleanly (e.g. Windows per-host/MITM needing
         // elevation), not a Debug dump — this is the user-facing error.
         let detail = d
@@ -2678,12 +2691,31 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
     if let Some(warning) = prepared.degradation.warning() {
         eprintln!("warning: {warning}");
     }
-    // The uniform launch verb across backends — mac/linux spawn the configured
-    // `command`; Windows owns the AppContainer spawn+wait+teardown behind `status()`.
+    #[cfg(unix)]
+    let forwarding = nub_core::node::spawn::SignalForwardingGuard::new();
+    #[cfg(unix)]
+    let mut child = prepared
+        .spawn_with_signal_target(|target| {
+            forwarding.set_target(target);
+            Ok(())
+        })
+        .with_context(|| format!("spawning `{program}` under the sandbox"))?;
+    #[cfg(all(not(unix), not(windows)))]
+    let mut child = prepared
+        .spawn()
+        .with_context(|| format!("spawning `{program}` under the sandbox"))?;
+    #[cfg(windows)]
     let status = prepared
         .status()
         .with_context(|| format!("spawning `{program}` under the sandbox"))?;
-    Ok(status.code().unwrap_or(1))
+    #[cfg(windows)]
+    return Ok(nub_core::node::spawn::exit_code_from_status(&status));
+    #[cfg(not(windows))]
+    let status = child
+        .wait()
+        .with_context(|| format!("waiting for `{program}` under the sandbox"))?;
+    #[cfg(not(windows))]
+    Ok(nub_core::node::spawn::exit_code_from_status(&status))
 }
 
 /// The per-OS home anchors the sandbox compiler expands symbolic roots against.
@@ -2707,8 +2739,20 @@ fn sandbox_homes(cwd: &std::path::Path) -> nub_sandbox::Homes {
 
 /// Snapshot the ambient env for the sandbox compiler (Boundary B: the engine
 /// receives parsed data, it does not read the process env itself).
-fn ambient_env() -> std::collections::BTreeMap<String, String> {
-    std::env::vars().collect()
+fn ambient_env() -> Result<std::collections::BTreeMap<String, String>> {
+    std::env::vars_os()
+        .map(|(key, value)| {
+            let key = key.into_string().map_err(|key| {
+                let _ = key;
+                anyhow::anyhow!("sandbox target environment contains a non-Unicode variable name")
+            })?;
+            let value = value.into_string().map_err(|value| {
+                let _ = value;
+                anyhow::anyhow!("sandbox target environment variable {key} has a non-Unicode value")
+            })?;
+            Ok((key, value))
+        })
+        .collect()
 }
 
 fn run_script(

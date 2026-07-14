@@ -388,11 +388,16 @@ fn floor_env(ctx: &CompileCtx) -> EnvPolicy {
 }
 
 /// `sandbox: false` — every axis relaxed. The explicit escape hatch.
-fn unjailed(_ctx: &CompileCtx) -> SandboxPolicy {
+fn unjailed(ctx: &CompileCtx) -> SandboxPolicy {
     SandboxPolicy {
         fs: relaxed_fs(),
         net: relaxed_net(),
-        env: crate::policy::EnvPolicy::default(), // enforce=false → inherit
+        env: crate::policy::EnvPolicy {
+            resolved: true,
+            enforce: false,
+            constructed: ctx.ambient_env.clone(),
+            ..Default::default()
+        },
         pid: Default::default(),
     }
 }
@@ -436,6 +441,7 @@ fn secure_default_env(ctx: &CompileCtx) -> crate::policy::EnvPolicy {
         .cloned()
         .collect();
     crate::policy::EnvPolicy {
+        resolved: true,
         enforce: true,
         constructed,
         schema: Vec::new(),

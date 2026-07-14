@@ -102,11 +102,9 @@ pub fn apply(
     // inherit this process's full parent env at spawn — re-leaking every secret the
     // scrub removed. Clear it and set exactly the constructed map. (Ported hard-won
     // fix: a fresh Command inherits the parent environ, so env_clear is mandatory.)
-    if policy.env.enforce {
-        wrapped.env_clear();
-        for (k, v) in &policy.env.constructed {
-            wrapped.env(k, v);
-        }
+    wrapped.env_clear();
+    for (k, v) in &policy.env.constructed {
+        wrapped.env(k, v);
     }
     // Point the child at the loopback proxy (cooperative hint; the Seatbelt carve is
     // the real boundary). Set AFTER env_clear so it survives an enforced env scrub.
@@ -141,11 +139,9 @@ fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
-    if policy.env.enforce {
-        command.env_clear();
-        for (k, v) in &policy.env.constructed {
-            command.env(k, v);
-        }
+    command.env_clear();
+    for (k, v) in &policy.env.constructed {
+        command.env(k, v);
     }
     command
 }

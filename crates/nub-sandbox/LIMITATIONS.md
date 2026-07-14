@@ -2,11 +2,12 @@
 
 > **Linux Bubblewrap backend.** Linux uses an unmodified stock Bubblewrap executable
 > to construct a private mount/PID/network view. Current bounds: unprivileged user
-> namespaces must be usable; `CLOSE_RANGE_CLOEXEC` requires Linux 5.11; UID 0 is
-> rejected pending a capability-based probe; per-host proxy bridging is not wired and
-> therefore fails safe to no network; denied globs are expanded only across declared
-> project/workspace/package roots at startup; and pre-existing hardlink aliases remain
-> an open research item.
+> namespaces and a stock `setsid` launcher must be usable; each candidate is accepted
+> only after a behavior probe, and each target is released only after its namespaces,
+> zero capability sets, seccomp posture, and session group are verified; per-host proxy
+> bridging is not wired and therefore fails safe to no network; denied globs are expanded
+> only across declared project/workspace/package roots at startup; and pre-existing
+> hardlink aliases remain an open research item.
 
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
@@ -343,3 +344,17 @@ Network-deny policy also creates a private network namespace and installs a smal
 filter for socket families that cross that namespace plus `io_uring_setup`. Unrestricted
 network policy installs no network filter. Nested namespace inheritance and conditional
 keyring hardening are separate unfinished work and are not claimed here.
+
+Before a Bubblewrap executable is used, a bounded probe verifies the required stock
+mount operations, read-only remounting, private `/proc` and `/dev`, network isolation,
+and seccomp effect. The probe runs for each launch so acceptance cannot outlive a changed
+host confinement context. The production target then stops at an in-sandbox gate after
+Bubblewrap setup. Nub verifies that exact process has zero inheritable, permitted,
+effective, bounding, and ambient capabilities; occupies the expected namespaces; has
+the required seccomp mode; and is its own session and process-group leader before it is
+resumed. This permits UID 0 only when the resulting process has no Linux capabilities.
+
+Inherited descriptors are marked close-on-exec with `close_range` where available. On
+older kernels, Nub enumerates a verified procfs `/proc/self/fd` directory with raw
+syscalls and marks every non-setup descriptor close-on-exec; it does not rely on the
+current `RLIMIT_NOFILE` as an enumeration bound.

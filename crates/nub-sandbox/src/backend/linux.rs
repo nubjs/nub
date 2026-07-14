@@ -11,24 +11,24 @@ use crate::matcher::path::{PathMatcher, canonicalize_including_nonexistent};
 use crate::policy::{Effect, FsAccess, SandboxPolicy, TmpMode};
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
-    SeccompRule, TargetArch,
+    SeccompRule, TargetArch, sock_filter,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{Seek, Write};
-use std::os::fd::AsRawFd;
+use std::io::{Read, Seek, Write};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 const ESSENTIAL_READ_DIRS: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt",
 ];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootView {
     ReadWrite,
@@ -57,8 +57,376 @@ struct BubblewrapLaunch {
     executable: Option<File>,
 }
 
+pub(crate) struct LinuxSupervision {
+    info_read: File,
+    info_write: Option<File>,
+    block_read: Option<File>,
+    block_write: File,
+    expected: ExpectedView,
+}
+
+struct ExpectedView {
+    user: PathBuf,
+    mount: PathBuf,
+    pid: PathBuf,
+    ipc: PathBuf,
+    net: Option<PathBuf>,
+    require_seccomp: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct BubblewrapInfo {
+    #[serde(rename = "child-pid")]
+    child_pid: i32,
+}
+
+impl ExpectedView {
+    fn capture(require_net: bool, require_seccomp: bool) -> std::io::Result<Self> {
+        let namespace = |name: &str| fs::read_link(format!("/proc/self/ns/{name}"));
+        Ok(Self {
+            user: namespace("user")?,
+            mount: namespace("mnt")?,
+            pid: namespace("pid")?,
+            ipc: namespace("ipc")?,
+            net: require_net.then(|| namespace("net")).transpose()?,
+            require_seccomp,
+        })
+    }
+}
+
+impl LinuxSupervision {
+    fn new(require_net: bool, require_seccomp: bool) -> std::io::Result<Self> {
+        let (info_read, info_write) = pipe_pair()?;
+        set_nonblocking(&info_read)?;
+        let (block_read, block_write) = pipe_pair()?;
+        Ok(Self {
+            info_read,
+            info_write: Some(info_write),
+            block_read: Some(block_read),
+            block_write,
+            expected: ExpectedView::capture(require_net, require_seccomp)?,
+        })
+    }
+
+    fn append_args(&self, setup: &mut Command) {
+        setup
+            .arg("--info-fd")
+            .arg(
+                self.info_write
+                    .as_ref()
+                    .expect("supervision info writer available")
+                    .as_raw_fd()
+                    .to_string(),
+            )
+            .arg("--block-fd")
+            .arg(
+                self.block_read
+                    .as_ref()
+                    .expect("supervision block reader available")
+                    .as_raw_fd()
+                    .to_string(),
+            );
+    }
+
+    fn child_fds(&self) -> [RawFd; 2] {
+        [
+            self.info_write
+                .as_ref()
+                .expect("supervision info writer available")
+                .as_raw_fd(),
+            self.block_read
+                .as_ref()
+                .expect("supervision block reader available")
+                .as_raw_fd(),
+        ]
+    }
+
+    pub(crate) fn verify_and_release(mut self, child: &mut Child) -> std::io::Result<i32> {
+        let reaper_pid = self.verify(child)?;
+        let target_pid = self.release_and_verify(child, reaper_pid)?;
+        self.resume(target_pid)?;
+        Ok(target_pid)
+    }
+
+    pub(crate) fn verify(&mut self, child: &mut Child) -> std::io::Result<i32> {
+        self.info_write.take();
+        self.block_read.take();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut bytes = Vec::with_capacity(512);
+        let info = loop {
+            let mut chunk = [0u8; 512];
+            match self.info_read.read(&mut chunk) {
+                Ok(0) => {
+                    if let Ok(info) = serde_json::from_slice::<BubblewrapInfo>(&bytes) {
+                        break info;
+                    }
+                    return Err(std::io::Error::other(
+                        "Bubblewrap closed its info channel before a complete status record",
+                    ));
+                }
+                Ok(count) => {
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if bytes.len() > 64 * 1024 {
+                        return Err(std::io::Error::other(
+                            "Bubblewrap returned an oversized status record",
+                        ));
+                    }
+                    if let Ok(info) = serde_json::from_slice::<BubblewrapInfo>(&bytes) {
+                        break info;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(std::io::Error::other(format!(
+                    "Bubblewrap exited before its supervised child was ready: {status}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out waiting for Bubblewrap's supervised child",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        verify_child_view(info.child_pid, child.id(), &self.expected)?;
+        Ok(info.child_pid)
+    }
+
+    pub(crate) fn release(&mut self) -> std::io::Result<()> {
+        self.block_write.write_all(b"1")?;
+        Ok(())
+    }
+
+    pub(crate) fn release_and_verify(
+        &mut self,
+        child: &mut Child,
+        reaper_pid: i32,
+    ) -> std::io::Result<i32> {
+        self.release()?;
+        await_hardened_child(reaper_pid, child, &self.expected)
+    }
+
+    pub(crate) fn resume(&self, target_pid: i32) -> std::io::Result<()> {
+        if unsafe { libc::kill(target_pid, libc::SIGCONT) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+}
+
+fn set_nonblocking(file: &File) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn pipe_pair() -> std::io::Result<(File, File)> {
+    let mut fds = [-1; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let first = file_above_stdio(unsafe { File::from_raw_fd(fds[0]) })?;
+    let second = file_above_stdio(unsafe { File::from_raw_fd(fds[1]) })?;
+    Ok((first, second))
+}
+
+fn verify_child_view(pid: i32, outer_pid: u32, expected: &ExpectedView) -> std::io::Result<()> {
+    if pid <= 0 {
+        return Err(std::io::Error::other(
+            "Bubblewrap reported an invalid supervised child PID",
+        ));
+    }
+    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name).map(str::trim))
+    };
+    let parent = field("PPid:")
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| std::io::Error::other("supervised child status omitted PPid"))?;
+    if parent != outer_pid {
+        return Err(std::io::Error::other(
+            "Bubblewrap status identified a process outside its launcher tree",
+        ));
+    }
+    let current = |name: &str| fs::read_link(format!("/proc/{pid}/ns/{name}"));
+    for (name, outer) in [
+        ("user", &expected.user),
+        ("mnt", &expected.mount),
+        ("pid", &expected.pid),
+        ("ipc", &expected.ipc),
+    ] {
+        if current(name)? == *outer {
+            return Err(std::io::Error::other(format!(
+                "supervised child did not enter a distinct {name} namespace"
+            )));
+        }
+    }
+    if let Some(outer_net) = &expected.net
+        && current("net")? == *outer_net
+    {
+        return Err(std::io::Error::other(
+            "supervised child did not enter the requested network namespace",
+        ));
+    }
+    Ok(())
+}
+
+fn await_hardened_child(
+    reaper_pid: i32,
+    child: &mut Child,
+    expected: &ExpectedView,
+) -> std::io::Result<i32> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(target_pid) = single_child_pid(reaper_pid)? {
+            let status = fs::read_to_string(format!("/proc/{target_pid}/status"));
+            if status.as_deref().is_ok_and(|status| {
+                status.lines().any(|line| {
+                    line.strip_prefix("State:")
+                        .is_some_and(|state| state.trim().starts_with(['T', 't']))
+                })
+            }) {
+                verify_hardened_child(target_pid, reaper_pid, expected)?;
+                return Ok(target_pid);
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(std::io::Error::other(format!(
+                "Bubblewrap exited before its target hardening was verified: {status}"
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for the sandbox target verification stop",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn single_child_pid(reaper_pid: i32) -> std::io::Result<Option<i32>> {
+    let children = fs::read_to_string(format!("/proc/{reaper_pid}/task/{reaper_pid}/children"))?;
+    let children = children
+        .split_whitespace()
+        .map(str::parse::<i32>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| std::io::Error::other("Bubblewrap reported an invalid target PID"))?;
+    match children.as_slice() {
+        [] => Ok(None),
+        [pid] if *pid > 0 => Ok(Some(*pid)),
+        _ => Err(std::io::Error::other(format!(
+            "Bubblewrap's namespace reaper had {} children at the verification gate",
+            children.len()
+        ))),
+    }
+}
+
+fn verify_hardened_child(
+    pid: i32,
+    reaper_pid: i32,
+    expected: &ExpectedView,
+) -> std::io::Result<()> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name).map(str::trim))
+    };
+    if !field("State:").is_some_and(|state| state.starts_with(['T', 't'])) {
+        return Err(std::io::Error::other(
+            "sandbox target did not stop at its verification gate",
+        ));
+    }
+    if field("PPid:").and_then(|value| value.parse().ok()) != Some(reaper_pid) {
+        return Err(std::io::Error::other(
+            "the sandbox target was not owned by Bubblewrap's namespace reaper",
+        ));
+    }
+    for capability in ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"] {
+        if field(capability) != Some("0000000000000000") {
+            return Err(std::io::Error::other(format!(
+                "sandbox target retained Linux capabilities in {capability}"
+            )));
+        }
+    }
+    if expected.require_seccomp && field("Seccomp:") != Some("2") {
+        return Err(std::io::Error::other(
+            "sandbox target did not enter seccomp filter mode",
+        ));
+    }
+    let sid = unsafe { libc::getsid(pid) };
+    let pgid = unsafe { libc::getpgid(pid) };
+    if sid != pid || pgid != pid {
+        return Err(std::io::Error::other(format!(
+            "sandbox target is not its verified session-group leader (pid={pid}, sid={sid}, pgid={pgid})"
+        )));
+    }
+    for name in ["user", "mnt", "pid", "ipc"] {
+        if fs::read_link(format!("/proc/{pid}/ns/{name}"))?
+            != fs::read_link(format!("/proc/{reaper_pid}/ns/{name}"))?
+        {
+            return Err(std::io::Error::other(format!(
+                "sandbox target escaped Bubblewrap's {name} namespace"
+            )));
+        }
+    }
+    if expected.net.is_some()
+        && fs::read_link(format!("/proc/{pid}/ns/net"))?
+            != fs::read_link(format!("/proc/{reaper_pid}/ns/net"))?
+    {
+        return Err(std::io::Error::other(
+            "sandbox target escaped Bubblewrap's network namespace",
+        ));
+    }
+    Ok(())
+}
+
 /// Apply a resolved policy using Bubblewrap. The exact same operation can be nested:
 /// an outer mount/PID view remains in force and the child adds a stricter view inside it.
+pub(crate) fn preflight_process(
+    policy: &SandboxPolicy,
+    spec: &CommandSpec,
+) -> Result<(), Degradation> {
+    let cwd = spec
+        .cwd
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| Degradation {
+            lost: vec!["process-cwd".to_string()],
+            reason: Some("resolving inherited sandbox working directory failed".to_string()),
+        })?;
+    let cwd = fs::canonicalize(&cwd).map_err(|error| Degradation {
+        lost: vec!["process-cwd".to_string()],
+        reason: Some(format!(
+            "resolving sandbox working directory {}: {error}",
+            cwd.display()
+        )),
+    })?;
+    resolve_program(&spec.program, &cwd, target_path(policy).as_deref()).ok_or_else(|| {
+        Degradation {
+            lost: vec!["process-entry".to_string()],
+            reason: Some(format!(
+                "sandbox entry program could not be resolved in the target environment: {}",
+                Path::new(&spec.program).display()
+            )),
+        }
+    })?;
+    Ok(())
+}
+
 pub fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
@@ -66,7 +434,12 @@ pub fn apply(
     proxy_token: Option<&str>,
     ca_bundle: Option<&Path>,
     tmp_dir: Option<&Path>,
+    runtime: Option<&super::linux_monitor::RuntimeCapability>,
 ) -> Result<Prepared, Degradation> {
+    validate_process_inputs(&spec).map_err(|reason| Degradation {
+        lost: vec!["process-input".to_string()],
+        reason: Some(reason),
+    })?;
     let confine_fs = fs_confines(&policy.fs);
     let sandboxing =
         confine_fs || policy.net.enforce || policy.env.enforce || policy.fs.tmp != TmpMode::Shared;
@@ -77,21 +450,23 @@ pub fn apply(
             degradation: Degradation::full(),
             proxy: None,
             _inherited_files: Vec::new(),
+            supervision: None,
             _private_tmp: None,
         });
     }
 
-    if unsafe { libc::geteuid() } == 0 {
-        return Err(Degradation {
-            lost: vec!["process-isolation".to_string()],
-            reason: Some(
-                "sandboxed Linux execution as UID 0 cannot preserve both capability removal and nested sandboxing"
-                    .to_string(),
-            ),
-        });
-    }
+    let runtime = runtime.ok_or_else(|| Degradation {
+        lost: vec!["runtime-capability-missing".to_string()],
+        reason: Some(
+            "Linux sandbox confinement requires the embedder's earliest bootstrap capability"
+                .to_string(),
+        ),
+    })?;
+    let _runtime = runtime
+        .materialize()
+        .map_err(super::linux_monitor::runtime_degradation)?;
 
-    let bwrap = find_bwrap().map_err(|reason| Degradation {
+    let (bwrap, setsid_program) = find_bwrap(policy.net.enforce).map_err(|reason| Degradation {
         lost: vec!["fs".to_string()],
         reason: Some(reason),
     })?;
@@ -108,6 +483,15 @@ pub fn apply(
             cwd.display()
         )),
     })?;
+    if !cwd.metadata().is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(Degradation {
+            lost: vec!["process-cwd".to_string()],
+            reason: Some(format!(
+                "sandbox working directory is not a directory: {}",
+                cwd.display()
+            )),
+        });
+    }
     let entry_program = resolve_program(&spec.program, &cwd, target_path(policy).as_deref())
         .ok_or_else(|| Degradation {
             lost: vec!["process-entry".to_string()],
@@ -156,39 +540,40 @@ pub fn apply(
             reason: Some(reason),
         },
     )?;
+    validate_cwd_visibility(&cwd, root_view, policy.fs.tmp, &masks, &mount_plan).map_err(
+        |reason| Degradation {
+            lost: vec!["process-cwd".to_string()],
+            reason: Some(reason),
+        },
+    )?;
     let masks = masks
         .into_iter()
         .filter(|mask| !mask_already_enforced(mask))
         .collect::<Vec<_>>();
 
-    let mut command = Command::new(&bwrap.program);
-    command.args(["--die-with-parent", "--new-session", "--unshare-user"]);
-    command.args(["--cap-drop", "ALL"]);
+    let mut setup = Command::new("");
+    setup.args(["--die-with-parent", "--new-session", "--unshare-user"]);
+    setup.args(["--cap-drop", "ALL"]);
     // Deliberately do not disable further user namespaces: a sandboxed agent must be
     // able to invoke Nub again and add a stricter child sandbox.
-    command.args(["--unshare-pid", "--unshare-ipc"]);
+    setup.args(["--unshare-pid", "--unshare-ipc"]);
 
     match root_view {
         RootView::ReadWrite => {
-            command.args(["--bind", "/", "/"]);
+            setup.args(["--bind", "/", "/"]);
         }
         RootView::ReadOnly => {
-            command.args(["--ro-bind", "/", "/"]);
+            setup.args(["--ro-bind", "/", "/"]);
         }
         RootView::Minimal => {
-            append_minimal_read_mounts(
-                &mut command,
-                &entry_program,
-                ca_bundle,
-                &bwrap.visible_path,
-            )?;
+            append_minimal_read_mounts(&mut setup, &entry_program, ca_bundle, &bwrap.visible_path)?;
         }
     };
 
     // Replace host devices and host process information immediately after the root
     // view. Policy masks are layered later, so an explicit deny below `/dev` or the
     // fresh `/proc` cannot be hidden by these ancestor mounts.
-    command.args(["--dev", "/dev", "--proc", "/proc"]);
+    setup.args(["--dev", "/dev", "--proc", "/proc"]);
 
     match policy.fs.tmp {
         TmpMode::Shared => {}
@@ -199,18 +584,18 @@ pub fn apply(
                     reason: Some("private temporary directory could not be created".to_string()),
                 });
             };
-            command.arg("--bind").arg(dir).arg("/tmp");
+            setup.arg("--bind").arg(dir).arg("/tmp");
         }
         TmpMode::Deny => {
             // Traverse-only lets a later explicit project bind under `/tmp` remain
             // reachable, while the empty read-only tmp itself cannot be listed or
             // written.
-            command.args(["--perms", "111", "--tmpfs", "/tmp"]);
+            setup.args(["--perms", "111", "--tmpfs", "/tmp"]);
         }
     }
 
     for grant in &mount_plan {
-        command
+        setup
             .arg(match grant.access {
                 MountAccess::ReadOnly => "--ro-bind",
                 MountAccess::ReadWrite => "--bind",
@@ -226,7 +611,7 @@ pub fn apply(
             reason: Some(format!("opening empty mask source: {e}")),
         })?;
         let fd = source.as_raw_fd().to_string();
-        command
+        setup
             .arg("--perms")
             .arg(match mask.kind {
                 MaskKind::EmptyReadable => "444",
@@ -238,7 +623,7 @@ pub fn apply(
         mask_sources.push(source);
     }
     for mask in masks.iter().filter(|m| m.directory) {
-        command
+        setup
             .arg("--perms")
             .arg(match mask.kind {
                 MaskKind::EmptyReadable => "555",
@@ -252,20 +637,20 @@ pub fn apply(
     if policy.fs.tmp == TmpMode::Deny {
         // Delay this until child mounts under `/tmp` have been installed; otherwise
         // Bubblewrap cannot create their destination mountpoints.
-        command.args(["--remount-ro", "/tmp"]);
+        setup.args(["--remount-ro", "/tmp"]);
     }
     if root_view == RootView::Minimal {
         // Bubblewrap creates destination ancestors in its synthetic root. Freeze
         // them after every authored mount and mask has landed so they do not become
         // accidental write grants; explicit writable submounts retain their flags.
-        command.args(["--remount-ro", "/"]);
+        setup.args(["--remount-ro", "/"]);
     }
 
     let mut degradation = Degradation::full();
     if policy.net.enforce {
         // A route-less network namespace is the fail-safe floor. The follow-up bridge
         // will reconnect only the already-running, host-side filtered proxy.
-        command.arg("--unshare-net");
+        setup.arg("--unshare-net");
         if proxy_port.is_some() {
             degradation.lost.push("net-per-host".to_string());
             degradation.reason = Some(
@@ -284,41 +669,71 @@ pub fn apply(
                 lost: vec!["net".to_string()],
                 reason: Some(format!("writing network filter: {e}")),
             })?;
-        command.arg("--seccomp").arg(source.as_raw_fd().to_string());
+        setup.arg("--seccomp").arg(source.as_raw_fd().to_string());
         Some(source)
     } else {
         None
     };
 
-    command.arg("--chdir").arg(&cwd).arg("--");
-    command.arg(&entry_program).args(&spec.args);
+    let supervision =
+        LinuxSupervision::new(policy.net.enforce, seccomp_source.is_some()).map_err(|error| {
+            Degradation {
+                lost: vec!["process-isolation".to_string()],
+                reason: Some(format!("preparing Bubblewrap supervision: {error}")),
+            }
+        })?;
+    supervision.append_args(&mut setup);
 
-    if policy.env.enforce {
-        command.env_clear();
-        for (key, value) in &policy.env.constructed {
-            command.env(key, value);
-        }
-    }
+    let mut target_env = policy
+        .env
+        .constructed
+        .iter()
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        .collect::<BTreeMap<_, _>>();
     if let Some(port) = proxy_port {
-        super::set_proxy_env(&mut command, port, proxy_token);
+        super::insert_proxy_env(&mut target_env, port, proxy_token);
     }
     if let Some(bundle) = ca_bundle {
-        super::set_ca_env(&mut command, bundle);
+        super::insert_ca_env(&mut target_env, bundle);
     }
     if policy.fs.tmp == TmpMode::Private {
-        super::set_tmp_env(&mut command, Path::new("/tmp"));
+        super::insert_tmp_env(&mut target_env, Path::new("/tmp"));
     }
+    append_target_environment(&mut setup, &target_env).map_err(|reason| Degradation {
+        lost: vec!["env".to_string()],
+        reason: Some(reason),
+    })?;
+    setup.arg("--chdir").arg(&cwd);
+
+    let arguments = write_bwrap_arguments(setup.get_args()).map_err(|e| Degradation {
+        lost: vec!["process-entry".to_string()],
+        reason: Some(format!("serializing Bubblewrap launch arguments: {e}")),
+    })?;
+    let mut command = Command::new(&bwrap.program);
+    command.env_clear();
+    command
+        .arg("--args")
+        .arg(arguments.as_raw_fd().to_string())
+        .arg("--")
+        .arg(&setsid_program)
+        .arg("/bin/sh")
+        .args(["-c", TARGET_GATE_SCRIPT, "nub-sandbox-target"])
+        .arg(&entry_program)
+        .args(&spec.args);
     let inherited_fds = mask_sources
         .iter()
         .chain(seccomp_source.iter())
+        .chain(std::iter::once(&arguments))
         .chain(bwrap.executable.iter())
         .map(AsRawFd::as_raw_fd)
+        .chain(supervision.child_fds())
         .collect::<Vec<_>>();
     seal_inherited_fds(&mut command, inherited_fds);
 
     let mut inherited_files = Vec::with_capacity(2);
     inherited_files.extend(mask_sources);
     inherited_files.extend(seccomp_source);
+    inherited_files.push(arguments);
     inherited_files.extend(bwrap.executable);
 
     Ok(Prepared {
@@ -326,6 +741,7 @@ pub fn apply(
         degradation,
         proxy: None,
         _inherited_files: inherited_files,
+        supervision: Some(supervision),
         _private_tmp: None,
     })
 }
@@ -614,6 +1030,45 @@ fn validate_entry_visibility(
     Ok(())
 }
 
+fn validate_cwd_visibility(
+    cwd: &Path,
+    root_view: RootView,
+    tmp: TmpMode,
+    masks: &[Mask],
+    grants: &[linux_grants::MountGrant],
+) -> Result<(), String> {
+    if masks
+        .iter()
+        .any(|mask| cwd == mask.path || (mask.directory && cwd.starts_with(&mask.path)))
+    {
+        return Err(format!(
+            "sandbox working directory is hidden by the final filesystem policy: {}",
+            cwd.display()
+        ));
+    }
+    let granted = grants.iter().any(|grant| {
+        cwd == grant.path || cwd.starts_with(&grant.path) || grant.path.starts_with(cwd)
+    });
+    if tmp != TmpMode::Shared && cwd.starts_with("/tmp") && !granted {
+        return Err(format!(
+            "sandbox working directory is hidden by the temporary-directory policy: {}",
+            cwd.display()
+        ));
+    }
+    if root_view == RootView::Minimal
+        && !granted
+        && !ESSENTIAL_READ_DIRS
+            .iter()
+            .any(|root| cwd == Path::new(root) || cwd.starts_with(root))
+    {
+        return Err(format!(
+            "sandbox working directory is absent from the final filesystem view: {}",
+            cwd.display()
+        ));
+    }
+    Ok(())
+}
+
 fn alternate_procfs_masks() -> Result<Vec<Mask>, String> {
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")
         .map_err(|e| format!("reading process mount table: {e}"))?;
@@ -774,41 +1229,164 @@ fn exact_rule_root(pattern: &str) -> Option<PathBuf> {
     Some(PathBuf::from(trimmed))
 }
 
-fn find_bwrap() -> Result<BubblewrapLaunch, String> {
-    // Prefer the distro binary: Ubuntu can grant its known path the AppArmor
-    // `userns` permission while rejecting an otherwise identical bundled helper.
-    for candidate in [PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")] {
-        if executable(&candidate) {
-            return Ok(BubblewrapLaunch {
-                program: candidate.clone(),
-                visible_path: candidate,
-                executable: None,
-            });
+fn validate_process_inputs(spec: &CommandSpec) -> Result<(), String> {
+    let reject_nul = |label: &str, value: &OsStr| {
+        if value.as_bytes().contains(&0) {
+            Err(format!("sandbox {label} contains a NUL byte"))
+        } else {
+            Ok(())
+        }
+    };
+    reject_nul("entry program", &spec.program)?;
+    for (index, arg) in spec.args.iter().enumerate() {
+        reject_nul(&format!("argument {index}"), arg)?;
+    }
+    if let Some(cwd) = &spec.cwd {
+        reject_nul("working directory", cwd.as_os_str())?;
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+enum BubblewrapCandidate {
+    System(PathBuf),
+    Bundled(PathBuf),
+}
+
+fn find_bwrap(require_net: bool) -> Result<(BubblewrapLaunch, PathBuf), String> {
+    let setsid_program = find_setsid()?;
+    let candidate = choose_bwrap(require_net, &setsid_program)?;
+    Ok((launch_bwrap(&candidate)?, setsid_program))
+}
+
+fn choose_bwrap(require_net: bool, setsid_program: &Path) -> Result<BubblewrapCandidate, String> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in [PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")] {
+        if executable(&path)
+            && let Ok(canonical) = fs::canonicalize(path)
+            && seen.insert(canonical.clone())
+        {
+            candidates.push(BubblewrapCandidate::System(canonical));
         }
     }
-
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        for candidate in [
+        for path in [
             dir.join("nub-resources/bwrap"),
             dir.join("../nub-resources/bwrap"),
             dir.join("bwrap"),
         ] {
-            if executable(&candidate) {
-                let executable = File::open(&candidate).map_err(|e| {
-                    format!("opening bundled Bubblewrap {}: {e}", candidate.display())
-                })?;
-                verify_bundled_bwrap(&executable, &candidate)?;
-                return Ok(BubblewrapLaunch {
-                    program: PathBuf::from(format!("/proc/self/fd/{}", executable.as_raw_fd())),
-                    visible_path: candidate,
-                    executable: Some(executable),
-                });
+            if executable(&path)
+                && let Ok(canonical) = fs::canonicalize(path)
+                && seen.insert(canonical.clone())
+            {
+                candidates.push(BubblewrapCandidate::Bundled(canonical));
             }
         }
     }
-    Err("Bubblewrap helper not found (system and bundled paths checked)".to_string())
+    if candidates.is_empty() {
+        return Err("Bubblewrap helper not found (system and bundled paths checked)".to_string());
+    }
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        match launch_bwrap(&candidate).and_then(|launch| {
+            probe_bwrap(&launch, setsid_program, require_net)?;
+            Ok(launch)
+        }) {
+            Ok(_) => return Ok(candidate),
+            Err(reason) => failures.push(format!("{}: {reason}", candidate.path().display())),
+        }
+    }
+    Err(classify_bwrap_failures(&failures))
+}
+
+fn find_setsid() -> Result<PathBuf, String> {
+    find_setsid_in([
+        PathBuf::from("/usr/bin/setsid"),
+        PathBuf::from("/bin/setsid"),
+    ])
+}
+
+fn find_setsid_in(paths: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf, String> {
+    paths
+        .into_iter()
+        .find_map(|path| {
+            executable(&path)
+                .then(|| fs::canonicalize(path).ok())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            "the stock setsid launcher required for supervised sessions was not found".to_string()
+        })
+}
+
+impl BubblewrapCandidate {
+    fn path(&self) -> &Path {
+        match self {
+            Self::System(path) | Self::Bundled(path) => path,
+        }
+    }
+}
+
+fn launch_bwrap(candidate: &BubblewrapCandidate) -> Result<BubblewrapLaunch, String> {
+    match candidate {
+        BubblewrapCandidate::System(path) => Ok(BubblewrapLaunch {
+            program: path.clone(),
+            visible_path: path.clone(),
+            executable: None,
+        }),
+        BubblewrapCandidate::Bundled(path) => {
+            let executable = file_above_stdio(
+                File::open(path).map_err(|error| format!("opening bundled Bubblewrap: {error}"))?,
+            )
+            .map_err(|error| format!("duplicating bundled Bubblewrap: {error}"))?;
+            verify_bundled_bwrap(&executable, path)?;
+            Ok(BubblewrapLaunch {
+                program: PathBuf::from(format!("/proc/self/fd/{}", executable.as_raw_fd())),
+                visible_path: path.clone(),
+                executable: Some(executable),
+            })
+        }
+    }
+}
+
+fn classify_bwrap_failures(failures: &[String]) -> String {
+    let detail = failures.join("; ");
+    let lower = detail.to_ascii_lowercase();
+    if fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .is_ok_and(|value| value.trim() == "1")
+        && (lower.contains("permission denied") || lower.contains("uid map"))
+    {
+        return format!(
+            "Bubblewrap is blocked by Ubuntu's AppArmor user-namespace policy ({detail})"
+        );
+    }
+    if fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+        .is_ok_and(|value| value.trim() == "0")
+    {
+        return format!("unprivileged user namespaces are disabled ({detail})");
+    }
+    if fs::read_to_string("/proc/sys/kernel/osrelease")
+        .is_ok_and(|value| value.to_ascii_lowercase().contains("microsoft"))
+    {
+        return format!("Bubblewrap cannot create the required views under WSL ({detail})");
+    }
+    if Path::new("/.dockerenv").exists()
+        || Path::new("/run/.containerenv").exists()
+        || fs::read_to_string("/proc/1/cgroup").is_ok_and(|value| {
+            ["docker", "containerd", "kubepods", "libpod"]
+                .iter()
+                .any(|marker| value.contains(marker))
+        })
+    {
+        return format!("the container policy blocks required Bubblewrap behavior ({detail})");
+    }
+    if lower.contains("unknown option") || lower.contains("invalid option") {
+        return format!("installed Bubblewrap lacks required stock options ({detail})");
+    }
+    format!("Bubblewrap cannot enforce the required process view ({detail})")
 }
 
 fn verify_bundled_bwrap(file: &File, path: &Path) -> Result<(), String> {
@@ -845,18 +1423,235 @@ fn verify_bundled_bwrap(file: &File, path: &Path) -> Result<(), String> {
     }
 }
 
+fn probe_bwrap(
+    launch: &BubblewrapLaunch,
+    setsid_program: &Path,
+    require_net: bool,
+) -> Result<(), String> {
+    let destination = tempfile::Builder::new()
+        .prefix("nub-bwrap-probe-mask-")
+        .tempfile_in("/var/tmp")
+        .map_err(|error| format!("creating mask destination: {error}"))?;
+    fs::write(destination.path(), b"host-bytes")
+        .map_err(|error| format!("seeding mask destination: {error}"))?;
+    let source = open_inheritable_dev_null()
+        .map_err(|error| format!("opening probe mask source: {error}"))?;
+    let seccomp = if require_net {
+        Some(
+            write_seccomp_program(build_probe_seccomp()?)
+                .map_err(|error| format!("writing probe seccomp program: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let supervision = LinuxSupervision::new(require_net, require_net)
+        .map_err(|error| format!("preparing probe supervision: {error}"))?;
+
+    let mut setup = Command::new("");
+    setup.args([
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--cap-drop",
+        "ALL",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--remount-ro",
+        "/tmp",
+        "--perms",
+        "000",
+        "--ro-bind-data",
+    ]);
+    setup
+        .arg(source.as_raw_fd().to_string())
+        .arg(destination.path());
+    if require_net {
+        setup.arg("--unshare-net");
+        setup
+            .arg("--seccomp")
+            .arg(seccomp.as_ref().unwrap().as_raw_fd().to_string());
+    }
+    supervision.append_args(&mut setup);
+    setup.args(["--clearenv", "--setenv", "PATH", "/usr/bin:/bin"]);
+    let arguments = write_bwrap_arguments(setup.get_args())
+        .map_err(|error| format!("serializing probe arguments: {error}"))?;
+    let mut command = Command::new(&launch.program);
+    command
+        .env_clear()
+        .arg("--args")
+        .arg(arguments.as_raw_fd().to_string())
+        .arg("--")
+        .arg(setsid_program)
+        .arg("/bin/sh")
+        .args(["-c", TARGET_GATE_SCRIPT, "nub-bwrap-target"])
+        .arg("/bin/sh")
+        .args(["-c", BWRAP_PROBE_SCRIPT, "nub-bwrap-probe"])
+        .arg(destination.path())
+        .arg(if require_net { "1" } else { "0" })
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let child_fds = [source.as_raw_fd(), arguments.as_raw_fd()]
+        .into_iter()
+        .chain(seccomp.iter().map(AsRawFd::as_raw_fd))
+        .chain(launch.executable.iter().map(AsRawFd::as_raw_fd))
+        .chain(supervision.child_fds())
+        .collect::<Vec<_>>();
+    seal_inherited_fds(&mut command, child_fds);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("probe could not start: {error}"))?;
+    let pgid = match supervision.verify_and_release(&mut child) {
+        Ok(pgid) => pgid,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            return Err(format!(
+                "probe supervision failed: {error}{}",
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            ));
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("waiting for probe: {error}"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("probe timed out".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        Err(format!("behavior probe exited with {status}"))
+    } else {
+        Err(format!("behavior probe exited with {status}: {stderr}"))
+    }
+}
+
+const BWRAP_PROBE_SCRIPT: &str = r#"
+set -eu
+[ ! -s "$1" ]
+[ "$(stat -c %a "$1")" = 0 ]
+if (printf x > "$1") 2>/dev/null; then exit 21; fi
+if (printf x > /tmp/nub-bwrap-probe-write) 2>/dev/null; then exit 22; fi
+[ -c /dev/null ]
+[ -r /proc/self/status ]
+if [ "$2" = 1 ]; then
+  routes=0
+  while read -r line; do
+    case "$line" in Iface*) continue ;; '') continue ;; *) routes=1 ;; esac
+  done < /proc/net/route
+  [ "$routes" = 0 ]
+  if /usr/bin/uname >/dev/null 2>&1; then exit 23; fi
+fi
+"#;
+
+const TARGET_GATE_SCRIPT: &str = r#"kill -STOP $$ || exit 125
+exec "$@"
+"#;
+
 fn executable(path: &Path) -> bool {
     path.metadata()
         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 fn open_inheritable_dev_null() -> std::io::Result<File> {
-    File::open("/dev/null")
+    file_above_stdio(File::open("/dev/null")?)
 }
 
-fn build_network_seccomp() -> Result<BpfProgram, String> {
+fn file_above_stdio(file: File) -> std::io::Result<File> {
+    if file.as_raw_fd() >= 3 {
+        return Ok(file);
+    }
+    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn append_target_environment(
+    setup: &mut Command,
+    env: &BTreeMap<OsString, OsString>,
+) -> Result<(), String> {
+    setup.arg("--clearenv");
+    for (key, value) in env {
+        let key_bytes = key.as_bytes();
+        if key_bytes.is_empty() || key_bytes.contains(&b'=') || key_bytes.contains(&0) {
+            return Err(format!("invalid target environment key: {key:?}"));
+        }
+        if value.as_bytes().contains(&0) {
+            return Err(format!(
+                "target environment variable {key:?} contains a NUL byte"
+            ));
+        }
+        setup.arg("--setenv").arg(key).arg(value);
+    }
+    Ok(())
+}
+
+fn write_bwrap_arguments<'a>(args: impl Iterator<Item = &'a OsStr>) -> std::io::Result<File> {
+    let mut file = file_above_stdio(tempfile::tempfile()?)?;
+    for arg in args {
+        if arg.as_bytes().contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a Bubblewrap argument contains a NUL byte",
+            ));
+        }
+        file.write_all(arg.as_bytes())?;
+        file.write_all(&[0])?;
+    }
+    file.rewind()?;
+    Ok(file)
+}
+
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+
+pub(super) fn build_network_seccomp() -> Result<BpfProgram, String> {
     let arch = TargetArch::try_from(std::env::consts::ARCH)
         .map_err(|e| format!("unsupported architecture for network filter: {e}"))?;
+    build_network_seccomp_for(arch, libc::SYS_socket, libc::SYS_io_uring_setup)
+}
+
+fn build_network_seccomp_for(
+    arch: TargetArch,
+    socket_syscall: i64,
+    io_uring_setup_syscall: i64,
+) -> Result<BpfProgram, String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 
     // The private network namespace handles ordinary IP traffic. AF_UNIX is listed
@@ -887,13 +1682,13 @@ fn build_network_seccomp() -> Result<BpfProgram, String> {
             .map_err(|e| format!("network-family rule: {e}"))?,
         );
     }
-    rules.insert(libc::SYS_socket, socket_rules);
+    rules.insert(socket_syscall, socket_rules);
 
     // io_uring can create sockets without issuing socket(2), so disabling its setup
     // closes the alternate route whenever network access is denied.
-    rules.insert(libc::SYS_io_uring_setup, Vec::new());
+    rules.insert(io_uring_setup_syscall, Vec::new());
 
-    SeccompFilter::new(
+    let program = SeccompFilter::new(
         rules,
         SeccompAction::Allow,
         SeccompAction::Errno(libc::EPERM as u32),
@@ -901,11 +1696,105 @@ fn build_network_seccomp() -> Result<BpfProgram, String> {
     )
     .map_err(|e| format!("building network filter: {e}"))?
     .try_into()
-    .map_err(|e| format!("compiling network filter: {e}"))
+    .map_err(|e| format!("compiling network filter: {e}"))?;
+    if arch == TargetArch::x86_64 {
+        prepend_x86_64_unsupported_abi_guard(program)
+    } else {
+        Ok(program)
+    }
+}
+
+fn prepend_x86_64_unsupported_abi_guard(mut program: BpfProgram) -> Result<BpfProgram, String> {
+    const MAX_BPF_INSTRUCTIONS: usize = 4096;
+    const LEGACY_CONFUSED_ABI_FIRST: u32 = 512;
+    const LEGACY_CONFUSED_ABI_LAST: u32 = 547;
+
+    let denied = u32::from(SeccompAction::Errno(libc::EPERM as u32));
+    let guard = [
+        // Load seccomp_data.arch.
+        sock_filter {
+            code: 0x20,
+            jt: 0,
+            jf: 0,
+            k: 4,
+        },
+        // A foreign architecture skips to seccompiler's own arch check and KILL action.
+        sock_filter {
+            code: 0x15,
+            jt: 0,
+            jf: 6,
+            k: AUDIT_ARCH_X86_64,
+        },
+        // Load seccomp_data.nr.
+        sock_filter {
+            code: 0x20,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        },
+        // Reject every syscall carrying the unsupported x32 ABI bit.
+        sock_filter {
+            code: 0x35,
+            jt: 0,
+            jf: 1,
+            k: X32_SYSCALL_BIT,
+        },
+        sock_filter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: denied,
+        },
+        // Linux before 5.4 also accepted confused x32 encodings 512..=547.
+        sock_filter {
+            code: 0x35,
+            jt: 0,
+            jf: 2,
+            k: LEGACY_CONFUSED_ABI_FIRST,
+        },
+        sock_filter {
+            code: 0x25,
+            jt: 1,
+            jf: 0,
+            k: LEGACY_CONFUSED_ABI_LAST,
+        },
+        sock_filter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: denied,
+        },
+    ];
+    let guarded_len = guard.len() + program.len();
+    if guarded_len > MAX_BPF_INSTRUCTIONS {
+        return Err(format!(
+            "network filter has {guarded_len} instructions, above the kernel limit of {MAX_BPF_INSTRUCTIONS}"
+        ));
+    }
+    let mut guarded = Vec::with_capacity(guarded_len);
+    guarded.extend(guard);
+    guarded.append(&mut program);
+    Ok(guarded)
+}
+
+fn build_probe_seccomp() -> Result<BpfProgram, String> {
+    let arch = TargetArch::try_from(std::env::consts::ARCH)
+        .map_err(|error| format!("unsupported architecture for probe filter: {error}"))?;
+    let mut rules = BTreeMap::new();
+    rules.insert(libc::SYS_uname, Vec::new());
+    SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,
+        SeccompAction::Errno(libc::EPERM as u32),
+        arch,
+    )
+    .map_err(|error| format!("building probe filter: {error}"))?
+    .try_into()
+    .map_err(|error| format!("compiling probe filter: {error}"))
 }
 
 fn write_seccomp_program(program: BpfProgram) -> std::io::Result<File> {
-    let mut file = tempfile::tempfile()?;
+    let mut file = file_above_stdio(tempfile::tempfile()?)?;
     let byte_len = program.len() * std::mem::size_of::<libc::sock_filter>();
     let bytes = unsafe { std::slice::from_raw_parts(program.as_ptr().cast::<u8>(), byte_len) };
     file.write_all(bytes)?;
@@ -916,14 +1805,14 @@ fn write_seccomp_program(program: BpfProgram) -> std::io::Result<File> {
 fn seal_inherited_fds(command: &mut Command, bubblewrap_data_fds: Vec<i32>) {
     // Keep only stdio and Bubblewrap's harmless setup-data descriptors. This closes
     // the inherited-open-file escape from path denial while retaining Rust's exec
-    // error pipe until exec succeeds. CLOSE_RANGE_CLOEXEC is available since Linux
-    // 5.11; an older kernel makes spawn fail instead of weakening the boundary.
+    // error pipe until exec succeeds. Linux 5.11+ marks the whole range atomically;
+    // older kernels use a raw procfs descriptor walk that performs no allocation.
     unsafe {
         command.pre_exec(move || {
             const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
             let result = libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC);
             if result < 0 {
-                return Err(std::io::Error::last_os_error());
+                cloexec_open_fds_from_proc()?;
             }
             for &fd in &bubblewrap_data_fds {
                 let flags = libc::fcntl(fd, libc::F_GETFD);
@@ -936,30 +1825,144 @@ fn seal_inherited_fds(command: &mut Command, bubblewrap_data_fds: Vec<i32>) {
     }
 }
 
+unsafe fn cloexec_open_fds_from_proc() -> std::io::Result<()> {
+    const PROC_SUPER_MAGIC: libc::c_long = 0x9fa0;
+    const DIRENT_HEADER: usize = 19;
+    let directory = unsafe {
+        libc::syscall(
+            libc::SYS_openat,
+            libc::AT_FDCWD,
+            c"/proc/self/fd".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0,
+        ) as RawFd
+    };
+    if directory < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(directory, stat.as_mut_ptr()) } != 0
+        || unsafe { stat.assume_init() }.f_type != PROC_SUPER_MAGIC
+    {
+        unsafe { libc::close(directory) };
+        return Err(std::io::Error::other(
+            "/proc/self/fd is not a procfs descriptor directory",
+        ));
+    }
+
+    let mut buffer = [0u8; 8192];
+    let mut saw_directory = false;
+    loop {
+        let count = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                directory,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            ) as isize
+        };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            unsafe { libc::close(directory) };
+            return Err(error);
+        }
+        if count == 0 {
+            break;
+        }
+        let count = count as usize;
+        let mut offset = 0usize;
+        while offset < count {
+            if count - offset < DIRENT_HEADER {
+                unsafe { libc::close(directory) };
+                return Err(std::io::Error::other(
+                    "procfs descriptor enumeration returned a truncated record",
+                ));
+            }
+            let record = &buffer[offset..count];
+            let reclen = u16::from_ne_bytes([record[16], record[17]]) as usize;
+            if reclen < DIRENT_HEADER || offset + reclen > count {
+                unsafe { libc::close(directory) };
+                return Err(std::io::Error::other(
+                    "procfs descriptor enumeration returned a malformed record",
+                ));
+            }
+            let name = &record[DIRENT_HEADER..reclen];
+            let Some(end) = name.iter().position(|byte| *byte == 0) else {
+                unsafe { libc::close(directory) };
+                return Err(std::io::Error::other(
+                    "procfs descriptor enumeration returned an unterminated name",
+                ));
+            };
+            let name = &name[..end];
+            if name != b"." && name != b".." {
+                let mut fd: RawFd = 0;
+                if name.is_empty() {
+                    unsafe { libc::close(directory) };
+                    return Err(std::io::Error::other(
+                        "procfs descriptor enumeration returned an empty name",
+                    ));
+                }
+                for byte in name {
+                    if !byte.is_ascii_digit() {
+                        unsafe { libc::close(directory) };
+                        return Err(std::io::Error::other(
+                            "procfs descriptor enumeration returned a nonnumeric name",
+                        ));
+                    }
+                    fd = fd
+                        .checked_mul(10)
+                        .and_then(|value| value.checked_add(i32::from(*byte - b'0')))
+                        .ok_or_else(|| {
+                            std::io::Error::other(
+                                "procfs descriptor enumeration overflowed a descriptor number",
+                            )
+                        })?;
+                }
+                if fd == directory {
+                    saw_directory = true;
+                }
+                if fd >= 3 && fd != directory {
+                    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+                    if flags < 0
+                        || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+                    {
+                        let error = std::io::Error::last_os_error();
+                        unsafe { libc::close(directory) };
+                        return Err(error);
+                    }
+                }
+            }
+            offset += reclen;
+        }
+    }
+    unsafe { libc::close(directory) };
+    if !saw_directory {
+        return Err(std::io::Error::other(
+            "procfs descriptor enumeration omitted its own descriptor",
+        ));
+    }
+    Ok(())
+}
+
 fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
-    if policy.env.enforce {
-        command.env_clear();
-        for (key, value) in &policy.env.constructed {
-            command.env(key, value);
-        }
+    command.env_clear();
+    for (key, value) in &policy.env.constructed {
+        command.env(key, value);
     }
     command
 }
 
 fn target_path(policy: &SandboxPolicy) -> Option<OsString> {
-    target_path_with(policy, std::env::var_os("PATH"))
-}
-
-fn target_path_with(policy: &SandboxPolicy, ambient: Option<OsString>) -> Option<OsString> {
-    if policy.env.enforce {
-        return policy.env.constructed.get("PATH").map(OsString::from);
-    }
-    Some(ambient.unwrap_or_else(|| OsString::from("/usr/bin:/bin")))
+    policy.env.constructed.get("PATH").map(OsString::from)
 }
 
 fn resolve_program(program: &OsStr, child_cwd: &Path, path: Option<&OsStr>) -> Option<PathBuf> {
@@ -1008,6 +2011,226 @@ mod tests {
             &CompileCtx::new(homes, root.join("project"), true, BTreeMap::new()),
         )
         .unwrap()
+    }
+
+    fn seccomp_data(syscall: u32, audit_arch: u32, argument_zero: u64) -> [u8; 64] {
+        let mut data = [0_u8; 64];
+        data[0..4].copy_from_slice(&syscall.to_ne_bytes());
+        data[4..8].copy_from_slice(&audit_arch.to_ne_bytes());
+        data[16..24].copy_from_slice(&argument_zero.to_ne_bytes());
+        data
+    }
+
+    fn evaluate_bpf(program: &BpfProgram, data: &[u8; 64]) -> u32 {
+        let mut accumulator = 0_u32;
+        let mut pc = 0_usize;
+        loop {
+            let instruction = program
+                .get(pc)
+                .unwrap_or_else(|| panic!("BPF program counter {pc} is out of bounds"));
+            match instruction.code {
+                // BPF_LD | BPF_W | BPF_ABS
+                0x20 => {
+                    let offset = instruction.k as usize;
+                    accumulator = u32::from_ne_bytes(
+                        data[offset..offset + 4]
+                            .try_into()
+                            .expect("BPF load must fit in seccomp_data"),
+                    );
+                    pc += 1;
+                }
+                // BPF_ALU | BPF_AND | BPF_K
+                0x54 => {
+                    accumulator &= instruction.k;
+                    pc += 1;
+                }
+                // BPF_JMP | BPF_JA
+                0x05 => pc += 1 + instruction.k as usize,
+                // BPF_JMP | BPF_JEQ | BPF_K
+                0x15 => {
+                    pc += 1 + usize::from(if accumulator == instruction.k {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    });
+                }
+                // BPF_JMP | BPF_JGT | BPF_K
+                0x25 => {
+                    pc += 1 + usize::from(if accumulator > instruction.k {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    });
+                }
+                // BPF_JMP | BPF_JGE | BPF_K
+                0x35 => {
+                    pc += 1 + usize::from(if accumulator >= instruction.k {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    });
+                }
+                // BPF_RET | BPF_K
+                0x06 => return instruction.k,
+                code => panic!("unsupported BPF instruction 0x{code:02x} at {pc}"),
+            }
+        }
+    }
+
+    #[test]
+    fn network_seccomp_rejects_unsupported_x86_abis_before_native_dispatch() {
+        const AUDIT_ARCH_AARCH64: u32 = 0xc000_00b7;
+        const AUDIT_ARCH_RISCV64: u32 = 0xc000_00f3;
+        const X86_64_SOCKET: u32 = 41;
+        const X86_64_GETPID: u32 = 39;
+        const GENERIC_SOCKET: u32 = 198;
+        const GENERIC_GETPID: u32 = 172;
+        const IO_URING_SETUP: u32 = 425;
+
+        let denied = u32::from(SeccompAction::Errno(libc::EPERM as u32));
+        let allowed = u32::from(SeccompAction::Allow);
+        let killed = u32::from(SeccompAction::KillProcess);
+        let x86 = build_network_seccomp_for(
+            TargetArch::x86_64,
+            i64::from(X86_64_SOCKET),
+            i64::from(IO_URING_SETUP),
+        )
+        .unwrap();
+        for (syscall, family) in [
+            (X86_64_SOCKET, libc::AF_INET),
+            (IO_URING_SETUP, 0),
+            (X86_64_SOCKET | X32_SYSCALL_BIT, libc::AF_INET),
+            (X86_64_SOCKET | X32_SYSCALL_BIT, libc::AF_NETLINK),
+            (IO_URING_SETUP | X32_SYSCALL_BIT, 0),
+            (X86_64_GETPID | X32_SYSCALL_BIT, 0),
+            (u32::MAX, 0),
+        ] {
+            assert_eq!(
+                evaluate_bpf(
+                    &x86,
+                    &seccomp_data(syscall, AUDIT_ARCH_X86_64, family as u64),
+                ),
+                denied,
+                "x86-64 syscall {syscall:#x} escaped the network filter",
+            );
+        }
+        for syscall in 512..=547 {
+            assert_eq!(
+                evaluate_bpf(&x86, &seccomp_data(syscall, AUDIT_ARCH_X86_64, 0)),
+                denied,
+                "legacy confused-ABI syscall {syscall} escaped the network filter",
+            );
+        }
+        for syscall in [511, 548, X86_64_GETPID] {
+            assert_eq!(
+                evaluate_bpf(&x86, &seccomp_data(syscall, AUDIT_ARCH_X86_64, 0)),
+                allowed,
+                "native syscall {syscall} did not reach seccompiler dispatch",
+            );
+        }
+        assert_eq!(
+            evaluate_bpf(
+                &x86,
+                &seccomp_data(X86_64_SOCKET, AUDIT_ARCH_X86_64, libc::AF_NETLINK as u64),
+            ),
+            allowed,
+        );
+        assert_eq!(
+            evaluate_bpf(&x86, &seccomp_data(X86_64_GETPID, AUDIT_ARCH_AARCH64, 0)),
+            killed,
+        );
+
+        for (arch, audit_arch) in [
+            (TargetArch::aarch64, AUDIT_ARCH_AARCH64),
+            (TargetArch::riscv64, AUDIT_ARCH_RISCV64),
+        ] {
+            let program = build_network_seccomp_for(
+                arch,
+                i64::from(GENERIC_SOCKET),
+                i64::from(IO_URING_SETUP),
+            )
+            .unwrap();
+            assert_eq!(
+                evaluate_bpf(
+                    &program,
+                    &seccomp_data(GENERIC_SOCKET, audit_arch, libc::AF_INET as u64),
+                ),
+                denied,
+            );
+            assert_eq!(
+                evaluate_bpf(&program, &seccomp_data(IO_URING_SETUP, audit_arch, 0)),
+                denied,
+            );
+            for syscall in [512, 547, GENERIC_SOCKET | X32_SYSCALL_BIT, u32::MAX] {
+                assert_eq!(
+                    evaluate_bpf(&program, &seccomp_data(syscall, audit_arch, 0)),
+                    allowed,
+                    "non-x86 filter unexpectedly guarded syscall {syscall:#x}",
+                );
+            }
+            assert_eq!(
+                evaluate_bpf(
+                    &program,
+                    &seccomp_data(GENERIC_GETPID, AUDIT_ARCH_X86_64, 0)
+                ),
+                killed,
+            );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn installed_network_seccomp_denies_raw_x32_syscalls() {
+        unsafe fn denied(syscall: libc::c_long, arguments: [libc::c_long; 3]) -> bool {
+            unsafe {
+                *libc::__errno_location() = 0;
+                libc::syscall(syscall, arguments[0], arguments[1], arguments[2]) == -1
+                    && *libc::__errno_location() == libc::EPERM
+            }
+        }
+
+        let program = build_network_seccomp().unwrap();
+        let child = unsafe { libc::fork() };
+        assert!(
+            child >= 0,
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if child == 0 {
+            if seccompiler::apply_filter(&program).is_err() {
+                unsafe { libc::_exit(10) };
+            }
+            let x32 = libc::c_long::from(X32_SYSCALL_BIT);
+            let checks = unsafe {
+                [
+                    denied(
+                        libc::SYS_socket | x32,
+                        [libc::AF_INET.into(), libc::SOCK_STREAM.into(), 0],
+                    ),
+                    denied(
+                        libc::SYS_socket | x32,
+                        [libc::AF_NETLINK.into(), libc::SOCK_RAW.into(), 0],
+                    ),
+                    denied(libc::SYS_io_uring_setup | x32, [1, 0, 0]),
+                    denied(libc::SYS_getpid | x32, [0, 0, 0]),
+                    denied(libc::c_long::from(u32::MAX), [0, 0, 0]),
+                ]
+            };
+            if checks.iter().any(|denied| !denied) {
+                unsafe { libc::_exit(11) };
+            }
+            if unsafe { libc::syscall(libc::SYS_getpid) } <= 0 {
+                unsafe { libc::_exit(12) };
+            }
+            unsafe { libc::_exit(0) };
+        }
+
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "raw x32 syscall child failed with wait status {status:#x}",
+        );
     }
 
     #[test]
@@ -1254,27 +2477,15 @@ mod tests {
             .env
             .constructed
             .insert("PATH".to_string(), "target-bin".to_string());
-        assert_eq!(
-            target_path_with(&enforced, Some(OsString::from("/wrong"))),
-            Some(OsString::from("target-bin"))
-        );
+        assert_eq!(target_path(&enforced), Some(OsString::from("target-bin")));
         assert_eq!(
             resolve_program(OsStr::new("tool"), &cwd, target_path(&enforced).as_deref()),
             Some(fs::canonicalize(&tool).unwrap())
         );
 
-        let inherited = SandboxPolicy::default();
-        assert_eq!(
-            target_path_with(&inherited, Some(OsString::from("/ambient"))),
-            Some(OsString::from("/ambient"))
-        );
-
         let mut missing = enforced.clone();
         missing.env.constructed.remove("PATH");
-        assert_eq!(
-            target_path_with(&missing, Some(OsString::from("/ambient"))),
-            None
-        );
+        assert_eq!(target_path(&missing), None);
         assert_eq!(resolve_program(OsStr::new("tool"), &cwd, None), None);
 
         let direct = cwd.join("direct");
@@ -1307,5 +2518,142 @@ mod tests {
             access: MountAccess::ReadOnly,
         };
         assert!(validate_entry_visibility(&entry, TmpMode::Deny, &[], &[grant]).is_ok());
+    }
+
+    #[test]
+    fn cwd_visibility_rejects_masks_and_tmp_but_accepts_a_real_submount() {
+        let cwd = PathBuf::from("/tmp/project");
+        let mask = Mask {
+            path: cwd.clone(),
+            kind: MaskKind::Unreadable,
+            directory: true,
+        };
+        assert!(
+            validate_cwd_visibility(&cwd, RootView::ReadWrite, TmpMode::Shared, &[mask], &[])
+                .is_err()
+        );
+        assert!(
+            validate_cwd_visibility(&cwd, RootView::ReadWrite, TmpMode::Deny, &[], &[]).is_err()
+        );
+        let grant = linux_grants::MountGrant {
+            path: PathBuf::from("/tmp/project"),
+            access: MountAccess::ReadOnly,
+        };
+        assert!(
+            validate_cwd_visibility(&cwd, RootView::Minimal, TmpMode::Private, &[], &[grant])
+                .is_ok()
+        );
+        assert!(
+            validate_cwd_visibility(
+                Path::new("/workspace"),
+                RootView::Minimal,
+                TmpMode::Shared,
+                &[],
+                &[]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn target_environment_rejects_invalid_keys_and_nuls() {
+        let mut setup = Command::new("");
+        let mut env = BTreeMap::new();
+        env.insert(OsString::from("BAD=KEY"), OsString::from("value"));
+        assert!(append_target_environment(&mut setup, &env).is_err());
+        env.clear();
+        env.insert(
+            OsString::from("GOOD"),
+            OsString::from_vec(b"bad\0value".to_vec()),
+        );
+        assert!(append_target_environment(&mut setup, &env).is_err());
+    }
+
+    #[test]
+    fn process_inputs_reject_nuls_before_launch_setup() {
+        let valid = CommandSpec::new("/bin/true").arg("ok").cwd("/");
+        assert!(validate_process_inputs(&valid).is_ok());
+
+        let bad_program = CommandSpec::new(OsString::from_vec(b"bad\0program".to_vec()));
+        assert!(validate_process_inputs(&bad_program).is_err());
+
+        let bad_arg =
+            CommandSpec::new("/bin/true").arg(OsString::from_vec(b"bad\0argument".to_vec()));
+        assert!(validate_process_inputs(&bad_arg).is_err());
+
+        let bad_cwd = CommandSpec::new("/bin/true")
+            .cwd(PathBuf::from(OsString::from_vec(b"/bad\0cwd".to_vec())));
+        assert!(validate_process_inputs(&bad_cwd).is_err());
+    }
+
+    #[test]
+    fn old_kernel_fd_fallback_marks_sparse_high_descriptors_cloexec() {
+        let secret = tempfile::tempfile().unwrap();
+        let secret_fd = secret.as_raw_fd();
+        let mut initial_limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut initial_limit) },
+            0
+        );
+        let high_floor = initial_limit
+            .rlim_cur
+            .min(initial_limit.rlim_max)
+            .saturating_sub(1)
+            .min(4096) as i32;
+        assert!(
+            high_floor > 64,
+            "test needs a descriptor above its child limit"
+        );
+        let high_fd = unsafe { libc::fcntl(secret_fd, libc::F_DUPFD_CLOEXEC, high_floor) };
+        assert!(high_fd >= high_floor);
+        assert_eq!(unsafe { libc::fcntl(secret_fd, libc::F_SETFD, 0) }, 0);
+        assert_eq!(unsafe { libc::fcntl(high_fd, libc::F_SETFD, 0) }, 0);
+        let high = unsafe { File::from_raw_fd(high_fd) };
+        let script = format!(
+            "test ! -e /proc/self/fd/{secret_fd} && test ! -e /proc/self/fd/{high_fd} && test ! -e /proc/self/fd/3"
+        );
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &script]);
+        unsafe {
+            command.pre_exec(|| {
+                let limit = libc::rlimit {
+                    rlim_cur: 64,
+                    rlim_max: 64,
+                };
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                cloexec_open_fds_from_proc()
+            });
+        }
+        assert!(command.status().unwrap().success());
+        drop(high);
+    }
+
+    #[test]
+    fn bwrap_failure_diagnostics_are_host_specific_without_admin_advice() {
+        let message = classify_bwrap_failures(&["candidate: unknown option --info-fd".into()]);
+        assert!(message.contains("required stock options"), "{message}");
+        for banned in ["sudo", "sysctl", "disable AppArmor", "apparmor_parser"] {
+            assert!(!message.contains(banned), "{message}");
+        }
+    }
+
+    #[test]
+    fn setsid_discovery_is_absolute_and_missing_helper_fails_without_admin_advice() {
+        let temp = tempfile::tempdir().unwrap();
+        let helper = temp.path().join("setsid");
+        fs::write(&helper, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(find_setsid_in([helper.clone()]).unwrap(), helper);
+
+        let message = find_setsid_in([temp.path().join("missing")]).unwrap_err();
+        assert!(message.contains("setsid launcher"), "{message}");
+        for banned in ["sudo", "install", "administrator"] {
+            assert!(!message.contains(banned), "{message}");
+        }
     }
 }

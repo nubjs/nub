@@ -16,7 +16,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use tempfile::TempDir;
 
 /// A fixture: a project dir + a fake home (so secret denies target fixture paths,
@@ -102,12 +101,12 @@ impl Fixture {
         let spec = CommandSpec::new(program)
             .args(args.iter().copied())
             .cwd(&self.proj);
-        let prepared = apply(&policy, spec).expect("apply");
-        let mut cmd = prepared.command;
-        cmd.stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .stdin(Stdio::null());
-        cmd.status().expect("spawn").success()
+        apply(&policy, spec)
+            .expect("apply")
+            .output()
+            .expect("spawn")
+            .status
+            .success()
     }
 }
 
