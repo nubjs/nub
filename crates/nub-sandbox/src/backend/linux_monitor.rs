@@ -24,7 +24,6 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -83,12 +82,8 @@ const NESTED_PID_FD: RawFd = 206;
 const NESTED_IPC_FD: RawFd = 207;
 const NESTED_UTS_FD: RawFd = 208;
 const NESTED_NETWORK_FD: RawFd = 209;
+const NESTED_BWRAP_FD: RawFd = 210;
 const FIRST_NESTED_SOURCE_FD: RawFd = 224;
-static NESTED_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-pub(super) fn nested_worker_active() -> bool {
-    NESTED_WORKER_ACTIVE.load(Ordering::Relaxed)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileIdentity {
@@ -248,6 +243,51 @@ impl RuntimeCapability {
         })
     }
 
+    fn from_retained_runtime() -> io::Result<Self> {
+        let root = Path::new(PRIVATE_RUNTIME_ROOT);
+        let executable = pin_path(&root.join("nub-monitor"), OsStr::new("nub-monitor"))?;
+        let parsed = parse_elf(&executable.file)?;
+        let kind = match &parsed.interpreter {
+            None => {
+                validate_static_image(&parsed)?;
+                RuntimeKind::Static
+            }
+            Some(interpreter) => {
+                if !parsed.has_dynamic {
+                    return Err(invalid_data("ELF PT_INTERP has no dynamic table"));
+                }
+                let loader_path = PathBuf::from(OsString::from_vec(interpreter.clone()));
+                if !loader_path.is_absolute() {
+                    return Err(invalid_data("ELF PT_INTERP is not absolute"));
+                }
+                let loader = pin_path(&root.join("ld.so"), OsStr::new("ld.so"))?;
+                let loader_elf = parse_elf(&loader.file)?;
+                validate_loader_image(&loader_elf)?;
+                let family = loader_family(&loader_path)?;
+                require_proven_loader_search(family)?;
+                let inventory = retained_runtime_inventory(&root.join("lib"))?;
+                let (libraries, inhibit_rpath) =
+                    resolve_needed_closure(&[&parsed, &loader_elf], &inventory)?;
+                RuntimeKind::Dynamic {
+                    loader,
+                    family,
+                    libraries,
+                    inhibit_rpath,
+                }
+            }
+        };
+        let objects = runtime_objects_from_parts(&executable, &kind)?;
+        let image = RuntimeImage {
+            executable,
+            kind,
+            build_marker: runtime_build_marker(&objects),
+        };
+        require_retained_runtime_sources(&image)?;
+        Ok(Self {
+            source: RuntimeSource::Explicit(image),
+        })
+    }
+
     pub(crate) fn materialize(&self) -> io::Result<&RuntimeImage> {
         match &self.source {
             RuntimeSource::Current { authority, image } => image
@@ -273,6 +313,66 @@ impl RuntimeCapability {
             source: RuntimeSource::Explicit(image),
         })
     }
+}
+
+fn retained_runtime_inventory(root: &Path) -> io::Result<Vec<InventoryObject>> {
+    let mut entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    if entries.len() > MAX_RUNTIME_OBJECTS {
+        return Err(invalid_data(
+            "retained runtime library inventory exceeds its object budget",
+        ));
+    }
+    let mut objects = BTreeMap::<(u64, u64), InventoryObject>::new();
+    for entry in entries {
+        let name = entry.file_name();
+        validate_loader_object_name(&name, "retained runtime library name")?;
+        let path = entry.path();
+        if !fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err(invalid_data(
+                "retained runtime library is not a regular file",
+            ));
+        }
+        let file = File::open(&path)?;
+        let file = duplicate_above_stdio(&file)?;
+        let identity = FileIdentity::from_file(&file)?;
+        match objects.entry((identity.dev, identity.ino)) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let parsed = parse_elf(&file)?;
+                entry.insert(InventoryObject {
+                    file,
+                    path,
+                    aliases: BTreeSet::from([name]),
+                    identity,
+                    parsed,
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().aliases.insert(name);
+            }
+        }
+    }
+    Ok(objects.into_values().collect())
+}
+
+fn require_retained_runtime_sources(image: &RuntimeImage) -> io::Result<()> {
+    let mut objects = vec![&image.executable];
+    if let RuntimeKind::Dynamic {
+        loader, libraries, ..
+    } = &image.kind
+    {
+        objects.push(loader);
+        objects.extend(libraries);
+    }
+    if objects
+        .into_iter()
+        .any(|object| !valid_private_runtime_path(&object.source_path))
+    {
+        return Err(invalid_data(
+            "recursive runtime authority escaped the retained private runtime",
+        ));
+    }
+    Ok(())
 }
 
 fn capture_early_current_authority() -> io::Result<EarlyRuntimeAuthority> {
@@ -1072,6 +1172,7 @@ struct TrustedSessionCleanup {
 struct TrustedSession {
     namespaces: TrustedNamespaces,
     root: OwnedFd,
+    bwrap: File,
     restrictions: ProcessRestrictionCeiling,
     identity: TrustedSessionIdentity,
     cleanup: TrustedSessionCleanup,
@@ -1184,6 +1285,7 @@ enum NestedWorkerNetwork {
 struct NestedWorkerAuthority {
     root: OwnedFd,
     root_identity: DescriptorIdentity,
+    bwrap: File,
     owner_user: NamespaceHandle,
     mount: NamespaceHandle,
     pid: NamespaceHandle,
@@ -1306,6 +1408,7 @@ impl TrustedSession {
         let request =
             relocate_fd_at_least(sealed_memfd(&request.encode()?)?, FIRST_NESTED_SOURCE_FD)?;
         let root = duplicate_fd_at_least(self.root.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
+        let bwrap = duplicate_fd_at_least(self.bwrap.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
         let owner_user = duplicate_fd_at_least(
             self.namespaces.owner_user.fd.as_raw_fd(),
             FIRST_NESTED_SOURCE_FD,
@@ -1331,6 +1434,7 @@ impl TrustedSession {
         let mut remaps = vec![
             (request.as_raw_fd(), NESTED_REQUEST_FD),
             (root.as_raw_fd(), NESTED_ROOT_FD),
+            (bwrap.as_raw_fd(), NESTED_BWRAP_FD),
             (owner_user.as_raw_fd(), NESTED_USER_FD),
             (mount.as_raw_fd(), NESTED_MOUNT_FD),
             (pid.as_raw_fd(), NESTED_PID_FD),
@@ -1386,15 +1490,14 @@ fn nested_worker_main() -> io::Result<i32> {
     }
     require_single_threaded_worker()?;
 
-    let runtime = RuntimeCapability::current_process()?;
     let bootstrap = NestedWorkerBootstrap::from_fixed(mode)?;
     match bootstrap.enter(mode)? {
         NestedWorkerRole::Parent(child) => wait_nested_worker_child(child),
         NestedWorkerRole::Child(bootstrap) => {
-            NESTED_WORKER_ACTIVE.store(true, Ordering::Relaxed);
             bootstrap.authority.verify_entered()?;
+            let runtime = RuntimeCapability::from_retained_runtime()?;
             let request = read_sealed_nested_request(bootstrap.request.as_raw_fd())?;
-            run_nested_worker_request(request, runtime)
+            run_nested_worker_request(request, runtime, bootstrap.authority.bwrap)
         }
     }
 }
@@ -1410,6 +1513,19 @@ impl NestedWorkerBootstrap {
             ));
         }
         let root_identity = descriptor_identity(root.as_raw_fd())?;
+        // The parent admitted this exact executable before entering the outer
+        // user namespace. Re-check its immutable shape, but do not reinterpret
+        // its mapped uid as host ownership after reentry.
+        let bwrap = File::from(take_fixed_fd(NESTED_BWRAP_FD, "Bubblewrap executable")?);
+        let bwrap_metadata = bwrap.metadata()?;
+        if !bwrap_metadata.is_file()
+            || bwrap_metadata.mode() & 0o111 == 0
+            || bwrap_metadata.mode() & 0o022 != 0
+        {
+            return Err(invalid_data(
+                "nested worker Bubblewrap authority is not an immutable executable file",
+            ));
+        }
         let owner_user = validate_namespace_fd(
             take_fixed_fd(NESTED_USER_FD, "owner user namespace")?,
             NamespaceKind::User,
@@ -1467,6 +1583,7 @@ impl NestedWorkerBootstrap {
             authority: NestedWorkerAuthority {
                 root,
                 root_identity,
+                bwrap,
                 owner_user,
                 mount,
                 pid,
@@ -1753,6 +1870,7 @@ fn read_sealed_nested_request(fd: RawFd) -> io::Result<NestedWorkerRequest> {
 fn run_nested_worker_request(
     request: NestedWorkerRequest,
     runtime: RuntimeCapability,
+    bwrap: File,
 ) -> io::Result<i32> {
     let homes = crate::matcher::path::Homes {
         home: PathBuf::from(OsString::from_vec(request.homes.home)),
@@ -1785,12 +1903,17 @@ fn run_nested_worker_request(
             "nested per-host networking is not implemented",
         ));
     }
-    let prepared = super::apply_with_runtime(&policy, request.command.into_spec()?, &runtime)
-        .map_err(|degradation| {
-            io::Error::other(degradation.warning().unwrap_or_else(|| {
-                "nested sandbox preparation failed without a diagnostic".to_string()
-            }))
-        })?;
+    let prepared = super::apply_with_retained_linux_authority(
+        &policy,
+        request.command.into_spec()?,
+        &runtime,
+        bwrap,
+    )
+    .map_err(|degradation| {
+        io::Error::other(degradation.warning().unwrap_or_else(|| {
+            "nested sandbox preparation failed without a diagnostic".to_string()
+        }))
+    })?;
     if !prepared.degradation.is_full() {
         return Err(io::Error::other(
             prepared.degradation.warning().unwrap_or_else(|| {
@@ -1809,6 +1932,7 @@ fn run_nested_worker_request(
 fn capture_trusted_session(
     namespace_init_pid: libc::pid_t,
     outer: &mut Child,
+    bwrap: File,
     restrictions: ProcessRestrictionCeiling,
     deadline: Instant,
 ) -> io::Result<TrustedSession> {
@@ -1859,6 +1983,7 @@ fn capture_trusted_session(
             network,
         },
         root,
+        bwrap,
         restrictions,
         identity: TrustedSessionIdentity {
             outer_pid,
@@ -2190,6 +2315,7 @@ fn capture_error(stage: &str, error: io::Error) -> io::Error {
 /// before this value is returned.
 pub(crate) struct RetainedMonitorLaunch {
     spec: BootstrapSpec,
+    bwrap: File,
     bootstrap: OwnedFd,
     control_parent: Option<OwnedFd>,
     control_child: Option<OwnedFd>,
@@ -2208,7 +2334,11 @@ pub(crate) struct RetainedMonitorLaunch {
 }
 
 impl RetainedMonitorLaunch {
-    pub(crate) fn new(runtime: &RuntimeCapability, spec: BootstrapSpec) -> io::Result<Self> {
+    pub(crate) fn new(
+        runtime: &RuntimeCapability,
+        spec: BootstrapSpec,
+        bwrap: &File,
+    ) -> io::Result<Self> {
         let image = runtime.materialize()?;
         if spec.executable != image.executable.identity || spec.build_marker != image.build_marker {
             return Err(invalid_input(
@@ -2241,6 +2371,7 @@ impl RetainedMonitorLaunch {
         let (monitor_program, monitor_args) = private_monitor_command(image);
         Ok(Self {
             spec,
+            bwrap: duplicate_file_at_least(bwrap, FIRST_UNRESERVED_MONITOR_FD)?,
             bootstrap,
             control_parent: Some(control_parent),
             control_child: Some(relocate_fd_at_least(
@@ -2448,8 +2579,13 @@ impl RetainedMonitorLaunch {
             validate_blocked_namespace_init_identity(identity)?;
             let restrictions = ProcessRestrictionCeiling::from_spec(&self.spec);
             let capture_deadline = deadline.unwrap_or_else(|| Instant::now() + DESCRIBE_TIMEOUT);
-            let mut trusted =
-                capture_trusted_session(monitor_pid, &mut outer, restrictions, capture_deadline)?;
+            let mut trusted = capture_trusted_session(
+                monitor_pid,
+                &mut outer,
+                duplicate_file_at_least(&self.bwrap, FIRST_NESTED_SOURCE_FD)?,
+                restrictions,
+                capture_deadline,
+            )?;
             self.block_writer
                 .as_mut()
                 .ok_or_else(|| invalid_input("sandbox Bubblewrap block capability is absent"))?
@@ -7073,6 +7209,7 @@ pub fn exercise_nested_worker_reentry(
         cache,
         project: project.clone(),
     };
+    let host_executable = std::env::current_exe()?;
     let mut outer_env = BTreeMap::new();
     outer_env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
     outer_env.insert(
@@ -7082,7 +7219,7 @@ pub fn exercise_nested_worker_reentry(
     let outer_context =
         crate::compiler::CompileCtx::new(homes.clone(), project.clone(), false, outer_env);
     let outer_surface = serde_json::json!({
-        "fs": ["...", "./", "<tmp>"],
+        "fs": ["./", "<tmp>"],
         "net": !restricted_network,
         "env": true
     });
@@ -7126,10 +7263,12 @@ pub fn exercise_nested_worker_reentry(
         project.clone(),
         child_env.clone(),
         CommandSpec::new("/bin/sh")
-            .args([
-                "-c",
-                "test \"$NESTED_ALLOWED\" = yes && test -z \"${NESTED_TRUSTED_PARENT_ONLY+x}\" && printf entered > allowed/result",
-            ])
+            .arg("-c")
+            .arg(
+                "test \"$NESTED_ALLOWED\" = yes && test -z \"${NESTED_TRUSTED_PARENT_ONLY+x}\" && test ! -e \"$1\" && printf entered > allowed/result",
+            )
+            .arg("nested-runtime-check")
+            .arg(host_executable.as_os_str())
             .cwd(&project)
             .deny_search_root(&project),
     )?;
@@ -10615,6 +10754,24 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(relative.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn recursive_runtime_authority_rejects_host_view_sources() {
+        let file = File::open("/proc/self/exe").unwrap();
+        let image = RuntimeImage {
+            executable: PinnedObject {
+                identity: FileIdentity::from_file(&file).unwrap(),
+                file,
+                source_path: PathBuf::from("/host/build/tree/nub-monitor"),
+                private_name: OsString::from("nub-monitor"),
+            },
+            kind: RuntimeKind::Static,
+            build_marker: [0; 32],
+        };
+        let error = require_retained_runtime_sources(&image).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("retained private runtime"));
     }
 
     #[test]
