@@ -184,7 +184,7 @@ pub fn install_from_pin(store: &Path, cwd: &Path) -> Result<InstallOutcome> {
     let Some((raw, pin, source)) = chain.pin else {
         bail!(
             "nub node install: no version given and no Node pin (devEngines.runtime, \
-             .node-version, .nvmrc, or engines.node) found in this project"
+             .node-version, .nvmrc, .tool-versions, or engines.node) found in this project"
         );
     };
     match &pin {

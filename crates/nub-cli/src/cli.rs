@@ -6382,7 +6382,7 @@ fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::Res
             "pinned Node version {pin} not found\n\
              \x20\x20Active shell Node: {shell_version} (does not satisfy the pin)\n\
              \x20\x20Provision it: nub node install {pin} (or run a file — nub installs the pin on demand)\n\
-             \x20\x20The pin comes from .node-version / .nvmrc / engines.node / devEngines.runtime."
+             \x20\x20The pin comes from .node-version / .nvmrc / .tool-versions / engines.node / devEngines.runtime."
         ),
         other => anyhow::Error::new(other),
     })
