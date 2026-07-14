@@ -35,7 +35,11 @@ jobs:
         run: cargo test -p nub-cli --test sandbox_conformance
 
   linux:
-    runs-on: ubuntu-24.04
+    # Ubuntu 24.04 mediates unprivileged user namespaces through AppArmor, but
+    # the hosted image does not load Bubblewrap's opt-in profile. Keep the
+    # required stock-package enforcement gate on an unmodified supported host;
+    # Noble compatibility is exercised separately on a configured VM.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -45,6 +49,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bubblewrap
           uname -a
+          dpkg-query -W -f='${Version}\n' bubblewrap
+          sysctl kernel.unprivileged_userns_clone || true
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          if command -v aa-status >/dev/null 2>&1; then sudo aa-status || true; fi
           bwrap --die-with-parent --new-session --unshare-user --cap-drop ALL \
             --unshare-pid --unshare-ipc --ro-bind / / --dev /dev --proc /proc -- true
       - name: Linux Bubblewrap enforcement
