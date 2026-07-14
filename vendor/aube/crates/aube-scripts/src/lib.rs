@@ -327,7 +327,7 @@ fn spawn_jailed_shell(
         .as_deref()
         .unwrap_or_else(|| Path::new("sh"));
     let profile = jail_profile(jail, home);
-    let mut cmd = tokio::process::Command::new("sandbox-exec");
+    let mut cmd = tokio::process::Command::new("/usr/bin/sandbox-exec");
     cmd.arg("-p")
         .arg(profile)
         .arg("--")
@@ -1501,6 +1501,58 @@ mod env_overlay_tests {
 #[cfg(test)]
 mod jail_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn system_sandbox_launcher_ignores_the_child_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = PathBuf::from("/private/tmp").join(format!(
+            "aube-sandbox-launcher-{}-{unique}",
+            std::process::id()
+        ));
+        let _cleanup = Cleanup(root.clone());
+        let package_dir = root.join("package");
+        let home = root.join("home");
+        let fake_bin = root.join("fake-bin");
+        let fake_launcher = fake_bin.join("sandbox-exec");
+        let marker = root.join("fake-sandbox-exec-invoked");
+        for dir in [&package_dir, &home, &fake_bin] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            &fake_launcher,
+            "#!/bin/sh\n: > \"$FAKE_SANDBOX_MARKER\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let jail = ScriptJail::new(&package_dir);
+        let mut cmd = spawn_jailed_shell("true", &ScriptSettings::default(), &jail, &home);
+        let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+        cmd.env_clear()
+            .env("PATH", path)
+            .env("FAKE_SANDBOX_MARKER", &marker)
+            .current_dir(&package_dir);
+        let status = cmd.status().await.expect("spawn system sandbox-exec");
+
+        assert!(status.success(), "the real Seatbelt launch must succeed");
+        assert!(
+            !marker.exists(),
+            "the child PATH must not select an alternate sandbox-exec"
+        );
+    }
 
     #[test]
     fn jail_home_uses_full_package_path() {
