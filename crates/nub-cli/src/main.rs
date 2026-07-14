@@ -11,10 +11,6 @@ mod nubx_consent;
 mod nubx_resolve;
 mod phantom_scan;
 mod pm_engine;
-// Slice-1 project `nub.jsonc` reader. Fully test-covered but not yet consumed by
-// the production run path — the field-wiring commits in this branch add the
-// readers; this allow is removed once they do.
-#[allow(dead_code)]
 mod project_config;
 mod self_shim;
 mod verify_deps;

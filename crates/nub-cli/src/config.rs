@@ -71,6 +71,14 @@ pub fn config_path() -> Option<PathBuf> {
     Some(nub_core::node::discovery::config_dir()?.join("nub.jsonc"))
 }
 
+/// Load the shared typed schema from the global config home. The global layer is
+/// deliberately best-effort: absent, unreadable, malformed, or invalid input is
+/// treated as no typed layer. The legacy `exec.implicitDlx` hot path below stays
+/// independent until its public config surface is migrated.
+pub(crate) fn load_global_config() -> Option<crate::project_config::LoadedConfig> {
+    crate::project_config::read_global_config_at(&config_path()?).ok()
+}
+
 /// Read `exec.implicitDlx`. Absent file / absent key / unparseable value / any
 /// unknown sibling key all mean the default (`Prompt`) — config is best-effort and
 /// never fails the gate.
@@ -306,6 +314,52 @@ mod tests {
             // A malformed file degrades to the default rather than erroring.
             std::fs::write(&path, "{ this is not valid json").unwrap();
             assert_eq!(implicit_dlx(), ImplicitDlx::Prompt);
+        });
+    }
+
+    #[test]
+    fn malformed_shared_schema_is_best_effort_globally() {
+        with_config_home(|home| {
+            let path = home.join("nub").join("nub.jsonc");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, r#"{ "nodeCompat": "not-a-bool" }"#).unwrap();
+            assert_eq!(load_global_config(), None);
+
+            std::fs::write(&path, r#"{ "nodeComapt": true }"#).unwrap();
+            assert_eq!(
+                load_global_config().unwrap().values,
+                crate::project_config::ProjectConfig::default()
+            );
+
+            let project = crate::project_config::read_project_config_at(&path);
+            assert!(matches!(
+                project,
+                Err(crate::project_config::ConfigError::UnknownKey { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn typed_global_layer_accepts_legacy_consent_without_schema_drift() {
+        with_config_home(|home| {
+            let path = home.join("nub").join("nub.jsonc");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                r#"{
+                  "exec": { "implicitDlx": "never" },
+                  "unknownLegacySibling": 42,
+                  "nodeCompat": false,
+                  "preload": []
+                }"#,
+            )
+            .unwrap();
+
+            let loaded = load_global_config().expect("best-effort typed global layer");
+            assert_eq!(loaded.values.dlx.consent, Some(ImplicitDlx::Never));
+            assert_eq!(loaded.values.node_compat, Some(false));
+            assert_eq!(loaded.values.preload, Some(Vec::new()));
+            assert_eq!(implicit_dlx(), ImplicitDlx::Never);
         });
     }
 

@@ -29,6 +29,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use jsonc_parser::ParseOptions;
@@ -39,6 +40,34 @@ use crate::config::ImplicitDlx;
 /// The filename discovered up-tree. `nub.json` is NEVER accepted (no dual-name
 /// ambiguity) — one name, matching the global file.
 const FILE_NAME: &str = "nub.jsonc";
+
+const ROOT_KEYS: &[&str] = &[
+    "$schema",
+    "nodeCompat",
+    "preload",
+    "nodeOptions",
+    "v8Flags",
+    "env",
+    "define",
+    "loader",
+    "conditions",
+    "tsconfig",
+    "verifyDepsBeforeRun",
+    "sandbox",
+    "install",
+    "dlx",
+];
+const INSTALL_KEYS: &[&str] = &[
+    "nodeLinker",
+    "symlinkDisablePattern",
+    "hoist",
+    "minimumReleaseAge",
+    "minimumReleaseAgeExclude",
+    "nodeOptions",
+    "sandbox",
+];
+const DLX_KEYS: &[&str] = &["consent", "sandbox", "env"];
+const SANDBOX_AXIS_KEYS: &[&str] = &["fs", "net", "env"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -92,20 +121,20 @@ type Result<T> = std::result::Result<T, ConfigError>;
 // the schema is right so the future unflag turns on a validated surface.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The parsed, validated `nub.jsonc`. Absent fields are `None`/empty; the
-/// consumer applies built-in defaults. `$schema` is intentionally not stored
+/// The parsed, validated `nub.jsonc`. Absent fields are `None`; explicitly empty
+/// collections remain `Some(empty)` for precedence. `$schema` is not stored
 /// (accepted + ignored — editor metadata with no runtime effect).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ProjectConfig {
     // ── runtime top-levels (bunfig-style flat) ──
     pub node_compat: Option<bool>,
-    pub preload: Vec<String>,
-    pub node_options: Vec<String>,
-    pub v8_flags: Vec<String>,
+    pub preload: Option<Vec<String>>,
+    pub node_options: Option<Vec<String>>,
+    pub v8_flags: Option<Vec<String>>,
     pub env: Option<EnvSetting>,
-    pub define: BTreeMap<String, String>,
-    pub loader: BTreeMap<String, String>,
-    pub conditions: Vec<String>,
+    pub define: Option<BTreeMap<String, String>>,
+    pub loader: Option<BTreeMap<String, String>>,
+    pub conditions: Option<Vec<String>>,
     pub tsconfig: Option<String>,
     pub verify_deps_before_run: Option<VerifyDepsBeforeRun>,
 
@@ -117,6 +146,21 @@ pub struct ProjectConfig {
 
     // ── nubx / dlx ──
     pub dlx: DlxConfig,
+}
+
+impl ProjectConfig {
+    pub fn builtin_defaults() -> Self {
+        Self {
+            node_compat: Some(false),
+            env: Some(EnvSetting::Default),
+            verify_deps_before_run: Some(VerifyDepsBeforeRun::Warn),
+            dlx: DlxConfig {
+                consent: Some(ImplicitDlx::Prompt),
+                ..DlxConfig::default()
+            },
+            ..Self::default()
+        }
+    }
 }
 
 /// The `env` field's tri-state (merged `env` + `envFile`, per the spec):
@@ -152,11 +196,11 @@ pub enum VerifyDepsBeforeRun {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InstallConfig {
     pub node_linker: Option<NodeLinker>,
-    pub symlink_disable_pattern: Vec<String>,
+    pub symlink_disable_pattern: Option<Vec<String>>,
     pub hoist: Option<Hoist>,
     pub minimum_release_age: Option<Duration>,
-    pub minimum_release_age_exclude: Vec<String>,
-    pub node_options: Vec<String>,
+    pub minimum_release_age_exclude: Option<Vec<String>>,
+    pub node_options: Option<Vec<String>>,
     pub sandbox: Option<SandboxSetting>,
 }
 
@@ -188,6 +232,97 @@ pub struct DlxConfig {
     pub env: Option<EnvSetting>,
 }
 
+/// Where a configuration value came from. File-backed sources retain both the
+/// exact path and its containing directory so relative values never fall back to
+/// the ambient process cwd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSource {
+    pub kind: ConfigSourceKind,
+    pub path: Option<PathBuf>,
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSourceKind {
+    Cli,
+    Environment,
+    Project,
+    Global,
+    Defaults,
+}
+
+impl ConfigSource {
+    fn transient(kind: ConfigSourceKind, root: &Path) -> Self {
+        Self {
+            kind,
+            path: None,
+            root: root.to_path_buf(),
+        }
+    }
+
+    fn file(kind: ConfigSourceKind, path: &Path) -> Self {
+        Self {
+            kind,
+            path: Some(path.to_path_buf()),
+            root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+        }
+    }
+}
+
+/// Parsed data paired with the file that supplied it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedConfig {
+    pub source: ConfigSource,
+    pub values: ProjectConfig,
+}
+
+/// Typed keys used to retain the winning source after precedence resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConfigKey {
+    NodeCompat,
+    Preload,
+    NodeOptions,
+    V8Flags,
+    Env,
+    Define,
+    Loader,
+    Conditions,
+    Tsconfig,
+    VerifyDepsBeforeRun,
+    Sandbox,
+    InstallNodeLinker,
+    InstallSymlinkDisablePattern,
+    InstallHoist,
+    InstallMinimumReleaseAge,
+    InstallMinimumReleaseAgeExclude,
+    InstallNodeOptions,
+    InstallSandbox,
+    DlxConsent,
+    DlxSandbox,
+    DlxEnv,
+}
+
+/// Process-local overlays. Every field remains optional so an explicit false or
+/// empty collection wins while an absent value falls through.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ConfigOverlays {
+    pub cli: ProjectConfig,
+    pub environment: ProjectConfig,
+    pub defaults: ProjectConfig,
+}
+
+/// The one resolved configuration view for an invocation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveConfig {
+    pub cwd: PathBuf,
+    pub values: ProjectConfig,
+    pub sources: BTreeMap<ConfigKey, ConfigSource>,
+    pub project: Option<LoadedConfig>,
+    pub global: Option<LoadedConfig>,
+}
+
+static EFFECTIVE_CONFIG: OnceLock<EffectiveConfig> = OnceLock::new();
+
 // ── sandbox skeleton ─────────────────────────────────────────────────────────
 
 /// The `sandbox` wrapper trichotomy (skeleton). Shape-validated here; the Phase-1
@@ -208,8 +343,8 @@ pub enum SandboxSetting {
     Granular(SandboxAxes),
 }
 
-/// The three sandbox axes. Each is independently optional; an absent axis inherits
-/// the axis default.
+/// The three sandbox axes. Each is independently optional; the Phase-1 compiler
+/// assigns the decided floor/inheritance semantics.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SandboxAxes {
     pub fs: Option<SandboxAxis>,
@@ -284,9 +419,22 @@ pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
 /// never a discovery decision) — this is where the bulk of coverage lives.
 /// FAIL-LOUD: an unknown key or malformed value is a [`ConfigError`], NOT a
 /// silent degrade (unlike the best-effort global reader).
-pub fn read_project_config_at(path: &Path) -> Result<ProjectConfig> {
+pub fn read_project_config_at(path: &Path) -> Result<LoadedConfig> {
     let text = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
-    parse_project_config(&text)
+    let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
+    Ok(LoadedConfig {
+        source: ConfigSource::file(ConfigSourceKind::Project, &source_path),
+        values: parse_project_config(&text)?,
+    })
+}
+
+pub(crate) fn read_global_config_at(path: &Path) -> Result<LoadedConfig> {
+    let text = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
+    let source_path = std::path::absolute(path).map_err(ConfigError::Io)?;
+    Ok(LoadedConfig {
+        source: ConfigSource::file(ConfigSourceKind::Global, &source_path),
+        values: parse_global_config(&text)?,
+    })
 }
 
 /// Parse + validate from raw JSONC text. Split out so tests can hit the validator
@@ -302,11 +450,34 @@ pub fn parse_project_config(text: &str) -> Result<ProjectConfig> {
     validate_root(obj)
 }
 
+fn parse_global_config(text: &str) -> Result<ProjectConfig> {
+    let value = jsonc_parser::parse_to_serde_value(text, &ParseOptions::default())
+        .map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let Some(value) = value else {
+        return Ok(ProjectConfig::default());
+    };
+    let mut obj = as_object(&value, "")?.clone();
+    let legacy_consent = obj
+        .remove("exec")
+        .and_then(|exec| {
+            exec.get("implicitDlx")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|value| ImplicitDlx::parse(&value));
+    obj.retain(|key, _| ROOT_KEYS.contains(&key.as_str()));
+    let mut config = validate_root(&obj)?;
+    if config.dlx.consent.is_none() {
+        config.dlx.consent = legacy_consent;
+    }
+    Ok(config)
+}
+
 /// The PRODUCTION entry — the only caller that consults the gate. Off ⇒ `Ok(None)`
 /// (no file discovered or read; effective config = global only). On ⇒ discover
 /// up-tree from `start` and read; a malformed project file propagates as an error
 /// (fail-loud), a genuinely absent file is `Ok(None)`.
-pub fn load_project_config(start: &Path) -> Result<Option<ProjectConfig>> {
+pub fn load_project_config(start: &Path) -> Result<Option<LoadedConfig>> {
     if !discovery_enabled() {
         return Ok(None);
     }
@@ -314,6 +485,219 @@ pub fn load_project_config(start: &Path) -> Result<Option<ProjectConfig>> {
         Some(path) => read_project_config_at(&path).map(Some),
         None => Ok(None),
     }
+}
+
+/// Resolve one invocation's typed snapshot after cwd handling. Project failures
+/// are fail-loud; the global layer is supplied best-effort by `crate::config`.
+pub fn load_effective_config(cwd: &Path, overlays: ConfigOverlays) -> Result<EffectiveConfig> {
+    let project = load_project_config(cwd)?;
+    let global = crate::config::load_global_config();
+    Ok(resolve_effective_config(cwd, global, project, overlays))
+}
+
+/// Initialize and retain the process snapshot. Callers must do this only after
+/// the invocation's final cwd has been applied and before command dispatch.
+pub fn initialize_effective_config(
+    cwd: &Path,
+    overlays: ConfigOverlays,
+) -> Result<&'static EffectiveConfig> {
+    if let Some(config) = EFFECTIVE_CONFIG.get() {
+        return Ok(config);
+    }
+    let config = load_effective_config(cwd, overlays)?;
+    let _ = EFFECTIVE_CONFIG.set(config);
+    Ok(EFFECTIVE_CONFIG
+        .get()
+        .expect("effective config was initialized"))
+}
+
+pub fn effective_config() -> Option<&'static EffectiveConfig> {
+    EFFECTIVE_CONFIG.get()
+}
+
+fn resolve_effective_config(
+    cwd: &Path,
+    global: Option<LoadedConfig>,
+    project: Option<LoadedConfig>,
+    overlays: ConfigOverlays,
+) -> EffectiveConfig {
+    let mut values = ProjectConfig::default();
+    let mut sources = BTreeMap::new();
+
+    let defaults_source = ConfigSource::transient(ConfigSourceKind::Defaults, cwd);
+    merge_layer(
+        &mut values,
+        &mut sources,
+        &overlays.defaults,
+        &defaults_source,
+    );
+    if let Some(layer) = global.as_ref() {
+        merge_layer(&mut values, &mut sources, &layer.values, &layer.source);
+    }
+    if let Some(layer) = project.as_ref() {
+        merge_layer(&mut values, &mut sources, &layer.values, &layer.source);
+    }
+    let environment_source = ConfigSource::transient(ConfigSourceKind::Environment, cwd);
+    merge_layer(
+        &mut values,
+        &mut sources,
+        &overlays.environment,
+        &environment_source,
+    );
+    let cli_source = ConfigSource::transient(ConfigSourceKind::Cli, cwd);
+    merge_layer(&mut values, &mut sources, &overlays.cli, &cli_source);
+
+    EffectiveConfig {
+        cwd: cwd.to_path_buf(),
+        values,
+        sources,
+        project,
+        global,
+    }
+}
+
+macro_rules! merge_field {
+    ($dst:expr, $sources:expr, $src:expr, $source:expr, $field:ident, $key:expr) => {
+        if let Some(value) = $src.$field.as_ref() {
+            $dst.$field = Some(value.clone());
+            $sources.insert($key, $source.clone());
+        }
+    };
+}
+
+fn merge_layer(
+    values: &mut ProjectConfig,
+    sources: &mut BTreeMap<ConfigKey, ConfigSource>,
+    layer: &ProjectConfig,
+    source: &ConfigSource,
+) {
+    merge_field!(
+        values,
+        sources,
+        layer,
+        source,
+        node_compat,
+        ConfigKey::NodeCompat
+    );
+    merge_field!(values, sources, layer, source, preload, ConfigKey::Preload);
+    merge_field!(
+        values,
+        sources,
+        layer,
+        source,
+        node_options,
+        ConfigKey::NodeOptions
+    );
+    merge_field!(values, sources, layer, source, v8_flags, ConfigKey::V8Flags);
+    merge_field!(values, sources, layer, source, env, ConfigKey::Env);
+    merge_field!(values, sources, layer, source, define, ConfigKey::Define);
+    merge_field!(values, sources, layer, source, loader, ConfigKey::Loader);
+    merge_field!(
+        values,
+        sources,
+        layer,
+        source,
+        conditions,
+        ConfigKey::Conditions
+    );
+    merge_field!(
+        values,
+        sources,
+        layer,
+        source,
+        tsconfig,
+        ConfigKey::Tsconfig
+    );
+    merge_field!(
+        values,
+        sources,
+        layer,
+        source,
+        verify_deps_before_run,
+        ConfigKey::VerifyDepsBeforeRun
+    );
+    merge_field!(values, sources, layer, source, sandbox, ConfigKey::Sandbox);
+
+    merge_field!(
+        values.install,
+        sources,
+        layer.install,
+        source,
+        node_linker,
+        ConfigKey::InstallNodeLinker
+    );
+    merge_field!(
+        values.install,
+        sources,
+        layer.install,
+        source,
+        symlink_disable_pattern,
+        ConfigKey::InstallSymlinkDisablePattern
+    );
+    merge_field!(
+        values.install,
+        sources,
+        layer.install,
+        source,
+        hoist,
+        ConfigKey::InstallHoist
+    );
+    merge_field!(
+        values.install,
+        sources,
+        layer.install,
+        source,
+        minimum_release_age,
+        ConfigKey::InstallMinimumReleaseAge
+    );
+    merge_field!(
+        values.install,
+        sources,
+        layer.install,
+        source,
+        minimum_release_age_exclude,
+        ConfigKey::InstallMinimumReleaseAgeExclude
+    );
+    merge_field!(
+        values.install,
+        sources,
+        layer.install,
+        source,
+        node_options,
+        ConfigKey::InstallNodeOptions
+    );
+    merge_field!(
+        values.install,
+        sources,
+        layer.install,
+        source,
+        sandbox,
+        ConfigKey::InstallSandbox
+    );
+    merge_field!(
+        values.dlx,
+        sources,
+        layer.dlx,
+        source,
+        consent,
+        ConfigKey::DlxConsent
+    );
+    merge_field!(
+        values.dlx,
+        sources,
+        layer.dlx,
+        source,
+        sandbox,
+        ConfigKey::DlxSandbox
+    );
+    merge_field!(
+        values.dlx,
+        sources,
+        layer.dlx,
+        source,
+        env,
+        ConfigKey::DlxEnv
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -398,48 +782,32 @@ fn reject_unknown_keys(
 }
 
 fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> {
-    const ALLOWED: &[&str] = &[
-        "$schema",
-        "nodeCompat",
-        "preload",
-        "nodeOptions",
-        "v8Flags",
-        "env",
-        "define",
-        "loader",
-        "conditions",
-        "tsconfig",
-        "verifyDepsBeforeRun",
-        "sandbox",
-        "install",
-        "dlx",
-    ];
-    reject_unknown_keys(obj, "", ALLOWED)?;
+    reject_unknown_keys(obj, "", ROOT_KEYS)?;
 
     let mut cfg = ProjectConfig::default();
     if let Some(v) = obj.get("nodeCompat") {
         cfg.node_compat = Some(as_bool(v, "nodeCompat")?);
     }
     if let Some(v) = obj.get("preload") {
-        cfg.preload = as_string_array(v, "preload")?;
+        cfg.preload = Some(as_string_array(v, "preload")?);
     }
     if let Some(v) = obj.get("nodeOptions") {
-        cfg.node_options = as_string_array(v, "nodeOptions")?;
+        cfg.node_options = Some(as_string_array(v, "nodeOptions")?);
     }
     if let Some(v) = obj.get("v8Flags") {
-        cfg.v8_flags = as_string_array(v, "v8Flags")?;
+        cfg.v8_flags = Some(as_string_array(v, "v8Flags")?);
     }
     if let Some(v) = obj.get("env") {
         cfg.env = Some(validate_env_setting(v, "env")?);
     }
     if let Some(v) = obj.get("define") {
-        cfg.define = as_string_map(v, "define")?;
+        cfg.define = Some(as_string_map(v, "define")?);
     }
     if let Some(v) = obj.get("loader") {
-        cfg.loader = as_string_map(v, "loader")?;
+        cfg.loader = Some(as_string_map(v, "loader")?);
     }
     if let Some(v) = obj.get("conditions") {
-        cfg.conditions = as_string_array(v, "conditions")?;
+        cfg.conditions = Some(as_string_array(v, "conditions")?);
     }
     if let Some(v) = obj.get("tsconfig") {
         cfg.tsconfig = Some(as_str(v, "tsconfig")?.to_string());
@@ -496,17 +864,8 @@ fn validate_verify_deps(v: &Value, path: &str) -> Result<VerifyDepsBeforeRun> {
 }
 
 fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
-    const ALLOWED: &[&str] = &[
-        "nodeLinker",
-        "symlinkDisablePattern",
-        "hoist",
-        "minimumReleaseAge",
-        "minimumReleaseAgeExclude",
-        "nodeOptions",
-        "sandbox",
-    ];
     let obj = as_object(v, path)?;
-    reject_unknown_keys(obj, path, ALLOWED)?;
+    reject_unknown_keys(obj, path, INSTALL_KEYS)?;
 
     let mut install = InstallConfig::default();
     if let Some(v) = obj.get("nodeLinker") {
@@ -528,7 +887,7 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
     }
     if let Some(v) = obj.get("symlinkDisablePattern") {
         install.symlink_disable_pattern =
-            as_string_array(v, &child(path, "symlinkDisablePattern"))?;
+            Some(as_string_array(v, &child(path, "symlinkDisablePattern"))?);
     }
     if let Some(v) = obj.get("hoist") {
         let p = child(path, "hoist");
@@ -550,11 +909,13 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
         )?);
     }
     if let Some(v) = obj.get("minimumReleaseAgeExclude") {
-        install.minimum_release_age_exclude =
-            as_string_array(v, &child(path, "minimumReleaseAgeExclude"))?;
+        install.minimum_release_age_exclude = Some(as_string_array(
+            v,
+            &child(path, "minimumReleaseAgeExclude"),
+        )?);
     }
     if let Some(v) = obj.get("nodeOptions") {
-        install.node_options = as_string_array(v, &child(path, "nodeOptions"))?;
+        install.node_options = Some(as_string_array(v, &child(path, "nodeOptions"))?);
     }
     if let Some(v) = obj.get("sandbox") {
         install.sandbox = Some(validate_sandbox(v, &child(path, "sandbox"))?);
@@ -563,9 +924,8 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
 }
 
 fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
-    const ALLOWED: &[&str] = &["consent", "sandbox", "env"];
     let obj = as_object(v, path)?;
-    reject_unknown_keys(obj, path, ALLOWED)?;
+    reject_unknown_keys(obj, path, DLX_KEYS)?;
 
     let mut dlx = DlxConfig::default();
     if let Some(v) = obj.get("consent") {
@@ -618,9 +978,8 @@ fn classify_sandbox_string(s: &str) -> SandboxSetting {
 }
 
 fn validate_sandbox_axes(v: &Value, path: &str) -> Result<SandboxAxes> {
-    const ALLOWED: &[&str] = &["fs", "net", "env"];
     let obj = as_object(v, path)?;
-    reject_unknown_keys(obj, path, ALLOWED)?;
+    reject_unknown_keys(obj, path, SANDBOX_AXIS_KEYS)?;
 
     let mut axes = SandboxAxes::default();
     if let Some(v) = obj.get("fs") {
@@ -755,12 +1114,27 @@ mod tests {
             }"#,
         );
         assert_eq!(cfg.node_compat, Some(true));
-        assert_eq!(cfg.preload, vec!["./telemetry.ts"]);
-        assert_eq!(cfg.node_options, vec!["--max-old-space-size=4096"]);
-        assert_eq!(cfg.v8_flags, vec!["--expose-gc"]);
-        assert_eq!(cfg.define.get("__DEV__").map(String::as_str), Some("false"));
-        assert_eq!(cfg.loader.get(".svg").map(String::as_str), Some("text"));
-        assert_eq!(cfg.conditions, vec!["worker"]);
+        assert_eq!(cfg.preload, Some(vec!["./telemetry.ts".into()]));
+        assert_eq!(
+            cfg.node_options,
+            Some(vec!["--max-old-space-size=4096".into()])
+        );
+        assert_eq!(cfg.v8_flags, Some(vec!["--expose-gc".into()]));
+        assert_eq!(
+            cfg.define
+                .as_ref()
+                .and_then(|values| values.get("__DEV__"))
+                .map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            cfg.loader
+                .as_ref()
+                .and_then(|values| values.get(".svg"))
+                .map(String::as_str),
+            Some("text")
+        );
+        assert_eq!(cfg.conditions, Some(vec!["worker".into()]));
         assert_eq!(cfg.tsconfig.as_deref(), Some("./tsconfig.runtime.json"));
     }
 
@@ -836,7 +1210,10 @@ mod tests {
             }"#,
         );
         assert_eq!(cfg.install.node_linker, Some(NodeLinker::Isolated));
-        assert_eq!(cfg.install.symlink_disable_pattern, vec!["@corp/tool-*"]);
+        assert_eq!(
+            cfg.install.symlink_disable_pattern,
+            Some(vec!["@corp/tool-*".into()])
+        );
         assert_eq!(
             cfg.install.hoist,
             Some(Hoist::Patterns(vec!["*types*".into()]))
@@ -845,8 +1222,14 @@ mod tests {
             cfg.install.minimum_release_age,
             Some(Duration::from_secs(3 * 86_400))
         );
-        assert_eq!(cfg.install.minimum_release_age_exclude, vec!["@myorg/*"]);
-        assert_eq!(cfg.install.node_options, vec!["--max-old-space-size=2048"]);
+        assert_eq!(
+            cfg.install.minimum_release_age_exclude,
+            Some(vec!["@myorg/*".into()])
+        );
+        assert_eq!(
+            cfg.install.node_options,
+            Some(vec!["--max-old-space-size=2048".into()])
+        );
     }
 
     #[test]
@@ -955,6 +1338,56 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_five_shapes_are_lossless_and_inert_in_the_snapshot() {
+        let granular = serde_json::json!({
+            "fs": { "./data": { "read": true, "write": false } },
+            "net": [],
+            "env": false
+        });
+        let cases = vec![
+            ("false".to_string(), SandboxSetting::Disabled),
+            ("true".to_string(), SandboxSetting::Enabled),
+            (
+                r#""build-jail""#.to_string(),
+                SandboxSetting::Preset("build-jail".into()),
+            ),
+            (
+                r#""./team.json""#.to_string(),
+                SandboxSetting::FileRef("./team.json".into()),
+            ),
+            (
+                granular.to_string(),
+                SandboxSetting::Granular(SandboxAxes {
+                    fs: Some(SandboxAxis::Object(BTreeMap::from([(
+                        "./data".into(),
+                        serde_json::json!({ "read": true, "write": false }),
+                    )]))),
+                    net: Some(SandboxAxis::Array(Vec::new())),
+                    env: Some(SandboxAxis::Bool(false)),
+                }),
+            ),
+        ];
+
+        for (raw, expected) in cases {
+            let parsed = parse(&format!(r#"{{ "sandbox": {raw} }}"#));
+            assert_eq!(parsed.sandbox, Some(expected.clone()));
+            let snapshot = resolve_effective_config(
+                Path::new("/effective"),
+                None,
+                Some(LoadedConfig {
+                    source: ConfigSource::file(
+                        ConfigSourceKind::Project,
+                        Path::new("/project/nub.jsonc"),
+                    ),
+                    values: parsed,
+                }),
+                ConfigOverlays::default(),
+            );
+            assert_eq!(snapshot.values.sandbox, Some(expected));
+        }
+    }
+
+    #[test]
     fn sandbox_axes_accept_array_and_object_forms() {
         let cfg = parse(
             r#"{
@@ -1023,11 +1456,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join(FILE_NAME), "{}").unwrap();
-        let deep = root.join("packages").join("app").join("src");
+        let app = root.join("packages").join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join(FILE_NAME), r#"{ "nodeCompat": false }"#).unwrap();
+        let deep = app.join("src");
         std::fs::create_dir_all(&deep).unwrap();
 
-        let found = discover_project_config(&deep).expect("walks up to the root file");
-        assert_eq!(found, root.join(FILE_NAME));
+        let found = discover_project_config(&deep).expect("walks up to the nearest file");
+        assert_eq!(found, app.join(FILE_NAME));
     }
 
     #[test]
@@ -1058,7 +1494,276 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
         let cfg = with_project_config_enabled(|| load_project_config(dir.path()).unwrap());
-        assert_eq!(cfg.unwrap().node_compat, Some(true));
+        assert_eq!(cfg.unwrap().values.node_compat, Some(true));
+    }
+
+    #[test]
+    fn loaded_config_retains_exact_source_path_and_containing_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let deep = root.join("packages/app");
+        std::fs::create_dir_all(&deep).unwrap();
+        let path = root.join(FILE_NAME);
+        std::fs::write(&path, r#"{ "tsconfig": "./tsconfig.runtime.json" }"#).unwrap();
+
+        let loaded = with_project_config_enabled(|| load_project_config(&deep).unwrap().unwrap());
+        assert_eq!(loaded.source.kind, ConfigSourceKind::Project);
+        assert_eq!(loaded.source.path.as_deref(), Some(path.as_path()));
+        assert_eq!(loaded.source.root, root);
+        assert_eq!(
+            loaded.values.tsconfig.as_deref(),
+            Some("./tsconfig.runtime.json")
+        );
+    }
+
+    #[test]
+    fn effective_cwd_drives_discovery_not_the_ambient_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let ambient = dir.path().join("ambient");
+        let effective = dir.path().join("requested").join("child");
+        std::fs::create_dir_all(&ambient).unwrap();
+        std::fs::create_dir_all(&effective).unwrap();
+        std::fs::write(
+            dir.path().join("requested").join(FILE_NAME),
+            r#"{ "preload": ["./from-requested.ts"] }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            ambient.join(FILE_NAME),
+            r#"{ "preload": ["./from-ambient.ts"] }"#,
+        )
+        .unwrap();
+
+        let project = with_project_config_enabled(|| load_project_config(&effective).unwrap());
+        let snapshot =
+            resolve_effective_config(&effective, None, project, ConfigOverlays::default());
+        assert_eq!(
+            snapshot.values.preload,
+            Some(vec!["./from-requested.ts".into()])
+        );
+        assert_eq!(snapshot.cwd, effective);
+        assert_eq!(
+            snapshot.sources.get(&ConfigKey::Preload).unwrap().root,
+            dir.path().join("requested")
+        );
+    }
+
+    #[test]
+    fn precedence_is_cli_then_environment_then_project_then_global_then_defaults() {
+        fn layer(kind: ConfigSourceKind, name: &str) -> LoadedConfig {
+            LoadedConfig {
+                source: ConfigSource::file(kind, Path::new(&format!("/{name}/nub.jsonc"))),
+                values: ProjectConfig {
+                    tsconfig: Some(name.to_string()),
+                    ..ProjectConfig::default()
+                },
+            }
+        }
+
+        let defaults = ProjectConfig {
+            tsconfig: Some("defaults".into()),
+            ..ProjectConfig::default()
+        };
+        let global = Some(layer(ConfigSourceKind::Global, "global"));
+        let project = Some(layer(ConfigSourceKind::Project, "project"));
+        let environment = ProjectConfig {
+            tsconfig: Some("environment".into()),
+            ..ProjectConfig::default()
+        };
+        let cli = ProjectConfig {
+            tsconfig: Some("cli".into()),
+            ..ProjectConfig::default()
+        };
+
+        let snapshots = [
+            (
+                ConfigOverlays {
+                    cli: cli.clone(),
+                    environment: environment.clone(),
+                    defaults: defaults.clone(),
+                },
+                global.clone(),
+                project.clone(),
+                "cli",
+                ConfigSourceKind::Cli,
+            ),
+            (
+                ConfigOverlays {
+                    environment: environment.clone(),
+                    defaults: defaults.clone(),
+                    ..ConfigOverlays::default()
+                },
+                global.clone(),
+                project.clone(),
+                "environment",
+                ConfigSourceKind::Environment,
+            ),
+            (
+                ConfigOverlays {
+                    defaults: defaults.clone(),
+                    ..ConfigOverlays::default()
+                },
+                global.clone(),
+                project.clone(),
+                "project",
+                ConfigSourceKind::Project,
+            ),
+            (
+                ConfigOverlays {
+                    defaults: defaults.clone(),
+                    ..ConfigOverlays::default()
+                },
+                global.clone(),
+                None,
+                "global",
+                ConfigSourceKind::Global,
+            ),
+            (
+                ConfigOverlays {
+                    defaults,
+                    ..ConfigOverlays::default()
+                },
+                None,
+                None,
+                "defaults",
+                ConfigSourceKind::Defaults,
+            ),
+        ];
+
+        for (overlays, global, project, expected, source) in snapshots {
+            let snapshot = resolve_effective_config(Path::new("/cwd"), global, project, overlays);
+            assert_eq!(snapshot.values.tsconfig.as_deref(), Some(expected));
+            assert_eq!(
+                snapshot.sources.get(&ConfigKey::Tsconfig).unwrap().kind,
+                source
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_false_and_empty_values_override_lower_layers() {
+        let project = LoadedConfig {
+            source: ConfigSource::file(ConfigSourceKind::Project, Path::new("/project/nub.jsonc")),
+            values: ProjectConfig {
+                node_compat: Some(true),
+                preload: Some(vec!["./project.ts".into()]),
+                define: Some(BTreeMap::from([("PROJECT".into(), "true".into())])),
+                ..ProjectConfig::default()
+            },
+        };
+        let snapshot = resolve_effective_config(
+            Path::new("/cwd"),
+            None,
+            Some(project),
+            ConfigOverlays {
+                cli: ProjectConfig {
+                    node_compat: Some(false),
+                    preload: Some(Vec::new()),
+                    define: Some(BTreeMap::new()),
+                    ..ProjectConfig::default()
+                },
+                ..ConfigOverlays::default()
+            },
+        );
+
+        assert_eq!(snapshot.values.node_compat, Some(false));
+        assert_eq!(snapshot.values.preload, Some(Vec::new()));
+        assert_eq!(snapshot.values.define, Some(BTreeMap::new()));
+        for key in [ConfigKey::NodeCompat, ConfigKey::Preload, ConfigKey::Define] {
+            assert_eq!(
+                snapshot.sources.get(&key).unwrap().kind,
+                ConfigSourceKind::Cli
+            );
+        }
+    }
+
+    #[test]
+    fn shared_schema_keysets_match_the_parser() {
+        assert_eq!(
+            ROOT_KEYS,
+            [
+                "$schema",
+                "nodeCompat",
+                "preload",
+                "nodeOptions",
+                "v8Flags",
+                "env",
+                "define",
+                "loader",
+                "conditions",
+                "tsconfig",
+                "verifyDepsBeforeRun",
+                "sandbox",
+                "install",
+                "dlx",
+            ]
+        );
+        let text = r#"{
+          "$schema": "https://nubjs.com/schema/nub.json",
+          "nodeCompat": false,
+          "preload": [],
+          "nodeOptions": [],
+          "v8Flags": [],
+          "env": false,
+          "define": {},
+          "loader": {},
+          "conditions": [],
+          "tsconfig": "./tsconfig.json",
+          "verifyDepsBeforeRun": false,
+          "sandbox": false,
+          "install": {
+            "nodeLinker": "symlink",
+            "symlinkDisablePattern": [],
+            "hoist": false,
+            "minimumReleaseAge": "1d",
+            "minimumReleaseAgeExclude": [],
+            "nodeOptions": [],
+            "sandbox": false
+          },
+          "dlx": { "consent": "prompt", "sandbox": false, "env": false }
+        }"#;
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join("project.jsonc");
+        let global_path = dir.path().join("global.jsonc");
+        std::fs::write(&project_path, text).unwrap();
+        std::fs::write(&global_path, text).unwrap();
+        let project = read_project_config_at(&project_path).unwrap();
+        let global = read_global_config_at(&global_path).unwrap();
+        assert_eq!(project.values, global.values);
+        assert_eq!(project.source.kind, ConfigSourceKind::Project);
+        assert_eq!(global.source.kind, ConfigSourceKind::Global);
+    }
+
+    #[test]
+    fn one_test_fixture_can_force_the_gate_on_then_observe_it_off_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, r#"{ "nodeCompat": true }"#).unwrap();
+
+        let enabled = with_project_config_enabled(|| load_project_config(dir.path()).unwrap());
+        assert_eq!(enabled.unwrap().values.node_compat, Some(true));
+        assert_eq!(load_project_config(dir.path()).unwrap(), None);
+
+        std::fs::write(&path, "{ malformed").unwrap();
+        assert_eq!(load_project_config(dir.path()).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gate_off_ignores_an_unreadable_project_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, r#"{ "nodeCompat": true }"#).unwrap();
+        let original = std::fs::metadata(&path).unwrap().permissions();
+        let mut unreadable = original.clone();
+        unreadable.set_mode(0o000);
+        std::fs::set_permissions(&path, unreadable).unwrap();
+
+        assert_eq!(load_project_config(dir.path()).unwrap(), None);
+
+        std::fs::set_permissions(&path, original).unwrap();
     }
 
     #[test]
