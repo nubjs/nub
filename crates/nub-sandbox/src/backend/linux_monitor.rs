@@ -5,8 +5,8 @@
 //! environment-independent states 1-5 bootstrap, stopped-target handshake, and
 //! one-shot exec transition, plus the pinned ELF runtime closure and framed control
 //! channel, runtime signal relay, exact terminal-status reporting, and namespace
-//! process-tree cleanup. Final completion states and production launcher adoption
-//! remain deliberately uninstalled.
+//! process-tree cleanup. The harness closes the authenticated parent completion
+//! boundary; production launcher adoption remains deliberately uninstalled.
 #![cfg(target_os = "linux")]
 
 use super::{CommandSpec, Degradation};
@@ -20,7 +20,9 @@ use std::mem::{self, MaybeUninit};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, ExitStatus};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -390,6 +392,10 @@ pub(crate) struct BootstrapSpec {
     // Preserve the cleared state-6 post-TargetExited hold byte-for-byte while
     // state 7 is exercised independently. Production construction is false.
     hold_after_target_exited_for_harness: bool,
+    // State-8-only integrity seam: after publishing CleanupComplete, exit with
+    // a nonzero status so the parent must reject an otherwise valid protocol.
+    // Production and the sealed state-5/6/7 harness modes always leave it false.
+    fail_outer_status_after_cleanup_for_harness: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,6 +439,7 @@ impl BootstrapSpec {
             hold_before_runtime_cleanup_for_harness: false,
             hold_after_runtime_cleanup_for_harness: false,
             hold_after_target_exited_for_harness: false,
+            fail_outer_status_after_cleanup_for_harness: false,
         })
     }
 
@@ -449,7 +456,8 @@ impl BootstrapSpec {
             | (u16::from(self.hold_after_exec_for_harness) << 2)
             | (u16::from(self.hold_before_runtime_cleanup_for_harness) << 3)
             | (u16::from(self.hold_after_runtime_cleanup_for_harness) << 4)
-            | (u16::from(self.hold_after_target_exited_for_harness) << 5);
+            | (u16::from(self.hold_after_target_exited_for_harness) << 5)
+            | (u16::from(self.fail_outer_status_after_cleanup_for_harness) << 6);
         put_u16(&mut out, flags);
         out.extend_from_slice(&self.session);
         out.extend_from_slice(&self.release);
@@ -485,7 +493,7 @@ impl BootstrapSpec {
             return Err(invalid_data("unsupported sandbox bootstrap version"));
         }
         let flags = cursor.u16()?;
-        if flags & !0b11_1111 != 0 {
+        if flags & !0b111_1111 != 0 {
             return Err(invalid_data("unknown sandbox bootstrap flags"));
         }
         let session = cursor.array::<32>()?;
@@ -535,6 +543,7 @@ impl BootstrapSpec {
             hold_before_runtime_cleanup_for_harness: flags & 8 != 0,
             hold_after_runtime_cleanup_for_harness: flags & 16 != 0,
             hold_after_target_exited_for_harness: flags & 32 != 0,
+            fail_outer_status_after_cleanup_for_harness: flags & 64 != 0,
         })
     }
 }
@@ -2935,13 +2944,19 @@ struct RunningBoundaryInputs {
     terminate_seen: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RunningHarnessBehavior {
+    hold_before_cleanup: bool,
+    hold_after_cleanup: bool,
+    hold_after_target_exited: bool,
+    fail_outer_status_after_cleanup: bool,
+}
+
 fn run_running_state(
     target: &mut StoppedTarget,
     control: &mut ControlChannel,
     state: &mut MonitorState,
-    hold_before_cleanup_for_harness: bool,
-    hold_after_cleanup_for_harness: bool,
-    hold_after_target_exited_for_harness: bool,
+    harness: RunningHarnessBehavior,
 ) -> io::Result<()> {
     let mut inputs = RunningBoundaryInputs {
         signal_sequence: 0,
@@ -2964,8 +2979,7 @@ fn run_running_state(
                 control,
                 state,
                 &mut inputs,
-                hold_after_cleanup_for_harness,
-                hold_after_target_exited_for_harness,
+                harness,
                 deadline,
             );
         }
@@ -3007,7 +3021,7 @@ fn run_running_state(
                 true,
                 deadline,
             )?;
-            if hold_before_cleanup_for_harness {
+            if harness.hold_before_cleanup {
                 thread::sleep(Duration::from_secs(1));
                 ensure_before_deadline(
                     deadline,
@@ -3020,8 +3034,7 @@ fn run_running_state(
                 control,
                 state,
                 &mut inputs,
-                hold_after_cleanup_for_harness,
-                hold_after_target_exited_for_harness,
+                harness,
                 deadline,
             );
         }
@@ -3106,11 +3119,10 @@ fn finish_running_target_until(
     control: &mut ControlChannel,
     state: &mut MonitorState,
     inputs: &mut RunningBoundaryInputs,
-    hold_after_cleanup_for_harness: bool,
-    hold_after_target_exited_for_harness: bool,
+    harness: RunningHarnessBehavior,
     deadline: Instant,
 ) -> io::Result<()> {
-    if hold_after_cleanup_for_harness {
+    if harness.hold_after_cleanup {
         thread::sleep(Duration::from_secs(1));
         ensure_before_deadline(
             deadline,
@@ -3144,7 +3156,7 @@ fn finish_running_target_until(
             "sandbox target completion was attempted before ECHILD",
         ));
     }
-    if hold_after_target_exited_for_harness {
+    if harness.hold_after_target_exited {
         let payload = report.encode()?;
         control.send_with_deadline(FrameKind::TargetExited, payload, Some(deadline))?;
         // Packet publication is the linearization point. The state assignment
@@ -3162,7 +3174,12 @@ fn finish_running_target_until(
     control.send_with_deadline(FrameKind::TargetExited, payload, Some(deadline))?;
     // As above, successful SOCK_SEQPACKET publication commits the transition.
     *state = MonitorState::TargetExitedAwaitingCompletion;
-    run_session_completion_state(control, state, attestation)
+    run_session_completion_state(
+        control,
+        state,
+        attestation,
+        harness.fail_outer_status_after_cleanup,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3175,6 +3192,7 @@ fn run_session_completion_state(
     control: &mut ControlChannel,
     state: &mut MonitorState,
     attestation: CompletionAttestation,
+    fail_outer_status_after_cleanup_for_harness: bool,
 ) -> io::Result<()> {
     let deadline = Instant::now() + DESCRIBE_TIMEOUT;
     let mut phase = CompletionInputPhase::AwaitingRequest;
@@ -3269,6 +3287,12 @@ fn run_session_completion_state(
     control.send_with_deadline(FrameKind::CleanupComplete, payload, Some(deadline))?;
     // Packet publication is the terminal state-7 linearization point.
     *state = MonitorState::CleanupCompletePublished;
+    if fail_outer_status_after_cleanup_for_harness {
+        // This is intentionally after the terminal packet and deliberately
+        // bypasses the Fatal path: State 8 must reject a nonzero outer status
+        // even when every authenticated protocol event was otherwise valid.
+        unsafe { libc::_exit(23) }
+    }
     Ok(())
 }
 
@@ -3398,9 +3422,13 @@ fn run_target_stopped_state(
                         &mut target,
                         control,
                         state,
-                        spec.hold_before_runtime_cleanup_for_harness,
-                        spec.hold_after_runtime_cleanup_for_harness,
-                        spec.hold_after_target_exited_for_harness,
+                        RunningHarnessBehavior {
+                            hold_before_cleanup: spec.hold_before_runtime_cleanup_for_harness,
+                            hold_after_cleanup: spec.hold_after_runtime_cleanup_for_harness,
+                            hold_after_target_exited: spec.hold_after_target_exited_for_harness,
+                            fail_outer_status_after_cleanup: spec
+                                .fail_outer_status_after_cleanup_for_harness,
+                        },
                     )
                 }
             }
@@ -4524,7 +4552,8 @@ pub fn exercise_monitor_state_6(
 }
 
 /// Harness-only real-kernel exercise for the one-shot retained-monitor state-7
-/// completion handshake. State 8 and the production launcher remain held.
+/// completion handshake. State 8 is independently selectable and the production
+/// launcher remains held.
 #[doc(hidden)]
 pub fn exercise_monitor_state_7(
     runtime: &RuntimeCapability,
@@ -4554,6 +4583,35 @@ pub fn exercise_monitor_state_7(
             )
         })?;
     }
+    exercise_monitor_state_7_parent_death(runtime, bwrap)
+}
+
+/// Harness-only proof for the trusted parent side of the state-7 completion
+/// protocol. This closes state 8 without switching the production launcher or
+/// exposing the session boundary through Prepared.
+#[doc(hidden)]
+pub fn exercise_monitor_state_8(
+    runtime: &RuntimeCapability,
+    bwrap: impl AsRef<Path>,
+) -> io::Result<()> {
+    let bwrap = bwrap.as_ref();
+    for case in [
+        State5HarnessCase::SessionLiteralExit143,
+        State5HarnessCase::SessionDefaultTerm,
+        State5HarnessCase::SessionDescendants,
+        State5HarnessCase::SessionCancellation,
+        State5HarnessCase::SessionOuterStatusMismatch,
+    ] {
+        exercise_monitor_harness_case(runtime, bwrap, case, None).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("state-8 harness case {case:?}: {error}"),
+            )
+        })?;
+    }
+    exercise_state_8_protocol_adversaries()?;
+    // The abrupt-parent windows exercise the same descriptor capability and
+    // PDEATHSIG boundary State 8 relies on; keep their sealed State-7 driver.
     exercise_monitor_state_7_parent_death(runtime, bwrap)
 }
 
@@ -4708,6 +4766,11 @@ enum State5HarnessCase {
     CompletionEarlyRequest,
     CompletionOuterParentDeathBeforeRequest,
     CompletionOuterParentDeathAfterRequest,
+    SessionLiteralExit143,
+    SessionDefaultTerm,
+    SessionDescendants,
+    SessionCancellation,
+    SessionOuterStatusMismatch,
 }
 
 impl State5HarnessCase {
@@ -4742,7 +4805,11 @@ impl State5HarnessCase {
             | Self::CompletionSendFailure
             | Self::CompletionEarlyRequest
             | Self::CompletionOuterParentDeathBeforeRequest
-            | Self::CompletionOuterParentDeathAfterRequest => "target-runtime-exit-143",
+            | Self::CompletionOuterParentDeathAfterRequest
+            | Self::SessionLiteralExit143
+            | Self::SessionCancellation
+            | Self::SessionOuterStatusMismatch => "target-runtime-exit-143",
+            Self::SessionDescendants => "target-exec-descendants",
             Self::RuntimeCountInt => "target-runtime-count-int",
             Self::RuntimeCountTerm => "target-runtime-count-term",
             Self::ExitRace => "target-exec-exit",
@@ -4806,7 +4873,18 @@ impl State5HarnessCase {
     }
 
     fn is_runtime(self) -> bool {
-        self.is_state_6() || self.is_state_7()
+        self.is_state_6() || self.is_state_7() || self.is_state_8()
+    }
+
+    fn is_state_8(self) -> bool {
+        matches!(
+            self,
+            Self::SessionLiteralExit143
+                | Self::SessionDefaultTerm
+                | Self::SessionDescendants
+                | Self::SessionCancellation
+                | Self::SessionOuterStatusMismatch
+        )
     }
 }
 
@@ -4863,6 +4941,10 @@ fn exercise_monitor_harness_case(
             State5HarnessCase::RuntimeCleanupFaultPrecedence
         ),
         hold_after_target_exited_for_harness: case.is_state_6(),
+        fail_outer_status_after_cleanup_for_harness: matches!(
+            case,
+            State5HarnessCase::SessionOuterStatusMismatch
+        ),
     };
     let _descriptor_pressure = if matches!(case, State5HarnessCase::RuntimeHighDescriptorPressure) {
         Some(open_descriptor_pressure_through(BOOTSTRAP_FD - 1)?)
@@ -5372,6 +5454,7 @@ fn exercise_monitor_runtime_case(
         State5HarnessCase::RuntimeDescendants
             | State5HarnessCase::RuntimeOuterParentDeath
             | State5HarnessCase::CompletionDescendants
+            | State5HarnessCase::SessionDescendants
     ) {
         *descendant_pins = wait_for_detached_descendants(target_pid)?;
     }
@@ -5404,6 +5487,18 @@ fn exercise_monitor_runtime_case(
             monitor_pid,
             attestation,
             parent_death_report,
+            descendant_pins,
+        );
+    }
+    if case.is_state_8() {
+        return exercise_monitor_parent_session_case(
+            case,
+            control,
+            signal_writer,
+            child,
+            target_pid,
+            monitor_pid,
+            attestation,
             descendant_pins,
         );
     }
@@ -5621,6 +5716,768 @@ fn exercise_monitor_runtime_case(
         expect_fatal_contains(control, "state-7-not-installed")?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParentCompletionAction {
+    Complete,
+    CancelBeforeRequest,
+    CancelAfterRequest,
+    CancelBeforeCommit,
+}
+
+#[derive(Debug)]
+struct ParentCompletionResult {
+    status: ExitStatus,
+    report: TargetExitedReport,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum State8PeerCase {
+    SuccessLiteral143,
+    SuccessSignal,
+    MalformedTargetExited,
+    UnexpectedTargetFrame,
+    ReplayedTargetExited,
+    WrongSessionTargetExited,
+    EofBeforeTargetExited,
+    WrongCleanupReport,
+    WrongCleanupCapability,
+    UnexpectedCleanupFrame,
+    ReplayedCleanup,
+    ExtraAfterCleanup,
+    EofBeforeCleanup,
+    CancellationAfterRequest,
+    CancellationBeforeCommit,
+    MissingCleanupDeadline,
+    LateCleanup,
+    LateOuterExit,
+    LateProcessPin,
+    OuterNonzero,
+    OuterSignaled,
+}
+
+impl State8PeerCase {
+    fn tag(self) -> u8 {
+        self as u8 + 1
+    }
+
+    fn completion_timeout(self) -> Duration {
+        match self {
+            Self::MissingCleanupDeadline => DESCRIBE_TIMEOUT,
+            Self::LateCleanup | Self::LateOuterExit | Self::LateProcessPin => {
+                Duration::from_millis(150)
+            }
+            _ => Duration::from_secs(1),
+        }
+    }
+
+    fn outer_verb(self) -> &'static str {
+        match self {
+            Self::SuccessLiteral143 | Self::SuccessSignal | Self::LateProcessPin => {
+                "state-8-outer-zero"
+            }
+            Self::CancellationBeforeCommit => "state-8-outer-zero",
+            Self::LateOuterExit => "state-8-outer-late-zero",
+            Self::OuterNonzero => "state-8-outer-23",
+            Self::OuterSignaled => "state-8-outer-term",
+            _ => "state-8-outer-park",
+        }
+    }
+
+    fn expected_error(self) -> Option<(io::ErrorKind, &'static str)> {
+        Some(match self {
+            Self::SuccessLiteral143 | Self::SuccessSignal => return None,
+            Self::MalformedTargetExited => (
+                io::ErrorKind::InvalidData,
+                "invalid sandbox completion attestation length",
+            ),
+            Self::UnexpectedTargetFrame => (
+                io::ErrorKind::InvalidData,
+                "expected TargetExited, received CleanupComplete",
+            ),
+            Self::ReplayedTargetExited | Self::ReplayedCleanup => (
+                io::ErrorKind::InvalidData,
+                "control sequence mismatch or replay",
+            ),
+            Self::WrongSessionTargetExited => {
+                (io::ErrorKind::InvalidData, "frame session mismatch")
+            }
+            Self::EofBeforeTargetExited | Self::EofBeforeCleanup => {
+                (io::ErrorKind::UnexpectedEof, "control channel closed")
+            }
+            Self::WrongCleanupReport | Self::WrongCleanupCapability => {
+                (io::ErrorKind::InvalidData, "exact attestation")
+            }
+            Self::UnexpectedCleanupFrame => (
+                io::ErrorKind::InvalidData,
+                "expected CleanupComplete, received Fatal",
+            ),
+            Self::ExtraAfterCleanup => (
+                io::ErrorKind::InvalidData,
+                "unexpected post-completion Fatal",
+            ),
+            Self::CancellationAfterRequest | Self::CancellationBeforeCommit => (
+                io::ErrorKind::Interrupted,
+                "completion cancelled before result commitment",
+            ),
+            Self::MissingCleanupDeadline | Self::LateCleanup => {
+                (io::ErrorKind::TimedOut, "control deadline elapsed")
+            }
+            Self::LateOuterExit => (
+                io::ErrorKind::TimedOut,
+                "timed out waiting for held monitor probe to exit",
+            ),
+            Self::LateProcessPin => (
+                io::ErrorKind::TimedOut,
+                "state-8 process cleanup deadline elapsed",
+            ),
+            Self::OuterNonzero | Self::OuterSignaled => {
+                (io::ErrorKind::InvalidData, "outer process exited")
+            }
+        })
+    }
+}
+
+fn exercise_state_8_protocol_adversaries() -> io::Result<()> {
+    for case in [
+        State8PeerCase::SuccessLiteral143,
+        State8PeerCase::SuccessSignal,
+        State8PeerCase::MalformedTargetExited,
+        State8PeerCase::UnexpectedTargetFrame,
+        State8PeerCase::ReplayedTargetExited,
+        State8PeerCase::WrongSessionTargetExited,
+        State8PeerCase::EofBeforeTargetExited,
+        State8PeerCase::WrongCleanupReport,
+        State8PeerCase::WrongCleanupCapability,
+        State8PeerCase::UnexpectedCleanupFrame,
+        State8PeerCase::ReplayedCleanup,
+        State8PeerCase::ExtraAfterCleanup,
+        State8PeerCase::EofBeforeCleanup,
+        State8PeerCase::CancellationAfterRequest,
+        State8PeerCase::CancellationBeforeCommit,
+        State8PeerCase::MissingCleanupDeadline,
+        State8PeerCase::LateCleanup,
+        State8PeerCase::LateOuterExit,
+        State8PeerCase::LateProcessPin,
+        State8PeerCase::OuterNonzero,
+        State8PeerCase::OuterSignaled,
+    ] {
+        exercise_state_8_protocol_adversary(case).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("state-8 parent protocol case {case:?}: {error}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn exercise_state_8_protocol_adversary(case: State8PeerCase) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    let executable = std::env::current_exe()?;
+    let session = [case.tag(); 32];
+    let (parent_fd, peer_fd) = seqpacket_pair()?;
+    let parent_pid = unsafe { libc::getpid() };
+    let peer_pid = unsafe { libc::fork() };
+    if peer_pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if peer_pid == 0 {
+        drop(parent_fd);
+        let outcome = ControlChannel::new(
+            peer_fd,
+            session,
+            ExpectedPeer {
+                pid: Some(parent_pid),
+                uid: unsafe { libc::getuid() },
+            },
+        )
+        .and_then(|mut peer| run_state_8_protocol_peer(case, &mut peer));
+        unsafe { libc::_exit(if outcome.is_ok() { 0 } else { 125 }) }
+    }
+    drop(peer_fd);
+
+    let mut outer = None;
+    let mut late_pin_reaper = None;
+    let execution = (|| -> io::Result<(io::Result<ParentCompletionResult>, libc::c_int)> {
+        outer = Some(
+            Command::new(&executable)
+                .arg(case.outer_verb())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+        );
+        let mut process_pins = Vec::new();
+        if matches!(case, State8PeerCase::LateProcessPin) {
+            let mut late_pin = Command::new(&executable)
+                .arg("state-8-outer-late-zero")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            let identity = match host_process_identity(late_pin.id() as libc::pid_t) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let _ = late_pin.kill();
+                    let _ = late_pin.wait();
+                    return Err(error);
+                }
+            };
+            process_pins.push(identity);
+            late_pin_reaper = Some(thread::spawn(move || late_pin.wait()));
+        }
+        let mut control = ControlChannel::new(
+            parent_fd,
+            session,
+            ExpectedPeer {
+                pid: Some(peer_pid),
+                uid: unsafe { libc::getuid() },
+            },
+        )?;
+        let action = match case {
+            State8PeerCase::CancellationAfterRequest => ParentCompletionAction::CancelAfterRequest,
+            State8PeerCase::CancellationBeforeCommit => ParentCompletionAction::CancelBeforeCommit,
+            _ => ParentCompletionAction::Complete,
+        };
+        let started = Instant::now();
+        let result = drive_parent_completion_session(
+            &mut control,
+            outer.as_mut().expect("state-8 outer child is initialized"),
+            &process_pins,
+            action,
+            case.completion_timeout(),
+        );
+        let elapsed = started.elapsed();
+        drop(control);
+        if case
+            .expected_error()
+            .is_some_and(|(kind, _)| kind == io::ErrorKind::TimedOut)
+            && elapsed
+                < case
+                    .completion_timeout()
+                    .saturating_sub(Duration::from_millis(25))
+        {
+            return Err(invalid_data(
+                "state-8 timeout case failed before its absolute deadline",
+            ));
+        }
+        let peer_status =
+            wait_for_raw_child_status(peer_pid, DESCRIBE_TIMEOUT + Duration::from_secs(1))?;
+        Ok((result, peer_status))
+    })();
+
+    let (result, peer_status) = match execution {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(outer) = outer.as_mut() {
+                let _ = fail_closed_parent_completion(outer, &[]);
+            }
+            terminate_and_reap_raw_child(peer_pid);
+            if let Some(reaper) = late_pin_reaper.take() {
+                let _ = reaper.join();
+            }
+            return Err(error);
+        }
+    };
+    if let Some(reaper) = late_pin_reaper.take() {
+        match reaper.join() {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(status)) => {
+                return Err(invalid_data(format!(
+                    "state-8 late process pin exited with {status}"
+                )));
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(io::Error::other("state-8 late process reaper panicked")),
+        }
+    }
+    if !libc::WIFEXITED(peer_status) || libc::WEXITSTATUS(peer_status) != 0 {
+        return Err(invalid_data(format!(
+            "state-8 protocol peer exited with raw status {peer_status:#x}"
+        )));
+    }
+
+    match case {
+        State8PeerCase::SuccessLiteral143 => {
+            let result = result?;
+            if result.status.code() != Some(143) || result.status.signal().is_some() {
+                return Err(invalid_data(
+                    "state-8 literal exit 143 was not preserved as an exit code",
+                ));
+            }
+        }
+        State8PeerCase::SuccessSignal => {
+            let result = result?;
+            if result.status.code().is_some() || result.status.signal() != Some(libc::SIGTERM) {
+                return Err(invalid_data(
+                    "state-8 SIGTERM result was not preserved as a signal",
+                ));
+            }
+        }
+        _ => {
+            let error = result.expect_err("state-8 parent accepted an adversarial completion");
+            let (expected_kind, expected_message) = case
+                .expected_error()
+                .expect("non-success State-8 case has an expected error");
+            if error.kind() != expected_kind || !error.to_string().contains(expected_message) {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "state-8 parent returned {error:?}, expected {expected_kind:?} containing {expected_message:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn terminate_and_reap_raw_child(pid: libc::pid_t) {
+    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    let mut status = 0;
+    loop {
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid
+            || (waited < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
+        {
+            return;
+        }
+        if waited < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+fn run_state_8_protocol_peer(case: State8PeerCase, peer: &mut ControlChannel) -> io::Result<()> {
+    if matches!(case, State8PeerCase::EofBeforeTargetExited) {
+        return Ok(());
+    }
+
+    let original = CompletionAttestation {
+        report: TargetExitedReport {
+            raw_status: if matches!(case, State8PeerCase::SuccessSignal) {
+                libc::SIGTERM
+            } else {
+                143 << 8
+            },
+            descendants_reaped: 0,
+        },
+        challenge: [case.tag().wrapping_add(0x40); COMPLETION_CHALLENGE_LEN],
+    };
+    match case {
+        State8PeerCase::MalformedTargetExited => {
+            return peer.send(
+                FrameKind::TargetExited,
+                vec![0; COMPLETION_ATTESTATION_LEN - 1],
+            );
+        }
+        State8PeerCase::UnexpectedTargetFrame => {
+            return peer.send(FrameKind::CleanupComplete, original.encode()?);
+        }
+        State8PeerCase::WrongSessionTargetExited => {
+            let packet = Frame {
+                session: [0xff; 32],
+                sequence: 0,
+                kind: FrameKind::TargetExited,
+                payload: original.encode()?,
+            }
+            .encode()?;
+            return send_raw_control_packet(peer.fd.as_raw_fd(), &packet);
+        }
+        State8PeerCase::ReplayedTargetExited => {
+            let packet = Frame {
+                session: peer.session,
+                sequence: 0,
+                kind: FrameKind::TargetExited,
+                payload: original.encode()?,
+            }
+            .encode()?;
+            send_raw_control_packet(peer.fd.as_raw_fd(), &packet)?;
+            send_raw_control_packet(peer.fd.as_raw_fd(), &packet)?;
+            thread::sleep(Duration::from_millis(300));
+            return Ok(());
+        }
+        _ => peer.send(FrameKind::TargetExited, original.encode()?)?,
+    }
+
+    let request = peer.receive()?;
+    if request.kind != FrameKind::CompleteSession {
+        return Err(invalid_data("state-8 parent did not send CompleteSession"));
+    }
+    original.require_exact_echo(&request.payload)?;
+    match peer.receive() {
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+        Err(error) => return Err(error),
+        Ok(frame) => {
+            return Err(invalid_data(format!(
+                "state-8 parent sent {:?} after CompleteSession",
+                frame.kind
+            )));
+        }
+    }
+
+    match case {
+        State8PeerCase::WrongCleanupReport => {
+            let mut wrong = original;
+            wrong.report.descendants_reaped = 1;
+            peer.send(FrameKind::CleanupComplete, wrong.encode()?)
+        }
+        State8PeerCase::WrongCleanupCapability => {
+            let mut wrong = original;
+            wrong.challenge[0] ^= 0xff;
+            peer.send(FrameKind::CleanupComplete, wrong.encode()?)
+        }
+        State8PeerCase::UnexpectedCleanupFrame => {
+            peer.send(FrameKind::Fatal, b"synthetic peer fault".to_vec())
+        }
+        State8PeerCase::ReplayedCleanup => {
+            let replay = Frame {
+                session: peer.session,
+                sequence: 0,
+                kind: FrameKind::TargetExited,
+                payload: original.encode()?,
+            }
+            .encode()?;
+            send_raw_control_packet(peer.fd.as_raw_fd(), &replay)
+        }
+        State8PeerCase::ExtraAfterCleanup => {
+            peer.send(FrameKind::CleanupComplete, original.encode()?)?;
+            peer.send(FrameKind::Fatal, b"unexpected extra frame".to_vec())
+        }
+        State8PeerCase::EofBeforeCleanup | State8PeerCase::CancellationAfterRequest => Ok(()),
+        State8PeerCase::MissingCleanupDeadline => {
+            thread::sleep(DESCRIBE_TIMEOUT + Duration::from_millis(250));
+            Ok(())
+        }
+        State8PeerCase::LateCleanup => {
+            thread::sleep(Duration::from_millis(300));
+            let _ = peer.send(FrameKind::CleanupComplete, original.encode()?);
+            Ok(())
+        }
+        State8PeerCase::SuccessLiteral143
+        | State8PeerCase::SuccessSignal
+        | State8PeerCase::CancellationBeforeCommit
+        | State8PeerCase::LateOuterExit
+        | State8PeerCase::LateProcessPin
+        | State8PeerCase::OuterNonzero
+        | State8PeerCase::OuterSignaled => {
+            peer.send(FrameKind::CleanupComplete, original.encode()?)?;
+            if unsafe { libc::shutdown(peer.fd.as_raw_fd(), libc::SHUT_WR) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        State8PeerCase::MalformedTargetExited
+        | State8PeerCase::UnexpectedTargetFrame
+        | State8PeerCase::ReplayedTargetExited
+        | State8PeerCase::WrongSessionTargetExited
+        | State8PeerCase::EofBeforeTargetExited => unreachable!(),
+    }
+}
+
+fn wait_for_raw_child_status(pid: libc::pid_t, timeout: Duration) -> io::Result<libc::c_int> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == pid {
+            return Ok(status);
+        }
+        if waited < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if Instant::now() >= deadline {
+            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if waited != pid {
+                return Err(io::Error::last_os_error());
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out waiting for state-8 protocol peer",
+            ));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exercise_monitor_parent_session_case(
+    case: State5HarnessCase,
+    control: &mut ControlChannel,
+    signal_writer: &mut Option<File>,
+    child: &mut Child,
+    target_pid: libc::pid_t,
+    monitor_pid: libc::pid_t,
+    target_attestation: TargetStoppedAttestation,
+    descendant_pins: &[HostProcessPin],
+) -> io::Result<()> {
+    let mut signal_sequence = 0u64;
+    let expected_exit = match case {
+        State5HarnessCase::SessionDefaultTerm | State5HarnessCase::SessionDescendants => {
+            send_signal_relay_record(signal_writer, &mut signal_sequence, libc::SIGTERM)?;
+            ExpectedTargetExit::Signaled(libc::SIGTERM)
+        }
+        State5HarnessCase::SessionLiteralExit143
+        | State5HarnessCase::SessionCancellation
+        | State5HarnessCase::SessionOuterStatusMismatch => {
+            send_signal_relay_record(signal_writer, &mut signal_sequence, libc::SIGUSR1)?;
+            ExpectedTargetExit::Exited(143)
+        }
+        _ => unreachable!("non-state-8 case passed to parent session harness"),
+    };
+
+    let mut process_pins = Vec::with_capacity(descendant_pins.len() + 2);
+    process_pins.push(host_process_identity(monitor_pid)?);
+    process_pins.push(HostProcessIdentity {
+        pid: target_pid,
+        starttime: target_attestation.starttime,
+    });
+    process_pins.extend(descendant_pins.iter().map(|pin| pin.identity));
+    let action = if matches!(case, State5HarnessCase::SessionCancellation) {
+        ParentCompletionAction::CancelBeforeRequest
+    } else {
+        ParentCompletionAction::Complete
+    };
+    let completion =
+        drive_parent_completion_session(control, child, &process_pins, action, DESCRIBE_TIMEOUT);
+
+    match case {
+        State5HarnessCase::SessionCancellation => {
+            let error =
+                completion.expect_err("state-8 cancellation unexpectedly returned a result");
+            if error.kind() != io::ErrorKind::Interrupted
+                || !error.to_string().contains("completion cancelled")
+            {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("state-8 cancellation returned the wrong error: {error}"),
+                ));
+            }
+            return Ok(());
+        }
+        State5HarnessCase::SessionOuterStatusMismatch => {
+            let error = completion.expect_err("state-8 accepted a nonzero outer status");
+            if !error.to_string().contains("outer process exited") {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("state-8 outer mismatch returned the wrong error: {error}"),
+                ));
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let completion = completion?;
+    expected_exit.verify(completion.report.raw_status)?;
+    let expected_descendants = if matches!(case, State5HarnessCase::SessionDescendants) {
+        descendant_pins.len() as u32
+    } else {
+        0
+    };
+    if completion.report.descendants_reaped != expected_descendants {
+        return Err(invalid_data(format!(
+            "state-8 completion reported {} descendant reaps, expected {expected_descendants}",
+            completion.report.descendants_reaped
+        )));
+    }
+    if completion.status.into_raw() != completion.report.raw_status {
+        return Err(invalid_data(
+            "state-8 child result was not derived from the original raw target status",
+        ));
+    }
+    Ok(())
+}
+
+fn drive_parent_completion_session(
+    control: &mut ControlChannel,
+    outer: &mut Child,
+    process_pins: &[HostProcessIdentity],
+    action: ParentCompletionAction,
+    completion_timeout: Duration,
+) -> io::Result<ParentCompletionResult> {
+    let mut cancellation_checks = 0usize;
+    let mut cancellation = || {
+        let check = cancellation_checks;
+        cancellation_checks = cancellation_checks.saturating_add(1);
+        match action {
+            ParentCompletionAction::Complete => false,
+            ParentCompletionAction::CancelBeforeRequest => check == 0,
+            ParentCompletionAction::CancelAfterRequest => check == 1,
+            ParentCompletionAction::CancelBeforeCommit => check == 6,
+        }
+    };
+    let outcome = drive_parent_completion_session_inner(
+        control,
+        outer,
+        process_pins,
+        &mut cancellation,
+        completion_timeout,
+    );
+    match outcome {
+        Ok(result) => Ok(result),
+        Err(error) => match fail_closed_parent_completion(outer, process_pins) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(io::Error::other(format!(
+                "{error}; state-8 fail-closed cleanup failed: {cleanup}"
+            ))),
+        },
+    }
+}
+
+fn drive_parent_completion_session_inner(
+    control: &mut ControlChannel,
+    outer: &mut Child,
+    process_pins: &[HostProcessIdentity],
+    cancellation: &mut impl FnMut() -> bool,
+    completion_timeout: Duration,
+) -> io::Result<ParentCompletionResult> {
+    // Cleanup ownership is armed by the outer wrapper before this first read.
+    let first = receive_control_until(control, Instant::now() + DESCRIBE_TIMEOUT)?;
+    if first.kind != FrameKind::TargetExited {
+        return Err(invalid_data(format!(
+            "state-8 expected TargetExited, received {:?}",
+            first.kind
+        )));
+    }
+    let original = CompletionAttestation::decode(&first.payload)?;
+    let deadline = Instant::now() + completion_timeout;
+    reject_parent_completion_cancellation(cancellation)?;
+
+    control.send_with_deadline(
+        FrameKind::CompleteSession,
+        original.encode()?,
+        Some(deadline),
+    )?;
+    shutdown_control_write(control)?;
+    reject_parent_completion_cancellation(cancellation)?;
+
+    let cleanup = receive_control_until(control, deadline)?;
+    if cleanup.kind != FrameKind::CleanupComplete {
+        return Err(invalid_data(format!(
+            "state-8 expected CleanupComplete, received {:?}",
+            cleanup.kind
+        )));
+    }
+    original.require_exact_echo(&cleanup.payload)?;
+    reject_parent_completion_cancellation(cancellation)?;
+    match receive_control_until(control, deadline) {
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+        Err(error) => return Err(error),
+        Ok(frame) => {
+            return Err(invalid_data(format!(
+                "state-8 received unexpected post-completion {:?} frame",
+                frame.kind
+            )));
+        }
+    }
+    reject_parent_completion_cancellation(cancellation)?;
+
+    let outer_status = wait_for_child_status_until(outer, deadline)?;
+    if outer_status.code() != Some(0) {
+        return Err(invalid_data(format!(
+            "state-8 outer process exited with {outer_status}, expected code 0"
+        )));
+    }
+    reject_parent_completion_cancellation(cancellation)?;
+    wait_for_completion_processes_exit_until(process_pins, deadline)?;
+    reject_parent_completion_cancellation(cancellation)?;
+    ensure_before_deadline(deadline, "state-8 completion deadline elapsed")?;
+    // This observation is the result-commit linearization point. Cancellation
+    // observed before it wins; after the result is returned it is irrelevant.
+    reject_parent_completion_cancellation(cancellation)?;
+    ensure_before_deadline(deadline, "state-8 completion deadline elapsed")?;
+
+    // Result commitment is last. Neither CleanupComplete nor the normalized
+    // outer process status can replace the immutable original target status.
+    Ok(ParentCompletionResult {
+        status: ExitStatus::from_raw(original.report.raw_status),
+        report: original.report,
+    })
+}
+
+fn reject_parent_completion_cancellation(
+    cancellation: &mut impl FnMut() -> bool,
+) -> io::Result<()> {
+    if cancellation() {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "state-8 completion cancelled before result commitment",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn fail_closed_parent_completion(
+    outer: &mut Child,
+    process_pins: &[HostProcessIdentity],
+) -> io::Result<()> {
+    let deadline = Instant::now() + DESCRIBE_TIMEOUT;
+    let mut failures = Vec::new();
+    let should_kill = match outer.try_wait() {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(error) => {
+            failures.push(format!("observing outer process: {error}"));
+            true
+        }
+    };
+    if should_kill {
+        if let Err(error) = outer.kill()
+            && error.kind() != io::ErrorKind::InvalidInput
+            && error.raw_os_error() != Some(libc::ESRCH)
+        {
+            failures.push(format!("killing outer process: {error}"));
+        }
+    }
+    if let Err(error) = wait_for_child_status_until(outer, deadline) {
+        failures.push(format!("reaping outer process: {error}"));
+    }
+    if let Err(error) = wait_for_completion_processes_exit_until(process_pins, deadline) {
+        failures.push(format!("verifying session process cleanup: {error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(failures.join("; ")))
+    }
+}
+
+fn wait_for_completion_processes_exit_until(
+    process_pins: &[HostProcessIdentity],
+    deadline: Instant,
+) -> io::Result<()> {
+    for identity in process_pins {
+        wait_for_host_process_identity_exit_until(*identity, deadline)?;
+    }
+    Ok(())
+}
+
+fn wait_for_host_process_identity_exit_until(
+    identity: HostProcessIdentity,
+    deadline: Instant,
+) -> io::Result<()> {
+    loop {
+        ensure_before_deadline(deadline, "state-8 process cleanup deadline elapsed")?;
+        match host_process_identity(identity.pid) {
+            Err(error) if process_disappeared(&error) => {
+                ensure_before_deadline(deadline, "state-8 process cleanup deadline elapsed")?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+            Ok(observed) if observed != identity => {
+                ensure_before_deadline(deadline, "state-8 process cleanup deadline elapsed")?;
+                return Ok(());
+            }
+            Ok(_) => {}
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7064,16 +7921,15 @@ fn wait_for_child_status(
     child: &mut std::process::Child,
     timeout: Duration,
 ) -> io::Result<std::process::ExitStatus> {
-    let deadline = Instant::now() + timeout;
+    wait_for_child_status_until(child, Instant::now() + timeout)
+}
+
+fn wait_for_child_status_until(child: &mut Child, deadline: Instant) -> io::Result<ExitStatus> {
     loop {
+        ensure_before_deadline(deadline, "timed out waiting for held monitor probe to exit")?;
         if let Some(status) = child.try_wait()? {
+            ensure_before_deadline(deadline, "timed out waiting for held monitor probe to exit")?;
             return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "timed out waiting for held monitor probe to exit",
-            ));
         }
         thread::sleep(Duration::from_millis(2));
     }
@@ -7214,6 +8070,7 @@ mod tests {
             hold_before_runtime_cleanup_for_harness: false,
             hold_after_runtime_cleanup_for_harness: false,
             hold_after_target_exited_for_harness: false,
+            fail_outer_status_after_cleanup_for_harness: false,
         }
     }
 
@@ -7252,6 +8109,7 @@ mod tests {
         value.hold_before_runtime_cleanup_for_harness = true;
         value.hold_after_runtime_cleanup_for_harness = true;
         value.hold_after_target_exited_for_harness = true;
+        value.fail_outer_status_after_cleanup_for_harness = true;
         assert_eq!(
             BootstrapSpec::decode(&value.encode().unwrap()).unwrap(),
             value

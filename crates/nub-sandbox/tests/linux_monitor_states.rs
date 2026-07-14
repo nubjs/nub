@@ -70,6 +70,28 @@ fn retained_monitor_session_completion_is_real() {
     );
 }
 
+#[test]
+fn retained_monitor_parent_session_boundary_is_real() {
+    let Some(bwrap) = usable_bwrap() else {
+        return;
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_nub-sandbox-monitor-harness"))
+        .arg("exercise-state-8")
+        .arg(bwrap)
+        .output()
+        .expect("run the state-8 retained-monitor harness");
+    assert!(
+        output.status.success(),
+        "state-8 harness failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "verified-monitor-state-8"
+    );
+}
+
 fn usable_bwrap() -> Option<&'static str> {
     let bwrap = ["/usr/bin/bwrap", "/bin/bwrap"]
         .into_iter()

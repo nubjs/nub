@@ -48,6 +48,17 @@ fn main() -> ExitCode {
         Some("target-runtime-exit-143") => return target_runtime_exit_143(),
         Some("target-runtime-count-int") => return target_runtime_count(libc::SIGINT),
         Some("target-runtime-count-term") => return target_runtime_count(libc::SIGTERM),
+        Some("state-8-outer-zero") => return ExitCode::SUCCESS,
+        Some("state-8-outer-late-zero") => {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            return ExitCode::SUCCESS;
+        }
+        Some("state-8-outer-23") => return ExitCode::from(23),
+        Some("state-8-outer-term") => unsafe {
+            libc::raise(libc::SIGTERM);
+            libc::_exit(124)
+        },
+        Some("state-8-outer-park") => unsafe { park_raw() },
         _ => {}
     }
 
@@ -120,6 +131,21 @@ fn main() -> ExitCode {
                 }
                 Err(error) => {
                     eprintln!("sandbox monitor state 7 failed: {error}");
+                    ExitCode::from(125)
+                }
+            }
+        }
+        Some("exercise-state-8") => {
+            let bwrap = std::env::args_os()
+                .nth(2)
+                .unwrap_or_else(|| "/usr/bin/bwrap".into());
+            match nub_sandbox::exercise_monitor_state_8(&runtime, bwrap) {
+                Ok(()) => {
+                    println!("verified-monitor-state-8");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("sandbox monitor state 8 failed: {error}");
                     ExitCode::from(125)
                 }
             }
