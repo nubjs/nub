@@ -2579,6 +2579,7 @@ fn run_as_node() -> Result<i32> {
     // (temp-dir shim, inside a `nub …` subtree the user opted into) keeps
     // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case.
     let compat = compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim();
+    initialize_config_snapshot(compat, false)?;
     if compat {
         run_file_with_compat(&forwarded, true)
     } else {
@@ -8046,6 +8047,7 @@ fn shim_version_line(pm: nub_core::pm::Pm, version: &str) -> String {
 /// Entry point for an `npm`/`pnpm`/`yarn`/… argv0 invocation through the shim.
 fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
+    initialize_config_snapshot(false, false)?;
     match shim_plan(invoked, args, &cwd)? {
         ShimPlan::Refuse { message } => {
             eprintln!("{message}");

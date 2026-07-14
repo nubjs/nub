@@ -6630,6 +6630,51 @@ fn run_points_node_env_at_an_augmenting_shim() {
 /// (the hijack is reached via an argv0=`node` symlink).
 #[cfg(unix)]
 #[test]
+fn node_argv0_initializes_one_inert_project_config_snapshot() {
+    let dir = std::env::temp_dir().join(format!("nub-node-config-snapshot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let proj = dir.join("proj");
+    let shim_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    std::fs::write(proj.join("nub.jsonc"), "{ malformed").unwrap();
+    let node_shim = shim_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &node_shim).expect("symlink nub to node");
+    let log = dir.join("snapshot.log");
+
+    let output = Command::new(&node_shim)
+        .arg("--version")
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .env("__NUB_TEST_CONFIG_SNAPSHOT_LOG", &log)
+        .output()
+        .expect("spawn node argv0 route");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "gate-off malformed project config must not block node argv0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lines: Vec<_> = std::fs::read_to_string(&log)
+        .expect("node argv0 route must initialize the config snapshot")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![format!(
+            "cwd={} project=none",
+            proj.canonicalize().unwrap().display()
+        )],
+        "the successful node argv0 route must initialize exactly one snapshot from its final cwd"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
 fn node_hijack_node_flag_opts_out_of_augmentation() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
