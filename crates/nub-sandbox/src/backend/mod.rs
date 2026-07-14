@@ -662,7 +662,7 @@ fn insert_proxy_env(env: &mut BTreeMap<OsString, OsString>, port: u16, token: Op
 /// enforcement is the backend's job; on an OS whose backend has not landed,
 /// [`generic_apply`] reports them as not-enforced (never silent).
 pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
-    apply_inner(policy, spec, None)
+    apply_inner(policy, spec, None, None)
 }
 
 /// Apply with the verified runtime capability returned by [`earliest_bootstrap`].
@@ -673,16 +673,27 @@ pub fn apply_with_runtime(
     spec: CommandSpec,
     runtime: &RuntimeCapability,
 ) -> Result<Prepared, Degradation> {
-    apply_inner(policy, spec, Some(runtime))
+    apply_inner(policy, spec, Some(runtime), None)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_with_retained_linux_authority(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+    runtime: &RuntimeCapability,
+    bwrap: std::fs::File,
+) -> Result<Prepared, Degradation> {
+    apply_inner(policy, spec, Some(runtime), Some(bwrap))
 }
 
 fn apply_inner(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     runtime: Option<&RuntimeCapability>,
+    retained_bwrap: Option<std::fs::File>,
 ) -> Result<Prepared, Degradation> {
     #[cfg(not(target_os = "linux"))]
-    let _ = runtime;
+    let _ = (runtime, retained_bwrap);
     if !policy.env.resolved {
         return Err(Degradation {
             lost: vec!["env-unresolved".to_string()],
@@ -694,7 +705,7 @@ fn apply_inner(
     }
     validate_apply_inputs(policy, &spec)?;
     #[cfg(target_os = "linux")]
-    let linux_preflight = linux::preflight(policy, &spec, runtime)?;
+    let linux_preflight = linux::preflight(policy, &spec, runtime, retained_bwrap)?;
     // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
     // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
     // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`
