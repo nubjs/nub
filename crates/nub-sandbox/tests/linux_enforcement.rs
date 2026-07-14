@@ -1531,6 +1531,24 @@ fn network_namespace_and_filter_block_host_egress() {
 }
 
 #[test]
+fn trusted_session_capture_accepts_full_and_restricted_network() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    for surface in [
+        serde_json::json!({ "fs": true, "env": true, "net": true }),
+        serde_json::json!({ "fs": true, "env": true, "net": false }),
+    ] {
+        assert_eq!(
+            f.run(surface, &[], TRUE, &[]).0,
+            0,
+            "typed trusted-session capture accepts the requested network mode"
+        );
+    }
+}
+
+#[test]
 fn nested_user_namespaces_remain_available_but_current_namespace_has_no_caps() {
     if skip_without_bwrap() {
         return;

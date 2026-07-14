@@ -59,6 +59,9 @@ const COMPLETION_ATTESTATION_LEN: usize = TARGET_EXITED_LEN + COMPLETION_CHALLEN
 const SIGNAL_RELAY_MAGIC: &[u8; 4] = b"NSG1";
 const SIGNAL_RELAY_RECORD_LEN: usize = 16;
 const MAX_RUNNING_EVENTS_PER_TURN: usize = 64;
+const NS_GET_USERNS: libc::c_ulong = 0xb701;
+const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
+const BWRAP_BLOCK_RELEASE_BYTE: u8 = 1;
 
 // These descriptors exist only in the post-fork Bubblewrap child.  The trusted
 // parent first duplicates every source above this reserved range, then remaps
@@ -927,6 +930,420 @@ fn runtime_objects_from_parts(
     Ok(objects)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DescriptorIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamespaceKind {
+    User,
+    Mount,
+    Pid,
+    Ipc,
+    Uts,
+    Network,
+}
+
+impl NamespaceKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Mount => "mnt",
+            Self::Pid => "pid",
+            Self::Ipc => "ipc",
+            Self::Uts => "uts",
+            Self::Network => "net",
+        }
+    }
+
+    fn clone_flag(self) -> libc::c_int {
+        match self {
+            Self::User => libc::CLONE_NEWUSER,
+            Self::Mount => libc::CLONE_NEWNS,
+            Self::Pid => libc::CLONE_NEWPID,
+            Self::Ipc => libc::CLONE_NEWIPC,
+            Self::Uts => libc::CLONE_NEWUTS,
+            Self::Network => libc::CLONE_NEWNET,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct NamespaceHandle {
+    fd: OwnedFd,
+    identity: DescriptorIdentity,
+}
+
+struct CapturedNamespace {
+    namespace: NamespaceHandle,
+    owner_user: NamespaceHandle,
+}
+
+#[allow(dead_code)]
+enum TrustedNetworkNamespace {
+    Restricted(NamespaceHandle),
+    AlreadyCurrent { identity: DescriptorIdentity },
+}
+
+#[allow(dead_code)]
+struct TrustedNamespaces {
+    owner_user: NamespaceHandle,
+    mount: NamespaceHandle,
+    pid: NamespaceHandle,
+    ipc: NamespaceHandle,
+    uts: NamespaceHandle,
+    network: TrustedNetworkNamespace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkRestrictionCeiling {
+    Full,
+    Deny,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessRestrictionCeiling {
+    network: NetworkRestrictionCeiling,
+    ambient_credentials_protected: bool,
+}
+
+impl ProcessRestrictionCeiling {
+    fn from_spec(spec: &BootstrapSpec) -> Self {
+        Self {
+            network: if spec.network_filter {
+                NetworkRestrictionCeiling::Deny
+            } else {
+                NetworkRestrictionCeiling::Full
+            },
+            ambient_credentials_protected: spec.deny_keyring,
+        }
+    }
+}
+
+#[allow(dead_code)]
+struct TrustedSessionIdentity {
+    outer_pid: libc::pid_t,
+    namespace_init_pid: libc::pid_t,
+}
+
+#[derive(Default)]
+struct TrustedSessionCleanup {
+    startup_released: bool,
+    authenticated_cleanup: bool,
+    outer_reaped: bool,
+}
+
+#[allow(dead_code)]
+struct TrustedSession {
+    namespaces: TrustedNamespaces,
+    root: OwnedFd,
+    restrictions: ProcessRestrictionCeiling,
+    identity: TrustedSessionIdentity,
+    cleanup: TrustedSessionCleanup,
+}
+
+fn capture_trusted_session(
+    namespace_init_pid: libc::pid_t,
+    outer: &mut Child,
+    restrictions: ProcessRestrictionCeiling,
+    deadline: Instant,
+) -> io::Result<TrustedSession> {
+    let outer_pid = libc::pid_t::try_from(outer.id())
+        .map_err(|_| invalid_data("Bubblewrap process ID does not fit pid_t"))?;
+    verify_blocked_namespace_init(namespace_init_pid, outer_pid)?;
+
+    let process = open_absolute_owned(
+        &format!("/proc/{namespace_init_pid}"),
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+    )
+    .map_err(|error| capture_error("opening the blocked namespace-init proc directory", error))?;
+    let root = wait_for_sandbox_root(&process, outer, deadline)?;
+    let mount = capture_namespace(&process, NamespaceKind::Mount)?;
+    let pid = capture_namespace(&process, NamespaceKind::Pid)?;
+    let ipc = capture_namespace(&process, NamespaceKind::Ipc)?;
+    let uts = capture_namespace(&process, NamespaceKind::Uts)?;
+    let network = capture_namespace(&process, NamespaceKind::Network)?;
+
+    let shared_owner = mount.owner_user.identity;
+    require_same_namespace_owner("PID", shared_owner, pid.owner_user.identity)?;
+    require_same_namespace_owner("IPC", shared_owner, ipc.owner_user.identity)?;
+    require_same_namespace_owner("UTS", shared_owner, uts.owner_user.identity)?;
+
+    let network = if restrictions.network == NetworkRestrictionCeiling::Deny {
+        require_same_namespace_owner(
+            "restricted network",
+            shared_owner,
+            network.owner_user.identity,
+        )?;
+        TrustedNetworkNamespace::Restricted(network.namespace)
+    } else {
+        let current = open_namespace_absolute("/proc/self/ns/net", NamespaceKind::Network)?;
+        require_full_network_identity(network.namespace.identity, current.identity)?;
+        TrustedNetworkNamespace::AlreadyCurrent {
+            identity: current.identity,
+        }
+    };
+
+    Ok(TrustedSession {
+        namespaces: TrustedNamespaces {
+            owner_user: mount.owner_user,
+            mount: mount.namespace,
+            pid: pid.namespace,
+            ipc: ipc.namespace,
+            uts: uts.namespace,
+            network,
+        },
+        root,
+        restrictions,
+        identity: TrustedSessionIdentity {
+            outer_pid,
+            namespace_init_pid,
+        },
+        cleanup: TrustedSessionCleanup::default(),
+    })
+}
+
+fn wait_for_sandbox_root(
+    process: &OwnedFd,
+    outer: &mut Child,
+    deadline: Instant,
+) -> io::Result<OwnedFd> {
+    loop {
+        let root = openat_owned(
+            process.as_raw_fd(),
+            c"root",
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+        .map_err(|error| capture_error("opening the blocked namespace-init root", error));
+        let error = match root.and_then(|root| {
+            validate_root_device_view(&root)
+                .map_err(|error| capture_error("validating the blocked sandbox root", error))?;
+            Ok(root)
+        }) {
+            Ok(root) => return Ok(root),
+            Err(error) => error,
+        };
+        if let Some(status) = outer.try_wait()? {
+            return Err(io::Error::other(format!(
+                "Bubblewrap exited before its blocked sandbox root was ready: {status}; last capture error: {}",
+                error
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "timed out waiting for Bubblewrap's blocked sandbox root; last capture error: {}",
+                    error
+                ),
+            ));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn capture_namespace(process: &OwnedFd, kind: NamespaceKind) -> io::Result<CapturedNamespace> {
+    let path = CString::new(format!("ns/{}", kind.name()))
+        .map_err(|_| invalid_input("namespace path contains NUL"))?;
+    let namespace = openat_owned(process.as_raw_fd(), &path, libc::O_RDONLY | libc::O_CLOEXEC)
+        .map_err(|error| {
+            capture_error(
+                &format!("opening the blocked {} namespace", kind.name()),
+                error,
+            )
+        })?;
+    let namespace = validate_namespace_fd(namespace, kind)?;
+    let owner = unsafe { libc::ioctl(namespace.fd.as_raw_fd(), NS_GET_USERNS) };
+    if owner < 0 {
+        return Err(capture_error(
+            &format!("deriving the owning user namespace for {}", kind.name()),
+            io::Error::last_os_error(),
+        ));
+    }
+    let owner_user =
+        validate_namespace_fd(unsafe { OwnedFd::from_raw_fd(owner) }, NamespaceKind::User)?;
+    Ok(CapturedNamespace {
+        namespace,
+        owner_user,
+    })
+}
+
+fn open_namespace_absolute(path: &str, kind: NamespaceKind) -> io::Result<NamespaceHandle> {
+    validate_namespace_fd(
+        open_absolute_owned(path, libc::O_RDONLY | libc::O_CLOEXEC)?,
+        kind,
+    )
+}
+
+fn validate_namespace_fd(fd: OwnedFd, kind: NamespaceKind) -> io::Result<NamespaceHandle> {
+    let observed = unsafe { libc::ioctl(fd.as_raw_fd(), NS_GET_NSTYPE) };
+    if observed < 0 {
+        return Err(capture_error(
+            &format!("validating {} namespace type", kind.name()),
+            io::Error::last_os_error(),
+        ));
+    }
+    if observed != kind.clone_flag() {
+        return Err(invalid_data(format!(
+            "captured {} namespace has type {observed:#x}, expected {:#x}",
+            kind.name(),
+            kind.clone_flag()
+        )));
+    }
+    Ok(NamespaceHandle {
+        identity: descriptor_identity(fd.as_raw_fd())?,
+        fd,
+    })
+}
+
+fn require_same_namespace_owner(
+    label: &str,
+    expected: DescriptorIdentity,
+    observed: DescriptorIdentity,
+) -> io::Result<()> {
+    if observed != expected {
+        return Err(invalid_data(format!(
+            "captured {label} namespace has a different owning user namespace"
+        )));
+    }
+    Ok(())
+}
+
+fn require_full_network_identity(
+    captured: DescriptorIdentity,
+    current: DescriptorIdentity,
+) -> io::Result<()> {
+    if captured != current {
+        return Err(invalid_data(
+            "full-network sandbox did not retain the trusted parent's current network namespace",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_root_device_view(root: &OwnedFd) -> io::Result<()> {
+    const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
+    let metadata = descriptor_stat(root.as_raw_fd())?;
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(invalid_data("sandbox root anchor is not a directory"));
+    }
+    let dev = openat_owned(
+        root.as_raw_fd(),
+        c"dev",
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+    )
+    .map_err(|error| capture_error("opening dev below the sandbox root anchor", error))?;
+    let current_dev = open_absolute_owned(
+        "/dev",
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+    )?;
+    if descriptor_identity(dev.as_raw_fd())? == descriptor_identity(current_dev.as_raw_fd())? {
+        return Err(invalid_data(
+            "sandbox root did not contain a fresh device filesystem",
+        ));
+    }
+    let mut filesystem = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(dev.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { filesystem.assume_init() }.f_type != TMPFS_MAGIC {
+        return Err(invalid_data(
+            "sandbox root device filesystem is not a tmpfs",
+        ));
+    }
+    let null = openat_owned(
+        dev.as_raw_fd(),
+        c"null",
+        libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+    )
+    .map_err(|error| capture_error("opening null below the sandbox dev anchor", error))?;
+    let null = descriptor_stat(null.as_raw_fd())?;
+    let canonical = null.st_mode & libc::S_IFMT == libc::S_IFCHR
+        && libc::major(null.st_rdev) == 1
+        && libc::minor(null.st_rdev) == 3;
+    let intentionally_unreadable = null.st_mode & libc::S_IFMT == libc::S_IFREG
+        && null.st_mode & 0o777 == 0
+        && null.st_size == 0;
+    if !canonical && !intentionally_unreadable {
+        return Err(invalid_data(
+            "sandbox root device filesystem omitted the canonical null device",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_blocked_namespace_init(pid: libc::pid_t, outer_pid: libc::pid_t) -> io::Result<()> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name).map(str::trim))
+    };
+    let outer_pid = outer_pid.to_string();
+    if field("PPid:") != Some(outer_pid.as_str())
+        || !field("NSpid:").is_some_and(|value| value.ends_with("\t1") || value == "1")
+    {
+        return Err(invalid_data(
+            "blocked Bubblewrap namespace init is not the direct PID-namespace reaper",
+        ));
+    }
+    Ok(())
+}
+
+fn descriptor_stat(fd: RawFd) -> io::Result<libc::stat> {
+    let mut metadata = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { metadata.assume_init() })
+}
+
+fn descriptor_identity(fd: RawFd) -> io::Result<DescriptorIdentity> {
+    let metadata = descriptor_stat(fd)?;
+    Ok(DescriptorIdentity {
+        dev: metadata.st_dev,
+        ino: metadata.st_ino,
+    })
+}
+
+fn open_absolute_owned(path: &str, flags: libc::c_int) -> io::Result<OwnedFd> {
+    let path = CString::new(path).map_err(|_| invalid_input("absolute path contains NUL"))?;
+    let fd = unsafe { libc::open(path.as_ptr(), flags) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn openat_owned(
+    directory: RawFd,
+    path: &std::ffi::CStr,
+    flags: libc::c_int,
+) -> io::Result<OwnedFd> {
+    let fd = unsafe { libc::openat(directory, path.as_ptr(), flags) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn release_bwrap_after_capture<T>(capture: io::Result<T>, mut block: File) -> io::Result<T> {
+    let captured = capture?;
+    block.write_all(&[BWRAP_BLOCK_RELEASE_BYTE])?;
+    drop(block);
+    Ok(captured)
+}
+
+fn capture_error(stage: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{stage}: {error}"))
+}
+
 /// Prepared, one-shot authority for starting the retained PID-1 monitor.
 /// Every child-side descriptor is relocated above the protocol's reserved range
 /// before this value is returned.
@@ -941,6 +1358,8 @@ pub(crate) struct RetainedMonitorLaunch {
     signal_writer: Option<File>,
     info_reader: Option<File>,
     info_writer: Option<File>,
+    block_reader: Option<File>,
+    block_writer: Option<File>,
     bindings: Vec<File>,
     runtime_objects: Vec<RuntimeObject>,
     monitor_program: OsString,
@@ -968,6 +1387,7 @@ impl RetainedMonitorLaunch {
         let (release_reader, release_writer) = pipe_files(false)?;
         let (signal_reader, signal_writer) = signal_relay_pipe_files()?;
         let (info_reader, info_writer) = pipe_files(true)?;
+        let (block_reader, block_writer) = pipe_files(false)?;
         let bindings = runtime_bindings(image)?
             .into_iter()
             .map(|file| duplicate_file_at_least(&file, FIRST_UNRESERVED_MONITOR_FD))
@@ -1001,6 +1421,11 @@ impl RetainedMonitorLaunch {
                 info_writer,
                 FIRST_UNRESERVED_MONITOR_FD,
             )?),
+            block_reader: Some(relocate_file_at_least(
+                block_reader,
+                FIRST_UNRESERVED_MONITOR_FD,
+            )?),
+            block_writer: Some(block_writer),
             bindings,
             runtime_objects,
             monitor_program,
@@ -1044,9 +1469,15 @@ impl RetainedMonitorLaunch {
             .info_writer
             .as_ref()
             .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
+        let block = self
+            .block_reader
+            .as_ref()
+            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
         command
             .arg("--info-fd")
             .arg(info.as_raw_fd().to_string())
+            .arg("--block-fd")
+            .arg(block.as_raw_fd().to_string())
             // The retained monitor owns the namespace root and must not inherit
             // an outer cwd that happens to remain reachable through the mount
             // plan. Bubblewrap also derives its implementation-added PWD from
@@ -1089,6 +1520,10 @@ impl RetainedMonitorLaunch {
             .info_writer
             .as_ref()
             .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
+        let block_reader = self
+            .block_reader
+            .as_ref()
+            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
         let remaps = vec![
             (self.bootstrap.as_raw_fd(), BOOTSTRAP_FD),
             (control_child.as_raw_fd(), CONTROL_FD),
@@ -1100,6 +1535,7 @@ impl RetainedMonitorLaunch {
             .iter()
             .map(AsRawFd::as_raw_fd)
             .chain(std::iter::once(info_writer.as_raw_fd()))
+            .chain(std::iter::once(block_reader.as_raw_fd()))
             .chain(caller_setup_fds.iter().copied())
             .collect::<BTreeSet<_>>();
         let deny_keyring = self.spec.deny_keyring;
@@ -1150,6 +1586,7 @@ impl RetainedMonitorLaunch {
         drop(self.release_reader.take());
         drop(self.signal_reader.take());
         drop(self.info_writer.take());
+        drop(self.block_reader.take());
         let result = (|| {
             let mut info = self
                 .info_reader
@@ -1159,6 +1596,17 @@ impl RetainedMonitorLaunch {
                 Some(deadline) => read_bwrap_child_pid_until(&mut info, &mut outer, deadline)?,
                 None => read_bwrap_child_pid(&mut info, &mut outer)?,
             };
+            let block = self
+                .block_writer
+                .take()
+                .ok_or_else(|| invalid_input("sandbox Bubblewrap block capability is absent"))?;
+            let restrictions = ProcessRestrictionCeiling::from_spec(&self.spec);
+            let capture_deadline = deadline.unwrap_or_else(|| Instant::now() + DESCRIBE_TIMEOUT);
+            let mut trusted = release_bwrap_after_capture(
+                capture_trusted_session(monitor_pid, &mut outer, restrictions, capture_deadline),
+                block,
+            )?;
+            trusted.cleanup.startup_released = true;
             let control_parent = self
                 .control_parent
                 .take()
@@ -1222,8 +1670,7 @@ impl RetainedMonitorLaunch {
                 control,
                 signal,
                 target_pid,
-                authenticated_cleanup: false,
-                outer_reaped: false,
+                trusted,
             })
         })();
         match result {
@@ -1240,6 +1687,8 @@ impl RetainedMonitorLaunch {
                 drop(self.signal_writer.take());
                 drop(self.info_reader.take());
                 drop(self.info_writer.take());
+                drop(self.block_reader.take());
+                drop(self.block_writer.take());
                 match fail_closed_outer(&mut outer) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(io::Error::new(
@@ -1377,8 +1826,7 @@ pub(crate) struct RetainedMonitorSession {
     control: ControlChannel,
     signal: SignalRelay,
     target_pid: libc::pid_t,
-    authenticated_cleanup: bool,
-    outer_reaped: bool,
+    trusted: TrustedSession,
 }
 
 impl RetainedMonitorSession {
@@ -1391,7 +1839,7 @@ impl RetainedMonitorSession {
     }
 
     pub(crate) fn cleanup_complete(&self) -> bool {
-        self.outer_reaped
+        self.trusted.cleanup.outer_reaped
     }
 
     pub(crate) fn wait(&mut self, outer: &mut Child) -> io::Result<ExitStatus> {
@@ -1430,7 +1878,7 @@ impl RetainedMonitorSession {
         let _ = unsafe { libc::shutdown(self.control.fd.as_raw_fd(), libc::SHUT_RDWR) };
         let result = fail_closed_outer(outer);
         if result.is_ok() {
-            self.outer_reaped = true;
+            self.trusted.cleanup.outer_reaped = true;
         }
         result
     }
@@ -1442,7 +1890,7 @@ impl RetainedMonitorSession {
     ) -> io::Result<T> {
         match result {
             Ok(value) => Ok(value),
-            Err(error) if self.outer_reaped => Err(error),
+            Err(error) if self.trusted.cleanup.outer_reaped => Err(error),
             Err(error) => match self.fail_closed(outer) {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(io::Error::other(format!(
@@ -1526,7 +1974,7 @@ impl RetainedMonitorSession {
             return Err(unexpected_monitor_frame("CleanupComplete", &cleanup));
         }
         original.require_exact_echo(&cleanup.payload)?;
-        self.authenticated_cleanup = true;
+        self.trusted.cleanup.authenticated_cleanup = true;
         match receive_control_until(&mut self.control, deadline) {
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
             Err(error) => return Err(error),
@@ -1538,9 +1986,9 @@ impl RetainedMonitorSession {
             }
         }
         let outer_status = wait_for_child_status_until(outer, deadline)?;
-        self.outer_reaped = true;
+        self.trusted.cleanup.outer_reaped = true;
         self.signal.close();
-        debug_assert!(self.authenticated_cleanup);
+        debug_assert!(self.trusted.cleanup.authenticated_cleanup);
         if outer_status.code() != Some(0) {
             return Err(invalid_data(format!(
                 "retained-monitor outer process exited with {outer_status}, expected code 0"
@@ -1566,7 +2014,7 @@ fn receive_launch_frame(
 
 impl Drop for RetainedMonitorSession {
     fn drop(&mut self) {
-        if !self.outer_reaped {
+        if !self.trusted.cleanup.outer_reaped {
             self.signal.close();
             let _ = unsafe { libc::shutdown(self.control.fd.as_raw_fd(), libc::SHUT_RDWR) };
         }
@@ -8970,6 +9418,90 @@ mod tests {
         assert!(!valid_private_runtime_path(Path::new(
             "/run/other/nub-monitor"
         )));
+    }
+
+    #[test]
+    fn namespace_type_validation_rejects_a_mismatched_handle() {
+        let mount =
+            open_absolute_owned("/proc/self/ns/mnt", libc::O_RDONLY | libc::O_CLOEXEC).unwrap();
+        let error = validate_namespace_fd(mount, NamespaceKind::Pid).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("expected"));
+    }
+
+    #[test]
+    fn namespace_owner_validation_compares_device_and_inode() {
+        let expected = DescriptorIdentity { dev: 7, ino: 11 };
+        require_same_namespace_owner("PID", expected, expected).unwrap();
+        let error =
+            require_same_namespace_owner("PID", expected, DescriptorIdentity { dev: 8, ino: 11 })
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn full_network_requires_the_exact_current_namespace_identity() {
+        let current = DescriptorIdentity { dev: 5, ino: 13 };
+        require_full_network_identity(current, current).unwrap();
+        let error = require_full_network_identity(DescriptorIdentity { dev: 6, ino: 13 }, current)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn host_root_is_rejected_as_a_fresh_device_view() {
+        let root =
+            open_absolute_owned("/", libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC).unwrap();
+        let error = validate_root_device_view(&root).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("fresh device filesystem"));
+    }
+
+    #[test]
+    fn namespace_init_must_be_the_outer_process_direct_reaper() {
+        let pid = unsafe { libc::getpid() };
+        let error = verify_blocked_namespace_init(pid, pid).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("direct PID-namespace reaper"));
+    }
+
+    #[test]
+    fn bubblewrap_block_gate_releases_only_after_successful_capture() {
+        let (mut failed_reader, failed_writer) = pipe_files(true).unwrap();
+        let error =
+            release_bwrap_after_capture::<()>(Err(invalid_data("capture rejected")), failed_writer)
+                .unwrap_err();
+        assert_eq!(error.to_string(), "capture rejected");
+        let mut byte = [0u8; 1];
+        assert_eq!(failed_reader.read(&mut byte).unwrap(), 0);
+
+        let (mut released_reader, released_writer) = pipe_files(true).unwrap();
+        release_bwrap_after_capture(Ok(()), released_writer).unwrap();
+        assert_eq!(released_reader.read(&mut byte).unwrap(), 1);
+        assert_eq!(byte, [BWRAP_BLOCK_RELEASE_BYTE]);
+    }
+
+    #[test]
+    fn process_restriction_ceiling_preserves_existing_dimensions() {
+        let mut value = bootstrap();
+        value.network_filter = false;
+        value.deny_keyring = true;
+        assert_eq!(
+            ProcessRestrictionCeiling::from_spec(&value),
+            ProcessRestrictionCeiling {
+                network: NetworkRestrictionCeiling::Full,
+                ambient_credentials_protected: true,
+            }
+        );
+        value.network_filter = true;
+        value.deny_keyring = false;
+        assert_eq!(
+            ProcessRestrictionCeiling::from_spec(&value),
+            ProcessRestrictionCeiling {
+                network: NetworkRestrictionCeiling::Deny,
+                ambient_credentials_protected: false,
+            }
+        );
     }
 
     #[test]
