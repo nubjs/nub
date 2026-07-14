@@ -5852,9 +5852,12 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     if !new_bin.join("nub").is_file() {
         bail!("nub upgrade: downloaded archive did not contain bin/nub");
     }
+    ensure_bin_executable(&new_bin.join("nub"))?;
+    verify_provisioned_version(&new_bin.join("nub"), &version)
+        .context("nub upgrade: staged release bundle failed validation")?;
 
-    // RESILIENCE CONTRACT: `bin/nub` is the ONLY component an upgrade hard-requires.
-    // Everything else the archive ships or the prior install left behind (a
+    // The staged binary validates any platform resources it requires before the
+    // swap. Everything else the archive ships or the prior install left behind (a
     // runtime/ sidecar, the nubx alias) is OPTIONAL and handled best-effort —
     // verify the download fully (checksum above), swap the binary, then never let a
     // missing/extra/shape-changed optional component abort an otherwise-successful
@@ -5912,8 +5915,18 @@ fn swap_dir(install_dir: &Path, name: &str, new_src: &Path) -> Result<()> {
         let _ = std::fs::remove_dir_all(&backup);
         std::fs::rename(&dest, &backup)
             .with_context(|| format!("could not move aside existing {}", dest.display()))?;
-        std::fs::rename(new_src, &dest)
-            .with_context(|| format!("could not install new {}", dest.display()))?;
+        if let Err(error) = std::fs::rename(new_src, &dest) {
+            let restore = std::fs::rename(&backup, &dest);
+            return match restore {
+                Ok(()) => {
+                    Err(error).with_context(|| format!("could not install new {}", dest.display()))
+                }
+                Err(restore_error) => bail!(
+                    "could not install new {} ({error}); restoring the prior install also failed ({restore_error})",
+                    dest.display()
+                ),
+            };
+        }
         let _ = std::fs::remove_dir_all(&backup);
     } else {
         std::fs::rename(new_src, &dest)
@@ -6137,6 +6150,7 @@ fn verify_provisioned_version(bin: &Path, expected: &str) -> Result<()> {
     let out = std::process::Command::new(bin)
         .arg("--version")
         .env(crate::self_shim::SELF_DISPATCHED_ENV, expected)
+        .env("__NUB_VALIDATE_RESOURCE_BUNDLE", "1")
         .output()
         .with_context(|| format!("probing {} --version", bin.display()))?;
     if !out.status.success() {
@@ -9222,6 +9236,19 @@ mod tests {
             0,
             "after upgrade, bin/nub must have the owner-execute bit set"
         );
+    }
+
+    #[test]
+    fn failed_bin_swap_restores_the_prior_install() {
+        let install = tempfile::tempdir().unwrap();
+        let old_bin = install.path().join("bin");
+        std::fs::create_dir_all(&old_bin).unwrap();
+        std::fs::write(old_bin.join("nub"), b"old").unwrap();
+
+        let missing_stage = install.path().join("missing-stage");
+        assert!(swap_dir(install.path(), "bin", &missing_stage).is_err());
+        assert_eq!(std::fs::read(old_bin.join("nub")).unwrap(), b"old");
+        assert!(!install.path().join(".bin.old").exists());
     }
 
     // BLOCKER regression guard: the npm-channel upgrade must target the scoped

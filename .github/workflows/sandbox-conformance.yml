@@ -21,6 +21,7 @@ on:
     paths:
       - "crates/nub-sandbox/**"
       - "crates/nub-cli/**"
+      - "scripts/build-bwrap-resource.sh"
       - ".github/workflows/sandbox-conformance.yml"
 jobs:
   macos:
@@ -55,6 +56,11 @@ jobs:
           if command -v aa-status >/dev/null 2>&1; then sudo aa-status || true; fi
           bwrap --die-with-parent --new-session --unshare-user --cap-drop ALL \
             --unshare-pid --unshare-ipc --ro-bind / / --dev /dev --proc /proc -- true
+      - name: Build the pinned fallback twice
+        run: |
+          scripts/build-bwrap-resource.sh bwrap-resource
+          echo "NUB_BWRAP_VERSION=0.11.2" >> "$GITHUB_ENV"
+          echo "NUB_BWRAP_SHA256=$(awk '{print $1}' bwrap-resource/bwrap.sha256)" >> "$GITHUB_ENV"
       - name: Linux Bubblewrap enforcement
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"
@@ -65,6 +71,23 @@ jobs:
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"
         run: cargo test -p nub-cli --test sandbox_conformance
+      - name: Linux fallback-only and incompatible-system conformance
+        env:
+          NUB_SANDBOX_REQUIRE_BWRAP: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p target/debug/nub-resources fallback-path
+          cp -a bwrap-resource/. target/debug/nub-resources/
+          ln -s "$PWD/bwrap-resource/bwrap" fallback-path/bwrap
+          sudo mv /usr/bin/bwrap /usr/bin/bwrap.system
+          restore() { sudo rm -f /usr/bin/bwrap; sudo mv /usr/bin/bwrap.system /usr/bin/bwrap; }
+          trap restore EXIT
+
+          PATH="$PWD/fallback-path:$PATH" cargo test -p nub-cli --test sandbox_conformance
+
+          printf '#!/bin/sh\nexit 97\n' | sudo tee /usr/bin/bwrap >/dev/null
+          sudo chmod 0755 /usr/bin/bwrap
+          PATH="$PWD/fallback-path:$PATH" cargo test -p nub-cli --test sandbox_conformance
 
   windows:
     runs-on: windows-latest

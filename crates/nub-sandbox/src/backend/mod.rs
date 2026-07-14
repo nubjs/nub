@@ -38,6 +38,14 @@ mod macos;
 mod linux;
 
 #[cfg(target_os = "linux")]
+pub use linux::validate_adjacent_resource_bundle;
+
+#[cfg(not(target_os = "linux"))]
+pub fn validate_adjacent_resource_bundle() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 mod linux_monitor;
 
 #[cfg(target_os = "linux")]

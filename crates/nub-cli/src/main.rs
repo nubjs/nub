@@ -30,6 +30,11 @@ fn main() -> Result<()> {
     // private argv/descriptor handshake and never enters logging or CLI setup.
     let sandbox_runtime = nub_sandbox::earliest_bootstrap()?;
 
+    if std::env::var_os("__NUB_VALIDATE_RESOURCE_BUNDLE").is_some() {
+        nub_sandbox::validate_adjacent_resource_bundle()
+            .map_err(|error| anyhow::anyhow!("invalid Nub resource bundle: {error}"))?;
+    }
+
     // Engine-aware subscriber: surfaces the embedded engine's warning
     // channel (brand-rewritten) by default; RUST_LOG still owns the
     // filter when set. See pm_engine::log.

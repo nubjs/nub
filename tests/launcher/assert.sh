@@ -21,12 +21,15 @@ if [ -x "$NATIVE" ]; then no "precondition: native is already +x (test is moot)"
 # copy exists. `chmod` as non-owner of a root file fails.
 if chmod +x "$NATIVE" 2>/dev/null; then no "precondition: non-root could chmod the native (not actually a non-owner case)"; else ok "precondition: cannot chmod native (not owner)"; fi
 
-# THE TEST: first `nub` as the non-root user. Must succeed via the staged copy.
-out=$(nub --version 2>&1)
-case "$out" in
-  *9.9.9-ci*) ok "first nub works for non-root via staged copy";;
-  *) no "first nub FAILED: $out";;
-esac
+# THE TEST: concurrent first calls as the non-root user. Every process must either
+# publish the bundle or accept the validated winner.
+OUT=/tmp/nub-first-calls
+mkdir -p "$OUT"
+for i in $(seq 1 20); do (nub --version >"$OUT/$i" 2>&1) & done
+wait
+bad=0
+for i in $(seq 1 20); do grep -q 9.9.9-ci "$OUT/$i" || bad=$((bad+1)); done
+if [ "$bad" -eq 0 ]; then ok "20 concurrent first calls work via one staged bundle"; else no "$bad concurrent first calls failed"; fi
 
 # A user-owned, executable copy must now exist under ~/.cache/nub/bin/.
 CACHE="$HOME/.cache/nub/bin"
@@ -35,7 +38,11 @@ if [ -n "$staged" ]; then
   ok "staged copy exists: ${staged#$HOME/}"
   [ -x "$staged" ] && ok "staged copy is executable" || no "staged copy not +x"
   [ -O "$staged" ] && ok "staged copy is owned by us" || no "staged copy not owned by us"
-  # The staleness tag is the directory name (<size>-<mtime>), so the executable keeps
+  resource="$(dirname "$staged")/nub-resources/bwrap"
+  [ -x "$resource" ] && ok "staged Bubblewrap resource is executable" || no "staged Bubblewrap resource not +x"
+  [ -O "$resource" ] && ok "staged Bubblewrap resource is owned by us" || no "staged Bubblewrap resource not owned by us"
+  [ "$(stat -c '%a' "$(dirname "$staged")")" = 700 ] && ok "staged bundle directory is owner-only" || no "staged bundle directory is not 0700"
+  # The staleness tag is the directory name, so the executable keeps
   # its bare verb name — required for argv0 verb dispatch.
   case "$(basename "$staged")" in nub) ok "staged file keeps bare verb name (argv0 dispatch)";; *) no "staged file misnamed: $(basename "$staged")";; esac
 else

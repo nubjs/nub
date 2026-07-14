@@ -1303,6 +1303,27 @@ fn open_bwrap_candidate_inventory() -> PinnedCandidateInventory {
     open_bwrap_candidate_inventory_from(system, bundled)
 }
 
+/// Validate the Linux resource paired with the running binary before a staged
+/// install is published. The digest pins the exact upstream build; the version
+/// is compiled alongside it so release assembly cannot accidentally pair a
+/// resource with a binary built for a different Bubblewrap release.
+pub fn validate_adjacent_resource_bundle() -> Result<(), String> {
+    let expected_version = option_env!("NUB_BWRAP_VERSION")
+        .ok_or_else(|| "Nub was built without a bundled Bubblewrap version".to_string())?;
+    if expected_version != "0.11.2" {
+        return Err(format!(
+            "Nub was built for unsupported bundled Bubblewrap {expected_version}"
+        ));
+    }
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("locating the staged Nub executable: {error}"))?;
+    let resource = executable
+        .parent()
+        .ok_or_else(|| "the staged Nub executable has no parent directory".to_string())?
+        .join("nub-resources/bwrap");
+    open_pinned_bwrap_candidate(&resource, BubblewrapOrigin::Bundled).map(|_| ())
+}
+
 fn open_bwrap_candidate_inventory_from(
     system: impl IntoIterator<Item = PathBuf>,
     bundled: impl IntoIterator<Item = PathBuf>,
@@ -2798,6 +2819,19 @@ mod tests {
             REQUIRED_EXECUTABLE_SNAPSHOT_SEALS
         );
         assert!(snapshot.as_raw_fd() >= FIRST_LAUNCH_DATA_FD);
+    }
+
+    #[test]
+    fn bundled_candidate_rejects_bytes_that_do_not_match_the_build() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("bwrap");
+        fs::write(&path, b"wrong bundle").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let source = File::open(&path).unwrap();
+        let expected = format!("{:x}", Sha256::digest(b"expected bundle"));
+
+        let error = executable_snapshot_with_digest(&source, &path, &expected).unwrap_err();
+        assert!(error.contains("digest mismatch"), "{error}");
     }
 
     #[test]

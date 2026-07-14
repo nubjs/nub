@@ -23,9 +23,15 @@ build="$fixture/build"
 mock_bin="$fixture/mock-bin"
 fallback_bin="$fixture/fallback-bin"
 nohash_bin="$fixture/nohash-bin"
-mkdir -p "$assets" "$build/bin" "$build/runtime" "$mock_bin" "$fallback_bin" "$nohash_bin"
-printf 'NEW-NUB\n' > "$build/bin/nub"
-printf 'FROM-ARCHIVE\n' > "$build/runtime/from-archive"
+mkdir -p "$assets" "$build/bin/nub-resources" "$build/runtime/nub-resources" "$mock_bin" "$fallback_bin" "$nohash_bin"
+cat > "$build/bin/nub" <<'NUB'
+#!/bin/sh
+echo v9.9.9
+NUB
+chmod +x "$build/bin/nub"
+printf 'BWRAP\n' > "$build/bin/nub-resources/bwrap"
+printf 'BWRAP\n' > "$build/runtime/nub-resources/bwrap"
+chmod +x "$build/bin/nub-resources/bwrap" "$build/runtime/nub-resources/bwrap"
 tar -czf "$assets/$archive_name" -C "$build" bin runtime
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -78,6 +84,7 @@ run_case() {
     install_dir="$case_root/home/.nub"
     mkdir -p "$install_dir/bin" "$install_dir/runtime" "$case_root/tmp"
     printf 'OLD-NUB\n' > "$install_dir/bin/nub"
+    printf 'FOREIGN-BIN\n' > "$install_dir/bin/foreign"
     printf 'EXISTING-RUNTIME\n' > "$install_dir/runtime/existing"
     printf 'EXISTING-PROFILE\n' > "$case_root/home/.zshrc"
     profile_before=$(cat "$case_root/home/.zshrc")
@@ -108,14 +115,18 @@ run_case() {
 
     if [[ "$expect_success" == 1 ]]; then
         [[ $status -eq 0 ]] || { echo "$name: expected success, got $status: $output" >&2; return 1; }
-        [[ $(cat "$install_dir/bin/nub") == NEW-NUB ]] || { echo "$name: new binary was not installed" >&2; return 1; }
-        [[ -f "$install_dir/runtime/from-archive" ]] || { echo "$name: verified archive was not extracted" >&2; return 1; }
+        [[ $("$install_dir/bin/nub" --version) == v9.9.9 ]] || { echo "$name: new binary was not installed" >&2; return 1; }
+        [[ $(cat "$install_dir/bin/foreign") == FOREIGN-BIN ]] || { echo "$name: foreign bin entry was removed" >&2; return 1; }
+        [[ -x "$install_dir/bin/nub-resources/bwrap" ]] || { echo "$name: adjacent resource was not executable" >&2; return 1; }
+        [[ -f "$install_dir/runtime/nub-resources/bwrap" ]] || { echo "$name: verified resource was not extracted" >&2; return 1; }
+        [[ $(cat "$install_dir/runtime/existing") == EXISTING-RUNTIME ]] || { echo "$name: foreign runtime entry was removed" >&2; return 1; }
     else
         [[ $status -ne 0 ]] || { echo "$name: expected failure" >&2; return 1; }
         [[ "$output" == *"$expected_message"* ]] || { echo "$name: missing error '$expected_message': $output" >&2; return 1; }
         [[ $(cat "$install_dir/bin/nub") == OLD-NUB ]] || { echo "$name: existing binary changed before verification" >&2; return 1; }
+        [[ $(cat "$install_dir/bin/foreign") == FOREIGN-BIN ]] || { echo "$name: foreign bin entry changed before verification" >&2; return 1; }
         [[ $(cat "$install_dir/runtime/existing") == EXISTING-RUNTIME ]] || { echo "$name: existing runtime changed before verification" >&2; return 1; }
-        [[ ! -e "$install_dir/runtime/from-archive" ]] || { echo "$name: archive was extracted before verification" >&2; return 1; }
+        [[ ! -e "$install_dir/runtime/nub-resources" ]] || { echo "$name: archive was extracted before verification" >&2; return 1; }
         [[ ! -e "$install_dir/.nub-receipt" ]] || { echo "$name: receipt was written after verification failure" >&2; return 1; }
         [[ $(cat "$case_root/home/.zshrc") == "$profile_before" ]] || { echo "$name: shell profile changed before verification" >&2; return 1; }
         [[ -z $(ls -A "$case_root/tmp") ]] || { echo "$name: temporary download files were not cleaned up" >&2; return 1; }

@@ -53,7 +53,7 @@ class Nub < Formula
   desc "Fast TypeScript runtime and package manager that augments Node"
   homepage "https://github.com/nubjs/nub"
   version "${VERSION}"
-  license "MIT"
+  license all_of: ["MIT", "LGPL-2.0-or-later", "BSD-3-Clause"]
 
   on_macos do
     on_arm do
@@ -80,14 +80,16 @@ class Nub < Formula
   def install
     # nub is a single self-contained binary: it embeds its runtime (preload +
     # vendored polyfills + native addon) and JIT-extracts it to ~/.cache/nub on
-    # first run, so there is no sidecar to keep beside the binary. The archive ships
+    # first run, so there is no runtime sidecar to keep beside the binary. The archive ships
     # bin/ (nub + nubx, both real copies; nub picks its verb from the argv[0]
-    # basename) PLUS a vestigial empty runtime/ that exists only to satisfy the
-    # sidecar-era `nub upgrade` (see release.yml). Two top-level entries means
+    # basename) plus a compatibility runtime/ layout for self-upgrade. Two top-level entries mean
     # Homebrew does NOT flatten a lone directory, so reference the binaries by their
     # bin/ path explicitly — install them straight onto PATH, no libexec, no symlink
-    # dance, and ignore runtime/.
+    # dance. Linux also installs the adjacent Bubblewrap resource.
     bin.install "bin/nub", "bin/nubx"
+    if OS.linux?
+      (bin/"nub-resources").install Dir["bin/nub-resources/*"]
+    end
   end
 
   test do
