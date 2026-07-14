@@ -23,7 +23,7 @@ There is no new runtime to adopt and no lock-in: every augmentation rides on Nod
 - **A bin runner** — run a local CLI an order of magnitude faster than `npx`, or fetch and run an uninstalled one from the registry. See [nubx](/docs/runner).
 - **A Node version manager** — pin a version and Nub provisions it from nodejs.org on demand, replacing `nvm` and `fnm`. See [node](/docs/node).
 - **A watcher** — restart on changes to your source, your `.env*` files, and your `tsconfig.json`, driven by the dependency graph. See [watch](/docs/watch).
-- **A GitHub Action** — swap `actions/setup-node` for `nubjs/setup-nub` to install Nub, warm the project's Node, and cache Nub's store in CI. See [GitHub Action](/docs/setup-nub).
+- **A GitHub Action** — swap `actions/setup-node` for `nubjs/setup-nub` to install Nub, warm the project's Node, and cache Nub's store in CI. See [GitHub Action](/docs/deployment/github-action).
 
 ## What Nub replaces
 
@@ -55,13 +55,13 @@ With [mise](https://mise.jdx.dev), `nub` and `nubx` both land on `PATH`:
 mise use -g nub
 ```
 
-For containers, the official image `ghcr.io/nubjs/nub` is a `node` base with Nub layered on. See [Docker](/docs/docker):
+For containers, the official image `ghcr.io/nubjs/nub` is a `node` base with Nub layered on. See [Docker](/docs/deployment/docker):
 
 ```dockerfile
 FROM ghcr.io/nubjs/nub
 ```
 
-In CI, swap `actions/setup-node` for the [setup-nub action](/docs/setup-nub):
+In CI, swap `actions/setup-node` for the [setup-nub action](/docs/deployment/github-action):
 
 ```diff
 - - uses: actions/setup-node@v4

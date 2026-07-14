@@ -449,6 +449,14 @@ pre .line[data-output] span {
   font-stretch: 110%;
 }
 
+/* An unlabeled `"---"` meta.json separator renders as an empty <p> that carries
+   only top-margin, so the divider is invisible whitespace. Draw a hairline rule
+   with symmetric spacing; the empty-guard leaves labeled separators untouched. */
+#nd-sidebar p:empty {
+  margin-block: 0.5rem;
+  border-top: 1px solid var(--color-fd-border);
+}
+
 /* Prev/next pager — the fumadocs FooterItem link is text-sm (14px) and the page-name
    title <p> inherits it, which reads too small. Target the title paragraph inside
    .font-medium (the wrapper div that holds the chevron icon + page name) to bring it

@@ -235,10 +235,11 @@ fn plan_from_flags(
 /// Reads the SAME store handle + sidecar dir the producer wrote, via the shared
 /// [`crate::dynamic_phantom`] path helpers, so the two cannot drift. Best-effort:
 /// a package absent from the default store (a `store-dir` override moves the CAS),
-/// a missing/torn sidecar, or a not-yet-scanned version all degrade to "not
-/// flagged" — a scan miss never itself forces materialization. Fans out across
-/// rayon; the backfill already warmed the sidecars, so each item is a small
-/// cached-JSON index load + a blake3 fingerprint + a small sidecar read.
+/// or a failed on-demand scan degrades to "not flagged" — a scan miss never
+/// itself forces materialization. Fans out across rayon. A warm sidecar is a
+/// cached-JSON index load + a blake3 fingerprint + a small sidecar read; a
+/// missing, torn, corrupt, or not-yet-written sidecar is scanned here and cached
+/// when publication succeeds.
 ///
 /// Empty under the internal A/B seam ([`enabled`] false). In production `expand`
 /// installs the hook only when armed, so this gate is belt-and-suspenders; the
@@ -255,25 +256,23 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<Stri
         return Vec::new();
     };
     // `Store::at` takes the CAS `files/` root; `store_v1` is its parent — the same
-    // derivation the producer's backfill uses, so both key the index identically.
+    // derivation the extract-time producer uses, so both key the index identically.
     let store = aube_store::Store::at(store_v1.join("files"));
-    // BTreeMap has no rayon bridge; collect the resolved set first (as the
-    // backfill does).
+    // BTreeMap has no rayon bridge; collect the resolved set first.
     let packages: Vec<(&String, &LockedPackage)> = graph.packages.iter().collect();
     packages
         .into_par_iter()
         .filter_map(|(dep_path, pkg)| {
-            // `registry_name()` + `integrity` key the index the SAME way the
-            // producer's backfill does, so npm-alias deps resolve to the right blob.
+            // `registry_name()` + `integrity` key the index the same way the
+            // linker does, so npm-alias deps resolve to the right blob.
             let index =
                 store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())?;
             // Read the cached verdict, or SCAN the loaded index on-demand when no
             // sidecar exists yet — the warm-cache-first-install gap. The extract
-            // hook writes a sidecar only on a fresh FETCH and the backfill reads
-            // only the PRE-EXISTING lockfile, so a warm-cached package with no
-            // sidecar (GC'd, or cached by a pre-eject-default nub) on a first
-            // install/add would otherwise reach this decision with no verdict and
-            // never seed its eject (leaving it symlinked, its phantom 404'ing).
+            // hook writes a sidecar only on a fresh FETCH, so a warm-cached package
+            // with no sidecar (GC'd, or cached by a pre-eject-default nub) would
+            // otherwise reach this decision with no verdict and never seed its
+            // eject (leaving it symlinked, its phantom 404'ing).
             // `cached_or_scan_verdict` scans + caches here so the decision is
             // correct at the point the resolved graph + CAS index are both in hand.
             let result = crate::dynamic_phantom::cached_or_scan_verdict(&sidecar_dir, &index)?;

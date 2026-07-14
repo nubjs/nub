@@ -1,0 +1,30 @@
+---
+title: "Nub 0.4.6"
+description: "Native text imports on Node 26.5+, automatic support for new experimental modules, and removal-safe flag injection."
+author: The Nub Team
+date: 2026-07-09
+---
+
+This release brings nub's Node feature support up to Node 26.x and makes flag injection resilient to Node removing flags in future releases.
+
+## New Node modules, enabled automatically
+
+nub unflags recent Node features so they work without passing `--experimental-*` yourself. Three new modules are enabled wherever the running Node accepts them:
+
+| Module | Available from | What it is |
+| --- | --- | --- |
+| `node:ffi` | Node 26.1 | Call native shared libraries directly from JS |
+| `node:vfs` | Node 26.4 | Virtual filesystem module |
+| `node:stream/iter` | Node 25.9 | Stream iterator helpers |
+
+Text imports (`import text from "./file.txt" with { type: "text" }`) now defer to Node's native implementation on Node 26.5+, where nub previously used its own polyfill. The output is identical either way.
+
+Ambiguous ES modules also run on older Node now: a `.js` file with ESM syntax and no `"type": "module"` — which bare Node refuses on the compat tier — is detected and run as ESM under nub.
+
+## Removal-safe flag injection
+
+nub injects `--experimental-*` flags on the Node versions that need them. Node removes some of those flags in later releases, and passing a removed flag is a startup abort before any code runs.
+
+nub now checks each flag against the target Node's own accepted-flag set and drops any the running Node no longer recognizes. A future Node that removes a flag no longer requires a nub release to stay working.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.6) list every change in this release.

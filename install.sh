@@ -3,6 +3,10 @@ set -euo pipefail
 
 # Nub installer — downloads the latest release binary from GitHub.
 # Usage: curl -fsSL https://raw.githubusercontent.com/nubjs/nub/main/install.sh | bash
+#
+# Customization (env vars):
+#   NUB_INSTALL_DIR      install location, absolute path (default: ~/.nub)
+#   NUB_NO_MODIFY_PATH   truthy (1/yes/true/on) to skip editing your shell profile
 
 # Windows: delegate to PowerShell
 if [[ ${OS:-} = Windows_NT ]]; then
@@ -27,6 +31,50 @@ fi
 error() { echo -e "${Red}error${Color_Off}: $*" >&2; exit 1; }
 info() { echo -e "${Dim}$*${Color_Off}"; }
 success() { echo -e "${Green}$*${Color_Off}"; }
+
+parse_sha256_sidecar() {
+    local sidecar=$1
+    local archive_name=$2
+    local expected_size actual_size
+
+    expected_size=$((67 + ${#archive_name}))
+    actual_size=$(wc -c < "$sidecar" | tr -d '[:space:]') || return 1
+    [[ "$actual_size" == "$expected_size" ]] || return 1
+
+    LC_ALL=C awk -v name="$archive_name" '
+        NR != 1 { exit 1 }
+        {
+            digest = substr($0, 1, 64)
+            if (length(digest) != 64 || digest ~ /[^0-9A-Fa-f]/ ||
+                substr($0, 65, 2) != "  " || substr($0, 67) != name) {
+                exit 1
+            }
+            print tolower(digest)
+        }
+        END { if (NR != 1) exit 1 }
+    ' "$sidecar"
+}
+
+sha256_file() {
+    local file=$1
+    local output digest
+
+    if command -v sha256sum >/dev/null 2>&1 && output=$(sha256sum "$file" 2>/dev/null); then
+        digest=$(printf '%s\n' "$output" | LC_ALL=C awk 'NR == 1 && length($1) == 64 && $1 !~ /[^0-9A-Fa-f]/ { print tolower($1); exit }')
+        if [[ -n "$digest" ]]; then
+            printf '%s\n' "$digest"
+            return 0
+        fi
+    fi
+    if command -v shasum >/dev/null 2>&1 && output=$(shasum -a 256 "$file" 2>/dev/null); then
+        digest=$(printf '%s\n' "$output" | LC_ALL=C awk 'NR == 1 && length($1) == 64 && $1 !~ /[^0-9A-Fa-f]/ { print tolower($1); exit }')
+        if [[ -n "$digest" ]]; then
+            printf '%s\n' "$digest"
+            return 0
+        fi
+    fi
+    return 1
+}
 
 # --- Platform detection ---
 
@@ -72,7 +120,18 @@ fi
 
 # --- Install ---
 
-install_dir="$HOME/.nub"
+# The install location is overridable via NUB_INSTALL_DIR (default ~/.nub). A
+# custom dir is normalized to an absolute path so the PATH line, the receipt, and
+# the "is this the default location?" test below are all exact. The default keeps
+# the literal "$HOME/.nub" spelling so the emitted PATH line stays $HOME-portable.
+default_install_dir="$HOME/.nub"
+if [[ -n "${NUB_INSTALL_DIR:-}" ]]; then
+    install_dir="$NUB_INSTALL_DIR"
+    mkdir -p "$install_dir" || error "Failed to create install directory: $install_dir"
+    install_dir=$(cd "$install_dir" && pwd) || error "Invalid NUB_INSTALL_DIR: $NUB_INSTALL_DIR"
+else
+    install_dir="$default_install_dir"
+fi
 bin_dir="$install_dir/bin"
 exe="$bin_dir/nub"
 
@@ -86,18 +145,40 @@ mkdir -p "$bin_dir" || error "Failed to create install directory: $bin_dir"
 # The archive ships bin/ plus a vestigial empty runtime/ (kept only to satisfy the
 # sidecar-era `nub upgrade`; the binary ignores ~/.nub/runtime — see release.yml).
 # (Windows is handled by install.ps1 above, so $target is always darwin/linux.)
-url="https://github.com/nubjs/nub/releases/download/v${version}/nub-${target}.tar.gz"
+archive_name="nub-${target}.tar.gz"
+url="https://github.com/nubjs/nub/releases/download/v${version}/${archive_name}"
+checksum_url="${url}.sha256"
 
 tmp_archive=$(mktemp) || error "Failed to create temp file"
-trap 'rm -f "$tmp_archive"' EXIT
+tmp_checksum=$(mktemp) || { rm -f "$tmp_archive"; error "Failed to create temp file"; }
+trap 'rm -f "$tmp_archive" "$tmp_checksum"' EXIT
 
 curl --fail --location --progress-bar --output "$tmp_archive" "$url" ||
     error "Failed to download nub from: $url"
+curl --fail --location --progress-bar --output "$tmp_checksum" "$checksum_url" ||
+    error "Failed to download checksum from: $checksum_url"
 
-# Replace any prior bin/ for a clean upgrade (other files under $install_dir,
-# e.g. caches, are preserved). A stale runtime/ from a pre-single-binary install
-# is also removed so it can't shadow the embedded runtime. Then extract bin/.
-rm -rf "${install_dir:?}/bin" "${install_dir:?}/runtime"
+# The sidecar detects corrupt, truncated, stale-cache, or mismatched assets. It
+# is not an independent authenticity check because both files share an origin.
+if ! expected_sha256=$(parse_sha256_sidecar "$tmp_checksum" "$archive_name"); then
+    error "Malformed checksum from: $checksum_url"
+fi
+if ! actual_sha256=$(sha256_file "$tmp_archive"); then
+    error "No usable SHA-256 tool found (install sha256sum or shasum)"
+fi
+if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    error "Checksum mismatch for $url (expected $expected_sha256, got $actual_sha256). Refusing to install a corrupt or mismatched archive."
+fi
+
+# Replace any prior nub artifacts for a clean upgrade. In the default ~/.nub —
+# which nub owns outright — drop the whole bin/ and a stale runtime/ from a
+# pre-single-binary install. A user-supplied NUB_INSTALL_DIR may hold unrelated
+# files, so there remove only the two executables we wrote. Then extract bin/.
+if [[ "$install_dir" == "$default_install_dir" ]]; then
+    rm -rf "${install_dir:?}/bin" "${install_dir:?}/runtime"
+else
+    rm -f "${bin_dir:?}/nub" "${bin_dir:?}/nubx"
+fi
 tar -xzf "$tmp_archive" -C "$install_dir" ||
     error "Failed to extract nub archive from: $url"
 
@@ -110,6 +191,16 @@ chmod +x "$exe" || error "Failed to set permissions on $exe"
 # makes this idempotent across reinstall/upgrade and harmless if a future
 # archive ever ships its own nubx. Relative target keeps it valid if ~/.nub moves.
 ln -sf nub "$bin_dir/nubx" || error "Failed to create nubx symlink in $bin_dir"
+
+# Install receipt: marks this dir as a nub self-managed install so `nub upgrade`
+# recognizes it as in-place-upgradeable even when NUB_INSTALL_DIR relocated it out
+# of the default ~/.nub (cli.rs detect_channel checks for this file). Survives an
+# upgrade — the self-owned swap only touches bin/.
+cat > "$install_dir/.nub-receipt" <<'RECEIPT' || error "Failed to write install receipt to $install_dir"
+# This file marks a nub self-managed install so `nub upgrade` can update it in
+# place. Created by the nub installer; safe to delete (deleting it disables
+# in-place self-update for a non-default install location).
+RECEIPT
 
 success "Installed nub v${version} (with nubx) to $exe"
 
@@ -125,9 +216,32 @@ tildify() {
 
 tilde_bin_dir=$(tildify "$bin_dir")
 
-# PATH export lines reference $HOME so they stay portable across machines.
-posix_path_line='export PATH="$HOME/.nub/bin:$PATH"'
-fish_path_line='set -gx PATH $HOME/.nub/bin $PATH'
+# PATH export lines reference $HOME (kept $HOME-relative when bin_dir is under home)
+# so they stay portable across machines; an out-of-home custom dir uses its absolute
+# path.
+# Both lines quote the directory so a custom NUB_INSTALL_DIR containing spaces
+# survives (fish word-splits an unquoted path). The default ~/.nub/bin has no
+# spaces, so its emitted lines are unchanged in effect.
+if [[ "$bin_dir" == "$HOME"/* ]]; then
+    posix_path_line="export PATH=\"\$HOME/${bin_dir#"$HOME"/}:\$PATH\""
+    fish_path_line="set -gx PATH \"\$HOME/${bin_dir#"$HOME"/}\" \$PATH"
+else
+    posix_path_line="export PATH=\"$bin_dir:\$PATH\""
+    fish_path_line="set -gx PATH \"$bin_dir\" \$PATH"
+fi
+
+# Honor NUB_NO_MODIFY_PATH: skip all shell-profile edits and just print the line
+# the user should add themselves (rustup/uv convention). Runs before the
+# already-in-PATH check so the opt-out is unconditional.
+case "$(printf '%s' "${NUB_NO_MODIFY_PATH:-}" | tr '[:upper:]' '[:lower:]')" in
+    ''|0|no|false|off) ;;
+    1|yes|true|on)
+        echo "Add the nub bin path to your shell profile:"
+        echo -e "  ${Bold}${posix_path_line}${Color_Off}"
+        exit 0
+        ;;
+    *) error "Invalid NUB_NO_MODIFY_PATH: ${NUB_NO_MODIFY_PATH} (expected 1/yes/true/on or 0/no/false/off)" ;;
+esac
 
 # Check if already in PATH
 if echo "$PATH" | tr ':' '\n' | grep -qx "$bin_dir"; then

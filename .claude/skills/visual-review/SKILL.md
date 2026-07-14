@@ -10,6 +10,8 @@ description: >-
   turn those fuzzy visual judgments into deterministic measurements — including
   optical center-of-mass, which measures the glyph ink's true visual center so
   differently-sized labels can be aligned by more than eye.
+metadata:
+  internal: true
 ---
 
 # Visual review — compute occlusion, don't perceive it

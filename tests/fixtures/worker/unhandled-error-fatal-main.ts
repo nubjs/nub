@@ -4,12 +4,13 @@
 // nub's browser-shape Worker is an EventTarget, whose dispatchEvent silently
 // drops an unlistened event — so a failed worker load USED to exit 0 in total
 // silence (the maintainer-found bug). The fix reproduces the oracle's fatality.
-new Worker(new URL("./does-not-exist.mjs", import.meta.url), { type: "module" });
+const w = new Worker(new URL("./does-not-exist.mjs", import.meta.url), {
+  type: "module",
+});
 
-// Keep the loop alive so the async worker-load failure has time to arrive. If the
-// swallow bug were present, the process would exit 0 and print this line; with the
-// fix the unhandled error is fatal before the timer ever fires.
-setTimeout(() => {
+// If the error is swallowed, the underlying worker still emits `exit`. Use that
+// event as the failure oracle so a slow worker load cannot race a fixed deadline.
+w.once("exit", () => {
   console.log("swallowed-and-survived");
   process.exit(0);
-}, 5000);
+});

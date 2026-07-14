@@ -668,10 +668,8 @@ fn resolve_from_package_json(pkg_json_path: &str, subpath: &str, direct: bool) -
 
     if !direct {
         if let Some(exports) = pkg.get("exports") {
-            match resolve_exports(exports, subpath, &["require", "types"]) {
-                Some(t) => target = t,
-                None => return None, // get-tsconfig returns `false` → caller short-circuits
-            }
+            // `None` = get-tsconfig's `false` → caller short-circuits
+            target = resolve_exports(exports, subpath, &["require", "types"])?;
         } else if subpath.is_empty() {
             if let Some(ts) = pkg.get("tsconfig").and_then(Value::as_str) {
                 target = ts.to_string();

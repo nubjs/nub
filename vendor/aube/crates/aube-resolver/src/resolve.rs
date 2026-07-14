@@ -187,6 +187,33 @@ impl Resolver {
             "peer-context pass produced {} contextualized packages",
             contextualized.packages.len()
         );
+
+        // Named-registry tarball persistence (pnpm-compat). Frozen installs
+        // skip preprocess, so they'd reconstruct a tarball URL from the DEFAULT
+        // registry — which 404s for a package a `namedRegistries` alias routed
+        // elsewhere. Mark every registry package whose resolved tarball host
+        // differs from its config-derived registry host so the writer always
+        // emits `resolution.tarball`. Comparing against the config-derived host
+        // (not the named route) makes this robust across lockfile REUSE (the
+        // reused pkg's tarball_url round-trips through parse) and correctly
+        // leaves scoped/default-registry packages — whose tarball host already
+        // matches config — untouched. Gated on a populated alias map so
+        // standalone aube (empty map) is byte-identical.
+        if !self.named_registries.is_empty() {
+            for pkg in contextualized.packages.values_mut() {
+                if pkg.local_source.is_none()
+                    && let Some(url) = pkg.tarball_url.as_deref()
+                {
+                    let config_registry = self.client.config_registry_for(pkg.registry_name());
+                    if aube_registry::registry_host_key(url)
+                        != aube_registry::registry_host_key(&config_registry)
+                    {
+                        pkg.force_tarball_url = true;
+                    }
+                }
+            }
+        }
+
         Ok(contextualized)
     }
 }

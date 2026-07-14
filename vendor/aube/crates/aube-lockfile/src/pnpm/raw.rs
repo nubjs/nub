@@ -288,7 +288,10 @@ pub(super) struct RawCatalogEntry {
 #[serde(rename_all = "camelCase")]
 pub(super) struct RawPackageInfo {
     pub(super) resolution: Option<Resolution>,
-    #[serde(default)]
+    // Legacy packages (e.g. cordova plugins) carry a nested `cordovaDependencies`
+    // map under `engines`, which pnpm preserves verbatim; keep string-valued
+    // engine entries and drop the nested non-string ones (engine-check-irrelevant).
+    #[serde(default, deserialize_with = "aube_manifest::engines_tolerant")]
     pub(super) engines: BTreeMap<String, String>,
     pub(super) peer_dependencies: Option<BTreeMap<String, String>>,
     pub(super) peer_dependencies_meta: Option<BTreeMap<String, RawPeerDepMeta>>,

@@ -7,8 +7,45 @@ use super::{RegistryClient, encoded_name};
 use crate::{Error, NetworkMode};
 
 impl RegistryClient {
-    pub(super) fn registry_url_for(&self, name: &str) -> &str {
-        self.config.registry_for(name)
+    /// The registry URL a package is fetched (and cached) against. A pnpm
+    /// `namedRegistries` route recorded for `name` wins over the config-derived
+    /// registry; otherwise this is exactly `config.registry_for(name)`. Returns
+    /// an owned `String` (not `&str`) because a route lookup borrows through a
+    /// lock guard that can't outlive the call — the default (empty-map) path is
+    /// behaviorally identical to the old `&str` return.
+    pub(super) fn registry_url_for(&self, name: &str) -> String {
+        if let Ok(routes) = self.named_routes.read()
+            && let Some(url) = routes.get(name)
+        {
+            return url.clone();
+        }
+        self.config.registry_for(name).to_string()
+    }
+
+    /// Record a pnpm `namedRegistries` route so a subsequent fetch of `pkg`
+    /// resolves against `url` (its aliased registry) rather than the default.
+    /// Called by the resolver's `preprocess_task` before the package's fetch.
+    ///
+    /// KNOWN LIMITATION: the route map is keyed by package NAME only (flat,
+    /// global). If one importer declares `@acme/foo` via a named-registry
+    /// alias and another declares the same `@acme/foo` with a plain range
+    /// expecting the default registry, the resolver dedups them to one node
+    /// and BOTH fetch from the aliased registry. pnpm encodes the registry into
+    /// the depPath and can keep the two as distinct nodes; nub cannot yet. This
+    /// is a narrow same-name-two-registries divergence, recorded here as a
+    /// known limitation rather than a bug fixed at this layer.
+    pub fn record_named_route(&self, pkg: String, url: String) {
+        if let Ok(mut routes) = self.named_routes.write() {
+            routes.insert(pkg, url);
+        }
+    }
+
+    /// The config-derived registry URL for `name` — the DEFAULT/scoped registry
+    /// a frozen install would reconstruct a tarball URL from, IGNORING any
+    /// named-registry route. The resolver compares this against a package's
+    /// resolved tarball host to decide whether the URL must be persisted.
+    pub fn config_registry_for(&self, name: &str) -> String {
+        self.config.registry_for(name).to_string()
     }
 
     pub(super) fn force_cache(&self) -> bool {
@@ -31,7 +68,7 @@ impl RegistryClient {
     /// that route on path segments (Artifactory's npm remote is the
     /// known offender) don't reject the request with 406. npm-cli and
     /// pnpm encode the same way.
-    pub(super) fn packument_url(&self, name: &str) -> (String, &str) {
+    pub(super) fn packument_url(&self, name: &str) -> (String, String) {
         let registry_url = self.registry_url_for(name);
         let url = format!(
             "{}/{}",
@@ -283,9 +320,9 @@ impl RegistryClient {
             // that registry's credentials even though the tarball lives on
             // a different origin. Keyed off the home registry URL so the
             // existing prefix lookup resolves the configured token.
-            let home_registry = self.config.registry_for(&package_name);
-            if self.config.always_auth_for(home_registry) {
-                return self.authed_for_package(req, home_registry, &package_name);
+            let home_registry = self.registry_url_for(&package_name);
+            if self.config.always_auth_for(&home_registry) {
+                return self.authed_for_package(req, &home_registry, &package_name);
             }
             self.authed_for_package(req, url, &package_name)
         } else {

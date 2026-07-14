@@ -92,4 +92,15 @@ pub struct RegistryClient {
     config: NpmConfig,
     network_mode: NetworkMode,
     fetch_policy: FetchPolicy,
+    /// pnpm `namedRegistries` routing: package name → the aliased registry
+    /// URL its `<alias>:<spec>` resolved to. Consulted FIRST by
+    /// [`RegistryClient::registry_url_for`] so a named-registry package fetches
+    /// (and caches) against its aliased host instead of the default registry.
+    /// Populated by the resolver's `preprocess_task` as it rewrites each
+    /// `<alias>:` spec. Interior-mutable + request-scoped; empty under any
+    /// non-pnpm posture, which makes `registry_url_for` behave exactly as
+    /// before (falls straight through to `config.registry_for`). `RwLock`
+    /// rather than `Mutex` because the map is read on every fetch but written
+    /// only once per named-registry spec.
+    named_routes: std::sync::RwLock<BTreeMap<String, String>>,
 }

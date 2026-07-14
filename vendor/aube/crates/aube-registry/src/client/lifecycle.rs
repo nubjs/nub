@@ -80,6 +80,7 @@ impl RegistryClient {
             config,
             network_mode: NetworkMode::Online,
             fetch_policy,
+            named_routes: std::sync::RwLock::new(BTreeMap::new()),
         }
     }
 

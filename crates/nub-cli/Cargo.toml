@@ -53,6 +53,11 @@ aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
 # materialization) via `aube_linker::set_disk_materialize_expand_hook`; a pure
 # library crate (no CLI/tokio surface), same lean-graph rationale as aube-lockfile.
 aube-linker = { path = "../../vendor/aube/crates/aube-linker" }
+# aube-resolver: `nub import` runs the peer-context pass (hoist_auto_installed_peers
+# + apply_peer_contexts) on a bun/npm-parsed graph before writing pnpm-lock, so the
+# imported lockfile carries peer suffixes the install path assumes pnpm-locks have
+# (#453). Pure offline graph transforms; a lean library crate already in the graph.
+aube-resolver = { path = "../../vendor/aube/crates/aube-resolver" }
 aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
 # default-features = false drops aube's default set (`mimalloc`, `config-tui`),
 # neither of which nub uses: aube's `config-tui` (ratatui/crossterm) only feeds
@@ -159,6 +164,13 @@ libc.workspace = true
 # (pm_engine/mod.rs::with_fd_captured). Without it the substitution silently
 # breaks and the default registry is never surfaced on Windows.
 libc.workspace = true
+# Expand 8.3 path components before auto-discovered env files reach Node's
+# Windows watcher. Node 24's bundled libuv aborts when an event path and watched
+# directory use short and long spellings of the same directory.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 [lints]
 workspace = true

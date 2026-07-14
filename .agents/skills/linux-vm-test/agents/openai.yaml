@@ -1,0 +1,4 @@
+interface:
+  display_name: "Linux VM Testing"
+  short_description: "Run and debug Nub inside local Linux VMs"
+  default_prompt: "Use $linux-vm-test to reproduce and debug this Nub behavior in a local Linux VM."

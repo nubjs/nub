@@ -90,14 +90,14 @@ Yes — Linux (x64, arm64), macOS (x64, arm64), Windows (x64). Same platforms th
 
 ## How do I use it in CI / GitHub Actions?
 
-Swap `actions/setup-node` for [`nubjs/setup-nub`](/docs/setup-nub):
+Swap `actions/setup-node` for [`nubjs/setup-nub`](/docs/deployment/github-action):
 
 ```diff
 - - uses: actions/setup-node@v4
 + - uses: nubjs/setup-nub@v0
 ```
 
-The action installs the Nub CLI onto the runner, and from there Nub provisions the project's pinned Node itself. It also pre-provisions a warm-up Node version and caches Nub's store across runs. See the [GitHub Action](/docs/setup-nub) page for the full input surface.
+The action installs the Nub CLI onto the runner, and from there Nub provisions the project's pinned Node itself. It also pre-provisions a warm-up Node version and caches Nub's store across runs. See the [GitHub Action](/docs/deployment/github-action) page for the full input surface.
 
 ## Does it replace my package manager?
 
@@ -372,7 +372,20 @@ Same as installing — match how you installed: `brew update && brew upgrade nub
 
 ## Is there a curl install script?
 
-Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. If you'd rather go through your package manager, `npm install -g --ignore-scripts=false @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing, and on macOS and Linux `brew install nubjs/tap/nub` works too.
+Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. The scripts verify the release archive against its SHA-256 sidecar before replacing an existing installation. This detects corrupt, truncated, stale-cache, or mismatched assets; it is not an independent authenticity guarantee because the archive and checksum share the same release origin. If you'd rather go through your package manager, `npm install -g --ignore-scripts=false @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing, and on macOS and Linux `brew install nubjs/tap/nub` works too.
+
+Two environment variables customize the script, following the same convention as rustup and uv:
+
+- `NUB_INSTALL_DIR` — install somewhere other than `~/.nub`. `nub upgrade` still updates it in place.
+- `NUB_NO_MODIFY_PATH` — set it truthy (`1`/`yes`/`true`/`on`) to skip the shell-profile edit; the script prints the `PATH` line for you to add yourself.
+
+Set them on the shell that runs the script — the right side of the pipe, not on `curl`:
+
+```bash
+curl -fsSL https://nubjs.com/install.sh | NUB_INSTALL_DIR="$HOME/.local/nub" NUB_NO_MODIFY_PATH=1 bash
+```
+
+On Windows, set `$env:NUB_INSTALL_DIR` / `$env:NUB_NO_MODIFY_PATH` before the `irm | iex`.
 
 ## Does it have a dev server?
 
@@ -389,4 +402,3 @@ No. The bundlers your project already uses (Vite / Rollup / Rolldown / esbuild /
 ## What's the hot-reload story?
 
 Watch mode restarts the process when files change — the watch set is the resolved dependency graph plus your `.env*` files and `tsconfig.json`, so it Just Works for TypeScript projects with no glob hygiene. It does not preserve in-memory state or hot-swap modules in place; a restart is a restart. See [Watch mode](/docs/watch).
-

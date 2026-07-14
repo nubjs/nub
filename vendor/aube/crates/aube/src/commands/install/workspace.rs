@@ -223,8 +223,10 @@ pub(super) fn importer_project_dir(
 /// closure in. Members already present in `graph` (the cold/resolve path
 /// produces every importer) are skipped, so this is a no-op there.
 /// Best-effort: a member without a parseable lockfile is skipped — a
-/// genuinely new member busts the warm path through its manifest hash and
-/// gets a full resolve instead.
+/// genuinely new member busts the warm path (via `state::new_workspace_member`,
+/// or `member_lockfiles_stale` under `sharedWorkspaceLockfile=false`) and gets
+/// a full resolve instead, so this merge only ever runs on the warm path for
+/// members already present at the last install.
 pub(super) fn merge_member_lockfile_graphs(
     workspace_root: &std::path::Path,
     graph: &mut aube_lockfile::LockfileGraph,

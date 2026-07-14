@@ -10,6 +10,8 @@ description: >-
   moment a worktree diverges a depended-on crate. Auto-triggers on a spurious
   cargo compile error that names a field/symbol absent from your checkout, on
   "worktree build contamination", and on setting CARGO_TARGET_DIR for a worktree.
+metadata:
+  internal: true
 ---
 
 # rust-build

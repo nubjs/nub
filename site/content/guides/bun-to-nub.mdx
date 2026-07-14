@@ -93,7 +93,7 @@ It is sometimes assumed that Bun's `--env-file=.env` expands into a cascade — 
 
 ## Shell commands: `Bun.$`
 
-Bun's `$` template tag runs shell commands with a chainable result API. There is no Node built-in for it. The common replacements:
+Bun's `$` template tag runs shell commands with a chainable result API. The closest mirror in the Node ecosystem is [`dax`](https://github.com/dsherret/dax) — its `$` tag has the same tagged-template shape, the same chainable output methods (`.text()`, `.json()`, `.lines()`, `.quiet()`, `.noThrow()`), and the same auto-escaping of interpolated values. Most `Bun.$` call sites port over as a one-word import change:
 
 ```ts
 // before (Bun)
@@ -102,14 +102,14 @@ const out = await $`ls -la ${dir}`.text();
 ```
 
 ```ts
-// after (Node) — tinyexec
-import { x } from "tinyexec";
-const { stdout } = await x("ls", ["-la", dir]);
+// after (Node) — dax
+import { $ } from "dax";
+const out = await $`ls -la ${dir}`.text();
 ```
 
-[`tinyexec`](https://github.com/tinylibs/tinyexec) is a small, dependency-light process runner and the lightest drop-in for most `$` call sites. If your code relies heavily on `$`'s chain methods (`.text()`, `.quiet()`, `.nothrow()`), a thin wrapper of ~100–150 lines over `tinyexec` (or [`execa`](https://github.com/sindresorhus/execa), which is heavier but feature-complete) preserves the call shape so you do not have to rewrite every site.
+dax is maintained by David Sherret (ts-morph, the Deno team), and it goes further than most `$` libraries in the way that matters most for a Bun migrant: it parses and runs a real shell — pipes, redirects, globs, `&&` — using [deno_task_shell](https://github.com/denoland/deno_task_shell)'s parser, and ships common Unix commands (`cat`, `cp`, `mkdir`, `rm`, …) built in so those pipelines run on Windows too. So a `Bun.$` pipeline like ``await $`cat file.txt | grep foo`.text()`` carries over unchanged instead of needing to be restructured. Interpolated values are auto-escaped, exactly as in Bun, so `${userInput}` cannot break out of its argument.
 
-Two things `Bun.$` does that a plain process runner does not: it parses and runs an embedded mini-shell (pipes, redirects, globs in the template string), and it auto-escapes interpolated values. tinyexec and execa run a single program with an argument array — they do not interpret a pipeline. For piped commands, restructure them into explicit steps in JavaScript (e.g. read a directory with `node:fs` instead of `ls | grep`), which is also safer than handing user-controlled strings to a shell.
+[`zx`](https://github.com/google/zx) is the more widely adopted `$` library and a reasonable choice too; dax is the closer mirror to Bun's chainable API and is cross-platform by default. For call sites that were never really shell — running one program with an argument array, capturing structured output, streaming — [`execa`](https://github.com/sindresorhus/execa) is the trusted, feature-complete option and is closer in shape to `Bun.spawn` than to `$`.
 
 ## Database access: `Bun.sql`
 
@@ -138,14 +138,14 @@ If you use Prisma, the migration is mostly about *raw* queries — your Prisma m
 
 This is the comprehensive reference: every Bun-specific API, grouped by category, with the recommended Node or npm-ecosystem replacement. Three things to read off it. First, a large share of Bun's "APIs" are standard Web APIs (`fetch`, `WebSocket`, `Request`/`Response`, `Blob`, `URL`, `crypto.subtle`, `structuredClone`, streams) — those are present on Node and on Nub's runtime, so there is nothing to migrate. Second, anything that exists only to make TypeScript/JSX run (`Bun.Transpiler`) is unnecessary under Nub, which runs TypeScript directly. Third, the genuinely Bun-only batteries — the `Bun.*` server, database, FS, hashing, and shell helpers — each map to a maintained Node primitive or a well-established npm package, listed below. Pick one replacement per call site and keep it consistent.
 
-Where a single package is named, it is a current, maintained option as of this writing; where the standard library covers it, the `node:*` module is the first choice.
+Each named package is chosen to mirror Bun's ergonomics as closely as possible while being current and well-maintained — the pick is the one a Bun developer would actually be happy to adopt, not the smallest dependency that technically covers the call. Where the standard library covers a surface cleanly, the `node:*` module is the first choice. There is no broad `Bun.*` compatibility shim for Node worth adopting (the one historical attempt is archived), so the path is per-API replacement, not preserving the Bun surface wholesale.
 
 ### Process, shell, and system
 
 | Bun API | Recommended replacement | Notes |
 | --- | --- | --- |
-| `Bun.$` (shell) | [`tinyexec`](https://github.com/tinylibs/tinyexec) or [`execa`](https://github.com/sindresorhus/execa) | See the [shell section](#shell-commands-bun) above. tinyexec is the lighter drop-in; execa is feature-complete. Neither interprets a pipeline — restructure pipes into explicit steps. |
-| `Bun.spawn`, `Bun.spawnSync` | `node:child_process` (`spawn`, `spawnSync`) | Wrap to reproduce the web-stream result shape if your code reads `.stdout` as a `ReadableStream`. |
+| `Bun.$` (shell) | [`dax`](https://github.com/dsherret/dax) | See the [shell section](#shell-commands-bun) above. dax mirrors Bun's chainable `$` and runs real pipelines cross-platform; [`execa`](https://github.com/sindresorhus/execa) for structured, non-shell spawning. |
+| `Bun.spawn`, `Bun.spawnSync` | [`execa`](https://github.com/sindresorhus/execa) or `node:child_process` | execa is the ergonomic promise-based wrapper (streaming, `.pipe()`, typed results); `node:child_process` (`spawn`/`spawnSync`) is the zero-dependency stdlib analog. Wrap either to reproduce the web-stream `.stdout` shape. |
 | `Bun.which(cmd)` | [`which`](https://github.com/npm/node-which) | Or resolve manually against `process.env.PATH` with `node:fs`. |
 | `Bun.openInEditor()` | [`open`](https://github.com/sindresorhus/open) or [`launch-editor`](https://github.com/yyx990803/launch-editor) | Opens a file in the user's editor; no Node built-in. |
 | `Bun.env` | `process.env` | Direct rename. |
@@ -183,10 +183,10 @@ Where a single package is named, it is a current, maintained option as of this w
 | Bun API | Recommended replacement | Notes |
 | --- | --- | --- |
 | `Bun.sql`, `Bun.SQL` (Postgres) | [`postgres`](https://github.com/porsager/postgres) (postgres.js) or [`pg`](https://github.com/brianc/node-postgres) | See the [database section](#database-access-bunsql) above. `Bun.sql` is modeled on postgres.js, so it is the near-drop-in; `pg` if you already pull it in via Prisma. |
-| `bun:sqlite` | `node:sqlite` (Node 22.5+) or [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3) | `node:sqlite` is the standard-library synchronous SQLite (experimental but functional); better-sqlite3 is the mature, battle-tested choice with the closest API. |
+| `bun:sqlite` | [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3) or `node:sqlite` (Node 22.5+) | better-sqlite3 is the mature, battle-tested mirror — a fully synchronous `prepare().get()/.all()/.run()` API, exactly `bun:sqlite`'s shape. `node:sqlite` is the zero-dependency stdlib option with the same synchronous shape (still marked experimental). |
 | `Bun.redis`, `Bun.RedisClient` | [`ioredis`](https://github.com/redis/ioredis) or [`redis`](https://github.com/redis/node-redis) | Both are maintained, full-featured Redis/Valkey clients. |
 | `Bun.s3`, `Bun.S3Client` | [`@aws-sdk/client-s3`](https://github.com/aws/aws-sdk-js-v3) | The official AWS SDK; works with any S3-compatible store. |
-| `Bun.secrets` | [`keytar`](https://github.com/atom/node-keytar) or the platform keychain via a small native addon | OS credential-store access; keytar is the established cross-platform option. |
+| `Bun.secrets` | [`@napi-rs/keyring`](https://github.com/Brooooooklyn/keyring-node) | OS credential-store access (macOS Keychain, Windows Credential Manager, libsecret) through prebuilt N-API binaries. The long-established `keytar` is archived and unmaintained — do not reach for it. |
 
 ### Hashing, crypto, and compression
 
@@ -231,7 +231,7 @@ Where a single package is named, it is a current, maintained option as of this w
 
 | Bun API | Recommended replacement | Notes |
 | --- | --- | --- |
-| `HTMLRewriter` | [`node-html-parser`](https://github.com/taoqf/node-html-parser) or [`cheerio`](https://github.com/cheeriojs/cheerio) | For streaming transformation specifically, [`html-rewriter-wasm`](https://github.com/worker-tools/html-rewriter) ports Cloudflare's rewriter. Nub does not provide a built-in rewriter. |
+| `HTMLRewriter` | [`cheerio`](https://github.com/cheeriojs/cheerio) or [`node-html-parser`](https://github.com/taoqf/node-html-parser) | jQuery-style select-and-mutate covers most `HTMLRewriter` uses (rewrite attributes, inject or replace elements); both are DOM-buffered, not streaming. No maintained npm port of Cloudflare's *streaming* rewriter exists — true streaming rewrite is a genuine gap. Nub does not provide a built-in rewriter. |
 | `Bun.escapeHTML` | [`escape-html`](https://github.com/component/escape-html) | Tiny, single-purpose. |
 | `Bun.stringWidth` | [`string-width`](https://github.com/sindresorhus/string-width) | Terminal display width (handles wide chars, ANSI). |
 | `Bun.stripANSI` | [`strip-ansi`](https://github.com/chalk/strip-ansi) | Removes ANSI escape codes. |
@@ -289,7 +289,7 @@ Use `node` directly to run a built, already-transpiled server bundle; reach for 
 
 ## CI and Dependabot
 
-- **CI setup:** replace a Bun setup action with Nub's. See the [setup-nub](/docs/setup-nub) page for the GitHub Action.
+- **CI setup:** replace a Bun setup action with Nub's. See the [setup-nub](/docs/deployment/github-action) page for the GitHub Action.
 - **Dependabot / Renovate:** these bots do not have native Nub support. Use `package-ecosystem: "npm"` so the bot understands your manifest, and add a workflow step that runs `nub install` after the bot's update to regenerate the lockfile in Nub's format. A bot that bumps `package.json` but cannot regenerate the lockfile will otherwise leave the two out of sync.
 
 ## Supply-chain cooldown (`minimumReleaseAge`)

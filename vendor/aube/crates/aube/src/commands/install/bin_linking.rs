@@ -224,6 +224,199 @@ pub(super) fn link_bins(
     Ok(())
 }
 
+/// Everything the link phase needs to lay down `.bin/` shims: the root
+/// project's direct-dep bins, the root/workspace-member self-bins, each
+/// workspace importer's dep bins, and the per-dep `.bin/` for transitive
+/// build-script PATH. Shared by `run_link_phase` (the initial pass) and
+/// `run_finalize_phase` (the re-link after dep build scripts run — a
+/// script can replace a JS launcher with a native binary, e.g. esbuild
+/// #394, and the shim must be regenerated against the post-build target).
+pub(crate) struct LinkAllBinsInput<'a> {
+    pub(crate) settings_ctx: &'a aube_settings::ResolveCtx<'a>,
+    pub(crate) node_linker: aube_linker::NodeLinker,
+    pub(crate) cwd: &'a Path,
+    pub(crate) modules_dir_name: &'a str,
+    pub(crate) aube_dir: &'a Path,
+    pub(crate) graph_for_link: &'a aube_lockfile::LockfileGraph,
+    pub(crate) virtual_store_dir_max_length: usize,
+    pub(crate) placements: Option<&'a aube_linker::HoistedPlacements>,
+    pub(crate) manifest: &'a aube_manifest::PackageJson,
+    pub(crate) manifests: &'a [(String, aube_manifest::PackageJson)],
+    pub(crate) ws_dirs: &'a BTreeMap<String, PathBuf>,
+    pub(crate) has_workspace: bool,
+    pub(crate) virtual_store_only: bool,
+    pub(crate) ignore_scripts: bool,
+    pub(crate) has_any_allow_rule: bool,
+    pub(crate) floor_may_allow_any: bool,
+}
+
+/// Derive the shim layout from settings the same way `run_link_phase`
+/// does, then lay down every `.bin/` shim. See [`LinkAllBinsInput`].
+pub(crate) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<()> {
+    let LinkAllBinsInput {
+        settings_ctx,
+        node_linker,
+        cwd,
+        modules_dir_name,
+        aube_dir,
+        graph_for_link,
+        virtual_store_dir_max_length,
+        placements,
+        manifest,
+        manifests,
+        ws_dirs,
+        has_workspace,
+        virtual_store_only,
+        ignore_scripts,
+        has_any_allow_rule,
+        floor_may_allow_any,
+    } = input;
+
+    if virtual_store_only {
+        return Ok(());
+    }
+
+    // `extendNodePath` controls whether shim scripts export `NODE_PATH`.
+    // `preferSymlinkedExecutables` only matters on POSIX: `Some(true)`
+    // keeps the symlink layout, `Some(false)` swaps in a shell shim so
+    // `extendNodePath` can actually take effect (bare symlinks can't set
+    // env vars). When the user leaves it unset, default to shim under the
+    // isolated linker (NODE_PATH matters there so transitives hoisted to
+    // `.aube/node_modules/` resolve from a shimmed bin) and symlink under
+    // hoisted. Mirrors pnpm's effective default. Windows always writes
+    // cmd/ps1/sh wrappers regardless. (A native-executable target always
+    // bypasses the shim regardless of this setting — see `create_bin_shim`.)
+    let extend_node_path = aube_settings::resolved::extend_node_path(settings_ctx);
+    let isolated = !matches!(node_linker, aube_linker::NodeLinker::Hoisted);
+    let prefer_symlinked_executables =
+        aube_settings::resolved::prefer_symlinked_executables(settings_ctx)
+            .or(isolated.then_some(false));
+    let hidden_modules_dir = aube_dir.join("node_modules");
+    let shim_opts = aube_linker::BinShimOptions {
+        extend_node_path,
+        prefer_symlinked_executables,
+        hidden_modules_dir: isolated.then_some(hidden_modules_dir.as_path()),
+    };
+
+    let mut pkg_json_cache = PkgJsonCache::new();
+    let mut ws_pkg_json_cache = WsPkgJsonCache::new();
+    let ws_dirs_for_bins = has_workspace.then_some(ws_dirs);
+    link_bins(
+        cwd,
+        modules_dir_name,
+        aube_dir,
+        graph_for_link,
+        virtual_store_dir_max_length,
+        placements,
+        shim_opts,
+        &mut pkg_json_cache,
+        ws_dirs_for_bins,
+        &mut ws_pkg_json_cache,
+    )?;
+    // Root importer's own `bin` (discussion #228). Runs after `link_bins`
+    // so a self-bin overrides a same-named dep bin. Self-bin targets are
+    // files in the importer's own tree — often build outputs that don't
+    // exist at install time, or are later restored from an
+    // `actions/upload-artifact` round-trip that strips the POSIX exec bit.
+    // A POSIX shim (shell script that invokes `node`) is itself `+x` and
+    // does not rely on the target's exec bit, so `aube run` works in both
+    // flows.
+    if let Some(bin) = manifest.extra.get("bin") {
+        let root_bin_dir = cwd.join(modules_dir_name).join(".bin");
+        let self_shim_opts = aube_linker::BinShimOptions {
+            prefer_symlinked_executables: Some(false),
+            ..shim_opts
+        };
+        link_bin_entries(
+            &root_bin_dir,
+            cwd,
+            manifest.name.as_deref(),
+            bin,
+            self_shim_opts,
+        )?;
+    }
+    if has_workspace {
+        for (importer_path, deps) in &graph_for_link.importers {
+            if importer_path == "." {
+                continue;
+            }
+            // pnpm v9 emits nested peer-context importer entries (e.g.
+            // `a/node_modules/@scope/b`). Those paths are reached through
+            // the workspace-to-workspace symlink chain, not distinct
+            // directories to receive their own `.bin`. Walking them here
+            // duplicates work on the physical workspace and, at monorepo
+            // depth, pushes the kernel's per-lookup symlink budget over
+            // SYMLOOP_MAX.
+            if !aube_linker::is_physical_importer(importer_path) {
+                continue;
+            }
+            let pkg_dir = cwd.join(importer_path);
+            let bin_dir = pkg_dir.join(modules_dir_name).join(".bin");
+            std::fs::create_dir_all(&bin_dir).into_diagnostic()?;
+            for dep in deps {
+                if let Some(ws_dir) = ws_dirs.get(&dep.name) {
+                    link_bins_for_workspace_dep(
+                        &mut ws_pkg_json_cache,
+                        &bin_dir,
+                        ws_dir,
+                        &dep.name,
+                        shim_opts,
+                    )?;
+                } else {
+                    link_bins_for_dep(
+                        &mut pkg_json_cache,
+                        aube_dir,
+                        &bin_dir,
+                        graph_for_link,
+                        &dep.dep_path,
+                        &dep.name,
+                        virtual_store_dir_max_length,
+                        placements,
+                        shim_opts,
+                    )?;
+                }
+            }
+            // Workspace member's own `bin` (discussion #228). `manifests`
+            // was parsed once upstream and keys by importer relpath. See
+            // the root self-bin call site for why this forces a POSIX shim.
+            if let Some((_, member_manifest)) =
+                manifests.iter().find(|(p, _)| p == importer_path)
+                && let Some(bin) = member_manifest.extra.get("bin")
+            {
+                let self_shim_opts = aube_linker::BinShimOptions {
+                    prefer_symlinked_executables: Some(false),
+                    ..shim_opts
+                };
+                link_bin_entries(
+                    &bin_dir,
+                    &pkg_dir,
+                    member_manifest.name.as_deref(),
+                    bin,
+                    self_shim_opts,
+                )?;
+            }
+        }
+    }
+    // Gate matches the lifecycle phase's (`finalize.rs`) via the shared
+    // `dep_build_scripts_may_run` predicate, threaded through
+    // `maybe_link_dep_bins`: the `defaultTrust` floor can authorize a
+    // package's build scripts with no explicit allow rule, and those
+    // scripts call binaries declared in the package's own `dependencies`
+    // — which must be shimmed into the dep's `.bin` and put on PATH.
+    maybe_link_dep_bins(
+        ignore_scripts,
+        has_any_allow_rule,
+        floor_may_allow_any,
+        aube_dir,
+        graph_for_link,
+        virtual_store_dir_max_length,
+        placements,
+        shim_opts,
+        &mut pkg_json_cache,
+    )?;
+    Ok(())
+}
+
 /// Link bins declared by a `workspace:` dep into the importer's
 /// `.bin/`. Workspace deps don't get a `.aube/<dep_path>/` materialization
 /// (the linker symlinks them straight into the importer's `node_modules/`),

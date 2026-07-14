@@ -2,6 +2,8 @@
 
 This file is the entry point for AI coding agents working in this repository. It mirrors the [`AGENTS.md` convention](https://agents.md) used by other AI tools. [`CLAUDE.md`](CLAUDE.md) is a symlink to this file — Claude Code and the `AGENTS.md` convention read identical content.
 
+When the active agent is OpenAI Codex, read [`CODEX.md`](CODEX.md) after this file. It is Codex-only maintainer guidance and does not apply to Claude or other agents.
+
 When present, `AGENTS.local.md` (gitignored, not part of a clean checkout) carries maintainer-local orientation — a personal orchestration workflow, sub-agent dispatch policy, and pointers into local-only directories that a fresh clone does not contain. It is an optional overlay; nothing in this file depends on it, and a contributor working without it has everything needed here.
 
 ## Non-negotiables — read first if you're opening a PR or editing this repo
@@ -162,7 +164,7 @@ As of 2026-06-22 (Pattern B), `vendor/aube` is plain tracked files in nub's own 
 
 **Minimum number of tests, comprehensively covering the API surface.** This is the load-bearing rule for the v0.1 implementation, and the antidote to AI-generated test bloat. Quality of coverage matters; volume of tests does not.
 
-> **Before you push, run the pre-push local verification loop** (see [Implementation quality discipline](#implementation-quality-discipline) below): incremental worktree build → the *exact* CI `clippy --all-targets`/`fmt`/scoped tests → an e2e tmp-fixture run of the specific feature → Docker for global-cache/config behavior → promote durable checks into the suite. Get it green locally and push ONCE — pushing fix-after-fix to "see if CI passes" starves the shared runner pool.
+> **Before you push, run the pre-push local verification loop** (see [Implementation quality discipline](#implementation-quality-discipline) below). Start with `make verify` for the bounded host-local gate: root and native formatting, all-target/all-feature clippy, the native addon, the static brand lint, and the ordinary test suite. It does not reproduce platform matrices, Docker jobs, or change-specific end-to-end tests; run those separately when the change requires them, then promote durable checks into the suite. Get it green locally and push ONCE — pushing fix-after-fix to "see if CI passes" starves the shared runner pool.
 
 - **Comprehensive coverage, not exhaustive coverage.** Each behavior gets tested once, well, against the cases that matter: golden path, the one or two failure modes that have user-facing implications, the boundary condition that's easy to get wrong. Stop there. Don't write `it("should not throw when input is null")` after you've already written `it("rejects null input")`.
 - **Hand-crafted feel.** Tests must read as if a careful engineer wrote them, not as if an agent enumerated possibilities. Concrete signs of agent bloat to avoid: identical assertions across multiple `describe` blocks with different setup; per-input parametrization where one assertion would do; test names that paraphrase the implementation instead of describing the contract; descriptions like "should handle X" without naming what "handle" means.
@@ -213,6 +215,8 @@ Feature-specific harnesses that encode this loop live under `tests/<feature>/` �
 
 **Quality over velocity. Always.** Don't move fast, check boxes, and ship stubs as complete implementations. The specific failure modes:
 
+- **Do not overengineer.** Solve the demonstrated problem at its actual scale. Do not introduce generalized infrastructure, extra abstraction, speculative hardening, or adjacent cleanup without evidence that the added complexity earns its cost; when evaluating recommendations, "not worth doing" is a valid and preferred verdict.
+- **Wait deliberately for sub-agent returns.** After dispatch, the root continues useful non-overlapping work. When returns are the remaining dependency and no useful root work remains, state the active count and one-line lane summaries, then call one blocking `wait_agent` with a substantive timeout. Do not end or yield assuming completion notifications will start a new root turn. Reconcile every result, then continue waiting as needed until all relevant agents are handled or new user input supersedes; never busy-poll with repeated short waits.
 - **Never mark a task `[x]` without verifying the behavior end-to-end.** Running `cargo test` is necessary but not sufficient. If the task says "implement per-line stream prefixing matching pnpm," you must run `nub -r --stream run build` on a real fixture and compare the output to `pnpm -r --stream run build`. A green test suite with a stubbed implementation is worse than an unchecked task.
 - **Never claim "parity" without evidence.** "Complete workspace parity with pnpm" means every flag, every edge case, every output format. If you haven't tested a flag, don't mark it done. If the implementation is a simplified version, say so explicitly in the task note — don't use language like "implemented" for something that's "scaffolded."
 - **Name what you actually built.** If you shipped `Stdio::inherit()` with a header line, that's not "stream prefixing." If you partitioned into fixed batches, that's not "work-stealing." Use precise language so the next reader knows the actual state.

@@ -196,6 +196,68 @@ fn import_text_works_on_compat_tier() {
     );
 }
 
+/// Import Text on the FAST tier BELOW 26.5 (Node 24.x): sync `module.registerHooks`,
+/// but native `--experimental-import-text` does not exist yet, so nub serves text imports
+/// via its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
+/// makeHooks load hook). Pins the 24.x fast-tier path deterministically — the host-Node
+/// `integration.rs` cases silently migrate to the native-defer path once the host reaches
+/// >= 26.5 (AGENTS.md "latest major"), leaving [22.15, 26.5) otherwise uncovered.
+#[test]
+fn import_text_works_on_fast_tier_below_26_5() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((24, 4, 0), "import-text", "main.ts")
+    else {
+        eprintln!("skipping: Node 24.4.0 not installed (set TEST_NODE_BIN_24_4_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "fast-tier (<26.5) import-text must succeed via nub's short-circuit: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
+        "fast tier <26.5: .md read as text via nub's loadTextImport: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("yaml-is-string:true") && stdout.contains("json-is-string:true"),
+        "fast tier <26.5: the attribute wins over data-loader parsing: stdout={stdout:?}"
+    );
+}
+
+/// Import Text on the NATIVE tier (Node >= 26.5.0). There nub injects
+/// `--experimental-import-text` and its preload DEFERS `with { type: "text" }` to
+/// Node's native text translator (feature-detected via the `NATIVE_IMPORT_TEXT` const
+/// in preload-common.cjs, `process.allowedNodeEnvironmentFlags`) instead of
+/// serving it with nub's own `loadTextImport`. The user-visible result must be
+/// byte-identical to the compat/host tiers — SAME fixture, SAME assertions — proving
+/// the mechanism swap is transparent, and the experimental warning native emits must
+/// stay suppressed by nub's injected `--disable-warning=ExperimentalWarning`.
+#[test]
+fn import_text_works_via_native_on_26_5() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((26, 5, 0), "import-text", "main.ts")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "native-tier import-text must succeed: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
+        "native tier: .md read as text via Node's native translator: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("yaml-is-string:true") && stdout.contains("json-is-string:true"),
+        "native tier: the attribute wins over data-loader parsing on the native path: stdout={stdout:?}"
+    );
+    // Native's textStrategy emits ExperimentalWarning('Text import'); nub's injected
+    // --disable-warning=ExperimentalWarning must keep it off the user's stderr.
+    assert!(
+        !stderr.contains("ExperimentalWarning"),
+        "native import-text experimental warning must stay suppressed: stderr={stderr:?}"
+    );
+}
+
 /// Node 18.18.0 is one patch below the 18.19 floor — the boundary case
 /// for the hard-error tier. Contract: stderr carries the canonical
 /// refusal text, exit is non-zero, and (implicitly) Node was never
@@ -452,4 +514,53 @@ fn force_async_tier_signal_gated_on_broken_band_and_foreign_loader() {
     } else {
         eprintln!("skipping: Node 26.2.0 not installed (fixed-band representative)");
     }
+}
+
+/// Module syntax detection — the `--experimental-detect-module` matrix bands
+/// [20.10.0, 20.19.0) ∪ [21.1.0, 22.7.0). Node 20.11.0 carries the flag but does not
+/// default it on (that came at 20.19), so an ambiguous ESM `.js` — ES-module syntax, a
+/// `package.json` with no `"type"` field — that bare Node 20.11 refuses ("To load an ES
+/// module, set type: module", exit 1) runs as ESM under nub, which injects the flag from
+/// the matrix band. This is the in-band, still-required case; a default-on Node needs no
+/// injection.
+#[test]
+fn detect_module_ambiguous_esm_runs_as_esm_on_compat_tier() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((20, 11, 0), "detect-module", "amb.js")
+    else {
+        eprintln!(
+            "skipping: Node 20.11.0 not installed (set TEST_NODE_BIN_20_11_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "compat-tier ambiguous ESM .js must run as ESM under nub (bare Node 20.11 refuses it): stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("detect-module:ran-as-esm:true"),
+        "ambiguous .js must be detected and run as an ES module: stdout={stdout:?}"
+    );
+}
+
+/// The node:ffi (26.1+), node:vfs (26.4+), and node:stream/iter (25.9+) enabler bands.
+/// Each module is flag-gated and default-off — bare Node throws
+/// ERR_UNKNOWN_BUILTIN_MODULE on import — so nub injecting the three `--experimental-*`
+/// flags from the matrix is exactly what makes them importable. Run on Node 26.5.0, which
+/// carries all three; the fixture imports each and the markers all read true.
+#[test]
+fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "module-enablers", "enablers.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "node:ffi/vfs/stream-iter must import under nub (bare Node rejects them default-off): stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("module-enablers:true,true,true"),
+        "all three enabler modules must load once nub injects their flags: stdout={stdout:?}"
+    );
 }

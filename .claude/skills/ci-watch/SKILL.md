@@ -11,6 +11,8 @@ description: >-
   the target to EXIST, polls authoritative terminal status, fails fast on the
   first failing check, and exits with a status the orchestrator can trust. Run it
   as a detached run_in_background task.
+metadata:
+  internal: true
 ---
 
 # Watching CI with the GitHub CLI

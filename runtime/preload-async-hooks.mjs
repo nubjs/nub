@@ -88,7 +88,10 @@ export async function load(url, context, nextLoad) {
   // checked BEFORE extension dispatch so `import s from "./c.yaml" with {type:"text"}`
   // returns the raw text, not parsed YAML. shortCircuits, so Node never runs its own
   // unknown-'text'-attribute validation. (Node 18.20+ parses the `with` syntax; the
-  // 18.19.x floor cannot parse it at all — see the import-text thread.)
+  // 18.19.x floor cannot parse it at all — see the import-text thread.) Unlike the
+  // fast-tier hook (preload-common.cjs) this ALWAYS polyfills, with no native
+  // fall-through gate: native import-text is Node 26.5+, but the compat tier tops out
+  // at Node 22.14, so a native-capable Node never reaches this loader worker.
   if (context?.importAttributes?.type === "text") return loadTextImport(url);
   const ext = extname(url);
   // node_modules deps are NEVER transpiled (the byte-parity boundary). This guard is

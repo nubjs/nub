@@ -10,6 +10,8 @@ description: >-
   probe edge cases. Ad-hoc e2e is a valid verification method on its own; this
   skill also covers when to promote a durable check into the committed test
   suite. Pairs with the `dev-loop` build skill and AGENTS.md's pre-push loop.
+metadata:
+  internal: true
 ---
 
 # Ad-hoc end-to-end testing of nub

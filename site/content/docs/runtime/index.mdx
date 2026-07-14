@@ -101,6 +101,11 @@ The **minimum version** column is the lowest Node where the API works under Nub.
 | [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) | Node 20.18 | unflagged below the native line, native above |
 | [`node:sqlite`](https://nodejs.org/api/sqlite.html) | Node 22.5 | unflagged below Node 22.13, native above |
 | [`addon imports`](https://nodejs.org/api/esm.html#node-addons) | Node 22.20 | unflagged, never native |
+| [`text imports`](https://nodejs.org/api/esm.html#import-attributes) | Node 18.20 | polyfilled below Node 26.5, native above |
+| [`node:stream/iter`](https://nodejs.org/api/stream.html) | Node 25.9 | unflagged, never native |
+| [`node:ffi`](https://nodejs.org/api/ffi.html) | Node 26.1 | unflagged, never native |
+| [`node:vfs`](https://nodejs.org/api/vfs.html) | Node 26.4 | unflagged, never native |
+| [module syntax detection](https://nodejs.org/api/packages.html#syntax-detection) | Node 20.10 | unflagged below the default-on line, native above |
 
 A dash means the API works across the full supported range, 18.19 and up. The floored rows have a real cutoff, because the underlying Node mechanism doesn't exist below it:
 
@@ -108,6 +113,9 @@ A dash means the API works across the full supported range, 18.19 and up. The fl
 - The `EventSource` global needs Node 20.18, the patch where Node added the flag on the 20 LTS line.
 - The `node:sqlite` module needs Node 22.5, where Node first shipped it.
 - Importing a native `.node` addon from an ES module needs Node 22.20 (or 23.6 on the 23 line), where Node added the flag Nub injects. It is never native — Node keeps the import behind the flag — so Nub injects it on every version that has it.
+- Importing a file as text — `import readme from "./README.md" with { type: "text" }` — needs Node 18.20, the first version whose parser accepts the `with` import-attribute syntax. Nub polyfills the feature below Node 26.5, then steps aside to Node's native text imports on 26.5 and up (where it injects the `--experimental-import-text` flag).
+- The `node:ffi` (Node 26.1), `node:vfs` (26.4), and `node:stream/iter` (25.9) modules are experimental and default-off; Node keeps each behind an `--experimental-*` flag, so Nub injects it on every version that has the module, and it never goes native through Node 27 nightly.
+- Module syntax detection runs an ambiguous `.js` — ES-module syntax with no `"type"` in `package.json` — as an ES module. Node hid it behind `--experimental-detect-module` from 20.10 (and 21.1 on the 21 line) until it became default-on at 20.19 and 22.7; Nub injects the flag in that window so the same file runs the same way on every version.
 
 ## Node version resolution
 
@@ -162,6 +170,10 @@ nub --import ./instrument.js server.ts
 nub script.ts --port 3000 --verbose
 echo 'console.log(1 + 1)' | nub -
 ```
+
+<Callout title="Debugging in VS Code">
+Point VS Code's debugger at the `nub` binary to run a program through Nub with breakpoints and stepping. See [Debugging](/docs/runtime/debugging).
+</Callout>
 
 ## Compatibility mode
 

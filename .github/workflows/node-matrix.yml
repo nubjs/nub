@@ -76,8 +76,12 @@ jobs:
             run_full=true; run_realapps=true
           fi
           if [[ "$run_full" == "true" ]]; then
-            # FULL sweep: tier boundaries + Node-fix points across every live line.
-            smoke='["18.19","20.19","22.12","22.15","22.16","23.6","23.11","24.1","24.11","24.12","25.0","25.2","26"]'
+            # FULL sweep: tier boundaries + Node-fix points across every live line, plus
+            # "latest" — floats to the newest release INCLUDING a brand-new major, so the
+            # nightly trips the day a future Node drops a flag nub injects on an open-ended
+            # band (e.g. --experimental-import-text: injected on every spawn >=26.5, so a
+            # removal exit-9s the whole leg). Redundant with "26" until 27 ships; that's fine.
+            smoke='["18.19","20.19","22.12","22.15","22.16","23.6","23.11","24.1","24.11","24.12","25.0","25.2","26","latest"]'
           fi
           {
             echo "smoke_versions=$smoke"

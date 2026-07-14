@@ -75,6 +75,14 @@ pub struct WorkspaceConfig {
     #[serde(default)]
     pub catalogs: BTreeMap<String, BTreeMap<String, String>>,
 
+    /// Registry aliases: `<alias>` → registry URL. A dep spec of the form
+    /// `<alias>:<range>` resolves the package from the aliased registry. Typed
+    /// (not left to `extra`) so the typo-guard test recognizes the key and the
+    /// discovery layer can read it directly. Only consulted when the embedder
+    /// enables named-registry routing (pnpm-compat mode).
+    #[serde(default)]
+    pub named_registries: BTreeMap<String, String>,
+
     // -- Node-Modules Settings --
     /// Linking strategy: "isolated" (default), "hoisted", or "pnp".
     #[serde(default)]

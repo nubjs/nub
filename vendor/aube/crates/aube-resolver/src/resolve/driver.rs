@@ -42,6 +42,95 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Specifier schemes that shadow a same-named `namedRegistries` alias. pnpm
+/// runs its named-registry resolver LAST, so an alias colliding with a built-in
+/// scheme is silently claimed by that scheme's own resolver. In aube's flow
+/// `catalog:`/`npm:`/`jsr:` are already consumed upstream in `preprocess_task`,
+/// and the local-source schemes (`workspace:`/`file:`/`link:`/`git:`/…) are
+/// dispatched after it; listing them here keeps `parse_named_registry_spec`
+/// correct in isolation and shadows the post-preprocess schemes.
+const RESERVED_SPECIFIER_SCHEMES: &[&str] = &[
+    "npm",
+    "jsr",
+    "catalog",
+    "workspace",
+    "file",
+    "link",
+    "portal",
+    "exec",
+    "git",
+    "github",
+    "http",
+    "https",
+    "node",
+];
+
+/// Parse a pnpm named-registry specifier `<alias>:<body>` into
+/// `(registry_url, real_pkg_name, resolved_range_or_tag)`, mirroring pnpm's
+/// `parseNamedRegistrySpecifierToRegistryPackageSpec`. `real_pkg_name` is
+/// `Some` only when the parsed package name differs from `dep_alias` (the
+/// package.json key). Returns `None` when the specifier isn't a `<alias>:`
+/// form, the alias isn't in `known`, the alias is a reserved scheme, or the
+/// scoped package name is malformed. Supported bodies: `<range>` (dep alias is
+/// the package name), `@owner/name[@range]`, `<name>[@range]`, and — when
+/// `dep_alias` is scoped — a bare `<tag>`.
+fn parse_named_registry_spec(
+    range: &str,
+    dep_alias: &str,
+    known: &BTreeMap<String, String>,
+) -> Option<(String, Option<String>, String)> {
+    let colon = range.find(':')?;
+    if colon == 0 {
+        return None;
+    }
+    let registry_name = &range[..colon];
+    if RESERVED_SPECIFIER_SCHEMES.contains(&registry_name) {
+        return None;
+    }
+    let registry_url = known.get(registry_name)?;
+    let body = &range[colon + 1..];
+
+    let (pkg_name, version_selector): (String, String) =
+        if node_semver::Range::parse(crate::semver_util::normalize_range(body)).is_ok() {
+            // `<alias>:<range>` — the dependency alias IS the package name.
+            (dep_alias.to_string(), body.to_string())
+        } else if body.starts_with('@') {
+            // `<alias>:@owner/name[@range]` — scoped package in the body.
+            let idx = body.rfind('@').unwrap_or(0);
+            let (name, ver) = if idx == 0 {
+                (body.to_string(), None)
+            } else {
+                (body[..idx].to_string(), Some(body[idx + 1..].to_string()))
+            };
+            if !name.contains('/') || name.ends_with('/') {
+                return None; // pnpm hard-errors INVALID_NAMED_REGISTRY_PACKAGE_NAME; we drop.
+            }
+            (name, ver.unwrap_or_else(|| "latest".to_string()))
+        } else if dep_alias.starts_with('@') {
+            // `<alias>:<tag>` — scoped alias, so a non-range body is a dist-tag
+            // (GitHub Packages shape, where the package is always scoped).
+            (dep_alias.to_string(), body.to_string())
+        } else {
+            // `<alias>:<name>[@range]` — unscoped package in the body.
+            let (name, ver) = match body.rfind('@') {
+                Some(i) if i >= 1 => (body[..i].to_string(), Some(body[i + 1..].to_string())),
+                _ => (body.to_string(), None),
+            };
+            if name.is_empty() {
+                return None;
+            }
+            (name, ver.unwrap_or_else(|| "latest".to_string()))
+        };
+
+    let version_selector = if version_selector.is_empty() {
+        "latest".to_string()
+    } else {
+        version_selector
+    };
+    let real_pkg_name = (pkg_name != dep_alias).then_some(pkg_name);
+    Some((registry_url.clone(), real_pkg_name, version_selector))
+}
+
 pub(crate) struct ResolveDriver<'a> {
     resolver: &'a mut Resolver,
     existing: Option<&'a LockfileGraph>,
@@ -1305,6 +1394,8 @@ impl<'a> ResolveDriver<'a> {
                 },
                 tarball_url,
                 registry_git_hosted,
+                // Re-derived by finalize_resolved_graph's named-registry pass.
+                force_tarball_url: false,
                 // `name` is the alias for npm-aliased tasks
                 // (`"h3-v2": "npm:h3@..."` → name = "h3-v2"),
                 // so stash the real registry name here. The
@@ -2049,6 +2140,37 @@ impl<'a> ResolveDriver<'a> {
                 break;
             }
         }
+
+        // Named-registry protocol (pnpm `namedRegistries`), run LAST so a
+        // built-in scheme always wins a collision. Empty map (any non-pnpm
+        // posture) skips this entirely, keeping the default path byte-identical.
+        // A matched `<alias>:<spec>` is rewritten to its real range/tag (+ real
+        // package name when the body names a different package) and the client
+        // is told to route this package's fetch to the aliased registry. The
+        // route is recorded BEFORE the task's fetch (preprocess precedes the
+        // async fetch), and `original_specifier` — captured at task
+        // construction — keeps the importer lockfile entry verbatim.
+        if !self.resolver.named_registries.is_empty()
+            && let Some((registry_url, real_pkg, resolved_range)) =
+                parse_named_registry_spec(&task.range, &task.name, &self.resolver.named_registries)
+        {
+            tracing::trace!(
+                "named-registry: {} {} -> {}@{} via {}",
+                task.name,
+                task.range,
+                real_pkg.as_deref().unwrap_or(&task.name),
+                resolved_range,
+                registry_url,
+            );
+            task.range = resolved_range;
+            if let Some(pkg) = real_pkg {
+                task.real_name = Some(pkg);
+            }
+            self.resolver
+                .client
+                .record_named_route(task.registry_name().to_string(), registry_url);
+        }
+
         Ok(true)
     }
 
@@ -2302,6 +2424,7 @@ impl<'a> ResolveDriver<'a> {
                     transitive_peer_dependencies: locked_pkg.transitive_peer_dependencies.clone(),
                     tarball_url: locked_pkg.tarball_url.clone(),
                     registry_git_hosted: locked_pkg.registry_git_hosted,
+                    force_tarball_url: locked_pkg.force_tarball_url,
                     alias_of: locked_pkg.alias_of.clone(),
                     yarn_checksum: locked_pkg.yarn_checksum.clone(),
                     engines: locked_pkg.engines.clone(),
@@ -2460,5 +2583,112 @@ mod tests {
             unreachable!();
         };
         assert_eq!(git.integrity.as_deref(), Some("sha512-old"));
+    }
+
+    fn known() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("work".to_string(), "https://npm.work.net/".to_string()),
+            ("gh".to_string(), "https://npm.pkg.github.com/".to_string()),
+        ])
+    }
+
+    #[test]
+    fn named_registry_range_form_uses_dep_alias_as_package() {
+        // `work:1.x.x` on `@work/constants` → the alias IS the package name.
+        let got = parse_named_registry_spec("work:1.x.x", "@work/constants", &known());
+        assert_eq!(
+            got,
+            Some((
+                "https://npm.work.net/".to_string(),
+                None,
+                "1.x.x".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn named_registry_scoped_body_names_a_different_package() {
+        // `gh:@acme/foo@1.2.3` — body names a package distinct from the alias.
+        let got = parse_named_registry_spec("gh:@acme/foo@1.2.3", "foo", &known());
+        assert_eq!(
+            got,
+            Some((
+                "https://npm.pkg.github.com/".to_string(),
+                Some("@acme/foo".to_string()),
+                "1.2.3".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn named_registry_scoped_body_without_range_defaults_latest() {
+        let got = parse_named_registry_spec("gh:@acme/foo", "foo", &known());
+        assert_eq!(
+            got,
+            Some((
+                "https://npm.pkg.github.com/".to_string(),
+                Some("@acme/foo".to_string()),
+                "latest".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn named_registry_unscoped_body_names_a_different_package() {
+        let got = parse_named_registry_spec("work:some-pkg@2.0.0", "alias", &known());
+        assert_eq!(
+            got,
+            Some((
+                "https://npm.work.net/".to_string(),
+                Some("some-pkg".to_string()),
+                "2.0.0".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn named_registry_bare_body_is_a_dist_tag_when_alias_is_scoped() {
+        // GitHub Packages shape: scoped alias, bare body is a dist-tag.
+        let got = parse_named_registry_spec("gh:beta", "@acme/foo", &known());
+        assert_eq!(
+            got,
+            Some((
+                "https://npm.pkg.github.com/".to_string(),
+                None,
+                "beta".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn named_registry_unknown_alias_falls_through() {
+        assert_eq!(
+            parse_named_registry_spec("other:1.x", "@x/y", &known()),
+            None
+        );
+    }
+
+    #[test]
+    fn named_registry_builtin_scheme_is_shadowed() {
+        // A `namedRegistries` alias colliding with a built-in scheme never fires
+        // here — the scheme's own resolver claims it (pnpm runs named last).
+        let mut m = known();
+        m.insert("npm".to_string(), "https://npm.work.net/".to_string());
+        assert_eq!(parse_named_registry_spec("npm:h3@2", "h3-v2", &m), None);
+    }
+
+    #[test]
+    fn named_registry_invalid_scoped_name_dropped() {
+        // `@noslash` has no `/` — pnpm errors INVALID_NAMED_REGISTRY_PACKAGE_NAME;
+        // we drop to None.
+        assert_eq!(
+            parse_named_registry_spec("gh:@noslash", "foo", &known()),
+            None
+        );
+    }
+
+    #[test]
+    fn named_registry_plain_range_is_not_a_named_spec() {
+        assert_eq!(parse_named_registry_spec("^1.2.3", "foo", &known()), None);
     }
 }

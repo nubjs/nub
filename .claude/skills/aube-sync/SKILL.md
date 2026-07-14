@@ -12,6 +12,8 @@ description: >-
   merged tree into `vendor/aube` via a delta-apply that preserves any in-tree
   fixes. Covers the merge-not-rebase rule, ours-wins conflict resolution, the
   nub-fork drift reconciliation, and the build/test gates.
+metadata:
+  internal: true
 ---
 
 # Syncing jdx/aube upstream into nub's vendored aube

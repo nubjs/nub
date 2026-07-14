@@ -176,6 +176,11 @@ fn env_file_flag_present() -> bool {
 /// `--env-file` (a child `nub`/`node` it spawns does not inherit the suppression).
 static NO_ENV_FILE: OnceLock<bool> = OnceLock::new();
 
+/// Per-child watch cleanup state. The long-lived Node watch supervisor skips
+/// preloads, so this survives there and is consumed independently by every
+/// restarted child before user preloads run.
+const WATCH_ENV_GUARD_ENV: &str = "__NUB_WATCH_ENV_GUARD";
+
 /// True iff the user passed `--no-env-file`. The authoritative kill-switch read
 /// by every env-file consumer ([`merge_child_env`], [`overlay_env_file_vars`],
 /// [`apply_env_file_vars`], and the auto-discovery load sites).
@@ -263,6 +268,142 @@ fn watch_inject_vars<'a>(
     env_vars
         .iter()
         .filter(|(k, v)| raw_env.get(*k) != Some(*v))
+        .collect()
+}
+
+/// Render an auto-discovered watch env file for Node's platform-specific watcher.
+/// Node 20.11 on Linux rejects absolute `--env-file` paths even when the file
+/// exists. Node 24's Windows watcher also aborts when an argv path contains an
+/// 8.3 component (for example `RUNNER~1`) but the filesystem event arrives with
+/// the long spelling. Keep Windows absolute and expand only short components;
+/// make Unix cwd-relative without canonicalizing so symlink and watch identity
+/// stay unchanged.
+fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool) -> Result<String> {
+    if !path.is_absolute() || !cwd.is_absolute() {
+        bail!("watch env-file paths and cwd must be absolute");
+    }
+
+    if windows {
+        let path = windows_long_watch_path(path)?;
+        let path = path
+            .to_str()
+            .context("watch env-file path is not valid UTF-8")?;
+        let path = strip_windows_verbatim_prefix(path);
+        return Ok(format!("--env-file={path}"));
+    }
+
+    for (parent_count, ancestor) in cwd.ancestors().enumerate() {
+        let Ok(suffix) = path.strip_prefix(ancestor) else {
+            continue;
+        };
+        let mut relative = PathBuf::new();
+        for _ in 0..parent_count {
+            relative.push("..");
+        }
+        relative.push(suffix);
+        if relative.as_os_str().is_empty() {
+            bail!("watch env-file path must name a file");
+        }
+        let relative = relative
+            .to_str()
+            .context("watch env-file relative path is not valid UTF-8")?;
+        return Ok(format!("--env-file={relative}"));
+    }
+
+    bail!(
+        "watch env-file path {} cannot be made relative to {}",
+        path.display(),
+        cwd.display()
+    )
+}
+
+/// Expand Windows 8.3 components without resolving symlinks or junctions.
+/// libuv normalizes filesystem-event paths with this same API; doing it for the
+/// watched path keeps both sides of its prefix comparison in one spelling.
+/// Callers pass either an existing auto-discovered env file or the existing
+/// watcher cwd, so failure is exceptional and should be reported rather than
+/// letting Node hit its process-aborting assertion.
+#[cfg(windows)]
+fn windows_long_watch_path(path: &Path) -> Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    let mut input: Vec<u16> = path.as_os_str().encode_wide().collect();
+    input.push(0);
+
+    // SAFETY: `input` is NUL-terminated and lives across both calls. The first
+    // call requests the required capacity without writing an output buffer.
+    let mut capacity = unsafe { GetLongPathNameW(input.as_ptr(), std::ptr::null_mut(), 0) };
+    if capacity == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("could not expand Windows watch path {}", path.display()));
+    }
+
+    loop {
+        let mut output = vec![0u16; capacity as usize];
+        // SAFETY: the output pointer is valid for `capacity` UTF-16 code units;
+        // the input remains NUL-terminated and neither buffer aliases the other.
+        let written =
+            unsafe { GetLongPathNameW(input.as_ptr(), output.as_mut_ptr(), output.len() as u32) };
+        if written == 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("could not expand Windows watch path {}", path.display())
+            });
+        }
+        if (written as usize) < output.len() {
+            output.truncate(written as usize);
+            return Ok(PathBuf::from(OsString::from_wide(&output)));
+        }
+        // The path changed between calls or the first capacity became stale.
+        // `GetLongPathNameW` returns the required size when the buffer is short.
+        capacity = written.saturating_add(1);
+    }
+}
+
+#[cfg(not(windows))]
+fn windows_long_watch_path(path: &Path) -> Result<PathBuf> {
+    Ok(path.to_path_buf())
+}
+
+/// Rust canonicalization and some Windows APIs emit verbatim paths, but Node's
+/// option parser expects the ordinary drive/UNC spelling. Handle UNC first so
+/// `\\?\UNC\server\share` becomes `\\server\share`, not `UNC\server\share`.
+fn strip_windows_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+    }
+}
+
+/// Exact ambient spellings for the env-file runtime-control denylist. A Unix
+/// process may carry both canonical and mixed-case spellings; Windows collapses
+/// them through its case-insensitive environment.
+fn ambient_denied_env_file_keys() -> Vec<String> {
+    env::vars_os()
+        .filter_map(|(key, _)| key.into_string().ok())
+        .filter(|key| nub_core::workspace::env::is_denied_env_file_key(key))
+        .collect()
+}
+
+/// Canonical placeholders the watch supervisor must carry so Node's early
+/// startup consumers cannot read a value from a raw env file. Unix startup
+/// lookup is exact-case, so a mixed-case ambient key does not cover the canonical
+/// spelling; Windows lookup is case-insensitive.
+fn watch_env_guard_placeholders(ambient_keys: &[String], windows: bool) -> Vec<&'static str> {
+    nub_core::workspace::env::denied_env_file_keys()
+        .iter()
+        .copied()
+        .filter(|denied| {
+            !ambient_keys.iter().any(|ambient| {
+                if windows {
+                    ambient.eq_ignore_ascii_case(denied)
+                } else {
+                    ambient == denied
+                }
+            })
+        })
         .collect()
 }
 
@@ -858,12 +999,14 @@ pub enum ColorWhen {
 
 /// Top-level entry point. Returns the process exit code.
 pub fn run(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
-    // Reclaim the PATH shim temp dir exactly once, on return. The shim is
-    // created lazily/idempotently by the spawn paths and is process-wide
-    // (PID-keyed); it must outlive every — possibly parallel — child, so
+    // Reclaim the active PATH shim temp dir exactly once, on return. The shim
+    // is created lazily/idempotently by the spawn paths and is process-wide; it
+    // must outlive every — possibly parallel — child, so
     // cleanup belongs here at the top level, not per-spawn (which would race
     // concurrent workspace scripts). Drop runs on every return path, including
     // errors, because `run()` returns to `main` rather than calling `exit`.
+    // Invalid retired records are left for a later dead-process reaper because
+    // their pathname identity can no longer be trusted.
     struct ShimCleanup;
     impl Drop for ShimCleanup {
         fn drop(&mut self) {
@@ -3798,6 +3941,7 @@ fn build_script_command(
     );
     let aug = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
+        node.path.as_std_path(),
         node.version,
         compat_mode,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
@@ -4612,6 +4756,28 @@ fn list_scripts(manifest: &serde_json::Value) -> String {
 
 fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
+    let compat_mode = node_compat_env();
+    let env_file_present = env_file_flag_present();
+    let no_env_file = no_env_file();
+    let project = nub_core::workspace::detect::detect_project(&cwd);
+    let env_file_paths = if env_file_present || no_env_file {
+        Vec::new()
+    } else {
+        project
+            .as_ref()
+            .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
+            .unwrap_or_default()
+    };
+    // A raw env-file path arms the child guard for the watch lifetime. Validate
+    // its serialized ambient state before Node discovery: an uncached
+    // `node --version` probe inherits NODE_OPTIONS, so waiting until command
+    // assembly would let invalid bytes fail with an unrelated Node error first.
+    if !compat_mode
+        && !env_file_paths.is_empty()
+        && env::var_os("NODE_OPTIONS").is_some_and(|value| value.to_str().is_none())
+    {
+        bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
+    }
     // Fire point (running a file): provision a pinned-but-uncached version.
     let node = nub_core::node::discovery::discover_or_provision_node(&cwd)?;
     if let Some(w) = nub_core::node::discovery::engines_disagreement_warning(&cwd, &node) {
@@ -4626,7 +4792,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // user's argv — no flag injection, no preload, no eager `.env*` — matching the
     // zero-augmentation contract of `--node`/compat everywhere else. Version
     // provisioning above still applies (compat = no augmentation, not no-pinning).
-    if node_compat_env() {
+    if compat_mode {
         let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
@@ -4673,17 +4839,6 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // the child. This keeps `nub --watch --env-file …` consistent with the direct
     // file runner. `--no-env-file` suppresses BOTH the auto args and the explicit
     // `--env-file` overlay — the watched Node receives no `--env-file` args at all.
-    let env_file_present = env_file_flag_present();
-    let no_env_file = no_env_file();
-    let project = nub_core::workspace::detect::detect_project(&cwd);
-    let env_file_paths = if env_file_present || no_env_file {
-        Vec::new()
-    } else {
-        project
-            .as_ref()
-            .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
-            .unwrap_or_default()
-    };
     // Load the `.env*` files ONCE: `raw_env` is the unexpanded merge (the values
     // Node's `--env-file` args deliver), `auto_env` is the same map expanded. A
     // single read (rather than `load_env_files` + a second `load_env_files_raw`)
@@ -4721,21 +4876,29 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
 
     let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
 
-    let node_options = env::var("NODE_OPTIONS").ok();
+    let node_options_os = env::var_os("NODE_OPTIONS");
+    let node_options = node_options_os.as_ref().and_then(|value| value.to_str());
+    let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let inject = nub_core::node::flags::compute_inject_flags(
         node.version.clone(),
         args,
-        node_options.as_deref(),
+        node_options,
         false,
+        accepted.as_ref(),
     );
     for flag in &inject {
         node_args.push(flag.to_string());
     }
+    let sanitized_node_options = node_options.map(|existing| {
+        nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)
+    });
 
     // Reverse so the highest-priority `.env*` file lands last (Node's
     // last-writer-wins ⇒ nub's first-writer-wins precedence).
     for path in env_file_paths.iter().rev() {
-        node_args.push(format!("--env-file={}", path.display()));
+        // `cmd` inherits `cwd`; the helper chooses the path form required by the
+        // platform watcher without changing cwd or file precedence.
+        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows))?);
     }
 
     if let Some(preload) = &preload_path {
@@ -4757,6 +4920,18 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
+    // Node's Windows watch supervisor first registers the long-spelled env-file
+    // directory, then registers module paths reported by the watched child. If
+    // the inherited cwd contains an 8.3 component (for example RUNNER~1), those
+    // child paths use the short spelling and Node installs a second watcher for
+    // the same directory. libuv reports the event under the long spelling and
+    // older bundled versions abort on the mismatch. Align only this raw-env
+    // watch path's supervisor cwd; GetLongPathNameW preserves symlink/junction
+    // identity and non-Windows behavior stays byte-for-byte unchanged.
+    #[cfg(windows)]
+    if !env_file_paths.is_empty() {
+        cmd.current_dir(windows_long_watch_path(&cwd)?);
+    }
     // Inject ONLY the .env* vars whose `${VAR}` expansion changed the raw value
     // (#207) — see [`watch_inject_vars`]. A var Node's `--env-file` already
     // delivers identically is left to Node so the long-lived watcher re-reads it
@@ -4765,16 +4940,63 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for (k, v) in watch_inject_vars(&env_vars, &raw_env) {
         cmd.env(k, v);
     }
-    // This path spawns `node` directly and otherwise relies on OS env inheritance
-    // for NODE_OPTIONS, so an inherited below-floor version-gated flag (e.g.
-    // --experimental-webstorage on Node <22.4) would reach the child unstripped and
-    // abort it with exit 9 ("not allowed in NODE_OPTIONS"). Snip such flags against
-    // this watch invocation's resolved Node version before spawning — mirror of the
-    // two direct-spawn sites in spawn.rs. See flags::strip_unsupported_node_options.
-    if let Some(existing) = &node_options {
-        let stripped =
-            nub_core::node::flags::strip_unsupported_node_options(existing, &node.version);
-        cmd.env("NODE_OPTIONS", stripped);
+    // Node receives the auto-discovered files as raw `--env-file` paths and
+    // re-reads them in each watched child. Keep canonical placeholders in the
+    // preload-free supervisor so startup consumers cannot act on file values;
+    // an early child-only `--require` then removes every non-ambient denied
+    // spelling and restores the sanitized ambient NODE_OPTIONS before user
+    // preloads run. Arming by path presence, rather than current contents, keeps
+    // edits made after startup behind the same boundary.
+    if !env_file_paths.is_empty() {
+        if node_options_os.is_some() && node_options.is_none() {
+            bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
+        }
+        let preload = preload_path
+            .as_deref()
+            .context("watch env-file filtering requires the Nub runtime preload")?;
+        let cleanup_preload = Path::new(preload).with_file_name("watch-env-guard.cjs");
+        if !cleanup_preload.is_file() {
+            bail!(
+                "watch env-file filtering preload is missing: {}",
+                cleanup_preload.display()
+            );
+        }
+        let cleanup_preload = cleanup_preload
+            .to_str()
+            .context("watch env-file filtering preload path is not valid UTF-8")?;
+        let cleanup_token = nub_core::node::spawn::PreloadInjection {
+            flag: "--require",
+            value: cleanup_preload.to_string(),
+        }
+        .node_options_token();
+
+        let ambient_keys = ambient_denied_env_file_keys();
+        for key in watch_env_guard_placeholders(&ambient_keys, cfg!(windows)) {
+            cmd.env(key, "");
+        }
+        let state = serde_json::json!({
+            "denylist": nub_core::workspace::env::denied_env_file_keys(),
+            "ambientKeys": ambient_keys,
+            "nodeOptions": &sanitized_node_options,
+        });
+        cmd.env(
+            WATCH_ENV_GUARD_ENV,
+            serde_json::to_string(&state).context("could not serialize watch env-file guard")?,
+        );
+
+        let mut effective_node_options = cleanup_token;
+        if let Some(existing) = sanitized_node_options
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            effective_node_options.push(' ');
+            effective_node_options.push_str(existing);
+        }
+        cmd.env("NODE_OPTIONS", effective_node_options);
+    } else if let Some(existing) = sanitized_node_options {
+        // This path spawns Node directly and otherwise relies on OS inheritance.
+        // Strip below-floor version-gated flags just as the direct-spawn sites do.
+        cmd.env("NODE_OPTIONS", existing);
     }
     let status = cmd.status()?;
 
@@ -5087,6 +5309,7 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
+        node.path.as_std_path(),
         node.version,
         false,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
@@ -5260,14 +5483,22 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
     if s.contains("/homebrew/") || s.contains("/Cellar/") || s.contains("/linuxbrew/") {
         return UpgradeChannel::Homebrew;
     }
-    // Self-owned: the binary sits at `<install_dir>/bin/nub`, where install_dir
-    // ends in `.nub` (install.sh: `$HOME/.nub/bin/nub`). Derive install_dir by
-    // walking up from the binary so a copied-but-intact `.nub` tree still swaps.
+    // Self-owned: the binary sits at `<install_dir>/bin/nub`. Derive install_dir
+    // by walking up from the binary, then accept it as self-owned when EITHER the
+    // dir is the default `.nub` (covers installs predating the receipt) OR it
+    // carries a `.nub-receipt` marker the installer writes. The receipt is what
+    // makes a relocated `NUB_INSTALL_DIR` in-place-upgradeable, while still
+    // rejecting an unrelated `<dir>/bin/nub` (e.g. a distro `/usr/bin/nub`) that
+    // has neither signal. Order matters: npm/homebrew already returned above, so a
+    // package-managed binary never reaches here.
     let install_dir = bin_path
         .parent()
         .filter(|bin_dir| bin_dir.file_name().is_some_and(|n| n == "bin"))
         .and_then(Path::parent)
-        .filter(|install_dir| install_dir.file_name().is_some_and(|n| n == ".nub"));
+        .filter(|install_dir| {
+            install_dir.file_name().is_some_and(|n| n == ".nub")
+                || install_dir.join(".nub-receipt").is_file()
+        });
     match install_dir {
         Some(dir) => UpgradeChannel::SelfOwned {
             install_dir: dir.to_path_buf(),
@@ -5377,7 +5608,12 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                 println!("  command: {HOMEBREW_UPGRADE_DISPLAY}");
             }
             UpgradeChannel::SelfOwned { install_dir } => {
-                println!("would upgrade to {target} via self-owned (~/.nub)");
+                // Show the resolved dir, not a hardcoded ~/.nub — a receipt-marked
+                // NUB_INSTALL_DIR relocates it.
+                println!(
+                    "would upgrade to {target} via self-owned ({})",
+                    install_dir.display()
+                );
                 if cfg!(windows) {
                     println!(
                         "  note: a real self-owned upgrade is unsupported on Windows; \
@@ -8258,8 +8494,7 @@ mod tests {
     // ONLY the vars whose `${VAR}` expansion changed their raw value. Plain vars are
     // left to Node's `--env-file` (which re-reads on every restart), so editing
     // `.env` is picked up live instead of freezing at startup. `watch_inject_vars`
-    // is the selection; locking it here covers the fix without a flaky long-lived
-    // watcher + timed-file-edit integration test.
+    // is the selection; the integration suite separately locks the real restart.
     #[test]
     fn watch_injects_only_expansion_changed_vars() {
         // A plain var (raw == expanded) and an expansion-changed var.
@@ -8308,6 +8543,140 @@ mod tests {
             2,
             "with no raw_env (--env-file present) every var is injected; got {all:?}"
         );
+    }
+
+    #[test]
+    fn watch_env_file_arg_is_relative_to_the_watcher_cwd() {
+        let root = std::env::temp_dir().join("nub-watch-env-arg-root");
+        assert_eq!(
+            watch_env_file_arg(&root.join(".env"), &root, false).unwrap(),
+            "--env-file=.env"
+        );
+
+        let member = root.join("packages").join("app");
+        let one_level = Path::new("..").join(".env.local");
+        assert_eq!(
+            watch_env_file_arg(&root.join("packages").join(".env.local"), &member, false,).unwrap(),
+            format!("--env-file={}", one_level.to_str().unwrap())
+        );
+        let two_levels = Path::new("..").join("..").join(".env");
+        assert_eq!(
+            watch_env_file_arg(&root.join(".env"), &member, false).unwrap(),
+            format!("--env-file={}", two_levels.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn watch_env_file_arg_stays_absolute_for_windows_watchers() {
+        let root = std::env::temp_dir().join("nub-watch-env-arg-windows");
+        let path = root.join(".env");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&path, "A=1\n").unwrap();
+        let arg = watch_env_file_arg(&path, &root, true).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(arg.starts_with("--env-file="), "{arg}");
+        assert!(arg.ends_with(".env"), "{arg}");
+        assert!(!arg.starts_with(r"--env-file=\\?\"), "{arg}");
+    }
+
+    #[test]
+    fn windows_verbatim_prefix_stripping_handles_drive_and_unc_paths() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\D:\project\.env"),
+            r"D:\project\.env"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\UNC\server\share\.env"),
+            r"\\server\share\.env"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"D:\project\.env"),
+            r"D:\project\.env"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_watch_path_keeps_existing_file_and_cwd_in_one_spelling() {
+        let root = std::env::temp_dir().join("nub-watch-env-long-path");
+        let path = root.join(".env");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&path, "A=1\n").unwrap();
+
+        let expanded_root = windows_long_watch_path(&root).unwrap();
+        let expanded = windows_long_watch_path(&path).unwrap();
+        assert_eq!(expanded.parent(), Some(expanded_root.as_path()));
+
+        let expanded_root = expanded_root.to_str().unwrap();
+        let ordinary_root = strip_windows_verbatim_prefix(expanded_root);
+        let expanded = expanded.to_str().unwrap();
+        let ordinary = strip_windows_verbatim_prefix(expanded);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(Path::new(&ordinary_root).is_absolute(), "{ordinary_root}");
+        assert!(!ordinary_root.starts_with(r"\\?\"), "{ordinary_root}");
+        assert!(Path::new(&ordinary).is_absolute(), "{ordinary}");
+        assert!(ordinary.ends_with(".env"), "{ordinary}");
+        assert!(!ordinary.starts_with(r"\\?\"), "{ordinary}");
+    }
+
+    #[test]
+    fn watch_env_file_arg_rejects_relative_inputs() {
+        let absolute = std::env::temp_dir().join("nub-watch-env-arg-absolute");
+        assert!(watch_env_file_arg(Path::new(".env"), &absolute, false).is_err());
+        assert!(watch_env_file_arg(&absolute.join(".env"), Path::new("project"), true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_env_file_arg_handles_non_utf8_paths_without_lossy_argv() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let base = std::env::temp_dir();
+        let non_utf8 = std::ffi::OsString::from_vec(vec![b'n', 0xff]);
+        let ancestor = base.join(&non_utf8);
+        let cwd = ancestor.join("member");
+        assert_eq!(
+            watch_env_file_arg(&ancestor.join(".env"), &cwd, false).unwrap(),
+            format!("--env-file={}", Path::new("..").join(".env").display())
+        );
+
+        let non_utf8_file = cwd.join(std::ffi::OsString::from_vec(vec![b'.', 0xff]));
+        assert!(
+            watch_env_file_arg(&non_utf8_file, &cwd, false)
+                .unwrap_err()
+                .to_string()
+                .contains("not valid UTF-8")
+        );
+        assert!(
+            watch_env_file_arg(&non_utf8_file, &cwd, true)
+                .unwrap_err()
+                .to_string()
+                .contains("not valid UTF-8")
+        );
+    }
+
+    #[test]
+    fn watch_env_guard_placeholders_follow_os_key_semantics() {
+        let ambient = vec![
+            "NODE_OPTIONS".to_string(),
+            "node_extra_ca_certs".to_string(),
+        ];
+
+        let unix = watch_env_guard_placeholders(&ambient, false);
+        assert!(!unix.contains(&"NODE_OPTIONS"));
+        assert!(unix.contains(&"NODE_EXTRA_CA_CERTS"));
+        assert!(unix.contains(&"NODE_TLS_REJECT_UNAUTHORIZED"));
+        assert!(unix.contains(&"NODE_REPL_EXTERNAL_MODULE"));
+
+        let windows = watch_env_guard_placeholders(&ambient, true);
+        assert!(!windows.contains(&"NODE_OPTIONS"));
+        assert!(!windows.contains(&"NODE_EXTRA_CA_CERTS"));
+        assert!(windows.contains(&"NODE_TLS_REJECT_UNAUTHORIZED"));
+        assert!(windows.contains(&"NODE_REPL_EXTERNAL_MODULE"));
     }
 
     #[test]
@@ -8919,9 +9288,70 @@ mod tests {
             }
             other => panic!("expected SelfOwned, got {other:?}"),
         }
+        // An arbitrary `<dir>/bin/nub` with neither the `.nub` name nor a receipt
+        // stays Unknown — this is what keeps a distro `/usr/bin/nub` from being
+        // mistaken for a self-managed install and overwritten by `nub upgrade`.
+        assert_eq!(
+            detect_channel(Path::new("/some/random/place/bin/nub")),
+            UpgradeChannel::Unknown
+        );
         assert_eq!(
             detect_channel(Path::new("/some/random/place/nub")),
             UpgradeChannel::Unknown
+        );
+    }
+
+    // Receipt-based self-owned detection: a relocated NUB_INSTALL_DIR (not named
+    // `.nub`) is in-place-upgradeable IFF the installer's `.nub-receipt` marker is
+    // present next to bin/. Without it, the same layout stays Unknown. Uses a real
+    // temp dir because the receipt check hits the filesystem.
+    #[test]
+    fn detect_channel_honors_install_receipt_for_relocated_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path().join("custom-nub");
+        let bin = install_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let nub = bin.join("nub");
+
+        // No receipt yet → not recognized as self-owned.
+        assert_eq!(detect_channel(&nub), UpgradeChannel::Unknown);
+
+        // Installer drops the receipt → recognized, with install_dir recovered.
+        std::fs::write(install_dir.join(".nub-receipt"), "# marker\n").unwrap();
+        match detect_channel(&nub) {
+            UpgradeChannel::SelfOwned { install_dir: dir } => assert_eq!(dir, install_dir),
+            other => panic!("expected SelfOwned once the receipt exists, got {other:?}"),
+        }
+    }
+
+    // The critical repeat-upgrade invariant: a self-owned upgrade swaps only bin/,
+    // so the `.nub-receipt` marker MUST survive it — otherwise the NEXT upgrade
+    // would fail to re-detect a relocated install as self-owned. Exercises the real
+    // `swap_dir` the upgrade uses.
+    #[test]
+    fn install_receipt_survives_a_selfowned_bin_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path();
+        std::fs::create_dir_all(install_dir.join("bin")).unwrap();
+        std::fs::write(install_dir.join("bin").join("nub"), b"old").unwrap();
+        let receipt = install_dir.join(".nub-receipt");
+        std::fs::write(&receipt, "# marker\n").unwrap();
+
+        // Stage the replacement bin/ in a sibling dir (same filesystem, as the real
+        // upgrade does) and swap it in.
+        let staged = install_dir.join("staged-bin");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("nub"), b"new").unwrap();
+        swap_dir(install_dir, "bin", &staged).unwrap();
+
+        assert_eq!(
+            std::fs::read(install_dir.join("bin").join("nub")).unwrap(),
+            b"new",
+            "bin/ should hold the swapped-in binary"
+        );
+        assert!(
+            receipt.is_file(),
+            ".nub-receipt must survive the bin swap so repeat upgrades keep detecting self-owned"
         );
     }
 

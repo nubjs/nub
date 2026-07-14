@@ -1,5 +1,5 @@
-// `collapsible_if` fires on nested `if let { if let }` once the workspace MSRV
-// (1.88) unlocks let-chain suggestions; collapsing every site is cosmetic churn
+// `collapsible_if` fires on nested `if let { if let }` now that the workspace
+// MSRV supports let chains; collapsing every site is cosmetic churn
 // (and would diverge nub-native's verbatim get-tsconfig mirror), so allow it.
 #![allow(clippy::collapsible_if)]
 

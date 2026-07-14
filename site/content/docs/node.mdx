@@ -68,7 +68,7 @@ Once a version is pinned, Nub finds a binary for it in order:
 
 ## `nub node install`
 
-Provision a version into the cache *now*, instead of on the next `nub <file>`. The use cases are warming a CI cache in a setup step (the [GitHub Action](/docs/setup-nub) does this for you), or fetching a Node before you go offline.
+Provision a version into the cache *now*, instead of on the next `nub <file>`. The use cases are warming a CI cache in a setup step (the [GitHub Action](/docs/deployment/github-action) does this for you), or fetching a Node before you go offline.
 
 ```bash
 nub node install {{NODE_MAJOR}}          # newest {{NODE_MAJOR}}.x
@@ -167,7 +167,7 @@ node shim in /Users/you/.nub/node-shim (created)
 
 The shimmed `node` runs stock Node, unchanged. It resolves and provisions the version — the [precedence above](#version-precedence) — but adds nothing else: no TypeScript, no injected globals, no automatic `.env`. A bare `node` behaves like `node`; `nub` is what adds the runtime features. So `node app.ts` type-strips exactly as stock Node does, while `nub app.ts` transpiles and runs it.
 
-This is opt-in and reversible, the same shape as [`nub pm shim`](/docs/pm-shim). It installs a `node` link in `~/.nub/node-shim` and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
+This is opt-in and reversible, the same shape as [`nub pm shim`](/docs/pm/pm-shim). It installs a `node` link in `~/.nub/node-shim` and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
 
 ```console
 $ nub node unshim

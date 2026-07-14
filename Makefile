@@ -1,6 +1,7 @@
 CARGO   ?= cargo
 PROFILE ?= release
 BIN_DIR ?= /usr/local/bin
+RUST_BUILD = $(CURDIR)/scripts/rust-build.sh
 TARGET   = target/$(PROFILE)/nub
 
 ifeq ($(PROFILE),release)
@@ -9,7 +10,7 @@ else
   CARGO_FLAGS =
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev test test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -69,6 +70,22 @@ uninstall-dev:
 
 test:
 	$(CARGO) test
+
+# Bounded host-local gate. Platform matrices, Docker jobs, and change-specific
+# end-to-end tests remain separate parts of the pre-push verification loop.
+verify:
+	@test -f node_modules/@oxc-project/runtime/package.json || { \
+		echo "make verify requires installed JS dependencies; run: pnpm install --frozen-lockfile" >&2; \
+		exit 1; \
+	}
+	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check
+	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check)
+	$(MAKE) --no-print-directory PROFILE=debug CARGO="env NUB_SHARED_TARGET='$(CURDIR)/target' '$(RUST_BUILD)'" addon
+	@test -s runtime/addons/nub-native.node
+	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features -- -D warnings
+	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features -- -D warnings)
+	tests/brand-lint/check-env-reads.sh
+	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" test
 
 # Run the integration suite across a Node version matrix (18.19 floor → 22.15
 # fast-path floor) — the local mirror of ci.yml's `test` job. Locates or

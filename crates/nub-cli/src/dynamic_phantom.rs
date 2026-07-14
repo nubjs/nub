@@ -42,7 +42,6 @@ use std::path::{Path, PathBuf};
 
 use aube_store::{PackageIndex, index_content_fingerprint};
 use nub_phantom_scan::{ScanResult, scan_index};
-use rayon::prelude::*;
 
 /// Whether dynamic phantom detection + ancestor-closure eject is armed.
 /// Unconditionally ON for users — there is NO user-facing opt-out (the removed
@@ -128,8 +127,9 @@ pub fn register() {
 
 /// Scan one freshly-imported package index and persist its verdict to the
 /// per-content sidecar. Best-effort throughout — any failure simply leaves no
-/// sidecar, which the linker reads as "no eject" (a scan miss must never itself
-/// force materialization).
+/// sidecar for the linker to find. The linker retries the scan from the CAS;
+/// only an unavailable index or failed retry degrades to "no eject" (a scan
+/// miss must never itself force materialization).
 ///
 /// Panic-safety rests on the scan being panic-free BY CONSTRUCTION, not on the
 /// `catch_unwind`: oxc reports an unparseable/hostile file via a return flag (not
@@ -165,21 +165,19 @@ fn scan_and_cache(dir: &Path, index: &PackageIndex) {
 /// correct REGARDLESS of whether a sidecar was pre-written.
 ///
 /// Why the on-demand scan is load-bearing (the warm-cache-first-install gap):
-/// the two sidecar PRODUCERS both miss a real case. The extract hook writes a
-/// sidecar only on a genuine tarball FETCH, and [`backfill_from_lockfile`] reads
-/// the PRE-EXISTING lockfile — so a package WARM in the CAS with no sidecar
-/// (GC'd, or cached by a pre-eject-default nub) on the FIRST install/add of a
-/// project (no lockfile yet, warm reuse ⇒ no fetch) reaches link with no sidecar.
-/// Treating that as "no eject" left the package symlinked to the shared store and
-/// its undeclared phantom 404'd (`nuxt prepare` → `Cannot find package 'scule'`).
-/// Scanning here at the link-time decision point — where the resolved graph and
-/// the loaded CAS index are both in hand — closes it for every path at once
-/// (install/add/update, first or Nth, GC'd or pre-eject-default cache).
+/// the extract hook writes a sidecar only on a genuine tarball FETCH, so a package
+/// WARM in the CAS with no sidecar (GC'd, or cached by a pre-eject-default nub)
+/// reaches link with no verdict. Treating that as "no eject" left the package
+/// symlinked to the shared store and its undeclared phantom 404'd (`nuxt prepare`
+/// → `Cannot find package 'scule'`). Scanning here at the link-time decision point
+/// — where the resolved graph and loaded CAS index are both in hand — closes it
+/// for every path at once (install/add/update, first or Nth, missing or corrupt
+/// sidecar).
 ///
-/// Best-effort like the producers: a torn/corrupt sidecar or a scan failure
-/// degrades to "no eject", never a crash or a false break. The write-on-scan
-/// reuses [`scan_and_cache`]'s atomic publish, so a subsequent install hits the
-/// warm sidecar (the scan cost is paid once per content-fingerprint).
+/// Best-effort like the producer: a torn/corrupt sidecar is treated as a miss;
+/// only an unavailable or failed scan degrades to "no eject", never a crash or a
+/// false break. The write-on-scan reuses [`scan_and_cache`]'s atomic publish, so
+/// a subsequent install hits the warm sidecar when publication succeeds.
 pub(crate) fn cached_or_scan_verdict(dir: &Path, index: &PackageIndex) -> Option<ScanResult> {
     let fingerprint = index_content_fingerprint(index);
     let sidecar = sidecar_path(dir, &fingerprint);
@@ -221,9 +219,10 @@ fn scan_of_index(index: &PackageIndex) -> Option<ScanResult> {
 /// The serialized JSON is the [`nub_phantom_scan::ScanResult`], read back by the
 /// CONSUMER ([`crate::pm_engine::phantom_closure`]) — which, being in nub-cli,
 /// deserializes it into the typed `ScanResult` (no cross-fork string coupling).
-/// Best-effort: any fs failure simply leaves no sidecar (a scan miss reads as "no
-/// eject"). Shared by the extract-hook/backfill producer ([`scan_and_cache`]) and
-/// the link-time [`cached_or_scan_verdict`] so both publish identically.
+/// Best-effort: any fs failure leaves the sidecar absent or unchanged (a later
+/// read retries an absent/corrupt target as a miss). Shared by the extract-hook
+/// producer ([`scan_and_cache`]) and the link-time [`cached_or_scan_verdict`] so
+/// both publish identically.
 fn write_sidecar_atomic(sidecar: &Path, fingerprint: &str, result: &ScanResult) {
     // The versioned subdir (`sidecar`'s parent) is where both the temp and the
     // final sidecar live, so the atomic rename stays within one directory.
@@ -236,12 +235,12 @@ fn write_sidecar_atomic(sidecar: &Path, fingerprint: &str, result: &ScanResult) 
     let _ = std::fs::create_dir_all(subdir);
     // Atomic publish: write a per-call-unique temp then rename, so a concurrent
     // installer's linker never observes a half-written sidecar. (The reader
-    // already degrades a torn read to "no eject" and self-heals, but rename
-    // closes the window.) The temp name carries the pid AND a process-wide
-    // sequence: two rayon tasks scanning the SAME content fingerprint — an
-    // npm-alias and its real package share one CAS index, so the backfill can
-    // enqueue both — must not write the same temp path. Concurrent renames of the
-    // same content to the same target are last-writer-wins and byte-identical.
+    // treats a torn read as a miss and retries the scan, but rename closes the
+    // window.) The temp name carries the pid AND a process-wide sequence: two
+    // rayon tasks scanning the SAME content fingerprint — an
+    // npm-alias and its real package can share one CAS index — must not write the
+    // same temp path. Concurrent renames of the same content to the same target
+    // are last-writer-wins and byte-identical.
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = subdir.join(format!("{fingerprint}.{}.{seq}.tmp", std::process::id()));
@@ -278,10 +277,10 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// this version (it is a path segment, see [`sidecar_path`]), so a version's
 /// immutable bytes — which hash to the same fingerprint forever — are re-scanned
 /// after a bump instead of serving a stale verdict: the bump makes every prior
-/// sidecar's path unreachable, so the extract hook + [`backfill_from_lockfile`]
-/// write fresh verdicts under the new version and the old-version sidecars are
-/// ignored (GC-able). Forgetting to bump when the logic changes reintroduces the
-/// exact forward-compat gap this segment closes. Starts at 1 for the post-R3
+/// sidecar's path unreachable, so the extract hook or link-time scan writes a
+/// fresh verdict under the new version and the old-version sidecars are ignored
+/// (GC-able). Forgetting to bump when the logic changes reintroduces the exact
+/// forward-compat gap this segment closes. Starts at 1 for the post-R3
 /// scanner: there is no prior VERSIONED scheme to migrate from, and any
 /// pre-versioning flat `phantom/<fingerprint>.json` sidecar (only ever written
 /// into ephemeral dev/CI caches — the eject default has not shipped in a release)
@@ -312,75 +311,6 @@ pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 2;
 pub(crate) fn sidecar_path(base: &Path, fingerprint: &str) -> PathBuf {
     base.join(format!("s{PHANTOM_SCANNER_VERSION}"))
         .join(format!("{fingerprint}.json"))
-}
-
-/// Pre-install BACKFILL pass — the warm-store companion to the extract hook,
-/// called from `run_engine` (so it runs on `nub install` / `nub ci`, NOT on the
-/// `add`/`remove`/`update`/`dedupe` verbs, which dispatch the engine directly).
-/// On those verbs a warm-cache package with no sidecar is simply not scanned this
-/// run (its eject waits for the next `install`); a fresh FETCH is still covered by
-/// the extract hook. A miss only ever means "no eject", never a false break.
-///
-/// The extract hook fires only on a genuine tarball FETCH; a package already in
-/// the CAS with no sidecar (the feature shipping over a warm cache, or a GC'd
-/// sidecar) is never re-scanned, so link finds no sidecar and doesn't eject.
-/// This pass runs BEFORE `install::run`, so the sidecars exist before link's
-/// per-package eject decision on THIS install: for each resolved package already
-/// materialized in the CAS but missing a sidecar, it computes and persists the
-/// verdict — reusing the same [`scan_and_cache`] the extract hook uses, so the
-/// fingerprint keying, sidecar-hit skip, panic-guard, and atomic write are one
-/// implementation.
-///
-/// The internal A/B seam ([`enabled`] false) is a STRICT no-op: it returns
-/// before any lockfile parse, store access, or fs touch, so that install path is
-/// byte-identical. No lockfile / an unparseable one is also a no-op — a fresh
-/// install has nothing
-/// cached to backfill, and the extract hook covers whatever it fetches. The scan
-/// is CPU-bound and per-package independent, so it fans out across rayon; a
-/// warm re-install where every sidecar already exists does zero scanning (each
-/// package is a `scan_and_cache` sidecar-hit early return).
-///
-/// Best-effort completeness, never correctness (a miss reads as "no eject"):
-/// - Assumes nub's DEFAULT `storeDir` (`store_v1_dir`). A user `store-dir`
-///   override (`.npmrc`/yaml) moves the CAS elsewhere, so `load_index` misses
-///   and the warm-cache backfill no-ops — fresh fetches still eject via the
-///   extract hook; only warm-cache eject is lost under an override.
-/// - Keys `load_index` on `pkg.integrity`; no-integrity packages (git deps /
-///   integrity-stripped proxies) that the linker reads via a computed-sha
-///   binding may not be backfilled. No false eject — the linker recomputes the
-///   fingerprint from its own index, so an absent/mismatched sidecar is "no eject".
-pub fn backfill_from_lockfile(project_dir: &Path) {
-    if !enabled() {
-        return;
-    }
-    let (Some(sidecar_dir), Some(store_v1)) = (phantom_cache_dir(), store_v1_dir()) else {
-        return;
-    };
-    let Ok(manifest) = aube_manifest::PackageJson::from_path(&project_dir.join("package.json"))
-    else {
-        return;
-    };
-    let Ok(graph) = aube_lockfile::parse_lockfile(project_dir, &manifest) else {
-        return;
-    };
-    // `Store::at` takes the CAS `files/` root; `store_v1_dir` is its parent, and
-    // the store derives `index/` from it — matching how nub's configured
-    // `storeDir` resolves to `<storeDir>/v1/files` (aube `open_store`).
-    let store = aube_store::Store::at(store_v1.join("files"));
-    // BTreeMap has no rayon bridge; collect the resolved set first.
-    let packages: Vec<&aube_lockfile::LockedPackage> = graph.packages.values().collect();
-    packages.into_par_iter().for_each(|pkg| {
-        // Not in the CAS ⇒ skip: the resolve/fetch phase fetches it and the
-        // extract hook covers it. `registry_name()` + `integrity` key the index
-        // the SAME way the linker's own eject-gate read does (`builder.rs`
-        // `disk_materialize` path), so npm-alias deps resolve to the right blob.
-        let Some(index) =
-            store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
-        else {
-            return;
-        };
-        scan_and_cache(&sidecar_dir, &index);
-    });
 }
 
 #[cfg(test)]
@@ -439,15 +369,14 @@ mod tests {
     }
 
     /// The warm-cache-first-install fix: the link-time consumer must SCAN a
-    /// package on-demand when its sidecar is missing (and cache the result),
-    /// rather than treat a missing sidecar as "no eject". Before the fix a
-    /// warm-cached phantom package with no sidecar (GC'd / pre-eject-default
-    /// cache) on a first install/add stayed symlinked and its phantom 404'd
-    /// (`nuxt prepare` → `Cannot find package 'scule'`). Exercises the real
+    /// package on-demand when its sidecar is missing or corrupt, cache the result,
+    /// then serve the repaired cache without reading CAS blobs. Before the fix a
+    /// warm-cached phantom package with no sidecar stayed symlinked and its phantom
+    /// 404'd (`nuxt prepare` → `Cannot find package 'scule'`). Exercises the real
     /// store-IO path: a CAS `PackageIndex` built from a package that statically
     /// imports an UNDECLARED dependency.
     #[test]
-    fn cached_or_scan_verdict_scans_on_missing_sidecar_then_serves_cache() {
+    fn cached_or_scan_verdict_scans_on_missing_or_corrupt_sidecar_then_serves_cache() {
         use aube_store::Store;
         let base = std::env::temp_dir().join(format!(
             "nub-cached-verdict-{}-{}",
@@ -478,8 +407,8 @@ mod tests {
         let sidecar_dir = base.join("phantom");
         let sidecar = sidecar_path(&sidecar_dir, &index_content_fingerprint(&index));
 
-        // No sidecar yet — the exact gap: extract hook (no fetch) + backfill (no
-        // lockfile) both missed it. The consumer must scan on-demand.
+        // No sidecar yet — the extract hook did not run for this warm CAS entry.
+        // The consumer must scan on-demand.
         assert!(!sidecar.exists(), "precondition: no sidecar written yet");
         let v =
             cached_or_scan_verdict(&sidecar_dir, &index).expect("scan-on-miss yields a verdict");
@@ -497,14 +426,33 @@ mod tests {
             "the on-demand scan is cached for the next warm hit"
         );
 
-        // The second call SERVES THE CACHE, not a rescan — proven by destroying the
-        // CAS blobs a rescan would read; the cached sidecar read must still return
-        // the verdict (the fingerprint is a pure function of the in-memory index).
+        // A corrupt sidecar is treated like a miss, rescanned while the CAS blobs
+        // are available, and atomically replaced with valid JSON.
+        std::fs::write(&sidecar, b"not-json").unwrap();
+        let repaired = cached_or_scan_verdict(&sidecar_dir, &index)
+            .expect("a corrupt sidecar is rescanned and repaired");
+        assert!(
+            repaired.has_unguarded_phantom
+                && repaired
+                    .targets
+                    .iter()
+                    .any(|t| t.name == "undeclared-phantom"),
+            "the corrupt-sidecar rescan preserves the phantom verdict"
+        );
+        let repaired_bytes = std::fs::read(&sidecar).unwrap();
+        assert!(
+            serde_json::from_slice::<ScanResult>(&repaired_bytes).is_ok(),
+            "the corrupt sidecar is replaced with valid JSON"
+        );
+
+        // The next call SERVES THE REPAIRED CACHE rather than rescanning:
+        // destroying the CAS blobs leaves only the cached verdict (the fingerprint
+        // is a pure function of the in-memory index).
         let _ = std::fs::remove_dir_all(base.join("store"));
         let v2 = cached_or_scan_verdict(&sidecar_dir, &index).expect("cached verdict served");
         assert!(
             v2.has_unguarded_phantom && v2.targets.iter().any(|t| t.name == "undeclared-phantom"),
-            "a warm sidecar hit returns the same verdict without rescanning"
+            "the repaired sidecar is served without rescanning"
         );
 
         let _ = std::fs::remove_dir_all(&base);

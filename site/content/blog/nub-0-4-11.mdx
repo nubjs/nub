@@ -1,0 +1,29 @@
+---
+title: "Nub 0.4.11"
+description: The install scripts gain two environment variables for relocating the install and skipping the shell-profile edit.
+author: The Nub Team
+date: 2026-07-12
+---
+
+A patch release adding two installer customization options.
+
+## Installer customization
+
+The `curl | bash` and `irm | iex` installers now honor two environment variables, following the same convention as rustup and uv:
+
+- Set `NUB_INSTALL_DIR` to install somewhere other than `~/.nub`; `nub upgrade` updates a relocated install in place.
+- Set `NUB_NO_MODIFY_PATH` truthy (`1`/`yes`/`true`/`on`) to skip the shell-profile edit; the script prints the `PATH` line to add yourself.
+
+Set them on the shell that runs the script — the right side of the pipe, not on `curl`:
+
+```bash
+curl -fsSL https://nubjs.com/install.sh | NUB_INSTALL_DIR="$HOME/.local/nub" NUB_NO_MODIFY_PATH=1 bash
+```
+
+With neither variable set, the installer behaves exactly as before. ([#420](https://github.com/nubjs/nub/pull/420))
+
+## Documentation
+
+A new VS Code debugging guide covers running programs through nub under the editor's debugger.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.11) list every change in this release.

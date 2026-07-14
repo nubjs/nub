@@ -321,6 +321,59 @@ snapshots:
 }
 
 #[test]
+fn pnpm_engines_tolerates_nested_map_value() {
+    // Legacy packages (cordova-plugin-inappbrowser, #417) write a nested
+    // `cordovaDependencies` map under `engines`; a strict map<string,string>
+    // deserializer trips on it and fails the whole install.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      cordova-plugin-inappbrowser:
+        specifier: 6.0.0
+        version: 6.0.0
+      lodash:
+        specifier: 4.17.21
+        version: 4.17.21
+
+packages:
+  cordova-plugin-inappbrowser@6.0.0:
+    resolution: {integrity: sha512-nested}
+    engines: {cordovaDependencies: {0.2.3: {cordova: '>=3.1.0'}, 6.0.0: {cordova: '>=9.0.0'}}}
+  lodash@4.17.21:
+    resolution: {integrity: sha512-ordinary}
+    engines: {node: '>=8'}
+
+snapshots:
+  cordova-plugin-inappbrowser@6.0.0: {}
+  lodash@4.17.21: {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    // Nested-map entry is dropped (not an engine range), so the package
+    // parses with no engine constraints...
+    assert!(
+        graph.packages["cordova-plugin-inappbrowser@6.0.0"]
+            .engines
+            .is_empty(),
+        "nested cordovaDependencies map must be dropped from engines"
+    );
+    // ...while an ordinary string-valued engines map is preserved intact.
+    assert_eq!(
+        graph.packages["lodash@4.17.21"].engines.get("node"),
+        Some(&">=8".to_string()),
+    );
+}
+
+#[test]
 fn parse_local_snapshot_optional_dependencies_as_edges() {
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");

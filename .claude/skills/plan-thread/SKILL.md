@@ -1,6 +1,8 @@
 ---
 name: plan-thread
 description: Use when an effort's APPROACH isn't settled yet and needs collaborative design BEFORE implementation — fleshing out how a feature/change should work, weighing options, resolving open questions with the human. The design-in-progress thread profile. Auto-triggers on "spin up a plan", "let's design", "plan thread", "how should we approach", "think through the approach".
+metadata:
+  internal: true
 ---
 
 # Plan threads

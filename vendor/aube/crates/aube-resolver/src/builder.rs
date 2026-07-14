@@ -41,6 +41,7 @@ impl Resolver {
             ignore_scripts: false,
             minimum_release_age: None,
             catalogs: BTreeMap::new(),
+            named_registries: BTreeMap::new(),
             read_package_hook: None,
             dependency_policy: DependencyPolicy::default(),
             vulnerable_ranges: BTreeMap::new(),
@@ -87,6 +88,7 @@ impl Resolver {
                 ignore_scripts: false,
                 minimum_release_age: None,
                 catalogs: BTreeMap::new(),
+                named_registries: BTreeMap::new(),
                 read_package_hook: None,
                 dependency_policy: DependencyPolicy::default(),
                 vulnerable_ranges: BTreeMap::new(),
@@ -273,6 +275,15 @@ impl Resolver {
     /// records the picks in the output graph's `catalogs` field.
     pub fn with_catalogs(mut self, catalogs: BTreeMap<String, BTreeMap<String, String>>) -> Self {
         self.catalogs = catalogs;
+        self
+    }
+
+    /// Provide the `namedRegistries` alias→URL map (pnpm-compat). Empty (the
+    /// default) leaves the named-registry branch inert — a `<alias>:<spec>`
+    /// task is rewritten and its registry route recorded only when its prefix
+    /// is a key here.
+    pub fn with_named_registries(mut self, named_registries: BTreeMap<String, String>) -> Self {
+        self.named_registries = named_registries;
         self
     }
 

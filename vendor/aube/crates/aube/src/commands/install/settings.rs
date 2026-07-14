@@ -832,6 +832,11 @@ pub(crate) struct ResolverConfigInputs<'a> {
     pub(crate) workspace_config: &'a aube_manifest::workspace::WorkspaceConfig,
     pub(crate) workspace_catalogs:
         &'a std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// Merged `namedRegistries` alias→URL map (builtin `gh:` + global
+    /// `config.yaml` + workspace yaml), from `discover_named_registries`.
+    /// Empty under any non-pnpm posture, which makes the resolver's
+    /// named-registry branch inert.
+    pub(crate) named_registries: &'a std::collections::BTreeMap<String, String>,
     /// CLI-supplied `--minimum-release-age` override in minutes. Only
     /// `aube install` exposes the flag today; every other caller passes
     /// `None` and gets the settings-chain value.
@@ -877,6 +882,7 @@ pub(crate) fn configure_resolver(
         settings_ctx,
         workspace_config,
         workspace_catalogs,
+        named_registries,
         minimum_release_age_override,
         target_lockfile_kind,
         dependency_policy,
@@ -1011,6 +1017,7 @@ pub(crate) fn configure_resolver(
         .with_resolution_mode(resolution_mode)
         .with_minimum_release_age(minimum_release_age)
         .with_catalogs(workspace_catalogs.clone())
+        .with_named_registries(named_registries.clone())
         .with_project_root(cwd.to_path_buf())
         .with_ignore_scripts(ignore_scripts)
         .with_dependency_policy(dependency_policy)

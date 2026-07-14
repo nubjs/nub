@@ -41,6 +41,7 @@ pub const WARN_AUBE_INVALID_PEER_PATTERN: &str = "WARN_AUBE_INVALID_PEER_PATTERN
 pub const WARN_AUBE_INVALID_SAVE_PREFIX: &str = "WARN_AUBE_INVALID_SAVE_PREFIX";
 pub const WARN_AUBE_CONCURRENCY_ENV_INVALID: &str = "WARN_AUBE_CONCURRENCY_ENV_INVALID";
 pub const WARN_AUBE_MANAGED_CONFIG_ENFORCED: &str = "WARN_AUBE_MANAGED_CONFIG_ENFORCED";
+pub const WARN_AUBE_INVALID_NAMED_REGISTRY_URL: &str = "WARN_AUBE_INVALID_NAMED_REGISTRY_URL";
 
 // ── update / prerelease ─────────────────────────────────────────────
 pub const WARN_AUBE_PRERELEASE_CHECK_SKIPPED: &str = "WARN_AUBE_PRERELEASE_CHECK_SKIPPED";
@@ -304,6 +305,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_MANAGED_CONFIG_ENFORCED,
         category: category::SETTINGS_CONFIG,
         description: "Managed hardening config enforced a stricter value than local config, env, or CLI requested.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_INVALID_NAMED_REGISTRY_URL,
+        category: category::SETTINGS_CONFIG,
+        description: "A `namedRegistries` alias mapped to a value that is not a valid http(s) URL. The alias was dropped.",
         exit_code: None,
     },
     // Update / prerelease

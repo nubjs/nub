@@ -245,6 +245,10 @@ pub const INSTALL_SHAPE_FIELDS: &[&str] = &[
     "catalog",
     "catalogs",
     "dependencies",
+    // `dependenciesMeta.<dep>.injected` reshapes the tree (top-level symlink
+    // ⇄ injected hard copy) and `.built` flips a dep's build policy, so a
+    // change to it must invalidate the install — it was silently ignored.
+    "dependenciesMeta",
     "devDependencies",
     "engines",
     "name",
@@ -255,6 +259,9 @@ pub const INSTALL_SHAPE_FIELDS: &[&str] = &[
     "pnpm",
     "publishConfig",
     "resolutions",
+    // Bun/Yarn build-policy allowlist: a newly-trusted dep must re-run its
+    // (previously-skipped) build script, so an edit must invalidate the install.
+    "trustedDependencies",
     "version",
     "workspaces",
 ];
@@ -426,6 +433,38 @@ mod tests {
             serde_json::from_str(r#"{"dependencies":{"react":"19.0.0"}}"#).unwrap();
         let b: serde_json::Value =
             serde_json::from_str(r#"{"dependencies":{"react":"19.1.0"}}"#).unwrap();
+        assert_ne!(
+            manifest_install_shape_digest(&a),
+            manifest_install_shape_digest(&b)
+        );
+    }
+
+    #[test]
+    fn manifest_digest_reacts_to_dependencies_meta_change() {
+        // Toggling `dependenciesMeta.<dep>.injected` reshapes the on-disk tree,
+        // so it must change the shape digest (was silently ignored).
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"dependencies":{"@x/lib":"workspace:*"}}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(
+            r#"{"dependencies":{"@x/lib":"workspace:*"},"dependenciesMeta":{"@x/lib":{"injected":true}}}"#,
+        )
+        .unwrap();
+        assert_ne!(
+            manifest_install_shape_digest(&a),
+            manifest_install_shape_digest(&b)
+        );
+    }
+
+    #[test]
+    fn manifest_digest_reacts_to_trusted_dependencies_change() {
+        // Adding a dep to `trustedDependencies` allow-lists its build script,
+        // which must re-run — so the shape digest must change.
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"dependencies":{"esbuild":"0.24.0"}}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(
+            r#"{"dependencies":{"esbuild":"0.24.0"},"trustedDependencies":["esbuild"]}"#,
+        )
+        .unwrap();
         assert_ne!(
             manifest_install_shape_digest(&a),
             manifest_install_shape_digest(&b)

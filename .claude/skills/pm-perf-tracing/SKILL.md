@@ -1,3 +1,10 @@
+---
+name: pm-perf-tracing
+description: Performance-trace Nub package-manager installs using the existing phase timings, structured diagnostics, and sampling-profiler workflow. Use when an install or package-manager operation is unexpectedly slow and the bottleneck needs to be localized before changing code.
+metadata:
+  internal: true
+---
+
 # pm-perf-tracing
 
 How to performance-trace the nub package manager (install/resolve/fetch/**link**) and find where the time actually goes — the method that cracked the hoisted-linker slowness (10.8s → root-caused to a per-file copy loop). Reach for this any time a `nub install` / PM operation is "mysteriously slow" — do NOT reverse-engineer from source; the instrumentation already exists, turn it on.

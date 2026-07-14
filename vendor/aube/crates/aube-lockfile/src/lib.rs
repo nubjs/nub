@@ -460,6 +460,20 @@ pub struct LockedPackage {
     /// preserves third-party pnpm lockfiles that mark registry-shaped
     /// tarballs as hosted git.
     pub registry_git_hosted: bool,
+    /// Write-time signal: always emit `resolution.tarball` for this package
+    /// because its resolved registry host is NOT what `.npmrc`/config would
+    /// derive (a pnpm `namedRegistries` alias routed it to a different host).
+    /// The default writer omits `tarball` for registry packages whose URL has
+    /// the derivable `/-/<name>-<ver>.tgz` shape and reconstructs it from the
+    /// configured registry at install time — but that reconstruction uses the
+    /// DEFAULT registry and would 404 for a named-registry package, so a frozen
+    /// install must read the persisted URL. Set by the resolver's finalize pass
+    /// (which has the registry config to compare hosts); `false` for standalone
+    /// aube and every config-derivable registry/scoped-registry package, so the
+    /// lockfile output is unchanged there. Not itself a lockfile field — it is
+    /// re-derived on every resolve, and a package that lands with it set simply
+    /// writes the `tarball` it already carries.
+    pub force_tarball_url: bool,
     /// For npm-alias deps (`"h3-v2": "npm:h3@2.0.1-rc.20"`): the real
     /// package name on the registry (`"h3"`). `None` means the entry
     /// is not aliased and `name` already holds the registry name.
@@ -641,6 +655,7 @@ mod locked_package_tests {
             bundled_dependencies: Vec::new(),
             tarball_url: None,
             registry_git_hosted: false,
+            force_tarball_url: false,
             alias_of: None,
             yarn_checksum: None,
             engines: BTreeMap::new(),

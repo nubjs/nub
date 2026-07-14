@@ -1,6 +1,8 @@
 ---
 name: audit-thread
 description: Use when running a compatibility/parity AUDIT — enumerating where nub diverges from a reference it claims parity with (pnpm CLI grammar, a lockfile format, a Node behavior, a flag surface). Encodes the hard gates that stop an audit from surfacing false positives. Auto-triggers on "audit", "compat audit", "parity audit", "find all the gaps", "what are we missing vs <tool>".
+metadata:
+  internal: true
 ---
 
 # Audit threads

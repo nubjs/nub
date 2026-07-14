@@ -293,6 +293,23 @@ pub struct EngineContext {
     /// incumbent PM, exactly like [`read_branded_pnpm_config`](Self::read_branded_pnpm_config)
     /// and the other incumbent-keyed read postures. aube assigns no policy.
     pub npm_save_prefix_on_bare_exact: bool,
+
+    /// Whether pnpm's `namedRegistries` alias→URL routing is active — a dep
+    /// spec like `"@work/constants": "work:1.x.x"` resolves from the aliased
+    /// registry declared in a `namedRegistries` map (plus the built-in `gh:`
+    /// alias → GitHub Packages). `false` (default) preserves upstream aube
+    /// behavior: the alias→URL map is never populated, so every `<alias>:`
+    /// spec falls through to its existing resolver exactly as today — the
+    /// resolver logic is a no-op on an empty map. An embedder mirroring a pnpm
+    /// incumbent sets this `true` to opt into the feature; standalone aube
+    /// (default `false`) stays byte-identical on the resolve path.
+    ///
+    /// DELIBERATELY separate from [`read_branded_pnpm_config`](Self::read_branded_pnpm_config)
+    /// (which defaults `true`): that posture cannot gate this feature without
+    /// activating it for standalone aube, breaking default-preservation. nub
+    /// sets this to the same value it computes for `read_branded_pnpm_config`
+    /// (pnpm incumbent or fresh nub-as-pnpm-drop-in).
+    pub named_registries_enabled: bool,
 }
 
 impl Default for EngineContext {
@@ -319,6 +336,7 @@ impl Default for EngineContext {
             runtime_node_bin: None,
             lifecycle_user_agent_product: None,
             npm_save_prefix_on_bare_exact: false,
+            named_registries_enabled: false,
         }
     }
 }
@@ -386,5 +404,6 @@ mod tests {
         assert_eq!(ctx.runtime_node_bin, None);
         assert_eq!(ctx.lifecycle_user_agent_product, None);
         assert!(!ctx.npm_save_prefix_on_bare_exact);
+        assert!(!ctx.named_registries_enabled);
     }
 }

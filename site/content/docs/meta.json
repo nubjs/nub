@@ -8,11 +8,10 @@
     "install",
     "node",
     "pm",
-    "pm-shim",
     "plugins",
     "faq",
+    "deployment",
     "---",
-    "setup-nub",
-    "docker"
+    "[Guides](/guides)"
   ]
 }

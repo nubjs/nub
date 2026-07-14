@@ -521,6 +521,84 @@ fn install_refuses_to_mutate_a_drifted_yarn_lock() {
     );
 }
 
+#[test]
+fn frozen_yarn_berry_installs_reject_a_drifted_workspace_member() {
+    let fixture = |tag: &str| {
+        let dir = pm_tmpdir(tag);
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"berry-drift-root","private":true,"packageManager":"yarn@4.17.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".yarnrc.yml"), "nodeLinker: node-modules\n").unwrap();
+        for (member, manifest) in [
+            (
+                "app",
+                r#"{"name":"@fixture/app","version":"1.0.0","dependencies":{"@fixture/utils":"workspace:*","is-odd":"3.0.1"}}"#,
+            ),
+            ("utils", r#"{"name":"@fixture/utils","version":"1.0.0"}"#),
+        ] {
+            let member_dir = dir.join("packages").join(member);
+            std::fs::create_dir_all(&member_dir).unwrap();
+            std::fs::write(member_dir.join("package.json"), manifest).unwrap();
+        }
+        let yarn_lock = r#"__metadata:
+  version: 10
+  cacheKey: 10c0
+
+"@fixture/app@workspace:packages/app":
+  version: 0.0.0-use.local
+  resolution: "@fixture/app@workspace:packages/app"
+  dependencies:
+    "@fixture/utils": "workspace:*"
+  languageName: unknown
+  linkType: soft
+
+"@fixture/utils@workspace:*, @fixture/utils@workspace:packages/utils":
+  version: 0.0.0-use.local
+  resolution: "@fixture/utils@workspace:packages/utils"
+  languageName: unknown
+  linkType: soft
+
+"berry-drift-root@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "berry-drift-root@workspace:."
+  languageName: unknown
+  linkType: soft
+"#;
+        std::fs::write(dir.join("yarn.lock"), yarn_lock).unwrap();
+        (dir, yarn_lock)
+    };
+
+    for (tag, args) in [
+        (
+            "berry-member-drift-install",
+            &["install", "--frozen-lockfile", "--ignore-scripts"][..],
+        ),
+        ("berry-member-drift-ci", &["ci", "--ignore-scripts"][..]),
+    ] {
+        let (dir, yarn_lock) = fixture(tag);
+        let (_, stderr, code) = run_install(&dir, args);
+        assert_ne!(
+            code, 0,
+            "{args:?} must reject member manifest drift: {stderr}"
+        );
+        assert!(
+            stderr.contains("packages/app: is-odd@3.0.1 is not satisfied by yarn.lock"),
+            "the failure must identify the drifted member dependency: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
+            yarn_lock,
+            "{args:?} must leave yarn.lock byte-identical"
+        );
+        assert!(
+            !dir.join("node_modules").exists() && !dir.join("packages/app/node_modules").exists(),
+            "{args:?} must fail before linking any dependency"
+        );
+    }
+}
+
 /// pnpm parity (`opts.ci && !opts.lockfileOnly`): under `CI=true` nub
 /// auto-selects frozen mode for a plain install, but a `--lockfile-only`
 /// run is exempt — it exists to regenerate the lock, so it re-resolves a

@@ -43,6 +43,20 @@ export function middleware(req: NextRequest) {
     }
   }
 
+  // `?hn` (Hacker News submissions) serves the statically prerendered
+  // /blog/hn/<slug> variant, which renders the post's `hnTitle` frontmatter
+  // as the headline + document title. Same URL in the address bar, no
+  // client-side swap, no flash.
+  if (
+    req.nextUrl.searchParams.has('hn') &&
+    pathname.startsWith('/blog/') &&
+    !pathname.startsWith('/blog/hn/')
+  ) {
+    const url = req.nextUrl.clone();
+    url.pathname = `/blog/hn${pathname.slice('/blog'.length)}`;
+    return NextResponse.rewrite(url);
+  }
+
   return NextResponse.next();
 }
 

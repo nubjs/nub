@@ -147,7 +147,6 @@ Modern API work out of the box under Nub. Node.js experimental APIs are unflagge
 | [`navigator.locks`](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) | polyfilled below Node 24.5, native above |
 | [`reportError`](https://developer.mozilla.org/en-US/docs/Web/API/Window/reportError) | polyfilled |
 | [`vm.Module`](https://nodejs.org/api/vm.html#class-vmmodule) | unflagged |
-| [`ShadowRealm`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ShadowRealm) | unflagged |
 | [`Wasm module imports`](https://nodejs.org/api/esm.html#wasm-modules) | unflagged below Node 24.5 (22.19 on the 22.x line), native above |
 | [`WebSocket`](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) | unflagged from Node 20.10, native from Node 22 |
 | [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) | unflagged from Node 20.18, native above |

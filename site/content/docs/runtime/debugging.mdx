@@ -1,0 +1,52 @@
+---
+title: Debugging
+description: Attach the VS Code debugger to a program run through Nub, with breakpoints and stepping working while augmentation is on.
+---
+
+VS Code's Node debugger launches your program with its own `node`, which skips Nub entirely. Point it at the `nub` binary instead and Nub launches the file for you — the inspector comes up and the debugger attaches with no extra setup.
+
+```json
+// .vscode/launch.json
+{
+  "type": "node",
+  "request": "launch",
+  "name": "Debug (nub)",
+  "runtimeExecutable": "nub",
+  "program": "${workspaceFolder}/src/index.ts",
+  "skipFiles": ["<node_internals>/**"]
+}
+```
+
+Set a breakpoint and run the configuration; execution stops at it. VS Code injects `--inspect-brk` ahead of your file, and Nub forwards it to the Node child it spawns, so the inspector binds to the port VS Code chose and attaches. The first stop lands on the first line of your file, not inside Nub's internals.
+
+<Callout title="If nub isn't found">
+VS Code resolves `runtimeExecutable` against its own `PATH`. If it can't find `nub`, set the field to the absolute path that `which nub` prints — for example `~/.nub/bin/nub`.
+</Callout>
+
+## Program arguments
+
+Pass your program's argv through `args`. Each entry lands on `process.argv`, exactly as it would after the file on the command line.
+
+```json
+{
+  "runtimeExecutable": "nub",
+  "program": "${workspaceFolder}/src/build.ts",
+  "args": ["--out", "./dist", "--verbose"]
+}
+```
+
+## TypeScript
+
+Breakpoints in `.ts` source land on the right line. Nub transpiles TypeScript with an inline source map and injects `--enable-source-maps`, so the debugger maps the running code back to your original file — no build step and no `outFiles` configuration.
+
+## Running without augmentation
+
+To debug on plain Node — every augmentation off, the project's pinned version still used — add `--node` through `runtimeArgs`. It answers the differential question: does the bug still reproduce with none of Nub's runtime changes?
+
+```json
+{
+  "runtimeExecutable": "nub",
+  "runtimeArgs": ["--node"],
+  "program": "${workspaceFolder}/src/index.ts"
+}
+```

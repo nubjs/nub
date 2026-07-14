@@ -24,6 +24,14 @@ const { join, dirname, extname: pathExtname } = require("node:path");
 // the Rust spawn layer, coupled to preload injection). Read by installVersionMarker.
 const VERSION_ENV = "__NUB_VERSION";
 
+// Whether this Node natively supports import-text (`--experimental-import-text`,
+// added Node 26.5.0, #62300). Feature-DETECTED via the accepted-flag set rather
+// than version-parsed — the flag is in `allowedNodeEnvironmentFlags` iff Node
+// knows it (26.5+). When true, the load hook steps aside and lets Node's own
+// textStrategy own `type:"text"` imports (nub injects the flag in spawn.rs), per
+// the additive contract; below 26.5 nub polyfills them via `loadTextImport`.
+const NATIVE_IMPORT_TEXT = process.allowedNodeEnvironmentFlags.has("--experimental-import-text");
+
 // ── data: URL unknown-format fidelity helpers ───────────────────────
 // Mirror Node's internal/modules/esm/get_format.js so nub's sync registerHooks load
 // hook surfaces ERR_UNKNOWN_MODULE_FORMAT for an unsupported `data:` MIME exactly as
@@ -504,13 +512,20 @@ function makeHooks(core, watchReporting) {
 
     // Import Text (attribute-keyed): honor `with { type: "text" }` on ANY extension,
     // ahead of extension dispatch so `import s from "./c.yaml" with {type:"text"}`
-    // returns raw text, not parsed YAML. Placed after watch reporting (so a text file
-    // gets the same watch treatment as any other), and before the extension/data
-    // dispatch (so the attribute wins over the `.txt`/`.yaml`/… data loaders and
-    // Node-native JSON). shortCircuits, so Node's own unknown-'text'-attribute
-    // validation never runs. Mirror of the compat-tier hook in preload-async-hooks.mjs.
+    // returns raw text, not parsed YAML. On Node 26.5+ (NATIVE_IMPORT_TEXT) step aside
+    // and let Node's own textStrategy own it — nub injects --experimental-import-text,
+    // so the additive "would plain Node + the flag do the same?" test holds and users
+    // get Node's exact semantics. Below 26.5 Node has no text-import support, so nub
+    // polyfills via loadTextImport (placed after watch reporting so a text file gets
+    // the same watch treatment, and before the extension/data dispatch so the attribute
+    // wins over the `.txt`/`.yaml`/… data loaders and Node-native JSON; it shortCircuits
+    // so Node's own unknown-'text'-attribute validation never runs). The compat-tier
+    // hook in preload-async-hooks.mjs always polyfills — that tier tops out at Node
+    // 22.14, below 26.5, so native import-text is never reachable there.
     // (Node 18.20+ parses the `with` syntax; the 18.19.x floor cannot.)
-    if (context?.importAttributes?.type === "text") return core.loadTextImport(url);
+    if (context?.importAttributes?.type === "text") {
+      return NATIVE_IMPORT_TEXT ? nextLoad(url, context) : core.loadTextImport(url);
+    }
 
     // A USER resolve hook (a ts-node/tsx-style transpiler registered AFTER nub's
     // own preload hook) claimed this file with the bare 'typescript' format: defer

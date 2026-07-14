@@ -16,6 +16,8 @@ description: >-
   incantations (`cargo
   build -p nub-cli --profile fast`, `make install-dev`, `make addon-fast`), the
   test invocations, and the exact CI cheap gates.
+metadata:
+  internal: true
 ---
 
 # Building & testing nub

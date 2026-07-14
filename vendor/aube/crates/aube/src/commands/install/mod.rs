@@ -633,6 +633,10 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     // workspace's catalog. See `discover_catalogs` for the precedence
     // order.
     let workspace_catalogs = super::discover_catalogs(&cwd)?;
+    // pnpm `namedRegistries` alias→URL map (empty under any non-pnpm posture);
+    // routes `<alias>:<spec>` deps to the aliased registry. Same discovery
+    // shape as catalogs.
+    let named_registries = super::discover_named_registries(&cwd);
     let settings_ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
     let dependency_policy = resolve_dependency_policy(&manifest, &settings_ctx);
     // Resolve the project's Node runtime before anything can spawn
@@ -930,6 +934,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             per_project_write_selection: per_project_write_selection.as_ref(),
             ws_config: &ws_config_shared,
             workspace_catalogs: &workspace_catalogs,
+            named_registries: &named_registries,
             settings_ctx: &settings_ctx,
             dependency_policy: &dependency_policy,
             lockfile_pre_parse: lockfile_pre_parse.as_ref(),
@@ -1511,6 +1516,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                     settings_ctx: &settings_ctx,
                     workspace_config: &ws_config_shared,
                     workspace_catalogs: &workspace_catalogs,
+                    named_registries: &named_registries,
                     minimum_release_age_override: opts.minimum_release_age_override,
                     // Same disambiguation as the `--lockfile-only` path:
                     // `None` only when no lockfile will be written, so
@@ -2726,6 +2732,9 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
         store: store.as_ref(),
         graph: &graph,
         graph_for_link: &graph_for_link,
+        manifest: &manifest,
+        ws_dirs: &ws_dirs,
+        has_workspace,
         manifests: &manifests,
         lifecycle_manifests: &lifecycle_manifests,
         direct_dep_info: &direct_dep_info,

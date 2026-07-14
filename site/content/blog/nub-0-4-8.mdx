@@ -1,0 +1,20 @@
+---
+title: "Nub 0.4.8"
+description: A lockfile-compatibility fix for nested-map engines values in pnpm-lock.yaml, plus documentation updates.
+author: The Nub Team
+date: 2026-07-11
+---
+
+A patch release: a lockfile-compatibility fix, plus new and updated documentation.
+
+## Lockfile compatibility
+
+`nub install` failed with `ERR_NUB_MANIFEST_PARSE` on a valid `pnpm-lock.yaml` when a package's `engines:` field held a nested map instead of a string range. Some legacy packages — `cordova-plugin-inappbrowser`, for one — put a nested `cordovaDependencies` map under `engines`, which pnpm preserves verbatim in the lockfile. Nub's parser expected a string there and rejected the file.
+
+Nub now tolerates non-string `engines` values in the lockfile, keeping the string ranges and ignoring the nested extras — the same way it already parses `package.json`. ([#439](https://github.com/nubjs/nub/pull/439), fixes [#417](https://github.com/nubjs/nub/issues/417))
+
+## Documentation
+
+This release adds a new "Nub vs Vite+" comparison guide and updates the bun-to-nub guide. The docs sidebar also renders its section separators as visible rules.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.8) list every change in this release.

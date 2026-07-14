@@ -1,0 +1,51 @@
+---
+title: Deployment
+description: Getting the Nub CLI into a deploy or build environment — the GitHub Action, the official Docker images, and the devDependency pattern for hosted builders that run the install for you.
+---
+
+A Nub project needs the `nub` CLI present wherever it builds. How you get it there depends on whether the environment gives you a setup step:
+
+- **You control a setup step** — a CI workflow or a Dockerfile. Install Nub explicitly: the [GitHub Action](/docs/deployment/github-action) on GitHub Actions, or the [Docker](/docs/deployment/docker) images in a container.
+- **A hosted builder runs the install for you** — Cloudflare Workers Builds, Netlify, some Vercel setups. There's no seam to add a setup step, so Nub rides in as a devDependency.
+
+## Hosted builds
+
+Hosted build environments run the install themselves from your lockfile and provision Node from `.node-version` or `.tool-versions`. There's no step to add the GitHub Action, so a `package.json` script that shells out to `nub` fails before it starts:
+
+```console
+sh: nub: not found
+```
+
+Add `@nubjs/nub` as a devDependency and call it from your scripts:
+
+```json
+{
+  "devDependencies": {
+    "@nubjs/nub": "^0.1.0"
+  },
+  "scripts": {
+    "build": "nubx vite build"
+  }
+}
+```
+
+The package declares `bin: { nub, nubx }`, so any installer — including the pnpm these builders run — links both onto `node_modules/.bin`, and your scripts resolve them no matter who ran the install. This holds even under pnpm's default blocking of dependency build scripts (pnpm 10+): bin-linking is independent of script approval, and Nub's launcher sets its own execute bit at runtime, so there's nothing to allowlist.
+
+It coexists with the project's real package manager. Nub reads the existing lockfile, so `@nubjs/nub` sits in `devDependencies` alongside pnpm, npm, or bun without conflict.
+
+The builder still provisions Node from your version pin — set it so the build Node matches the version Nub resolves at runtime:
+
+- `package.json` → `devEngines.runtime`
+- `.node-version`
+- `.nvmrc`
+- `package.json` → `engines.node`
+
+## Which to use
+
+- **GitHub Actions** — the [GitHub Action](/docs/deployment/github-action). It installs Nub, eagerly provisions the pinned Node, and fronts it on PATH.
+- **A Dockerfile you control** — the [Docker](/docs/deployment/docker) images, or one line to layer Nub onto your own `node` base.
+- **A hosted builder with no setup step** — the devDependency pattern above.
+
+## Version managers
+
+Environments driven by `.tool-versions` can provision the CLI directly. [mise](https://mise.jdx.dev) ships a `nub` entry, so `mise use nub@latest` puts `nub` and `nubx` on PATH.

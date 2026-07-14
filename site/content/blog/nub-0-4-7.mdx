@@ -1,0 +1,25 @@
+---
+title: "Nub 0.4.7"
+description: "Dependencies whose install scripts swap a JavaScript launcher for a native binary now run correctly."
+author: The Nub Team
+date: 2026-07-10
+---
+
+This release fixes running dependency binaries that are native executables rather than JavaScript — most visibly esbuild.
+
+## Native-executable bins
+
+Some packages ship a `bin` that starts life as a JavaScript launcher and is replaced with a platform-native executable by the package's install script. esbuild does exactly this. nub linked the `node_modules/.bin` entry before the install script ran, so the shim invoked the resulting binary as `node <binary>`:
+
+```
+$ ./node_modules/.bin/esbuild --version
+.../esbuild/bin/esbuild:1
+ELF...
+SyntaxError: Invalid or unexpected token
+```
+
+That broke `nubx esbuild`, `./node_modules/.bin/esbuild`, and any script that shells out to esbuild.
+
+nub now detects native executables (ELF, Mach-O, PE) and runs them directly — a symlink on Unix, a direct-exec wrapper on Windows — instead of wrapping them in `node`. Bin shims are regenerated after dependency install scripts run, so a launcher that turns native mid-install still gets the right shim, including when the build is restored from the side-effects cache.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.7) list every change in this release.

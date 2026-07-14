@@ -435,6 +435,10 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
         let is_jsr_registry_pkg = pkg.registry_name().starts_with("@jsr/");
         let preserve_tarball_url = graph.settings.lockfile_include_tarball_url
             || is_jsr_registry_pkg
+            // A pnpm `namedRegistries` package resolved to a non-default host:
+            // the derivable `/-/…tgz` shape would reconstruct against the wrong
+            // (default) registry, so the URL must be persisted verbatim.
+            || pkg.force_tarball_url
             || registry_tarball_url_is_not_derivable(
                 pkg.registry_name(),
                 &pkg.version,
@@ -887,9 +891,9 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
                                         path: path.clone(),
                                     }
                                 }
-                                (Some(hash), None) => WritablePatchedDependency::HashOnly {
-                                    hash: hash.clone(),
-                                },
+                                (Some(hash), None) => {
+                                    WritablePatchedDependency::HashOnly { hash: hash.clone() }
+                                }
                                 (None, Some(path)) => {
                                     WritablePatchedDependency::PathOnly(path.clone())
                                 }

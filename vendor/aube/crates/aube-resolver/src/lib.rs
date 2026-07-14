@@ -164,6 +164,13 @@ pub struct Resolver {
     /// `original_specifier` so the lockfile importer keeps the
     /// reference verbatim.
     catalogs: BTreeMap<String, BTreeMap<String, String>>,
+    /// `namedRegistries` alias→registry-URL map (pnpm-compat). A task whose
+    /// range is `<alias>:<spec>` where `<alias>` is a key here is rewritten to
+    /// the real package/range and its registry route recorded on the client
+    /// (see `preprocess_task`). Empty (the standalone-aube default) makes the
+    /// named-registry branch inert, so every `<alias>:` spec falls through
+    /// exactly as before.
+    named_registries: BTreeMap<String, String>,
     /// Optional `readPackage` hook, invoked once per resolved package
     /// before its transitive deps are enqueued. See [`ReadPackageHook`].
     /// Wired up by `aube` when a `.pnpmfile.cjs` is detected and

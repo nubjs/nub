@@ -146,6 +146,96 @@ pub(crate) fn load_workspace_catalogs(cwd: &std::path::Path) -> miette::Result<C
     discover_catalogs(cwd)
 }
 
+/// pnpm's built-in `gh:` alias → the GitHub Packages npm registry. A user
+/// `namedRegistries.gh` entry overrides it (GHES repoints `gh` at an
+/// enterprise host).
+const BUILTIN_GH_REGISTRY: &str = "https://npm.pkg.github.com/";
+
+/// A `namedRegistries` alias URL is accepted only when it's an absolute
+/// http(s) URL — mirrors pnpm's `new URL(url)` + `http:`/`https:` protocol
+/// check, catching the common typo of a bare host (`npm.work.example.com`).
+/// The scheme-prefix form is dependency-free and sufficient: a truly
+/// malformed-but-schemed URL surfaces later at fetch time.
+fn is_valid_named_registry_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    matches!(rest, Some(authority) if !authority.is_empty())
+}
+
+/// Insert one `alias → url` entry, validating the URL. pnpm hard-errors on an
+/// invalid `namedRegistries` URL; nub warn-drops it instead to keep install
+/// resilient.
+fn merge_named_registry(
+    out: &mut std::collections::BTreeMap<String, String>,
+    alias: String,
+    url: String,
+) {
+    if is_valid_named_registry_url(&url) {
+        out.insert(alias, url);
+    } else {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_INVALID_NAMED_REGISTRY_URL,
+            "namedRegistries alias '{alias}' maps to '{url}', which is not a valid http(s) URL — dropping it",
+        );
+    }
+}
+
+/// Discover the `namedRegistries` alias→URL map the resolver routes
+/// `<alias>:<spec>` dependencies through.
+///
+/// GATED on `engine_context().named_registries_enabled` — a separate posture
+/// from the pnpm-branded config reads because that one defaults `true` in
+/// standalone aube, where activating this feature would break
+/// default-preservation. Empty map = feature off; every `<alias>:` spec falls
+/// through to its existing resolver, so standalone aube stays byte-identical.
+///
+/// Sources, ascending precedence (later overrides earlier per-alias):
+/// 1. the built-in `gh:` → GitHub Packages;
+/// 2. `namedRegistries` in pnpm's GLOBAL `config.yaml` (via
+///    [`super::settings_context::load_global_config_yaml`], itself gated by the
+///    global-scope pnpm posture);
+/// 3. `namedRegistries` in the nearest workspace yaml
+///    (`pnpm-workspace.yaml` / `aube-workspace.yaml`) — the project surface
+///    wins over global, mirroring the settings layer's precedence.
+///
+/// Each URL is validated http(s); an invalid entry is warn-dropped (nub keeps
+/// install resilient rather than hard-erroring like pnpm).
+pub(crate) fn discover_named_registries(
+    project_root: &std::path::Path,
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::<String, String>::new();
+    if !aube_util::engine_context().named_registries_enabled {
+        return out;
+    }
+
+    // (1) built-in gh alias.
+    out.insert("gh".to_string(), BUILTIN_GH_REGISTRY.to_string());
+
+    // (2) global config.yaml, lower precedence than the workspace yaml.
+    let global = super::settings_context::load_global_config_yaml();
+    if let Some(value) = global.get("namedRegistries")
+        && let Ok(map) =
+            yaml_serde::from_value::<std::collections::BTreeMap<String, String>>(value.clone())
+    {
+        for (alias, url) in map {
+            merge_named_registry(&mut out, alias, url);
+        }
+    }
+
+    // (3) workspace yaml, highest precedence. Loaded from the walk-up dir when
+    // present, else project_root — mirroring discover_catalogs.
+    let workspace_yaml_dir = crate::dirs::find_workspace_yaml_root(project_root);
+    let yaml_dir = workspace_yaml_dir.as_deref().unwrap_or(project_root);
+    if let Ok((ws_config, _raw)) = aube_manifest::workspace::load_both(yaml_dir) {
+        for (alias, url) in ws_config.named_registries {
+            merge_named_registry(&mut out, alias, url);
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +282,85 @@ mod tests {
         .unwrap();
 
         assert!(discover_catalogs(dir.path()).unwrap().is_empty());
+    }
+
+    /// Serializes the tests that toggle the process-global
+    /// `named_registries_enabled` gate so they can't observe each other's
+    /// setting under cargo's parallel runner.
+    static NAMED_REGISTRY_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct NamedRegistryGate {
+        old: bool,
+    }
+
+    impl NamedRegistryGate {
+        fn set(enabled: bool) -> Self {
+            let old = aube_util::engine_context().named_registries_enabled;
+            aube_util::update_engine_context(|c| c.named_registries_enabled = enabled);
+            Self { old }
+        }
+    }
+
+    impl Drop for NamedRegistryGate {
+        fn drop(&mut self) {
+            let old = self.old;
+            aube_util::update_engine_context(|c| c.named_registries_enabled = old);
+        }
+    }
+
+    #[test]
+    fn named_registries_empty_when_gate_off() {
+        let _serial = NAMED_REGISTRY_GATE.lock().unwrap();
+        let _gate = NamedRegistryGate::set(false);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "namedRegistries:\n  work: https://npm.work.net/\n",
+        )
+        .unwrap();
+        assert!(discover_named_registries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn named_registries_builtin_gh_workspace_override_and_validation() {
+        let _serial = NAMED_REGISTRY_GATE.lock().unwrap();
+        let _gate = NamedRegistryGate::set(true);
+        let dir = tempfile::tempdir().unwrap();
+        // Workspace yaml overrides the built-in `gh` (GHES repoint), adds a
+        // valid alias, and carries an invalid URL that must be warn-dropped.
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "namedRegistries:\n  \
+             work: https://npm.work.net/\n  \
+             gh: https://ghe.example/\n  \
+             bad: npm.work.example.com\n",
+        )
+        .unwrap();
+
+        let map = discover_named_registries(dir.path());
+        // Workspace `gh` wins over the built-in default.
+        assert_eq!(
+            map.get("gh").map(String::as_str),
+            Some("https://ghe.example/")
+        );
+        assert_eq!(
+            map.get("work").map(String::as_str),
+            Some("https://npm.work.net/")
+        );
+        // Invalid (scheme-less) URL was dropped, not inserted.
+        assert!(!map.contains_key("bad"));
+    }
+
+    #[test]
+    fn named_registries_builtin_gh_present_without_workspace_config() {
+        let _serial = NAMED_REGISTRY_GATE.lock().unwrap();
+        let _gate = NamedRegistryGate::set(true);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
+        // No project namedRegistries → the built-in gh default is still seeded.
+        // (Assert presence, not the exact URL: a global pnpm config.yaml on the
+        // host could legitimately repoint gh, which would still leave it keyed.)
+        let map = discover_named_registries(dir.path());
+        assert!(map.contains_key("gh"));
     }
 }

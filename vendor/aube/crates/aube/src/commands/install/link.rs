@@ -1,4 +1,3 @@
-use super::bin_linking::{link_bin_entries, link_bins, link_bins_for_dep};
 use super::sweep::invalidate_changed_aube_entries;
 use super::{InstallPhaseTimings, lifecycle::resolve_link_strategy};
 use super::{bin_linking, delta};
@@ -429,161 +428,26 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     //    mode.
     let placements_ref = stats.hoisted_placements.as_ref();
     let phase_start = std::time::Instant::now();
-    // `extendNodePath` controls whether shim scripts export `NODE_PATH`.
-    // `preferSymlinkedExecutables` only matters on POSIX: `Some(true)`
-    // keeps the symlink layout, `Some(false)` swaps in a shell shim so
-    // `extendNodePath` can actually take effect (bare symlinks can't set
-    // env vars). When the user leaves it unset, default to shim under the
-    // isolated linker (NODE_PATH matters there so transitives hoisted to
-    // `.aube/node_modules/` resolve from a shimmed bin) and symlink under
-    // hoisted (every dep is already on the root `node_modules/` walk-up
-    // path, so NODE_PATH is unnecessary). Mirrors pnpm's effective
-    // default. Windows always writes cmd/ps1/sh wrappers regardless,
-    // since real symlinks there need Developer Mode.
-    let extend_node_path = aube_settings::resolved::extend_node_path(settings_ctx);
-    let isolated = !matches!(node_linker, aube_linker::NodeLinker::Hoisted);
-    let prefer_symlinked_executables =
-        aube_settings::resolved::prefer_symlinked_executables(settings_ctx)
-            .or(isolated.then_some(false));
-    // Only the isolated layout has a hidden modules dir worth exposing
-    // via NODE_PATH — under `node-linker=hoisted` every dep is already
-    // on the top-level `node_modules/` walk-up path, so appending
-    // `.aube/node_modules/` would just stuff a non-existent entry into
-    // every shim. `add.rs` (global install, hoisted-shaped) passes
-    // `None` for the same reason.
-    let hidden_modules_dir = aube_dir.join("node_modules");
-    let shim_opts = aube_linker::BinShimOptions {
-        extend_node_path,
-        prefer_symlinked_executables,
-        hidden_modules_dir: isolated.then_some(hidden_modules_dir.as_path()),
-    };
-    if !virtual_store_only {
-        let mut pkg_json_cache = bin_linking::PkgJsonCache::new();
-        let mut ws_pkg_json_cache = bin_linking::WsPkgJsonCache::new();
-        let ws_dirs_for_bins = has_workspace.then_some(ws_dirs);
-        link_bins(
-            cwd,
-            modules_dir_name,
-            aube_dir,
-            graph_for_link,
-            virtual_store_dir_max_length,
-            placements_ref,
-            shim_opts,
-            &mut pkg_json_cache,
-            ws_dirs_for_bins,
-            &mut ws_pkg_json_cache,
-        )?;
-        // Root importer's own `bin` (discussion #228). Runs after
-        // `link_bins` so a self-bin overrides a same-named dep bin.
-        // Self-bin targets are files in the importer's own tree — often
-        // build outputs that don't exist at install time, or are
-        // later restored from an `actions/upload-artifact` round-trip
-        // that strips the POSIX exec bit. A POSIX shim (shell script
-        // that invokes `node`) is itself `+x` and does not rely on
-        // the target's exec bit, so `aube run` works in both flows.
-        if let Some(bin) = manifest.extra.get("bin") {
-            let root_bin_dir = cwd.join(modules_dir_name).join(".bin");
-            let self_shim_opts = aube_linker::BinShimOptions {
-                prefer_symlinked_executables: Some(false),
-                ..shim_opts
-            };
-            link_bin_entries(
-                &root_bin_dir,
-                cwd,
-                manifest.name.as_deref(),
-                bin,
-                self_shim_opts,
-            )?;
-        }
-        if has_workspace {
-            for (importer_path, deps) in &graph_for_link.importers {
-                if importer_path == "." {
-                    continue;
-                }
-                // pnpm v9 emits nested peer-context importer entries
-                // (e.g. `a/node_modules/@scope/b`). Those paths are
-                // reached through the workspace-to-workspace symlink
-                // chain, not distinct directories to receive their own
-                // `.bin`. Walking them here duplicates work on the
-                // physical workspace and, at monorepo depth, pushes the
-                // kernel's per-lookup symlink budget over SYMLOOP_MAX.
-                if !aube_linker::is_physical_importer(importer_path) {
-                    continue;
-                }
-                let pkg_dir = cwd.join(importer_path);
-                let bin_dir = pkg_dir.join(modules_dir_name).join(".bin");
-                std::fs::create_dir_all(&bin_dir).into_diagnostic()?;
-                for dep in deps {
-                    if let Some(ws_dir) = ws_dirs.get(&dep.name) {
-                        bin_linking::link_bins_for_workspace_dep(
-                            &mut ws_pkg_json_cache,
-                            &bin_dir,
-                            ws_dir,
-                            &dep.name,
-                            shim_opts,
-                        )?;
-                    } else {
-                        link_bins_for_dep(
-                            &mut pkg_json_cache,
-                            aube_dir,
-                            &bin_dir,
-                            graph_for_link,
-                            &dep.dep_path,
-                            &dep.name,
-                            virtual_store_dir_max_length,
-                            placements_ref,
-                            shim_opts,
-                        )?;
-                    }
-                }
-                // Workspace member's own `bin` (discussion #228). `manifests`
-                // was parsed once upstream and keys by importer relpath.
-                // See the root self-bin call site for why this forces a
-                // POSIX shim instead of a symlink.
-                if let Some((_, member_manifest)) =
-                    manifests.iter().find(|(p, _)| p == importer_path)
-                    && let Some(bin) = member_manifest.extra.get("bin")
-                {
-                    let self_shim_opts = aube_linker::BinShimOptions {
-                        prefer_symlinked_executables: Some(false),
-                        ..shim_opts
-                    };
-                    link_bin_entries(
-                        &bin_dir,
-                        &pkg_dir,
-                        member_manifest.name.as_deref(),
-                        bin,
-                        self_shim_opts,
-                    )?;
-                }
-            }
-        }
-        // Gate matches the lifecycle phase's (`finalize.rs`) via the
-        // shared `dep_build_scripts_may_run` predicate, threaded through
-        // `maybe_link_dep_bins` (single, testable home for the decision):
-        // the `defaultTrust` floor can authorize a package's build
-        // scripts with no explicit allow rule, and those scripts call
-        // binaries declared in the package's own `dependencies` — which
-        // must be shimmed into the dep's `.bin` and put on PATH. Gating
-        // only on `has_any_allow_rule()` skipped this whole pass on a
-        // pure trust-floor install, so a postinstall calling a
-        // dep-provided CLI (e.g. lmdb's
-        // `node-gyp-build-optional-packages`) failed with exit 127 even
-        // though the script itself ran.
-        bin_linking::maybe_link_dep_bins(
-            ignore_scripts,
-            build_policy.has_any_allow_rule(),
-            floor_may_allow_any,
-            aube_dir,
-            graph_for_link,
-            virtual_store_dir_max_length,
-            placements_ref,
-            shim_opts,
-            &mut pkg_json_cache,
-        )?;
-        tracing::debug!("phase:link_bins {:.1?}", phase_start.elapsed());
-        phase_timings.record("link_bins", phase_start.elapsed());
-    }
+    bin_linking::link_all_bins(bin_linking::LinkAllBinsInput {
+        settings_ctx,
+        node_linker,
+        cwd,
+        modules_dir_name,
+        aube_dir,
+        graph_for_link,
+        virtual_store_dir_max_length,
+        placements: placements_ref,
+        manifest,
+        manifests,
+        ws_dirs,
+        has_workspace,
+        virtual_store_only,
+        ignore_scripts,
+        has_any_allow_rule: build_policy.has_any_allow_rule(),
+        floor_may_allow_any,
+    })?;
+    tracing::debug!("phase:link_bins {:.1?}", phase_start.elapsed());
+    phase_timings.record("link_bins", phase_start.elapsed());
     Ok(LinkPhaseOutput {
         stats,
         node_linker,

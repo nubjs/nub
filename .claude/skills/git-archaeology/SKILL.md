@@ -1,6 +1,8 @@
 ---
 name: git-archaeology
 description: Fast recipes for answering when/what/why a feature, flag, API, file, or string was added, removed, unflagged, or renamed in git history.
+metadata:
+  internal: true
 ---
 
 # git-archaeology

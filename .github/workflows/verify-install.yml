@@ -6,7 +6,7 @@ name: Verify install scripts
 # no publish step required. Complements the release's `Test install` jobs, which
 # only exercise `npm install -g` and never touch the curl/irm script path.
 #
-# Three guarantees enforced here beyond a basic smoke:
+# Four guarantees enforced here beyond a basic smoke:
 #   1. drift-guard: site/public/install.{sh,ps1} must be byte-for-byte identical to
 #      root install.{sh,ps1} (catches stale site-served copies before they reach users).
 #   2. nubx: every job asserts nubx exists AND runs after install (argv[0] dispatch is
@@ -14,6 +14,8 @@ name: Verify install scripts
 #   3. macOS 403 fix: curl uses a token-auth header on raw.githubusercontent.com so the
 #      CI runner never hits the unauthenticated rate-limit that caused intermittent 403s
 #      on macos-14.
+#   4. checksum ordering: local fixtures prove malformed or mismatched sidecars fail
+#      before the existing install is removed or the archive is extracted.
 
 on:
   workflow_dispatch:
@@ -32,6 +34,8 @@ on:
       - install.ps1
       - site/public/install.sh
       - site/public/install.ps1
+      - tests/installer/checksums.sh
+      - tests/installer/checksums.ps1
       - .github/workflows/verify-install.yml
 
 concurrency:
@@ -73,6 +77,10 @@ jobs:
         os: [windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - name: Verify checksum handling against local fixtures
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/installer/checksums.ps1
       - name: Install via install.ps1 (the real `irm | iex` path)
         shell: pwsh
         env:
@@ -205,3 +213,29 @@ jobs:
             exit 1
           fi
           "$nubx_path" --version
+
+  # Exercises the REPO's install.sh (not the main-served copy) against sandbox
+  # HOMEs to assert the customization knobs: per-shell PATH lines, the .nub-receipt
+  # marker, NUB_INSTALL_DIR relocation, and the NUB_NO_MODIFY_PATH opt-out. This is
+  # the only job that validates the branch's own script changes end-to-end (the
+  # curl-based jobs above fetch from `source`, which defaults to main).
+  harness:
+    name: install.sh harness · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - name: Verify checksum handling against local fixtures
+        shell: bash
+        run: bash tests/installer/checksums.sh
+      - name: Run tests/installer/run.sh
+        shell: bash
+        env:
+          # The harness's install.sh authenticates the releases/latest API call to
+          # dodge the unauthenticated rate-limit (403) on shared CI IPs.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_COLOR: "0"
+        run: bash tests/installer/run.sh

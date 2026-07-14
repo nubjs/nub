@@ -28,8 +28,9 @@
 //!   there is no shared-temp planted-dir class; the unix stat checks are skipped.
 //!
 //! - **R2 — verify the loaded code against a baked-in hash (integrity backstop).**
-//!   `build.rs` bakes the BLAKE3 digest of the three directly-loaded entrypoints
-//!   (`preload.mjs`, `preload.cjs`, `addons/nub-native.node`) into the binary. On
+//!   `build.rs` bakes the BLAKE3 digest of the four directly-loaded entrypoints
+//!   (`preload.mjs`, `preload.cjs`, `watch-env-guard.cjs`, and
+//!   `addons/nub-native.node`) into the binary. On
 //!   the load path (once per process, inside the OnceLock init, ~6 ms for the ~9 MB
 //!   addon on aarch64 — BLAKE3 over software SHA-256's ~28 ms there) the EXTRACTED
 //!   entrypoints are re-hashed against those consts. On mismatch we
@@ -66,17 +67,19 @@ const CACHE_KEY: &str = env!("NUB_RUNTIME_CACHE_KEY");
 /// (signed) binary so a tampered on-disk file can't swap its own hash alongside it.
 const HASH_PRELOAD_MJS: &str = env!("NUB_RUNTIME_HASH_PRELOAD_MJS");
 const HASH_PRELOAD_CJS: &str = env!("NUB_RUNTIME_HASH_PRELOAD_CJS");
+const HASH_WATCH_ENV_GUARD: &str = env!("NUB_RUNTIME_HASH_WATCH_ENV_GUARD");
 const HASH_ADDON: &str = env!("NUB_RUNTIME_HASH_ADDON");
 
-/// The three directly-loaded entrypoints and their baked digests. The native addon
-/// (`dlopen`'d) and the preload scripts (`--require`d) are the actual code-load
+/// The four directly-loaded entrypoints and their baked digests. The native addon
+/// (`dlopen`'d) and the preload scripts (`--require`d/`--import`ed) are the actual code-load
 /// surface; the vendored `node_modules` polyfills are intentionally OUT of the
 /// per-load hash (R1's 0700 owner-only base already closes their planted-file
 /// vector, and hashing the whole ~13 MB tree every run would be a real regression
 /// for a fast script runner — the entrypoints keep the cost ~1-2 ms).
-const VERIFIED_ENTRYPOINTS: [(&str, &str); 3] = [
+const VERIFIED_ENTRYPOINTS: [(&str, &str); 4] = [
     ("preload.mjs", HASH_PRELOAD_MJS),
     ("preload.cjs", HASH_PRELOAD_CJS),
+    ("watch-env-guard.cjs", HASH_WATCH_ENV_GUARD),
     ("addons/nub-native.node", HASH_ADDON),
 ];
 
@@ -355,7 +358,7 @@ fn file_blake3_hex(path: &Path) -> Option<String> {
     Some(blake3::hash(&bytes).to_hex().to_string())
 }
 
-/// Re-hash the extracted entrypoints in `dir` against the baked digests. All three
+/// Re-hash the extracted entrypoints in `dir` against the baked digests. All four
 /// must read AND match. ~6 ms (entrypoints only, addon-dominated), paid at most once
 /// per process (the caller runs inside the `EXTRACTED` OnceLock init).
 fn verify_entrypoints(dir: &Path) -> bool {
@@ -699,7 +702,7 @@ mod tests {
 
     #[test]
     fn tampered_entrypoint_is_detected_and_self_healed() {
-        // A WARM cache whose addon was swapped (planted / AV-corrupted) must be
+        // A WARM cache whose watch guard was swapped (planted / AV-corrupted) must be
         // detected and self-healed: re-extract the trusted in-binary blob over it,
         // restoring the verified bytes — never bricked, never silently loaded.
         let base = tmp_base("nub-rtc-heal");
@@ -711,7 +714,7 @@ mod tests {
             "fresh real-blob extraction verifies"
         );
 
-        fs::write(target.join("addons/nub-native.node"), b"malicious").unwrap();
+        fs::write(target.join("watch-env-guard.cjs"), b"malicious").unwrap();
         assert!(!verify_entrypoints(&target), "tamper must be detected");
 
         let healed = verify_or_heal(&base, &target, false).expect("self-heal returns the dir");

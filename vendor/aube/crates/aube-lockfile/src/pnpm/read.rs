@@ -1,7 +1,6 @@
 use super::dep_path::{
     dep_path_tail, parse_dep_path, peerless_alias_target, rewrite_peer_suffix,
-    rewrite_snapshot_alias_deps,
-    version_to_dep_path,
+    rewrite_snapshot_alias_deps, version_to_dep_path,
 };
 use super::raw::{
     RawBinSpec, RawDepSpec, RawRuntimeVariant, local_source_from_resolution, parse_raw_lockfile,
@@ -701,6 +700,11 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                 transitive_peer_dependencies,
                 tarball_url,
                 registry_git_hosted,
+                // Write-time-only signal, re-derived by the resolver's finalize
+                // pass; a parsed package keeps `false` and the persisted
+                // `tarball_url` above already carries the URL a frozen install
+                // fetches from.
+                force_tarball_url: false,
                 alias_of,
                 yarn_checksum: None,
                 engines,

@@ -1,0 +1,20 @@
+---
+title: "Nub 0.4.10"
+description: Expo projects below SDK 56 install with a project-local store, and a newly-added workspace member resolves on the shared lockfile layout.
+author: The Nub Team
+date: 2026-07-12
+---
+
+A patch release with two package-manager install fixes.
+
+## Expo below SDK 56
+
+Nub's default install links every project into one machine-global virtual store, shared across projects. That works when a project's tooling can resolve modules through the symlinks into that store — but a bundler that resolves by real path only ever crawls the project directory, so it can't see the shared store. Nub already installs those projects (bare React Native, Next.js) with a self-contained, project-local store instead.
+
+Expo is the same story below SDK 56: its Metro configuration crawls by real path and can't reach the machine-global store. SDK 56 changed that — its On-demand Filesystem makes Metro store-aware, and [Expo now supports global virtual stores](https://expo.dev/changelog/sdk-56). So nub now keys on the Expo version: a project on Expo below SDK 56 installs with a project-local store, while Expo 56 and up keeps the shared store. ([#446](https://github.com/nubjs/nub/pull/446))
+
+## Workspaces
+
+Adding a new member to a workspace and reinstalling now resolves that member against the shared lockfile layout, instead of leaving it unlinked. ([#443](https://github.com/nubjs/nub/pull/443))
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.10) list every change in this release.

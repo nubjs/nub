@@ -14,6 +14,7 @@
 //! runs against an unpinned runtime.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -251,8 +252,8 @@ pub fn provision_pm_from_tarball(
 
 /// The runnable bin of an already-installed `<pm_store>/<version>/`, or `None`
 /// when the version isn't cached (or its install is unreadable/incomplete —
-/// callers then take the network path, whose installer treats an existing
-/// `package/` dir as someone else's completed install).
+/// callers then take the network path, whose installer repairs only that
+/// incomplete version entry from verified staging).
 fn cached_bin(pm_store: &Path, version: &str) -> Option<PathBuf> {
     let pkg_dir = pm_store.join(version).join("package");
     let raw = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
@@ -428,22 +429,131 @@ fn extract_and_place(
     let top = extract_tgz(tarball, &staging)?;
     normalize_top_dir(&staging, &top)?;
 
-    // Atomic place. If a concurrent run already installed it, keep theirs.
-    if !final_dir.join("package").is_dir() {
-        std::fs::create_dir_all(pm_store).ok();
-        if let Err(e) = std::fs::rename(&staging, final_dir) {
-            if !final_dir.join("package").is_dir() {
-                return Err(e).with_context(|| {
-                    format!(
-                        "installing {pm} {} into {}",
-                        dist.version,
-                        final_dir.display()
-                    )
-                });
-            }
+    let staging_bin = staging.join("package").join(&dist.bin_subpath);
+    let final_bin = final_dir.join("package").join(&dist.bin_subpath);
+    if !staging_bin.is_file() {
+        bail!(
+            "cannot install {pm} {}: the verified package is missing the expected launcher {}",
+            dist.version,
+            final_bin.display()
+        );
+    }
+
+    if final_bin.is_file() {
+        return Ok(());
+    }
+    if final_dir.exists() {
+        return recover_incomplete_version(pm, dist, pm_store, final_dir, &staging);
+    }
+
+    #[cfg(test)]
+    run_before_initial_rename_test_hook(final_dir);
+
+    match std::fs::rename(&staging, final_dir) {
+        Ok(()) => require_launcher(pm, dist, &final_bin),
+        Err(_) if final_bin.is_file() => Ok(()),
+        Err(_) if final_dir.exists() => {
+            recover_incomplete_version(pm, dist, pm_store, final_dir, &staging)
         }
+        Err(e) => Err(e).with_context(|| placement_context(pm, dist, final_dir)),
+    }
+}
+
+fn recover_incomplete_version(
+    pm: super::Pm,
+    dist: &VersionDist,
+    pm_store: &Path,
+    final_dir: &Path,
+    staging: &Path,
+) -> Result<()> {
+    let final_bin = final_dir.join("package").join(&dist.bin_subpath);
+    if final_bin.is_file() {
+        return Ok(());
+    }
+
+    let quarantine = match move_to_unique_quarantine(pm_store, final_dir, &dist.version) {
+        Ok(path) => path,
+        Err(_) if final_bin.is_file() => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let _quarantine_guard = WorkGuard(quarantine.clone());
+    match std::fs::rename(staging, final_dir) {
+        Ok(()) => require_launcher(pm, dist, &final_bin),
+        Err(_) if final_bin.is_file() => Ok(()),
+        Err(e) => Err(e).with_context(|| placement_context(pm, dist, final_dir)),
+    }
+}
+
+fn move_to_unique_quarantine(pm_store: &Path, final_dir: &Path, version: &str) -> Result<PathBuf> {
+    rename_to_unique_sibling(final_dir, || next_quarantine_path(pm_store, version)).with_context(
+        || {
+            format!(
+                "cannot quarantine incomplete package-manager cache entry {}",
+                final_dir.display()
+            )
+        },
+    )
+}
+
+fn require_launcher(pm: super::Pm, dist: &VersionDist, launcher: &Path) -> Result<()> {
+    if !launcher.is_file() {
+        bail!(
+            "installing {pm} {} did not produce the expected launcher {}",
+            dist.version,
+            launcher.display()
+        );
     }
     Ok(())
+}
+
+fn placement_context(pm: super::Pm, dist: &VersionDist, final_dir: &Path) -> String {
+    format!(
+        "installing {pm} {} into {}",
+        dist.version,
+        final_dir.display()
+    )
+}
+
+fn rename_to_unique_sibling(
+    source: &Path,
+    mut next: impl FnMut() -> PathBuf,
+) -> std::io::Result<PathBuf> {
+    loop {
+        let candidate = next();
+        match std::fs::rename(source, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(_)
+                if std::fs::symlink_metadata(source).is_ok()
+                    && std::fs::symlink_metadata(&candidate).is_ok() =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn next_quarantine_path(pm_store: &Path, version: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    pm_store.join(format!(
+        ".tmp-replaced-{version}-{}-{sequence}",
+        std::process::id()
+    ))
+}
+
+#[cfg(test)]
+type BeforeInitialRenameHook = Box<dyn Fn(&Path) + Send>;
+
+#[cfg(test)]
+static BEFORE_INITIAL_RENAME_HOOK: std::sync::Mutex<Option<BeforeInitialRenameHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn run_before_initial_rename_test_hook(final_dir: &Path) {
+    if let Some(hook) = BEFORE_INITIAL_RENAME_HOOK.lock().unwrap().as_ref() {
+        hook(final_dir);
+    }
 }
 
 /// The silent (no announce, no `Installed` line) extract+place for the
@@ -751,26 +861,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store);
     }
 
+    const FAKE_PNPM_LAUNCHER: &[u8] = b"// fake pnpm launcher\n";
+
     /// Author a `package/`-rooted pnpm-shaped `.tgz` (gzip + tar) on disk — what
     /// the registry serves and what `nub pm use` downloads once, then hands to
     /// [`provision_pm_from_tarball`]. Same shape `extract.rs` authors in its own
     /// tests; restated here (three lines) rather than crossing the module seam.
     fn write_pnpm_tgz(archive: &Path) {
+        write_pnpm_tgz_with_launcher(archive, Some(FAKE_PNPM_LAUNCHER));
+    }
+
+    fn write_pnpm_tgz_with_launcher(archive: &Path, launcher: Option<&[u8]>) {
         use flate2::{Compression, write::GzEncoder};
         let manifest = br#"{ "name": "pnpm", "bin": { "pnpm": "bin/pnpm.cjs" } }"#;
-        let bin = b"// fake pnpm launcher\n";
         let gz = GzEncoder::new(std::fs::File::create(archive).unwrap(), Compression::fast());
         let mut tar = tar::Builder::new(gz);
-        for (path, body) in [
-            ("package/package.json", manifest.as_slice()),
-            ("package/bin/pnpm.cjs", bin.as_slice()),
-        ] {
+        for (path, body) in [("package/package.json", manifest.as_slice())]
+            .into_iter()
+            .chain(launcher.map(|body| ("package/bin/pnpm.cjs", body)))
+        {
             let mut h = tar::Header::new_gnu();
             h.set_size(body.len() as u64);
             h.set_mode(0o644);
             tar.append_data(&mut h, path, body).unwrap();
         }
         tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    fn fake_pnpm_dist() -> VersionDist {
+        VersionDist {
+            version: "9.12.0".to_string(),
+            tarball: "http://127.0.0.1:1/never-fetched.tgz".to_string(),
+            integrity: registry::Integrity::Sha512("unused-caller-already-verified".to_string()),
+            bin_subpath: PathBuf::from("bin/pnpm.cjs"),
+        }
+    }
+
+    fn assert_no_placement_debris(pm_store: &Path) {
+        let leftovers = std::fs::read_dir(pm_store)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with(".tmp-place-") || name.starts_with(".tmp-replaced-"))
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "placement work and quarantine dirs are cleaned: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -786,14 +924,8 @@ mod tests {
 
         let tgz = store.join("pnpm-9.12.0.tgz");
         write_pnpm_tgz(&tgz);
-        let dist = VersionDist {
-            version: "9.12.0".to_string(),
-            // A bogus tarball URL: if the pre-downloaded path ever tried to fetch,
-            // it would hit this and fail — it must not.
-            tarball: "http://127.0.0.1:1/never-fetched.tgz".to_string(),
-            integrity: registry::Integrity::Sha512("unused-caller-already-verified".to_string()),
-            bin_subpath: PathBuf::from("bin/pnpm.cjs"),
-        };
+        // The bogus URL in this dist fails fast if the pre-downloaded path ever fetches.
+        let dist = fake_pnpm_dist();
 
         // Cold: extracts the supplied tarball into the version-addressed store.
         let cold = provision_pm_from_tarball(Pm::Pnpm, &dist, &tgz, &store)
@@ -814,6 +946,109 @@ mod tests {
             warm, cold,
             "the warm hit returns the identical bin + version"
         );
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn provision_from_tarball_repairs_an_incomplete_version_entry() {
+        let store = offline_store_with("from-tarball-repair", "0.0.0-unused");
+        let _ = std::fs::remove_dir_all(store.join("pm"));
+
+        let tgz = store.join("pnpm-9.12.0.tgz");
+        write_pnpm_tgz(&tgz);
+        let dist = fake_pnpm_dist();
+        let final_dir = store.join("pm/pnpm/9.12.0");
+        std::fs::create_dir_all(final_dir.join("package")).unwrap();
+        std::fs::write(final_dir.join("stale-sentinel"), "stale").unwrap();
+
+        let provisioned = provision_pm_from_tarball(Pm::Pnpm, &dist, &tgz, &store)
+            .expect("a verified replacement repairs an incomplete version entry");
+        assert_eq!(
+            std::fs::read(&provisioned.bin).unwrap(),
+            FAKE_PNPM_LAUNCHER,
+            "the replacement launcher lands at the returned path"
+        );
+        assert!(
+            !final_dir.join("stale-sentinel").exists(),
+            "recovery replaces the whole version entry rather than merging trees"
+        );
+        assert_no_placement_debris(&store.join("pm/pnpm"));
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn placement_preserves_a_valid_concurrent_winner() {
+        let store = offline_store_with("from-tarball-winner", "0.0.0-unused");
+        let _ = std::fs::remove_dir_all(store.join("pm"));
+        let pm_store = store.join("pm/pnpm");
+        let final_dir = pm_store.join("9.12.0");
+        let winner_bin = final_dir.join("package/bin/pnpm.cjs");
+        assert!(!final_dir.exists());
+
+        let tgz = store.join("pnpm-9.12.0.tgz");
+        write_pnpm_tgz_with_launcher(&tgz, Some(b"candidate\n"));
+        let hook_target = final_dir.clone();
+        *BEFORE_INITIAL_RENAME_HOOK.lock().unwrap() = Some(Box::new(move |current| {
+            if current == hook_target.as_path() {
+                let winner = current.join("package/bin/pnpm.cjs");
+                std::fs::create_dir_all(winner.parent().unwrap()).unwrap();
+                std::fs::write(winner, b"winner\n").unwrap();
+            }
+        }));
+        let provisioned = provision_pm_from_tarball(Pm::Pnpm, &fake_pnpm_dist(), &tgz, &store);
+        *BEFORE_INITIAL_RENAME_HOOK.lock().unwrap() = None;
+        let provisioned = provisioned.expect("a valid concurrent winner is adopted");
+
+        assert_eq!(provisioned.bin, winner_bin);
+        assert_eq!(std::fs::read(&winner_bin).unwrap(), b"winner\n");
+        assert_no_placement_debris(&pm_store);
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn quarantine_rename_skips_a_stale_name_collision() {
+        let store = offline_store_with("quarantine-collision", "0.0.0-unused");
+        let source = store.join("9.12.0");
+        let stale_quarantine = store.join("stale-quarantine");
+        let fresh_quarantine = store.join("fresh-quarantine");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("incumbent"), "incumbent").unwrap();
+        std::fs::create_dir_all(&stale_quarantine).unwrap();
+        std::fs::write(stale_quarantine.join("sentinel"), "stale").unwrap();
+        let mut candidates = [stale_quarantine.clone(), fresh_quarantine.clone()].into_iter();
+
+        let quarantine = rename_to_unique_sibling(&source, || candidates.next().unwrap()).unwrap();
+        assert_eq!(quarantine, fresh_quarantine);
+        assert!(fresh_quarantine.join("incumbent").is_file());
+        assert!(stale_quarantine.join("sentinel").is_file());
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn a_malformed_replacement_does_not_disturb_an_incomplete_incumbent() {
+        let store = offline_store_with("from-tarball-incomplete", "0.0.0-unused");
+        let _ = std::fs::remove_dir_all(store.join("pm"));
+        let pm_store = store.join("pm/pnpm");
+        let final_dir = pm_store.join("9.12.0");
+        let tgz = store.join("pnpm-9.12.0.tgz");
+        write_pnpm_tgz_with_launcher(&tgz, None);
+        let dist = fake_pnpm_dist();
+
+        std::fs::create_dir_all(final_dir.join("package")).unwrap();
+        std::fs::write(final_dir.join("stale-sentinel"), "stale").unwrap();
+        let incumbent_err = provision_pm_from_tarball(Pm::Pnpm, &dist, &tgz, &store)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            incumbent_err.contains("verified package is missing the expected launcher"),
+            "unexpected error: {incumbent_err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(final_dir.join("stale-sentinel")).unwrap(),
+            "stale",
+            "staging validation fails before moving an incomplete incumbent"
+        );
+        assert_no_placement_debris(&pm_store);
         let _ = std::fs::remove_dir_all(&store);
     }
 

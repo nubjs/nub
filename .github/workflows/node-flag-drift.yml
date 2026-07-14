@@ -1,0 +1,100 @@
+name: Node flag drift
+
+# Guards the hand-vetted experimental-flag feature matrix against Node changing its
+# --experimental-* flag set underneath us. Two independent checks share one comparison
+# (scripts/check-node-flag-drift.mjs against scripts/node-flag-inventory.snapshot.json):
+#
+#   • snapshot-check — per-PR, Node PINNED to the snapshot's own version. Deterministic:
+#     it only fails if the snapshot or the inventory tool was edited wrong. This is the
+#     stable gate; it never depends on Node nightly moving.
+#   • nightly-drift — scheduled, Node NIGHTLY (and RC when one exists). A diff means Node
+#     added or removed an experimental flag since the snapshot; the job fails loudly so a
+#     human vets the change and, if nub should support it, hand-adds a band to the matrix.
+#     Deliberately NOT a per-PR gate — a Node-nightly change must never block unrelated PRs.
+
+on:
+  pull_request:
+    paths:
+      - scripts/node-flag-inventory.mjs
+      - scripts/check-node-flag-drift.mjs
+      - scripts/node-flag-inventory.snapshot.json
+      - crates/nub-core/src/node/feature_matrix.rs
+      - .github/workflows/node-flag-drift.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/node-flag-inventory.mjs
+      - scripts/check-node-flag-drift.mjs
+      - scripts/node-flag-inventory.snapshot.json
+      - crates/nub-core/src/node/feature_matrix.rs
+      - .github/workflows/node-flag-drift.yml
+  schedule:
+    # Daily at 06:30 UTC — offset off the hour to dodge cron pile-ups.
+    - cron: "30 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-flag-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Deterministic per-PR check: regenerate the inventory on the EXACT Node the snapshot
+  # was captured on and assert byte-identity. Skipped on the nightly schedule.
+  snapshot-check:
+    if: github.event_name != 'schedule'
+    name: Snapshot matches pinned Node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - name: Read pinned Node version from the snapshot
+        id: pin
+        run: |
+          set -euo pipefail
+          ver=$(node -e 'process.stdout.write(require("./scripts/node-flag-inventory.snapshot.json").nodeVersion.replace(/^v/,""))')
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Snapshot pins Node $ver"
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: ${{ steps.pin.outputs.version }}
+      - name: Check snapshot is in sync with pinned Node
+        run: node scripts/check-node-flag-drift.mjs --snapshot scripts/node-flag-inventory.snapshot.json
+
+  # Early-warning against Node's pre-release lines. Downloads the latest nightly (and RC,
+  # when one is published) straight from nodejs.org and diffs its flag set vs the snapshot.
+  nightly-drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: Drift vs ${{ matrix.channel }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [nightly, rc]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - name: Install latest ${{ matrix.channel }} Node
+        id: node
+        run: |
+          set -euo pipefail
+          base="https://nodejs.org/download/${{ matrix.channel }}"
+          # index.json is newest-first; [0].version is the latest build on the channel.
+          ver=$(curl -fsSL "$base/index.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s);process.stdout.write(a.length?a[0].version:"")})')
+          if [ -z "$ver" ]; then
+            echo "no $ver build published on the ${{ matrix.channel }} channel right now — skipping"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Latest ${{ matrix.channel }}: $ver"
+          dest="$RUNNER_TEMP/node-${ver}"
+          curl -fsSL "$base/${ver}/node-${ver}-linux-x64.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "bin=$RUNNER_TEMP/node-${ver}-linux-x64/bin" >> "$GITHUB_OUTPUT"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+      - name: Diff ${{ matrix.channel }} flag set vs snapshot
+        if: steps.node.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          export PATH="${{ steps.node.outputs.bin }}:$PATH"
+          node --version
+          node scripts/check-node-flag-drift.mjs --snapshot scripts/node-flag-inventory.snapshot.json

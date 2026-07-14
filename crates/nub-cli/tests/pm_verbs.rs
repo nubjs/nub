@@ -124,6 +124,37 @@ const IS_POSITIVE_PACKAGE_LOCK: &str = r#"{
 }
 "#;
 
+/// A minimal npm lockfile where `demo-plugin` declares a peer on `demo-host`,
+/// with both as direct deps. An organic pnpm-lock keys the plugin as
+/// `demo-plugin@1.0.0(demo-host@1.0.0)`; the #453 bug wrote a bare
+/// `demo-plugin@1.0.0`. `import` reads peer data straight from the lockfile —
+/// no registry — so synthetic package names exercise the pass fully offline.
+const PEER_DEP_PACKAGE_LOCK: &str = r#"{
+  "name": "fixture",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "fixture",
+      "version": "1.0.0",
+      "dependencies": { "demo-plugin": "1.0.0", "demo-host": "1.0.0" }
+    },
+    "node_modules/demo-host": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/demo-host/-/demo-host-1.0.0.tgz",
+      "integrity": "sha512-8ND1j3y9/HP94TOvGzr69/FgbkX2ruOldhLEsTWwcJVfo4oRjwemJmJxt7RJkKYH8tz7vYBP9JcKQY8CLuJ90Q=="
+    },
+    "node_modules/demo-plugin": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/demo-plugin/-/demo-plugin-1.0.0.tgz",
+      "integrity": "sha512-8ND1j3y9/HP94TOvGzr69/FgbkX2ruOldhLEsTWwcJVfo4oRjwemJmJxt7RJkKYH8tz7vYBP9JcKQY8CLuJ90Q==",
+      "peerDependencies": { "demo-host": "^1.0.0" }
+    }
+  }
+}
+"#;
+
 /// `nub add` then `nub rm` (alias) round-trip on a truly-fresh project: add
 /// persists the dep + writes nub's neutral `nub.lock` + links node_modules;
 /// remove strips the dep from the manifest again. Both outputs brand-clean.
@@ -531,6 +562,35 @@ fn import_converts_package_lock_to_pnpm_lock() {
     );
     let forced = run_nub(&dir, &["import", "--force"]);
     assert_eq!(forced.code, 0, "stderr: {}", forced.stderr);
+}
+
+/// Regression for #453: importing a suffix-less source (npm/bun) must run the
+/// peer-context pass so the written pnpm-lock carries peer suffixes. The install
+/// path skips that pass for pnpm incumbents, assuming a pnpm-lock already has
+/// them; a bare `demo-plugin@1.0.0` would leave the store-resident plugin with
+/// no peer sibling under the isolated layout and fail at runtime with
+/// `Cannot find package 'demo-host'`.
+#[test]
+fn import_writes_peer_suffixes_for_suffixless_source() {
+    let dir = pm_tmpdir("import-peer");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"fixture","version":"1.0.0","dependencies":{"demo-plugin":"1.0.0","demo-host":"1.0.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("package-lock.json"), PEER_DEP_PACKAGE_LOCK).unwrap();
+
+    let out = run_nub(&dir, &["import"]);
+    assert_eq!(
+        out.code, 0,
+        "stdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    let lock = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+    assert!(
+        lock.contains("demo-plugin@1.0.0(demo-host@1.0.0)"),
+        "imported pnpm-lock must peer-suffix the plugin key (#453): {lock}"
+    );
 }
 
 /// `nub link` (register) → `nub link <name>` (consume) → `nub unlink <name>`

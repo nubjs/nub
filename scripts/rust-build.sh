@@ -72,4 +72,7 @@ fi
 
 mkdir -p "$target"
 printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s\n' "$why" "$target" >&2
+# NUB_SHARED_TARGET is routing input for this wrapper, not part of the command's
+# environment. In particular, tests must not expose it to spawned user code.
+unset NUB_SHARED_TARGET
 exec env CARGO_TARGET_DIR="$target" cargo "$@"

@@ -36,6 +36,10 @@ export const blog = defineCollections({
   schema: frontmatterSchema.extend({
     author: z.string(),
     date: z.string().date().or(z.date()),
+    // Alternate headline for `?hn` visits (Hacker News submissions):
+    // middleware rewrites /blog/<slug>?hn to the statically prerendered
+    // /blog/hn/<slug> variant, which renders this as the title server-side.
+    hnTitle: z.string().optional(),
   }),
   postprocess: {
     includeProcessedMarkdown: true,

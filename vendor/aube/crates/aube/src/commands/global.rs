@@ -382,13 +382,23 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bin_names: &[String]) {
                 continue;
             };
             // The .cmd shim embeds the target as `"%~dp0\<rel_path>"`.
-            // Extract the relative path from the ELSE branch (the one
-            // without `.exe`), which looks like:
-            //   prog "%~dp0\<rel_target>" %*
+            // Two shapes:
+            //   - node shim: extract from the ELSE branch (`prog "%~dp0\
+            //     <rel>" %*`), skipping the IF-branch `"%~dp0\node.exe"`.
+            //   - direct-exec shim for a native bin (#394): the whole file
+            //     is `@"%~dp0\<rel>" %*` — a line that STARTS with `@"%~dp0\`,
+            //     which the node shim never produces. Its `<rel>` typically
+            //     ends in `.exe`, so it must be matched by shape, not by the
+            //     `.exe"` filter below (which would drop it and skip the
+            //     ownership check, over-removing another install's bin).
             let owned = content
                 .lines()
                 .filter_map(|line| {
                     let line = line.trim();
+                    if let Some(after) = line.strip_prefix("@\"%~dp0\\") {
+                        let end = after.find('"')?;
+                        return Some(after[..end].to_string());
+                    }
                     // Match the fallback line: `prog "%~dp0\<path>" %*`
                     // Skip lines containing `.exe"` (those are the IF branch).
                     if line.contains("%~dp0\\") && !line.contains(".exe\"") {

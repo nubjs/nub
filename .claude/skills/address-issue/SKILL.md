@@ -10,6 +10,8 @@ description: >-
   a reported bug. Encodes the maintainer-hygiene conventions in AGENTS.md so the
   reporter is acknowledged, the issue is auto-closed by the merge, and the loop
   is closed when the fix ships.
+metadata:
+  internal: true
 ---
 
 # Addressing a nub issue end-to-end

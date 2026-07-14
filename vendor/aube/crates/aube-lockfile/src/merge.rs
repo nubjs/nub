@@ -73,6 +73,16 @@ pub fn merge_branch_lockfiles(
 
     // Write out the combined graph as `aube-lock.yaml` (plain filename,
     // not branch-scoped).
+    //
+    // KNOWN LIMITATION: this is a pure parse→write merge with no
+    // resolve-finalize pass, so `force_tarball_url` (set only during
+    // finalize for a named-registry package on a non-default host) is never
+    // set here. A CUSTOM (non-`gh:`) named registry serving STANDARD-suffix
+    // (`/-/name-ver.tgz`) tarball paths on a non-default host could therefore
+    // lose its persisted tarball URL across a `gitBranchLockfile` merge,
+    // making a later frozen install re-derive the URL against the default
+    // registry. The built-in `gh:` alias is unaffected — GitHub Packages uses
+    // non-derivable `/download/…` URLs that are always preserved.
     pnpm::write(&base_path, &merged, manifest)?;
 
     for path in &report.merged_files {

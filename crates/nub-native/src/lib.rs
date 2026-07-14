@@ -6,9 +6,9 @@
 //! function transpiles TS/JSX, mirroring `oxc-transform@0.132.0`'s `transformSync`
 //! for byte-for-byte emit parity.
 
-// `collapsible_if` fires on nested `if let { if let }` once the workspace MSRV
-// (1.88) unlocks let-chain suggestions; collapsing every site is cosmetic churn
-// (and tsconfig.rs is a verbatim get-tsconfig mirror), so allow it.
+// `collapsible_if` fires on intentional nested `if let { if let }` sites;
+// collapsing every site is cosmetic churn (and tsconfig.rs is a verbatim
+// get-tsconfig mirror), so allow it.
 #![allow(clippy::collapsible_if)]
 
 mod cache;

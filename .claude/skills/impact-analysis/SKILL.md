@@ -1,6 +1,8 @@
 ---
 name: impact-analysis
 description: The impact-analysis reviewer lens — a MANDATORY leg of every significant self-review. Given a diff, systematically trace each changed symbol's BLAST RADIUS through the whole codebase (all call sites of a modified function, all readers/writers of a changed field, all impls/match-arms of a changed trait/enum, downstream behavioral/serialized/cross-process effects) so a locally-correct change that breaks a distant caller is caught BEFORE merge. Invoke (via the Skill tool) when dispatching the self-review of a non-trivial code change, or when asked to "trace the impact", "find the blast radius", "what does this change break", "who calls this", "impact analysis". Auto-triggers on a self-review of any behavioral code change.
+metadata:
+  internal: true
 ---
 
 # Impact analysis

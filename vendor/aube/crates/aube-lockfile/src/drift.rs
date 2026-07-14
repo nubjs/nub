@@ -483,8 +483,19 @@ impl LockfileGraph {
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
 
-        // Skip the check entirely if no DirectDep has a specifier (non-pnpm format).
-        if importer_deps.iter().all(|d| d.specifier.is_none()) {
+        // Skip the check entirely if the importer's recorded deps carry no
+        // specifier (a non-pnpm lockfile format that doesn't record them).
+        // Guard on the importer actually being present in the lockfile: a
+        // brand-new workspace member absent from it has an empty
+        // `importer_deps`, for which `all(specifier.is_none())` is vacuously
+        // true — skipping here would wrongly report the new member Fresh and
+        // its declared deps would never resolve (nubjs/nub#441). Falling
+        // through instead makes each manifest dep read as added against the
+        // empty locked specs (Stale), while a depless new member still reads
+        // Fresh (nothing to add — matches a `workspace:*` link with no deps).
+        if self.importers.contains_key(importer_path)
+            && importer_deps.iter().all(|d| d.specifier.is_none())
+        {
             return DriftStatus::Fresh;
         }
         let lockfile_specs: BTreeMap<&str, &str> = importer_deps
@@ -2364,6 +2375,67 @@ mod drift_tests {
         assert_eq!(
             graph.check_drift_workspace(
                 &workspace_manifests,
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                true,
+            ),
+            DriftStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn workspace_drift_stale_when_member_added_with_deps_but_absent_from_lockfile() {
+        // A newly-added workspace member with deps (present in the manifests,
+        // absent from the lockfile importers) must invalidate the lockfile so
+        // its deps get resolved — the `Prefer`-mode counterpart to the
+        // warm-path new-member check (nubjs/nub#441). The per-importer loop's
+        // `all(specifier.is_none())` early-return is vacuously true for the
+        // empty lockfile entry, so without the presence guard the member reads
+        // Fresh and its deps silently never resolve. A depless new member,
+        // however, legitimately has no importer entry and stays Fresh (see
+        // `workspace_drift_allows_root_links_for_workspace_packages`).
+        let root_dep = DirectDep {
+            name: "lodash".into(),
+            dep_path: "lodash@4.17.21".into(),
+            dep_type: DepType::Production,
+            specifier: Some("^4.17.0".into()),
+        };
+        let mut importers = BTreeMap::new();
+        importers.insert(".".to_string(), vec![root_dep]);
+        let graph = LockfileGraph {
+            importers,
+            packages: BTreeMap::new(),
+            ..Default::default()
+        };
+        let root = (".".to_string(), make_manifest(&[("lodash", "^4.17.0")]));
+
+        // New member WITH deps → stale (its react dep can't be satisfied by a
+        // non-existent importer entry).
+        assert_eq!(
+            graph.check_drift_workspace(
+                &[
+                    root.clone(),
+                    (
+                        "packages/web".to_string(),
+                        make_manifest(&[("react", "^19.0.0")]),
+                    ),
+                ],
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                true,
+            ),
+            DriftStatus::Stale {
+                reason: "packages/web: manifest adds react@^19.0.0".to_string()
+            }
+        );
+
+        // New member with NO deps → fresh (nothing to install; matches the
+        // depless `workspace:*` link invariant).
+        assert_eq!(
+            graph.check_drift_workspace(
+                &[root, ("packages/web".to_string(), make_manifest(&[]))],
                 &BTreeMap::new(),
                 &[],
                 &BTreeMap::new(),

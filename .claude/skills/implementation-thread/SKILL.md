@@ -14,6 +14,8 @@ description: >-
   told "merge it" / "all the way through". This is NOT a fray skill (it governs
   how one implementation effort runs internally); it COMPOSES with fray — an
   implementation-thread is one fray thread.
+metadata:
+  internal: true
 ---
 
 # implementation-thread

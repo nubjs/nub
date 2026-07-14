@@ -1,5 +1,6 @@
 ---
 title: "Node’s phantom dependency problem and the path to a 5x faster package manager"
+hnTitle: "How we built a 5x faster JavaScript package manager"
 description: One copy of every package per machine, symlinked into every project — and the mechanisms that make that layout work across the ecosystem.
 author: The Nub Team
 date: 2026-07-07T12:00:00Z
@@ -13,7 +14,7 @@ Most package managers across all modern language ecosystems — Rust's Cargo, Py
 
 A package version is downloaded from its registry once per machine.
 
-The differences are all in what happens next — how the files get from that cache into `node_modules`, the directory inside each project that Node actually loads code from. Classic npm copies them: the whole dependency graph, physically, into every project, flattened, one version of each package at the top, with only version conflicts nesting deeper:
+The differences are all in what happens next — how the files get from that cache into `node_modules`, the directory inside each project that Node actually loads code from. Classic npm copies them. Every package in the dependency graph — yours and everything transitive — is physically copied into the project and hoisted to the top level of `node_modules`:
 
 ```text
 my-app/
@@ -199,7 +200,11 @@ The global store also switches off wherever it can't work or isn't wanted:
 
 - **CI (`CI=1` in the environment), and `nub ci` anywhere** — real directories and relative links, a `node_modules` that survives a Docker `COPY --from` into a fresh image where the machine store wouldn't exist.
 - **Injected workspace dependencies** (`dependenciesMeta.*.injected`) — these exist to give each consumer its own copy, so the store stays in the project.
-- **Manual opt-out** — a single setting moves the virtual store back inside the project: same isolated layout, same phantom protection, no cross-project sharing.
+- **Manual opt-out** — one `.npmrc` setting moves the virtual store back inside the project: same isolated layout, same phantom protection, no cross-project sharing.
+
+  ```ini
+  enableGlobalVirtualStore=false
+  ```
 
 The default, though, is the global store, with the scanner, the Vite compat, and the framework fallback closing the gaps.
 
@@ -207,7 +212,7 @@ The default, though, is the global store, with the scanner, the Vite compat, and
 
 All together, Nub can safely symlink the vast majority of packages into your project-local `node_modules`, while surgically falling back to a classic hardlink approach for any problematic dependencies. The final result: symlink-based linkers are finally feasible in JavaScript, and warm installs are up to 5x faster.
 
-The fixture is a large tree — 1,168 packages, 81,398 files — installed warm: store populated, frozen lockfile, `node_modules` wiped between runs, no network. It runs on Linux because Linux is the shared primitive: Bun and Nub's hoisted mode both link with per-file hardlinks there, so the comparison is syscall-for-syscall. The two Nub rows isolate the two claims — with `--node-linker hoisted`, Nub produces Bun's exact flat layout with the same per-file hardlink calls; the default row is the same install with the one-symlink-per-package relink this post is about.
+The fixture: 1,168 packages, 81,398 files, installed warm — store populated, frozen lockfile, `node_modules` wiped between runs, no network. The two Nub rows are the same install under two linkers: `--node-linker hoisted` builds the same flat, per-file-hardlinked layout as Bun; the default row is the one-symlink-per-package relink this post is about.
 
 <Bench
   label="warm install · 1168 packages · Linux (ubuntu-latest)"

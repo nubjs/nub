@@ -37,6 +37,15 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "NODE_REPL_EXTERNAL_MODULE",
 ];
 
+/// The runtime-control keys Nub refuses to source from env files.
+///
+/// The watch launcher uses this same canonical set to guard Node's raw
+/// `--env-file` path at the process boundary. Keep the policy defined here so
+/// parsed-map filtering and raw-file delegation cannot drift.
+pub fn denied_env_file_keys() -> &'static [&'static str] {
+    ENV_FILE_DENYLIST
+}
+
 /// Whether `key` is a denylisted runtime-control variable nub ignores from a
 /// `.env*` / `--env-file` source. ASCII case-insensitive — environment variable
 /// lookups are case-insensitive on Windows, so a lowercased spelling must not slip
@@ -242,12 +251,11 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
 /// The raw loader, additionally reporting (1) whether a `.env` FILE declared
 /// `NODE_ENV` (always dropped — dotenv/@next/env/Vite parity, #263) and (2) which
 /// denylisted runtime-control keys were dropped ([`ENV_FILE_DENYLIST`]). Both
-/// drops happen HERE at load, so every consumer of the returned map —
-/// [`load_env_files`] (direct run/file injection) and [`load_env_files_raw`]
-/// (watch injection) — is covered by construction; a denylisted key can never
-/// enter the map that flows to a spawned child. The reports are consumed by
-/// [`load_env_files`] to warn; the plain [`load_env_files_raw`] wrapper discards
-/// them (the watch path defers the corresponding warnings to avoid false claims).
+/// drops happen HERE at load, so every consumer of the returned map is covered by
+/// construction. The reports are consumed by [`load_env_files`] to warn. The
+/// plain [`load_env_files_raw`] wrapper discards them because watch separately
+/// delegates the raw files to Node; that spawn boundary installs a stable guard
+/// for this same denylist before handing Node the paths.
 fn load_env_files_raw_reporting(
     project_root: &Path,
 ) -> (HashMap<String, String>, bool, Vec<String>) {
@@ -331,8 +339,8 @@ pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
     // Warn only here — this map is injected straight into the child via
     // `Command::env`, so a dropped `.env` `NODE_ENV` / denylisted var truly never
     // reaches it. The watch path (plain `load_env_files_raw`) hands the files to
-    // Node's `--env-file` instead, so nub isn't the one ignoring them there and must
-    // not claim to.
+    // Node's `--env-file` behind a per-restart process guard, but avoids repeating
+    // this load-time warning for a long-lived watcher.
     if node_env_ignored {
         warn_node_env_from_dotenv_ignored();
     }
@@ -976,10 +984,10 @@ mod tests {
 
     /// Env hygiene (Deno parity): a `.env` FILE must never inject a runtime-control
     /// var ([`ENV_FILE_DENYLIST`]) — those configure Node's own start-up, not the
-    /// user's program. `NODE_OPTIONS` is the load-bearing case and
-    /// `NODE_TLS_REJECT_UNAUTHORIZED` confirms the case-insensitive match; benign
-    /// siblings must still load. The strip runs in the shared per-file loop, so
-    /// `.env` coverage exercises it for every `.env*` file — mode-file SELECTION is a
+    /// user's program. Every canonical key is exercised directly, with one
+    /// mixed-case spelling to lock the case-insensitive match; benign siblings
+    /// must still load. The strip runs in the shared per-file loop, so `.env`
+    /// coverage exercises it for every `.env*` file — mode-file SELECTION is a
     /// separate concern (tested by `env_file_names*`) and needs no ambient env here.
     #[test]
     fn denylisted_runtime_control_vars_never_injected() {
@@ -988,21 +996,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join(".env"),
-            "NODE_OPTIONS=--require ./x.js\nnode_tls_reject_unauthorized=0\nAPP_KEY=safe\n",
+            "NODE_OPTIONS=--require ./x.js\n\
+             node_tls_reject_unauthorized=0\n\
+             NODE_EXTRA_CA_CERTS=/x.pem\n\
+             NODE_REPL_EXTERNAL_MODULE=./repl.js\n\
+             APP_KEY=safe\n",
         )
         .unwrap();
 
         let base = load_env_files(&dir);
-        assert!(
-            !base.contains_key("NODE_OPTIONS"),
-            "a `.env` NODE_OPTIONS must not reach the child; got {base:?}"
-        );
-        assert!(
-            !base
-                .keys()
-                .any(|k| k.eq_ignore_ascii_case("NODE_TLS_REJECT_UNAUTHORIZED")),
-            "a `.env` NODE_TLS_REJECT_UNAUTHORIZED must be dropped case-insensitively; got {base:?}"
-        );
+        for denied in denied_env_file_keys() {
+            assert!(
+                !base.keys().any(|key| key.eq_ignore_ascii_case(denied)),
+                "a `.env` {denied} must not reach the child; got {base:?}"
+            );
+        }
         assert_eq!(
             base.get("APP_KEY").map(String::as_str),
             Some("safe"),

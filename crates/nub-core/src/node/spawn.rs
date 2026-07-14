@@ -5,15 +5,101 @@
 use std::env;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::{
+    self as unix_fs, DirBuilderExt, MetadataExt as UnixMetadataExt, PermissionsExt,
+};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt as WindowsMetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
+#[cfg(unix)]
+use same_file::Handle as FileHandle;
 
 use super::discovery::ResolvedNode;
 use super::flags;
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct FileHandle {
+    file: fs::File,
+    identity: WindowsFileIdentity,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Eq, PartialEq)]
+struct WindowsFileIdentity {
+    volume_serial: u64,
+    file_id: [u8; 16],
+}
+
+#[cfg(windows)]
+fn windows_file_identity(
+    volume_serial: u64,
+    file_id: [u8; 16],
+) -> std::io::Result<WindowsFileIdentity> {
+    if file_id == [0; 16] || file_id == [u8::MAX; 16] {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "filesystem did not provide a stable 128-bit file identity",
+        ));
+    }
+    Ok(WindowsFileIdentity {
+        volume_serial,
+        file_id,
+    })
+}
+
+#[cfg(windows)]
+impl FileHandle {
+    fn from_path(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+        };
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        let mut info = FILE_ID_INFO::default();
+        // SAFETY: `file` owns a valid handle; `info` is writable for exactly the
+        // size reported, and both remain live for the call and returned record.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                std::ptr::addr_of_mut!(info).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            file,
+            identity: windows_file_identity(info.VolumeSerialNumber, info.FileId.Identifier)?,
+        })
+    }
+
+    fn as_file(&self) -> &fs::File {
+        &self.file
+    }
+}
+
+#[cfg(windows)]
+impl PartialEq for FileHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+
+#[cfg(windows)]
+impl Eq for FileHandle {}
 
 /// Spawn a child, retrying briefly on a TRANSIENT `EAGAIN`/`ENOMEM` from the
 /// kernel's `fork`/`clone` under peak thread/PID pressure. On a resource-
@@ -460,16 +546,42 @@ impl Drop for ForegroundGuard {
 }
 
 /// Put the spawned child in its own process group (`setpgid(0, 0)` at exec) so
-/// [`track_child_group`] can signal the whole subtree. No-op off Unix.
+/// [`track_child_group`] can signal the whole subtree. On Linux, additionally
+/// arm `PR_SET_PDEATHSIG(SIGTERM)` as the kernel-side backstop for signals the
+/// forwarder structurally cannot relay: SIGKILL on the Nub leader (Playwright's
+/// default `webServer` teardown, `docker kill`, CI cancellation, the OOM killer)
+/// is never delivered to userspace, so the forward thread never runs and the
+/// child subtree would run on orphaned (#463). This guards BOTH callers: the
+/// `nub run` script child (`sh -c` subtree) and the `nub <file>` file-run
+/// `node` leaf — the orphan exposure is identical. With the pdeathsig armed
+/// the kernel itself TERMs the child when Nub's spawning thread dies, no
+/// matter how.
+/// No-op off Unix; macOS has no pdeathsig equivalent, so it keeps the
+/// forwarding-only behavior (the group forward covers every catchable signal).
 pub fn group_on_spawn(cmd: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setpgid(0, 0) only repoints the child's own process-group id
-        // between fork and exec — async-signal-safe, touches no parent state.
+        // Captured BEFORE fork: the child's TOCTOU re-check below must compare
+        // getppid() against the REAL parent, not a post-fork read that would
+        // already name the reaper if the parent died between fork and prctl.
+        #[cfg(target_os = "linux")]
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: setpgid(0, 0) / prctl / getppid / raise between fork and exec
+        // are all async-signal-safe and touch no parent state.
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 libc::setpgid(0, 0);
+                #[cfg(target_os = "linux")]
+                {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    // The pdeathsig only fires for deaths AFTER registration; if
+                    // the parent died in the fork→prctl window, deliver the same
+                    // signal ourselves instead of running on orphaned.
+                    if libc::getppid() != parent {
+                        libc::raise(libc::SIGTERM);
+                    }
+                }
                 Ok(())
             });
         }
@@ -589,8 +701,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         cmd.arg(format!("--allow-fs-read={}", install_dir.display()));
     }
 
-    // ShimGuard must live until after child.wait() — declared at function scope.
-    let mut _shim_guard: Option<ShimGuard> = None;
     // Removes the compile-cache sentinel (R8) on drop, after the child exits.
     let mut _ccache_guard: Option<CompileCacheSentinelGuard> = None;
 
@@ -629,18 +739,29 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // a half-setup (flags + a nested shim, no preload). See
     // wiki/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
-        // Flag injection.
+        // Flag injection — intersected with the binary's actual accepted-flag set
+        // (probed + cached) so an open-ended `Unflag` band never injects a flag a
+        // future Node has removed (which would abort startup with "bad option").
+        let accepted = super::discovery::accepted_env_flags(config.node.path.as_std_path());
         let inject = flags::compute_inject_flags(
             config.node.version.clone(),
             config.user_args,
             node_options.as_deref(),
             config.show_warnings,
+            accepted.as_ref(),
         );
         for flag in &inject {
             cmd.arg(flag);
         }
 
-        // Web Storage: nub ALWAYS injects `--experimental-webstorage` on the band
+        // Web Storage: injected here, NOT through `compute_inject_flags`, so it sits
+        // OUTSIDE the Stage-4 accepted-flag intersection above. Safe: its band is
+        // CLOSED (`22.4–<25`) and the flag stabilized (not removed) at 25 — no
+        // open-ended-removal hazard, so it needs no probe guard. (Any FUTURE
+        // open-ended flag should go through `compute_inject_flags` to inherit the
+        // guard, not this direct-injection path.)
+        //
+        // nub ALWAYS injects `--experimental-webstorage` on the band
         // where that flag is the enabling mechanism (Node 22.4 through <25, i.e.
         // `webstorage_flag_needed`), regardless of whether the user opted into
         // localStorage persistence (the maintainer, 2026-06-15: "a flag that we inject no
@@ -696,9 +817,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
                 new_path.push(existing);
             }
             cmd.env("PATH", new_path);
-            _shim_guard = Some(ShimGuard {
-                path: PathBuf::from(shim_dir.as_str()),
-            });
         }
 
         // `process.versions.nub` source: hand the running binary's version to the
@@ -772,8 +890,9 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // and right before user code, calls `module.enableCompileCache(dir)` so the
         // user's OWN modules still cache into their dir — the feature keeps working,
         // only the preload chain is excluded. The sentinel path is keyed on nub's
-        // PID; the child reads it from `process.ppid` (nub is its direct parent),
-        // the same PID-keyed temp pattern as the PATH shim.
+        // PID; the child reads it from `process.ppid` (nub is its direct parent).
+        // Unlike the randomized PATH shim, this private parent/child handoff stays
+        // PID-only intentionally.
         //
         // COVERAGE GATE (compile-cache vs V8 coverage). A WARM compile cache makes
         // V8's coverage imprecise: cached bytecode collapses/omits per-branch ranges,
@@ -1001,22 +1120,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     Ok(SpawnResult { status })
 }
 
-/// RAII guard that removes the PATH shim directory on drop.
-pub struct ShimGuard {
-    path: PathBuf,
-}
-
-impl Drop for ShimGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
 /// Path of the compile-cache sentinel file (R8) for a given nub PID. spawn.rs
 /// writes the user's original `NODE_COMPILE_CACHE` dir here keyed on nub's own
 /// PID; the child preload reads it from a path derived from `process.ppid` (nub
-/// is the child's direct parent). Same `<tmpdir>/nub-…-<pid>` shape as the PATH
-/// shim, so cleanup is symmetric and a recycled PID can't collide across runs.
+/// is the child's direct parent).
 fn compile_cache_sentinel_path(nub_pid: u32) -> PathBuf {
     compile_cache_tmpdir().join(format!("nub-ccache-{nub_pid}"))
 }
@@ -1089,68 +1196,467 @@ impl Drop for CompileCacheSentinelGuard {
     }
 }
 
-fn setup_path_shim(nub_binary: &Path) -> Result<Utf8PathBuf> {
-    let pid = std::process::id();
-    let dir_name = format!("nub-node-shim-{pid}");
-    let shim_dir = env::temp_dir().join(&dir_name);
+const PATH_SHIM_PREFIX: &str = "nub-node-shim-";
+const PATH_SHIM_CREATE_RETRIES: usize = 16;
 
-    fs::create_dir_all(&shim_dir)
-        .with_context(|| format!("creating PATH shim dir: {}", shim_dir.display()))?;
+static PATH_SHIM_MANAGER: PathShimManager = PathShimManager::new();
 
-    #[cfg(unix)]
-    let node_shim = shim_dir.join("node");
+struct PathShimManager {
+    state: Mutex<Option<ShimRecord>>,
+}
+
+struct ShimRecord {
+    dir: PathBuf,
+    dir_identity: FileHandle,
+    node_identity: FileHandle,
+}
+
+#[derive(Default)]
+struct ShimSetupOptions {
     #[cfg(windows)]
-    let node_shim = shim_dir.join("node.exe");
+    force_copy: bool,
+    #[cfg(test)]
+    fail_before_commit: bool,
+}
 
-    // Concurrent workspace spawns (one nub process, N worker threads — see the
-    // run -r work queue in cli.rs) race this setup, so the shim must be
-    // PUBLISHED ATOMICALLY: materialize under a unique temp name, then rename
-    // into place. A racer can then only ever observe `node`/`node.exe` absent
-    // or complete. The naive `exists()`-then-create had two real failure modes:
-    // on Windows the fallback `fs::copy` (hard_link fails across volumes — on
-    // GitHub runners the repo is on D:, TEMP on C:) leaves a half-written
-    // `node.exe` open for write that a sibling's child shell then tries to
-    // EXECUTE → ERROR_SHARING_VIOLATION ("The process cannot access the file
-    // because it is being used by another process", the run_aggregate CI
-    // flake, 2026-06-10); on Unix two threads could both pass `!exists()` and
-    // the loser's `symlink` EEXIST error silently dropped the shim via the
-    // caller's `.ok()`. Losing the rename race is fine — the winner's shim is
-    // complete by definition; clean up our temp and use theirs.
-    if !node_shim.exists() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static TMP_N: AtomicU64 = AtomicU64::new(0);
-        let tmp = shim_dir.join(format!(
-            ".node-staging-{pid}-{}",
-            TMP_N.fetch_add(1, Ordering::Relaxed)
-        ));
-        #[cfg(unix)]
-        {
-            unix_fs::symlink(nub_binary, &tmp)
-                .with_context(|| format!("creating node shim symlink in {}", shim_dir.display()))?;
-        }
-        #[cfg(windows)]
-        {
-            fs::hard_link(nub_binary, &tmp)
-                .or_else(|_| fs::copy(nub_binary, &tmp).map(|_| ()))
-                .with_context(|| {
-                    format!(
-                        "creating node shim in {} (tried hard_link then copy)",
-                        shim_dir.display()
-                    )
-                })?;
-        }
-        if let Err(rename_err) = fs::rename(&tmp, &node_shim) {
-            let _ = fs::remove_file(&tmp);
-            // A sibling published first (their shim is complete) — otherwise
-            // the rename failed for a real reason worth surfacing.
-            if !node_shim.exists() {
-                return Err(rename_err)
-                    .with_context(|| format!("publishing node shim into {}", shim_dir.display()));
-            }
+struct PendingShimDir {
+    path: PathBuf,
+    pid: u32,
+    identity: Option<FileHandle>,
+    armed: bool,
+}
+
+impl PendingShimDir {
+    fn new(path: PathBuf, pid: u32) -> Self {
+        Self {
+            path,
+            pid,
+            identity: None,
+            armed: true,
         }
     }
 
-    Utf8PathBuf::try_from(shim_dir).map_err(|e| anyhow::anyhow!("shim dir path not UTF-8: {e}"))
+    fn set_identity(&mut self, identity: FileHandle) {
+        self.identity = Some(identity);
+    }
+
+    fn identity(&self) -> &FileHandle {
+        self.identity
+            .as_ref()
+            .expect("created PATH shim directory has an identity")
+    }
+
+    fn disarm(mut self) -> FileHandle {
+        let identity = self
+            .identity
+            .take()
+            .expect("published PATH shim directory has an identity");
+        self.armed = false;
+        identity
+    }
+}
+
+impl Drop for PendingShimDir {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(created) = self.identity.take() else {
+            let _ = fs::remove_dir(&self.path);
+            return;
+        };
+        let unchanged =
+            validate_shim_dir(&self.path, false).is_ok_and(|current| current.eq(&created));
+        if unchanged {
+            remove_shim_entry(&node_shim_path(&self.path));
+            remove_shim_entry(&staging_shim_path(&self.path, self.pid));
+            let _ = fs::remove_dir(&self.path);
+        }
+    }
+}
+
+impl PathShimManager {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(None),
+        }
+    }
+
+    fn setup(&self, nub_binary: &Path) -> Result<Utf8PathBuf> {
+        self.setup_in(
+            nub_binary,
+            &env::temp_dir(),
+            std::process::id(),
+            secure_shim_nonce,
+            ShimSetupOptions::default(),
+        )
+    }
+
+    fn setup_in(
+        &self,
+        nub_binary: &Path,
+        temp_dir: &Path,
+        pid: u32,
+        mut nonce: impl FnMut() -> Result<[u8; 16]>,
+        options: ShimSetupOptions,
+    ) -> Result<Utf8PathBuf> {
+        // Declared before every source/node handle so an error unwinds those
+        // handles before the pending directory guard tries to remove entries.
+        // This matters on Windows, where a delete-pending hardlink keeps its
+        // directory entry until the last file handle closes.
+        let mut pending = None;
+        let mut cached_validation_error = None;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(record) = state.as_ref() {
+            match validate_shim_record(record) {
+                Ok(()) => return shim_dir_utf8(record.dir.clone()),
+                Err(error) => {
+                    cached_validation_error = Some(format!("{error:#}"));
+                    // Keep the manager lock held while retiring the invalid
+                    // record and publishing its replacement. Concurrent callers
+                    // can then observe only the old record before validation or
+                    // the fully validated replacement, never an empty window.
+                    // Do not clean the invalid path here: validation failed, so
+                    // pathname-based cleanup can no longer prove its identity.
+                    drop(state.take().expect("cached PATH shim record is present"));
+                }
+            }
+        }
+
+        let nub_binary = fs::canonicalize(nub_binary)
+            .with_context(|| format!("resolving Nub binary: {}", nub_binary.display()))?;
+        let nub_identity = validate_nub_binary(&nub_binary)?;
+
+        for _ in 0..PATH_SHIM_CREATE_RETRIES {
+            let suffix = nonce_hex(nonce()?);
+            let path = temp_dir.join(format!("{PATH_SHIM_PREFIX}{pid}-{suffix}"));
+            match create_shim_dir(&path) {
+                Ok(()) => {
+                    pending = Some(PendingShimDir::new(path, pid));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("creating PATH shim dir: {}", path.display()));
+                }
+            }
+        }
+        let pending_dir = pending.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not create a collision-free PATH shim directory after {PATH_SHIM_CREATE_RETRIES} attempts"
+            )
+        })?;
+
+        set_private_shim_permissions(&pending_dir.path)?;
+        let dir_identity = validate_shim_dir(&pending_dir.path, true)?;
+        pending_dir.set_identity(dir_identity);
+        let published =
+            publish_node_shim(&nub_binary, &nub_identity, &pending_dir.path, pid, &options)?;
+        let utf8_dir = shim_dir_utf8(pending_dir.path.clone())?;
+        validate_shim_candidate(&pending_dir.path, pending_dir.identity(), &published)?;
+        #[cfg(test)]
+        if options.fail_before_commit {
+            anyhow::bail!("injected PATH shim commit failure");
+        }
+        let dir_identity = pending
+            .take()
+            .expect("validated PATH shim directory is pending")
+            .disarm();
+
+        let record = ShimRecord {
+            dir: PathBuf::from(utf8_dir.as_str()),
+            dir_identity,
+            node_identity: published,
+        };
+        *state = Some(record);
+        drop(state);
+        if let Some(error) = cached_validation_error {
+            tracing::warn!(
+                error = %error,
+                "cached Node PATH shim failed validation; created a replacement"
+            );
+        }
+        Ok(utf8_dir)
+    }
+
+    fn cleanup(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = state.take() else { return };
+        let ShimRecord {
+            dir,
+            dir_identity,
+            node_identity,
+        } = record;
+        let valid_dir =
+            validate_shim_dir(&dir, true).is_ok_and(|current| current.eq(&dir_identity));
+        let node = node_shim_path(&dir);
+        let valid_node = open_node_shim(&node).is_ok_and(|current| current.eq(&node_identity));
+        if valid_dir && valid_node {
+            // Windows retains a delete-pending file's directory entry until
+            // its last handle closes. Keep only the directory handle live
+            // across the bounded file + empty-directory removal.
+            drop(node_identity);
+            remove_shim_entry(&node);
+            let _ = fs::remove_dir(&dir);
+        }
+        drop(dir_identity);
+    }
+}
+
+fn setup_path_shim(nub_binary: &Path) -> Result<Utf8PathBuf> {
+    PATH_SHIM_MANAGER.setup(nub_binary)
+}
+
+fn secure_shim_nonce() -> Result<[u8; 16]> {
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce)
+        .map_err(|error| anyhow::anyhow!("generating PATH shim nonce: {error}"))?;
+    Ok(nonce)
+}
+
+fn nonce_hex(nonce: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(32);
+    for byte in nonce {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    encoded
+}
+
+fn create_shim_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700).create(path)
+    }
+    #[cfg(windows)]
+    {
+        // The exclusive random leaf inherits the established per-user TEMP
+        // DACL; validation separately rejects directory reparse points.
+        fs::create_dir(path)
+    }
+}
+
+fn set_private_shim_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("setting PATH shim permissions: {}", path.display()))?;
+    }
+    #[cfg(windows)]
+    let _ = path;
+    Ok(())
+}
+
+fn validate_nub_binary(path: &Path) -> Result<FileHandle> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("reading Nub binary metadata: {}", path.display()))?;
+    if !metadata.file_type().is_file() || is_reparse_point(&metadata) {
+        anyhow::bail!("Nub binary is not a regular file: {}", path.display());
+    }
+    FileHandle::from_path(path)
+        .with_context(|| format!("opening Nub binary identity: {}", path.display()))
+}
+
+fn validate_shim_dir(path: &Path, require_private: bool) -> Result<FileHandle> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("reading PATH shim dir metadata: {}", path.display()))?;
+    if !metadata.file_type().is_dir() || is_reparse_point(&metadata) {
+        anyhow::bail!("PATH shim path is not a real directory: {}", path.display());
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        if metadata.uid() != euid {
+            anyhow::bail!("PATH shim directory is not owned by the current user");
+        }
+        if require_private && metadata.mode() & 0o7777 != 0o700 {
+            anyhow::bail!("PATH shim directory permissions are not 0700");
+        }
+    }
+    #[cfg(windows)]
+    let _ = require_private;
+    FileHandle::from_path(path)
+        .with_context(|| format!("opening PATH shim dir identity: {}", path.display()))
+}
+
+#[cfg(unix)]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn node_shim_path(dir: &Path) -> PathBuf {
+    #[cfg(unix)]
+    let name = "node";
+    #[cfg(windows)]
+    let name = "node.exe";
+    dir.join(name)
+}
+
+fn staging_shim_path(dir: &Path, pid: u32) -> PathBuf {
+    dir.join(format!(".node-staging-{pid}"))
+}
+
+/// Remove one known immediate shim entry, never a directory tree. A concurrent
+/// replacement can make this fail or delete only that immediate file/symlink;
+/// it can never redirect cleanup into unrelated contents.
+fn remove_shim_entry(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.file_type().is_dir() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn publish_node_shim(
+    nub_binary: &Path,
+    nub_identity: &FileHandle,
+    shim_dir: &Path,
+    pid: u32,
+    options: &ShimSetupOptions,
+) -> Result<FileHandle> {
+    let node_shim = node_shim_path(shim_dir);
+    let staging = staging_shim_path(shim_dir, pid);
+
+    #[cfg(unix)]
+    {
+        let _ = options;
+        unix_fs::symlink(nub_binary, &staging)
+            .with_context(|| format!("creating node shim symlink in {}", shim_dir.display()))?;
+        let identity = validate_node_shim(&staging, nub_identity)?;
+        fs::rename(&staging, &node_shim)
+            .with_context(|| format!("publishing node shim into {}", shim_dir.display()))?;
+        Ok(identity)
+    }
+
+    #[cfg(windows)]
+    {
+        // TEMP may be on a different volume from the running binary, so a
+        // failed hardlink falls back to copying the captured source into staging.
+        let identity = if !options.force_copy && fs::hard_link(nub_binary, &staging).is_ok() {
+            validate_node_shim(&staging, nub_identity)?
+        } else {
+            copy_file_from_handle(nub_identity, &staging)
+                .with_context(|| format!("copying node shim into {}", shim_dir.display()))?
+        };
+        fs::rename(&staging, &node_shim)
+            .with_context(|| format!("publishing node shim into {}", shim_dir.display()))?;
+        Ok(identity)
+    }
+}
+
+#[cfg(unix)]
+fn open_node_shim(path: &Path) -> Result<FileHandle> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("reading node shim metadata: {}", path.display()))?;
+    if !metadata.file_type().is_symlink() {
+        anyhow::bail!("node shim is not a symlink: {}", path.display());
+    }
+    FileHandle::from_path(path)
+        .with_context(|| format!("opening node shim target: {}", path.display()))
+}
+
+#[cfg(unix)]
+fn validate_node_shim(path: &Path, nub_identity: &FileHandle) -> Result<FileHandle> {
+    let identity = open_node_shim(path)?;
+    if !identity.eq(nub_identity) {
+        anyhow::bail!("node shim does not target the current Nub binary");
+    }
+    Ok(identity)
+}
+
+#[cfg(windows)]
+fn open_node_shim(path: &Path) -> Result<FileHandle> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("reading node shim metadata: {}", path.display()))?;
+    if !metadata.file_type().is_file() || is_reparse_point(&metadata) {
+        anyhow::bail!("node shim is not a regular non-reparse file");
+    }
+    FileHandle::from_path(path)
+        .with_context(|| format!("opening node shim identity: {}", path.display()))
+}
+
+#[cfg(windows)]
+fn validate_node_shim(path: &Path, nub_identity: &FileHandle) -> Result<FileHandle> {
+    let identity = open_node_shim(path)?;
+    if !identity.eq(nub_identity) {
+        anyhow::bail!("node shim hardlink does not target the current Nub binary");
+    }
+    Ok(identity)
+}
+
+fn validate_shim_record(record: &ShimRecord) -> Result<()> {
+    let dir_identity = validate_shim_dir(&record.dir, true)?;
+    if !dir_identity.eq(&record.dir_identity) {
+        anyhow::bail!("PATH shim directory identity changed");
+    }
+    let node_identity = open_node_shim(&node_shim_path(&record.dir))?;
+    if !node_identity.eq(&record.node_identity) {
+        anyhow::bail!("node shim identity changed");
+    }
+    Ok(())
+}
+
+fn validate_shim_candidate(
+    dir: &Path,
+    expected_dir: &FileHandle,
+    published: &FileHandle,
+) -> Result<()> {
+    let dir_identity = validate_shim_dir(dir, true)?;
+    if !dir_identity.eq(expected_dir) {
+        anyhow::bail!("PATH shim directory identity changed during creation");
+    }
+    let node_identity = open_node_shim(&node_shim_path(dir))?;
+    if !node_identity.eq(published) {
+        anyhow::bail!("node shim identity changed during creation");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_file_from_handle(source: &FileHandle, destination: &Path) -> Result<FileHandle> {
+    use std::io::Write;
+    use std::os::windows::fs::FileExt;
+
+    let mut destination_file = fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(destination)?;
+    let mut offset = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = source.as_file().seek_read(&mut buffer, offset)?;
+        if read == 0 {
+            break;
+        }
+        destination_file.write_all(&buffer[..read])?;
+        offset += read as u64;
+    }
+    destination_file.flush()?;
+    drop(destination_file);
+    FileHandle::from_path(destination).map_err(Into::into)
+}
+
+fn shim_dir_utf8(path: PathBuf) -> Result<Utf8PathBuf> {
+    Utf8PathBuf::try_from(path).map_err(|error| anyhow::anyhow!("shim dir path not UTF-8: {error}"))
 }
 
 /// Compute the augmentation environment variables (NODE_OPTIONS + PATH)
@@ -1162,13 +1668,16 @@ fn setup_path_shim(nub_binary: &Path) -> Result<Utf8PathBuf> {
 /// Returns `None` if already re-entrant (parent nub already set up augmentation)
 /// or if compat mode is active.
 ///
-/// The PATH shim temp dir created here is process-wide (keyed by PID) and
-/// reclaimed exactly once on process exit via [`cleanup_shim`]; it is
+/// The active PATH shim temp dir is process-wide and reclaimed exactly once on
+/// process exit via [`cleanup_shim`]. A record that fails validation is retired
+/// without pathname-based cleanup and replaced; a later dead-process reaper
+/// handles its old directory. The active shim is
 /// deliberately NOT returned as a per-call RAII guard, because concurrent
 /// workspace scripts share the one dir and a per-call drop would `rm -rf` it
 /// out from under sibling scripts still running.
 pub fn compute_augmentation_env(
     nub_binary: &Path,
+    node_path: &Path,
     node_version: super::version::NodeVersion,
     compat_mode: bool,
     pnp: Option<&Path>,
@@ -1207,11 +1716,16 @@ pub fn compute_augmentation_env(
     // NODE_OPTIONS — injected experimental flags, the preload, and webstorage.
     // Dedupe injected flags against any existing NODE_OPTIONS so we don't emit a
     // flag the user already set.
+    // Intersected with the binary's actual accepted-flag set (probed + cached),
+    // same self-correcting guard as the direct-spawn path: a flag a future Node has
+    // removed is dropped instead of aborting the script-runner child at startup.
+    let accepted = super::discovery::accepted_env_flags(node_path);
     let inject = flags::compute_inject_flags(
         node_version.clone(),
         &[],
         existing_node_options.as_deref(),
         false,
+        accepted.as_ref(),
     );
     let mut node_opts_parts: Vec<String> = inject.iter().map(|f| f.to_string()).collect();
     // Yarn PnP `--require <.pnp.cjs>` BEFORE nub's preload token so PnP's
@@ -1837,28 +2351,21 @@ pub fn exit_code(result: &SpawnResult) -> i32 {
     exit_code_from_status(&result.status)
 }
 
-/// Clean up any PATH shim directories left by this process.
+/// Clean up this process's active validated PATH shim directory.
 pub fn cleanup_shim() {
-    let pid = std::process::id();
-    let dir_name = format!("nub-node-shim-{pid}");
-    let shim_dir = env::temp_dir().join(&dir_name);
-    if shim_dir.exists() {
-        let _ = fs::remove_dir_all(&shim_dir);
-    }
+    PATH_SHIM_MANAGER.cleanup();
 }
 
 /// Cap on directories examined in a single reaper sweep. A sweep is best-effort
 /// and bounded so it can never spin on a pathologically large `TMPDIR`; any
 /// leftover stale dirs are simply collected on a later run.
 const REAP_SCAN_CAP: usize = 4096;
+// A legacy directory can contain several abandoned concurrent-publication
+// staging files. Bound that inner scan too; later invocations resume cleanup.
+const REAP_LEGACY_ENTRY_CAP: usize = 256;
 
-/// `nub run`/exec creates a process-wide PATH shim dir `nub-node-shim-<pid>`,
-/// reclaimed on normal exit by [`cleanup_shim`]. A run that is KILLED or crashes
-/// before that drop runs leaks its dir, so stale dirs accumulate unbounded in
-/// `TMPDIR` over time. This reaps them: it scans the temp dir for
-/// `nub-node-shim-<pid>` entries whose `<pid>` is no longer a live process and
-/// removes those, leaving live runs' dirs (including any concurrent nub run, and
-/// our own, which [`cleanup_shim`] owns) untouched.
+/// Reap randomized PATH shim directories leaked by dead processes, plus the
+/// legacy PID-only directories created by older Nub versions.
 ///
 /// HOT PATH: this is NOT called on the run/spawn/teardown critical path. It does
 /// a directory scan + per-entry `stat`, which is exactly the synchronous cost the
@@ -1876,21 +2383,82 @@ fn reap_stale_shims_in(temp: &Path, self_pid: u32, is_alive: impl Fn(u32) -> boo
         return;
     };
 
-    for entry in entries.flatten().take(REAP_SCAN_CAP) {
+    for entry in entries.take(REAP_SCAN_CAP).flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(pid_str) = name.strip_prefix("nub-node-shim-") else {
+        let Some((pid, kind)) = parse_shim_dir_name(name) else {
             continue;
         };
-        let Ok(pid) = pid_str.parse::<u32>() else {
-            continue;
-        };
-        // Never touch our own dir (cleanup_shim owns it) or a live process's dir.
         if pid == self_pid || is_alive(pid) {
             continue;
         }
-        let _ = fs::remove_dir_all(entry.path());
+        let require_private = matches!(kind, ShimDirNameKind::Randomized);
+        let Ok(dir_identity) = validate_shim_dir(&entry.path(), require_private) else {
+            continue;
+        };
+        remove_shim_entry(&node_shim_path(&entry.path()));
+        remove_shim_entry(&staging_shim_path(&entry.path(), pid));
+        if matches!(kind, ShimDirNameKind::Legacy) {
+            remove_legacy_staging_entries(&entry.path(), pid);
+        }
+        let _ = fs::remove_dir(entry.path());
+        drop(dir_identity);
     }
+}
+
+fn remove_legacy_staging_entries(dir: &Path, pid: u32) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.take(REAP_LEGACY_ENTRY_CAP).flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if is_legacy_staging_name(name, pid) {
+            remove_shim_entry(&entry.path());
+        }
+    }
+}
+
+fn is_legacy_staging_name(name: &str, pid: u32) -> bool {
+    let prefix = format!(".node-staging-{pid}-");
+    let Some(counter) = name.strip_prefix(&prefix) else {
+        return false;
+    };
+    if counter.is_empty()
+        || (counter.len() > 1 && counter.starts_with('0'))
+        || !counter.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    counter.parse::<u64>().is_ok()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShimDirNameKind {
+    Legacy,
+    Randomized,
+}
+
+fn parse_shim_dir_name(name: &str) -> Option<(u32, ShimDirNameKind)> {
+    let tail = name.strip_prefix(PATH_SHIM_PREFIX)?;
+    let (pid, kind) = match tail.split_once('-') {
+        Some((pid, nonce)) => {
+            if nonce.len() != 32
+                || !nonce
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return None;
+            }
+            (pid, ShimDirNameKind::Randomized)
+        }
+        None => (tail, ShimDirNameKind::Legacy),
+    };
+    if pid.is_empty() || pid.starts_with('0') || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let pid = pid.parse::<u32>().ok()?;
+    (pid != 0).then_some((pid, kind))
 }
 
 /// Spawn [`reap_stale_shims`] on a DETACHED background thread so the sweep's
@@ -1911,7 +2479,12 @@ fn pid_is_alive(pid: u32) -> bool {
     // kill(pid, 0) performs the permission/existence check WITHOUT sending a
     // signal: 0 → alive; ESRCH → no such process (reapable); EPERM → process
     // exists but is owned by another user (alive — do not reap).
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        // Negative pid_t values address process groups or every permitted
+        // process. Never reinterpret an out-of-range directory name that way.
+        return true;
+    };
+    let rc = unsafe { libc::kill(pid, 0) };
     if rc == 0 {
         return true;
     }
@@ -3179,100 +3752,642 @@ mod tests {
         assert_eq!(resolve(&[("TEMP", "C:\\")]), PathBuf::from("C:\\"));
     }
 
-    #[test]
-    fn path_shim_setup_and_cleanup() {
-        let nub_bin = env::current_exe().unwrap();
-        // Race 8 concurrent setups first — the workspace runner calls this from
-        // its worker threads, and publication must be atomic (every call
-        // succeeds and agrees on the dir; no loser errors with EEXIST, no
-        // half-written shim). Then assert on the published result below.
-        let dirs: Vec<_> = std::thread::scope(|s| {
-            (0..8)
-                .map(|_| s.spawn(|| setup_path_shim(&nub_bin).unwrap()))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|h| h.join().unwrap())
-                .collect()
-        });
-        assert!(
-            dirs.windows(2).all(|w| w[0] == w[1]),
-            "all concurrent setups must agree on one shim dir: {dirs:?}"
-        );
-        let shim_dir = setup_path_shim(&nub_bin).unwrap();
-        let dir = PathBuf::from(shim_dir.as_str());
-        assert!(
-            !fs::read_dir(&dir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .any(|e| e.file_name().to_string_lossy().contains("staging")),
-            "lost-race staging temps must be cleaned up"
-        );
-
-        // The shim entry is platform-specific: a `node` symlink on Unix, a
-        // `node.exe` hardlink/copy on Windows (A-WIN2). Check the right one — and
-        // that it actually links/points to the binary we passed.
-        #[cfg(unix)]
-        {
-            let node_shim = dir.join("node");
-            assert!(
-                node_shim.symlink_metadata().is_ok(),
-                "unix: node symlink created"
-            );
-            assert_eq!(
-                fs::read_link(&node_shim).unwrap(),
-                nub_bin,
-                "unix: node symlinks to the nub binary"
-            );
+    fn shim_test_root(label: &str) -> PathBuf {
+        for _ in 0..PATH_SHIM_CREATE_RETRIES {
+            let root = env::temp_dir().join(format!(
+                "nub-path-shim-test-{}-{label}-{}",
+                std::process::id(),
+                nonce_hex(secure_shim_nonce().unwrap())
+            ));
+            match fs::create_dir(&root) {
+                Ok(()) => return root,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("creating isolated PATH shim test root: {error}"),
+            }
         }
-        #[cfg(windows)]
-        {
-            let node_shim = dir.join("node.exe");
-            assert!(
-                node_shim.is_file(),
-                "windows: node.exe (hardlink/copy) created"
-            );
-        }
+        panic!("could not create an isolated PATH shim test root")
+    }
 
-        cleanup_shim();
-        assert!(!dir.exists());
+    fn shim_test_binary(root: &Path, name: &str, contents: &[u8]) -> PathBuf {
+        let path = root.join(name);
+        fs::write(&path, contents).unwrap();
+        path
     }
 
     #[test]
-    fn reaper_removes_dead_pid_dirs_and_spares_live_and_own() {
-        // Isolated scratch temp dir so we never touch the real TMPDIR.
-        let root = env::temp_dir().join(format!("nub-reaper-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-
-        let self_pid = 1000u32;
-        let live_pid = 2000u32; // a concurrent run, still alive
-        let dead_pid = 3000u32; // a run that was killed before cleanup
-
-        let mk = |pid: u32| {
-            let d = root.join(format!("nub-node-shim-{pid}"));
-            fs::create_dir_all(&d).unwrap();
-            fs::write(d.join("node"), b"shim").unwrap();
-            d
-        };
-        let own = mk(self_pid);
-        let live = mk(live_pid);
-        let dead = mk(dead_pid);
-        // A non-shim dir must be ignored entirely.
-        let unrelated = root.join("some-other-tmp");
-        fs::create_dir_all(&unrelated).unwrap();
-
-        // Liveness probe: every pid alive EXCEPT the dead one.
-        reap_stale_shims_in(&root, self_pid, |pid| pid != dead_pid);
-
+    fn path_shim_is_private_randomized_and_shared_by_concurrent_setups() {
+        let root = shim_test_root("concurrent");
+        let nub_binary = shim_test_binary(&root, "nub-bin", b"current nub");
+        let manager = PathShimManager::new();
+        let pid = 4242;
+        let dirs: Vec<_> = std::thread::scope(|scope| {
+            (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        manager
+                            .setup_in(
+                                &nub_binary,
+                                &root,
+                                pid,
+                                || Ok([0xab; 16]),
+                                ShimSetupOptions::default(),
+                            )
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect()
+        });
         assert!(
-            own.exists(),
-            "the current process's own dir is never reaped"
+            dirs.windows(2).all(|pair| pair[0] == pair[1]),
+            "concurrent callers published different PATH shim dirs: {dirs:?}"
         );
-        assert!(live.exists(), "a live concurrent run's dir is never reaped");
-        assert!(!dead.exists(), "a dead pid's leaked dir is reaped");
-        assert!(unrelated.exists(), "non-shim entries are left untouched");
 
-        let _ = fs::remove_dir_all(&root);
+        let dir = PathBuf::from(dirs[0].as_str());
+        assert_eq!(
+            parse_shim_dir_name(dir.file_name().unwrap().to_str().unwrap()),
+            Some((pid, ShimDirNameKind::Randomized))
+        );
+        assert!(
+            !fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().contains("staging"))
+        );
+        #[cfg(unix)]
+        {
+            let metadata = fs::symlink_metadata(&dir).unwrap();
+            assert_eq!(metadata.mode() & 0o7777, 0o700);
+            // SAFETY: `geteuid` has no preconditions.
+            assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+            assert_eq!(
+                fs::read_link(node_shim_path(&dir)).unwrap(),
+                fs::canonicalize(&nub_binary).unwrap()
+            );
+        }
+
+        manager.cleanup();
+        assert!(!dir.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_same_pid_collision_is_never_adopted() {
+        let root = shim_test_root("collision");
+        let nub_binary = shim_test_binary(&root, "nub-bin", b"current nub");
+        let pid = 5151;
+        let stale_nonce = [0x11; 16];
+        let fresh_nonce = [0x22; 16];
+        let stale = root.join(format!(
+            "{PATH_SHIM_PREFIX}{pid}-{}",
+            nonce_hex(stale_nonce)
+        ));
+        create_shim_dir(&stale).unwrap();
+        set_private_shim_permissions(&stale).unwrap();
+        fs::write(node_shim_path(&stale), b"obsolete shim").unwrap();
+
+        let mut nonces = [stale_nonce, fresh_nonce].into_iter();
+        let manager = PathShimManager::new();
+        let created = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                pid,
+                || Ok(nonces.next().unwrap()),
+                ShimSetupOptions::default(),
+            )
+            .unwrap();
+        let expected = root.join(format!(
+            "{PATH_SHIM_PREFIX}{pid}-{}",
+            nonce_hex(fresh_nonce)
+        ));
+        assert_eq!(Path::new(created.as_str()), expected);
+        assert_eq!(fs::read(node_shim_path(&stale)).unwrap(), b"obsolete shim");
+
+        manager.cleanup();
+        assert!(stale.exists(), "cleanup removed a stale same-PID collision");
+        assert!(!expected.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpublished_path_shim_rolls_back_before_retry() {
+        let root = shim_test_root("rollback");
+        let nub_binary = shim_test_binary(&root, "nub-bin", b"current nub");
+        let pid = 6161;
+        let nonce = [0x33; 16];
+        let dir = root.join(format!("{PATH_SHIM_PREFIX}{pid}-{}", nonce_hex(nonce)));
+        let manager = PathShimManager::new();
+
+        let error = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                pid,
+                || Ok(nonce),
+                ShimSetupOptions {
+                    #[cfg(windows)]
+                    force_copy: false,
+                    fail_before_commit: true,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected PATH shim commit failure")
+        );
+        assert!(!dir.exists(), "an unpublished PATH shim directory leaked");
+        assert!(manager.state.lock().unwrap().is_none());
+
+        manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                pid,
+                || Ok(nonce),
+                ShimSetupOptions::default(),
+            )
+            .unwrap();
+        manager.cleanup();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_cached_shim_is_replaced_once_for_concurrent_callers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = shim_test_root("cached-invalid");
+        let nub_binary = shim_test_binary(&root, "nub-bin", b"current nub");
+        let replacement = shim_test_binary(&root, "replacement-bin", b"not nub");
+        let manager = PathShimManager::new();
+        let dir = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                7171,
+                || Ok([0x44; 16]),
+                ShimSetupOptions::default(),
+            )
+            .unwrap();
+        let node = node_shim_path(Path::new(dir.as_str()));
+        fs::rename(&node, node.with_extension("old")).unwrap();
+        #[cfg(unix)]
+        unix_fs::symlink(&replacement, &node).unwrap();
+        #[cfg(windows)]
+        fs::copy(&replacement, &node).unwrap();
+
+        let nonce_calls = AtomicUsize::new(0);
+        let replacements: Vec<_> = std::thread::scope(|scope| {
+            (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        manager
+                            .setup_in(
+                                &nub_binary,
+                                &root,
+                                7171,
+                                || {
+                                    nonce_calls.fetch_add(1, Ordering::Relaxed);
+                                    Ok([0x55; 16])
+                                },
+                                ShimSetupOptions::default(),
+                            )
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect()
+        });
+        assert_eq!(nonce_calls.load(Ordering::Relaxed), 1);
+        assert!(
+            replacements.windows(2).all(|pair| pair[0] == pair[1]),
+            "concurrent callers published different replacements: {replacements:?}"
+        );
+        assert_ne!(replacements[0], dir);
+        let replacement_dir = PathBuf::from(replacements[0].as_str());
+        assert!(replacement_dir.exists());
+
+        manager.cleanup();
+        assert!(!replacement_dir.exists());
+        assert!(
+            Path::new(dir.as_str()).exists(),
+            "cleanup removed a directory whose node entry changed identity"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_cached_shim_replacement_can_retry_later() {
+        let root = shim_test_root("cached-retry");
+        let nub_binary = shim_test_binary(&root, "nub-bin", b"current nub");
+        let replacement = shim_test_binary(&root, "replacement-bin", b"not nub");
+        let manager = PathShimManager::new();
+        let original = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                7272,
+                || Ok([0x66; 16]),
+                ShimSetupOptions::default(),
+            )
+            .unwrap();
+        let node = node_shim_path(Path::new(original.as_str()));
+        fs::rename(&node, node.with_extension("old")).unwrap();
+        #[cfg(unix)]
+        unix_fs::symlink(&replacement, &node).unwrap();
+        #[cfg(windows)]
+        fs::copy(&replacement, &node).unwrap();
+
+        let failed_nonce = [0x77; 16];
+        let failed_dir = root.join(format!(
+            "{PATH_SHIM_PREFIX}{}-{}",
+            7272,
+            nonce_hex(failed_nonce)
+        ));
+        let error = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                7272,
+                || Ok(failed_nonce),
+                ShimSetupOptions {
+                    #[cfg(windows)]
+                    force_copy: false,
+                    fail_before_commit: true,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected PATH shim commit failure")
+        );
+        assert!(manager.state.lock().unwrap().is_none());
+        assert!(!failed_dir.exists());
+
+        let retry_nonce = [0x88; 16];
+        let retried = manager
+            .setup_in(
+                &nub_binary,
+                &root,
+                7272,
+                || Ok(retry_nonce),
+                ShimSetupOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            Path::new(retried.as_str()),
+            root.join(format!(
+                "{PATH_SHIM_PREFIX}{}-{}",
+                7272,
+                nonce_hex(retry_nonce)
+            ))
+        );
+
+        manager.cleanup();
+        assert!(!Path::new(retried.as_str()).exists());
+        assert!(Path::new(original.as_str()).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn randomized_shim_name_parser_is_canonical() {
+        let nonce = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            parse_shim_dir_name("nub-node-shim-1"),
+            Some((1, ShimDirNameKind::Legacy))
+        );
+        assert_eq!(
+            parse_shim_dir_name(&format!("nub-node-shim-4294967295-{nonce}")),
+            Some((u32::MAX, ShimDirNameKind::Randomized))
+        );
+        assert!(is_legacy_staging_name(".node-staging-1-0", 1));
+        assert!(is_legacy_staging_name(
+            ".node-staging-1-18446744073709551615",
+            1
+        ));
+
+        for invalid in [
+            "nub-node-shim-01",
+            "nub-node-shim-4294967296",
+            "nub-node-shim-1-0123456789abcdef0123456789abcde",
+            "nub-node-shim-1-0123456789abcdef0123456789abcdeF",
+            "nub-node-shim-1-0123456789abcdef0123456789abcdef-extra",
+        ] {
+            assert_eq!(parse_shim_dir_name(invalid), None, "accepted {invalid}");
+        }
+        for invalid in [
+            ".node-staging-1-01",
+            ".node-staging-1-18446744073709551616",
+            ".node-staging-1-0-extra",
+        ] {
+            assert!(!is_legacy_staging_name(invalid, 1), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn reaper_handles_randomized_and_legacy_names_without_pid_reuse_damage() {
+        let root = shim_test_root("reaper");
+        let make = |name: &str| {
+            let dir = root.join(name);
+            create_shim_dir(&dir).unwrap();
+            set_private_shim_permissions(&dir).unwrap();
+            fs::write(node_shim_path(&dir), b"shim").unwrap();
+            dir
+        };
+        let own = make("nub-node-shim-1000-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let live = make("nub-node-shim-2000-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let dead = make("nub-node-shim-3000-dddddddddddddddddddddddddddddddd");
+        let legacy_dead = make("nub-node-shim-3001");
+        fs::write(legacy_dead.join(".node-staging-3001-0"), b"staged").unwrap();
+        let dead_with_foreign = make("nub-node-shim-3005-55555555555555555555555555555555");
+        fs::write(dead_with_foreign.join("foreign-entry"), b"keep").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&legacy_dead, fs::Permissions::from_mode(0o755)).unwrap();
+        let malformed = make("nub-node-shim-3002-EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE");
+        #[cfg(unix)]
+        let non_private = {
+            let dir = make("nub-node-shim-3003-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+            dir
+        };
+        #[cfg(unix)]
+        let redirected = {
+            let target = root.join("redirect-target");
+            fs::create_dir(&target).unwrap();
+            let path = root.join("nub-node-shim-3004-ffffffffffffffffffffffffffffffff");
+            unix_fs::symlink(target, &path).unwrap();
+            path
+        };
+
+        reap_stale_shims_in(&root, 1000, |pid| pid == 2000);
+
+        assert!(own.exists());
+        assert!(live.exists());
+        assert!(!dead.exists());
+        assert!(!legacy_dead.exists());
+        assert!(
+            dead_with_foreign.join("foreign-entry").exists(),
+            "reaper recursively removed foreign directory contents"
+        );
+        assert!(malformed.exists());
+        #[cfg(unix)]
+        assert!(
+            non_private.exists(),
+            "a non-private randomized dir was reaped"
+        );
+        #[cfg(unix)]
+        assert!(
+            redirected.symlink_metadata().is_ok(),
+            "a redirected randomized path was reaped"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_staging_reaping_is_bounded_per_directory() {
+        let root = shim_test_root("legacy-reap-cap");
+        let dir = root.join("nub-node-shim-7777");
+        fs::create_dir(&dir).unwrap();
+        for counter in 0..=REAP_LEGACY_ENTRY_CAP {
+            fs::write(dir.join(format!(".node-staging-7777-{counter}")), b"staged").unwrap();
+        }
+
+        remove_legacy_staging_entries(&dir, 7777);
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().flatten().count(),
+            1,
+            "one sweep exceeded the per-directory reaper cap"
+        );
+        remove_legacy_staging_entries(&dir, 7777);
+        assert_eq!(fs::read_dir(&dir).unwrap().flatten().count(), 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_identity_compares_the_full_128_bit_file_id() {
+        let lower_64_bits = [0x5a; 8];
+        let mut first_id = [0u8; 16];
+        first_id[..8].copy_from_slice(&lower_64_bits);
+        let mut second_id = first_id;
+        second_id[15] = 1;
+
+        assert_ne!(
+            WindowsFileIdentity {
+                volume_serial: 7,
+                file_id: first_id,
+            },
+            WindowsFileIdentity {
+                volume_serial: 7,
+                file_id: second_id,
+            },
+            "ReFS identities that differ above 64 bits must remain distinct"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_identity_rejects_unsupported_sentinel_values() {
+        assert!(windows_file_identity(7, [0; 16]).is_err());
+        assert!(windows_file_identity(7, [u8::MAX; 16]).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_hardlink_and_forced_copy_keep_distinct_validated_identities() {
+        let root = shim_test_root("windows-publication");
+        let source = shim_test_binary(&root, "nub-bin", b"current nub bytes");
+
+        let hardlink_probe = root.join("hardlink-probe");
+        if fs::hard_link(&source, &hardlink_probe).is_ok() {
+            fs::remove_file(hardlink_probe).unwrap();
+            let hardlink_manager = PathShimManager::new();
+            let hardlink_dir = hardlink_manager
+                .setup_in(
+                    &source,
+                    &root,
+                    9191,
+                    || Ok([0x88; 16]),
+                    ShimSetupOptions::default(),
+                )
+                .unwrap();
+            {
+                let state = hardlink_manager.state.lock().unwrap();
+                let record = state.as_ref().unwrap();
+                let source_identity = FileHandle::from_path(&source).unwrap();
+                assert_eq!(source_identity, record.node_identity);
+                assert_eq!(
+                    FileHandle::from_path(&record.dir).unwrap(),
+                    record.dir_identity
+                );
+            }
+            hardlink_manager.cleanup();
+            assert!(
+                !Path::new(hardlink_dir.as_str()).exists(),
+                "Windows hardlink cleanup leaked its shim directory"
+            );
+        } else {
+            eprintln!("skipping hardlink publication: test TEMP does not support hardlinks");
+        }
+
+        let copy_manager = PathShimManager::new();
+        let dir = copy_manager
+            .setup_in(
+                &source,
+                &root,
+                9292,
+                || Ok([0x99; 16]),
+                ShimSetupOptions {
+                    force_copy: true,
+                    ..ShimSetupOptions::default()
+                },
+            )
+            .unwrap();
+        {
+            let state = copy_manager.state.lock().unwrap();
+            let record = state.as_ref().unwrap();
+            let source_identity = FileHandle::from_path(&source).unwrap();
+            assert_ne!(source_identity, record.node_identity);
+            assert_eq!(
+                fs::read(&source).unwrap(),
+                fs::read(node_shim_path(&record.dir)).unwrap(),
+                "forced-copy bytes differ from the source"
+            );
+        }
+
+        copy_manager.cleanup();
+        assert!(
+            !Path::new(dir.as_str()).exists(),
+            "Windows copy cleanup leaked its shim directory"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_cached_shim_rejects_directory_and_node_reparse_points() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+
+        let root = shim_test_root("windows-reparse");
+        let source = shim_test_binary(&root, "nub-bin", b"current nub bytes");
+
+        let dir_manager = PathShimManager::new();
+        let dir = PathBuf::from(
+            dir_manager
+                .setup_in(
+                    &source,
+                    &root,
+                    9393,
+                    || Ok([0xab; 16]),
+                    ShimSetupOptions::default(),
+                )
+                .unwrap()
+                .as_str(),
+        );
+        let displaced = dir.with_extension("old");
+        match fs::rename(&dir, &displaced) {
+            Ok(()) => {
+                if let Err(error) = symlink_dir(&displaced, &dir) {
+                    if error.raw_os_error() == Some(1314) {
+                        eprintln!(
+                            "skipping Windows directory reparse rejection: symlink privilege is unavailable"
+                        );
+                        dir_manager.cleanup();
+                    } else {
+                        panic!("creating directory reparse point: {error}");
+                    }
+                } else {
+                    let replacement = dir_manager
+                        .setup_in(
+                            &source,
+                            &root,
+                            9393,
+                            || Ok([0xac; 16]),
+                            ShimSetupOptions::default(),
+                        )
+                        .unwrap();
+                    assert_ne!(Path::new(replacement.as_str()), dir);
+                    assert!(Path::new(replacement.as_str()).exists());
+                    dir_manager.cleanup();
+                    assert!(!Path::new(replacement.as_str()).exists());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Windows can block renaming a directory while the cached
+                // directory/node handles are live. That is already fail-closed;
+                // exercise the reparse validator directly so this branch still
+                // covers the fallback boundary.
+                dir_manager.cleanup();
+                let target = root.join("directory-reparse-target");
+                let reparse = root.join("directory-reparse");
+                fs::create_dir(&target).unwrap();
+                if let Err(error) = symlink_dir(&target, &reparse) {
+                    if error.raw_os_error() == Some(1314) {
+                        eprintln!(
+                            "skipping direct Windows directory reparse rejection: symlink privilege is unavailable"
+                        );
+                    } else {
+                        panic!("creating direct directory reparse point: {error}");
+                    }
+                } else {
+                    let error = validate_shim_dir(&reparse, true).unwrap_err();
+                    assert!(
+                        error.to_string().contains("not a real directory"),
+                        "direct directory reparse point was not rejected: {error:#}"
+                    );
+                }
+            }
+            Err(error) => panic!("displacing cached shim directory: {error}"),
+        }
+
+        let node_manager = PathShimManager::new();
+        let dir = node_manager
+            .setup_in(
+                &source,
+                &root,
+                9494,
+                || Ok([0xad; 16]),
+                ShimSetupOptions {
+                    force_copy: true,
+                    ..ShimSetupOptions::default()
+                },
+            )
+            .unwrap();
+        let node = node_shim_path(Path::new(dir.as_str()));
+        fs::rename(&node, node.with_extension("old")).unwrap();
+        if let Err(error) = symlink_file(&source, &node) {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!(
+                    "skipping Windows node reparse rejection: symlink privilege is unavailable"
+                );
+                node_manager.cleanup();
+                fs::remove_dir_all(root).unwrap();
+                return;
+            }
+            panic!("creating file reparse point: {error}");
+        }
+        let replacement = node_manager
+            .setup_in(
+                &source,
+                &root,
+                9494,
+                || Ok([0xae; 16]),
+                ShimSetupOptions::default(),
+            )
+            .unwrap();
+        assert_ne!(Path::new(replacement.as_str()), Path::new(dir.as_str()));
+        assert!(Path::new(replacement.as_str()).exists());
+        node_manager.cleanup();
+        assert!(!Path::new(replacement.as_str()).exists());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

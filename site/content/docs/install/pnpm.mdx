@@ -48,6 +48,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>workspaces</code> / <code>pnpm-workspace.yaml</code></>, status: 'yes' },
     { feature: <><code>catalog:</code> / <code>catalogs:</code></>, status: 'yes' },
     { feature: <><code>workspace:</code> protocol</>, status: 'yes' },
+    { feature: <><code>namedRegistries</code></>, status: 'yes', note: 'Alias-to-registry map; built-in gh: alias for GitHub Packages.' },
     { feature: <>workspace selectors</>, status: 'partial', note: 'No git-since ([ref]) selector.' },
     // ── Config files ──────────────────────────────────────────────────
     { feature: <code>.npmrc</code>, status: 'yes' },
@@ -98,6 +99,7 @@ The refusal names the detected version (v5.4 reads `(pnpm 7)`). Migrate by runni
 When pnpm is the incumbent, Nub honors pnpm's configuration surface:
 
 - `pnpm-workspace.yaml` — `packages:` globs and the `catalog:` / `catalogs:` maps.
+- `namedRegistries` — an alias-to-registry-URL map from `pnpm-workspace.yaml` or the global pnpm `config.yaml`; a dependency spec prefixed `<alias>:` (e.g. `"@work/constants": "work:1.x.x"`) resolves from that registry, the built-in `gh:` alias points at GitHub Packages, and auth rides existing `//host/:_authToken=` entries in `.npmrc`.
 - `pnpm.overrides` — version pins applied during resolution, written into the lockfile's `overrides:` block.
 - `pnpm.packageExtensions` — extra dependency/peer metadata merged onto resolved packages, hashed into the lockfile's `packageExtensionsChecksum`.
 - `pnpm.patchedDependencies` — patch files applied to dependency contents during linking, wired to `nub patch` / `patch-commit` / `patch-remove`.
@@ -110,6 +112,8 @@ packages:
   - 'packages/*'
 catalog:
   lodash.merge: 4.6.2
+namedRegistries:
+  work: https://npm.example.com/
 ```
 
 ```json

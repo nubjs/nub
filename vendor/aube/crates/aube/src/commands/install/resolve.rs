@@ -45,6 +45,7 @@ pub(super) struct LockfileOnlyInput<'a> {
     pub per_project_write_selection: Option<&'a std::collections::BTreeSet<String>>,
     pub ws_config: &'a aube_manifest::workspace::WorkspaceConfig,
     pub workspace_catalogs: &'a crate::commands::CatalogMap,
+    pub named_registries: &'a std::collections::BTreeMap<String, String>,
     pub settings_ctx: &'a aube_settings::ResolveCtx<'a>,
     pub dependency_policy: &'a aube_resolver::DependencyPolicy,
     pub lockfile_pre_parse: Option<&'a (LockfileGraph, LockfileKind)>,
@@ -78,6 +79,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         per_project_write_selection,
         ws_config,
         workspace_catalogs,
+        named_registries,
         settings_ctx,
         dependency_policy,
         lockfile_pre_parse,
@@ -234,6 +236,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             settings_ctx,
             workspace_config: ws_config,
             workspace_catalogs,
+            named_registries,
             minimum_release_age_override,
             // `lockfile=false` collapses to `None` so the resolver
             // doesn't waste a fetch widening a lockfile that will

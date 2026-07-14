@@ -1,0 +1,4 @@
+interface:
+  display_name: "Windows VM Testing"
+  short_description: "Run and debug Nub in the local Windows VM"
+  default_prompt: "Use $windows-vm-test to reproduce and debug this Nub behavior in the local Windows VM."

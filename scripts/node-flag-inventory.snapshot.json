@@ -1,0 +1,187 @@
+{
+  "nodeVersion": "v26.5.0",
+  "optionTypeLegend": {
+    "0": "kNoOp",
+    "1": "kV8Option",
+    "2": "kBoolean",
+    "3": "kInteger",
+    "4": "kUInteger",
+    "5": "kString",
+    "6": "kHostPort",
+    "7": "kStringList"
+  },
+  "envVarSettingsLegend": {
+    "0": "kAllowedInEnvvar",
+    "1": "kDisallowedInEnvvar"
+  },
+  "flags": {
+    "--experimental-abortcontroller": [
+      0,
+      0
+    ],
+    "--experimental-addon-modules": [
+      2,
+      0
+    ],
+    "--experimental-config-file": [
+      5,
+      1
+    ],
+    "--experimental-detect-module": [
+      2,
+      0
+    ],
+    "--experimental-eventsource": [
+      2,
+      0
+    ],
+    "--experimental-fetch": [
+      0,
+      0
+    ],
+    "--experimental-ffi": [
+      2,
+      0
+    ],
+    "--experimental-global-customevent": [
+      0,
+      0
+    ],
+    "--experimental-global-navigator": [
+      2,
+      0
+    ],
+    "--experimental-global-webcrypto": [
+      0,
+      0
+    ],
+    "--experimental-import-meta-resolve": [
+      2,
+      0
+    ],
+    "--experimental-import-text": [
+      2,
+      0
+    ],
+    "--experimental-inspector-network-resource": [
+      2,
+      1
+    ],
+    "--experimental-json-modules": [
+      0,
+      0
+    ],
+    "--experimental-loader": [
+      7,
+      0
+    ],
+    "--experimental-modules": [
+      0,
+      0
+    ],
+    "--experimental-network-inspection": [
+      2,
+      1
+    ],
+    "--experimental-package-map": [
+      5,
+      0
+    ],
+    "--experimental-print-required-tla": [
+      2,
+      0
+    ],
+    "--experimental-quic": [
+      0,
+      0
+    ],
+    "--experimental-repl-await": [
+      2,
+      0
+    ],
+    "--experimental-report": [
+      0,
+      0
+    ],
+    "--experimental-require-module": [
+      2,
+      0
+    ],
+    "--experimental-sea-config": [
+      5,
+      1
+    ],
+    "--experimental-shadow-realm": [
+      2,
+      0
+    ],
+    "--experimental-specifier-resolution": [
+      0,
+      0
+    ],
+    "--experimental-sqlite": [
+      2,
+      0
+    ],
+    "--experimental-storage-inspection": [
+      2,
+      1
+    ],
+    "--experimental-stream-iter": [
+      2,
+      0
+    ],
+    "--experimental-test-coverage": [
+      2,
+      1
+    ],
+    "--experimental-test-module-mocks": [
+      2,
+      1
+    ],
+    "--experimental-test-snapshots": [
+      0,
+      1
+    ],
+    "--experimental-test-tag-filter": [
+      7,
+      1
+    ],
+    "--experimental-top-level-await": [
+      0,
+      0
+    ],
+    "--experimental-vfs": [
+      2,
+      0
+    ],
+    "--experimental-vm-modules": [
+      2,
+      0
+    ],
+    "--experimental-wasi-unstable-preview1": [
+      0,
+      0
+    ],
+    "--experimental-wasm-modules": [
+      0,
+      0
+    ],
+    "--experimental-websocket": [
+      2,
+      0
+    ],
+    "--experimental-webstorage": [
+      2,
+      0
+    ],
+    "--experimental-worker": [
+      0,
+      0
+    ],
+    "--experimental-worker-inspection": [
+      2,
+      1
+    ]
+  }
+}

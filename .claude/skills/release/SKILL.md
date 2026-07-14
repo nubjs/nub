@@ -10,6 +10,8 @@ description: >-
   notes from the full changeset and comment the version + release link on every
   closed issue + merged PR the release ships (mandatory maintainer hygiene). Do
   NOT cut until all fixes are green.
+metadata:
+  internal: true
 ---
 
 # Cutting a nub release

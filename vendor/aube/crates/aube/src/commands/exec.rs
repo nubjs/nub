@@ -459,19 +459,35 @@ fn resolve_node_bin_target_path(path: &Path) -> Option<NodeBinTarget> {
     let content = std::fs::read_to_string(path).ok()?;
     let parent = path.parent()?;
     if let Some(rel) = aube_linker::parse_posix_shim_target(&content) {
+        let target = aube_linker::normalize_path(&parent.join(rel));
+        // A shim whose target is a native executable (e.g. esbuild after
+        // its postinstall replaces the JS launcher — #394) must be exec'd
+        // directly, never handed to `node`. This is a runtime safety net
+        // in case a stale `node` shim survives the post-build relink.
+        let native = aube_linker::is_native_executable_target(&target);
         return Some(NodeBinTarget {
-            path: aube_linker::normalize_path(&parent.join(rel)),
-            node: local_node_program(parent),
-            node_path: parse_posix_node_path(&content)
-                .map(|rel| aube_linker::normalize_path(&parent.join(rel))),
+            node: (!native).then(|| local_node_program(parent)).flatten(),
+            node_path: (!native)
+                .then(|| {
+                    parse_posix_node_path(&content)
+                        .map(|rel| aube_linker::normalize_path(&parent.join(rel)))
+                })
+                .flatten(),
+            path: target,
         });
     }
     let rel = parse_cmd_shim_target(&content)?;
+    let target = aube_linker::normalize_path(&parent.join(rel));
+    let native = aube_linker::is_native_executable_target(&target);
     Some(NodeBinTarget {
-        path: aube_linker::normalize_path(&parent.join(rel)),
-        node: local_node_program(parent),
-        node_path: parse_cmd_node_path(&content)
-            .map(|rel| aube_linker::normalize_path(&parent.join(rel))),
+        node: (!native).then(|| local_node_program(parent)).flatten(),
+        node_path: (!native)
+            .then(|| {
+                parse_cmd_node_path(&content)
+                    .map(|rel| aube_linker::normalize_path(&parent.join(rel)))
+            })
+            .flatten(),
+        path: target,
     })
 }
 

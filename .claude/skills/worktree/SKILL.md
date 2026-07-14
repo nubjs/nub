@@ -11,6 +11,8 @@ description: >-
   (`~/.cache/nub/shared-target`) that all worktrees reuse, and applying
   `.worktreeinclude` — plus the eagerly-pull-the-shared-tree discipline and the
   safe cleanup path. Pairs with the `dev-loop` build skill.
+metadata:
+  internal: true
 ---
 
 # Worktrees for parallel nub work

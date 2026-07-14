@@ -427,6 +427,9 @@ pub(crate) fn build_resolver(
     // tools' lockfiles coexist undeclared.
     let target_lockfile_kind =
         Some(resolve_lockfile_kind_for_write(cwd)?.unwrap_or_else(|| default_lockfile_kind(&ctx)));
+    // `add`/`update`/`dedupe`/`audit` route `<alias>:<spec>` deps the same as
+    // install; empty under any non-pnpm posture.
+    let named_registries = super::discover_named_registries(cwd);
     Ok(install::configure_resolver(
         aube_resolver::Resolver::new(std::sync::Arc::new(make_client(cwd))),
         cwd,
@@ -435,6 +438,7 @@ pub(crate) fn build_resolver(
             settings_ctx: &ctx,
             workspace_config: &ws_config,
             workspace_catalogs: &catalogs,
+            named_registries: &named_registries,
             minimum_release_age_override: None,
             target_lockfile_kind,
             dependency_policy: None,

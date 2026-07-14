@@ -14,6 +14,8 @@ description: >-
   to the branch) runs the probe with no PR open. Pairs with `ad-hoc-test` (local
   host probing), `dev-loop` (build), `ci-watch` (await the run), and AGENTS.md's
   Docker section (Linux-only; this skill covers what Docker can't).
+metadata:
+  internal: true
 ---
 
 # Ad-hoc testing on a real OS/platform via CI

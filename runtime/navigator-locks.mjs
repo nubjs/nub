@@ -3,15 +3,14 @@
 // scope: the common in-process serialization use is covered; cross-thread coordination
 // would need a SharedArrayBuffer waitlist and is out of scope until there's demand).
 //
-// Spec: https://w3c.github.io/web-locks/. Modeled to match Node's own
-// internal/locks.js (the native impl on 24.5+) so behavior is identical across the
-// version boundary — including `steal`, AbortSignal integration, and the option/name
-// validation that the WPT web-locks suite exercises. Requires a `navigator` object to
-// host `navigator.locks`; navigator-shim.mjs backfills that on Node < 21 and MUST run
-// first.
+// Spec: https://w3c.github.io/web-locks/. Follows the Web Locks algorithms and
+// Web IDL conversion order, including where Node's native implementation diverges.
+// Requires a `navigator` object to host `navigator.locks`; navigator-shim.mjs
+// backfills that on Node < 21 and MUST run first.
 
 if (typeof globalThis.navigator === "object" && typeof globalThis.navigator.locks === "undefined") {
   const AbortSig = globalThis.AbortSignal;
+  const emptyOptions = Object.create(null);
 
   const abortError = (msg) => new DOMException(msg || "The operation was aborted", "AbortError");
   const stolenError = () => abortError("The lock was stolen by another request");
@@ -148,29 +147,40 @@ if (typeof globalThis.navigator === "object" && typeof globalThis.navigator.lock
 
   class LockManager {
     async request(name, optionsOrCallback, maybeCallback) {
+      if (arguments.length < 2) {
+        throw new TypeError("Failed to execute 'request' on 'LockManager': 2 arguments required.");
+      }
       let options = optionsOrCallback;
       let callback = maybeCallback;
-      if (callback === undefined) {
+      if (arguments.length < 3) {
         callback = options;
         options = undefined;
       }
 
       // WebIDL DOMString coercion (throws TypeError on a Symbol, like the binding).
       name = `${name}`;
-      if (typeof callback !== "function") {
-        throw new TypeError("Failed to execute 'request' on 'LockManager': parameter 2 is not a function.");
+      if (options == null) {
+        options = emptyOptions;
+      } else if (typeof options !== "object" && typeof options !== "function") {
+        throw new TypeError("Failed to execute 'request' on 'LockManager': options cannot be converted to a dictionary.");
       }
-      if (options === undefined || typeof options === "function") options = {};
 
-      const mode = options.mode === undefined ? "exclusive" : options.mode;
+      const ifAvailable = !!options.ifAvailable;
+      const modeValue = options.mode;
+      const mode = modeValue === undefined ? "exclusive" : `${modeValue}`;
       if (mode !== "exclusive" && mode !== "shared") {
         throw new TypeError(`Failed to execute 'request' on 'LockManager': '${mode}' is not a valid value for enumeration LockMode.`);
       }
-      const ifAvailable = !!options.ifAvailable;
-      const steal = !!options.steal;
       const signal = options.signal;
-      if (signal !== undefined && signal !== null && !(AbortSig && signal instanceof AbortSig)) {
+      if (signal !== undefined && (signal === null || (typeof signal !== "object" && typeof signal !== "function"))) {
+        throw new TypeError("Failed to execute 'request' on 'LockManager': member signal is not an object.");
+      }
+      if (signal !== undefined && !(AbortSig && signal instanceof AbortSig)) {
         throw new TypeError("Failed to execute 'request' on 'LockManager': member signal is not of type AbortSignal.");
+      }
+      const steal = !!options.steal;
+      if (typeof callback !== "function") {
+        throw new TypeError("Failed to execute 'request' on 'LockManager': callback is not a function.");
       }
 
       // Already-aborted signal rejects with its reason BEFORE the option-combo checks

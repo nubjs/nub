@@ -1,6 +1,8 @@
 ---
 name: benchmarking
 description: Comparative install-benchmarking methodology for nub vs npm/pnpm/bun — cold/warm protocol, genuine-cold cache isolation, load-robust measurement, and the anti-juicing honesty bar. Invoke (via the Skill tool) whenever you need to benchmark `nub install` against another package manager, produce or update the homepage/blog install numbers, or verify a perf claim before it ships. Encodes the hard-won gotchas: time setup OUTSIDE the measurement (hyperfine `--prepare`), the cache lives on DISK so env-var isolation is NOT trustworthy (bun ignores `BUN_INSTALL_CACHE_DIR`/`$HOME` — wipe the real path), VERIFY every cold is genuine via an offline-fails check, and only measure wall-clock on a quiet machine (gate on low load) with file counts as a load-independent cross-check. Pairs with `pm-perf-tracing` for the internal Rust phase decomposition.
+metadata:
+  internal: true
 ---
 
 # benchmarking

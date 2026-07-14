@@ -1,0 +1,27 @@
+---
+title: "Nub 0.4.9"
+description: pnpm named-registry support, so dependencies that resolve through a registry alias install under nub.
+author: The Nub Team
+date: 2026-07-12
+---
+
+A patch release adding pnpm named-registry support.
+
+## Named registries
+
+When pnpm is the incumbent package manager, nub now honors pnpm's `namedRegistries` — an alias-to-registry-URL map declared in `pnpm-workspace.yaml` or the global pnpm `config.yaml`. A dependency spec prefixed with the alias resolves from that registry:
+
+```yaml
+# pnpm-workspace.yaml
+namedRegistries:
+  work: https://npm.example.com/
+```
+
+```json
+// package.json
+{ "dependencies": { "@work/constants": "work:1.x.x" } }
+```
+
+Both direct and transitive named-registry specs resolve. The built-in `gh:` alias points at GitHub Packages, and a user entry can repoint it at a GitHub Enterprise host. Authentication is read from existing per-URL `.npmrc` entries — `//host/:_authToken=…` — so no new configuration is needed. Before this, a named-registry spec fell through to the default registry and failed to resolve. ([#440](https://github.com/nubjs/nub/issues/440))
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.9) list every change in this release.

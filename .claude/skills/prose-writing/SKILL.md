@@ -34,6 +34,8 @@ description: >-
   full guide: PROSE.md at the repo root (this skill is its trigger + index).
   Project-specific copy rules (brand vocabulary, claim-tracing, product framing)
   live in AGENTS.md, layered on top.
+metadata:
+  internal: true
 ---
 
 # prose-writing

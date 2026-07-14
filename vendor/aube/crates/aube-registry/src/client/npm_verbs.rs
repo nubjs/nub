@@ -104,7 +104,7 @@ impl RegistryClient {
     /// `maintainers` array when the collaborators endpoint 404s (older /
     /// non-npm registries).
     pub async fn fetch_owners(&self, name: &str) -> Result<Vec<Owner>, Error> {
-        let registry_url = self.registry_url_for(name).to_string();
+        let registry_url = self.registry_url_for(name);
         let url = format!(
             "{}/-/package/{}/collaborators",
             registry_url.trim_end_matches('/'),

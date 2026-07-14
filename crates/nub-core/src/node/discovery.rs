@@ -823,7 +823,8 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
 /// body. Two recursion guards: the per-invocation temp dirs (skipped by their
-/// `nub-node-shim-<pid>` name prefix) and the persistent global shim dir
+/// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names)
+/// and the persistent global shim dir
 /// (skipped by CANONICAL-PATH equality, since it's a fixed possibly-symlinked
 /// path a name prefix can't catch).
 fn which_node_in(
@@ -1089,6 +1090,122 @@ fn write_version_cache(node_path: &Path, version: &NodeVersion) {
     data[key] = serde_json::json!({
         "version": version.to_string(),
         "mtime": mtime,
+    });
+
+    let _ = fs::write(
+        &cache,
+        serde_json::to_string_pretty(&data).unwrap_or_default(),
+    );
+}
+
+/// The set of flag NAMES the given Node binary accepts (its
+/// `process.allowedNodeEnvironmentFlags`) — the authoritative universe of flags
+/// nub may inject or propagate via `NODE_OPTIONS`. Spawns the binary once with a
+/// tiny `-e` probe and caches the result on disk keyed by (path, mtime), so every
+/// repeat call is spawn-free (one probe per binary, ever). Returns `None` if the
+/// probe cannot run or produces nothing usable — callers then fall back to plain
+/// version-band gating rather than dropping flags they still need.
+///
+/// ## Why an authoritative probe and not a static binary byte-scan
+/// The option names ARE embedded as string literals in the Node binary, so a
+/// `strings | grep` would appear to work — but a string match is not proof the
+/// option is a LIVE accepted flag (it can sit in help text or unrelated data), and
+/// injecting a non-accepted flag is the exact `node: bad option` startup abort this
+/// guards against. `allowedNodeEnvironmentFlags` is Node's own ground truth.
+///
+/// ## Why this is needed (the open-ended-`Unflag`-band hazard)
+/// Node does NOT keep every experimental flag forever. Most unflagged flags survive
+/// as accepted no-ops (`--experimental-fetch`, `--experimental-modules`, …), but
+/// some are HARD-REMOVED on a later major — `--experimental-policy` and
+/// `--experimental-network-imports` are gone, and `--experimental-permission` was
+/// accepted through Node 23.11 then deleted at 24.0 (it stabilized to
+/// `--permission`). An open-ended `Unflag [lo, ∞)` band in the feature matrix would
+/// keep injecting such a flag into every future Node and abort it at startup.
+/// Intersecting the version-band inject set with this probe makes injection
+/// self-correcting: a flag the running Node no longer accepts is simply dropped, no
+/// nub release required.
+pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet<String>> {
+    if let Some(cached) = read_env_flags_cache(node_path) {
+        return Some(cached);
+    }
+
+    // Clear an inherited NODE_OPTIONS for the probe. `node -e` (unlike `node
+    // --version`) runs NODE_OPTIONS `--require`/`--import` preloads, so an inherited
+    // preload that writes to stdout would pollute the flag list, and a preload with
+    // side effects would run for nothing. The accepted-flag set is a static property
+    // of the binary, independent of NODE_OPTIONS — so removing it makes the probe
+    // deterministic and side-effect-free. (Pollution could only ADD tokens, never
+    // drop a real flag, so this is defense-in-depth, not a correctness fix.)
+    let output = Command::new(node_path)
+        .arg("-e")
+        .arg("process.stdout.write([...process.allowedNodeEnvironmentFlags].join(\"\\n\"))")
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let flags: std::collections::BTreeSet<String> =
+        stdout.split_whitespace().map(str::to_string).collect();
+    if flags.is_empty() {
+        return None;
+    }
+
+    write_env_flags_cache(node_path, &flags);
+    Some(flags)
+}
+
+/// mtime (seconds since epoch) of a Node binary, for cache-key freshness. `None`
+/// if the path can't be stat'd — a miss then forces a fresh probe.
+fn node_mtime_secs(node_path: &Path) -> Option<u64> {
+    fs::metadata(node_path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Read the cached `allowedNodeEnvironmentFlags` set for a binary, honoring the
+/// (path, mtime) key so a rebuilt/replaced Node at the same path re-probes. Kept in
+/// a sibling file to `node-discovery.json` so it never risks the version cache.
+fn read_env_flags_cache(node_path: &Path) -> Option<std::collections::BTreeSet<String>> {
+    let cache = cache_dir()?.join("node-env-flags.json");
+    let content = fs::read_to_string(&cache).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let key = node_path.to_string_lossy();
+    let entry = data.get(key.as_ref())?;
+    let cached_mtime = entry.get("mtime")?.as_u64()?;
+
+    if cached_mtime != node_mtime_secs(node_path)? {
+        return None;
+    }
+
+    let arr = entry.get("flags")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+fn write_env_flags_cache(node_path: &Path, flags: &std::collections::BTreeSet<String>) {
+    let Some(dir) = cache_dir() else { return };
+    let _ = fs::create_dir_all(&dir);
+    let cache = dir.join("node-env-flags.json");
+
+    let mut data: serde_json::Value = fs::read_to_string(&cache)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let key = node_path.to_string_lossy().to_string();
+    data[key] = serde_json::json!({
+        "flags": flags.iter().collect::<Vec<_>>(),
+        "mtime": node_mtime_secs(node_path).unwrap_or(0),
     });
 
     let _ = fs::write(

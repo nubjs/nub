@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 impl RegistryClient {
     pub fn cached_packument_lookup(&self, name: &str, cache_dir: &Path) -> CachedPackumentLookup {
-        let registry_url = self.config.registry_for(name).to_string();
+        let registry_url = self.registry_url_for(name);
         let Some(cache_path) = packument_cache_path(cache_dir, name, &registry_url) else {
             return CachedPackumentLookup::default();
         };
@@ -35,7 +35,7 @@ impl RegistryClient {
         name: &str,
         cache_dir: &Path,
     ) -> CachedPackumentLookup {
-        let registry_url = self.config.registry_for(name).to_string();
+        let registry_url = self.registry_url_for(name);
         let Some(cache_path) = packument_full_cache_path(cache_dir, name, &registry_url) else {
             return CachedPackumentLookup::default();
         };
@@ -51,8 +51,8 @@ impl RegistryClient {
         last_modified: Option<&str>,
         fresh: bool,
     ) {
-        let registry_url = self.config.registry_for(name);
-        let Some(cache_path) = packument_cache_path(cache_dir, name, registry_url) else {
+        let registry_url = self.registry_url_for(name);
+        let Some(cache_path) = packument_cache_path(cache_dir, name, &registry_url) else {
             return;
         };
         if cache_path.exists() {
@@ -74,8 +74,8 @@ impl RegistryClient {
     }
 
     pub fn replace_packument_cache(&self, name: &str, cache_dir: &Path, packument: &Packument) {
-        let registry_url = self.config.registry_for(name);
-        let Some(cache_path) = packument_cache_path(cache_dir, name, registry_url) else {
+        let registry_url = self.registry_url_for(name);
+        let Some(cache_path) = packument_cache_path(cache_dir, name, &registry_url) else {
             return;
         };
         let cached = CachedPackument {
@@ -103,8 +103,8 @@ impl RegistryClient {
         last_modified: Option<&str>,
         fresh: bool,
     ) {
-        let registry_url = self.config.registry_for(name);
-        let Some(cache_path) = packument_full_cache_path(cache_dir, name, registry_url) else {
+        let registry_url = self.registry_url_for(name);
+        let Some(cache_path) = packument_full_cache_path(cache_dir, name, &registry_url) else {
             return;
         };
         if cache_path.exists() {
@@ -134,7 +134,7 @@ impl RegistryClient {
         name: &str,
         cache_dir: &Path,
     ) -> Result<serde_json::Value, Error> {
-        let registry_url = self.config.registry_for(name).to_string();
+        let registry_url = self.registry_url_for(name);
         let cache_path = packument_full_cache_path(cache_dir, name, &registry_url)
             .ok_or_else(|| Error::InvalidName(name.to_string()))?;
         let cached = read_cached_full_packument(&cache_path);
@@ -179,7 +179,7 @@ impl RegistryClient {
             let is_last = attempt + 1 >= max_attempts;
             match {
                 let mut req = self
-                    .authed_get_for_package(&url, registry_url, name)
+                    .authed_get_for_package(&url, &registry_url, name)
                     .header("Accept", PACKUMENT_FULL_ACCEPT)
                     // RFC 9218: packument metadata is resolver-blocking,
                     // mark Critical so H2-aware origins prioritize it
@@ -328,7 +328,7 @@ impl RegistryClient {
         // Fast path: try the warm-cache read first. Matches the
         // freshness window logic in `fetch_packument_full_cached`
         // exactly so the two APIs share revalidation behavior.
-        let registry_url = self.config.registry_for(name).to_string();
+        let registry_url = self.registry_url_for(name);
         let cache_path = packument_full_cache_path(cache_dir, name, &registry_url)
             .ok_or_else(|| Error::InvalidName(name.to_string()))?;
         let force_cache = self.force_cache();
@@ -378,7 +378,7 @@ impl RegistryClient {
             return Err(Error::Offline(format!("packument for {name}")));
         }
 
-        let registry_url = self.config.registry_for(name).to_string();
+        let registry_url = self.registry_url_for(name);
         let cache_path = packument_full_cache_path(cache_dir, name, &registry_url)
             .ok_or_else(|| Error::InvalidName(name.to_string()))?;
         let (url, registry_url) = self.packument_url(name);
@@ -403,7 +403,7 @@ impl RegistryClient {
             let is_last = attempt + 1 >= max_attempts;
             match {
                 let mut req = self
-                    .authed_get_for_package(&url, registry_url, name)
+                    .authed_get_for_package(&url, &registry_url, name)
                     .header("Accept", PACKUMENT_FULL_ACCEPT);
                 if let Some(ref etag) = cached.etag {
                     req = req.header("If-None-Match", etag);
@@ -565,7 +565,7 @@ impl RegistryClient {
             let _attempt_send_t0 = std::time::Instant::now();
             match {
                 let req = self
-                    .authed_get_for_package(&url, registry_url, name)
+                    .authed_get_for_package(&url, &registry_url, name)
                     // RFC 9218: packument metadata is resolver-blocking,
                     // mark Critical so Cloudflare/Fastly H2 schedulers
                     // prioritize it ahead of pending tarball frames on
@@ -676,7 +676,7 @@ impl RegistryClient {
         name: &str,
         cache_dir: &Path,
     ) -> Result<Packument, Error> {
-        let registry_url = self.config.registry_for(name).to_string();
+        let registry_url = self.registry_url_for(name);
         let cache_path = packument_cache_path(cache_dir, name, &registry_url)
             .ok_or_else(|| Error::InvalidName(name.to_string()))?;
         let cached = read_cached_packument(&cache_path);
@@ -690,7 +690,7 @@ impl RegistryClient {
         cache_dir: &Path,
         lookup: CachedPackumentLookup,
     ) -> Result<Packument, Error> {
-        let registry_url = self.config.registry_for(name).to_string();
+        let registry_url = self.registry_url_for(name);
         let cache_path = packument_cache_path(cache_dir, name, &registry_url)
             .ok_or_else(|| Error::InvalidName(name.to_string()))?;
         let cached = match lookup.cached {
@@ -765,7 +765,7 @@ impl RegistryClient {
             let is_last = attempt + 1 >= max_attempts;
             match {
                 let mut req = self
-                    .authed_get_for_package(&url, registry_url, name)
+                    .authed_get_for_package(&url, &registry_url, name)
                     .header(
                         "Priority",
                         aube_util::http::priority::header_value(
