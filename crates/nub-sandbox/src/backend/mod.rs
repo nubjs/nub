@@ -936,8 +936,10 @@ fn generic_apply(
 /// one that doesn't pushes the axis into `lost` so the caller never mistakes an
 /// unenforced private/deny-tmp for a real one (fail-safe honesty, never silent).
 /// macOS ENFORCES the mode in its SBPL, so it never consults this (hence the cfg).
-#[cfg(not(target_os = "macos"))]
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
 fn tmp_lost_axis(policy: &SandboxPolicy) -> Option<&'static str> {
     match policy.fs.tmp {
         crate::policy::TmpMode::Shared => None,
