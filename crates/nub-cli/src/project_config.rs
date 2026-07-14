@@ -505,10 +505,43 @@ pub fn initialize_effective_config(
         return Ok(config);
     }
     let config = load_effective_config(cwd, overlays)?;
-    let _ = EFFECTIVE_CONFIG.set(config);
+    if EFFECTIVE_CONFIG.set(config).is_ok() {
+        record_snapshot_initialization_for_tests(
+            EFFECTIVE_CONFIG
+                .get()
+                .expect("effective config was initialized"),
+        );
+    }
     Ok(EFFECTIVE_CONFIG
         .get()
         .expect("effective config was initialized"))
+}
+
+fn record_snapshot_initialization_for_tests(config: &EffectiveConfig) {
+    use std::io::Write;
+
+    // Internal process-test seam: one line is appended only when this process
+    // wins the OnceLock initialization. Double-underscore test controls are not
+    // part of nub's public configuration surface.
+    let Some(path) = std::env::var_os("__NUB_TEST_CONFIG_SNAPSHOT_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(
+            file,
+            "cwd={} project={}",
+            config.cwd.display(),
+            if config.project.is_some() {
+                "loaded"
+            } else {
+                "none"
+            }
+        );
+    }
 }
 
 pub fn effective_config() -> Option<&'static EffectiveConfig> {
