@@ -715,7 +715,7 @@ mod win {
             let reason = prepared.degradation.reason.as_deref().unwrap_or_default();
             if prepared.degradation.lost.iter().any(|s| s == "net-full")
                 && reason.contains("loopback")
-                && reason.contains("listener")
+                && reason.contains("full host networking")
             {
                 println!("PASS net:true honestly reports AppContainer's narrower network");
             } else {
@@ -762,16 +762,10 @@ mod win {
             ),
             0,
         );
-        expect_in(
-            &mut fails,
-            "AppContainer child cannot listen as a full host-network peer",
-            code(&confine, &child, &["__sbxchild__", "listen"]),
-            &[5, 9],
-        );
         expect(
             &mut fails,
-            "NC fully-relaxed child can bind a loopback listener",
-            code(&relaxed, &child, &["__sbxchild__", "listen"]),
+            "AppContainer child can bind a loopback listener",
+            code(&confine, &child, &["__sbxchild__", "listen"]),
             0,
         );
 
