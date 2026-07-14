@@ -451,23 +451,65 @@ fn windows_read_deny_inside_grant_fails_closed() {
     assert!(stderr.contains("read deny"), "{stderr}");
 }
 
+/// Windows AppContainer grants are inheritable. The compiler's secret-read deny set
+/// therefore cannot be carved out of either of these ordinary fixture grants; reject
+/// before running the child instead of reporting an unenforceable sandbox as applied.
+#[cfg(target_os = "windows")]
+fn fixture_read_deny_fails_closed(name: &str, writable_marker: &str) {
+    let fx = load_fixture(name);
+    let tree = Tree::new();
+    let policy_path = tree.proj.join("__policy.json");
+    std::fs::write(&policy_path, tree.render_policy(&fx.policy)).unwrap();
+    let marker = tree.proj.join(writable_marker);
+
+    let out = Command::new(nub_bin())
+        .arg("run")
+        .arg("--sandbox")
+        .arg(&policy_path)
+        .arg("--")
+        .arg(&tree.probe)
+        .arg("write")
+        .arg(&marker)
+        .current_dir(&tree.proj)
+        .env("HOME", &tree.home)
+        .env("USERPROFILE", &tree.home)
+        .output()
+        .expect("spawn nub");
+    assert!(!out.status.success(), "{name} must fail closed");
+    assert!(
+        !marker.exists(),
+        "{name} must reject the sandbox before running its child"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("fail-closed"), "{stderr}");
+    assert!(stderr.contains("read deny"), "{stderr}");
+}
+
 #[test]
 fn fs_generous_read_secret_denyset() {
     drive("fs-generous-read-secrets");
 }
 
 #[test]
+#[cfg(not(target_os = "windows"))]
 fn fs_write_confine() {
     drive("fs-write-confine");
 }
 
-/// Windows-only: the intentional regression guard for the `\\?\` verbatim-prefix strip
+#[test]
+#[cfg(target_os = "windows")]
+fn fs_write_confine() {
+    fixture_read_deny_fails_closed("fs-write-confine", "writable/must-not-run.txt");
+}
+
+/// Non-Windows regression guard for the `\\?\` verbatim-prefix strip
 /// (`matcher/path.rs`). A `./`-relative policy compiled through the real compiler +
 /// `std::fs::canonicalize` must still grant the child its own project dir. See the
 /// fixture note.
 #[test]
+#[cfg(target_os = "windows")]
 fn fs_windows_relative_canon_grant() {
-    drive("fs-windows-relative-canon");
+    fixture_read_deny_fails_closed("fs-windows-relative-canon", "must-not-run.txt");
 }
 
 #[test]
