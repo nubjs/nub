@@ -30,7 +30,8 @@ The action installs the `nub` CLI, then eagerly provisions the project's pinned 
 1. `package.json#/devEngines/runtime`
 2. `.node-version`
 3. `.nvmrc`
-4. `package.json#/engines/node`
+4. `.tool-versions` (the asdf/mise file's `nodejs` line)
+5. `package.json#/engines/node`
 
 That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version — the same PATH guarantee setup-node gives. A project with no pin is fine: the eager step skips cleanly and Nub provisions at runtime instead.
 
