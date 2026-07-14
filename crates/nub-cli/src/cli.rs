@@ -9476,7 +9476,7 @@ mod tests {
         //    single-binary layout (bin/ ONLY — the runtime is embedded in the
         //    binary, not a sidecar), with sentinel bytes so we can prove the
         //    SWAPPED-IN binary is the downloaded one, not the old one.
-        const NEW_NUB_BYTES: &[u8] = b"#!/bin/sh\necho fake-upgraded-nub 9.9.9\n";
+        const NEW_NUB_BYTES: &[u8] = b"#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo v9.9.9; else echo fake-upgraded-nub 9.9.9; fi\n";
         let build = fixture.path().join("build");
         std::fs::create_dir_all(build.join("bin")).unwrap();
         std::fs::write(build.join("bin").join("nub"), NEW_NUB_BYTES).unwrap();
@@ -9639,7 +9639,7 @@ mod tests {
         let _g = RELEASE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         const FAKE_VERSION: &str = "9.9.9";
-        const NEW_NUB_BYTES: &[u8] = b"#!/bin/sh\necho fake-upgraded-nub\n";
+        const NEW_NUB_BYTES: &[u8] = b"#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo v9.9.9; else echo fake-upgraded-nub; fi\n";
         let fixture = tempfile::tempdir().expect("fixture root");
 
         // Build a bin/ + EMPTY runtime/ archive — exactly what release.yml's

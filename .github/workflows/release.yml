@@ -560,7 +560,21 @@ jobs:
           if [[ "${{ matrix.platform }}" == linux-* ]]; then
             cp -a bwrap-resource "$PKG/bin/nub-resources"
             chmod +x "$PKG/bin/nub-resources/bwrap"
-            __NUB_VALIDATE_RESOURCE_BUNDLE=1 "$PKG/bin/nub" --version
+            if [[ "${{ matrix.platform }}" == linux-arm64* ]]; then
+              # This job is an x64 cross-builder, so executing the arm64 binary
+              # would be an invalid smoke test. Prove the paired artifact without
+              # execution: the resource matches its recorded digest, that exact
+              # digest is compiled into Nub, and both ELFs target AArch64. Native
+              # x64 execution remains below.
+              EXPECTED="$(awk '{print $1}' "$PKG/bin/nub-resources/bwrap.sha256")"
+              ACTUAL="$(sha256sum "$PKG/bin/nub-resources/bwrap" | awk '{print $1}')"
+              test "$ACTUAL" = "$EXPECTED"
+              grep -aqF "$EXPECTED" "$PKG/bin/nub"
+              file "$PKG/bin/nub" | grep -q 'ARM aarch64'
+              file "$PKG/bin/nub-resources/bwrap" | grep -q 'ARM aarch64'
+            else
+              __NUB_VALIDATE_RESOURCE_BUNDLE=1 "$PKG/bin/nub" --version
+            fi
           fi
 
       - name: Upload platform package
@@ -625,9 +639,8 @@ jobs:
     #     win32-x64       (windows-latest)
     #     win32-arm64     (windows-11-arm)
     #     linux-x64-musl  (node:22-alpine container on ubuntu-latest)
-    #   POST-PUBLISH ONLY (no hosted runner for the build's arch/libc — cannot be
-    #   exec'd here; the PUBLISHED package is smoked on its native host by
-    #   test-install / test-install-musl after publish):
+    #   ARTIFACT-ONLY (no hosted runner for the build's arch/libc, so these are
+    #   packaged but cannot be executed by this workflow):
     #     darwin-x64, linux-arm64, linux-arm64-musl
     # Cheap: no install, no build — each leg only downloads ITS platform artifact
     # and exec's the staged binary once.
