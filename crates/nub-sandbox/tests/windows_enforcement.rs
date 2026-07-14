@@ -604,6 +604,94 @@ mod win {
             eprintln!("FAIL ACE setup failure still ran the child");
         }
 
+        // A relative child cwd is resolved at apply-time beneath the clean protected
+        // fixture root. Restore the parent's ambient cwd before status() so the launch
+        // plan must retain the same absolute directory that clean-DACL preflight checked.
+        let relative_marker = f.work.join("relative-cwd-ran.txt");
+        let relative_marker_arg = relative_marker.to_string_lossy().into_owned();
+        let relative_policy = read_confine(&[&f.work], &[&f.work]);
+        let parent_cwd = std::env::current_dir().expect("read parent cwd");
+        std::env::set_current_dir(&f.root).expect("enter clean fixture root");
+        let relative_prepared = apply(
+            &relative_policy,
+            CommandSpec::new(child.as_os_str())
+                .args(["__sbxchild__", "write", relative_marker_arg.as_str()])
+                .cwd("work"),
+        );
+        std::env::set_current_dir(&parent_cwd).expect("restore parent cwd");
+        match relative_prepared {
+            Ok(prepared) => match prepared.status() {
+                Ok(status) if status.success() && relative_marker.exists() => {
+                    println!("PASS relative cwd is preflighted and launched under clean root")
+                }
+                Ok(status) => {
+                    fails += 1;
+                    eprintln!(
+                        "FAIL relative cwd launch: status={status:?} marker={}",
+                        relative_marker.exists()
+                    );
+                }
+                Err(error) => {
+                    fails += 1;
+                    eprintln!("FAIL relative cwd launch error: {error}");
+                }
+            },
+            Err(degradation) => {
+                fails += 1;
+                eprintln!("FAIL clean relative cwd was rejected: {degradation:?}");
+            }
+        }
+
+        // A nested read deny inside an inheritable read/write grant is not representable
+        // by the AppContainer ACL model. Prove the marker is otherwise writable, then
+        // require direct engine apply() to fail before it can return a launchable plan.
+        let control_marker = f.work.join("nested-deny-control.txt");
+        expect(
+            &mut fails,
+            "NC nested-deny marker is writable without the deny",
+            code(
+                &relative_policy,
+                &child,
+                &["__sbxchild__", "write", &a(&canon_native(&control_marker))],
+            ),
+            0,
+        );
+        let rejected_marker = f.work.join("nested-deny-must-not-run.txt");
+        let rejected_marker_arg = rejected_marker.to_string_lossy().into_owned();
+        let mut nested_deny_policy = relative_policy;
+        nested_deny_policy.fs.rules.entries.push(rule(
+            &f.work.join("secret.env"),
+            Effect::Deny,
+            FsAccess::Read,
+        ));
+        let rejected_spec = CommandSpec::new(child.as_os_str())
+            .args(["__sbxchild__", "write", rejected_marker_arg.as_str()])
+            .cwd(&f.root);
+        match apply(&nested_deny_policy, rejected_spec) {
+            Err(degradation)
+                if degradation.lost.iter().any(|axis| axis == "fs-read-deny")
+                    && degradation
+                        .reason
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("read deny") =>
+            {
+                println!("PASS nested read deny fails closed in direct engine apply")
+            }
+            Err(degradation) => {
+                fails += 1;
+                eprintln!("FAIL nested read-deny diagnostic: {degradation:?}");
+            }
+            Ok(_) => {
+                fails += 1;
+                eprintln!("FAIL direct engine accepted unrepresentable nested read deny");
+            }
+        }
+        if rejected_marker.exists() {
+            fails += 1;
+            eprintln!("FAIL rejected nested read deny still ran the child");
+        }
+
         // In-AppContainer proof — the child reports its own token. Load-bearing: without
         // this a "denied" could be a launch failure, not confinement.
         let confine = read_confine(&[&f.work], &[]);
