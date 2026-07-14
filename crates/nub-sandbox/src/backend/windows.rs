@@ -457,8 +457,8 @@ pub(crate) fn apply(
     if net_plan == WinNetPlan::Unconfined {
         deg.lost.push("net-full".to_string());
         reason.get_or_insert_with(|| {
-            "AppContainer internetClient permits public outbound connections but not \
-             loopback, private-LAN, or listener/server access"
+            "AppContainer internetClient permits public outbound connections but does not \
+             provide full host networking: AppContainer loopback destinations remain restricted"
                 .to_string()
         });
     }

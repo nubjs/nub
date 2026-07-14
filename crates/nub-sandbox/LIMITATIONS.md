@@ -83,7 +83,7 @@ reported as `net-per-host`; it never silently widens to unrestricted egress.
 
 ### Windows per-host egress and MITM are unavailable
 
-An AppContainer child is blocked from loopback by default. The package-wide loopback exemption needed to reach a proxy exposes every local listener, not just the proxy port. The backend therefore rejects per-host and MITM policies before launch, rather than installing the exemption. Coarse `net: true` permits public outbound connections but not loopback, private-LAN, or listener/server access; coarse deny remains available without elevation.
+An AppContainer child is blocked from loopback destinations by default. The package-wide loopback exemption needed to reach a proxy exposes every local listener, not just the proxy port. The backend therefore rejects per-host and MITM policies before launch, rather than installing the exemption. Coarse `net: true` permits public outbound connections but is not full host networking; coarse deny remains available without elevation.
 
 ### MITM tier: credential-brokering residuals (INFO, doc-only)
 
