@@ -109,7 +109,7 @@ pub use backend::{
 #[doc(hidden)]
 pub use backend::{
     PreparedSignalCallback, exercise_monitor_state_6, exercise_monitor_state_7,
-    exercise_monitor_state_8, exercise_monitor_states_1_to_5,
+    exercise_monitor_state_8, exercise_monitor_states_1_to_5, exercise_nested_worker_reentry,
 };
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, compile, compile_with_warnings,

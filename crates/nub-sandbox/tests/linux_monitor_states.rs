@@ -92,6 +92,29 @@ fn retained_monitor_parent_session_boundary_is_real() {
     );
 }
 
+#[test]
+fn nested_worker_reentry_is_exact_and_compiles_only_inside_the_retained_view() {
+    let Some(_bwrap) = usable_bwrap() else {
+        return;
+    };
+    for mode in ["full", "restricted"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_nub-sandbox-monitor-harness"))
+            .arg(format!("exercise-nested-worker-{mode}"))
+            .output()
+            .expect("run the retained-view nested worker harness");
+        assert!(
+            output.status.success(),
+            "nested worker {mode} harness failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("verified-nested-worker-{mode}")
+        );
+    }
+}
+
 fn usable_bwrap() -> Option<&'static str> {
     let bwrap = ["/usr/bin/bwrap", "/bin/bwrap"]
         .into_iter()

@@ -51,7 +51,7 @@ mod linux_monitor;
 #[cfg(target_os = "linux")]
 pub use linux_monitor::{
     RuntimeCapability, earliest_bootstrap, exercise_monitor_state_6, exercise_monitor_state_7,
-    exercise_monitor_state_8, exercise_monitor_states_1_to_5,
+    exercise_monitor_state_8, exercise_monitor_states_1_to_5, exercise_nested_worker_reentry,
 };
 
 /// Non-Linux embedders keep the same explicit startup/apply seam without carrying

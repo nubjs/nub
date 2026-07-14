@@ -1387,7 +1387,8 @@ fn open_pinned_bwrap_candidate(
         return Err("opened candidate is not executable".to_string());
     }
     if origin == BubblewrapOrigin::System
-        && (metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0)
+        && (!trusted_system_candidate_owner(metadata.uid())
+            || metadata.permissions().mode() & 0o022 != 0)
     {
         return Err(format!(
             "system candidate is not root-owned and protected from group/other writes (uid={}, mode={:o})",
@@ -1410,6 +1411,17 @@ fn open_pinned_bwrap_candidate(
         source_path,
         source_identity,
     })
+}
+
+fn trusted_system_candidate_owner(uid: u32) -> bool {
+    if uid == 0 {
+        return true;
+    }
+    super::linux_monitor::nested_worker_active()
+        && fs::read_to_string("/proc/sys/kernel/overflowuid")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            == Some(uid)
 }
 
 fn executable_snapshot(source: &File, path: &Path) -> Result<File, String> {

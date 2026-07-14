@@ -11,6 +11,7 @@
 
 use super::{CommandSpec, Degradation};
 use crate::policy::SandboxPolicy;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{CString, OsStr, OsString};
@@ -23,6 +24,7 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,6 +47,7 @@ pub(crate) const PRIVATE_RUNTIME_ROOT: &str = "/dev/.nub-sandbox/runtime";
 pub(crate) const PRIVATE_SUPPORT_ROOT: &str = "/dev/.nub-sandbox/support";
 pub(crate) const PRIVATE_CA_BUNDLE: &str = "/dev/.nub-sandbox/support/ca-bundle.pem";
 pub(crate) const CANDIDATE_PROBE_SENTINEL: &str = "__nub-sandbox-candidate-probe-v1";
+const NESTED_WORKER_SENTINEL: &str = "__nub-sandbox-nested-worker-v1";
 const LINUX_NSIG: libc::c_int = 65;
 const REQUIRED_BOOTSTRAP_SEALS: libc::c_int =
     libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
@@ -72,6 +75,20 @@ pub(crate) const CONTROL_FD: RawFd = 199;
 pub(crate) const RELEASE_FD: RawFd = 200;
 pub(crate) const SIGNAL_RELAY_FD: RawFd = 201;
 const FIRST_UNRESERVED_MONITOR_FD: RawFd = SIGNAL_RELAY_FD + 1;
+const NESTED_REQUEST_FD: RawFd = 202;
+const NESTED_ROOT_FD: RawFd = 203;
+const NESTED_USER_FD: RawFd = 204;
+const NESTED_MOUNT_FD: RawFd = 205;
+const NESTED_PID_FD: RawFd = 206;
+const NESTED_IPC_FD: RawFd = 207;
+const NESTED_UTS_FD: RawFd = 208;
+const NESTED_NETWORK_FD: RawFd = 209;
+const FIRST_NESTED_SOURCE_FD: RawFd = 224;
+static NESTED_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn nested_worker_active() -> bool {
+    NESTED_WORKER_ACTIVE.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileIdentity {
@@ -367,6 +384,13 @@ pub fn earliest_bootstrap() -> io::Result<RuntimeCapability> {
         Some(value) if value == OsStr::new(CANDIDATE_PROBE_SENTINEL) => {
             let code = candidate_probe_main().map(|_| 0).unwrap_or_else(|error| {
                 eprintln!("sandbox candidate probe failed: {error}");
+                125
+            });
+            std::process::exit(code);
+        }
+        Some(value) if value == OsStr::new(NESTED_WORKER_SENTINEL) => {
+            let code = nested_worker_main().unwrap_or_else(|error| {
+                eprintln!("sandbox nested worker failed: {error}");
                 125
             });
             std::process::exit(code);
@@ -1053,6 +1077,735 @@ struct TrustedSession {
     cleanup: TrustedSessionCleanup,
 }
 
+#[derive(Serialize, Deserialize)]
+struct NestedWorkerRequest {
+    surface: serde_json::Value,
+    homes: NestedHomes,
+    cwd: Vec<u8>,
+    ambient_env: BTreeMap<String, String>,
+    command: NestedCommand,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NestedHomes {
+    home: Vec<u8>,
+    tmp: Vec<u8>,
+    cache: Vec<u8>,
+    project: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NestedCommand {
+    program: Vec<u8>,
+    args: Vec<Vec<u8>>,
+    cwd: Vec<u8>,
+    deny_search_roots: Vec<Vec<u8>>,
+}
+
+impl NestedCommand {
+    fn from_spec(spec: CommandSpec) -> io::Result<Self> {
+        let cwd = spec
+            .cwd
+            .ok_or_else(|| invalid_input("nested sandbox command cwd is unresolved"))?;
+        require_absolute_nested_path(&cwd, "command cwd")?;
+        for root in &spec.deny_search_roots {
+            require_absolute_nested_path(root, "deny-search root")?;
+        }
+        Ok(Self {
+            program: spec.program.into_vec(),
+            args: spec.args.into_iter().map(OsString::into_vec).collect(),
+            cwd: cwd.into_os_string().into_vec(),
+            deny_search_roots: spec
+                .deny_search_roots
+                .into_iter()
+                .map(|path| path.into_os_string().into_vec())
+                .collect(),
+        })
+    }
+
+    fn into_spec(self) -> io::Result<CommandSpec> {
+        let cwd = PathBuf::from(OsString::from_vec(self.cwd));
+        require_absolute_nested_path(&cwd, "command cwd")?;
+        let deny_search_roots = self
+            .deny_search_roots
+            .into_iter()
+            .map(|path| {
+                let path = PathBuf::from(OsString::from_vec(path));
+                require_absolute_nested_path(&path, "deny-search root")?;
+                Ok(path)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(CommandSpec {
+            program: OsString::from_vec(self.program),
+            args: self.args.into_iter().map(OsString::from_vec).collect(),
+            cwd: Some(cwd),
+            deny_search_roots,
+        })
+    }
+}
+
+fn require_absolute_nested_path(path: &Path, label: &str) -> io::Result<()> {
+    if !path.is_absolute() || path.as_os_str().as_bytes().contains(&0) {
+        return Err(invalid_input(format!(
+            "nested sandbox {label} is not an absolute NUL-free path"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NestedNetworkMode {
+    Full,
+    Restricted,
+}
+
+impl NestedNetworkMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Restricted => "restricted",
+        }
+    }
+
+    fn parse(value: &OsStr) -> io::Result<Self> {
+        match value.as_bytes() {
+            b"full" => Ok(Self::Full),
+            b"restricted" => Ok(Self::Restricted),
+            _ => Err(invalid_data("nested worker network mode is invalid")),
+        }
+    }
+}
+
+enum NestedWorkerNetwork {
+    Restricted(NamespaceHandle),
+    AlreadyCurrent(DescriptorIdentity),
+}
+
+struct NestedWorkerAuthority {
+    root: OwnedFd,
+    root_identity: DescriptorIdentity,
+    owner_user: NamespaceHandle,
+    mount: NamespaceHandle,
+    pid: NamespaceHandle,
+    ipc: NamespaceHandle,
+    uts: NamespaceHandle,
+    network: NestedWorkerNetwork,
+}
+
+struct NestedWorkerBootstrap {
+    request: OwnedFd,
+    authority: NestedWorkerAuthority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NestedEntryStage {
+    User,
+    Credentials,
+    Mount,
+    Root,
+    Ipc,
+    Uts,
+    Network,
+    Pid,
+    Fork,
+}
+
+const FULL_NESTED_ENTRY_ORDER: &[NestedEntryStage] = &[
+    NestedEntryStage::User,
+    NestedEntryStage::Credentials,
+    NestedEntryStage::Mount,
+    NestedEntryStage::Root,
+    NestedEntryStage::Ipc,
+    NestedEntryStage::Uts,
+    NestedEntryStage::Pid,
+    NestedEntryStage::Fork,
+];
+const RESTRICTED_NESTED_ENTRY_ORDER: &[NestedEntryStage] = &[
+    NestedEntryStage::User,
+    NestedEntryStage::Credentials,
+    NestedEntryStage::Mount,
+    NestedEntryStage::Root,
+    NestedEntryStage::Ipc,
+    NestedEntryStage::Uts,
+    NestedEntryStage::Network,
+    NestedEntryStage::Pid,
+    NestedEntryStage::Fork,
+];
+
+fn nested_entry_order(mode: NestedNetworkMode) -> &'static [NestedEntryStage] {
+    match mode {
+        NestedNetworkMode::Full => FULL_NESTED_ENTRY_ORDER,
+        NestedNetworkMode::Restricted => RESTRICTED_NESTED_ENTRY_ORDER,
+    }
+}
+
+fn validate_nested_entry_order(
+    mode: NestedNetworkMode,
+    order: &[NestedEntryStage],
+) -> io::Result<()> {
+    if order != nested_entry_order(mode) {
+        return Err(invalid_data(
+            "nested worker namespace entry order is invalid",
+        ));
+    }
+    Ok(())
+}
+
+impl NestedWorkerRequest {
+    fn new(
+        surface: serde_json::Value,
+        homes: crate::matcher::path::Homes,
+        cwd: PathBuf,
+        ambient_env: BTreeMap<String, String>,
+        command: CommandSpec,
+    ) -> io::Result<Self> {
+        for (path, label) in [
+            (&homes.home, "home"),
+            (&homes.tmp, "temporary home"),
+            (&homes.cache, "cache home"),
+            (&homes.project, "project home"),
+            (&cwd, "compile cwd"),
+        ] {
+            require_absolute_nested_path(path, label)?;
+        }
+        Ok(Self {
+            surface,
+            homes: NestedHomes {
+                home: homes.home.into_os_string().into_vec(),
+                tmp: homes.tmp.into_os_string().into_vec(),
+                cache: homes.cache.into_os_string().into_vec(),
+                project: homes.project.into_os_string().into_vec(),
+            },
+            cwd: cwd.into_os_string().into_vec(),
+            ambient_env,
+            command: NestedCommand::from_spec(command)?,
+        })
+    }
+
+    fn encode(&self) -> io::Result<Vec<u8>> {
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| invalid_input(format!("encoding nested worker request: {error}")))?;
+        if bytes.is_empty() || bytes.len() > MAX_BOOTSTRAP_BYTES {
+            return Err(invalid_input(
+                "nested worker request exceeds the byte budget",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> io::Result<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|error| invalid_data(format!("decoding nested worker request: {error}")))
+    }
+}
+
+impl TrustedSession {
+    fn run_nested_worker(&self, request: NestedWorkerRequest) -> io::Result<std::process::Output> {
+        use std::process::Stdio;
+
+        let request =
+            relocate_fd_at_least(sealed_memfd(&request.encode()?)?, FIRST_NESTED_SOURCE_FD)?;
+        let root = duplicate_fd_at_least(self.root.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
+        let owner_user = duplicate_fd_at_least(
+            self.namespaces.owner_user.fd.as_raw_fd(),
+            FIRST_NESTED_SOURCE_FD,
+        )?;
+        let mount =
+            duplicate_fd_at_least(self.namespaces.mount.fd.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
+        let pid =
+            duplicate_fd_at_least(self.namespaces.pid.fd.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
+        let ipc =
+            duplicate_fd_at_least(self.namespaces.ipc.fd.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
+        let uts =
+            duplicate_fd_at_least(self.namespaces.uts.fd.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
+        let (mode, network) = match &self.namespaces.network {
+            TrustedNetworkNamespace::Restricted(network) => (
+                NestedNetworkMode::Restricted,
+                Some(duplicate_fd_at_least(
+                    network.fd.as_raw_fd(),
+                    FIRST_NESTED_SOURCE_FD,
+                )?),
+            ),
+            TrustedNetworkNamespace::AlreadyCurrent { .. } => (NestedNetworkMode::Full, None),
+        };
+        let mut remaps = vec![
+            (request.as_raw_fd(), NESTED_REQUEST_FD),
+            (root.as_raw_fd(), NESTED_ROOT_FD),
+            (owner_user.as_raw_fd(), NESTED_USER_FD),
+            (mount.as_raw_fd(), NESTED_MOUNT_FD),
+            (pid.as_raw_fd(), NESTED_PID_FD),
+            (ipc.as_raw_fd(), NESTED_IPC_FD),
+            (uts.as_raw_fd(), NESTED_UTS_FD),
+        ];
+        if let Some(network) = &network {
+            remaps.push((network.as_raw_fd(), NESTED_NETWORK_FD));
+        }
+
+        let mut command = Command::new("/proc/self/exe");
+        command
+            .arg(NESTED_WORKER_SENTINEL)
+            .arg(mode.label())
+            .env_clear()
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                mark_inherited_fds_cloexec()?;
+                for &(source, destination) in &remaps {
+                    if libc::dup2(source, destination) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        command.spawn()?.wait_with_output()
+    }
+}
+
+fn nested_worker_main() -> io::Result<i32> {
+    let mut arguments = std::env::args_os();
+    let _program = arguments.next();
+    if arguments.next().as_deref() != Some(OsStr::new(NESTED_WORKER_SENTINEL)) {
+        return Err(invalid_data("nested worker sentinel mismatch"));
+    }
+    let mode = arguments
+        .next()
+        .as_deref()
+        .map(NestedNetworkMode::parse)
+        .transpose()?
+        .ok_or_else(|| invalid_data("nested worker network mode is absent"))?;
+    if arguments.next().is_some() {
+        return Err(invalid_data("nested worker received trailing arguments"));
+    }
+    if std::env::vars_os().next().is_some() {
+        return Err(invalid_data("nested worker environment is not empty"));
+    }
+    require_single_threaded_worker()?;
+
+    let runtime = RuntimeCapability::current_process()?;
+    let bootstrap = NestedWorkerBootstrap::from_fixed(mode)?;
+    match bootstrap.enter(mode)? {
+        NestedWorkerRole::Parent(child) => wait_nested_worker_child(child),
+        NestedWorkerRole::Child(bootstrap) => {
+            NESTED_WORKER_ACTIVE.store(true, Ordering::Relaxed);
+            bootstrap.authority.verify_entered()?;
+            let request = read_sealed_nested_request(bootstrap.request.as_raw_fd())?;
+            run_nested_worker_request(request, runtime)
+        }
+    }
+}
+
+impl NestedWorkerBootstrap {
+    fn from_fixed(mode: NestedNetworkMode) -> io::Result<Self> {
+        let request = take_fixed_fd(NESTED_REQUEST_FD, "request")?;
+        let root = take_fixed_fd(NESTED_ROOT_FD, "root")?;
+        let root_stat = descriptor_stat(root.as_raw_fd())?;
+        if root_stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(invalid_data(
+                "nested worker root capability is not a directory",
+            ));
+        }
+        let root_identity = descriptor_identity(root.as_raw_fd())?;
+        let owner_user = validate_namespace_fd(
+            take_fixed_fd(NESTED_USER_FD, "owner user namespace")?,
+            NamespaceKind::User,
+        )?;
+        let mount = validate_namespace_fd(
+            take_fixed_fd(NESTED_MOUNT_FD, "mount namespace")?,
+            NamespaceKind::Mount,
+        )?;
+        let pid = validate_namespace_fd(
+            take_fixed_fd(NESTED_PID_FD, "PID namespace")?,
+            NamespaceKind::Pid,
+        )?;
+        let ipc = validate_namespace_fd(
+            take_fixed_fd(NESTED_IPC_FD, "IPC namespace")?,
+            NamespaceKind::Ipc,
+        )?;
+        let uts = validate_namespace_fd(
+            take_fixed_fd(NESTED_UTS_FD, "UTS namespace")?,
+            NamespaceKind::Uts,
+        )?;
+        for (label, namespace) in [
+            ("mount", &mount),
+            ("PID", &pid),
+            ("IPC", &ipc),
+            ("UTS", &uts),
+        ] {
+            require_same_namespace_owner(
+                label,
+                owner_user.identity,
+                namespace_owner_identity(namespace)?,
+            )?;
+        }
+        let network = match mode {
+            NestedNetworkMode::Restricted => {
+                let network = validate_namespace_fd(
+                    take_fixed_fd(NESTED_NETWORK_FD, "network namespace")?,
+                    NamespaceKind::Network,
+                )?;
+                require_same_namespace_owner(
+                    "restricted network",
+                    owner_user.identity,
+                    namespace_owner_identity(&network)?,
+                )?;
+                NestedWorkerNetwork::Restricted(network)
+            }
+            NestedNetworkMode::Full => {
+                require_fixed_fd_absent(NESTED_NETWORK_FD, "full-network namespace")?;
+                NestedWorkerNetwork::AlreadyCurrent(
+                    open_namespace_absolute("/proc/self/ns/net", NamespaceKind::Network)?.identity,
+                )
+            }
+        };
+        Ok(Self {
+            request,
+            authority: NestedWorkerAuthority {
+                root,
+                root_identity,
+                owner_user,
+                mount,
+                pid,
+                ipc,
+                uts,
+                network,
+            },
+        })
+    }
+
+    fn enter(self, mode: NestedNetworkMode) -> io::Result<NestedWorkerRole> {
+        let order = nested_entry_order(mode);
+        validate_nested_entry_order(mode, order)?;
+        for stage in order {
+            match stage {
+                NestedEntryStage::User => {
+                    enter_namespace(&self.authority.owner_user, NamespaceKind::User)?
+                }
+                NestedEntryStage::Credentials => reset_nested_worker_credentials()?,
+                NestedEntryStage::Mount => {
+                    enter_namespace(&self.authority.mount, NamespaceKind::Mount)?
+                }
+                NestedEntryStage::Root => self.authority.reanchor_root()?,
+                NestedEntryStage::Ipc => enter_namespace(&self.authority.ipc, NamespaceKind::Ipc)?,
+                NestedEntryStage::Uts => enter_namespace(&self.authority.uts, NamespaceKind::Uts)?,
+                NestedEntryStage::Network => match &self.authority.network {
+                    NestedWorkerNetwork::Restricted(network) => {
+                        enter_namespace(network, NamespaceKind::Network)?
+                    }
+                    NestedWorkerNetwork::AlreadyCurrent(_) => {
+                        return Err(invalid_data(
+                            "full-network worker attempted network namespace entry",
+                        ));
+                    }
+                },
+                NestedEntryStage::Pid => enter_namespace(&self.authority.pid, NamespaceKind::Pid)?,
+                NestedEntryStage::Fork => {
+                    let child = unsafe { libc::fork() };
+                    if child < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if child == 0 {
+                        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        return Ok(NestedWorkerRole::Child(self));
+                    }
+                    return Ok(NestedWorkerRole::Parent(child));
+                }
+            }
+        }
+        Err(invalid_data(
+            "nested worker entry omitted its fork boundary",
+        ))
+    }
+}
+
+enum NestedWorkerRole {
+    Parent(libc::pid_t),
+    Child(NestedWorkerBootstrap),
+}
+
+fn take_fixed_fd(fd: RawFd, label: &str) -> io::Result<OwnedFd> {
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return Err(capture_error(
+            &format!("loading nested worker {label} capability"),
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn require_fixed_fd_absent(fd: RawFd, label: &str) -> io::Result<()> {
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
+        return Err(invalid_data(format!(
+            "nested worker unexpectedly received a {label} capability"
+        )));
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EBADF) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn namespace_owner_identity(namespace: &NamespaceHandle) -> io::Result<DescriptorIdentity> {
+    let owner = unsafe { libc::ioctl(namespace.fd.as_raw_fd(), NS_GET_USERNS) };
+    if owner < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(
+        validate_namespace_fd(unsafe { OwnedFd::from_raw_fd(owner) }, NamespaceKind::User)?
+            .identity,
+    )
+}
+
+fn enter_namespace(namespace: &NamespaceHandle, kind: NamespaceKind) -> io::Result<()> {
+    if unsafe { libc::setns(namespace.fd.as_raw_fd(), kind.clone_flag()) } != 0 {
+        return Err(capture_error(
+            &format!("entering retained {} namespace", kind.name()),
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
+fn reset_nested_worker_credentials() -> io::Result<()> {
+    if unsafe { libc::setresgid(0, 0, 0) } != 0 || unsafe { libc::setresuid(0, 0, 0) } != 0 {
+        return Err(capture_error(
+            "resetting nested worker credentials",
+            io::Error::last_os_error(),
+        ));
+    }
+    let mut real_uid = 1;
+    let mut effective_uid = 1;
+    let mut saved_uid = 1;
+    let mut real_gid = 1;
+    let mut effective_gid = 1;
+    let mut saved_gid = 1;
+    if unsafe { libc::getresuid(&mut real_uid, &mut effective_uid, &mut saved_uid) } != 0
+        || unsafe { libc::getresgid(&mut real_gid, &mut effective_gid, &mut saved_gid) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if [real_uid, effective_uid, saved_uid] != [0; 3]
+        || [real_gid, effective_gid, saved_gid] != [0; 3]
+    {
+        return Err(invalid_data(
+            "nested worker credentials did not reset inside the owner user namespace",
+        ));
+    }
+    Ok(())
+}
+
+impl NestedWorkerAuthority {
+    fn reanchor_root(&self) -> io::Result<()> {
+        if unsafe { libc::fchdir(self.root.as_raw_fd()) } != 0
+            || unsafe { libc::chroot(c".".as_ptr()) } != 0
+            || unsafe { libc::chdir(c"/".as_ptr()) } != 0
+        {
+            return Err(capture_error(
+                "re-anchoring nested worker root capability",
+                io::Error::last_os_error(),
+            ));
+        }
+        let current = open_absolute_owned("/", libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)?;
+        if descriptor_identity(current.as_raw_fd())? != self.root_identity {
+            return Err(invalid_data(
+                "nested worker root does not match the retained root capability",
+            ));
+        }
+        validate_entered_root_device_view(&self.root)
+    }
+
+    fn verify_entered(&self) -> io::Result<()> {
+        require_single_threaded_worker()?;
+        if std::env::vars_os().next().is_some() {
+            return Err(invalid_data(
+                "entered nested worker environment is not empty",
+            ));
+        }
+        require_current_namespace(NamespaceKind::User, self.owner_user.identity)?;
+        require_current_namespace(NamespaceKind::Mount, self.mount.identity)?;
+        require_current_namespace(NamespaceKind::Pid, self.pid.identity)?;
+        require_current_namespace(NamespaceKind::Ipc, self.ipc.identity)?;
+        require_current_namespace(NamespaceKind::Uts, self.uts.identity)?;
+        let expected_network = match &self.network {
+            NestedWorkerNetwork::Restricted(network) => network.identity,
+            NestedWorkerNetwork::AlreadyCurrent(identity) => *identity,
+        };
+        require_current_namespace(NamespaceKind::Network, expected_network)?;
+        let root = open_absolute_owned("/", libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)?;
+        let root = descriptor_identity(root.as_raw_fd())?;
+        if root != self.root_identity {
+            return Err(invalid_data(
+                "forked nested worker escaped the retained root capability",
+            ));
+        }
+        if unsafe { libc::getuid() } != 0
+            || unsafe { libc::getgid() } != 0
+            || unsafe { libc::getpid() } <= 1
+        {
+            return Err(invalid_data(
+                "nested worker credentials or PID namespace identity is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn require_current_namespace(kind: NamespaceKind, expected: DescriptorIdentity) -> io::Result<()> {
+    let current =
+        open_namespace_absolute(&format!("/proc/self/ns/{}", kind.name()), kind)?.identity;
+    if current != expected {
+        return Err(invalid_data(format!(
+            "nested worker did not enter the exact retained {} namespace",
+            kind.name()
+        )));
+    }
+    Ok(())
+}
+
+fn require_single_threaded_worker() -> io::Result<()> {
+    let threads = fs::read_dir("/proc/self/task")?.count();
+    if threads != 1 {
+        return Err(invalid_data(format!(
+            "nested worker is not single-threaded ({threads} threads)"
+        )));
+    }
+    Ok(())
+}
+
+fn wait_nested_worker_child(child: libc::pid_t) -> io::Result<i32> {
+    let mut status = 0;
+    loop {
+        let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+        if waited == child {
+            break;
+        }
+        if waited < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+    }
+    if libc::WIFEXITED(status) {
+        return Ok(libc::WEXITSTATUS(status));
+    }
+    if libc::WIFSIGNALED(status) {
+        return Ok(128 + libc::WTERMSIG(status));
+    }
+    Err(invalid_data("nested worker child stopped unexpectedly"))
+}
+
+fn read_sealed_nested_request(fd: RawFd) -> io::Result<NestedWorkerRequest> {
+    validate_fd_kind(
+        fd,
+        libc::S_IFREG,
+        "nested worker request is not a regular file",
+    )?;
+    let seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
+    if seals < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if seals & REQUIRED_BOOTSTRAP_SEALS != REQUIRED_BOOTSTRAP_SEALS {
+        return Err(invalid_data("nested worker request is not fully sealed"));
+    }
+    let stat = fstat(fd)?;
+    let size = usize::try_from(stat.st_size)
+        .map_err(|_| invalid_data("nested worker request size is invalid"))?;
+    if size == 0 || size > MAX_BOOTSTRAP_BYTES {
+        return Err(invalid_data(
+            "nested worker request exceeds the byte budget",
+        ));
+    }
+    let mut bytes = vec![0; size];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let read = unsafe {
+            libc::pread(
+                fd,
+                bytes[offset..].as_mut_ptr().cast(),
+                bytes.len() - offset,
+                offset as libc::off_t,
+            )
+        };
+        if read > 0 {
+            offset += read as usize;
+        } else if read == 0 {
+            return Err(invalid_data("nested worker request is truncated"));
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    NestedWorkerRequest::decode(&bytes)
+}
+
+fn run_nested_worker_request(
+    request: NestedWorkerRequest,
+    runtime: RuntimeCapability,
+) -> io::Result<i32> {
+    let homes = crate::matcher::path::Homes {
+        home: PathBuf::from(OsString::from_vec(request.homes.home)),
+        tmp: PathBuf::from(OsString::from_vec(request.homes.tmp)),
+        cache: PathBuf::from(OsString::from_vec(request.homes.cache)),
+        project: PathBuf::from(OsString::from_vec(request.homes.project)),
+    };
+    let cwd = PathBuf::from(OsString::from_vec(request.cwd));
+    for (path, label) in [
+        (&homes.home, "home"),
+        (&homes.tmp, "temporary home"),
+        (&homes.cache, "cache home"),
+        (&homes.project, "project home"),
+        (&cwd, "compile cwd"),
+    ] {
+        require_absolute_nested_path(path, label)?;
+    }
+    let context = crate::compiler::CompileCtx::new(homes, cwd, false, request.ambient_env);
+    let policy = crate::compiler::compile(&request.surface, &context)
+        .map_err(|error| io::Error::other(format!("compiling nested policy: {error}")))?;
+    if policy.net.enforce
+        && policy
+            .net
+            .rules
+            .iter()
+            .any(|rule| rule.effect == crate::policy::Effect::Allow)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "nested per-host networking is not implemented",
+        ));
+    }
+    let prepared = super::apply_with_runtime(&policy, request.command.into_spec()?, &runtime)
+        .map_err(|degradation| {
+            io::Error::other(degradation.warning().unwrap_or_else(|| {
+                "nested sandbox preparation failed without a diagnostic".to_string()
+            }))
+        })?;
+    if !prepared.degradation.is_full() {
+        return Err(io::Error::other(
+            prepared.degradation.warning().unwrap_or_else(|| {
+                "nested sandbox preparation degraded without a diagnostic".to_string()
+            }),
+        ));
+    }
+    let status = prepared.status()?;
+    if let Some(code) = status.code() {
+        Ok(code)
+    } else {
+        Ok(128 + status.signal().unwrap_or(libc::SIGKILL))
+    }
+}
+
 fn capture_trusted_session(
     namespace_init_pid: libc::pid_t,
     outer: &mut Child,
@@ -1073,7 +1826,6 @@ fn capture_trusted_session(
     let pid = capture_namespace(&process, NamespaceKind::Pid)?;
     let ipc = capture_namespace(&process, NamespaceKind::Ipc)?;
     let uts = capture_namespace(&process, NamespaceKind::Uts)?;
-    let network = capture_namespace(&process, NamespaceKind::Network)?;
 
     let shared_owner = mount.owner_user.identity;
     require_same_namespace_owner("PID", shared_owner, pid.owner_user.identity)?;
@@ -1081,6 +1833,7 @@ fn capture_trusted_session(
     require_same_namespace_owner("UTS", shared_owner, uts.owner_user.identity)?;
 
     let network = if restrictions.network == NetworkRestrictionCeiling::Deny {
+        let network = capture_namespace(&process, NamespaceKind::Network)?;
         require_same_namespace_owner(
             "restricted network",
             shared_owner,
@@ -1088,8 +1841,9 @@ fn capture_trusted_session(
         )?;
         TrustedNetworkNamespace::Restricted(network.namespace)
     } else {
+        let network = capture_namespace_handle(&process, NamespaceKind::Network)?;
         let current = open_namespace_absolute("/proc/self/ns/net", NamespaceKind::Network)?;
-        require_full_network_identity(network.namespace.identity, current.identity)?;
+        require_full_network_identity(network.identity, current.identity)?;
         TrustedNetworkNamespace::AlreadyCurrent {
             identity: current.identity,
         }
@@ -1154,16 +1908,7 @@ fn wait_for_sandbox_root(
 }
 
 fn capture_namespace(process: &OwnedFd, kind: NamespaceKind) -> io::Result<CapturedNamespace> {
-    let path = CString::new(format!("ns/{}", kind.name()))
-        .map_err(|_| invalid_input("namespace path contains NUL"))?;
-    let namespace = openat_owned(process.as_raw_fd(), &path, libc::O_RDONLY | libc::O_CLOEXEC)
-        .map_err(|error| {
-            capture_error(
-                &format!("opening the blocked {} namespace", kind.name()),
-                error,
-            )
-        })?;
-    let namespace = validate_namespace_fd(namespace, kind)?;
+    let namespace = capture_namespace_handle(process, kind)?;
     let owner = unsafe { libc::ioctl(namespace.fd.as_raw_fd(), NS_GET_USERNS) };
     if owner < 0 {
         return Err(capture_error(
@@ -1177,6 +1922,19 @@ fn capture_namespace(process: &OwnedFd, kind: NamespaceKind) -> io::Result<Captu
         namespace,
         owner_user,
     })
+}
+
+fn capture_namespace_handle(process: &OwnedFd, kind: NamespaceKind) -> io::Result<NamespaceHandle> {
+    let path = CString::new(format!("ns/{}", kind.name()))
+        .map_err(|_| invalid_input("namespace path contains NUL"))?;
+    let namespace = openat_owned(process.as_raw_fd(), &path, libc::O_RDONLY | libc::O_CLOEXEC)
+        .map_err(|error| {
+            capture_error(
+                &format!("opening the blocked {} namespace", kind.name()),
+                error,
+            )
+        })?;
+    validate_namespace_fd(namespace, kind)
 }
 
 fn open_namespace_absolute(path: &str, kind: NamespaceKind) -> io::Result<NamespaceHandle> {
@@ -1233,11 +1991,6 @@ fn require_full_network_identity(
 }
 
 fn validate_root_device_view(root: &OwnedFd) -> io::Result<()> {
-    const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
-    let metadata = descriptor_stat(root.as_raw_fd())?;
-    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return Err(invalid_data("sandbox root anchor is not a directory"));
-    }
     let dev = openat_owned(
         root.as_raw_fd(),
         c"dev",
@@ -1252,6 +2005,25 @@ fn validate_root_device_view(root: &OwnedFd) -> io::Result<()> {
         return Err(invalid_data(
             "sandbox root did not contain a fresh device filesystem",
         ));
+    }
+    validate_device_view(root, dev)
+}
+
+fn validate_entered_root_device_view(root: &OwnedFd) -> io::Result<()> {
+    let dev = openat_owned(
+        root.as_raw_fd(),
+        c"dev",
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+    )
+    .map_err(|error| capture_error("opening dev below the sandbox root anchor", error))?;
+    validate_device_view(root, dev)
+}
+
+fn validate_device_view(root: &OwnedFd, dev: OwnedFd) -> io::Result<()> {
+    const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
+    let metadata = descriptor_stat(root.as_raw_fd())?;
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(invalid_data("sandbox root anchor is not a directory"));
     }
     let mut filesystem = MaybeUninit::<libc::statfs>::uninit();
     if unsafe { libc::fstatfs(dev.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
@@ -2031,6 +2803,10 @@ pub(crate) struct RetainedMonitorSession {
 }
 
 impl RetainedMonitorSession {
+    fn run_nested_worker(&self, request: NestedWorkerRequest) -> io::Result<std::process::Output> {
+        self.trusted.run_nested_worker(request)
+    }
+
     pub(crate) fn target_pid(&self) -> libc::pid_t {
         self.target_pid
     }
@@ -6274,10 +7050,173 @@ pub(crate) fn runtime_degradation(error: io::Error) -> Degradation {
     }
 }
 
+/// Harness-only real-kernel exercise for nested retained-view reentry. The
+/// request seam stays private until the remaining lifecycle work is installed.
+#[doc(hidden)]
+pub fn exercise_nested_worker_reentry(
+    runtime: &RuntimeCapability,
+    restricted_network: bool,
+) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir()?;
+    let project = fixture.path().join("project");
+    let home = project.join("home");
+    let cache = project.join("cache");
+    let allowed = project.join("allowed");
+    fs::create_dir_all(&home)?;
+    fs::create_dir_all(&cache)?;
+    fs::create_dir_all(&allowed)?;
+    let homes = crate::matcher::path::Homes {
+        home,
+        tmp: PathBuf::from("/tmp"),
+        cache,
+        project: project.clone(),
+    };
+    let mut outer_env = BTreeMap::new();
+    outer_env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+    outer_env.insert(
+        "NESTED_TRUSTED_PARENT_ONLY".to_string(),
+        "secret".to_string(),
+    );
+    let outer_context =
+        crate::compiler::CompileCtx::new(homes.clone(), project.clone(), false, outer_env);
+    let outer_surface = serde_json::json!({
+        "fs": ["...", "./", "<tmp>"],
+        "net": !restricted_network,
+        "env": true
+    });
+    let outer_policy = crate::compiler::compile(&outer_surface, &outer_context)
+        .map_err(|error| io::Error::other(format!("compiling outer worker fixture: {error}")))?;
+    let outer = super::apply_with_runtime(
+        &outer_policy,
+        CommandSpec::new("/bin/sleep")
+            .arg("30")
+            .cwd(&project)
+            .deny_search_root(&project),
+        runtime,
+    )
+    .map_err(|degradation| {
+        io::Error::other(
+            degradation
+                .warning()
+                .unwrap_or_else(|| "preparing outer worker fixture failed".to_string()),
+        )
+    })?
+    .spawn()?;
+    let session = outer
+        .retained_monitor
+        .as_ref()
+        .ok_or_else(|| invalid_data("outer worker fixture omitted its retained session"))?;
+
+    let mut child_env = BTreeMap::new();
+    child_env.insert("NESTED_ALLOWED".to_string(), "yes".to_string());
+    let marker = allowed.join(if restricted_network {
+        "restricted"
+    } else {
+        "full"
+    });
+    let apply_request = NestedWorkerRequest::new(
+        serde_json::json!({
+            "fs": ["...", "./", "<tmp>"],
+            "net": true,
+            "env": true
+        }),
+        homes.clone(),
+        project.clone(),
+        child_env.clone(),
+        CommandSpec::new("/bin/sh")
+            .args([
+                "-c",
+                "test \"$NESTED_ALLOWED\" = yes && test -z \"${NESTED_TRUSTED_PARENT_ONLY+x}\" && printf entered > allowed/result",
+            ])
+            .cwd(&project)
+            .deny_search_root(&project),
+    )?;
+    let applied = session.run_nested_worker(apply_request)?;
+    require_nested_worker_success("nested filesystem apply", &applied)?;
+    fs::rename(allowed.join("result"), &marker)?;
+    if fs::read(&marker)? != b"entered" {
+        return Err(invalid_data(
+            "nested filesystem apply did not create the expected in-view result",
+        ));
+    }
+
+    let mut host_only = tempfile::Builder::new()
+        .prefix("nub-nested-host-only-")
+        .tempfile_in("/tmp")?;
+    host_only.write_all(b"#!/bin/sh\nexit 0\n")?;
+    let host_only_path = host_only.path().to_path_buf();
+    fs::set_permissions(&host_only_path, fs::Permissions::from_mode(0o700))?;
+    let host_view = NestedWorkerRequest::new(
+        serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        homes.clone(),
+        project.clone(),
+        child_env.clone(),
+        CommandSpec::new(host_only_path.as_os_str())
+            .cwd(&project)
+            .deny_search_root(&project),
+    )?;
+    let host_view = session.run_nested_worker(host_view)?;
+    require_nested_worker_failure(
+        "host-view executable collision",
+        &host_view,
+        "entry program could not be resolved",
+    )?;
+
+    let missing_path = NestedWorkerRequest::new(
+        serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        homes,
+        project.clone(),
+        child_env,
+        CommandSpec::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .cwd(&project)
+            .deny_search_root(&project),
+    )?;
+    let missing_path = session.run_nested_worker(missing_path)?;
+    require_nested_worker_failure(
+        "missing caller PATH",
+        &missing_path,
+        "entry program could not be resolved",
+    )?;
+
+    drop(outer);
+    Ok(())
+}
+
+fn require_nested_worker_success(label: &str, output: &std::process::Output) -> io::Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{label} failed with {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )))
+}
+
+fn require_nested_worker_failure(
+    label: &str,
+    output: &std::process::Output,
+    expected: &str,
+) -> io::Result<()> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && stderr.contains(expected) {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{label} did not fail with {expected:?}: {}\nstdout: {}\nstderr: {stderr}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    )))
+}
+
 /// Harness-only real-kernel exercise for retained-monitor states 1-5. This is
 /// intentionally separate from the production launcher until runtime
 /// supervision and the remaining session-lifecycle states are installed.
-#[doc(hidden)]
 pub fn exercise_monitor_states_1_to_5(
     runtime: &RuntimeCapability,
     bwrap: impl AsRef<Path>,
@@ -9647,6 +10586,35 @@ mod tests {
         let error = require_full_network_identity(DescriptorIdentity { dev: 6, ino: 13 }, current)
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn nested_worker_entry_order_is_exact_and_full_network_skips_setns() {
+        assert_eq!(
+            nested_entry_order(NestedNetworkMode::Restricted),
+            RESTRICTED_NESTED_ENTRY_ORDER
+        );
+        assert_eq!(
+            nested_entry_order(NestedNetworkMode::Full),
+            FULL_NESTED_ENTRY_ORDER
+        );
+        assert!(!nested_entry_order(NestedNetworkMode::Full).contains(&NestedEntryStage::Network));
+        let mut wrong = RESTRICTED_NESTED_ENTRY_ORDER.to_vec();
+        wrong.swap(0, 2);
+        let error = validate_nested_entry_order(NestedNetworkMode::Restricted, &wrong).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn nested_worker_request_requires_resolved_absolute_paths() {
+        let unresolved = NestedCommand::from_spec(CommandSpec::new("/bin/true"))
+            .err()
+            .unwrap();
+        assert_eq!(unresolved.kind(), io::ErrorKind::InvalidInput);
+        let relative = NestedCommand::from_spec(CommandSpec::new("/bin/true").cwd("relative"))
+            .err()
+            .unwrap();
+        assert_eq!(relative.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
