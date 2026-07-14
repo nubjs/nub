@@ -977,7 +977,10 @@ mod win {
         //    withheld. Compiled over the runner's REAL ambient env. ───────────────────
         // SAFETY: single-threaded test main; seed an ambient var the floor must withhold.
         unsafe { std::env::set_var("NUB_SBX_Q3_USERVAR", "must-not-leak") };
-        let fs_only = serde_json::json!({ "fs": [f.work.to_string_lossy()] });
+        // An empty read allow-set still engages the AppContainer, but has no granted
+        // subtree for the compiler's injected secret denies to shadow. That isolates the
+        // env-floor contract from the separately-tested nested-read-deny rejection.
+        let fs_only = serde_json::json!({ "fs": [] });
         let floored = compile_surface(&f, &fs_only);
         assert!(
             floored.env.enforce && !floored.env.constructed.contains_key("NUB_SBX_Q3_USERVAR"),
