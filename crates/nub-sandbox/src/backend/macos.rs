@@ -610,6 +610,18 @@ fn resolve_program(
     // bare name → PATH search
     let path_var = child_path?;
     for dir in std::env::split_paths(std::ffi::OsStr::new(path_var)) {
+        // POSIX PATH resolves relative components (including an empty component) from
+        // the process cwd. The process will run in `spec.cwd`, so profile construction
+        // must use that same base rather than nub's ambient cwd.
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            let base = match child_cwd {
+                Some(cwd) => cwd.to_path_buf(),
+                None => std::env::current_dir().ok()?,
+            };
+            base.join(dir)
+        };
         let cand = dir.join(p);
         if cand.is_file() {
             return Some(canonicalize_including_nonexistent(&cand));
@@ -1748,6 +1760,29 @@ mod tests {
             term.contains(&program.to_string_lossy().replace('\\', "\\\\")),
             "program grant must name the child-PATH executable: {term}"
         );
+    }
+
+    #[test]
+    fn bare_program_grant_anchors_relative_and_empty_path_at_child_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let child_cwd = root.path().join("child");
+        let child_bin = child_cwd.join("bin");
+        std::fs::create_dir_all(&child_bin).unwrap();
+        let relative_program = child_bin.join("relative-tool");
+        let empty_program = child_cwd.join("empty-tool");
+        std::fs::write(&relative_program, b"tool").unwrap();
+        std::fs::write(&empty_program, b"tool").unwrap();
+
+        let relative = program_read_term(
+            &CommandSpec::new("relative-tool").cwd(&child_cwd),
+            Some("bin"),
+        )
+        .expect("relative PATH resolves from child cwd");
+        assert!(relative.contains(&relative_program.to_string_lossy().replace('\\', "\\\\")));
+
+        let empty = program_read_term(&CommandSpec::new("empty-tool").cwd(&child_cwd), Some(":"))
+            .expect("empty PATH component resolves from child cwd");
+        assert!(empty.contains(&empty_program.to_string_lossy().replace('\\', "\\\\")));
     }
 
     #[test]

@@ -177,6 +177,33 @@ fn bare_entry_program_is_granted_from_the_child_path() {
     );
 }
 
+#[test]
+fn bare_entry_program_uses_relative_child_path_from_child_cwd() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = fixture();
+    let child_bin = f.proj.join("bin");
+    let tool = child_bin.join("child-path-tool");
+    fs::create_dir(&child_bin).unwrap();
+    fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_ne!(
+        std::env::current_dir().unwrap(),
+        f.proj,
+        "the parent and child cwd must differ for this regression"
+    );
+    assert!(
+        f.allowed_env(
+            serde_json::json!({ "fs": [], "net": false, "env": true }),
+            &[("PATH", "bin")],
+            "child-path-tool",
+            &[],
+        ),
+        "a relative constructed PATH entry must resolve from the effective child cwd"
+    );
+}
+
 // ── fs read-confine (array form = allowlist: project + toolchain only) ─────────
 
 #[test]
