@@ -70,7 +70,11 @@ mod win {
                 Err(_) => 9,
             },
             Some("connect") => connect(&a[1], a[2].parse().unwrap_or(0)),
-            Some("connectenvproxy") => connect_env_proxy(),
+            Some("listen") => match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+                Ok(_) => 0,
+                Err(e) if e.raw_os_error() == Some(10013) => 5,
+                Err(_) => 9,
+            },
             Some("getenv") => match std::env::var(&a[1]) {
                 Ok(_) => 0,
                 Err(_) => 4,
@@ -128,27 +132,6 @@ mod win {
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 6,
             Err(_) => 9,
         }
-    }
-
-    /// Connect to the loopback egress proxy the parent injected via `HTTP_PROXY`
-    /// (`http://[token@]127.0.0.1:<port>`). A successful TCP connect proves the confined
-    /// AppContainer child can REACH the loopback proxy — i.e. the per-run loopback
-    /// exemption is live (absent it, AppContainer→loopback is WFP-blocked → WSAEACCES).
-    /// Exit 4 if the hint was not injected. Same connect exit-code contract otherwise.
-    fn connect_env_proxy() -> i32 {
-        let Ok(url) = std::env::var("HTTP_PROXY") else {
-            return 4;
-        };
-        let after = url.split("://").nth(1).unwrap_or(&url);
-        let hostport = after
-            .rsplit('@')
-            .next()
-            .unwrap_or(after)
-            .trim_end_matches('/');
-        let Some((host, port)) = hostport.rsplit_once(':') else {
-            return 9;
-        };
-        connect(host, port.parse().unwrap_or(0))
     }
 
     /// Spawn a detached grandchild (`sleep`), record its pid, exit — so the parent can
@@ -250,8 +233,8 @@ mod win {
 
     /// Give the fixture root a PROTECTED DACL: strip inherited ACEs and grant only the
     /// current user full control, so a not-granted file carries no AC-SID/AAP grant and the
-    /// LowBox access check denies it — the clean-DACL confined root the launcher provides in
-    /// production. `icacls` is the one-shot reliable path for test setup.
+    /// LowBox access check denies it. The backend verifies this exact precondition before
+    /// every filesystem-confined launch. `icacls` is the reliable one-shot test setup.
     fn secure_root(root: &Path) {
         let user = std::env::var("USERNAME").expect("USERNAME set on Windows");
         let status = std::process::Command::new("icacls")
@@ -261,6 +244,19 @@ mod win {
             .status()
             .expect("run icacls");
         assert!(status.success(), "icacls failed to secure the fixture root");
+    }
+
+    fn grant_all_application_packages(root: &Path) {
+        let status = std::process::Command::new("icacls")
+            .arg(root)
+            .arg("/grant")
+            .arg("*S-1-15-2-1:(OI)(CI)RX")
+            .status()
+            .expect("run icacls");
+        assert!(
+            status.success(),
+            "icacls failed to grant ALL APPLICATION PACKAGES"
+        );
     }
 
     impl Fixture {
@@ -347,14 +343,8 @@ mod win {
         }
     }
 
-    fn relaxed_fs() -> FsPolicy {
-        FsPolicy {
-            rules: FsRuleSet {
-                entries: Vec::new(),
-                default_effect: Effect::Allow,
-            },
-            tmp: TmpMode::Shared,
-        }
+    fn relaxed_policy(f: &Fixture) -> SandboxPolicy {
+        compile_surface(f, &serde_json::Value::Bool(false))
     }
 
     /// A minimal env map the AppContainer child needs to start + the caller's marker.
@@ -408,7 +398,13 @@ mod win {
     // ── the run helpers ───────────────────────────────────────────────────────────
 
     fn code(policy: &SandboxPolicy, program: &Path, args: &[&str]) -> i32 {
-        let spec = CommandSpec::new(program.as_os_str()).args(args.iter().copied());
+        let cwd = program
+            .parent()
+            .and_then(Path::parent)
+            .expect("fixture program is root/bin/child.exe");
+        let spec = CommandSpec::new(program.as_os_str())
+            .args(args.iter().copied())
+            .cwd(cwd);
         let prepared = match apply(policy, spec) {
             Ok(p) => p,
             Err(d) => {
@@ -548,6 +544,66 @@ mod win {
         let child = f.child.clone();
         let a = |s: &str| s.to_string();
 
+        // The allowlist is sound only below a protected DACL with no AAP reach. A dirty
+        // working root must fail before the child can create a marker.
+        let dirty = f.root.join("dirty-aap");
+        std::fs::create_dir_all(&dirty).unwrap();
+        grant_all_application_packages(&dirty);
+        let dirty_marker = dirty.join("must-not-run.txt");
+        let dirty_marker_arg = dirty_marker.to_string_lossy().into_owned();
+        let dirty_policy = read_confine(&[&dirty], &[&dirty]);
+        let dirty_spec = CommandSpec::new(child.as_os_str())
+            .args(["__sbxchild__", "write", dirty_marker_arg.as_str()])
+            .cwd(&dirty);
+        match apply(&dirty_policy, dirty_spec) {
+            Err(d)
+                if d.lost.iter().any(|axis| axis == "fs-root")
+                    && d.reason
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("ALL APPLICATION PACKAGES") =>
+            {
+                println!("PASS dirty AAP working root fails closed")
+            }
+            Err(d) => {
+                fails += 1;
+                eprintln!("FAIL dirty-root diagnostic: {d:?}");
+            }
+            Ok(_) => {
+                fails += 1;
+                eprintln!("FAIL dirty AAP working root was accepted");
+            }
+        }
+        if dirty_marker.exists() {
+            fails += 1;
+            eprintln!("FAIL dirty-root rejection still ran the child");
+        }
+
+        // Every requested ACE is part of the launch promise. A missing grant target must
+        // surface as a status error instead of being debug-logged and silently skipped.
+        let missing = f.root.join("missing-grant");
+        let ace_policy = read_confine(&[&missing], &[]);
+        let ace_marker = f.work.join("ace-failure-must-not-run.txt");
+        let ace_marker_arg = ace_marker.to_string_lossy().into_owned();
+        let ace_spec = CommandSpec::new(child.as_os_str())
+            .args(["__sbxchild__", "write", ace_marker_arg.as_str()])
+            .cwd(&f.root);
+        let ace_error = apply(&ace_policy, ace_spec)
+            .expect("clean root passes apply")
+            .status()
+            .expect_err("missing ACE target must fail launch")
+            .to_string();
+        if ace_error.contains("read grant ACE") && ace_error.contains("missing-grant") {
+            println!("PASS failed read-grant ACE is surfaced")
+        } else {
+            fails += 1;
+            eprintln!("FAIL ACE failure diagnostic: {ace_error}");
+        }
+        if ace_marker.exists() {
+            fails += 1;
+            eprintln!("FAIL ACE setup failure still ran the child");
+        }
+
         // In-AppContainer proof — the child reports its own token. Load-bearing: without
         // this a "denied" could be a launch failure, not confinement.
         let confine = read_confine(&[&f.work], &[]);
@@ -580,10 +636,7 @@ mod win {
             &[5, 9],
         );
         // NC: relaxed fs (not sandboxing → plain spawn) reads the secret fine.
-        let relaxed = SandboxPolicy {
-            fs: relaxed_fs(),
-            ..Default::default()
-        };
+        let relaxed = relaxed_policy(&f);
         expect(
             &mut fails,
             "NC read secret under relaxed fs (readable absent confinement)",
@@ -651,15 +704,36 @@ mod win {
             0,
         );
 
+        // `internetClient` is useful public egress, but not full host networking. The
+        // backend must report that narrower contract whenever another axis engages the
+        // AppContainer under a `net: true` policy.
+        {
+            let spec = CommandSpec::new(child.as_os_str())
+                .args(["__sbxchild__", "token"])
+                .cwd(&f.root);
+            let prepared = apply(&confine, spec).expect("apply net-unconfined policy");
+            let reason = prepared.degradation.reason.as_deref().unwrap_or_default();
+            if prepared.degradation.lost.iter().any(|s| s == "net-full")
+                && reason.contains("loopback")
+                && reason.contains("listener")
+            {
+                println!("PASS net:true honestly reports AppContainer's narrower network");
+            } else {
+                fails += 1;
+                eprintln!(
+                    "FAIL net:true degradation: lost={:?} reason={:?}",
+                    prepared.degradation.lost, prepared.degradation.reason
+                );
+            }
+        }
+
         // ── loopback egress denied (local-exfil closed; per-host needs an exemption) ─
         // A LOOPBACK service (docker.sock-class local exfil, or a would-be egress
         // proxy) is unreachable from inside the AppContainer by default: Windows blocks
-        // AppContainer loopback absent a registered exemption (`NetworkIsolation…`). This
-        // is the narrowed-endpoint property on Windows — local-IPC exfil is closed — AND
-        // it is precisely WHY per-host via the loopback proxy is honestly DEGRADED here
-        // (the confined child cannot reach the proxy without the exemption, not wired in
-        // this phase). We prove the block empirically; the NC is a fully-relaxed (NON-
-        // AppContainer) spawn that reaches the same loopback service.
+        // AppContainer loopback absent a package-wide exemption. The backend deliberately
+        // does not install that exemption because it would expose arbitrary local
+        // forwarders. We prove the narrower `net:true` behavior empirically; the NC is a
+        // fully-relaxed (non-AppContainer) spawn that reaches the same loopback service.
         let loopback = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let lport = loopback.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -677,10 +751,7 @@ mod win {
             ),
             &[5, 6, 9],
         );
-        let relaxed = SandboxPolicy {
-            fs: relaxed_fs(),
-            ..Default::default()
-        };
+        let relaxed = relaxed_policy(&f);
         expect(
             &mut fails,
             "NC fully-relaxed (no AppContainer) reaches the loopback service",
@@ -689,6 +760,18 @@ mod win {
                 &child,
                 &["__sbxchild__", "connect", "127.0.0.1", &lport.to_string()],
             ),
+            0,
+        );
+        expect_in(
+            &mut fails,
+            "AppContainer child cannot listen as a full host-network peer",
+            code(&confine, &child, &["__sbxchild__", "listen"]),
+            &[5, 9],
+        );
+        expect(
+            &mut fails,
+            "NC fully-relaxed child can bind a loopback listener",
+            code(&relaxed, &child, &["__sbxchild__", "listen"]),
             0,
         );
 
@@ -710,7 +793,9 @@ mod win {
         // it isn't. Lock in the corrected state so it can't silently regress.
         {
             let spec_args: &[&str] = &["__sbxchild__", "token"];
-            let spec = CommandSpec::new(child.as_os_str()).args(spec_args.iter().copied());
+            let spec = CommandSpec::new(child.as_os_str())
+                .args(spec_args.iter().copied())
+                .cwd(&f.root);
             let prepared = apply(&scrub, spec).expect("apply env-withholding scrub policy");
             if prepared
                 .degradation
@@ -746,12 +831,13 @@ mod win {
             ),
             0,
         );
-        // NC: env not enforced → child inherits the parent env → sees the secret.
+        // NC: the compiler snapshots the ambient parent env → sees the secret.
+        let env_relaxed = relaxed_policy(&f);
         expect(
             &mut fails,
             "NC env not enforced → secret visible (inherited)",
             code(
-                &confine,
+                &env_relaxed,
                 &child,
                 &["__sbxchild__", "getenv", "NUB_SBX_SECRET"],
             ),
@@ -880,14 +966,9 @@ mod win {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(event) };
         }
 
-        // ── strict-Windows net tier (Q21/Q22): per-host + MITM ride nub's loopback
-        //    egress proxy, reachable only through an admin-registered loopback exemption.
-        //    Prove the mechanism end-to-end against the REAL backend — the admin-gated
-        //    exemption write, the exemption→proxy reach with external egress still sealed,
-        //    the RAII teardown, and the unelevated fail-CLOSED path. Elevation-branched:
-        //    the elevated legs run under nubadmin (High IL), the fail-closed leg under a
-        //    standard user (Medium IL). ────────────────────────────────────────────────
-        net_tier(&mut fails, &f, &child);
+        // Per-host cannot be made precise with AppContainer's package-wide loopback
+        // exemption. Reject it on every privilege tier before a child can run.
+        per_host_reject(&mut fails, &f, &child);
 
         // ── process-reap (Job Object KILL_ON_JOB_CLOSE) ──────────────────────────
         job_reap(&mut fails, &f);
@@ -895,7 +976,7 @@ mod win {
         if fails == 0 { Ok(()) } else { Err(fails) }
     }
 
-    /// A single Host Allow rule (per-host ⇒ Tier 1 when elevated).
+    /// A single Host Allow rule (the per-host signal).
     fn allow_rule(host: &str) -> NetRule {
         NetRule {
             target: NetTarget::Host(host.to_string()),
@@ -903,9 +984,7 @@ mod win {
         }
     }
 
-    /// A per-host strict policy: fs read-confine (engages the AppContainer + grants the
-    /// child exe) plus an enforced net with one Allow rule (the per-host signal that,
-    /// elevated, selects Tier 1 — proxy started, loopback exemption registered).
+    /// A per-host strict policy: fs read-confine plus one allowed hostname.
     fn per_host_policy(f: &Fixture) -> SandboxPolicy {
         let mut policy = read_confine(&[&f.work], &[]);
         policy.net = NetPolicy {
@@ -917,212 +996,37 @@ mod win {
         policy
     }
 
-    /// Whether THIS test process runs elevated (full admin token) — the exact condition
-    /// under which the backend selects Tier 1 (`launch::is_elevated`). Determines which
-    /// legs of the net tier are live.
-    fn test_is_elevated() -> bool {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::Security::{
-            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
-        };
-        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-        // SAFETY: query-only token handle into our own process; TOKEN_ELEVATION is exactly
-        // sized for the TokenElevation class.
-        unsafe {
-            let mut tok = std::ptr::null_mut();
-            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
-                return false;
-            }
-            let mut elev = TOKEN_ELEVATION { TokenIsElevated: 0 };
-            let mut ret = 0u32;
-            let ok = GetTokenInformation(
-                tok,
-                TokenElevation,
-                std::ptr::from_mut(&mut elev).cast(),
-                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-                &mut ret,
-            );
-            CloseHandle(tok);
-            ok != 0 && elev.TokenIsElevated != 0
-        }
-    }
-
-    /// Free the `NetworkIsolationGetAppContainerConfig` buffer with its matching process-heap
-    /// deallocator (HeapFree each entry's `Sid`, then the array — the MSDN `FreeAppContainerConfig`
-    /// sample). NOT `NetworkIsolationFreeAppContainers`, whose `INET_FIREWALL_APP_CONTAINER` walk
-    /// type-confuses a `SID_AND_ATTRIBUTES` array into a STATUS_HEAP_CORRUPTION (#433).
-    fn free_ac_config(arr: *mut windows_sys::Win32::Security::SID_AND_ATTRIBUTES, count: u32) {
-        use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
-        if arr.is_null() {
-            return;
-        }
-        // SAFETY: `arr`/`count` come from a successful Get, which allocates the array and each
-        // entry's `Sid` on the process heap.
-        unsafe {
-            let heap = GetProcessHeap();
-            for i in 0..count as usize {
-                let sid = (*arr.add(i)).Sid;
-                if !sid.is_null() {
-                    HeapFree(heap, 0, sid.cast());
-                }
-            }
-            HeapFree(heap, 0, arr.cast());
-        }
-    }
-
-    /// Size of the machine-wide AppContainer loopback-exemption list (read path is open
-    /// even unprivileged). Used to prove per-run teardown leaves no accretion.
-    fn exemption_count() -> u32 {
-        use windows_sys::Win32::NetworkManagement::WindowsFirewall::NetworkIsolationGetAppContainerConfig;
-        use windows_sys::Win32::Security::SID_AND_ATTRIBUTES;
-        let mut count: u32 = 0;
-        let mut arr: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
-        // SAFETY: out-params for the current list; the returned array is freed immediately.
-        let rc = unsafe { NetworkIsolationGetAppContainerConfig(&mut count, &mut arr) };
-        free_ac_config(arr, count);
-        if rc == 0 { count } else { 0 }
-    }
-
-    /// STEP-1 fact #1 — the exemption write is admin-gated. Derive a throwaway AC SID (no
-    /// profile created) and attempt to add it to the machine-wide list via a read-modify-
-    /// write that PRESERVES existing entries; on success (elevated) restore the prior list
-    /// exactly. Unelevated ⇒ the Set must return ACCESS_DENIED; elevated ⇒ it must succeed.
-    fn exemption_admin_gate(fails: &mut u32, elevated: bool) {
-        use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
-        use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
-            NetworkIsolationGetAppContainerConfig, NetworkIsolationSetAppContainerConfig,
-        };
-        use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
-        use windows_sys::Win32::Security::{FreeSid, PSID, SID_AND_ATTRIBUTES};
-
-        let name: Vec<u16> = "nub_sbx_gate_probe\0".encode_utf16().collect();
-        let mut sid: PSID = std::ptr::null_mut();
-        // SAFETY: derive-only (no profile); `sid` is an out-param freed below with FreeSid.
-        let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
-        if hr != 0 || sid.is_null() {
-            *fails += 1;
-            eprintln!("FAIL exemption-gate setup: DeriveAppContainerSid hr=0x{hr:08x}");
-            return;
-        }
-        let mut count: u32 = 0;
-        let mut arr: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
-        // SAFETY: read the current list (open unprivileged); `arr`/`count` are out-params.
-        let grc = unsafe { NetworkIsolationGetAppContainerConfig(&mut count, &mut arr) };
-        let existing: &[SID_AND_ATTRIBUTES] = if grc != 0 || arr.is_null() || count == 0 {
-            &[]
-        } else {
-            // SAFETY: `arr` names `count` entries per the successful Get.
-            unsafe { std::slice::from_raw_parts(arr, count as usize) }
-        };
-        let mut new_list = existing.to_vec();
-        new_list.push(SID_AND_ATTRIBUTES {
-            Sid: sid,
-            Attributes: 0,
-        });
-        // SAFETY: `new_list` outlives the call; its Sid pointers reference the live `arr`
-        // allocation or the caller-owned `sid` (freed only after).
-        let set_rc = unsafe {
-            NetworkIsolationSetAppContainerConfig(new_list.len() as u32, new_list.as_ptr())
-        };
-        // If the write actually landed (elevated), restore the exact prior list.
-        if set_rc == 0 {
-            let restore = if existing.is_empty() {
-                std::ptr::null()
-            } else {
-                existing.as_ptr()
-            };
-            // SAFETY: `existing` (borrowing `arr`) is still alive here.
-            unsafe { NetworkIsolationSetAppContainerConfig(count, restore) };
-        }
-        free_ac_config(arr, count);
-        unsafe { FreeSid(sid) };
-
-        if elevated {
-            expect(
-                fails,
-                "exemption write SUCCEEDS when elevated",
-                set_rc as i32,
-                0,
-            );
-        } else {
-            expect(
-                fails,
-                "exemption write ACCESS_DENIED when NOT elevated (admin-gated)",
-                set_rc as i32,
-                ERROR_ACCESS_DENIED as i32,
-            );
-        }
-    }
-
-    /// STEP-1 facts #2/#3 (elevated) + the fail-closed path (unelevated), against the real
-    /// `apply`/`status` backend.
-    fn net_tier(fails: &mut u32, f: &Fixture, child: &Path) {
-        let elevated = test_is_elevated();
-        println!("== net tier: test process is_elevated = {elevated} ==");
-
-        // Fact #1: the exemption write is admin-gated (both branches assert the OS verdict).
-        exemption_admin_gate(fails, elevated);
-
-        if elevated {
-            let policy = per_host_policy(f);
-            let baseline = exemption_count();
-
-            // Fact #2a: the confined child REACHES nub's loopback egress proxy — the per-run
-            // exemption is live (contrast the "AppContainer child DENIED loopback" baseline
-            // above, which runs WITHOUT an exemption).
-            expect(
-                fails,
-                "Tier1: confined child REACHES the loopback egress proxy (exemption live)",
-                code(&policy, child, &["__sbxchild__", "connectenvproxy"]),
-                0,
-            );
-            // Fact #2b: direct external egress stays SEALED (internetClient withheld) — the
-            // exemption opens loopback ONLY, so nub's proxy is the child's sole egress.
-            expect_in(
-                fails,
-                "Tier1: direct external egress DENIED (proxy is the sole egress)",
-                code(
-                    &policy,
-                    child,
-                    &["__sbxchild__", "connect", "1.1.1.1", "443"],
-                ),
-                &[5, 6],
-            );
-            // Fact #3: the RAII teardown removed the per-run exemption — no list accretion.
-            let after = exemption_count();
-            if after == baseline {
-                println!("PASS Tier1 teardown: exemption list returned to baseline ({baseline})");
-            } else {
-                *fails += 1;
-                eprintln!(
-                    "FAIL Tier1 teardown: exemption list {after} != baseline {baseline} (leak)"
-                );
-            }
-        } else {
-            // Unelevated per-host must FAIL CLOSED with an elevation message — NEVER a silent
-            // coarse-degrade (the maintainer's informative-fail requirement).
-            let policy = per_host_policy(f);
-            let spec =
-                CommandSpec::new(child.as_os_str()).args(["__sbxchild__", "token"].iter().copied());
-            match apply(&policy, spec) {
-                Ok(_) => {
+    fn per_host_reject(fails: &mut u32, f: &Fixture, child: &Path) {
+        let policy = per_host_policy(f);
+        let marker = f.work.join("per-host-must-not-run.txt");
+        let marker_arg = marker.to_string_lossy().into_owned();
+        let spec = CommandSpec::new(child.as_os_str())
+            .args(["__sbxchild__", "write", marker_arg.as_str()])
+            .cwd(&f.root);
+        match apply(&policy, spec) {
+            Err(d) => {
+                let reason = d.reason.as_deref().unwrap_or_default();
+                if d.lost.iter().any(|s| s == "net-per-host")
+                    && reason.contains("every loopback listener")
+                    && reason.contains("forwarder")
+                {
+                    println!("PASS per-host policy fails closed before launch");
+                } else {
                     *fails += 1;
-                    eprintln!("FAIL unelevated per-host must fail-closed, but apply() succeeded");
-                }
-                Err(d) => {
-                    let named = d.lost.iter().any(|s| s == "net-per-host");
-                    let explains = d.reason.as_deref().unwrap_or_default().contains("elevat");
-                    if named && explains {
-                        println!("PASS unelevated per-host FAILS CLOSED with an elevation message");
-                    } else {
-                        *fails += 1;
-                        eprintln!(
-                            "FAIL fail-closed shape: lost={:?} reason={:?}",
-                            d.lost, d.reason
-                        );
-                    }
+                    eprintln!(
+                        "FAIL per-host fail-closed shape: lost={:?} reason={:?}",
+                        d.lost, d.reason
+                    );
                 }
             }
+            Ok(_) => {
+                *fails += 1;
+                eprintln!("FAIL per-host policy was accepted");
+            }
+        }
+        if marker.exists() {
+            *fails += 1;
+            eprintln!("FAIL rejected per-host policy still ran the child");
         }
     }
 

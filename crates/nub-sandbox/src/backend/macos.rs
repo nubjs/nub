@@ -125,7 +125,7 @@ pub fn apply(
 
     Ok(Prepared {
         command: wrapped,
-        degradation: degradation(policy, proxy_port),
+        degradation: degradation(policy, proxy_port, tmp_dir),
         proxy: None,
         _private_tmp: None,
     })
@@ -338,7 +338,9 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
     // its parent dir: a directory grant would expose the program's SIBLINGS (e.g. a
     // `.env`/key next to a project-local tool), defeating a tight read allowlist. A
     // non-system toolchain's out-of-dir libs need an explicit toolchain allow.
-    if let Some(term) = program_read_term(spec) {
+    if let Some(term) =
+        program_read_term(spec, policy.env.constructed.get("PATH").map(String::as_str))
+    {
         out.push_str(&format!("(allow file-read* {term})\n"));
         out.push_str(&format!("(allow file-map-executable {term})\n"));
     }
@@ -578,16 +580,21 @@ fn is_dangerous_write_root(term: &MatchTerm) -> bool {
 /// Best-effort read/map grant for the target program FILE so read-confine can exec
 /// it. `None` when the program can't be resolved (a bare name with no PATH hit) —
 /// the essential base still covers system tools.
-fn program_read_term(spec: &CommandSpec) -> Option<String> {
-    let resolved = resolve_program(&spec.program, spec.cwd.as_deref())?;
+fn program_read_term(spec: &CommandSpec, child_path: Option<&str>) -> Option<String> {
+    let resolved = resolve_program(&spec.program, spec.cwd.as_deref(), child_path)?;
     let file = normalize_slashes(&resolved.to_string_lossy());
     Some(format!("(subpath \"{}\")", sbpl_escape(&file)))
 }
 
 /// Resolve a program to an absolute, canonical path. A cwd-relative program is
 /// resolved against the CHILD's cwd (`spec.cwd`, where the kernel will resolve it),
-/// falling back to the process cwd; a bare name is searched on `PATH`.
-fn resolve_program(program: &std::ffi::OsStr, child_cwd: Option<&Path>) -> Option<PathBuf> {
+/// falling back to the process cwd; a bare name is searched on the constructed
+/// child `PATH`, matching the lookup performed after `sandbox-exec` enters the child.
+fn resolve_program(
+    program: &std::ffi::OsStr,
+    child_cwd: Option<&Path>,
+    child_path: Option<&str>,
+) -> Option<PathBuf> {
     let p = Path::new(program);
     if p.is_absolute() {
         return Some(canonicalize_including_nonexistent(p));
@@ -601,8 +608,8 @@ fn resolve_program(program: &std::ffi::OsStr, child_cwd: Option<&Path>) -> Optio
         return Some(canonicalize_including_nonexistent(&base.join(p)));
     }
     // bare name → PATH search
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
+    let path_var = child_path?;
+    for dir in std::env::split_paths(std::ffi::OsStr::new(path_var)) {
         let cand = dir.join(p);
         if cand.is_file() {
             return Some(canonicalize_including_nonexistent(&cand));
@@ -969,7 +976,11 @@ fn sbpl_escape(s: &str) -> String {
 /// (`proxy_port == None`) the profile coarse-denies and we report `net-per-host`
 /// degraded (fail-safe, not silent). With a proxy the per-host allows ARE enforced (via
 /// SNI/target gating), so enforcement is full.
-fn degradation(policy: &SandboxPolicy, proxy_port: Option<u16>) -> Degradation {
+fn degradation(
+    policy: &SandboxPolicy,
+    proxy_port: Option<u16>,
+    tmp_dir: Option<&std::path::Path>,
+) -> Degradation {
     let mut deg = Degradation::full();
     if policy.net.enforce
         && proxy_port.is_none()
@@ -979,6 +990,12 @@ fn degradation(policy: &SandboxPolicy, proxy_port: Option<u16>) -> Degradation {
         deg.reason = Some(
             "egress proxy unavailable — per-host allows denied (coarse network deny)".to_string(),
         );
+    }
+    if policy.fs.tmp == crate::policy::TmpMode::Private && tmp_dir.is_none() {
+        deg.lost.push("tmp-private".to_string());
+        deg.reason.get_or_insert_with(|| {
+            "private temporary directory allocation failed; shared temp remains hidden".to_string()
+        });
     }
     deg
 }
@@ -1707,13 +1724,43 @@ mod tests {
             ..Default::default()
         };
         // No proxy available → per-host can't be enforced → degraded.
-        let deg = degradation(&p, None);
+        let deg = degradation(&p, None, None);
         assert_eq!(deg.lost, vec!["net-per-host".to_string()]);
         // WITH a proxy the per-host allows ARE enforced (SNI/target gating) → full.
-        assert!(degradation(&p, Some(9999)).is_full());
+        assert!(degradation(&p, Some(9999), None).is_full());
         // A pure deny-all net (no allow rules) is fully enforced, not degraded.
         p.net.rules.clear();
-        assert!(degradation(&p, None).is_full());
+        assert!(degradation(&p, None, None).is_full());
+    }
+
+    #[test]
+    fn bare_program_grant_uses_the_constructed_child_path() {
+        let root = tempfile::tempdir().unwrap();
+        let child_bin = root.path().join("child-bin");
+        std::fs::create_dir(&child_bin).unwrap();
+        let program = child_bin.join("tool");
+        std::fs::write(&program, b"tool").unwrap();
+
+        let child_path = child_bin.to_string_lossy().into_owned();
+        let term = program_read_term(&CommandSpec::new("tool"), Some(&child_path))
+            .expect("constructed PATH resolves the entry program");
+        assert!(
+            term.contains(&program.to_string_lossy().replace('\\', "\\\\")),
+            "program grant must name the child-PATH executable: {term}"
+        );
+    }
+
+    #[test]
+    fn missing_private_tmp_is_reported_as_fail_safe_over_confinement() {
+        let mut p = fs_policy(Effect::Allow, vec![]);
+        p.fs.tmp = TmpMode::Private;
+        let deg = degradation(&p, None, None);
+        assert_eq!(deg.lost, vec!["tmp-private"]);
+        assert!(
+            deg.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("shared temp remains hidden"))
+        );
     }
 
     #[test]

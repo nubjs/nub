@@ -199,7 +199,7 @@ impl Tree {
         // subtree, which would collapse read-confine). A user-SID grant does NOT satisfy the
         // LowBox check, so the child still reaches only the backend's explicit AC-SID grants.
         // %TEMP% under a user profile carries no AAP today, so this is defensive; it mirrors
-        // the clean-DACL confined root the launcher provides in production.
+        // the clean-DACL precondition the backend verifies before launch.
         secure_windows_root(&root);
         let proj = root.join("proj");
         let home = root.join("home");
@@ -224,11 +224,9 @@ impl Tree {
         std::fs::write(proj.join("nested/package.json"), b"{}").unwrap();
         // On Windows the sandboxed child must ALSO be C:\-traversable — the sibling probe
         // under the CI checkout is unreachable from a LowBox token — so copy it into the
-        // C:\-rooted tree, in a DEDICATED `bin/` subdir. The Windows backend auto-grants
-        // the program's PARENT DIR an inheritable read subtree (so a native exe can load
-        // sibling DLLs); placing the probe at the tree root would auto-grant read to the
-        // WHOLE tree and collapse read-confine — `bin/` holds only the probe, so the
-        // auto-grant exposes nothing (mirrors windows_enforcement.rs's `bin/child.exe`).
+        // C:\-rooted tree, in a dedicated `bin/` subdir. The Windows backend grants the
+        // program file explicitly; separating it from fixture data also prevents an
+        // executable grant from obscuring the read-confine oracle.
         // Elsewhere the sibling probe is reachable (the program auto-grant + its system
         // libs), so use it in place.
         let probe = if cfg!(windows) {
@@ -411,8 +409,46 @@ fn drive(name: &str) {
 // ── the matrix — one test per fixture (parallel, granular failure attribution) ────
 
 #[test]
+#[cfg(not(target_os = "windows"))]
 fn fs_read_confine() {
     drive("fs-read-confine");
+}
+
+/// Windows cannot carve the compiler's `.env*` read deny out of a granted project
+/// subtree. The CLI must reject that degradation before the child creates a marker.
+#[test]
+#[cfg(target_os = "windows")]
+fn windows_read_deny_inside_grant_fails_closed() {
+    let tree = Tree::new();
+    let policy_path = tree.proj.join("__policy.json");
+    std::fs::write(
+        &policy_path,
+        tree.render_policy(&serde_json::json!({ "fs": ["./"], "env": true, "net": true })),
+    )
+    .unwrap();
+    let marker = tree.proj.join("must-not-run.txt");
+
+    let out = Command::new(nub_bin())
+        .arg("run")
+        .arg("--sandbox")
+        .arg(&policy_path)
+        .arg("--")
+        .arg(&tree.probe)
+        .arg("write")
+        .arg(&marker)
+        .current_dir(&tree.proj)
+        .env("HOME", &tree.home)
+        .env("USERPROFILE", &tree.home)
+        .output()
+        .expect("spawn nub");
+    assert!(!out.status.success());
+    assert!(
+        !marker.exists(),
+        "the rejected sandbox must not run its child"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("fail-closed"), "{stderr}");
+    assert!(stderr.contains("read deny"), "{stderr}");
 }
 
 #[test]

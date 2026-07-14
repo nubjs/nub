@@ -22,8 +22,9 @@
 //!   - env-scrub: the child env IS the policy's constructed map (`lpEnvironment`),
 //!     built by construction exactly as the mac/linux backends do.
 //!   - coarse egress: no `internetClient` capability ⇒ ALL egress (incl. loopback)
-//!     is blocked; the capability is granted only when net is unconfined. Per-host is
-//!     the egress proxy's job (S6) — reported degraded until then.
+//!     is blocked. An AppContainer with `internetClient` has public outbound access,
+//!     not full host networking. Per-host requests fail closed because the available
+//!     exemption exposes every loopback listener, including local forwarders.
 //!   - process-reap: a Job Object with `KILL_ON_JOB_CLOSE`; the whole tree dies when
 //!     the job handle closes (after the child exits, or if nub does).
 //!
@@ -71,11 +72,6 @@ pub(crate) struct WindowsLaunch {
     env: Option<BTreeMap<String, String>>,
     /// Grant the `internetClient` capability (egress allowed). `false` ⇒ coarse deny.
     allow_internet: bool,
-    /// Strict-Windows Tier 1: register a machine-wide loopback exemption for the per-run
-    /// AC SID before spawn (so the child can reach nub's loopback egress proxy — its SOLE
-    /// egress, since `allow_internet` stays `false`), torn down when the child exits.
-    /// Requires elevation; `apply` sets it only when [`plan_net`] chose [`WinNetPlan::Tier1`].
-    register_loopback_exemption: bool,
 }
 
 /// What the allowlist model could NOT express for a policy, so the caller can be told.
@@ -269,34 +265,26 @@ fn fs_confines(fs: &FsPolicy) -> bool {
     fs.rules.default_effect != Effect::Allow || !fs.rules.entries.is_empty()
 }
 
-/// The Windows net posture the backend can achieve for a policy, given whether nub runs
-/// elevated. THE WINDOWS DIFFERENCE (design.md; `wiki/research/sandbox-windows-net-parity.md`):
-/// per-host + MITM ride nub's loopback egress proxy, but an AppContainer child is blocked
-/// from ALL loopback by WFP regardless of capability, and the only lift —
-/// `NetworkIsolationSetAppContainerConfig` — is admin-only. So the per-host/MITM tier is
-/// reachable ONLY when elevated; coarse on/off needs no proxy and stays unprivileged. Pure
-/// fn ⇒ host-unit-tested (the `is_elevated` FFI is factored out into the caller).
+/// The Windows net posture the backend can achieve for a policy. AppContainer provides a
+/// useful coarse egress boundary, but its available loopback exemption is package-wide:
+/// it exposes every listener rather than only nub's proxy port. Per-host policy therefore
+/// fails closed instead of pretending that an elevated process can enforce it safely.
 #[derive(Debug, PartialEq, Eq)]
 enum WinNetPlan {
-    /// Net unconfined — grant `internetClient`, no proxy.
+    /// Net unconfined at the policy layer. An enforcing AppContainer can provide only
+    /// the narrower `internetClient` capability; `apply` reports that loss.
     Unconfined,
     /// Coarse egress-deny — withhold `internetClient`, no proxy (deny-all; unprivileged).
     CoarseDeny,
-    /// Strict-Windows Tier 1 — register the per-run AC-SID loopback exemption so the child
-    /// reaches nub's proxy (its SOLE egress, `internetClient` withheld). Per-host + MITM
-    /// enforce. Requires elevation.
-    Tier1,
-    /// Fail-CLOSED: the policy needs per-host/MITM but nub is not elevated, so the loopback
-    /// exemption can't be registered. The maintainer requirement — surface a clear error,
-    /// NEVER silently coarse-degrade an allow-list into a deny-all.
-    FailUnelevated,
+    /// Fail closed: the only available proxy path requires an AppContainer-wide
+    /// loopback exemption, which also exposes arbitrary local forwarders.
+    PerHostUnsupported,
 }
 
 /// Decide the net posture. Per-host is signalled by any Allow rule (matches
 /// `backend::start_proxy_if_needed`, which is what actually starts the proxy). A pure
-/// deny-all is coarse (no proxy, no elevation). `elevated` is consulted only on the
-/// per-host branch, so the caller may pass `false` elsewhere without changing the verdict.
-fn plan_net(net: &NetPolicy, elevated: bool) -> WinNetPlan {
+/// deny-all is coarse (no proxy or elevation required).
+fn plan_net(net: &NetPolicy) -> WinNetPlan {
     if !net.enforce {
         return WinNetPlan::Unconfined;
     }
@@ -304,11 +292,7 @@ fn plan_net(net: &NetPolicy, elevated: bool) -> WinNetPlan {
     if !needs_proxy {
         return WinNetPlan::CoarseDeny;
     }
-    if elevated {
-        WinNetPlan::Tier1
-    } else {
-        WinNetPlan::FailUnelevated
-    }
+    WinNetPlan::PerHostUnsupported
 }
 
 // TRAVERSE MODEL (why a LEAF grant alone suffices — no ancestor traverse grants): a
@@ -332,9 +316,8 @@ pub(crate) fn apply(
     spec: super::CommandSpec,
     proxy_port: Option<u16>,
     proxy_token: Option<&str>,
-    // The MITM child CA-bundle. On the Tier-1 elevated per-host path it is injected into
-    // the child env (CA-trust) AND added to the read allow-set so the confined child can
-    // read it; on the plain path it rides `set_ca_env`.
+    // The MITM child CA-bundle. Per-host policies fail closed before the AppContainer
+    // launch path; on the plain path it rides `set_ca_env`.
     ca_bundle: Option<&std::path::Path>,
     // Private-tmp fresh dir. CUT-1: enforcement (redirect TEMP/TMP + hide the shared tmp
     // without breaking the OS-essential TEMP floor) is a follow-up decision, so the env is
@@ -347,21 +330,8 @@ pub(crate) fn apply(
     let sandboxing = confine_fs || policy.net.enforce;
     let tmp_lost = super::tmp_lost_axis(policy);
 
-    // ── net posture (strict-Windows tier decision) ──────────────────────────────
-    // Per-host + MITM ride nub's loopback proxy, which an AppContainer child can reach
-    // ONLY through an admin-registered loopback exemption. `is_elevated` is queried lazily
-    // (only when a per-host rule is present) so the coarse/unconfined paths pay nothing.
-    let net_plan = plan_net(
-        &policy.net,
-        policy.net.enforce
-            && policy.net.rules.iter().any(|r| r.effect == Effect::Allow)
-            && launch::is_elevated(),
-    );
-    // INFORMATIVE FAIL (maintainer requirement): a per-host / MITM config on an unelevated
-    // Windows host cannot register the exemption, so FAIL CLOSED with a clear message —
-    // never silently collapse an allow-list into a coarse deny-all. Coarse on/off is
-    // unaffected (it never reaches here).
-    if net_plan == WinNetPlan::FailUnelevated {
+    let net_plan = plan_net(&policy.net);
+    if net_plan == WinNetPlan::PerHostUnsupported {
         let mut lost = vec!["net-per-host".to_string()];
         if !policy.net.brokers.is_empty() {
             lost.push("net-per-request".to_string());
@@ -369,28 +339,33 @@ pub(crate) fn apply(
         return Err(Degradation {
             lost,
             reason: Some(
-                "per-host network rules (and TLS inspection / credential brokering) require \
-                 nub to register a loopback network exemption, which on Windows needs \
-                 administrator elevation. Re-run nub from an elevated (Run as administrator) \
-                 prompt, or use a coarse net policy — allow-all or deny-all — which needs no \
-                 elevation."
+                "per-host network rules cannot be enforced on Windows: the available \
+                 AppContainer exemption exposes every loopback listener, so a local \
+                 forwarder could bypass the hostname policy; use a coarse deny-all policy"
                     .to_string(),
             ),
         });
     }
-    let tier1 = net_plan == WinNetPlan::Tier1;
-    // Tier 1 is meaningless without the running proxy the child routes through; if the
-    // proxy failed to start (CA/TLS build or bind failure) fail closed rather than launch a
-    // child that can reach nothing under a per-host promise.
-    if tier1 && proxy_port.is_none() {
-        return Err(Degradation {
-            lost: vec!["net-per-host".to_string()],
-            reason: Some(
-                "the egress proxy required for per-host / TLS-inspect enforcement could not \
-                 start"
-                    .to_string(),
-            ),
-        });
+
+    if confine_fs {
+        let Some(cwd) = spec.cwd.as_deref() else {
+            return Err(Degradation {
+                lost: vec!["fs-root".to_string()],
+                reason: Some(
+                    "Windows filesystem confinement requires an explicit working directory"
+                        .to_string(),
+                ),
+            });
+        };
+        if let Err(error) = launch::verify_clean_root(cwd) {
+            return Err(Degradation {
+                lost: vec!["fs-root".to_string()],
+                reason: Some(format!(
+                    "Windows filesystem confinement requires a protected clean-DACL working \
+                     root with no ALL APPLICATION PACKAGES access: {error}"
+                )),
+            });
+        }
     }
 
     // Nothing needs the AppContainer: only env-scrub (or nothing). Use the plain
@@ -449,17 +424,6 @@ pub(crate) fn apply(
         read_grants.push(prog);
     }
 
-    // Tier 1 + MITM: the confined child must READ the ephemeral CA bundle to trust the
-    // proxy's minted leaves. Grant it as nub infra (not user config), mirroring the
-    // mac/linux ca-bundle read grant. Only under a real per-host tier (`tier1`); the plain
-    // path handles CA-trust via `set_ca_env` on an unconfined fs.
-    if tier1 && let Some(bundle) = ca_bundle {
-        let b = bundle.to_path_buf();
-        if !read_grants.contains(&b) {
-            read_grants.push(b);
-        }
-    }
-
     // ── degradation (fail-safe-not-silent) ──────────────────────────────────────
     let mut deg = Degradation::full();
     let mut reason: Option<String> = None;
@@ -490,10 +454,14 @@ pub(crate) fn apply(
                 .to_string()
         });
     }
-    // Net per-host / MITM is NOT a degradation here: an unelevated per-host config already
-    // returned the informative fail-closed above, and an elevated one (`tier1`) ENFORCES
-    // via the loopback exemption registered in `run()` — so there is nothing to report lost.
-    // Coarse deny-all and unconfined net are fully honored with no proxy.
+    if net_plan == WinNetPlan::Unconfined {
+        deg.lost.push("net-full".to_string());
+        reason.get_or_insert_with(|| {
+            "AppContainer internetClient permits public outbound connections but not \
+             loopback, private-LAN, or listener/server access"
+                .to_string()
+        });
+    }
     // (Ascendant-env read is OS-CLOSED — the AppContainer denies the parent
     // OpenProcess(PROCESS_VM_READ), run 29043151805 — so NO `env-read-ascendant`
     // Degradation is emitted. Reporting it would falsely tell a frontend Windows is
@@ -515,13 +483,10 @@ pub(crate) fn apply(
         cwd: spec.cwd,
         read_grants,
         write_grants,
-        env: build_child_env(&policy.env, tier1, proxy_port, proxy_token, ca_bundle),
-        // Grant internetClient only when net is unconfined; an enforced net (coarse deny
-        // OR Tier 1) withholds it. For Tier 1 this is LOAD-BEARING: the loopback exemption
-        // opens loopback but withholding internetClient keeps external egress blocked, so
-        // nub's proxy is the child's SOLE egress (matches mac/linux `remote ip localhost`).
+        env: Some(policy.env.constructed.clone()),
+        // Grant internetClient only when net is unconfined. This is deliberately reported
+        // as less than full host networking above.
         allow_internet: !policy.net.enforce,
-        register_loopback_exemption: tier1,
     };
 
     // The `command` field is unused on the launch path (status() runs `launch`); it
@@ -533,62 +498,6 @@ pub(crate) fn apply(
         launch: Some(launch),
         _private_tmp: None,
     })
-}
-
-/// The child's resolved env block.
-///
-/// The compiler snapshots both relaxed and enforced environments into `constructed`.
-/// Apply never re-reads the ambient process environment.
-/// - Tier 1 folds in the cooperative proxy hint (clients route through the loopback proxy)
-///   and the MITM CA-trust vars (the child trusts the proxy's minted leaves). A non-Tier-1
-///   enforced env stays the plain scrub — no proxy is running to route to.
-#[cfg(target_os = "windows")]
-fn build_child_env(
-    env: &crate::policy::EnvPolicy,
-    tier1: bool,
-    proxy_port: Option<u16>,
-    proxy_token: Option<&str>,
-    ca_bundle: Option<&std::path::Path>,
-) -> Option<BTreeMap<String, String>> {
-    let mut m = env.constructed.clone();
-    if tier1 {
-        if let Some(port) = proxy_port {
-            let url = match proxy_token {
-                Some(t) => format!("http://{t}@127.0.0.1:{port}"),
-                None => format!("http://127.0.0.1:{port}"),
-            };
-            for k in [
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "ALL_PROXY",
-            ] {
-                m.insert(k.to_string(), url.clone());
-            }
-            m.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
-        }
-        if let Some(bundle) = ca_bundle {
-            // The same tool-convention CA-trust keys as `backend::set_ca_env`.
-            let p = bundle.to_string_lossy().into_owned();
-            for k in [
-                "NODE_EXTRA_CA_CERTS",
-                "SSL_CERT_FILE",
-                "REQUESTS_CA_BUNDLE",
-                "CURL_CA_BUNDLE",
-                "GIT_SSL_CAINFO",
-                "PIP_CERT",
-                "NPM_CONFIG_CAFILE",
-                "npm_config_cafile",
-                "CARGO_HTTP_CAINFO",
-                "AWS_CA_BUNDLE",
-                "DENO_CERT",
-            ] {
-                m.insert(k.to_string(), p.clone());
-            }
-        }
-    }
-    Some(m)
 }
 
 /// Resolve a program to an absolute path (best-effort) so its parent dir can be
@@ -645,37 +554,32 @@ mod launch {
     use std::sync::{Mutex, MutexGuard};
     use windows_sys::Win32::Foundation::{
         CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
-        SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0,
-    };
-    use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
-        NetworkIsolationGetAppContainerConfig, NetworkIsolationSetAppContainerConfig,
+        SetHandleInformation, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
-        NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
-        SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+        ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetEffectiveRightsFromAclW,
+        GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT,
+        SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
     };
     use windows_sys::Win32::Security::{
         ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, FreeSid, GetLengthSid,
-        GetTokenInformation, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
-        SID_AND_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+        GetSecurityDescriptorControl, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+        SE_DACL_PROTECTED, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
-    use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
-        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-        GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcessToken,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-        PROCESS_INFORMATION, ReleaseMutex, ResumeThread, STARTUPINFOEXW, UpdateProcThreadAttribute,
-        WaitForSingleObject,
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
+        InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
+        STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     // Generic access rights (avoid a Storage_FileSystem feature dep for FILE_GENERIC_*).
@@ -690,6 +594,9 @@ mod launch {
     const SE_GROUP_ENABLED: u32 = 0x4;
     // The well-known internetClient capability SID.
     const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
+    // ALL APPLICATION PACKAGES. Any right for this SID invalidates the default-deny
+    // AppContainer assumption for that path.
+    const ALL_APPLICATION_PACKAGES_SID: &str = "S-1-15-2-1";
 
     /// Monotonic per-process counter so concurrent launches never collide on the
     /// AppContainer profile name (combined with pid + a time nonce).
@@ -701,173 +608,90 @@ mod launch {
     /// then missing). A single global lock is ample — ACL edits are brief and rare.
     static ACL_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Machine-wide named mutex serializing the loopback-exemption RMW (below). The
-    /// exemption list is MACHINE-WIDE state, so a process-local lock is insufficient — two
-    /// concurrent elevated nub processes would race the get→set and lose each other's
-    /// entry. `Global\` needs `SeCreateGlobalPrivilege`, which the elevated Tier-1 path
-    /// holds. Versioned so a future format change can't collide with an old holder.
-    const EXEMPTION_MUTEX_NAME: &str = "Global\\nub_sbx_loopback_exempt_v1";
-
-    /// Whether nub runs with an ELEVATED (full admin) token — the exact condition under
-    /// which the loopback-exemption write (`NetworkIsolationSetAppContainerConfig`) succeeds
-    /// (a standard user or an admin's filtered Medium-IL token both report `false` and both
-    /// get ACCESS_DENIED on the write — empirically confirmed on the nub-win VM). So this is
-    /// the honest gate for whether the strict-Windows per-host/MITM tier is available.
-    pub(super) fn is_elevated() -> bool {
-        let mut token: HANDLE = std::ptr::null_mut();
-        // SAFETY: query-only handle into our own process token.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return false;
+    /// Verify that `cwd` is rooted beneath a protected DACL and that neither it nor any
+    /// ancestor up to that boundary grants ALL APPLICATION PACKAGES access. The LowBox
+    /// allowlist is default-deny only under this precondition; inherited AAP access would
+    /// otherwise let the child reach files nub never granted.
+    pub(super) fn verify_clean_root(cwd: &Path) -> io::Result<()> {
+        let sid_text = to_wide(ALL_APPLICATION_PACKAGES_SID);
+        let mut aap_sid: PSID = std::ptr::null_mut();
+        if unsafe { ConvertStringSidToSidW(sid_text.as_ptr(), &mut aap_sid) } == 0 {
+            return Err(io::Error::last_os_error());
         }
-        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-        let mut ret_len: u32 = 0;
-        // SAFETY: `elevation` is a correctly-sized TOKEN_ELEVATION out-buffer.
-        let ok = unsafe {
-            GetTokenInformation(
-                token,
-                TokenElevation,
-                std::ptr::from_mut(&mut elevation).cast(),
-                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-                &mut ret_len,
-            )
+        let _sid = LocalFreeGuard(aap_sid.cast());
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: aap_sid.cast(),
         };
-        unsafe { CloseHandle(token) };
-        ok != 0 && elevation.TokenIsElevated != 0
-    }
 
-    /// Run `f` holding the machine-wide loopback-exemption mutex, so the get→modify→set of
-    /// the firewall's shared exemption list is atomic across concurrent nub processes.
-    /// Best-effort: on a create/timeout failure `f` still runs (the RMW race is fail-SAFE —
-    /// a lost entry only REMOVES a child's loopback reach, never widens egress). A 10s cap
-    /// keeps a wedged holder from deadlocking teardown.
-    fn with_exemption_lock<T>(f: impl FnOnce() -> T) -> T {
-        let name = to_wide(EXEMPTION_MUTEX_NAME);
-        // SAFETY: standard named-mutex create; NULL security attrs, not initially owned.
-        let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
-        // WAIT_ABANDONED also means WE now OWN the mutex (a prior holder died mid-RMW): treat
-        // it as held so we RELEASE it afterwards rather than re-abandon it on CloseHandle. The
-        // protected state may be inconsistent, but our RMW re-reads the whole list, so a
-        // crashed predecessor is self-healing — the lock is only about atomicity, not the data.
-        let held = !h.is_null()
-            && matches!(
-                unsafe { WaitForSingleObject(h, 10_000) },
-                WAIT_OBJECT_0 | WAIT_ABANDONED
-            );
-        let out = f();
-        if !h.is_null() {
-            if held {
-                unsafe { ReleaseMutex(h) };
-            }
-            unsafe { CloseHandle(h) };
-        }
-        out
-    }
-
-    /// Free the buffer `NetworkIsolationGetAppContainerConfig` hands back. That buffer is a
-    /// process-heap allocation — the `SID_AND_ATTRIBUTES` array plus a separate heap block per
-    /// entry `Sid` — so the matching deallocator is `HeapFree` on the process heap for each
-    /// `Sid` then the array (the MSDN `FreeAppContainerConfig` sample). It is NOT freed with
-    /// `NetworkIsolationFreeAppContainers`: that is the deallocator for
-    /// `NetworkIsolationEnumAppContainers`'s much larger `INET_FIREWALL_APP_CONTAINER` records,
-    /// and pointing it at a `SID_AND_ATTRIBUTES` array type-confuses the walk into freeing
-    /// garbage interior pointers → STATUS_HEAP_CORRUPTION (windows-latest MSVC; #433).
-    fn free_app_container_config(arr: *mut SID_AND_ATTRIBUTES, count: u32) {
-        if arr.is_null() {
-            return;
-        }
-        // SAFETY: `arr`/`count` come from a successful `NetworkIsolationGetAppContainerConfig`,
-        // which allocates the array and each entry's `Sid` on the process heap.
-        unsafe {
-            let heap = GetProcessHeap();
-            for i in 0..count as usize {
-                let sid = (*arr.add(i)).Sid;
-                if !sid.is_null() {
-                    HeapFree(heap, 0, sid.cast());
-                }
-            }
-            HeapFree(heap, 0, arr.cast());
-        }
-    }
-
-    /// Add or remove `sid` in the machine-wide AppContainer loopback-exemption list via a
-    /// read-modify-write (`NetworkIsolationSetAppContainerConfig` REPLACES the whole list,
-    /// so the current entries must be preserved — never clobber other apps' exemptions).
-    /// Held under [`with_exemption_lock`]. A stale copy of `sid` is always dropped first, so
-    /// register is idempotent and remove is exact.
-    fn set_loopback_exemption(sid: PSID, add: bool) -> io::Result<()> {
-        with_exemption_lock(|| {
-            let mut count: u32 = 0;
-            let mut arr: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
-            // SAFETY: out-params for the current exemption list (count + heap array).
-            let rc = unsafe { NetworkIsolationGetAppContainerConfig(&mut count, &mut arr) };
-            if rc != 0 {
-                return Err(io::Error::from_raw_os_error(rc as i32));
-            }
-            let existing: &[SID_AND_ATTRIBUTES] = if arr.is_null() || count == 0 {
-                &[]
-            } else {
-                // SAFETY: `arr` points at `count` entries per the successful Get above.
-                unsafe { std::slice::from_raw_parts(arr, count as usize) }
-            };
-            let mut new_list: Vec<SID_AND_ATTRIBUTES> = existing
-                .iter()
-                .filter(|e| !sids_equal(e.Sid, sid))
-                .copied()
-                .collect();
-            if add {
-                new_list.push(SID_AND_ATTRIBUTES {
-                    Sid: sid,
-                    Attributes: 0,
-                });
-            }
-            // SAFETY: `new_list` outlives the Set call; its Sid pointers reference either
-            // the still-live `arr` allocation or the caller's `sid` (freed only after).
-            let set_rc = unsafe {
-                NetworkIsolationSetAppContainerConfig(
-                    new_list.len() as u32,
-                    if new_list.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        new_list.as_ptr()
-                    },
+        for path in cwd.ancestors() {
+            let wpath = to_wide_path(path);
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            let rc = unsafe {
+                GetNamedSecurityInfoW(
+                    wpath.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut sd,
                 )
             };
-            // Free the got list AFTER Set (new_list borrowed its Sid pointers).
-            free_app_container_config(arr, count);
-            if set_rc != 0 {
-                return Err(io::Error::from_raw_os_error(set_rc as i32));
+            if rc != 0 {
+                return Err(io::Error::other(format!(
+                    "could not inspect {}: {}",
+                    path.display(),
+                    io::Error::from_raw_os_error(rc as i32)
+                )));
             }
-            Ok(())
-        })
-    }
+            let _sd = LocalFreeGuard(sd);
+            if dacl.is_null() {
+                return Err(io::Error::other(format!(
+                    "{} has a null DACL",
+                    path.display()
+                )));
+            }
 
-    /// Byte-equality of two SIDs (both are self-relative fixed-length structures).
-    fn sids_equal(a: PSID, b: PSID) -> bool {
-        if a.is_null() || b.is_null() {
-            return false;
-        }
-        let (la, lb) = unsafe { (GetLengthSid(a), GetLengthSid(b)) };
-        if la != lb {
-            return false;
-        }
-        // SAFETY: GetLengthSid reports each SID's exact byte length.
-        let sa = unsafe { std::slice::from_raw_parts(a.cast::<u8>(), la as usize) };
-        let sb = unsafe { std::slice::from_raw_parts(b.cast::<u8>(), lb as usize) };
-        sa == sb
-    }
+            let mut rights = 0u32;
+            let rc = unsafe { GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights) };
+            if rc != 0 {
+                return Err(io::Error::other(format!(
+                    "could not evaluate ALL APPLICATION PACKAGES rights on {}: {}",
+                    path.display(),
+                    io::Error::from_raw_os_error(rc as i32)
+                )));
+            }
+            if rights != 0 {
+                return Err(io::Error::other(format!(
+                    "{} grants ALL APPLICATION PACKAGES access",
+                    path.display()
+                )));
+            }
 
-    /// Removes the per-run loopback exemption on drop. Owned SID copy (independent of the
-    /// profile-owned SID pointer). Best-effort remove — a failure only leaves an ORPHANED
-    /// exemption for a now-deleted AC SID (harmless: it grants nothing, but accretes a list
-    /// entry; the crash-leak is documented in LIMITATIONS.md).
-    struct ExemptionGuard {
-        sid: Vec<u8>,
-    }
-    impl Drop for ExemptionGuard {
-        fn drop(&mut self) {
-            let sid = self.sid.as_ptr() as PSID;
-            let _ = set_loopback_exemption(sid, false);
+            let mut control = 0u16;
+            let mut revision = 0u32;
+            if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0 {
+                return Err(io::Error::other(format!(
+                    "could not read DACL control flags on {}: {}",
+                    path.display(),
+                    io::Error::last_os_error()
+                )));
+            }
+            if control & SE_DACL_PROTECTED != 0 {
+                return Ok(());
+            }
         }
+
+        Err(io::Error::other(format!(
+            "{} has no protected-DACL ancestor",
+            cwd.display()
+        )))
     }
 
     impl WindowsLaunch {
@@ -887,28 +711,6 @@ mod launch {
             // profile-owned SID pointer surviving.
             let sid_copy = copy_sid(ac_sid)?;
 
-            // 1b. Strict-Windows Tier 1: register the machine-wide loopback exemption for
-            //     this per-run AC SID so the child can reach nub's loopback egress proxy
-            //     (its SOLE egress — internetClient stays withheld). `_exemption` removes it
-            //     on drop (RAII, owned SID copy so it's independent of the profile SID).
-            //     FAIL-CLOSED: a failed register aborts the launch rather than spawn a child
-            //     that can't reach its proxy under a per-host promise. TRADEOFF (bounded +
-            //     documented, LIMITATIONS.md): the exemption widens the child to ALL loopback
-            //     services for the run's lifetime — scoped to this ephemeral SID and torn
-            //     down on exit, but not narrowable to only the proxy port without admin WFP.
-            let _exemption = if self.register_loopback_exemption {
-                let owned = copy_sid(ac_sid)?;
-                set_loopback_exemption(ac_sid, true).map_err(|e| {
-                    io::Error::other(format!(
-                        "sandbox: could not register the loopback network exemption required \
-                         for per-host net / TLS inspection (needs elevation): {e}"
-                    ))
-                })?;
-                Some(ExemptionGuard { sid: owned })
-            } else {
-                None
-            };
-
             // 2. Grant the leaf allow-ACEs; `_aces` revokes them on drop (declared before
             //    the job ⇒ revoked after the tree is reaped, before profile delete). Leaf
             //    read/write grants are INHERITABLE (cover the subtree). NO ancestor
@@ -917,48 +719,52 @@ mod launch {
             //    access — no WRITE_DAC on a shared ancestor, no C:\-owned store. A
             //    REVOKE_ACCESS teardown on the unique SID removes exactly our ACEs from
             //    every path, whatever the access mask.
-            let mut granted: Vec<std::path::PathBuf> = Vec::new();
+            let mut _aces = AceGuard {
+                paths: Vec::new(),
+                sid: sid_copy,
+            };
             for dir in &self.read_grants {
-                // A failed grant (e.g. a >MAX_PATH path, or a dir we can't WRITE_DAC) is
-                // skipped, not fatal — the child is then denied that leaf. Log at debug so
-                // a "child can't read its own dir" report is diagnosable, not silent.
-                match set_ace(
+                set_ace(
                     dir,
                     ac_sid,
                     GENERIC_READ | GENERIC_EXECUTE,
                     GRANT_ACCESS,
                     true,
-                ) {
-                    Ok(()) => granted.push(dir.clone()),
-                    Err(e) => tracing::debug!(
-                        path = %dir.display(),
-                        error = %e,
-                        "sandbox: read-grant ACE failed — leaf unreachable to the child"
-                    ),
+                )
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "sandbox: installing read grant ACE on {} failed: {error}",
+                            dir.display()
+                        ),
+                    )
+                })?;
+                if !_aces.paths.contains(dir) {
+                    _aces.paths.push(dir.clone());
                 }
             }
             for dir in &self.write_grants {
-                if let Err(e) = set_ace(
+                set_ace(
                     dir,
                     ac_sid,
                     GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
                     GRANT_ACCESS,
                     true,
-                ) {
-                    tracing::debug!(
-                        path = %dir.display(),
-                        error = %e,
-                        "sandbox: write-grant ACE failed — leaf not writable by the child"
-                    );
-                }
-                if !granted.contains(dir) {
-                    granted.push(dir.clone());
+                )
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "sandbox: installing write grant ACE on {} failed: {error}",
+                            dir.display()
+                        ),
+                    )
+                })?;
+                if !_aces.paths.contains(dir) {
+                    _aces.paths.push(dir.clone());
                 }
             }
-            let _aces = AceGuard {
-                paths: granted,
-                sid: sid_copy,
-            };
 
             // 3. Capabilities: internetClient iff egress allowed.
             let mut cap_sid_owned: Option<CapSid> = None;
@@ -1661,10 +1467,9 @@ mod tests {
             effect: Effect::Allow,
         };
 
-        // Unconfined net — grant internetClient, no proxy (elevation-irrelevant).
+        // Unconfined net — grant internetClient, no proxy.
         let unconfined = NetPolicy::default();
-        assert_eq!(plan_net(&unconfined, false), WinNetPlan::Unconfined);
-        assert_eq!(plan_net(&unconfined, true), WinNetPlan::Unconfined);
+        assert_eq!(plan_net(&unconfined), WinNetPlan::Unconfined);
 
         // Pure deny-all — coarse egress-deny, unprivileged (elevation-irrelevant).
         let deny_all = NetPolicy {
@@ -1672,19 +1477,17 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         };
-        assert_eq!(plan_net(&deny_all, false), WinNetPlan::CoarseDeny);
-        assert_eq!(plan_net(&deny_all, true), WinNetPlan::CoarseDeny);
+        assert_eq!(plan_net(&deny_all), WinNetPlan::CoarseDeny);
 
-        // Per-host (any Allow rule) needs the elevated loopback exemption: Tier 1 when
-        // elevated, fail-CLOSED (never silent coarse-degrade) when not.
+        // Per-host (any Allow rule) always fails closed: the package-wide exemption
+        // cannot restrict loopback reach to nub's proxy port.
         let per_host = NetPolicy {
             enforce: true,
             rules: vec![allow("example.com")],
             default_effect: Effect::Deny,
             ..Default::default()
         };
-        assert_eq!(plan_net(&per_host, true), WinNetPlan::Tier1);
-        assert_eq!(plan_net(&per_host, false), WinNetPlan::FailUnelevated);
+        assert_eq!(plan_net(&per_host), WinNetPlan::PerHostUnsupported);
     }
 
     // `apply` is `#[cfg(windows)]`, so this test compiles + runs only on the Windows VM/CI.
@@ -1693,7 +1496,7 @@ mod tests {
     fn apply_windows_net_tiers() {
         use crate::policy::{NetPolicy, NetRule, NetTarget};
         let mk = |net: NetPolicy| SandboxPolicy {
-            fs: fs(Effect::Deny, vec![]),
+            fs: fs(Effect::Allow, vec![]),
             net,
             ..Default::default()
         };
@@ -1721,8 +1524,8 @@ mod tests {
             deg.lost
         );
 
-        // Per-host: Tier 1 (enforced, no degradation) when elevated; fail-CLOSED with a
-        // clear elevation message otherwise — NEVER a silent coarse-degrade.
+        // Per-host always fails closed. Elevation does not make the package-wide
+        // loopback exemption precise enough to enforce a hostname policy.
         let per_host = mk(NetPolicy {
             enforce: true,
             rules: vec![NetRule {
@@ -1740,30 +1543,13 @@ mod tests {
             None,
             None,
         );
-        if launch::is_elevated() {
-            let deg = res.expect("elevated: Tier 1 applies").degradation;
-            assert!(
-                !deg.lost.iter().any(|s| s == "net-per-host"),
-                "Tier 1 enforces per-host — no net-per-host degradation (got {:?})",
-                deg.lost
-            );
-        } else {
-            // `expect_err` would require `Prepared: Debug` (the Ok type), which it does not
-            // implement; match instead.
-            let err = match res {
-                Ok(_) => panic!("unelevated per-host must fail-closed, not degrade"),
-                Err(d) => d,
-            };
-            assert!(
-                err.lost.iter().any(|s| s == "net-per-host"),
-                "the fail-closed Degradation must name net-per-host (got {:?})",
-                err.lost
-            );
-            assert!(
-                err.reason.as_deref().unwrap_or_default().contains("elevat"),
-                "the fail message must name the elevation requirement (got {:?})",
-                err.reason
-            );
-        }
+        let err = match res {
+            Ok(_) => panic!("per-host must fail closed"),
+            Err(d) => d,
+        };
+        assert!(err.lost.iter().any(|s| s == "net-per-host"));
+        let reason = err.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("every loopback listener"), "{reason}");
+        assert!(reason.contains("forwarder"), "{reason}");
     }
 }
