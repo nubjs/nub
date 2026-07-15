@@ -1354,6 +1354,9 @@ fn augmentation_to_lifecycle_overlay(
     if let Some(node_path) = &aug.node_path {
         overlay.push((OsString::from("NODE_PATH"), node_path.clone()));
     }
+    aug.apply_compat_restore_markers(|key, value| {
+        overlay.push((OsString::from(key), value.to_os_string()));
+    });
     // localStorage-neutralize signal for dependency build scripts' node children
     // (webstorage flag-needed band, no user --localstorage-file); preload reads + deletes.
     aug.apply_localstorage_env(|k, v| {

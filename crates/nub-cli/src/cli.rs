@@ -257,10 +257,10 @@ fn merge_child_env(
 /// env var). Inject a key iff nub's `${VAR}` expansion changed it from the raw
 /// value Node's `--env-file` delivers (`raw_env` is the unexpanded `.env*` merge);
 /// every plain var is left to Node's `--env-file` and live-reloads on restart. A
-/// key absent from `raw_env` is injected — that is the explicit `--env-file` case
-/// (`raw_env` is empty there: auto-discovery is suppressed and Node gets no
-/// `--env-file` args, so injection is the only delivery channel). Pure over its
-/// inputs so the selection can be unit-tested without spawning Node.
+/// key absent from `raw_env` is injected — including a CLI-only `--env-file`
+/// value. A CLI value that overrides a config source also differs from `raw_env`
+/// and is injected, keeping CLI strongest. Pure over its inputs so the selection
+/// can be unit-tested without spawning Node.
 fn watch_inject_vars<'a>(
     env_vars: &'a HashMap<String, String>,
     raw_env: &HashMap<String, String>,
@@ -4279,6 +4279,9 @@ fn build_script_command(
     // localStorage-neutralize signal for the script subtree's node children (webstorage
     // flag-needed band, no user --localstorage-file): the preload reads + deletes it.
     if let Some(aug) = aug.as_ref() {
+        aug.apply_compat_restore_markers(|key, value| {
+            command.env(key, value);
+        });
         aug.apply_localstorage_env(|k, v| {
             command.env(k, v);
         });
@@ -5021,14 +5024,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         return Ok(code);
     }
     let config_env_sources = matches!(&runtime.env, crate::project_config::RuntimeEnv::Sources(_));
-    let env_file_paths = if env_file_present || no_env_file || compat_mode {
+    let env_file_paths = if no_env_file || compat_mode {
         Vec::new()
     } else {
         match &runtime.env {
-            crate::project_config::RuntimeEnv::Default => project
+            crate::project_config::RuntimeEnv::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
                 .unwrap_or_default(),
+            crate::project_config::RuntimeEnv::Default => Vec::new(),
             crate::project_config::RuntimeEnv::Sources(paths) => paths.clone(),
             crate::project_config::RuntimeEnv::Disabled => Vec::new(),
         }
@@ -5099,49 +5103,34 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // `discover_env_files`' highest-priority-first list in reverse for nub's
     // first-writer-wins precedence to line up.
     //
-    // Auto-discovery suppression (the maintainer, 2026-06-15): when the user passed
-    // `--env-file`, the eager `.env*` discovery is suppressed on the watch path too
-    // — neither the `discover_env_files` `--env-file` Node args nor the pre-expanded
-    // `load_env_files` map are populated, so only the user's explicit file(s) reach
-    // the child. This keeps `nub --watch --env-file …` consistent with the direct
-    // file runner. `--no-env-file` suppresses BOTH the auto args and the explicit
-    // `--env-file` overlay — the watched Node receives no `--env-file` args at all.
-    // Load the `.env*` files ONCE: `raw_env` is the unexpanded merge (the values
-    // Node's `--env-file` args deliver), `auto_env` is the same map expanded. A
-    // single read (rather than `load_env_files` + a second `load_env_files_raw`)
-    // avoids re-parsing every file twice and closes the TOCTOU window where a file
-    // changing between two reads could spuriously inject a plain var.
-    let raw_env = if env_file_present || no_env_file {
-        // `--env-file` suppresses auto-discovery: no auto `--env-file` args reach
-        // Node, so injection is the only delivery channel — leave `raw_env` empty
-        // so the inject loop injects every var (see `watch_inject_vars`). Under
-        // `--no-env-file` `merge_child_env` returns empty, so nothing is injected.
+    // CLI `--env-file` suppresses only the automatic `.env*` cascade. An explicit
+    // config `env` source list remains part of the requested configuration and is
+    // composed first; CLI values overlay it below, matching direct mode.
+    // `--no-env-file` suppresses both sources. Read the active base files once:
+    // `raw_env` is the unexpanded merge delivered by Node's `--env-file` args and
+    // `auto_env` is the same map expanded for values Node cannot reproduce.
+    let raw_env = if no_env_file {
+        // The kill switch prevents both config/automatic reads and the CLI
+        // overlay, so no env-file-derived value reaches the watched child.
         HashMap::new()
     } else {
         match &runtime.env {
-            crate::project_config::RuntimeEnv::Default => project
+            crate::project_config::RuntimeEnv::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::load_env_files_raw(&p.root))
                 .unwrap_or_default(),
+            crate::project_config::RuntimeEnv::Default => HashMap::new(),
             crate::project_config::RuntimeEnv::Sources(paths) => {
                 load_runtime_env_sources_raw(paths)?
             }
             crate::project_config::RuntimeEnv::Disabled => HashMap::new(),
         }
     };
-    // Pre-expand the auto base to the same map the direct file runner's
-    // `load_env_files` produces. When `--env-file` is present `merge_child_env`
-    // discards this (auto-discovery suppressed), so the empty `raw_env` clone is
-    // fine — only the explicit `--env-file` overlay survives there.
+    // Pre-expand the config/automatic base to the same map the direct file
+    // runner produces, then overlay CLI values so they are strongest.
     let mut auto_env = raw_env.clone();
     nub_core::workspace::env::expand_env_map(&mut auto_env);
-    // `merge_child_env` applies the `--env-file` suppression gate and overlays the
-    // explicit `--env-file` vars (shell still wins).
-    let mut env_vars = if env_file_present {
-        HashMap::new()
-    } else {
-        auto_env
-    };
+    let mut env_vars = auto_env;
     overlay_env_file_vars(&mut env_vars);
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
@@ -5214,8 +5203,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for (k, v) in watch_inject_vars(&env_vars, &raw_env) {
         cmd.env(k, v);
     }
-    // Node receives the auto-discovered files as raw `--env-file` paths and
-    // re-reads them in each watched child. Keep canonical placeholders in the
+    // Node receives the active config/automatic files as raw `--env-file` paths
+    // and re-reads them in each watched child. Keep canonical placeholders in the
     // preload-free supervisor so startup consumers cannot act on file values;
     // an early child-only `--require` then removes every non-ambient denied
     // spelling and restores the sanitized ambient NODE_OPTIONS before user
@@ -5617,6 +5606,9 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     cmd.env("NODE", node_env);
     // localStorage-neutralize signal (webstorage flag-needed band, no user
     // --localstorage-file); applied before the partial moves of aug below.
+    aug.apply_compat_restore_markers(|key, value| {
+        cmd.env(key, value);
+    });
     aug.apply_localstorage_env(|k, v| {
         cmd.env(k, v);
     });
@@ -8841,8 +8833,8 @@ mod tests {
             "an expansion-changed var must be injected with its expanded value; got {injected:?}"
         );
 
-        // Explicit `--env-file` case: `raw_env` is empty (Node gets no `--env-file`
-        // args), so injection is the only delivery channel — inject everything.
+        // CLI-only `--env-file` case: with no config/automatic source, `raw_env`
+        // is empty and injection is the only delivery channel.
         let all: HashMap<_, _> = watch_inject_vars(&env_vars, &HashMap::new())
             .into_iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -8850,7 +8842,7 @@ mod tests {
         assert_eq!(
             all.len(),
             2,
-            "with no raw_env (--env-file present) every var is injected; got {all:?}"
+            "with no raw_env every CLI env-file var is injected; got {all:?}"
         );
     }
 

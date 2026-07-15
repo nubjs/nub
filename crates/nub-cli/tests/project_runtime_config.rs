@@ -46,7 +46,7 @@ impl Fixture {
               "v8Flags": ["--max-old-space-size=256"],
               "env": "./runtime.env",
               "define": { "CONFIG_WORD": "\"defined\"" },
-              "loader": { ".blob": "text" },
+              "loader": { ".blob": "text", ".view": "jsx" },
               "conditions": ["runtime-config"],
               "tsconfig": "./tsconfig.runtime.jsonc"
             }"#,
@@ -65,10 +65,15 @@ impl Fixture {
         .unwrap();
         std::fs::write(
             config_root.join("tsconfig.runtime.jsonc"),
-            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] } } }"#,
+            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] }, "jsx": "react", "jsxFactory": "make" } }"#,
         )
         .unwrap();
         std::fs::write(project.join("message.blob"), "loaded-text").unwrap();
+        std::fs::write(
+            project.join("component.view"),
+            "const make = (tag) => ({ tag, mode: 'classic' });\nexport default <widget />;\n",
+        )
+        .unwrap();
         std::fs::write(
             project.join("node_modules/conditional-pkg/package.json"),
             r#"{ "type": "module", "exports": { ".": { "runtime-config": "./custom.js", "default": "./default.js" } } }"#,
@@ -89,11 +94,13 @@ impl Fixture {
             r#"import text from './message.blob';
 import { alias } from 'runtime-alias';
 import condition from 'conditional-pkg';
+import component from './component.view';
 console.log(JSON.stringify({
   define: CONFIG_WORD,
   env: process.env.RUNTIME_ENV,
   preload: globalThis.__runtimePreload,
   text, alias, condition,
+  jsxMode: component.mode,
   stack: Error.stackTraceLimit,
   nodeOptions: process.env.NODE_OPTIONS,
 }));
@@ -158,6 +165,7 @@ console.log(JSON.stringify({
         assert_eq!(value["text"], "loaded-text");
         assert_eq!(value["alias"], "aliased");
         assert_eq!(value["condition"], "condition");
+        assert_eq!(value["jsxMode"], "classic");
         assert_eq!(value["stack"], 23);
         let options = value["nodeOptions"].as_str().unwrap();
         assert!(options.contains("--max-old-space-size=256"), "{options}");
@@ -178,6 +186,7 @@ console.log(JSON.stringify({
         assert_eq!(value["text"], "loaded-text");
         assert_eq!(value["alias"], "aliased");
         assert_eq!(value["condition"], "condition");
+        assert_eq!(value["jsxMode"], "classic");
     }
 }
 
@@ -221,6 +230,7 @@ fn runtime_snapshot_reaches_watch_child() {
     assert_eq!(value["text"], "loaded-text");
     assert_eq!(value["alias"], "aliased");
     assert_eq!(value["condition"], "condition");
+    assert_eq!(value["jsxMode"], "classic");
 }
 
 #[test]
@@ -259,6 +269,117 @@ fn node_compat_config_is_zero_augmentation_and_environment_false_overrides_it() 
     assert_eq!(
         String::from_utf8_lossy(&augmented.stdout).trim(),
         "preloaded"
+    );
+}
+
+#[test]
+fn inherited_runtime_snapshot_yields_to_nested_node_compat_with_zero_augmentation() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.project.join("nested-compat.js"),
+        r#"console.log(JSON.stringify({
+  preload: globalThis.__runtimePreload ?? null,
+  execArgv: process.execArgv,
+  nodeOptions: process.env.NODE_OPTIONS ?? null,
+  nodePath: process.env.NODE_PATH ?? null,
+  node: process.env.NODE ?? null,
+  compileCache: process.env.NODE_COMPILE_CACHE ?? null,
+  runtimeConfig: process.env.__NUB_RUNTIME_CONFIG ?? null,
+  nubVersion: process.versions.nub ?? null,
+  shimInPath: (process.env.PATH ?? '').includes('nub-node-shim-'),
+}));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("package.json"),
+        r#"{ "scripts": {
+          "nested-env": "NODE_COMPAT=1 node nested-compat.js",
+          "nested-cli": "node --node nested-compat.js"
+        } }"#,
+    )
+    .unwrap();
+    let user_compile_cache = fixture.project.join("user-compile-cache");
+    let user_compile_cache_text = user_compile_cache.to_string_lossy().into_owned();
+    for script in ["nested-env", "nested-cli"] {
+        let output = fixture
+            .command()
+            .env("NODE_OPTIONS", "--trace-warnings")
+            .env("NODE_PATH", "/user/node-path")
+            .env("NODE", "/user/node")
+            .env("NODE_COMPILE_CACHE", &user_compile_cache)
+            .args(["run", script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+                .unwrap();
+        assert_eq!(value["preload"], serde_json::Value::Null, "{script}");
+        assert_eq!(value["execArgv"], serde_json::json!([]), "{script}");
+        assert_eq!(value["nodeOptions"], "--trace-warnings", "{script}");
+        assert_eq!(value["nodePath"], "/user/node-path", "{script}");
+        assert_eq!(value["node"], "/user/node", "{script}");
+        assert_eq!(value["compileCache"], user_compile_cache_text, "{script}");
+        assert_eq!(value["runtimeConfig"], serde_json::Value::Null, "{script}");
+        assert_eq!(value["nubVersion"], serde_json::Value::Null, "{script}");
+        assert_eq!(value["shimInPath"], false, "{script}");
+    }
+}
+
+#[test]
+fn watch_composes_explicit_config_env_sources_before_cli_env_file() {
+    use std::io::BufRead;
+
+    let fixture = Fixture::new();
+    let config_root = fixture.xdg_config.join("nub");
+    std::fs::write(
+        config_root.join("first.env"),
+        "CONFIG_ONLY=first\nSHARED=first\n",
+    )
+    .unwrap();
+    std::fs::write(config_root.join("second.env"), "SHARED=second\n").unwrap();
+    std::fs::write(
+        config_root.join("nub.jsonc"),
+        r#"{ "env": ["./first.env", "./second.env"] }"#,
+    )
+    .unwrap();
+    let cli_env = fixture.project.join("cli.env");
+    std::fs::write(&cli_env, "SHARED=cli\nCLI_ONLY=cli\n").unwrap();
+    std::fs::write(
+        fixture.project.join("env-probe.js"),
+        "console.log(JSON.stringify({ config: process.env.CONFIG_ONLY, shared: process.env.SHARED, cli: process.env.CLI_ONLY }));\n",
+    )
+    .unwrap();
+
+    let mut child = fixture
+        .command()
+        .arg(format!("--env-file={}", cli_env.display()))
+        .args(["watch", "env-probe.js"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        let _ = tx.send(lines.next().transpose());
+        for _ in lines {}
+    });
+    let line = rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("watch child produced no output")
+        .unwrap()
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+        serde_json::json!({ "config": "first", "shared": "cli", "cli": "cli" })
     );
 }
 

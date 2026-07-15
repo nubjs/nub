@@ -680,6 +680,15 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // node bin executes IN that member rather than inheriting the parent's cwd.
     cmd.current_dir(config.cwd);
 
+    // A compat re-entry may arrive through an augmented parent's PATH shim.
+    // Restore the environment captured before that parent installed Nub's
+    // NODE_OPTIONS/NODE_PATH/NODE/compile-cache values, and remove its exact
+    // shim component. This makes a nested `NODE_COMPAT=1 node ...` genuinely
+    // vanilla instead of merely skipping a second augmentation pass.
+    if config.compat_mode {
+        restore_compat_environment(&mut cmd);
+    }
+
     // Permission model detection and auto-grant.
     let has_permission = config.user_args.iter().any(|a| is_permission_flag(a));
     let has_allow_addons = config.user_args.iter().any(|a| a == "--allow-addons");
@@ -741,6 +750,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // a half-setup (flags + a nested shim, no preload). See
     // wiki/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
+        install_compat_restore_marker(&mut cmd, COMPAT_NODE_OPTIONS_ENV, "NODE_OPTIONS");
+        install_compat_restore_marker(&mut cmd, COMPAT_NODE_PATH_ENV, "NODE_PATH");
+        install_compat_restore_marker(&mut cmd, COMPAT_NODE_ENV, "NODE");
+        install_compat_restore_marker(
+            &mut cmd,
+            COMPAT_NODE_COMPILE_CACHE_ENV,
+            "NODE_COMPILE_CACHE",
+        );
         // Flag injection — intersected with the binary's actual accepted-flag set
         // (probed + cached) so an open-ended `Unflag` band never injects a flag a
         // future Node has removed (which would abort startup with "bad option").
@@ -819,6 +836,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
                 new_path.push(existing);
             }
             cmd.env("PATH", new_path);
+            cmd.env(COMPAT_SHIM_DIR_ENV, shim_dir.as_str());
         }
 
         // `process.versions.nub` source: hand the running binary's version to the
@@ -1830,6 +1848,24 @@ pub struct AugmentationEnv {
 }
 
 impl AugmentationEnv {
+    /// Preserve the environment that a later compat-mode PATH-shim re-entry must
+    /// restore before it launches plain Node. Empty marker values mean the
+    /// corresponding variable was absent before augmentation.
+    pub fn apply_compat_restore_markers(&self, mut set_env: impl FnMut(&str, &std::ffi::OsStr)) {
+        let node_options = compat_restore_value(COMPAT_NODE_OPTIONS_ENV, "NODE_OPTIONS");
+        let node_path = compat_restore_value(COMPAT_NODE_PATH_ENV, "NODE_PATH");
+        let node = compat_restore_value(COMPAT_NODE_ENV, "NODE");
+        let compile_cache =
+            compat_restore_value(COMPAT_NODE_COMPILE_CACHE_ENV, "NODE_COMPILE_CACHE");
+        set_env(COMPAT_NODE_OPTIONS_ENV, &node_options);
+        set_env(COMPAT_NODE_PATH_ENV, &node_path);
+        set_env(COMPAT_NODE_ENV, &node);
+        set_env(COMPAT_NODE_COMPILE_CACHE_ENV, &compile_cache);
+        if let Some(shim_dir) = self.shim_dir.as_deref() {
+            set_env(COMPAT_SHIM_DIR_ENV, std::ffi::OsStr::new(shim_dir));
+        }
+    }
+
     /// The PATH-shim's `node` entry (a symlink/hardlink → nub), suitable as the
     /// `$NODE` value that npm/pnpm set so userland `$NODE child.js` (and
     /// `spawn(process.env.NODE, …)`) invoke "the same Node this script runs under."
@@ -1996,6 +2032,57 @@ pub const RUNTIME_CONFIG_ENV: &str = "__NUB_RUNTIME_CONFIG";
 /// `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the brand
 /// boundary.
 pub(crate) const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
+
+const COMPAT_NODE_OPTIONS_ENV: &str = "__NUB_COMPAT_NODE_OPTIONS";
+const COMPAT_NODE_PATH_ENV: &str = "__NUB_COMPAT_NODE_PATH";
+const COMPAT_NODE_ENV: &str = "__NUB_COMPAT_NODE";
+const COMPAT_NODE_COMPILE_CACHE_ENV: &str = "__NUB_COMPAT_NODE_COMPILE_CACHE";
+const COMPAT_SHIM_DIR_ENV: &str = "__NUB_COMPAT_SHIM_DIR";
+
+fn compat_restore_value(marker: &str, name: &str) -> std::ffi::OsString {
+    env::var_os(marker)
+        .or_else(|| env::var_os(name))
+        .unwrap_or_default()
+}
+
+fn install_compat_restore_marker(cmd: &mut Command, marker: &str, name: &str) {
+    cmd.env(marker, compat_restore_value(marker, name));
+}
+
+fn restore_compat_environment(cmd: &mut Command) {
+    for (marker, name) in [
+        (COMPAT_NODE_OPTIONS_ENV, "NODE_OPTIONS"),
+        (COMPAT_NODE_PATH_ENV, "NODE_PATH"),
+        (COMPAT_NODE_ENV, "NODE"),
+        (COMPAT_NODE_COMPILE_CACHE_ENV, "NODE_COMPILE_CACHE"),
+    ] {
+        if let Some(value) = env::var_os(marker) {
+            if value.is_empty() {
+                cmd.env_remove(name);
+            } else {
+                cmd.env(name, value);
+            }
+        }
+        cmd.env_remove(marker);
+    }
+
+    if let Some(shim_dir) = env::var_os(COMPAT_SHIM_DIR_ENV) {
+        if let Some(path) = env::var_os("PATH") {
+            let filtered = env::split_paths(&path)
+                .filter(|entry| entry.as_os_str() != shim_dir.as_os_str())
+                .collect::<Vec<_>>();
+            if let Ok(path) = env::join_paths(filtered) {
+                cmd.env("PATH", path);
+            }
+        }
+        cmd.env_remove(COMPAT_SHIM_DIR_ENV);
+    }
+
+    cmd.env_remove(RUNTIME_CONFIG_ENV);
+    cmd.env_remove(VERSION_ENV);
+    cmd.env_remove(NEUTRALIZE_LOCALSTORAGE_ENV);
+    cmd.env_remove(FORCE_ASYNC_TIER_ENV);
+}
 
 /// Node versions where the async `module.register` loader's `resolveSync`/
 /// `loadSync` are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`.
