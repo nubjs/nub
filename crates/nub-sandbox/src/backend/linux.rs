@@ -1239,10 +1239,14 @@ fn net_equivalent_socket_masks() -> Result<Vec<Mask>, String> {
     .iter()
     .map(PathBuf::from)
     .collect();
-    // The D-Bus SESSION bus is per-uid; masking it denies the session bus's own
-    // network-reachable services (portals, etc.).
+    // Per-uid runtime sockets under XDG_RUNTIME_DIR: the D-Bus SESSION bus (its own
+    // network-reachable services — portals, etc.) AND the ROOTLESS container-runtime API
+    // sockets, which are the DEFAULT for rootless Docker/Podman and are just as much a full
+    // host + off-box escape as their rootful counterparts.
     let uid = unsafe { libc::getuid() };
-    paths.push(PathBuf::from(format!("/run/user/{uid}/bus")));
+    for name in ["bus", "docker.sock", "podman/podman.sock"] {
+        paths.push(PathBuf::from(format!("/run/user/{uid}/{name}")));
+    }
 
     let mut masks = Vec::new();
     for path in paths {
@@ -2183,6 +2187,7 @@ struct SandboxSyscalls {
 
 pub(super) fn build_seccomp(
     restrict_network: bool,
+    per_host: bool,
     deny_keyring: bool,
     permit_keyring_join: bool,
 ) -> Result<Option<BpfProgram>, String> {
@@ -2194,6 +2199,7 @@ pub(super) fn build_seccomp(
     build_seccomp_for(
         arch,
         restrict_network,
+        per_host,
         deny_keyring,
         permit_keyring_join,
         SandboxSyscalls {
@@ -2210,6 +2216,7 @@ pub(super) fn build_seccomp(
 fn build_seccomp_for(
     arch: TargetArch,
     restrict_network: bool,
+    per_host: bool,
     deny_keyring: bool,
     permit_keyring_join: bool,
     syscalls: SandboxSyscalls,
@@ -2221,7 +2228,20 @@ fn build_seccomp_for(
         // included because filesystem and abstract sockets cross that boundary.
         // AF_NETLINK remains available so nested Bubblewrap can configure its own
         // private network namespace without reaching the host network.
-        let denied_families = [
+        //
+        // PER-HOST carve-out (C3): the empty netns is the boundary, but it does NOT confine
+        // every family — AF_VSOCK reaches the hypervisor (CID-addressed, not netns-scoped)
+        // and AF_BLUETOOTH/AF_RDS/AF_CAN/AF_TIPC/AF_IB/AF_NFC are global buses/transports —
+        // so those MUST stay seccomp-denied even for per-host. Per-host only lifts the three
+        // families the child genuinely needs to reach the in-netns bridge + the relay UDS:
+        // AF_INET, AF_INET6 (loopback to the bridge, which the netns confines to `lo`) and
+        // AF_UNIX (the relay socket + legit local IPC). Everything else — including AF_PACKET
+        // (no raw-socket need to reach the proxy) — stays denied, minimizing the delta from
+        // coarse-deny. `io_uring_setup` stays blocked below so a socket cannot be created off
+        // the family filter. WITHOUT this carve-out, per-host would be a strict WEAKENING of
+        // coarse-deny (which denies all these families) — the netns alone is not sufficient.
+        const PER_HOST_PERMITTED: [libc::c_int; 3] = [libc::AF_UNIX, libc::AF_INET, libc::AF_INET6];
+        let all_denied = [
             libc::AF_UNIX,
             libc::AF_INET,
             libc::AF_INET6,
@@ -2235,6 +2255,10 @@ fn build_seccomp_for(
             libc::AF_IB,
             libc::AF_NFC,
         ];
+        let denied_families: Vec<libc::c_int> = all_denied
+            .into_iter()
+            .filter(|family| !(per_host && PER_HOST_PERMITTED.contains(family)))
+            .collect();
         let mut socket_rules = Vec::with_capacity(denied_families.len());
         for family in denied_families {
             socket_rules.push(
@@ -2680,6 +2704,7 @@ mod tests {
         let x86 = build_seccomp_for(
             TargetArch::x86_64,
             true,
+            false,
             true,
             false,
             SandboxSyscalls {
@@ -2745,6 +2770,7 @@ mod tests {
             let program = build_seccomp_for(
                 arch,
                 true,
+                false,
                 true,
                 false,
                 SandboxSyscalls {
@@ -2802,11 +2828,12 @@ mod tests {
         let allowed = u32::from(SeccompAction::Allow);
         let killed = u32::from(SeccompAction::KillProcess);
 
-        assert!(build_seccomp(false, false, false).unwrap().is_none());
+        assert!(build_seccomp(false, false, false, false).unwrap().is_none());
         let build = |network, keyring, permit_join| {
             build_seccomp_for(
                 TargetArch::x86_64,
                 network,
+                false,
                 keyring,
                 permit_join,
                 SandboxSyscalls {
@@ -2923,6 +2950,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn per_host_seccomp_permits_ip_and_unix_but_still_denies_vsock() {
+        // C3 cross-layer regression: per-host lifts the socket ceiling ONLY for the families
+        // the child needs to reach the in-netns bridge + relay UDS (AF_INET/AF_INET6/AF_UNIX).
+        // The empty netns does NOT confine AF_VSOCK (hypervisor CID addressing) or the other
+        // global buses/transports, so those MUST stay denied — otherwise per-host would be a
+        // strict weakening of coarse-deny.
+        const SOCKET: i64 = 41; // x86-64 socket(2)
+        const IO_URING_SETUP: i64 = 425;
+        let denied = u32::from(SeccompAction::Errno(libc::EPERM as u32));
+        let allowed = u32::from(SeccompAction::Allow);
+        let syscalls = || SandboxSyscalls {
+            socket: SOCKET,
+            io_uring_setup: IO_URING_SETUP,
+            keyctl: 250,
+            add_key: 248,
+            request_key: 249,
+        };
+        let per_host =
+            build_seccomp_for(TargetArch::x86_64, true, true, false, false, syscalls()).unwrap();
+        let coarse =
+            build_seccomp_for(TargetArch::x86_64, true, false, false, false, syscalls()).unwrap();
+        let sock = |program: &BpfProgram, family: libc::c_int| {
+            evaluate_bpf(
+                program,
+                &seccomp_data(SOCKET as u32, AUDIT_ARCH_X86_64, family as u64),
+            )
+        };
+        // Per-host PERMITS the three families the bridge/relay need — which coarse-deny denies.
+        for family in [libc::AF_INET, libc::AF_INET6, libc::AF_UNIX] {
+            assert_eq!(
+                sock(&per_host, family),
+                allowed,
+                "per-host permits {family}"
+            );
+            assert_eq!(sock(&coarse, family), denied, "coarse-deny denies {family}");
+        }
+        // Per-host STILL denies every netns-unconfined family (the cross-layer fix).
+        for family in [
+            libc::AF_VSOCK,
+            libc::AF_PACKET,
+            libc::AF_XDP,
+            libc::AF_BLUETOOTH,
+            libc::AF_RDS,
+            libc::AF_CAN,
+            libc::AF_TIPC,
+            libc::AF_IB,
+            libc::AF_NFC,
+        ] {
+            assert_eq!(
+                sock(&per_host, family),
+                denied,
+                "per-host must still deny netns-unconfined family {family}"
+            );
+        }
+        // io_uring_setup stays blocked under per-host so a socket cannot be created off the
+        // family filter.
+        assert_eq!(
+            evaluate_bpf(
+                &per_host,
+                &seccomp_data(IO_URING_SETUP as u32, AUDIT_ARCH_X86_64, 0)
+            ),
+            denied,
+            "per-host must block io_uring_setup (it can create any-family sockets)"
+        );
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn installed_network_seccomp_denies_raw_x32_syscalls() {
@@ -2934,7 +3028,7 @@ mod tests {
             }
         }
 
-        let program = build_seccomp(true, false, false).unwrap().unwrap();
+        let program = build_seccomp(true, false, false, false).unwrap().unwrap();
         let child = unsafe { libc::fork() };
         assert!(
             child >= 0,

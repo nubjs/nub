@@ -339,6 +339,72 @@ fn af_unix_cross_layer_daemon_socket_denied_local_ipc_preserved() {
             "neg-control: unenforced net leaves the daemon socket reachable"
         );
     }
+
+    // The ROOTLESS container-runtime socket is the DEFAULT for rootless Docker/Podman and is
+    // just as much a host escape — stand a stand-in up at the real rootless path and prove it
+    // is masked too (regression guard for the rootless entries). Guarded: only when the
+    // runtime dir is writable and the path is free.
+    let rootless = PathBuf::from(format!("/run/user/{uid}/docker.sock"));
+    let runtime_dir_writable = std::fs::metadata(format!("/run/user/{uid}"))
+        .is_ok_and(|m| m.is_dir())
+        && !rootless.exists();
+    if runtime_dir_writable {
+        if let Ok(listener) = UnixListener::bind(&rootless) {
+            let _guard = RemoveOnDrop(rootless.clone());
+            assert_eq!(
+                f.run(
+                    json!({ "fs": true, "net": ["127.0.0.0/8"] }),
+                    &probe,
+                    &["udsconnect", rootless.to_str().unwrap()]
+                ),
+                1,
+                "the rootless container-runtime socket is force-masked under net-confinement"
+            );
+            assert_eq!(
+                f.run(
+                    json!({ "fs": true, "net": true }),
+                    &probe,
+                    &["udsconnect", rootless.to_str().unwrap()]
+                ),
+                0,
+                "neg-control: unenforced net reaches the rootless runtime socket"
+            );
+            drop(listener);
+        }
+    }
+}
+
+struct RemoveOnDrop(PathBuf);
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn per_host_denies_netns_unconfined_socket_families() {
+    if skip_without_bwrap() {
+        return;
+    }
+    let f = fixture();
+    let Some(probe) = compile_probe(&f.proj) else {
+        return;
+    };
+
+    // The empty netns confines IP traffic but NOT AF_VSOCK — vsock CID addressing reaches the
+    // hypervisor across the netns. Per-host keeps AF_VSOCK (and the other netns-unconfined
+    // families) seccomp-denied, so it is not a weakening of coarse-deny. Guard on vsock being
+    // creatable when UNENFORCED (the neg-control): where the kernel lacks vsock the probe
+    // can't distinguish a seccomp block from an unsupported family, so skip.
+    let unenforced = f.run(json!({ "fs": true, "net": true }), &probe, &["vsock"]);
+    if unenforced != 0 {
+        return; // no usable AF_VSOCK transport here — inconclusive, skip
+    }
+    assert_eq!(
+        f.run(net_policy(), &probe, &["vsock"]),
+        1,
+        "per-host must deny AF_VSOCK (the empty netns does not confine it)"
+    );
 }
 
 #[test]
@@ -418,6 +484,9 @@ const PROBE_C: &str = r#"
 #include <sys/un.h>
 #include <sys/time.h>
 #include <unistd.h>
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
+#endif
 
 static int dial(const char* ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -575,6 +644,13 @@ int main(int argc, char** argv) {
     }
     if (!strcmp(argv[1], "udsconnect")) return uds_connect(argv[2]);
     if (!strcmp(argv[1], "abstract")) return abstract_ok();
+    /* Create an AF_VSOCK socket. 0 = created (reaches the hypervisor transport), 1 = the
+       socket() was refused (seccomp EPERM, or the family is unsupported). */
+    if (!strcmp(argv[1], "vsock")) {
+        int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+        if (fd < 0) return 1;
+        close(fd); return 0;
+    }
     if (!strcmp(argv[1], "sleep")) { sleep(atoi(argv[2])); return 0; }
     return 1;
 }

@@ -898,15 +898,12 @@ impl BootstrapSpec {
         })
     }
 
-    /// Whether the target installs a seccomp filter. The socket-blocking filter is dropped
-    /// for per-host (the empty netns is the boundary; the child must create sockets), so
-    /// per-host with no keyring deny installs NO filter at all.
-    fn restrict_network_socket(&self) -> bool {
-        self.network_filter && !self.per_host
-    }
-
+    /// Whether the target installs a seccomp filter. Per-host STILL installs the socket
+    /// filter (a per-host variant that permits AF_INET/AF_INET6/AF_UNIX but keeps denying
+    /// AF_VSOCK and the other netns-unconfined families) — so `network_filter` alone gates
+    /// the filter regardless of `per_host`.
     fn uses_seccomp(&self) -> bool {
-        self.restrict_network_socket() || self.deny_keyring
+        self.network_filter || self.deny_keyring
     }
 }
 
@@ -4638,7 +4635,8 @@ fn create_stopped_target(
 ) -> io::Result<(StoppedTarget, TargetStoppedAttestation)> {
     let prepared_exec = PreparedTargetExec::new(spec)?;
     let seccomp = super::linux::build_seccomp(
-        spec.restrict_network_socket(),
+        spec.network_filter,
+        spec.per_host,
         spec.deny_keyring,
         spec.permit_keyring_join,
     )
