@@ -1097,6 +1097,12 @@ fn reject_unknown_keys(
 fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> {
     reject_unknown_keys(obj, "", ROOT_KEYS)?;
 
+    // `$schema` is accepted + ignored, but still typed: the published schema
+    // declares it a string, and fail-loud validation applies to it too.
+    if let Some(v) = obj.get("$schema") {
+        as_str(v, "$schema")?;
+    }
+
     let mut cfg = ProjectConfig::default();
     if let Some(v) = obj.get("nodeCompat") {
         cfg.node_compat = Some(as_bool(v, "nodeCompat")?);
