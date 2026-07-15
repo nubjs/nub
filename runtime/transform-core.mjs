@@ -149,6 +149,15 @@ function __ensureBuiltins() {
 // original eager-at-eval behavior). The floor defers to first-use — see above.
 if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 
+// The Rust frontend resolves one source-anchored snapshot after final cwd and
+// transports it unchanged through nested shim launches. This is internal
+// process plumbing, not a user-facing environment knob.
+let RUNTIME_CONFIG = {};
+try { RUNTIME_CONFIG = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
+const RUNTIME_DEFINE = RUNTIME_CONFIG.define || {};
+const RUNTIME_LOADER = RUNTIME_CONFIG.loader || {};
+const RUNTIME_TSCONFIG = RUNTIME_CONFIG.tsconfig || undefined;
+
 // NOTE: the transpile-cache version component is no longer read here. nub's
 // version is baked into the native addon at compile time (`env!("CARGO_PKG_VERSION")`
 // in nub-native's cache.rs), which `make version` keeps in lockstep with
@@ -172,6 +181,15 @@ export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
 // native loader untouched, byte-identical. node_modules is excluded at the gate.
 export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
 export const DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
+for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
+  if (["ts", "tsx", "jsx"].includes(loader)) {
+    delete DATA_EXTS[ext];
+    TRANSPILE_EXTS.add(ext);
+  } else {
+    TRANSPILE_EXTS.delete(ext);
+    DATA_EXTS[ext] = loader === "text" ? "txt" : loader;
+  }
+}
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 
 // Packages resolved from Nub's distribution, not the user's.
@@ -220,7 +238,7 @@ export function getTsconfigForDir(dir) {
   if (tsconfigCache.has(dir)) return tsconfigCache.get(dir);
   // { path: string|null, compilerOptions: object|null, tsconfigHash: string }
   const result = nubNative
-    ? nubNative.loadTsconfig(dir)
+    ? nubNative.loadTsconfig(dir, RUNTIME_TSCONFIG)
     : { path: null, compilerOptions: null, tsconfigHash: "" };
   tsconfigCache.set(dir, result);
   if (result.path) _reportDep?.(result.path);
@@ -296,7 +314,7 @@ export function barePkg(specifier) {
 function resolveTs(specifier, parentPath) {
   if (!nubNative) return null;
   try {
-    return nubNative.resolveTs(specifier, parentPath || "");
+    return nubNative.resolveTs(specifier, parentPath || "", RUNTIME_TSCONFIG);
   } catch {
     return null;
   }
@@ -485,7 +503,10 @@ function moduleFormatWithInfo(ext, pkgType, filePath, source) {
   if (ext === ".cts" || ext === ".cjs") return { format: "commonjs", info: null };
   if (pkgType === "module") return { format: "module", info: null };
   if (pkgType === "commonjs") return { format: "commonjs", info: null };
-  const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+  const configuredLoader = RUNTIME_LOADER[ext];
+  const lang = configuredLoader === "tsx" || configuredLoader === "jsx"
+    ? configuredLoader
+    : ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
   const info = detectModuleInfo(filePath, source, lang);
   return { format: info.hasValueEsmSyntax ? "module" : "commonjs", info };
 }
@@ -604,7 +625,10 @@ export function loadTranspile(url, ext) {
   // parse (ambiguous ext, no explicit `type`), else null (a no-parse short-circuit).
   const { format, info: moduleInfo } = moduleFormatWithInfo(ext, pkgType, filePath, source);
 
-  const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+  const configuredLoader = RUNTIME_LOADER[ext];
+  const lang = configuredLoader === "tsx" || configuredLoader === "jsx"
+    ? configuredLoader
+    : ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
 
   const opts = {
     lang,
@@ -619,6 +643,7 @@ export function loadTranspile(url, ext) {
     // (top-level await, class fields, private methods) untouched.
     target: "es2022",
     typescript: {},
+    define: RUNTIME_DEFINE,
     // Decorators default to OFF (Stage-3 mode), matching tsc: legacy semantics
     // and metadata are opt-in via tsconfig. See wiki/runtime/non-erasable-syntax.md.
     decorator: co?.experimentalDecorators === true
@@ -654,8 +679,9 @@ export function loadTranspile(url, ext) {
   // type → different format → distinct entry). `cacheDir: null/undefined` is the
   // JS enable/disable signal: native then skips all cache I/O and just transforms.
   const formatByte = format === "commonjs" ? "c" : "m";
+  const runtimeHash = JSON.stringify({ define: RUNTIME_DEFINE, loader: configuredLoader || null, tsconfig: RUNTIME_TSCONFIG || null });
   const result = nubNative.transformCached(
-    filePath, source, opts, ext, tsconfigHash || "", pkgType || "", formatByte, getCacheDir() ?? undefined,
+    filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined,
   );
   if (result.errors.length > 0) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");
@@ -689,7 +715,7 @@ export function maybeTranspilePlainJs(url, ext) {
   }
   // lang "ts" parses all JS (a TS superset) but NOT JSX — JSX-in-.js is out of scope.
   const info = detectModuleInfo(filePath, source, "ts");
-  if (!info.transformableSyntax && !info.hasDecorators) {
+  if (!info.transformableSyntax && !info.hasDecorators && Object.keys(RUNTIME_DEFINE).length === 0) {
     return null; // no-op: Node's native loader handles it, byte-identical.
   }
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,

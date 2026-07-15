@@ -27,7 +27,11 @@ const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 /// ⇒ fall through to Node (the compat boundary). `parent_path` is the importer's
 /// absolute filesystem path (empty for the entry).
 #[napi]
-pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
+pub fn resolve_ts(
+    specifier: String,
+    parent_path: String,
+    tsconfig: Option<String>,
+) -> Option<String> {
     let parent_ext = extname(&parent_path);
     let parent_dir = if parent_path.is_empty() {
         std::env::current_dir().ok()?.to_string_lossy().into_owned()
@@ -43,7 +47,7 @@ pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
     // outside node_modules. (Not gated on a TS parent: a plain .js with a paths
     // alias resolves too.)
     if !is_relative && !is_absolute && !is_file_url && !is_node_modules(&parent_path) {
-        let candidates = tsconfig::match_paths(&parent_dir, &specifier);
+        let candidates = tsconfig::match_paths(&parent_dir, &specifier, tsconfig.as_deref());
         for candidate in candidates {
             if let Some(resolved) = try_resolve_file(&candidate, &parent_ext, true) {
                 return Some(resolved);
