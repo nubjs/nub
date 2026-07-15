@@ -224,6 +224,19 @@ pub struct EngineContext {
     /// `.npmrc`, preserving explicit project npm config precedence.
     pub synthetic_project_npmrc_entries: Vec<(String, String)>,
 
+    /// Project-scoped setting overrides supplied directly by an embedder.
+    /// Unlike [`synthetic_project_npmrc_entries`](Self::synthetic_project_npmrc_entries),
+    /// these feed only the typed settings resolver, never the registry client.
+    /// They are applied after config-file settings but below environment and
+    /// CLI sources. Empty by default, preserving standalone aube behavior.
+    pub project_setting_overrides: Vec<(String, String)>,
+
+    /// Canonical setting names whose `.npmrc` aliases the embedder excludes
+    /// from typed settings resolution. Raw `.npmrc` entries remain available to
+    /// config inspection and the registry client. Empty by default, preserving
+    /// standalone aube behavior.
+    pub ignored_npmrc_settings: Vec<String>,
+
     /// PATH entries prepended (in order, ahead of the existing PATH) to every
     /// lifecycle spawn. An embedder places a runtime shim dir first so a bare
     /// `node` in a build script resolves to the augmented runtime. Default
@@ -330,6 +343,8 @@ impl Default for EngineContext {
             pnpmfile_default_enabled: true,
             synthetic_user_npmrc_entries: Vec::new(),
             synthetic_project_npmrc_entries: Vec::new(),
+            project_setting_overrides: Vec::new(),
+            ignored_npmrc_settings: Vec::new(),
             path_prepends: Vec::new(),
             env_overlay: Vec::new(),
             runtime_node_dir: None,
@@ -398,6 +413,8 @@ mod tests {
         assert!(ctx.pnpmfile_default_enabled);
         assert!(ctx.synthetic_user_npmrc_entries.is_empty());
         assert!(ctx.synthetic_project_npmrc_entries.is_empty());
+        assert!(ctx.project_setting_overrides.is_empty());
+        assert!(ctx.ignored_npmrc_settings.is_empty());
         assert!(ctx.path_prepends.is_empty());
         assert!(ctx.env_overlay.is_empty());
         assert_eq!(ctx.runtime_node_dir, None);

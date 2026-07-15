@@ -190,9 +190,9 @@ pub enum VerifyDepsBeforeRun {
     Prompt,
 }
 
-/// The `install` block. `node_linker` is the collapsed flat layout enum; the rest
-/// are engine-coupled and parse-validated here (their effect wiring is a later,
-/// aube-coupled effort).
+/// The `install` block. `node_linker` is the collapsed flat layout enum. The
+/// native PM consumes the non-sandbox fields through its aube settings bridge;
+/// `sandbox` remains inert until the sandbox execution slice lands.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InstallConfig {
     pub node_linker: Option<NodeLinker>,

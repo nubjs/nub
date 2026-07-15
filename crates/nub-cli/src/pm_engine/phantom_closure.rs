@@ -71,28 +71,38 @@ pub(crate) fn register() {
     aube_linker::set_disk_materialize_expand_hook(Box::new(expand));
 }
 
-/// nub's own embedder-default names that may seed the eject set. nub exposes NO
-/// user-facing `diskMaterializePackages` knob (maintainer 2026-07-07): the dynamic
-/// phantom detector is the sole eject mechanism, so a hand-listed package is
-/// redundant. The resolved seed still carries nub's INTERNAL vite #315 embedder
-/// default ([`super::mod::nub_setting_defaults`]) — kept so the phantom-eject
-/// opt-out (no-hook) path still ejects vite<8.1 — but every OTHER name arrived
-/// from a user source (`.npmrc`/env/`pnpm-workspace.yaml`) and is dropped by
-/// [`nub_internal_seed`]. Standalone aube installs no hook and honors the full
-/// seed verbatim, so its `diskMaterializePackages` knob is unaffected.
+/// nub's own embedder-default names that may seed the eject set. Native
+/// `install.symlinkDisablePattern` entries are admitted separately; incumbent
+/// `.npmrc`/env/workspace values remain ignored. Standalone aube installs no
+/// hook and honors its full `diskMaterializePackages` knob unchanged.
 ///
 /// SHARED with [`super::nub_setting_defaults`], which seeds exactly this name as
 /// the embedder default — sourcing both from one const so a future internal
 /// default can't be added in one place and silently dropped by the other.
 pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
 
-/// Keep only nub's own embedder-default seed names, dropping every user-source
-/// entry — the mechanism that retires the user-facing `diskMaterializePackages`
-/// knob under nub while leaving standalone aube's byte-for-byte.
+static NATIVE_CONFIG_SEED: std::sync::LazyLock<std::sync::RwLock<Vec<String>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+
+pub(super) fn set_native_config_seed(seed: Vec<String>) {
+    match NATIVE_CONFIG_SEED.write() {
+        Ok(mut current) => *current = seed,
+        Err(poisoned) => *poisoned.into_inner() = seed,
+    }
+}
+
+/// Keep nub's internal seed plus native config entries, dropping every
+/// incumbent/user-source `diskMaterializePackages` entry.
 fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
+    let configured = match NATIVE_CONFIG_SEED.read() {
+        Ok(seed) => seed.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
     resolved_seed
         .iter()
-        .filter(|n| NUB_INTERNAL_DISK_MATERIALIZE_SEED.contains(&n.as_str()))
+        .filter(|n| {
+            NUB_INTERNAL_DISK_MATERIALIZE_SEED.contains(&n.as_str()) || configured.contains(n)
+        })
         .cloned()
         .collect()
 }
@@ -100,9 +110,7 @@ fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
 /// The hook entry: read the per-version scanner's sidecars (the store-IO half)
 /// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
 /// closure/seed policy — is unit-tested with injected flags and never touches
-/// the host store. The resolved seed is first filtered to nub's internal names
-/// ([`nub_internal_seed`]) so a user's `diskMaterializePackages` value has no
-/// effect under nub.
+/// the host store. The resolved seed is filtered through [`nub_internal_seed`].
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
     plan_from_flags(
         graph,

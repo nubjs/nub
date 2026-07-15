@@ -31,8 +31,8 @@ impl<'a> PickResult<'a> {
 /// versions whose registry publish time is later than the cutoff
 /// (lexicographic compare on ISO-8601 UTC strings, which sort
 /// correctly). When the packument has no `time` entry for a version
-/// (e.g. abbreviated corgi payload in `Highest` mode), the cutoff is
-/// ignored and the version stays eligible.
+/// (e.g. abbreviated corgi payload in `Highest` mode), lenient mode keeps the
+/// version eligible while strict mode fails closed.
 ///
 /// `strict` controls fallback when the cutoff filters out every
 /// satisfying version: with `strict=true` we return `None` and the
@@ -110,14 +110,13 @@ pub(crate) fn pick_version<'a>(
     };
 
     // Does `ver` clear `effective` (the cutoff that applies to it)?
-    // `None` => no wall, keep the version. Missing time => keep it: we'd
-    // rather risk a slightly newer transitive than fail to resolve the
-    // range entirely.
+    // `None` => no wall, keep the version. Missing time stays eligible in
+    // lenient mode, but strict mode treats an unverifiable age as gated.
     let passes_effective_cutoff = |ver: &str, effective: Option<&str>| -> bool {
         let Some(c) = effective else { return true };
         match packument.time.get(ver) {
             Some(t) => t.as_str() <= c,
-            None => true,
+            None => !strict,
         }
     };
 
