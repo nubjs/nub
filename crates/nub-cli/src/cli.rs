@@ -5180,7 +5180,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             .status()?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
-    let mut runtime_node_options = runtime_node_options(&runtime, &node)?;
+    let runtime_node_options = runtime_node_options(&runtime, &node)?;
     let runtime_json = runtime_config_json(&runtime)?;
 
     // Auto-loaded `.env*` files are handed to the watched Node as `--env-file`
@@ -5242,12 +5242,17 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let preload_path = nub_core::node::spawn::find_public_preload(&nub_binary);
-    if let Some(preload) = &preload_path {
-        runtime_node_options.insert(
-            0,
-            nub_core::node::spawn::preload_injection(preload, &node.version).node_options_token(),
-        );
-    }
+    // Additivity: nub's own augmentation preload must load AFTER the user's
+    // ambient NODE_OPTIONS-derived requires — nub never changes the user's
+    // observable preload order. e3188d2714 regressed this by inserting the token
+    // at the FRONT of the project-config runtime options (which are concatenated
+    // ahead of the ambient NODE_OPTIONS), so nub's preload ran before a user's
+    // `--require`. The token is now placed after the ambient requires but before
+    // the project-config preloads, so those still load with nub's hooks active —
+    // matching the non-watch spawn order (nub preload precedes runtime options).
+    let nub_preload_token = preload_path.as_deref().map(|preload| {
+        nub_core::node::spawn::preload_injection(preload, &node.version).node_options_token()
+    });
 
     let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
 
@@ -5354,11 +5359,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             serde_json::to_string(&state).context("could not serialize watch env-file guard")?,
         );
 
+        // Order: cleanup guard → ambient requires → nub preload → project config.
         let mut effective_node_options = cleanup_token;
-        for option in &runtime_node_options {
-            effective_node_options.push(' ');
-            effective_node_options.push_str(option);
-        }
         if let Some(existing) = sanitized_node_options
             .as_deref()
             .filter(|value| !value.is_empty())
@@ -5366,17 +5368,28 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             effective_node_options.push(' ');
             effective_node_options.push_str(existing);
         }
+        if let Some(token) = nub_preload_token.as_deref() {
+            effective_node_options.push(' ');
+            effective_node_options.push_str(token);
+        }
+        for option in &runtime_node_options {
+            effective_node_options.push(' ');
+            effective_node_options.push_str(option);
+        }
         cmd.env("NODE_OPTIONS", effective_node_options);
     } else {
-        let mut effective_node_options = runtime_node_options.join(" ");
+        // Same order, minus the env-file cleanup guard: ambient requires → nub
+        // preload → project config.
+        let mut parts: Vec<String> = Vec::new();
         if let Some(existing) = sanitized_node_options.filter(|value| !value.is_empty()) {
-            if !effective_node_options.is_empty() {
-                effective_node_options.push(' ');
-            }
-            effective_node_options.push_str(&existing);
+            parts.push(existing);
         }
-        if !effective_node_options.is_empty() {
-            cmd.env("NODE_OPTIONS", effective_node_options);
+        if let Some(token) = nub_preload_token {
+            parts.push(token);
+        }
+        parts.extend(runtime_node_options.iter().cloned());
+        if !parts.is_empty() {
+            cmd.env("NODE_OPTIONS", parts.join(" "));
         }
     }
     let status = cmd.status()?;
