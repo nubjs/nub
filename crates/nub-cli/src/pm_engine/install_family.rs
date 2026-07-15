@@ -764,6 +764,7 @@ fn run_import(typed: &str, args: &[String]) -> Result<i32> {
     // import needs neither the runtime nor the layout policy — just the
     // chdir and the brand seams (registered before any engine read).
     super::apply_dir(globals.dir.as_deref())?;
+    crate::cli::initialize_config_snapshot(false, false)?;
     super::engine_brand_preflight();
     match import_to_pnpm_lock(verb.force) {
         Ok(summary) => {

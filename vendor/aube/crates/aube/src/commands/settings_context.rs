@@ -118,9 +118,8 @@ pub(crate) fn global_output_flags() -> GlobalOutputFlags {
 pub(crate) struct FileSources {
     pub managed_aube_config: Vec<(String, String)>,
     pub user_npmrc: Vec<(String, String)>,
-    settings_user_npmrc: Vec<(String, String)>,
     pub project_npmrc: Vec<(String, String)>,
-    settings_project_npmrc: Vec<(String, String)>,
+    project_config_settings: Vec<(String, String)>,
     pub user_aube_config: Vec<(String, String)>,
     pub project_aube_config: Vec<(String, String)>,
     /// pnpm's global `config.yaml` (`<configDir>/config.yaml`, pnpm v11),
@@ -131,18 +130,11 @@ pub(crate) struct FileSources {
 impl FileSources {
     pub(crate) fn load(cwd: &Path) -> Self {
         let npmrc = aube_registry::config::load_npmrc_entries_split(cwd);
-        let engine_context = aube_util::engine_context();
-        let settings_user_npmrc =
-            filter_ignored_npmrc_settings(&npmrc.user, &engine_context.ignored_npmrc_settings);
-        let mut settings_project_npmrc =
-            filter_ignored_npmrc_settings(&npmrc.project, &engine_context.ignored_npmrc_settings);
-        settings_project_npmrc.extend(engine_context.project_setting_overrides);
         Self {
             managed_aube_config: config::load_managed_aube_config_entries(),
             user_npmrc: npmrc.user,
-            settings_user_npmrc,
             project_npmrc: npmrc.project,
-            settings_project_npmrc,
+            project_config_settings: aube_util::engine_context().project_config_settings,
             user_aube_config: config::load_user_aube_config_entries(),
             project_aube_config: config::load_project_aube_config_entries(cwd),
             global_config_yaml: load_global_config_yaml(),
@@ -158,87 +150,16 @@ impl FileSources {
         aube_settings::ResolveCtx {
             managed_aube_config: &self.managed_aube_config,
             project_aube_config: &self.project_aube_config,
-            project_npmrc: &self.settings_project_npmrc,
+            project_npmrc: &self.project_npmrc,
+            project_config: &self.project_config_settings,
             user_aube_config: &self.user_aube_config,
-            user_npmrc: &self.settings_user_npmrc,
+            user_npmrc: &self.user_npmrc,
             workspace_yaml,
             global_config_yaml: &self.global_config_yaml,
             env,
             cli,
             embedder_defaults: aube_settings::embedder_defaults(),
         }
-    }
-}
-
-fn filter_ignored_npmrc_settings(
-    entries: &[(String, String)],
-    ignored_settings: &[String],
-) -> Vec<(String, String)> {
-    entries
-        .iter()
-        .filter(|(key, _)| {
-            ignored_settings.iter().all(|setting| {
-                aube_settings::meta::find(setting)
-                    .is_none_or(|meta| !meta.npmrc_keys.contains(&key.as_str()))
-            })
-        })
-        .cloned()
-        .collect()
-}
-
-#[cfg(test)]
-mod ignored_npmrc_settings_tests {
-    use super::filter_ignored_npmrc_settings;
-
-    #[test]
-    fn filters_every_alias_for_named_settings_but_keeps_unrelated_entries() {
-        let entries = vec![
-            ("nodeLinker".to_string(), "isolated".to_string()),
-            ("node-linker".to_string(), "hoisted".to_string()),
-            (
-                "enable-global-virtual-store".to_string(),
-                "false".to_string(),
-            ),
-            (
-                "disable-global-virtual-store-for-packages".to_string(),
-                "next".to_string(),
-            ),
-            ("disk-materialize-packages".to_string(), "vite".to_string()),
-            ("hoist".to_string(), "false".to_string()),
-            ("hoist-pattern".to_string(), "*".to_string()),
-            ("minimum-release-age".to_string(), "60".to_string()),
-            (
-                "minimum-release-age-exclude".to_string(),
-                "@internal/*".to_string(),
-            ),
-            ("minimum-release-age-strict".to_string(), "true".to_string()),
-            ("node-options".to_string(), "--trace-warnings".to_string()),
-            (
-                "registry".to_string(),
-                "https://registry.example/".to_string(),
-            ),
-        ];
-        let ignored = vec![
-            "nodeLinker".to_string(),
-            "enableGlobalVirtualStore".to_string(),
-            "disableGlobalVirtualStoreForPackages".to_string(),
-            "diskMaterializePackages".to_string(),
-            "hoist".to_string(),
-            "hoistPattern".to_string(),
-            "minimumReleaseAge".to_string(),
-            "minimumReleaseAgeExclude".to_string(),
-            "minimumReleaseAgeStrict".to_string(),
-            "nodeOptions".to_string(),
-        ];
-
-        assert_eq!(
-            filter_ignored_npmrc_settings(&entries, &ignored),
-            vec![(
-                "registry".to_string(),
-                "https://registry.example/".to_string()
-            )]
-        );
-        assert_eq!(entries.len(), 12, "the raw config view remains intact");
     }
 }
 
@@ -779,6 +700,7 @@ mod resolve_virtual_store_dir_tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: ws,
@@ -855,6 +777,7 @@ mod default_lockfile_kind_tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: npmrc,
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: ws,

@@ -791,6 +791,11 @@ fn engine_session_inner(
     // `Too many open files (os error 24)`.
     resource_limits::raise_nofile_limit();
     apply_dir(dir)?;
+    // Install-family `-C/--dir` is verb-local, so this is the first point at
+    // which its final effective cwd is known. Initialize exactly one project
+    // snapshot here; the ordinary CLI routes have already initialized theirs,
+    // making this call an inert OnceLock read on those paths.
+    crate::cli::initialize_config_snapshot(false, false)?;
     engine_brand_preflight();
     let cwd = std::env::current_dir()?;
     let detected = resolve_identity_walk_up(&cwd, strictness)?;
@@ -842,18 +847,10 @@ fn engine_session_inner(
     };
     aube_settings::set_embedder_defaults(setting_defaults);
     aube_util::update_engine_context(|c| {
-        c.project_setting_overrides = native_install
+        c.project_config_settings = native_install
             .as_ref()
             .map(|config| config.settings.clone())
             .unwrap_or_default();
-        c.ignored_npmrc_settings = if native_mode {
-            NATIVE_INSTALL_NPMRC_EXCLUSIONS
-                .iter()
-                .map(|setting| (*setting).to_string())
-                .collect()
-        } else {
-            Vec::new()
-        };
     });
     phantom_closure::set_native_config_seed(
         native_install
@@ -887,19 +884,6 @@ struct NativeInstallSettings {
     node_options: Option<String>,
     symlink_disable_pattern: Vec<String>,
 }
-
-const NATIVE_INSTALL_NPMRC_EXCLUSIONS: &[&str] = &[
-    "nodeLinker",
-    "enableGlobalVirtualStore",
-    "disableGlobalVirtualStoreForPackages",
-    "diskMaterializePackages",
-    "hoist",
-    "hoistPattern",
-    "minimumReleaseAge",
-    "minimumReleaseAgeExclude",
-    "minimumReleaseAgeStrict",
-    "nodeOptions",
-];
 
 fn native_install_settings(
     detected: Option<&DetectedLockfile>,
@@ -1021,10 +1005,13 @@ fn lower_native_install_settings(
         settings.push(("minimumReleaseAgeExclude".to_string(), exclude.join(",")));
     }
 
-    let node_options = install
-        .node_options
-        .as_ref()
-        .map(|options| options.join(" "));
+    let node_options = install.node_options.as_ref().map(|options| {
+        options
+            .iter()
+            .map(|option| nub_core::node::spawn::node_options_token(option))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
     if let Some(value) = node_options.as_ref() {
         settings.push(("nodeOptions".to_string(), value.clone()));
     }
@@ -2384,6 +2371,11 @@ fn nub_setting_defaults(
             fresh_format.to_string(),
         ),
         ("defaultTrust".to_string(), "true".to_string()),
+        // Nub's default 24-hour release-age gate is hard: if the registry
+        // payload cannot establish a version's publish time, resolution fails
+        // closed. Standalone aube retains its built-in lenient default because
+        // this value exists only at the Nub embedder tier.
+        ("minimumReleaseAgeStrict".to_string(), "true".to_string()),
         ("virtualStoreDir".to_string(), store_dir.clone()),
         ("stateDir".to_string(), store_dir),
         (
@@ -3031,6 +3023,30 @@ mod tests {
     }
 
     #[test]
+    fn native_node_options_preserve_each_json_element_as_one_token() {
+        let install = InstallConfig {
+            node_options: Some(vec![
+                "--conditions=plain".into(),
+                "--require=/tmp/a path/preload.cjs".into(),
+                r#"--conditions=a"b"#.into(),
+                r#"--require=C:\Users\Jane Doe\preload.cjs"#.into(),
+            ]),
+            ..InstallConfig::default()
+        };
+        let lowered = lower_native_install_settings(&install, &[]).unwrap();
+        assert_eq!(
+            lowered.node_options.as_deref(),
+            Some(
+                r#"--conditions=plain "--require=/tmp/a path/preload.cjs" "--conditions=a\"b" "--require=C:\\Users\\Jane Doe\\preload.cjs""#
+            )
+        );
+        assert_eq!(
+            get(&lowered.settings, "nodeOptions"),
+            lowered.node_options.as_deref()
+        );
+    }
+
+    #[test]
     fn reserved_install_combinations_fail_loudly() {
         for (install, needle) in [
             (
@@ -3540,6 +3556,11 @@ mod tests {
                 get(&defaults, "defaultTrust"),
                 Some("true"),
                 "{label}: defaultTrust must be \"true\""
+            );
+            assert_eq!(
+                get(&defaults, "minimumReleaseAgeStrict"),
+                Some("true"),
+                "{label}: Nub's default release-age gate must fail closed"
             );
 
             // Must never inject an allow-all build-script key.

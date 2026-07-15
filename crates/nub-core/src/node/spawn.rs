@@ -988,7 +988,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         if let Some(pnp) = config.pnp {
             node_opts_parts.push(format!(
                 "--require={}",
-                node_options_quote(&pnp.display().to_string())
+                node_options_token(&pnp.display().to_string())
             ));
         }
         if let Some(ref inj) = injection {
@@ -1022,7 +1022,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // silently drop the exclude.
             node_opts_parts.push(format!(
                 "--test-coverage-exclude={}",
-                node_options_quote(&format!("{}/**", runtime_dir.display()))
+                node_options_token(&format!("{}/**", runtime_dir.display()))
             ));
         }
         // Web Storage (mirrors the argv site above): always inject
@@ -1734,7 +1734,7 @@ pub fn compute_augmentation_env(
     if let Some(pnp) = pnp {
         node_opts_parts.push(format!(
             "--require={}",
-            node_options_quote(&pnp.display().to_string())
+            node_options_token(&pnp.display().to_string())
         ));
     }
     node_opts_parts.push(injection.node_options_token());
@@ -2168,14 +2168,14 @@ impl PreloadInjection {
     /// which doubles as the re-entrancy key: a child detects a parent-injected
     /// preload by finding this exact token in its inherited NODE_OPTIONS.
     ///
-    /// The VALUE half is quoted with [`node_options_quote`] so a preload path
+    /// The VALUE half is quoted with [`node_options_token`] so a preload path
     /// containing a space (e.g. a cache or temp dir under `C:\Users\John Doe\…`,
     /// or a macOS `~/Library/Application Support/…`) survives Node's NODE_OPTIONS
     /// tokenizer, which splits on unquoted spaces. The re-entrancy detector
     /// ([`is_reentrant_in`]) compares against this same quoted form, so the key
     /// still round-trips.
     pub fn node_options_token(&self) -> String {
-        format!("{}={}", self.flag, node_options_quote(&self.value))
+        format!("{}={}", self.flag, node_options_token(&self.value))
     }
 }
 
@@ -2189,13 +2189,14 @@ impl PreloadInjection {
 /// Single quotes do NOT work — Node has no single-quote handling, so they'd
 /// become literal characters in the path (`ERR_INVALID_STATE` on the store).
 ///
-/// Values WITHOUT a space are returned unchanged: they tokenize fine bare, and
-/// not quoting them keeps NODE_OPTIONS readable and matches plain-Node argv.
+/// Values without whitespace, quotes, or emptiness are returned unchanged: they
+/// tokenize fine bare, and not quoting them keeps NODE_OPTIONS readable and
+/// matches plain-Node argv.
 /// Use this for EVERY value-bearing flag nub writes into NODE_OPTIONS
 /// (`--test-coverage-exclude=`, the preload `--require=`/`--import=` token,
 /// PnP `--require=`).
-fn node_options_quote(value: &str) -> String {
-    if value.contains(' ') {
+pub fn node_options_token(value: &str) -> String {
+    if value.is_empty() || value.chars().any(char::is_whitespace) || value.contains('"') {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{escaped}\"")
     } else {
@@ -2534,29 +2535,54 @@ mod tests {
     use crate::node::version::NodeVersion;
 
     #[test]
-    fn node_options_quote_only_wraps_spacey_values() {
+    fn node_options_token_preserves_spaces_quotes_and_backslashes() {
         // No space → returned bare (tokenizes fine, stays readable / argv-like).
-        assert_eq!(node_options_quote("/tmp/store.sqlite"), "/tmp/store.sqlite");
+        assert_eq!(node_options_token("/tmp/store.sqlite"), "/tmp/store.sqlite");
         // Space → wrapped in double quotes (single quotes are literal to Node's
         // tokenizer and would corrupt the path → ERR_INVALID_STATE).
         assert_eq!(
-            node_options_quote("/tmp/nub cache/store.sqlite"),
+            node_options_token("/tmp/nub cache/store.sqlite"),
             "\"/tmp/nub cache/store.sqlite\""
         );
         // Windows: backslashes inside the quotes are escape chars to Node, so each
         // must be doubled or `\U`/`\J`/`\.` get eaten. Only quoted when spacey.
         assert_eq!(
-            node_options_quote(r"C:\Users\John Doe\.cache\store.sqlite"),
+            node_options_token(r"C:\Users\John Doe\.cache\store.sqlite"),
             r#""C:\\Users\\John Doe\\.cache\\store.sqlite""#
         );
         // A backslash path WITHOUT a space stays bare — Node only treats `\` as an
         // escape INSIDE a quoted string, so an unquoted backslash is literal.
         assert_eq!(
-            node_options_quote(r"C:\Users\John\.cache\store.sqlite"),
+            node_options_token(r"C:\Users\John\.cache\store.sqlite"),
             r"C:\Users\John\.cache\store.sqlite"
         );
         // An embedded double-quote in a spacey value is backslash-escaped.
-        assert_eq!(node_options_quote(r#"/tmp/a "b" c"#), r#""/tmp/a \"b\" c""#);
+        assert_eq!(node_options_token(r#"/tmp/a "b" c"#), r#""/tmp/a \"b\" c""#);
+        assert_eq!(
+            node_options_token(r#"--conditions=a"b"#),
+            r#""--conditions=a\"b""#
+        );
+        assert_eq!(node_options_token(""), r#""""#);
+    }
+
+    #[test]
+    fn node_options_token_round_trips_as_one_real_node_option() {
+        let title = r#"hello "quoted" C:\tmp"#;
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg("process.stdout.write(process.title)")
+            .env(
+                "NODE_OPTIONS",
+                node_options_token(&format!("--title={title}")),
+            )
+            .output()
+            .expect("host Node must run");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), title);
     }
 
     #[test]
