@@ -161,10 +161,11 @@ fn plan_from_flags(
         .collect();
     let is_top_level = |name: &str| root_provided.contains(name);
 
-    // Seed set by NAME: the caller's disk-materialize list ∪ every dynamically-
+    // Seed set by NAME: every dynamically-
     // flagged importer that SURVIVES the precision seed-selection filter. Embedded
-    // vite<8.1 is seeded by dep_path below.
-    let mut seed_names_set: HashSet<&str> = seed_names.iter().copied().collect();
+    // vite<8.1 and caller-supplied package-name patterns are seeded by dep_path
+    // below.
+    let mut seed_names_set: HashSet<&str> = HashSet::new();
 
     // Dynamic phantom source (the per-version scanner's sidecars) — the replacement
     // for the retired hand-curated map. Each SURVIVING flagged importer seeds the
@@ -184,6 +185,9 @@ fn plan_from_flags(
     let mut seed_dep_paths: HashSet<&str> = HashSet::new();
     for (dep_path, pkg) in &graph.packages {
         if seed_names_set.contains(pkg.name.as_str())
+            || seed_names
+                .iter()
+                .any(|pattern| aube_linker::package_name_matches(pattern, &pkg.name))
             || (pkg.name == "vite" && super::vite_compat::vite_lt_8_1(&pkg.version))
         {
             seed_dep_paths.insert(dep_path.as_str());
@@ -214,7 +218,7 @@ fn plan_from_flags(
     // Rung-1 names: every closure member's name ∪ the original seed names (the
     // executor is name-keyed). Original seed names are kept even if absent from
     // the graph — the executor simply never matches an absent name.
-    let mut names: HashSet<String> = seed_names.iter().map(|s| s.to_string()).collect();
+    let mut names: HashSet<String> = HashSet::new();
     for dep_path in &closure {
         if let Some(pkg) = graph.packages.get(dep_path) {
             names.insert(pkg.name.clone());
@@ -501,6 +505,28 @@ mod tests {
         let g = graph(&[("lodash@4.17.21", "lodash", &[])]);
         let plan = plan_from_flags(&g, &[], &[]);
         assert!(plan.names.is_empty());
+    }
+
+    #[test]
+    fn configured_seed_patterns_match_wildcards_and_literals() {
+        let g = graph(&[
+            ("app@1.0.0", "app", &[("is-number", "7.0.0")]),
+            ("is-number@7.0.0", "is-number", &[]),
+            ("left-pad@1.3.0", "left-pad", &[]),
+        ]);
+        for pattern in ["is-*", "is-number"] {
+            let plan = plan_from_flags(&g, &[pattern.to_string()], &[]);
+            let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+            assert!(
+                names.contains("is-number"),
+                "pattern {pattern} seeds the package"
+            );
+            assert!(
+                names.contains("app"),
+                "pattern {pattern} expands its importer closure"
+            );
+            assert!(!names.contains("left-pad"));
+        }
     }
 
     #[test]

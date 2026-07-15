@@ -2044,7 +2044,6 @@ fn dispatch_subcommand(
     if let Some(add_argv) = install_to_add_args(&rest)
         && let Some(spec) = crate::pm_engine::lookup_verb("add")
     {
-        initialize_config_snapshot(false, false)?;
         let pm = suggest_package_manager(&env::current_dir()?);
         // `add_argv[0]` is the canonical verb ("add"); the engine wants the
         // args after the verb. Report the user's actual typed spelling so
@@ -2059,7 +2058,6 @@ fn dispatch_subcommand(
     // real-PM fallback). `install`/`i`/`ci` are NOT in the registry — they
     // are live clap verbs handled below.
     if let Some(spec) = crate::pm_engine::lookup_verb(&subcommand) {
-        initialize_config_snapshot(false, false)?;
         // The PM hint is only consumed by the unwired-verb stub fallback
         // (`{pm} {verb}`); use the nub-identity-aware suggestion so a fresh /
         // nub-identity project gets a `nub`-flavored hint (the verb *is* a
@@ -2094,7 +2092,16 @@ fn dispatch_subcommand(
         env::set_current_dir(dir)?;
     }
     let (config_node, config_no_check) = command_config_flags(&cli.command);
-    initialize_config_snapshot(config_node, config_no_check)?;
+    // Install-family commands own a verb-local `-C/--dir` that is parsed below
+    // this point. Their engine session applies it first, then initializes the
+    // one process snapshot from that final cwd. Every other command has already
+    // reached its final cwd here and initializes normally.
+    if !matches!(
+        &cli.command,
+        Some(Command::Install { .. } | Command::Ci { .. })
+    ) {
+        initialize_config_snapshot(config_node, config_no_check)?;
+    }
 
     match cli.command {
         Some(Command::Run {
@@ -2753,7 +2760,7 @@ fn command_config_flags(command: &Option<Command>) -> (bool, bool) {
     }
 }
 
-fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
+pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
     use crate::project_config::{ConfigOverlays, ProjectConfig, VerifyDepsBeforeRun};
 
     let cwd = env::current_dir()?;

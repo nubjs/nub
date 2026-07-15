@@ -21,6 +21,30 @@ use std::sync::OnceLock;
 
 use aube_lockfile::LockfileGraph;
 
+/// Match one package-name pattern using the linker's existing `glob` primitive.
+/// Invalid glob syntax falls back to a literal comparison, so adding wildcard
+/// support never makes a previously exact-matchable string disappear.
+pub fn package_name_matches(pattern: &str, package_name: &str) -> bool {
+    glob::Pattern::new(pattern)
+        .map(|compiled| compiled.matches(package_name))
+        .unwrap_or_else(|_| pattern == package_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::package_name_matches;
+
+    #[test]
+    fn package_name_patterns_cover_wildcards_and_literals() {
+        assert!(package_name_matches("is-*", "is-number"));
+        assert!(!package_name_matches("is-*", "number-is"));
+        assert!(package_name_matches("@corp/tool-*", "@corp/tool-cli"));
+        assert!(!package_name_matches("@corp/tool-*", "@other/tool-cli"));
+        assert!(package_name_matches("is-number", "is-number"));
+        assert!(!package_name_matches("is-number", "is-positive"));
+    }
+}
+
 /// The materialization plan a [`DmExpandHook`] produces from the resolved graph.
 #[derive(Debug, Default, Clone)]
 pub struct DiskMaterializePlan {

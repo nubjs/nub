@@ -84,6 +84,57 @@ fn registry_reachable() -> bool {
         })
 }
 
+#[test]
+fn install_dir_initializes_one_gate_off_snapshot_from_final_cwd() {
+    let outer = pm_tmpdir("dir-snapshot-outer");
+    let target = outer.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        target.join("package.json"),
+        r#"{"name":"target","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    // A malformed dormant project file proves the production gate does not read
+    // it while the snapshot log still records the final verb-local cwd.
+    std::fs::write(target.join("nub.jsonc"), "{ malformed").unwrap();
+
+    for (idx, args) in [
+        vec!["install", "--dir", "target", "--lockfile-only", "--offline"],
+        vec!["install", "-C", "target", "--lockfile-only", "--offline"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let log = outer.join(format!("snapshot-{idx}.log"));
+        let output = Command::new(nub_binary())
+            .args(args)
+            .current_dir(&outer)
+            .env("XDG_DATA_HOME", pm_tmpdir("dir-snapshot-data"))
+            .env("XDG_CACHE_HOME", pm_tmpdir("dir-snapshot-cache"))
+            .env("__NUB_TEST_CONFIG_SNAPSHOT_LOG", &log)
+            .output()
+            .expect("run install with verb-local cwd");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "install should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines: Vec<_> = std::fs::read_to_string(&log)
+            .expect("snapshot log")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![format!(
+                "cwd={} project=none",
+                target.canonicalize().unwrap().display()
+            )]
+        );
+    }
+}
+
 /// Truly-fresh project (no lockfile, no PM declaration, no pnpm-named file):
 /// nub claims identity via the neutral lockfile only. The engine resolves, links
 /// the isolated (pnpm-style) layout under `node_modules/.store`, and writes nub's

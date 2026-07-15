@@ -71,6 +71,10 @@ pub struct ResolveCtx<'a> {
     /// Project-scope `.npmrc` (`<cwd>/.npmrc`) plus any
     /// `npmrcAuthFile` it points at, in load order.
     pub project_npmrc: &'a [(String, String)],
+    /// Project configuration supplied by an embedding host. This is a distinct
+    /// tier below CLI/environment and above the ordinary file/global sources.
+    /// Standalone aube leaves it empty.
+    pub project_config: &'a [(String, String)],
     /// User-scope aube config (`~/.config/aube/config.toml`). Aube's
     /// authoritative store for user-level settings written via
     /// `aube config set` — outranks `~/.npmrc` so leftover entries in
@@ -137,6 +141,7 @@ impl<'a> ResolveCtx<'a> {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: npmrc,
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml,
@@ -222,6 +227,7 @@ pub fn process_env() -> &'static [(String, String)] {
 ///
 /// ```text
 /// cli > env
+///     > project_config     (embedder-owned project settings)
 ///     > workspace_yaml      (pnpm-workspace.yaml / aube-workspace.yaml)
 ///     > global_config_yaml  (<configDir>/config.yaml, pnpm v11, pnpm-incumbent only)
 ///     > project_aube_config (<cwd>/.config/aube/config.toml)
@@ -1260,6 +1266,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &npmrc,
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1284,6 +1291,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &aube_config,
             project_npmrc: &npmrc,
+            project_config: &[],
             user_aube_config: &aube_config,
             user_npmrc: &npmrc,
             workspace_yaml: &ws,
@@ -1308,6 +1316,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &aube_config,
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1323,6 +1332,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &aube_config,
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1343,6 +1353,7 @@ mod tests {
             managed_aube_config: &managed,
             project_aube_config: &local,
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1365,6 +1376,7 @@ mod tests {
             managed_aube_config: &managed_true,
             project_aube_config: &local_false,
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1380,6 +1392,7 @@ mod tests {
             managed_aube_config: &managed_false,
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1410,6 +1423,7 @@ mod tests {
             managed_aube_config: &managed_age,
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1424,6 +1438,7 @@ mod tests {
             managed_aube_config: &managed_advisory,
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1438,6 +1453,7 @@ mod tests {
             managed_aube_config: &managed_exotic_subdeps,
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1458,6 +1474,7 @@ mod tests {
             managed_aube_config: &managed,
             project_aube_config: &local,
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1484,6 +1501,7 @@ mod tests {
             managed_aube_config: &managed,
             project_aube_config: &local,
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1513,6 +1531,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &user_aube_config,
             user_npmrc: &user_npmrc,
             workspace_yaml: &ws,
@@ -1539,6 +1558,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &project_npmrc,
+            project_config: &[],
             user_aube_config: &user_aube_config,
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1565,6 +1585,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &project_aube_config,
             project_npmrc: &project_npmrc,
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1594,6 +1615,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &user_aube_config,
             user_npmrc: &user_npmrc,
             workspace_yaml: &ws,
@@ -1622,6 +1644,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &project_npmrc,
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1650,6 +1673,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &project_npmrc,
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1674,6 +1698,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1850,6 +1875,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1865,6 +1891,50 @@ mod tests {
     }
 
     #[test]
+    fn embedder_project_config_sits_below_cli_env_and_above_global_sources() {
+        fn ctx<'a>(
+            project: &'a [(String, String)],
+            ws: &'a BTreeMap<String, yaml_serde::Value>,
+            cfg: &'a BTreeMap<String, yaml_serde::Value>,
+            env: &'a [(String, String)],
+            cli: &'a [(String, String)],
+        ) -> ResolveCtx<'a> {
+            ResolveCtx {
+                managed_aube_config: &[],
+                project_aube_config: &[],
+                project_npmrc: &[],
+                project_config: project,
+                user_aube_config: &[],
+                user_npmrc: &[],
+                workspace_yaml: ws,
+                global_config_yaml: cfg,
+                env,
+                cli,
+                embedder_defaults: &[],
+            }
+        }
+
+        let ws = BTreeMap::new();
+        let cfg = raw_yaml("storeDir: /tmp/from-global-config\n");
+        let project = entries(&[("storeDir", "/tmp/from-project-config")]);
+        let env = entries(&[("NPM_CONFIG_STORE_DIR", "/tmp/from-env")]);
+        let cli = entries(&[("--store-dir", "/tmp/from-cli")]);
+
+        assert_eq!(
+            resolved::store_dir(&ctx(&project, &ws, &cfg, &[], &[])),
+            Some("/tmp/from-project-config".to_string())
+        );
+        assert_eq!(
+            resolved::store_dir(&ctx(&project, &ws, &cfg, &env, &[])),
+            Some("/tmp/from-env".to_string())
+        );
+        assert_eq!(
+            resolved::store_dir(&ctx(&project, &ws, &cfg, &env, &cli)),
+            Some("/tmp/from-cli".to_string())
+        );
+    }
+
+    #[test]
     fn project_workspace_yaml_outranks_global_config_yaml() {
         // Precedence: the project-root `pnpm-workspace.yaml` overrides the
         // user's global `config.yaml` (matching pnpm v11, where the
@@ -1875,6 +1945,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &ws,
@@ -1901,6 +1972,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &user_npmrc,
             workspace_yaml: &ws,

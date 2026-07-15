@@ -43,23 +43,26 @@ impl Linker {
             aube_dir_override: None,
             no_integrity_read_keys: std::collections::BTreeMap::new(),
             link_progress: None,
-            disk_materialize: std::collections::HashSet::new(),
+            disk_materialize: Vec::new(),
         }
     }
 
     /// Force a set of packages to materialize as real project-local directories
     /// even under the global virtual store (see the field docs on [`Linker`]).
-    /// Names are matched exactly against each graph package. Standalone aube and
+    /// Entries are matched as package-name patterns against each graph package.
+    /// Standalone aube and
     /// every test omit this → the set is empty and the GVS pass is unchanged.
     pub fn with_disk_materialize(mut self, names: &[String]) -> Self {
-        self.disk_materialize = names.iter().cloned().collect();
+        self.disk_materialize = names.to_vec();
         self
     }
 
     /// Whether `pkg_name` is on the disk-materialize list. Consulted only in
     /// the global-virtual-store link pass; always false when the list is empty.
     pub(crate) fn disk_materialize_matches(&self, pkg_name: &str) -> bool {
-        !self.disk_materialize.is_empty() && self.disk_materialize.contains(pkg_name)
+        self.disk_materialize
+            .iter()
+            .any(|pattern| crate::package_name_matches(pattern, pkg_name))
     }
 
     /// Supply a shared counter the materialize pass bumps once per linked
