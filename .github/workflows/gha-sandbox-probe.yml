@@ -1,0 +1,117 @@
+name: gha-sandbox-probe
+
+# Branch-scoped feasibility probe (NO PR). Answers: can nub's Linux sandbox run
+# on GitHub-hosted runners — single-level and nested — and what is the SIMPLEST
+# setup that makes nested bwrap work on a hosted image?
+on:
+  push:
+    branches: [probe/gha-sandbox-feasibility]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # ---- FAST CORE: diagnostics + baseline capability, per image ----------------
+  diagnostics:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnostics + baseline sandbox probe
+        run: bash tests/gha-sandbox-probe/diagnostics.sh
+
+  # ---- WORKAROUND MATRIX: one candidate per fresh runner ----------------------
+  workarounds:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+        mode: [baseline, sysctl-disable, complain-knob, aa-complain, setuid, d5-helper]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nested bwrap under workaround "${{ matrix.mode }}"
+        run: bash tests/gha-sandbox-probe/probe-nesting.sh "${{ matrix.mode }}"
+
+  # ---- CONTAINER JOBS (candidate E): nested bwrap inside a job container -------
+  container-plain:
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup + nested bwrap inside plain container
+        shell: bash
+        run: |
+          set +e
+          apt-get update -qq && apt-get install -y -qq bubblewrap >/dev/null 2>&1
+          echo "container: plain ubuntu:24.04 (no extra caps)"
+          bwrap --version
+          echo "== single-level =="
+          bwrap --die-with-parent --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev -- /bin/true
+          echo "single-level rc=$?"
+          echo "== nested =="
+          bwrap --die-with-parent --unshare-user --ro-bind / / --proc /proc --dev /dev -- \
+            bwrap --die-with-parent --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev -- /bin/true
+          rc=$?; echo "RESULT:nested-container-plain=$([[ $rc -eq 0 ]] && echo PASS || echo FAIL)"; echo "DETAIL:nested-container-plain=rc=$rc"
+
+  container-sysadmin:
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04
+      options: --cap-add=SYS_ADMIN --security-opt seccomp=unconfined
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup + nested bwrap inside --cap-add=SYS_ADMIN container
+        shell: bash
+        run: |
+          set +e
+          apt-get update -qq && apt-get install -y -qq bubblewrap >/dev/null 2>&1
+          echo "container: ubuntu:24.04 --cap-add=SYS_ADMIN --security-opt seccomp=unconfined"
+          bwrap --version
+          bwrap --die-with-parent --unshare-user --ro-bind / / --proc /proc --dev /dev -- \
+            bwrap --die-with-parent --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev -- /bin/true
+          rc=$?; echo "RESULT:nested-container-sysadmin=$([[ $rc -eq 0 ]] && echo PASS || echo FAIL)"; echo "DETAIL:nested-container-sysadmin=rc=$rc"
+
+  container-privileged:
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup + nested bwrap inside --privileged container
+        shell: bash
+        run: |
+          set +e
+          apt-get update -qq && apt-get install -y -qq bubblewrap >/dev/null 2>&1
+          echo "container: ubuntu:24.04 --privileged"
+          bwrap --version
+          bwrap --die-with-parent --unshare-user --ro-bind / / --proc /proc --dev /dev -- \
+            bwrap --die-with-parent --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev -- /bin/true
+          rc=$?; echo "RESULT:nested-container-privileged=$([[ $rc -eq 0 ]] && echo PASS || echo FAIL)"; echo "DETAIL:nested-container-privileged=rc=$rc"
+
+  # ---- BEST-EFFORT: tie raw findings to nub's ACTUAL single-level tests --------
+  nub-single-level-tests:
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install bwrap
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+      - name: Run nub linux_enforcement (NUB_SANDBOX_REQUIRE_BWRAP=1)
+        env:
+          NUB_SANDBOX_REQUIRE_BWRAP: "1"
+        run: |
+          set +e
+          cargo test -p nub-sandbox --test linux_enforcement -- --nocapture 2>&1 | tail -60
+          echo "RESULT:nub-linux-enforcement-${{ matrix.os }}=exit${PIPESTATUS[0]:-$?}"
