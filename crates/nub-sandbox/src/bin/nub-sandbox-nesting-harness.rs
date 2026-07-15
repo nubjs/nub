@@ -230,11 +230,16 @@ mod imp {
 
         wait_for_ready(&signals, "park-leaf")
             .map_err(|error| format!("phase B: the parked chain never came up: {error}"))?;
-        // Snapshot the chain's host PIDs BEFORE cancelling so we can prove they die.
+        // Snapshot the chain's host PIDs BEFORE cancelling so we can prove they die. The
+        // scan MUST see the retained MONITORS — PID 1 of each nested namespace, owner of
+        // reap/teardown — else "zero survivors" is vacuous for the very processes that
+        // matter, so require at least one monitor and a multi-level chain here.
         let before = scan_all_harness_pids()?;
-        if before.len() < 2 {
+        let monitors = before.iter().filter(|(_, role)| *role == "monitor").count();
+        if monitors < 3 || before.len() < 6 {
             return Err(format!(
-                "phase B: expected a multi-process nested chain, saw {} harness process(es)",
+                "phase B: survivor scan is not seeing the full nested chain (saw {} monitors, {} processes total) — the zero-survivors proof would be vacuous",
+                monitors,
                 before.len()
             ));
         }
@@ -246,7 +251,7 @@ mod imp {
         let deadline = Instant::now() + SURVIVOR_TIMEOUT;
         loop {
             let survivors = scan_all_harness_pids()?;
-            if survivors.iter().all(|pid| *pid == std::process::id()) {
+            if survivors.iter().all(|(pid, _)| *pid == std::process::id()) {
                 break;
             }
             if Instant::now() >= deadline {
@@ -752,16 +757,14 @@ mod imp {
         Ok(())
     }
 
-    /// Any live host process whose executable is THIS binary — the monitor, the target,
-    /// and every nested level all run the harness image — other than the driver itself.
-    /// Returns the first survivor's pid/cmdline for a diagnostic, or `None` if clean.
+    /// Any live host process of the chain other than the driver itself. Returns the
+    /// first survivor's pid/role/cmdline for a diagnostic, or `None` if clean.
     fn scan_harness_survivors() -> Result<Option<String>, String> {
-        let survivors = scan_all_harness_pids()?;
-        for pid in survivors {
+        for (pid, role) in scan_all_harness_pids()? {
             if pid != std::process::id() {
                 let cmd = fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
                 return Ok(Some(format!(
-                    "pid {pid}: {}",
+                    "pid {pid} ({role}): {}",
                     cmd.replace('\0', " ").trim()
                 )));
             }
@@ -769,29 +772,43 @@ mod imp {
         Ok(None)
     }
 
-    fn scan_all_harness_pids() -> Result<Vec<u32>, String> {
+    /// The chain role of a process by its exe link, or `None` if not ours. Matched
+    /// mount-namespace-independently: `readlink(/proc/<pid>/exe)` returns the string the
+    /// process's OWN mount view recorded at exec, readable from any namespace. A nest
+    /// TARGET runs this very binary; a retained MONITOR is exec'd from the private
+    /// runtime image under the reserved runtime root — as `ld.so` on a DYNAMIC (glibc)
+    /// runtime and `nub-monitor` on a STATIC (musl) one, so match the ROOT, not a
+    /// basename (a basename match is blind to the glibc monitor, the process that owns
+    /// reap/relay/teardown); the outer bwrap HELPER is the dedicated helper path.
+    fn harness_role(exe: &Path, self_exe: &Path) -> Option<&'static str> {
+        if exe == self_exe {
+            Some("target")
+        } else if exe.starts_with("/dev/.nub-sandbox/runtime") {
+            Some("monitor")
+        } else if exe == Path::new("/usr/libexec/nub/nub-bwrap") {
+            Some("helper")
+        } else {
+            None
+        }
+    }
+
+    fn scan_all_harness_pids() -> Result<Vec<(u32, &'static str)>, String> {
         let self_exe = fs::read_link("/proc/self/exe")
             .map_err(|error| format!("reading self exe: {error}"))?;
-        let mut pids = Vec::new();
+        let mut found = Vec::new();
         for entry in fs::read_dir("/proc").map_err(|error| format!("reading /proc: {error}"))? {
             let entry = entry.map_err(|error| format!("reading a /proc entry: {error}"))?;
             let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
                 continue;
             };
-            // Same-uid processes of the whole chain have a readable exe link. Catch all
-            // three roles so "zero survivors" is not vacuous: nest TARGETS (this exe),
-            // the retained MONITORS (exec'd from the private runtime image at
-            // `.../runtime/nub-monitor`), and the outer bwrap HELPER. A foreign or gone
-            // process is skipped — it cannot be one of ours.
-            if let Ok(exe) = fs::read_link(format!("/proc/{pid}/exe")) {
-                let ours = exe == self_exe
-                    || exe.file_name().is_some_and(|name| name == "nub-monitor")
-                    || exe == Path::new("/usr/libexec/nub/nub-bwrap");
-                if ours {
-                    pids.push(pid);
-                }
+            // Same-uid processes of the whole chain have a readable exe link; a foreign
+            // or gone process is skipped — it cannot be one of ours.
+            if let Ok(exe) = fs::read_link(format!("/proc/{pid}/exe"))
+                && let Some(role) = harness_role(&exe, &self_exe)
+            {
+                found.push((pid, role));
             }
         }
-        Ok(pids)
+        Ok(found)
     }
 }

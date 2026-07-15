@@ -638,6 +638,11 @@ pub(crate) struct BootstrapSpec {
     pub(crate) env: BTreeMap<OsString, OsString>,
     pub(crate) network_filter: bool,
     pub(crate) deny_keyring: bool,
+    // Whether the keyring-deny seccomp permits keyctl(KEYCTL_JOIN_SESSION_KEYRING,
+    // NULL) — needed ONLY by a nesting launch so a nested monitor can establish its
+    // own isolation under the inherited outer filter. False for a single-level launch,
+    // whose seccomp is then byte-identical to the pre-nesting filter.
+    pub(crate) permit_keyring_join: bool,
     // A sealed, harness-only fault injection used to prove the monitor's
     // initial-stop deadline and cleanup path against a real child process.
     hold_before_initial_stop_for_harness: bool,
@@ -698,6 +703,7 @@ impl BootstrapSpec {
             env,
             network_filter: policy.net.enforce,
             deny_keyring: super::linux::protects_ambient_credentials(policy),
+            permit_keyring_join: spec.require_nesting,
             hold_before_initial_stop_for_harness: false,
             hold_after_exec_for_harness: false,
             hold_before_runtime_cleanup_for_harness: false,
@@ -749,6 +755,7 @@ impl BootstrapSpec {
             env: BTreeMap::new(),
             network_filter,
             deny_keyring,
+            permit_keyring_join: nesting,
             hold_before_initial_stop_for_harness: false,
             hold_after_exec_for_harness: false,
             hold_before_runtime_cleanup_for_harness: false,
@@ -775,7 +782,8 @@ impl BootstrapSpec {
             | (u16::from(self.hold_after_target_exited_for_harness) << 5)
             | (u16::from(self.fail_outer_status_after_cleanup_for_harness) << 6)
             | (u16::from(self.deny_keyring) << 7)
-            | (u16::from(self.hold_after_completion_request_for_harness) << 8);
+            | (u16::from(self.hold_after_completion_request_for_harness) << 8)
+            | (u16::from(self.permit_keyring_join) << 9);
         put_u16(&mut out, flags);
         out.extend_from_slice(&self.session);
         out.extend_from_slice(&self.release);
@@ -811,7 +819,7 @@ impl BootstrapSpec {
             return Err(invalid_data("unsupported sandbox bootstrap version"));
         }
         let flags = cursor.u16()?;
-        if flags & !0b1_1111_1111 != 0 {
+        if flags & !0b11_1111_1111 != 0 {
             return Err(invalid_data("unknown sandbox bootstrap flags"));
         }
         let session = cursor.array::<32>()?;
@@ -857,6 +865,7 @@ impl BootstrapSpec {
             env,
             network_filter: flags & 1 != 0,
             deny_keyring: flags & 128 != 0,
+            permit_keyring_join: flags & 512 != 0,
             hold_before_initial_stop_for_harness: flags & 2 != 0,
             hold_after_exec_for_harness: flags & 4 != 0,
             hold_before_runtime_cleanup_for_harness: flags & 8 != 0,
@@ -4590,8 +4599,12 @@ fn create_stopped_target(
     spec: &BootstrapSpec,
 ) -> io::Result<(StoppedTarget, TargetStoppedAttestation)> {
     let prepared_exec = PreparedTargetExec::new(spec)?;
-    let seccomp = super::linux::build_seccomp(spec.network_filter, spec.deny_keyring)
-        .map_err(|error| io::Error::other(format!("building target seccomp: {error}")))?;
+    let seccomp = super::linux::build_seccomp(
+        spec.network_filter,
+        spec.deny_keyring,
+        spec.permit_keyring_join,
+    )
+    .map_err(|error| io::Error::other(format!("building target seccomp: {error}")))?;
     let (gate_reader, gate_writer) = pipe_files(false)?;
     let (error_reader, error_writer) = pipe_files(true)?;
     let gate_reader_fd = gate_reader.as_raw_fd();
@@ -6028,6 +6041,7 @@ fn exercise_monitor_harness_case(
         env,
         network_filter: case.network_filter(),
         deny_keyring: false,
+        permit_keyring_join: false,
         hold_before_initial_stop_for_harness: matches!(
             case,
             State5HarnessCase::InitialStopDeadline
@@ -8750,6 +8764,7 @@ mod tests {
             )]),
             network_filter: true,
             deny_keyring: true,
+            permit_keyring_join: false,
             hold_before_initial_stop_for_harness: false,
             hold_after_exec_for_harness: false,
             hold_before_runtime_cleanup_for_harness: false,

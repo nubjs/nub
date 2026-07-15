@@ -204,12 +204,25 @@ pub(crate) fn preflight(
     })?);
     masks = merge_masks(masks);
     if spec.require_nesting {
-        // Any remaining mask WITHIN /proc (e.g. a user `!/proc/...` deny) would also
-        // block a nested child's procfs mount; drop them for a nesting launch. Masks of
-        // ALTERNATE procfs mounts (outside /proc) do not affect /proc visibility and
-        // are retained.
+        // A mask WITHIN /proc breaks fs_fully_visible and would block a nested child's
+        // procfs mount. The keyring metadata masks are already skipped for nesting
+        // above, so any mask under /proc here is a USER-authored `!/proc/...` deny. Do
+        // NOT silently drop a user-requested restriction: fail CLOSED (fail-safe) so the
+        // caller sees the incompatibility, rather than launch with the deny quietly
+        // gone. Alternate-procfs masks (outside /proc) never reach this branch.
         let proc_root = Path::new("/proc");
-        masks.retain(|mask| mask.path != proc_root && !mask.path.starts_with("/proc/"));
+        if let Some(mask) = masks
+            .iter()
+            .find(|mask| mask.path == proc_root || mask.path.starts_with("/proc/"))
+        {
+            return Err(Degradation {
+                lost: vec!["fs-read-deny".to_string()],
+                reason: Some(format!(
+                    "a nesting sandbox cannot also deny a path under /proc ({}): the kernel requires /proc fully visible so a nested child can mount its own procfs — remove the /proc deny or disable nesting",
+                    mask.path.display()
+                )),
+            });
+        }
     }
     validate_reserved_runtime_view(&cwd, &entry_program, &mount_plan, &masks).map_err(
         |reason| Degradation {
@@ -1584,16 +1597,17 @@ fn trusted_system_candidate_metadata(uid: u32, mode: u32) -> bool {
 }
 
 /// The dedicated helper's owner gate, tolerant of a nested user namespace. It admits
-/// the host view (root-owned) OR a nested view where the host-root owner is UNMAPPED
-/// and `stat` therefore reports the kernel overflow uid — the exact case a level-2+
-/// composition hits when it opens the same read-only host helper from inside its own
-/// user namespace (root maps to nobody). Group/other write is forbidden in both cases
-/// (mode is not uid-mapped). This owner check is defense-in-depth ONLY: the caller
-/// hard-verifies the pinned helper fd against the packaged-build digest, which is the
-/// actual tamper-evidence and is unaffected by the userns owner mapping — so a
-/// substituted helper is caught by the digest regardless of the reported owner. The
-/// overflow uid can only be observed for a host-root file from a nested userns; in the
-/// initial userns root maps to 0, so this never widens the level-1 (host) admission.
+/// the host view (root-owned) OR a view where the file's owner is UNMAPPED and `stat`
+/// therefore reports the kernel overflow uid — the exact case a level-2+ composition
+/// hits when it opens the same read-only host helper from inside its own user namespace
+/// (host root maps to nobody). Group/other write is forbidden in both cases (mode is
+/// not uid-mapped). This owner check is defense-in-depth ONLY and is not, on its own,
+/// meant to be tamper-evidence: a genuinely nobody-owned (overflow) file would also
+/// pass it. The caller hard-verifies the pinned helper fd against the packaged-build
+/// digest, which IS the tamper-evidence and is unaffected by the userns owner mapping —
+/// so a substituted helper is caught by the digest regardless of the reported owner.
+/// In the initial (host) userns a root-owned file reports uid 0, so accepting the
+/// overflow uid never widens the level-1 admission (there it is genuinely uid 0).
 fn trusted_helper_metadata(uid: u32, mode: u32) -> bool {
     (uid == 0 || uid == overflow_uid()) && mode & 0o022 == 0
 }
@@ -2039,6 +2053,7 @@ struct SandboxSyscalls {
 pub(super) fn build_seccomp(
     restrict_network: bool,
     deny_keyring: bool,
+    permit_keyring_join: bool,
 ) -> Result<Option<BpfProgram>, String> {
     if !restrict_network && !deny_keyring {
         return Ok(None);
@@ -2049,6 +2064,7 @@ pub(super) fn build_seccomp(
         arch,
         restrict_network,
         deny_keyring,
+        permit_keyring_join,
         SandboxSyscalls {
             socket: libc::SYS_socket,
             io_uring_setup: libc::SYS_io_uring_setup,
@@ -2064,6 +2080,7 @@ fn build_seccomp_for(
     arch: TargetArch,
     restrict_network: bool,
     deny_keyring: bool,
+    permit_keyring_join: bool,
     syscalls: SandboxSyscalls,
 ) -> Result<BpfProgram, String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
@@ -2113,37 +2130,43 @@ fn build_seccomp_for(
         for syscall in [syscalls.add_key, syscalls.request_key] {
             rules.insert(syscall, Vec::new());
         }
-        // keyctl is denied EXCEPT the anonymous session-keyring join
-        // `keyctl(KEYCTL_JOIN_SESSION_KEYRING, NULL)` — the exact isolation primitive
-        // the (possibly NESTED) monitor uses to hand its child a fresh EMPTY session
-        // keyring. Without this carve-out a nested monitor inherits this filter and
-        // cannot establish its own isolation, so nested composition fails closed (the
-        // "inherited keyring seccomp must still permit creating the next monitor"
-        // invariant). The carve-out leaks nothing: a NULL-name join yields an empty
-        // keyring, while every credential read/search/update and any NAMED join (which
-        // could re-attach an ancestor keyring holding credentials) still EPERMs. Rules
-        // are OR'd, so keyctl matches -> EPERM whenever the option is not the join OR
-        // the name pointer is non-NULL; only `(join, NULL)` falls through to Allow.
-        rules.insert(
-            syscalls.keyctl,
-            vec![
-                SeccompRule::new(vec![
-                    SeccompCondition::new(
-                        0,
-                        SeccompCmpArgLen::Dword,
-                        SeccompCmpOp::Ne,
-                        libc::KEYCTL_JOIN_SESSION_KEYRING as u64,
-                    )
-                    .map_err(|e| format!("keyring option condition: {e}"))?,
-                ])
-                .map_err(|e| format!("keyring option rule: {e}"))?,
-                SeccompRule::new(vec![
-                    SeccompCondition::new(1, SeccompCmpArgLen::Qword, SeccompCmpOp::Ne, 0)
-                        .map_err(|e| format!("keyring name condition: {e}"))?,
-                ])
-                .map_err(|e| format!("keyring name rule: {e}"))?,
-            ],
-        );
+        if permit_keyring_join {
+            // A NESTING launch's keyctl is denied EXCEPT the anonymous session-keyring
+            // join `keyctl(KEYCTL_JOIN_SESSION_KEYRING, NULL)` — the exact isolation
+            // primitive the nested monitor uses (under THIS inherited filter) to hand
+            // ITS child a fresh EMPTY session keyring. Without the carve-out a nested
+            // monitor cannot establish its own isolation, so composition fails closed
+            // (the "inherited keyring seccomp must still permit creating the next
+            // monitor" invariant). It leaks nothing: a NULL-name join yields an empty
+            // keyring, while every credential read/search/update and any NAMED join
+            // (which could re-attach an ancestor keyring holding credentials) still
+            // EPERMs. Rules are OR'd, so keyctl matches -> EPERM whenever the option is
+            // not the join OR the name pointer is non-NULL; only `(join, NULL)` Allows.
+            // A single-level launch (permit_keyring_join=false) keeps the strict
+            // deny-all below, so its filter is byte-identical to the pre-nesting one.
+            rules.insert(
+                syscalls.keyctl,
+                vec![
+                    SeccompRule::new(vec![
+                        SeccompCondition::new(
+                            0,
+                            SeccompCmpArgLen::Dword,
+                            SeccompCmpOp::Ne,
+                            libc::KEYCTL_JOIN_SESSION_KEYRING as u64,
+                        )
+                        .map_err(|e| format!("keyring option condition: {e}"))?,
+                    ])
+                    .map_err(|e| format!("keyring option rule: {e}"))?,
+                    SeccompRule::new(vec![
+                        SeccompCondition::new(1, SeccompCmpArgLen::Qword, SeccompCmpOp::Ne, 0)
+                            .map_err(|e| format!("keyring name condition: {e}"))?,
+                    ])
+                    .map_err(|e| format!("keyring name rule: {e}"))?,
+                ],
+            );
+        } else {
+            rules.insert(syscalls.keyctl, Vec::new());
+        }
     }
 
     let program = SeccompFilter::new(
@@ -2522,6 +2545,7 @@ mod tests {
             TargetArch::x86_64,
             true,
             true,
+            false,
             SandboxSyscalls {
                 socket: i64::from(X86_64_SOCKET),
                 io_uring_setup: i64::from(IO_URING_SETUP),
@@ -2586,6 +2610,7 @@ mod tests {
                 arch,
                 true,
                 true,
+                false,
                 SandboxSyscalls {
                     socket: i64::from(GENERIC_SOCKET),
                     io_uring_setup: i64::from(IO_URING_SETUP),
@@ -2641,12 +2666,13 @@ mod tests {
         let allowed = u32::from(SeccompAction::Allow);
         let killed = u32::from(SeccompAction::KillProcess);
 
-        assert!(build_seccomp(false, false).unwrap().is_none());
-        let build = |network, keyring| {
+        assert!(build_seccomp(false, false, false).unwrap().is_none());
+        let build = |network, keyring, permit_join| {
             build_seccomp_for(
                 TargetArch::x86_64,
                 network,
                 keyring,
+                permit_join,
                 SandboxSyscalls {
                     socket: SOCKET,
                     io_uring_setup: IO_URING_SETUP,
@@ -2657,9 +2683,11 @@ mod tests {
             )
             .unwrap()
         };
-        let network = build(true, false);
-        let keyring = build(false, true);
-        let union = build(true, true);
+        // Single-level filters (permit_keyring_join=false): the keyring dimension keeps
+        // the strict deny-all keyctl of the pre-nesting filter.
+        let network = build(true, false, false);
+        let keyring = build(false, true, false);
+        let union = build(true, true, false);
 
         for syscall in [KEYCTL as u32, ADD_KEY as u32, REQUEST_KEY as u32] {
             assert_eq!(
@@ -2676,12 +2704,26 @@ mod tests {
                 denied,
             );
         }
-        // The nested-monitor carve-out: the ANONYMOUS session-keyring join is the one
-        // keyctl the deny filter must permit (so a nested monitor can isolate its
-        // child), while a NAMED join — which could re-attach an ancestor keyring — and
-        // every other keyctl option stay denied.
+        // A single-level keyring filter denies EVERY keyctl including the anonymous
+        // session-keyring join — byte-identical to the pre-nesting filter.
         let join = libc::KEYCTL_JOIN_SESSION_KEYRING as u64;
         for program in [&keyring, &union] {
+            assert_eq!(
+                evaluate_bpf(
+                    program,
+                    &seccomp_data(KEYCTL as u32, AUDIT_ARCH_X86_64, join)
+                ),
+                denied,
+                "single-level keyring filter must still deny the join (byte-identical)",
+            );
+        }
+        // The nested-monitor carve-out (permit_keyring_join=true): the ANONYMOUS
+        // session-keyring join is the one keyctl a nesting filter must permit (so a
+        // nested monitor can isolate its child), while a NAMED join — which could
+        // re-attach an ancestor keyring — and every other keyctl option stay denied.
+        let keyring_nesting = build(false, true, true);
+        let union_nesting = build(true, true, true);
+        for program in [&keyring_nesting, &union_nesting] {
             assert_eq!(
                 evaluate_bpf(
                     program,
@@ -2696,7 +2738,13 @@ mod tests {
                     &seccomp_data_arg1(KEYCTL as u32, AUDIT_ARCH_X86_64, join, 0x7fff_0000),
                 ),
                 denied,
-                "a NAMED session-keyring join must stay denied",
+                "a NAMED session-keyring join must stay denied even when nesting",
+            );
+            // A non-join keyctl option stays denied under the nesting filter too.
+            assert_eq!(
+                evaluate_bpf(program, &seccomp_data(KEYCTL as u32, AUDIT_ARCH_X86_64, 0)),
+                denied,
+                "a non-join keyctl option must stay denied under the nesting filter",
             );
         }
         for program in [&network, &keyring, &union] {
@@ -2750,7 +2798,7 @@ mod tests {
             }
         }
 
-        let program = build_seccomp(true, false).unwrap().unwrap();
+        let program = build_seccomp(true, false, false).unwrap().unwrap();
         let child = unsafe { libc::fork() };
         assert!(
             child >= 0,
