@@ -22,7 +22,6 @@
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -135,13 +134,15 @@ pub(crate) fn splice_unix_tcp(uds: UnixStream, tcp: std::net::TcpStream) {
 /// so a crash-orphaned dir is GC-able by dead-pid. The short name keeps the UDS path well
 /// under the 108-byte `sun_path` limit.
 fn make_socket_dir() -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
     let mut rand = [0u8; 8];
     getrandom::getrandom(&mut rand)
         .map_err(|error| io::Error::other(format!("socket-dir nonce: {error}")))?;
     let nonce = rand.iter().fold(0u64, |acc, &b| (acc << 8) | b as u64);
     let dir = std::env::temp_dir().join(format!("nub-net-{}-{:016x}", std::process::id(), nonce));
-    fs::create_dir(&dir)?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    // Create 0700 ATOMICALLY (mode set at mkdir, before the socket is bound), so no window
+    // exists where a co-resident user could traverse the dir to the relay socket.
+    fs::DirBuilder::new().mode(0o700).create(&dir)?;
     Ok(dir)
 }
 
