@@ -633,6 +633,8 @@ pub struct SpawnConfig<'a> {
     /// a node bin run via `nub exec -r` executes IN the member, seeing its own
     /// `.env` / Node pin / `.bin` chain rather than the workspace root's.
     pub cwd: &'a Path,
+    /// Resolved project/global Node options, already validated against this Node.
+    pub runtime_node_options: &'a [String],
 }
 
 /// The result of spawning a Node process.
@@ -994,6 +996,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         if let Some(ref inj) = injection {
             node_opts_parts.push(inj.node_options_token());
         }
+        node_opts_parts.extend(config.runtime_node_options.iter().cloned());
         // Coverage-exclude nub's own runtime (R9) — via NODE_OPTIONS, not just argv.
         // The CLI-arg form at the `cmd.arg(glob)` site above only reaches the DIRECT
         // child nub spawns. But the test-runner coverage fixtures spawn the actual
@@ -1682,6 +1685,24 @@ pub fn compute_augmentation_env(
     compat_mode: bool,
     pnp: Option<&Path>,
 ) -> Option<AugmentationEnv> {
+    compute_augmentation_env_with_options(
+        nub_binary,
+        node_path,
+        node_version,
+        compat_mode,
+        pnp,
+        &[],
+    )
+}
+
+pub fn compute_augmentation_env_with_options(
+    nub_binary: &Path,
+    node_path: &Path,
+    node_version: super::version::NodeVersion,
+    compat_mode: bool,
+    pnp: Option<&Path>,
+    runtime_node_options: &[String],
+) -> Option<AugmentationEnv> {
     if compat_mode {
         return None;
     }
@@ -1738,6 +1759,7 @@ pub fn compute_augmentation_env(
         ));
     }
     node_opts_parts.push(injection.node_options_token());
+    node_opts_parts.extend(runtime_node_options.iter().cloned());
     // Web Storage (mirrors `spawn_node`): always inject
     // `--experimental-webstorage` on the flag-needed band (22.4–24.x) so a
     // script-run child shell's `node` has `sessionStorage` out of the box, with no
@@ -1961,6 +1983,8 @@ pub(crate) const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTOR
 /// deleted by the preload, so it inherits into augmented descendants (which run
 /// the same preload via NODE_OPTIONS) and they advertise the marker too.
 pub(crate) const VERSION_ENV: &str = "__NUB_VERSION";
+
+pub const RUNTIME_CONFIG_ENV: &str = "__NUB_RUNTIME_CONFIG";
 
 /// Tells nub's fast-tier preload to register its module hooks via the ASYNC
 /// loader-worker path (`module.register`) instead of the sync

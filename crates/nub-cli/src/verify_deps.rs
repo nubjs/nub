@@ -149,6 +149,15 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
 /// unknown-pnpm-version default, and every non-pnpm incumbent keep reading the
 /// neutral project `.npmrc` — unchanged from before this key was yaml-aware.
 fn resolve_policy(project: &Project) -> Policy {
+    if let Some(value) = crate::project_config::effective_config().and_then(|config| {
+        config
+            .sources
+            .get(&crate::project_config::ConfigKey::VerifyDepsBeforeRun)
+            .filter(|source| source.kind != crate::project_config::ConfigSourceKind::Defaults)?;
+        config.values.verify_deps_before_run.as_ref()
+    }) {
+        return project_config_policy(value);
+    }
     if let Some(p) = std::env::var("NUB_VERIFY_DEPS_BEFORE_RUN")
         .ok()
         .and_then(|v| parse_policy(&v))
@@ -171,6 +180,18 @@ fn resolve_policy(project: &Project) -> Policy {
         return p;
     }
     Policy::Warn
+}
+
+fn project_config_policy(value: &crate::project_config::VerifyDepsBeforeRun) -> Policy {
+    use crate::project_config::VerifyDepsBeforeRun;
+    match value {
+        VerifyDepsBeforeRun::Enabled(false) => Policy::Off,
+        VerifyDepsBeforeRun::Error => Policy::Error,
+        VerifyDepsBeforeRun::Enabled(true)
+        | VerifyDepsBeforeRun::Install
+        | VerifyDepsBeforeRun::Warn
+        | VerifyDepsBeforeRun::Prompt => Policy::Warn,
+    }
 }
 
 /// pnpm incumbency + declared major at `workspace_root`, gating whether
@@ -411,6 +432,27 @@ mod tests {
         assert_eq!(parse_policy("  ERROR "), Some(Policy::Error));
         assert_eq!(parse_policy("nonsense"), None);
         assert_eq!(parse_policy(""), None);
+    }
+
+    #[test]
+    fn maps_the_typed_project_policy_without_reparsing() {
+        use crate::project_config::VerifyDepsBeforeRun;
+        assert_eq!(
+            project_config_policy(&VerifyDepsBeforeRun::Enabled(false)),
+            Policy::Off
+        );
+        assert_eq!(
+            project_config_policy(&VerifyDepsBeforeRun::Error),
+            Policy::Error
+        );
+        for value in [
+            VerifyDepsBeforeRun::Enabled(true),
+            VerifyDepsBeforeRun::Install,
+            VerifyDepsBeforeRun::Warn,
+            VerifyDepsBeforeRun::Prompt,
+        ] {
+            assert_eq!(project_config_policy(&value), Policy::Warn);
+        }
     }
 
     #[test]

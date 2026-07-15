@@ -323,6 +323,46 @@ pub struct EffectiveConfig {
 
 static EFFECTIVE_CONFIG: OnceLock<EffectiveConfig> = OnceLock::new();
 
+pub(crate) const RUNTIME_CONFIG_ENV: &str = nub_core::node::spawn::RUNTIME_CONFIG_ENV;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RuntimeConfig {
+    pub node_compat: bool,
+    pub preload: Vec<String>,
+    pub node_options: Vec<String>,
+    pub v8_flags: Vec<String>,
+    pub env: RuntimeEnv,
+    pub define: BTreeMap<String, String>,
+    pub loader: BTreeMap<String, String>,
+    pub conditions: Vec<String>,
+    pub tsconfig: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "sources", rename_all = "camelCase")]
+pub(crate) enum RuntimeEnv {
+    Default,
+    Disabled,
+    Sources(Vec<PathBuf>),
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            node_compat: false,
+            preload: Vec::new(),
+            node_options: Vec::new(),
+            v8_flags: Vec::new(),
+            env: RuntimeEnv::Default,
+            define: BTreeMap::new(),
+            loader: BTreeMap::new(),
+            conditions: Vec::new(),
+            tsconfig: None,
+        }
+    }
+}
+
 // ── sandbox skeleton ─────────────────────────────────────────────────────────
 
 /// The `sandbox` wrapper trichotomy (skeleton). Shape-validated here; the Phase-1
@@ -622,6 +662,129 @@ fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
     Some(values)
 }
 
+pub(crate) fn runtime_config() -> Result<RuntimeConfig> {
+    if let Some(serialized) = std::env::var_os(RUNTIME_CONFIG_ENV) {
+        let runtime: RuntimeConfig = serde_json::from_slice(serialized.as_encoded_bytes())
+            .map_err(|error| ConfigError::Value {
+                path: "runtime".to_string(),
+                message: format!("invalid inherited runtime snapshot: {error}"),
+            })?;
+        return Ok(runtime);
+    }
+
+    let Some(effective) = effective_config() else {
+        return Ok(RuntimeConfig::default());
+    };
+    effective.runtime_config()
+}
+
+impl EffectiveConfig {
+    fn source_root(&self, key: ConfigKey) -> &Path {
+        self.sources
+            .get(&key)
+            .map(|source| source.root.as_path())
+            .unwrap_or(self.cwd.as_path())
+    }
+
+    fn resolve_path(&self, key: ConfigKey, raw: &str) -> PathBuf {
+        if let Some(rest) = raw.strip_prefix("~/")
+            && let Some(home) = dirs_next::home_dir()
+        {
+            return home.join(rest);
+        }
+        let path = Path::new(raw);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.source_root(key).join(path)
+        }
+    }
+
+    fn runtime_config(&self) -> Result<RuntimeConfig> {
+        let values = &self.values;
+        let preload = values
+            .preload
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|value| {
+                if is_path_like(value) {
+                    self.resolve_path(ConfigKey::Preload, value)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
+
+        let env = match values.env.as_ref().unwrap_or(&EnvSetting::Default) {
+            EnvSetting::Default => RuntimeEnv::Default,
+            EnvSetting::Disabled => RuntimeEnv::Disabled,
+            EnvSetting::Sources(sources) => RuntimeEnv::Sources(
+                sources
+                    .iter()
+                    .map(|source| {
+                        let expanded = expand_runtime_path(source);
+                        self.resolve_path(ConfigKey::Env, &expanded)
+                    })
+                    .collect(),
+            ),
+        };
+
+        let tsconfig = values
+            .tsconfig
+            .as_deref()
+            .map(|path| self.resolve_path(ConfigKey::Tsconfig, path))
+            .map(|path| path.to_string_lossy().into_owned());
+
+        if let Some(path) = tsconfig.as_deref() {
+            let text = std::fs::read_to_string(path).map_err(|error| ConfigError::Value {
+                path: "tsconfig".into(),
+                message: format!("cannot read `{path}`: {error}"),
+            })?;
+            let parsed = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
+                .map_err(|error| ConfigError::Value {
+                    path: "tsconfig".into(),
+                    message: format!("cannot parse `{path}`: {error}"),
+                })?;
+            if !matches!(parsed, Some(Value::Object(_))) {
+                return Err(ConfigError::Value {
+                    path: "tsconfig".into(),
+                    message: format!("`{path}` must contain a JSON object"),
+                });
+            }
+        }
+
+        Ok(RuntimeConfig {
+            node_compat: values.node_compat.unwrap_or(false),
+            preload,
+            node_options: values.node_options.clone().unwrap_or_default(),
+            v8_flags: values.v8_flags.clone().unwrap_or_default(),
+            env,
+            define: values.define.clone().unwrap_or_default(),
+            loader: values.loader.clone().unwrap_or_default(),
+            conditions: values.conditions.clone().unwrap_or_default(),
+            tsconfig,
+        })
+    }
+}
+
+fn is_path_like(value: &str) -> bool {
+    value.starts_with('.')
+        || value.starts_with('/')
+        || value.starts_with('~')
+        || Path::new(value).is_absolute()
+}
+
+fn expand_runtime_path(value: &str) -> String {
+    let key = "__NUB_CONFIG_ENV_PATH_VALUE__";
+    let mut values: std::collections::HashMap<String, String> = std::env::vars().collect();
+    values.insert(key.to_string(), value.to_string());
+    nub_core::workspace::env::expand_env_map(&mut values);
+    values.remove(key).unwrap_or_default()
+}
+
 fn resolve_effective_config(
     cwd: &Path,
     global: Option<LoadedConfig>,
@@ -866,6 +1029,31 @@ fn as_string_map(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
         .collect()
 }
 
+/// Per-extension overrides are intentionally limited to transform capabilities
+/// the runtime already implements. New names are capability decisions, not a
+/// permissive config-parser fallback.
+fn validate_loader(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
+    const LOADERS: &[&str] = &["text", "jsonc", "json5", "toml", "yaml", "ts", "tsx", "jsx"];
+    let values = as_string_map(v, path)?;
+    for (extension, loader) in &values {
+        if !extension.starts_with('.') || extension.len() == 1 {
+            return Err(ConfigError::Value {
+                path: child(path, extension),
+                message: "extension keys must start with `.` and include a suffix".into(),
+            });
+        }
+        if !LOADERS.contains(&loader.as_str()) {
+            return Err(ConfigError::Value {
+                path: child(path, extension),
+                message: format!(
+                    "unsupported loader `{loader}`; expected text|jsonc|json5|toml|yaml|ts|tsx|jsx"
+                ),
+            });
+        }
+    }
+    Ok(values)
+}
+
 /// Reject any key of `obj` not in `allowed` (fail-loud). The blessed `$schema`
 /// key is tolerated at the root only (the caller adds it to `allowed` there).
 fn reject_unknown_keys(
@@ -911,7 +1099,7 @@ fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> 
         cfg.define = Some(as_string_map(v, "define")?);
     }
     if let Some(v) = obj.get("loader") {
-        cfg.loader = Some(as_string_map(v, "loader")?);
+        cfg.loader = Some(validate_loader(v, "loader")?);
     }
     if let Some(v) = obj.get("conditions") {
         cfg.conditions = Some(as_string_array(v, "conditions")?);
@@ -1243,6 +1431,79 @@ mod tests {
         );
         assert_eq!(cfg.conditions, Some(vec!["worker".into()]));
         assert_eq!(cfg.tsconfig.as_deref(), Some("./tsconfig.runtime.json"));
+    }
+
+    #[test]
+    fn loader_accepts_only_settled_runtime_capabilities() {
+        for loader in ["text", "jsonc", "json5", "toml", "yaml", "ts", "tsx", "jsx"] {
+            parse_project_config(&format!(r#"{{ "loader": {{ ".asset": "{loader}" }} }}"#))
+                .unwrap();
+        }
+        for loader in ["file", "css", "wasm", "html", "json", "js"] {
+            let error =
+                parse_project_config(&format!(r#"{{ "loader": {{ ".asset": "{loader}" }} }}"#))
+                    .unwrap_err();
+            assert!(
+                matches!(error, ConfigError::Value { ref path, .. } if path == "loader..asset"),
+                "{loader}: {error}"
+            );
+        }
+        assert!(matches!(
+            parse_project_config(r#"{ "loader": { "asset": "text" } }"#),
+            Err(ConfigError::Value { .. })
+        ));
+    }
+
+    #[test]
+    fn runtime_snapshot_anchors_paths_to_the_winning_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("project");
+        let cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(project_root.join("runtime.jsonc"), "{}").unwrap();
+        let project = LoadedConfig {
+            source: ConfigSource::file(ConfigSourceKind::Project, &project_root.join(FILE_NAME)),
+            values: ProjectConfig {
+                preload: Some(vec!["./preload.mjs".into(), "bare-package".into()]),
+                env: Some(EnvSetting::Sources(vec!["./custom.env".into()])),
+                tsconfig: Some("./runtime.jsonc".into()),
+                ..ProjectConfig::default()
+            },
+        };
+        let snapshot = resolve_effective_config(
+            &cwd,
+            None,
+            Some(project),
+            ConfigOverlays {
+                defaults: ProjectConfig::builtin_defaults(),
+                ..ConfigOverlays::default()
+            },
+        )
+        .runtime_config()
+        .unwrap();
+        assert_eq!(
+            snapshot.preload,
+            vec![
+                project_root
+                    .join("./preload.mjs")
+                    .to_string_lossy()
+                    .into_owned(),
+                "bare-package".to_string()
+            ]
+        );
+        assert_eq!(
+            snapshot.env,
+            RuntimeEnv::Sources(vec![project_root.join("./custom.env")])
+        );
+        assert_eq!(
+            snapshot.tsconfig.as_deref(),
+            Some(
+                project_root
+                    .join("./runtime.jsonc")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
     }
 
     #[test]
