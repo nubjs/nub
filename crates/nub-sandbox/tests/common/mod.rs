@@ -2,7 +2,7 @@
 //! builder over fixed home anchors + a controlled ambient env.
 
 use nub_sandbox::CommandRunner;
-use nub_sandbox::compiler::CompileCtx;
+use nub_sandbox::compiler::{CompileCtx, ScopeCapabilities};
 use nub_sandbox::matcher::Homes;
 use std::collections::BTreeMap;
 
@@ -49,7 +49,8 @@ pub fn homes() -> Homes {
     }
 }
 
-/// Build a ctx with the given trust + ambient env pairs.
+/// Build a ctx with the given trust + ambient env pairs. `trusted` maps to the
+/// single-block scope capabilities: approved (full) vs dependency-controlled (none).
 pub fn ctx(trusted: bool, env: &[(&str, &str)]) -> CompileCtx {
     let ambient: BTreeMap<String, String> = env
         .iter()
@@ -58,8 +59,19 @@ pub fn ctx(trusted: bool, env: &[(&str, &str)]) -> CompileCtx {
     CompileCtx {
         homes: homes(),
         cwd: homes().project,
-        trusted,
+        caps: caps(trusted),
         ambient_env: ambient,
         runner: Box::new(StubRunner),
+    }
+}
+
+/// The `ScopeCapabilities` for a trusted/untrusted scope — approved user config gets
+/// the full set, a dependency-controlled scope none. Exposed so chain tests can label
+/// each scope's identity independently.
+pub fn caps(trusted: bool) -> ScopeCapabilities {
+    if trusted {
+        ScopeCapabilities::approved()
+    } else {
+        ScopeCapabilities::dependency()
     }
 }

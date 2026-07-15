@@ -3141,7 +3141,8 @@ fn run_sandboxed(
     let ctx = nub_sandbox::CompileCtx::new(
         sandbox_homes(&cwd),
         cwd.clone(),
-        true,
+        // `--sandbox <file>` is the user's own approved config (one scope) — full caps.
+        nub_sandbox::ScopeCapabilities::approved(),
         ambient_env().context("capturing the sandbox target environment")?,
     );
     let (policy, warnings) = nub_sandbox::compile_with_warnings(&block, &ctx)

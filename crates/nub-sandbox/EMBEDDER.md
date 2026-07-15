@@ -61,10 +61,10 @@ drive many apply calls.
 ## Minimal usage sketch
 
 Grounded in the real signatures (`Homes` is a plain public-field struct the embedder
-fills from the host; `CompileCtx::new` takes homes/cwd/trust/ambient-env):
+fills from the host; `CompileCtx::new` takes homes/cwd/single-block-caps/ambient-env):
 
 ```rust
-use nub_sandbox::{apply_with_runtime, compile, earliest_bootstrap, CommandSpec, CompileCtx, Homes};
+use nub_sandbox::{apply_with_runtime, compile, earliest_bootstrap, CommandSpec, CompileCtx, Homes, ScopeCapabilities};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -81,7 +81,7 @@ let homes = Homes {
 let ctx = CompileCtx::new(
     homes,
     std::env::current_dir()?,
-    /* trusted = */ true,                            // gates `$(…)` — see trust boundary
+    ScopeCapabilities::approved(),                   // this block's caps — see the capability boundary
     std::env::vars().collect::<BTreeMap<_, _>>(),    // ambient env the child env is built from
 );
 
@@ -129,7 +129,8 @@ Two rules the sketch encodes:
 | Type | Role |
 | --- | --- |
 | `&serde_json::Value` | the surface `sandbox` block, already parsed by the embedder |
-| `CompileCtx { homes, cwd, trusted, ambient_env, runner }` | host context — symbolic-root anchors, cwd, the `$(…)` trust flag, the ambient env snapshot, the command runner (production shells out; tests inject a stub via `CommandRunner`) |
+| `CompileCtx { homes, cwd, caps, ambient_env, runner }` | host context — symbolic-root anchors, cwd, the single-block `ScopeCapabilities`, the ambient env snapshot, the command runner (production shells out; tests inject a stub via `CommandRunner`) |
+| `ScopeCapabilities { env_substitution, credential_broker }` | the dynamic capabilities a config SCOPE holds — approved user config (`nub.jsonc`/`scriptsMeta`) gets both, dependency-controlled config (`dependenciesMeta`) neither; fs `$(…)` is unconditional and not gated |
 | `Homes { home, tmp, cache, project }` | per-OS anchors `~` / `<tmp>` / `<cache>` / `./` expand against |
 
 **Through — the IR (`SandboxPolicy`):** flat, ordered, per-axis, fully resolved
@@ -177,13 +178,20 @@ engine defects — they define the seam. Full detail + bounds:
    strip inherited ACEs, or a nub-owned store). Ancestor traverse grants are NOT
    needed (traverse-bypass covers intermediate dirs).
 
-5. **Untrusted-config trust boundary.** The engine CANNOT detect trust — the CALLER
-   decides. `CompileCtx::trusted` gates `$(…)` command substitution: TRUE only for the
-   user's own config (`nub.jsonc` / `scriptsMeta`), FALSE for a `dependenciesMeta`
-   grant (an untrusted `$(…)` is a hard `CompileError::UntrustedSubstitution`, never
-   exec'd). The launcher is responsible for securing untrusted-config usage (e.g.
-   PR-CI, where the config itself is attacker-influenced). A future untrusted tier's
-   tighten-only axis defaults are a front-end posture, not an engine mechanism.
+5. **Per-scope capability boundary.** The engine CANNOT detect trust — the CALLER
+   assigns each scope its `ScopeCapabilities` by scope IDENTITY (never inferred from a
+   repository/checkout heuristic). Two independent, per-scope capabilities gate the
+   dynamic operations: `env_substitution` (`$(…)` command substitution in env and
+   inject-header values) and `credential_broker` (`net.inject`). Approved user config
+   (`nub.jsonc` / `scriptsMeta`) → `ScopeCapabilities::approved()` (both); dependency-
+   controlled config (`dependenciesMeta`) → `ScopeCapabilities::dependency()` (neither
+   — an ungranted `$(…)` is a hard `CompileError::UntrustedSubstitution`, an ungranted
+   `inject` a hard `CompileError::Shape`, never exec'd/brokered). Filesystem `$(…)` is
+   UNCONDITIONAL in every scope (an fs path is inert data). A single-block `compile`
+   uses `CompileCtx::caps`; a mixed chain assigns each `scope::ChainScope` its own caps,
+   so an outer approved scope may use `$(…)`/`inject` while an inner dependency scope in
+   the SAME compile is denied. The launcher is responsible for securing untrusted-config
+   usage (e.g. PR-CI, where the config itself is attacker-influenced).
 
 ## Net axis — proxy and the MITM tier
 

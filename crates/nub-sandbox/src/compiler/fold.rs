@@ -7,7 +7,7 @@
 use super::defaults;
 use super::env_grammar::{EnvType, parse_env_type};
 use super::resolve;
-use super::{CompileCtx, CompileError};
+use super::{CompileCtx, CompileError, ScopeCapabilities};
 use crate::matcher::path::expand_symbolic;
 use crate::policy::{
     CanonGlob, CredentialBroker, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsPolicy, FsRule,
@@ -422,6 +422,7 @@ fn splice_fs_defaults(ctx: &CompileCtx, out: &mut Vec<FsRule>) {
 pub fn fold_net(
     value: &Value,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
     parent: Option<&NetPolicy>,
 ) -> Result<NetPolicy, CompileError> {
@@ -449,7 +450,7 @@ pub fn fold_net(
                 if key == "..." {
                     return Err(CompileError::shape(&p, OBJECT_SENTINEL_MSG));
                 }
-                fold_net_object_value(key, val, ctx, &p, &mut policy)?;
+                fold_net_object_value(key, val, ctx, caps, &p, &mut policy)?;
             }
         }
         _ => {
@@ -495,13 +496,14 @@ fn fold_net_object_value(
     host: &str,
     val: &Value,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
     policy: &mut NetPolicy,
 ) -> Result<(), CompileError> {
     match val {
         Value::Bool(true) => push_net_rule(host, Effect::Allow, path, &mut policy.rules),
         Value::Bool(false) => push_net_rule(host, Effect::Deny, path, &mut policy.rules),
-        Value::Object(rule) => fold_net_rule_object(host, rule, ctx, path, policy),
+        Value::Object(rule) => fold_net_rule_object(host, rule, ctx, caps, path, policy),
         _ => Err(CompileError::shape(
             path,
             "net host value must be true, false, or a rule object (e.g. { \"inject\": { … } })",
@@ -519,6 +521,7 @@ fn fold_net_rule_object(
     host: &str,
     rule: &serde_json::Map<String, Value>,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
     policy: &mut NetPolicy,
 ) -> Result<(), CompileError> {
@@ -532,10 +535,11 @@ fn fold_net_rule_object(
             ));
         }
     }
-    // Credential brokering is a TRUSTED-ONLY capability. An untrusted grant
-    // (`dependenciesMeta`) must not be able to force TLS termination of an allowed host
-    // or inject ANY header (a literal value would otherwise slip past the `$(…)` gate).
-    if !ctx.trusted {
+    // Credential brokering is the `credential_broker` capability — approved user config
+    // only. A dependency-controlled scope must not be able to force TLS termination of an
+    // allowed host or inject ANY header (a literal value would otherwise slip past the
+    // per-scope `$(…)` gate below). Gated on THIS scope's caps, not a compile-wide flag.
+    if !caps.credential_broker {
         return Err(CompileError::shape(
             path,
             "credential brokering (`inject`) is a trusted-only capability — it is not permitted in an untrusted (dependenciesMeta) grant",
@@ -553,7 +557,7 @@ fn fold_net_rule_object(
     // `*.example.com` broker brokers exactly the hosts it would allow, at the user's
     // own risk (see `validate_broker_host`).
     validate_broker_host(host, path)?;
-    let injects = parse_inject(inject, ctx, &child(path, "inject"))?;
+    let injects = parse_inject(inject, ctx, caps, &child(path, "inject"))?;
     push_net_rule(host, Effect::Allow, path, &mut policy.rules)?;
     policy.brokers.push(CredentialBroker {
         host: crate::matcher::host::strip_trailing_dot(host).to_string(),
@@ -594,6 +598,7 @@ fn validate_broker_host(pattern: &str, path: &str) -> Result<(), CompileError> {
 fn parse_inject(
     value: &Value,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
 ) -> Result<Vec<HeaderInject>, CompileError> {
     let map = value.as_object().ok_or_else(|| {
@@ -613,7 +618,7 @@ fn parse_inject(
         let p = child(path, header);
         validate_header_name(header, &p)?;
         let raw_str = as_str(raw, &p)?;
-        let resolved = resolve_credential_value(raw_str, ctx, &p)?;
+        let resolved = resolve_credential_value(raw_str, ctx, caps, &p)?;
         if resolved.is_empty() {
             return Err(CompileError::shape(
                 &p,
@@ -637,14 +642,18 @@ fn parse_inject(
     Ok(out)
 }
 
-/// Resolve a credential value's `$(…)` through the trusted gate, mirroring env values.
+/// Resolve a credential value's `$(…)` through the `env_substitution` gate, mirroring
+/// env values (an inject value's `$(…)` is command substitution like any other, and
+/// gated on the same per-scope capability; the enclosing `credential_broker` gate has
+/// already admitted the inject block itself).
 fn resolve_credential_value(
     raw: &str,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
 ) -> Result<String, CompileError> {
     if resolve::has_substitution(raw) {
-        if !ctx.trusted {
+        if !caps.env_substitution {
             return Err(CompileError::untrusted_substitution(path));
         }
         resolve::resolve_with(raw, ctx.runner.as_ref())
@@ -762,6 +771,7 @@ fn push_net_rule(
 pub fn fold_env(
     value: &Value,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
     parent: Option<&EnvPolicy>,
 ) -> Result<EnvPolicy, CompileError> {
@@ -787,7 +797,7 @@ pub fn fold_env(
             construct_env(&entries, ctx, parent, &mut policy)?;
         }
         Value::Object(map) => {
-            let entries = parse_env_object(map, ctx, parent, path)?;
+            let entries = parse_env_object(map, ctx, caps, parent, path)?;
             construct_env(&entries, ctx, parent, &mut policy)?;
         }
         _ => {
@@ -909,6 +919,7 @@ fn parse_env_array(
 fn parse_env_object(
     map: &serde_json::Map<String, Value>,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     parent: Option<&EnvPolicy>,
     path: &str,
 ) -> Result<Vec<EnvEntry>, CompileError> {
@@ -950,7 +961,7 @@ fn parse_env_object(
         };
         reject_env_key_braces(&key, &p)?;
         let optional = optional || is_glob(&key);
-        let entry = parse_env_object_value(key, optional, val, ctx, &p)?;
+        let entry = parse_env_object_value(key, optional, val, ctx, caps, &p)?;
         out.push(entry);
     }
     Ok(out)
@@ -961,6 +972,7 @@ fn parse_env_object_value(
     optional: bool,
     val: &Value,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
 ) -> Result<EnvEntry, CompileError> {
     match val {
@@ -982,8 +994,8 @@ fn parse_env_object_value(
             key_match: KeyMatch::User,
             builtin: false,
         }),
-        Value::String(s) => parse_env_string_value(key, optional, s, ctx, path),
-        Value::Object(extras) => parse_env_extras(key, optional, extras, ctx, path),
+        Value::String(s) => parse_env_string_value(key, optional, s, ctx, caps, path),
+        Value::Object(extras) => parse_env_extras(key, optional, extras, ctx, caps, path),
         _ => Err(CompileError::shape(
             path,
             "env value must be a boolean, a type string, \"$(…)\", or an object",
@@ -996,9 +1008,10 @@ fn parse_env_string_value(
     optional: bool,
     s: &str,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
 ) -> Result<EnvEntry, CompileError> {
-    // `$(…)` resolver — trusted homes only.
+    // `$(…)` resolver — the `env_substitution` capability only.
     if resolve::has_substitution(s) {
         // Reject a glob-key literal BEFORE running the command (a glob key has no
         // single value to bind; without this the exec fires, then construct_env
@@ -1009,7 +1022,7 @@ fn parse_env_string_value(
                 "`$(…)` cannot be bound to a glob key",
             ));
         }
-        if !ctx.trusted {
+        if !caps.env_substitution {
             return Err(CompileError::untrusted_substitution(path));
         }
         let resolved = resolve::resolve_with(s, ctx.runner.as_ref())
@@ -1057,6 +1070,7 @@ fn parse_env_extras(
     optional_from_key: bool,
     extras: &serde_json::Map<String, Value>,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     path: &str,
 ) -> Result<EnvEntry, CompileError> {
     const ALLOWED: &[&str] = &["sensitive", "format", "value", "optional"];
@@ -1104,7 +1118,7 @@ fn parse_env_extras(
         }
         let raw = as_str(v, &child(path, "value"))?;
         let resolved = if resolve::has_substitution(raw) {
-            if !ctx.trusted {
+            if !caps.env_substitution {
                 return Err(CompileError::untrusted_substitution(&child(path, "value")));
             }
             resolve::resolve_with(raw, ctx.runner.as_ref())

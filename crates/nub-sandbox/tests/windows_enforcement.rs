@@ -525,7 +525,7 @@ mod win {
         let ctx = nub_sandbox::CompileCtx {
             homes,
             cwd: f.work.clone(),
-            trusted: true,
+            caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
             ambient_env: ambient,
             runner: Box::new(nub_sandbox::compiler::ShellRunner),
         };

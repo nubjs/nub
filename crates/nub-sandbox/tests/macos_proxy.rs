@@ -12,7 +12,7 @@
 //! started inside `apply()`; the child discovers its port from `HTTP_PROXY`.
 #![cfg(target_os = "macos")]
 
-use nub_sandbox::compiler::{CompileCtx, ShellRunner};
+use nub_sandbox::compiler::{CompileCtx, ScopeCapabilities, ShellRunner};
 use nub_sandbox::matcher::Homes;
 use nub_sandbox::{CommandSpec, apply, compile};
 use serde_json::{Value, json};
@@ -76,7 +76,7 @@ impl Fixture {
                 project: self.proj.clone(),
             },
             cwd: self.proj.clone(),
-            trusted: true,
+            caps: ScopeCapabilities::approved(),
             ambient_env: Default::default(),
             runner: Box::new(ShellRunner),
         }

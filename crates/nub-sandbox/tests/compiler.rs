@@ -966,7 +966,7 @@ fn unterminated_substitution_is_named_not_unknown_type() {
     let ctx = nub_sandbox::compiler::CompileCtx {
         homes: common::homes(),
         cwd: common::homes().project,
-        trusted: true,
+        caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
         runner: Box::new(PanicRunner),
     };
@@ -1036,7 +1036,7 @@ fn glob_key_substitution_is_rejected_before_running() {
     let ctx = nub_sandbox::compiler::CompileCtx {
         homes: common::homes(),
         cwd: common::homes().project,
-        trusted: true,
+        caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
         runner: Box::new(PanicRunner),
     };

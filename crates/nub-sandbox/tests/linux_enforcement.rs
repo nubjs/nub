@@ -11,7 +11,7 @@
 //! without depending on shell or language-runtime interpretations of errno.
 #![cfg(target_os = "linux")]
 
-use nub_sandbox::compiler::{CompileCtx, ShellRunner};
+use nub_sandbox::compiler::{CompileCtx, ScopeCapabilities, ShellRunner};
 use nub_sandbox::matcher::Homes;
 use nub_sandbox::{
     CommandSpec, PreparedSignalTarget, RuntimeCapability, apply_with_runtime, compile,
@@ -133,7 +133,7 @@ impl Fixture {
         CompileCtx {
             homes: self.homes(),
             cwd: self.proj.clone(),
-            trusted: true,
+            caps: ScopeCapabilities::approved(),
             ambient_env: env
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))

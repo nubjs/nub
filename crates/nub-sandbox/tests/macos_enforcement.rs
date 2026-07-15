@@ -9,7 +9,7 @@
 //! shared mutable state, so the suite is order- and thread-independent.
 #![cfg(target_os = "macos")]
 
-use nub_sandbox::compiler::{CompileCtx, ShellRunner};
+use nub_sandbox::compiler::{CompileCtx, ScopeCapabilities, ShellRunner};
 use nub_sandbox::matcher::Homes;
 use nub_sandbox::{CommandSpec, apply, compile};
 use serde_json::Value;
@@ -78,7 +78,7 @@ impl Fixture {
         CompileCtx {
             homes: self.homes(),
             cwd: self.proj.clone(),
-            trusted: true,
+            caps: ScopeCapabilities::approved(),
             ambient_env: ambient,
             runner: Box::new(ShellRunner),
         }

@@ -1,10 +1,11 @@
 //! `$(…)` command substitution for env values. stdout (trailing newline trimmed)
 //! becomes the value, whole or embedded — `"postgres://u:$(op read …)@h/db"`.
 //!
-//! Resolves ONLY in a trusted home (`nub.jsonc` / `scriptsMeta`) — NEVER in a
-//! `dependenciesMeta` grant. The caller sets `CompileCtx::trusted`; an untrusted
-//! `$(…)` is a hard [`CompileError`], never a silent exec (trust inversion is the
-//! whole reason the sandbox exists).
+//! Resolves ONLY in a scope holding the `env_substitution` capability (approved
+//! `nub.jsonc` / `scriptsMeta`) — NEVER in a `dependenciesMeta` scope. The caller
+//! assigns each scope its `ScopeCapabilities`; an ungranted `$(…)` is a hard
+//! [`CompileError`], never a silent exec (trust inversion is the whole reason the
+//! sandbox exists).
 
 /// Does the value contain a `$(…)` substitution?
 pub fn has_substitution(value: &str) -> bool {

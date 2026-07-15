@@ -15,7 +15,7 @@
 //! can manipulate the host with `sudo`; a `cargo test` cannot.
 #![cfg(target_os = "linux")]
 
-use nub_sandbox::compiler::{CompileCtx, ShellRunner};
+use nub_sandbox::compiler::{CompileCtx, ScopeCapabilities, ShellRunner};
 use nub_sandbox::matcher::Homes;
 use nub_sandbox::{CommandSpec, RuntimeCapability, apply_with_runtime, compile};
 use std::collections::BTreeMap;
@@ -83,7 +83,7 @@ fn set_up_host_admits_the_helper_and_a_nested_launch_succeeds() {
             project: proj.clone(),
         },
         cwd: proj.clone(),
-        trusted: true,
+        caps: ScopeCapabilities::approved(),
         ambient_env: BTreeMap::new(),
         runner: Box::new(ShellRunner),
     };

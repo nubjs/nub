@@ -9,7 +9,7 @@
 //! `compile` is the engine-pure half.
 
 use nub_sandbox::policy::Effect;
-use nub_sandbox::{CompileCtx, Homes, SandboxPolicy, compile};
+use nub_sandbox::{CompileCtx, Homes, SandboxPolicy, ScopeCapabilities, compile};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -44,7 +44,7 @@ fn compile_level(level: u32, ambient: BTreeMap<String, String>) -> SandboxPolicy
         cache: PathBuf::from("/var/tmp/nub-nest-ir/cache"),
         project: proj.clone(),
     };
-    let ctx = CompileCtx::new(homes, proj, true, ambient);
+    let ctx = CompileCtx::new(homes, proj, ScopeCapabilities::approved(), ambient);
     compile(&surface(level, &allowed.to_string_lossy()), &ctx).expect("level policy compiles")
 }
 

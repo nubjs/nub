@@ -13,7 +13,7 @@
 //! lands on tested ground — it does not exist yet (design.md §2.2 "single-term
 //! reality").
 
-use super::{CompileCtx, CompileError, CompileWarning, SandboxPolicy};
+use super::{CompileCtx, CompileError, CompileWarning, SandboxPolicy, ScopeCapabilities};
 use serde_json::Value;
 
 /// A candidate scope, ordered least- to most-specific by construction: the caller
@@ -43,6 +43,12 @@ pub fn resolve<'a>(candidates: &[ScopeCandidate<'a>]) -> Option<(&'a str, &'a Va
 pub struct ChainScope<'a> {
     pub label: &'a str,
     pub surface: Option<&'a Value>,
+    /// This scope's capabilities, decided by scope IDENTITY (approved `nub.jsonc` /
+    /// `scriptsMeta` vs dependency-controlled `dependenciesMeta`) — never inferred.
+    /// This is the point of the chain: each scope compiles against its OWN caps, so an
+    /// outer approved scope may use `$(…)` / `net.inject` while an inner dependency
+    /// scope in the SAME compile is denied them.
+    pub caps: ScopeCapabilities,
 }
 
 /// Compose an inheritance chain (outermost→innermost) into one resolved policy.
@@ -64,7 +70,11 @@ pub fn resolve_chain(
     let mut resolved: Option<SandboxPolicy> = None;
     for scope in scopes {
         if let Some(surface) = scope.surface {
-            let policy = super::compile_scope(surface, resolved.as_ref(), ctx, &mut warnings)?;
+            // Each scope compiles against ITS OWN capabilities — the security core of
+            // per-scope trust: a dependency-controlled scope's fold gates read its own
+            // (denying) caps regardless of an outer approved scope in the same chain.
+            let policy =
+                super::compile_scope(surface, resolved.as_ref(), ctx, scope.caps, &mut warnings)?;
             resolved = Some(policy);
         }
         // A keyless scope keeps `resolved` as-is (cascade: inherit the parent).
@@ -73,7 +83,15 @@ pub fn resolve_chain(
         Some(p) => p,
         // No scope declared a policy → not sandboxed. (The frontend only invokes
         // the chain when a policy exists somewhere; this is the defensive base.)
-        None => super::compile_scope(&Value::Bool(false), None, ctx, &mut warnings)?,
+        // `false` is a full unjail with no gated op, so the caps here are inert;
+        // pass the least-privilege set as the defensive default regardless.
+        None => super::compile_scope(
+            &Value::Bool(false),
+            None,
+            ctx,
+            ScopeCapabilities::dependency(),
+            &mut warnings,
+        )?,
     };
     Ok((policy, warnings))
 }

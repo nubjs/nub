@@ -44,7 +44,7 @@ fn main() -> ExitCode {
 mod imp {
     use nub_sandbox::{
         CommandSpec, CompileCtx, Homes, Prepared, PreparedChild, RuntimeCapability,
-        apply_with_runtime, compile,
+        ScopeCapabilities, apply_with_runtime, compile,
     };
     use serde_json::{Map, Value, json};
     use std::fs;
@@ -420,7 +420,12 @@ mod imp {
             cache: plan.fixture.join("cache"),
             project: proj.clone(),
         };
-        let ctx = CompileCtx::new(homes, proj.clone(), true, plan.ambient_env.clone());
+        let ctx = CompileCtx::new(
+            homes,
+            proj.clone(),
+            ScopeCapabilities::approved(),
+            plan.ambient_env.clone(),
+        );
         let policy = compile(&policy_surface(plan.level, &allowed, &signals), &ctx)
             .map_err(|error| format!("compiling the level-{} policy: {error}", plan.level))?;
 

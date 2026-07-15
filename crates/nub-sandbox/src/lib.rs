@@ -68,8 +68,10 @@
 //!   - **Per-host proxy wiring** — the launcher provisions/exempts the loopback
 //!     proxy path per OS as above.
 //!   - **Untrusted-config trust boundary** — the engine CANNOT detect trust; the
-//!     CALLER sets [`CompileCtx::trusted`] (gates `$(…)`) and secures untrusted-config
-//!     usage (e.g. PR-CI). A `dependenciesMeta` grant is compiled untrusted.
+//!     CALLER assigns each scope its [`ScopeCapabilities`] (via [`CompileCtx::caps`]
+//!     for a single block, or per [`compiler::scope::ChainScope`] in a chain) — the
+//!     `env_substitution` / `credential_broker` gates — and secures untrusted-config
+//!     usage (e.g. PR-CI). A `dependenciesMeta` scope compiles with no capabilities.
 //!
 //! # Net axis — the per-host egress proxy and the MITM tier
 //!
@@ -112,7 +114,8 @@ pub use backend::{
     exercise_monitor_state_8, exercise_monitor_states_1_to_5,
 };
 pub use compiler::{
-    CommandRunner, CompileCtx, CompileError, CompileWarning, compile, compile_with_warnings,
+    CommandRunner, CompileCtx, CompileError, CompileWarning, ScopeCapabilities, compile,
+    compile_with_warnings,
 };
 pub use matcher::Homes;
 pub use policy::SandboxPolicy;

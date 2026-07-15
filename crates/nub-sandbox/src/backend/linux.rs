@@ -2427,7 +2427,7 @@ fn resolve_program(program: &OsStr, child_cwd: &Path, path: Option<&OsStr>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{CompileCtx, compile};
+    use crate::compiler::{CompileCtx, ScopeCapabilities, compile};
     use crate::matcher::path::Homes;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -2442,7 +2442,12 @@ mod tests {
         };
         compile(
             &surface,
-            &CompileCtx::new(homes, root.join("project"), true, BTreeMap::new()),
+            &CompileCtx::new(
+                homes,
+                root.join("project"),
+                ScopeCapabilities::approved(),
+                BTreeMap::new(),
+            ),
         )
         .unwrap()
     }

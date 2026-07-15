@@ -43,6 +43,47 @@ impl std::fmt::Display for CompileWarning {
     }
 }
 
+/// The dynamic compile capabilities a single config SCOPE is permitted. Capability
+/// is decided by scope IDENTITY, never inferred from a repository/checkout heuristic:
+/// approved user config (`nub.jsonc` / `scriptsMeta`) gets the full set; dependency-
+/// controlled config (`dependenciesMeta`) gets none. The two axes are modeled
+/// independently because the invariant is phrased per capability ("MAY use `$(…)`",
+/// "MAY use `net.inject`") — a future scope could hold one without the other — even
+/// though today's two callers set them together.
+///
+/// Filesystem `$(…)` substitution is deliberately ABSENT: an fs path is inert data
+/// (never a credential or an injected header), so it is UNCONDITIONAL in every scope
+/// and never gated. Only these two dynamic capabilities discriminate by trust.
+#[derive(Debug, Clone, Copy)]
+pub struct ScopeCapabilities {
+    /// `$(…)` command substitution in env values and inject-header values. Denied to
+    /// dependency-controlled config: it must never spawn a command the user did not
+    /// author.
+    pub env_substitution: bool,
+    /// Credential-broker injection (`net.inject`) — forcing TLS termination of an
+    /// allowed host and injecting request headers. Denied to dependency-controlled
+    /// config: it must not broker the user's credentials.
+    pub credential_broker: bool,
+}
+
+impl ScopeCapabilities {
+    /// Approved user configuration (`nub.jsonc` / `scriptsMeta`): the full capability set.
+    pub fn approved() -> Self {
+        Self {
+            env_substitution: true,
+            credential_broker: true,
+        }
+    }
+
+    /// Dependency-controlled configuration (`dependenciesMeta`): no dynamic capability.
+    pub fn dependency() -> Self {
+        Self {
+            env_substitution: false,
+            credential_broker: false,
+        }
+    }
+}
+
 /// Host-provided context for a compile. All fields are ALREADY-PARSED data — the
 /// engine stays PM-pure (Boundary B): nub-cli does file discovery/parse and the
 /// ambient-env snapshot, then hands them here.
@@ -51,10 +92,13 @@ pub struct CompileCtx {
     pub homes: Homes,
     /// The current working directory (for diagnostics / relative anchoring).
     pub cwd: std::path::PathBuf,
-    /// Whether `$(…)` command substitution is permitted. TRUE only for the user's
-    /// own trusted config (`nub.jsonc` / `scriptsMeta`); FALSE for a
-    /// `dependenciesMeta` grant — an untrusted `$(…)` is a hard error, never exec.
-    pub trusted: bool,
+    /// The capabilities of a SINGLE-BLOCK compile — the `compile`/`compile_with_warnings`
+    /// entry, whose one scope IS this whole ctx (the `--sandbox <file>` / `run_sandboxed`
+    /// path, always approved user config). The chain resolver ([`scope::resolve_chain`])
+    /// assigns each scope its OWN capabilities via [`scope::ChainScope::caps`] and NEVER
+    /// reads this field — capability is decided per scope, so the fold gates read the
+    /// threaded per-scope `caps`, not the ctx.
+    pub caps: ScopeCapabilities,
     /// The ambient env snapshot the child env is constructed from.
     pub ambient_env: BTreeMap<String, String>,
     /// The `$(…)` command runner (production shells out; tests inject a stub).
@@ -62,17 +106,17 @@ pub struct CompileCtx {
 }
 
 impl CompileCtx {
-    /// A ctx with the real shell runner and the given homes/env/trust.
+    /// A ctx with the real shell runner and the given homes/env and single-block caps.
     pub fn new(
         homes: Homes,
         cwd: std::path::PathBuf,
-        trusted: bool,
+        caps: ScopeCapabilities,
         ambient_env: BTreeMap<String, String>,
     ) -> Self {
         Self {
             homes,
             cwd,
-            trusted,
+            caps,
             ambient_env,
             runner: Box::new(ShellRunner),
         }
@@ -180,7 +224,9 @@ pub fn compile_with_warnings(
     ctx: &CompileCtx,
 ) -> Result<(SandboxPolicy, Vec<CompileWarning>), CompileError> {
     let mut warnings = Vec::new();
-    let policy = compile_scope(surface, None, ctx, &mut warnings)?;
+    // A single-block compile is one scope; its capability is the ctx's (the entry
+    // owns the only scope). The chain path instead assigns each scope its own.
+    let policy = compile_scope(surface, None, ctx, ctx.caps, &mut warnings)?;
     Ok((policy, warnings))
 }
 
@@ -192,18 +238,19 @@ pub(crate) fn compile_scope(
     surface: &Value,
     parent: Option<&SandboxPolicy>,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     warnings: &mut Vec<CompileWarning>,
 ) -> Result<SandboxPolicy, CompileError> {
     match surface {
-        // `false` — fully unjail: every axis relaxed.
+        // `false` — fully unjail: every axis relaxed. No gated op (caps inert).
         Value::Bool(false) => Ok(unjailed(ctx)),
-        // `true` — secure defaults per axis (see `secure_default`).
+        // `true` — secure defaults per axis (see `secure_default`). No gated op.
         Value::Bool(true) => secure_default(ctx),
         // `"<preset>"` (bare) or `"./file"` (path-like).
         Value::String(s) => match classify_string(s) {
             StringKind::Preset => {
                 let expanded = preset::resolve(s)?;
-                let mut policy = compile_object(&expanded, parent, ctx, warnings)?;
+                let mut policy = compile_object(&expanded, parent, ctx, caps, warnings)?;
                 // A preset's broad grants (build-jail's `"./"`) re-open the built-in
                 // secret floor under last-match-wins; re-assert it post-fold.
                 preset::reassert_secret_floor(s, &mut policy, ctx);
@@ -214,7 +261,7 @@ pub(crate) fn compile_scope(
                 reference: s.clone(),
             }),
         },
-        Value::Object(_) => compile_object(surface, parent, ctx, warnings),
+        Value::Object(_) => compile_object(surface, parent, ctx, caps, warnings),
         _ => Err(CompileError::shape(
             "",
             "sandbox must be a boolean, a preset name, a file-ref, or a { fs, net, env } object",
@@ -233,6 +280,7 @@ fn compile_object(
     surface: &Value,
     parent: Option<&SandboxPolicy>,
     ctx: &CompileCtx,
+    caps: ScopeCapabilities,
     warnings: &mut Vec<CompileWarning>,
 ) -> Result<SandboxPolicy, CompileError> {
     let obj = surface
@@ -260,7 +308,7 @@ fn compile_object(
         None => floor_fs(),
     };
     let mut net = match obj.get("net") {
-        Some(v) => fold::fold_net(v, ctx, "net", parent.map(|p| &p.net))?,
+        Some(v) => fold::fold_net(v, ctx, caps, "net", parent.map(|p| &p.net))?,
         None if inherit_base => inherit_net(parent),
         None => floor_net(),
     };
@@ -269,7 +317,7 @@ fn compile_object(
     net.mode = parse_proxy_mode(obj.get("proxy"))?;
     finalize_net_inspection(&mut net, "net")?;
     let env = match obj.get("env") {
-        Some(v) => fold::fold_env(v, ctx, "env", parent.map(|p| &p.env))?,
+        Some(v) => fold::fold_env(v, ctx, caps, "env", parent.map(|p| &p.env))?,
         None if inherit_base => inherit_env(parent, ctx),
         None => floor_env(ctx),
     };

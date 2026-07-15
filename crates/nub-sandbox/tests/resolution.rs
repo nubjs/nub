@@ -5,6 +5,7 @@
 
 mod common;
 
+use nub_sandbox::compiler::CompileError;
 use nub_sandbox::compiler::compile;
 use nub_sandbox::compiler::compile_with_warnings;
 use nub_sandbox::compiler::scope::{ChainScope, resolve_chain};
@@ -137,10 +138,12 @@ fn chain(parent: &Value, child: &Value) -> nub_sandbox::policy::SandboxPolicy {
             ChainScope {
                 label: "project",
                 surface: Some(parent),
+                caps: common::caps(true),
             },
             ChainScope {
                 label: "script",
                 surface: Some(child),
+                caps: common::caps(true),
             },
         ],
         &ctx,
@@ -227,10 +230,12 @@ fn keyless_scope_cascades_the_parent_whole_policy() {
             ChainScope {
                 label: "project",
                 surface: Some(&parent),
+                caps: common::caps(true),
             },
             ChainScope {
                 label: "script",
                 surface: None,
+                caps: common::caps(true),
             }, // keyless
         ],
         &ctx,
@@ -259,4 +264,124 @@ fn object_spread_inner_inherits_parent_for_unlisted_axes() {
 fn rw(m: &PathMatcher, path: &std::path::Path) -> bool {
     let d = m.decide(path);
     matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::ReadWrite)
+}
+
+// ── per-scope capabilities in ONE compile (P7) ─────────────────────────────────
+
+/// An outer APPROVED (`nub.jsonc`) scope over a surface.
+fn approved_scope(surface: &Value) -> ChainScope<'_> {
+    ChainScope {
+        label: "nub.jsonc",
+        surface: Some(surface),
+        caps: common::caps(true),
+    }
+}
+
+/// The mixed chain the old compile-wide `trusted` bool could NOT express: an OUTER
+/// approved scope (`nub.jsonc`/`scriptsMeta`) uses `$(…)` + `net.inject` while an
+/// INNER dependency-controlled scope (`dependenciesMeta`) in the SAME compile is
+/// denied both — the fold gates read each scope's OWN caps, not a chain-wide flag.
+#[test]
+fn per_scope_capabilities_gate_each_scope_independently() {
+    // ctx.caps is deliberately DEPENDENCY: the chain must ignore it and read each
+    // ChainScope's caps. StubRunner resolves `$(echo hi)` → "hi".
+    let ctx = common::ctx(false, &[]);
+    let approved = json!({
+        "env": { "TOKEN": "$(echo hi)" },
+        "net": { "api.example.com": { "inject": { "Authorization": "Bearer $(echo hi)" } } },
+    });
+    let outer = approved_scope;
+
+    // (1) Outer approved uses both capabilities; the inner dependency scope only
+    //     inherits (no gated op) → the whole chain compiles, and the outer's resolved
+    //     `$(…)` value + broker survive. Proves ctx.caps (dependency) is IGNORED.
+    let inner_inert = json!({ "...": true });
+    let (policy, _) = resolve_chain(
+        &[
+            outer(&approved),
+            ChainScope {
+                label: "dependenciesMeta",
+                surface: Some(&inner_inert),
+                caps: common::caps(false),
+            },
+        ],
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        policy.env.constructed.get("TOKEN").map(String::as_str),
+        Some("hi"),
+        "approved scope's `$(…)` resolved despite a dependency ctx + inner dependency scope"
+    );
+    assert!(
+        policy
+            .net
+            .brokers
+            .iter()
+            .any(|b| b.host == "api.example.com"),
+        "approved scope's broker survived into the mixed-chain policy"
+    );
+
+    // (2) The inner dependency scope's OWN `$(…)` is denied even though an approved
+    //     scope precedes it — env_substitution is per-scope, not chain-wide.
+    let inner_subst = json!({ "env": { "X": "$(echo hi)" } });
+    let err = resolve_chain(
+        &[
+            outer(&approved),
+            ChainScope {
+                label: "dependenciesMeta",
+                surface: Some(&inner_subst),
+                caps: common::caps(false),
+            },
+        ],
+        &ctx,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CompileError::UntrustedSubstitution { .. }),
+        "inner dependency scope's `$(…)` is gated by its own caps: {err:?}"
+    );
+
+    // (3) The inner dependency scope's OWN `net.inject` is denied (credential_broker).
+    let inner_inject =
+        json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer x" } } } });
+    let err = resolve_chain(
+        &[
+            outer(&approved),
+            ChainScope {
+                label: "dependenciesMeta",
+                surface: Some(&inner_inject),
+                caps: common::caps(false),
+            },
+        ],
+        &ctx,
+    )
+    .unwrap_err();
+    match err {
+        CompileError::Shape { message, .. } => assert!(
+            message.contains("credential brokering"),
+            "inner dependency scope's `inject` is denied by the broker gate: {message}"
+        ),
+        other => panic!("expected the credential-broker Shape error, got {other:?}"),
+    }
+
+    // (4) Control: the SAME inner `$(…)` surface under an APPROVED identity compiles —
+    //     the gate keys on scope IDENTITY (caps), not chain position.
+    let (ok, _) = resolve_chain(
+        &[
+            outer(&approved),
+            ChainScope {
+                label: "scriptsMeta",
+                surface: Some(&inner_subst),
+                caps: common::caps(true),
+            },
+        ],
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        ok.env.constructed.get("X").map(String::as_str),
+        Some("hi"),
+        "an approved inner scope resolves `$(…)` — the gate is identity, not position"
+    );
 }
