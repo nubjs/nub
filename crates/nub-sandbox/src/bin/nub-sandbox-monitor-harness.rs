@@ -150,22 +150,6 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("exercise-nested-worker-full") | Some("exercise-nested-worker-restricted") => {
-            let restricted = verb.as_deref() == Some("exercise-nested-worker-restricted");
-            match nub_sandbox::exercise_nested_worker_reentry(&runtime, restricted) {
-                Ok(()) => {
-                    println!(
-                        "verified-nested-worker-{}",
-                        if restricted { "restricted" } else { "full" }
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("sandbox nested worker exercise failed: {error}");
-                    ExitCode::from(125)
-                }
-            }
-        }
         _ => ExitCode::from(2),
     }
 }

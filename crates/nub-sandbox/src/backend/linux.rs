@@ -98,7 +98,6 @@ pub(crate) fn preflight(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
     runtime: Option<&super::linux_monitor::RuntimeCapability>,
-    retained_bwrap: Option<File>,
 ) -> Result<LinuxPreflight, Degradation> {
     validate_process_inputs(spec).map_err(|reason| Degradation {
         lost: vec!["process-input".to_string()],
@@ -217,10 +216,7 @@ pub(crate) fn preflight(
         .collect::<Vec<_>>();
     // Open every executable candidate before any real proxy/tmp/CA support
     // resource exists. The admitted descriptor remains the launch authority.
-    let bwrap_candidates = retained_bwrap.map_or_else(
-        open_bwrap_candidate_inventory,
-        retained_bwrap_candidate_inventory,
-    );
+    let bwrap_candidates = open_bwrap_candidate_inventory();
     if bwrap_candidates.candidates.is_empty() {
         return Err(Degradation {
             lost: vec!["fs".to_string()],
@@ -300,12 +296,11 @@ pub fn apply(
         lost: vec!["process-isolation".to_string()],
         reason: Some(format!("preparing retained monitor bootstrap: {error}")),
     })?;
-    let retained_monitor =
-        super::linux_monitor::RetainedMonitorLaunch::new(runtime, bootstrap, &bwrap.executable)
-            .map_err(|error| Degradation {
-                lost: vec!["process-isolation".to_string()],
-                reason: Some(format!("preparing retained monitor launch: {error}")),
-            })?;
+    let retained_monitor = super::linux_monitor::RetainedMonitorLaunch::new(runtime, bootstrap)
+        .map_err(|error| Degradation {
+            lost: vec!["process-isolation".to_string()],
+            reason: Some(format!("preparing retained monitor launch: {error}")),
+        })?;
 
     let effective_ca = ca_bundle
         .or(ca_placeholder)
@@ -571,15 +566,11 @@ fn admit_bwrap_candidate(
             lost: vec!["process-isolation".to_string()],
             reason: Some(format!("preparing Bubblewrap candidate probe: {error}")),
         })?;
-        let retained_monitor = super::linux_monitor::RetainedMonitorLaunch::new(
-            runtime,
-            bootstrap,
-            &candidate.executable,
-        )
-        .map_err(|error| Degradation {
-            lost: vec!["process-isolation".to_string()],
-            reason: Some(format!("preparing Bubblewrap candidate monitor: {error}")),
-        })?;
+        let retained_monitor = super::linux_monitor::RetainedMonitorLaunch::new(runtime, bootstrap)
+            .map_err(|error| Degradation {
+                lost: vec!["process-isolation".to_string()],
+                reason: Some(format!("preparing Bubblewrap candidate monitor: {error}")),
+            })?;
         let RetainedOuterSetup {
             mut command,
             setup_files,
@@ -1331,41 +1322,6 @@ pub fn validate_adjacent_resource_bundle() -> Result<(), String> {
         .ok_or_else(|| "the staged Nub executable has no parent directory".to_string())?
         .join("nub-resources/bwrap");
     open_pinned_bwrap_candidate(&resource, BubblewrapOrigin::Bundled).map(|_| ())
-}
-
-fn retained_bwrap_candidate_inventory(executable: File) -> PinnedCandidateInventory {
-    let candidate = (|| {
-        // This is the exact candidate admitted before the outer namespace was
-        // entered. Its original uid is intentionally not re-inferred through
-        // the nested user namespace; the retained descriptor is the authority.
-        let metadata = executable
-            .metadata()
-            .map_err(|error| format!("statting retained candidate: {error}"))?;
-        if !metadata.is_file() {
-            return Err("retained candidate is not a regular file".to_string());
-        }
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err("retained candidate is not executable".to_string());
-        }
-        if metadata.permissions().mode() & 0o022 != 0 {
-            return Err("retained candidate is group/other writable".to_string());
-        }
-        Ok(PinnedBubblewrapCandidate {
-            source_path: PathBuf::from(format!("/proc/self/fd/{}", executable.as_raw_fd())),
-            source_identity: (metadata.dev(), metadata.ino()),
-            executable,
-        })
-    })();
-    match candidate {
-        Ok(candidate) => PinnedCandidateInventory {
-            candidates: vec![candidate],
-            failures: Vec::new(),
-        },
-        Err(error) => PinnedCandidateInventory {
-            candidates: Vec::new(),
-            failures: vec![error],
-        },
-    }
 }
 
 fn open_bwrap_candidate_inventory_from(

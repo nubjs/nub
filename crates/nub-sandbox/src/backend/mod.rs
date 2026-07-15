@@ -51,7 +51,7 @@ mod linux_monitor;
 #[cfg(target_os = "linux")]
 pub use linux_monitor::{
     RuntimeCapability, earliest_bootstrap, exercise_monitor_state_6, exercise_monitor_state_7,
-    exercise_monitor_state_8, exercise_monitor_states_1_to_5, exercise_nested_worker_reentry,
+    exercise_monitor_state_8, exercise_monitor_states_1_to_5,
 };
 
 /// Non-Linux embedders keep the same explicit startup/apply seam without carrying
@@ -662,7 +662,7 @@ fn insert_proxy_env(env: &mut BTreeMap<OsString, OsString>, port: u16, token: Op
 /// enforcement is the backend's job; on an OS whose backend has not landed,
 /// [`generic_apply`] reports them as not-enforced (never silent).
 pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
-    apply_inner(policy, spec, None, None)
+    apply_inner(policy, spec, None)
 }
 
 /// Apply with the verified runtime capability returned by [`earliest_bootstrap`].
@@ -673,27 +673,16 @@ pub fn apply_with_runtime(
     spec: CommandSpec,
     runtime: &RuntimeCapability,
 ) -> Result<Prepared, Degradation> {
-    apply_inner(policy, spec, Some(runtime), None)
-}
-
-#[cfg(target_os = "linux")]
-fn apply_with_retained_linux_authority(
-    policy: &SandboxPolicy,
-    spec: CommandSpec,
-    runtime: &RuntimeCapability,
-    bwrap: std::fs::File,
-) -> Result<Prepared, Degradation> {
-    apply_inner(policy, spec, Some(runtime), Some(bwrap))
+    apply_inner(policy, spec, Some(runtime))
 }
 
 fn apply_inner(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     runtime: Option<&RuntimeCapability>,
-    retained_bwrap: Option<std::fs::File>,
 ) -> Result<Prepared, Degradation> {
     #[cfg(not(target_os = "linux"))]
-    let _ = (runtime, retained_bwrap);
+    let _ = runtime;
     if !policy.env.resolved {
         return Err(Degradation {
             lost: vec!["env-unresolved".to_string()],
@@ -705,7 +694,7 @@ fn apply_inner(
     }
     validate_apply_inputs(policy, &spec)?;
     #[cfg(target_os = "linux")]
-    let linux_preflight = linux::preflight(policy, &spec, runtime, retained_bwrap)?;
+    let linux_preflight = linux::preflight(policy, &spec, runtime)?;
     // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
     // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
     // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`

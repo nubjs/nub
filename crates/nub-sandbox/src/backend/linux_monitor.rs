@@ -11,7 +11,6 @@
 
 use super::{CommandSpec, Degradation};
 use crate::policy::SandboxPolicy;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{CString, OsStr, OsString};
@@ -46,7 +45,6 @@ pub(crate) const PRIVATE_RUNTIME_ROOT: &str = "/dev/.nub-sandbox/runtime";
 pub(crate) const PRIVATE_SUPPORT_ROOT: &str = "/dev/.nub-sandbox/support";
 pub(crate) const PRIVATE_CA_BUNDLE: &str = "/dev/.nub-sandbox/support/ca-bundle.pem";
 pub(crate) const CANDIDATE_PROBE_SENTINEL: &str = "__nub-sandbox-candidate-probe-v1";
-const NESTED_WORKER_SENTINEL: &str = "__nub-sandbox-nested-worker-v1";
 const LINUX_NSIG: libc::c_int = 65;
 const REQUIRED_BOOTSTRAP_SEALS: libc::c_int =
     libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
@@ -61,9 +59,6 @@ const COMPLETION_ATTESTATION_LEN: usize = TARGET_EXITED_LEN + COMPLETION_CHALLEN
 const SIGNAL_RELAY_MAGIC: &[u8; 4] = b"NSG1";
 const SIGNAL_RELAY_RECORD_LEN: usize = 16;
 const MAX_RUNNING_EVENTS_PER_TURN: usize = 64;
-const NS_GET_USERNS: libc::c_ulong = 0xb701;
-const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
-const BWRAP_BLOCK_RELEASE_BYTE: u8 = 1;
 
 // These descriptors exist only in the post-fork Bubblewrap child.  The trusted
 // parent first duplicates every source above this reserved range, then remaps
@@ -74,16 +69,6 @@ pub(crate) const CONTROL_FD: RawFd = 199;
 pub(crate) const RELEASE_FD: RawFd = 200;
 pub(crate) const SIGNAL_RELAY_FD: RawFd = 201;
 const FIRST_UNRESERVED_MONITOR_FD: RawFd = SIGNAL_RELAY_FD + 1;
-const NESTED_REQUEST_FD: RawFd = 202;
-const NESTED_ROOT_FD: RawFd = 203;
-const NESTED_USER_FD: RawFd = 204;
-const NESTED_MOUNT_FD: RawFd = 205;
-const NESTED_PID_FD: RawFd = 206;
-const NESTED_IPC_FD: RawFd = 207;
-const NESTED_UTS_FD: RawFd = 208;
-const NESTED_NETWORK_FD: RawFd = 209;
-const NESTED_BWRAP_FD: RawFd = 210;
-const FIRST_NESTED_SOURCE_FD: RawFd = 224;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileIdentity {
@@ -243,51 +228,6 @@ impl RuntimeCapability {
         })
     }
 
-    fn from_retained_runtime() -> io::Result<Self> {
-        let root = Path::new(PRIVATE_RUNTIME_ROOT);
-        let executable = pin_path(&root.join("nub-monitor"), OsStr::new("nub-monitor"))?;
-        let parsed = parse_elf(&executable.file)?;
-        let kind = match &parsed.interpreter {
-            None => {
-                validate_static_image(&parsed)?;
-                RuntimeKind::Static
-            }
-            Some(interpreter) => {
-                if !parsed.has_dynamic {
-                    return Err(invalid_data("ELF PT_INTERP has no dynamic table"));
-                }
-                let loader_path = PathBuf::from(OsString::from_vec(interpreter.clone()));
-                if !loader_path.is_absolute() {
-                    return Err(invalid_data("ELF PT_INTERP is not absolute"));
-                }
-                let loader = pin_path(&root.join("ld.so"), OsStr::new("ld.so"))?;
-                let loader_elf = parse_elf(&loader.file)?;
-                validate_loader_image(&loader_elf)?;
-                let family = loader_family(&loader_path)?;
-                require_proven_loader_search(family)?;
-                let inventory = retained_runtime_inventory(&root.join("lib"))?;
-                let (libraries, inhibit_rpath) =
-                    resolve_needed_closure(&[&parsed, &loader_elf], &inventory)?;
-                RuntimeKind::Dynamic {
-                    loader,
-                    family,
-                    libraries,
-                    inhibit_rpath,
-                }
-            }
-        };
-        let objects = runtime_objects_from_parts(&executable, &kind)?;
-        let image = RuntimeImage {
-            executable,
-            kind,
-            build_marker: runtime_build_marker(&objects),
-        };
-        require_retained_runtime_sources(&image)?;
-        Ok(Self {
-            source: RuntimeSource::Explicit(image),
-        })
-    }
-
     pub(crate) fn materialize(&self) -> io::Result<&RuntimeImage> {
         match &self.source {
             RuntimeSource::Current { authority, image } => image
@@ -313,66 +253,6 @@ impl RuntimeCapability {
             source: RuntimeSource::Explicit(image),
         })
     }
-}
-
-fn retained_runtime_inventory(root: &Path) -> io::Result<Vec<InventoryObject>> {
-    let mut entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    if entries.len() > MAX_RUNTIME_OBJECTS {
-        return Err(invalid_data(
-            "retained runtime library inventory exceeds its object budget",
-        ));
-    }
-    let mut objects = BTreeMap::<(u64, u64), InventoryObject>::new();
-    for entry in entries {
-        let name = entry.file_name();
-        validate_loader_object_name(&name, "retained runtime library name")?;
-        let path = entry.path();
-        if !fs::symlink_metadata(&path)?.file_type().is_file() {
-            return Err(invalid_data(
-                "retained runtime library is not a regular file",
-            ));
-        }
-        let file = File::open(&path)?;
-        let file = duplicate_above_stdio(&file)?;
-        let identity = FileIdentity::from_file(&file)?;
-        match objects.entry((identity.dev, identity.ino)) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                let parsed = parse_elf(&file)?;
-                entry.insert(InventoryObject {
-                    file,
-                    path,
-                    aliases: BTreeSet::from([name]),
-                    identity,
-                    parsed,
-                });
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().aliases.insert(name);
-            }
-        }
-    }
-    Ok(objects.into_values().collect())
-}
-
-fn require_retained_runtime_sources(image: &RuntimeImage) -> io::Result<()> {
-    let mut objects = vec![&image.executable];
-    if let RuntimeKind::Dynamic {
-        loader, libraries, ..
-    } = &image.kind
-    {
-        objects.push(loader);
-        objects.extend(libraries);
-    }
-    if objects
-        .into_iter()
-        .any(|object| !valid_private_runtime_path(&object.source_path))
-    {
-        return Err(invalid_data(
-            "recursive runtime authority escaped the retained private runtime",
-        ));
-    }
-    Ok(())
 }
 
 fn capture_early_current_authority() -> io::Result<EarlyRuntimeAuthority> {
@@ -484,13 +364,6 @@ pub fn earliest_bootstrap() -> io::Result<RuntimeCapability> {
         Some(value) if value == OsStr::new(CANDIDATE_PROBE_SENTINEL) => {
             let code = candidate_probe_main().map(|_| 0).unwrap_or_else(|error| {
                 eprintln!("sandbox candidate probe failed: {error}");
-                125
-            });
-            std::process::exit(code);
-        }
-        Some(value) if value == OsStr::new(NESTED_WORKER_SENTINEL) => {
-            let code = nested_worker_main().unwrap_or_else(|error| {
-                eprintln!("sandbox nested worker failed: {error}");
                 125
             });
             std::process::exit(code);
@@ -1054,1268 +927,11 @@ fn runtime_objects_from_parts(
     Ok(objects)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DescriptorIdentity {
-    dev: u64,
-    ino: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NamespaceKind {
-    User,
-    Mount,
-    Pid,
-    Ipc,
-    Uts,
-    Network,
-}
-
-impl NamespaceKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Mount => "mnt",
-            Self::Pid => "pid",
-            Self::Ipc => "ipc",
-            Self::Uts => "uts",
-            Self::Network => "net",
-        }
-    }
-
-    fn clone_flag(self) -> libc::c_int {
-        match self {
-            Self::User => libc::CLONE_NEWUSER,
-            Self::Mount => libc::CLONE_NEWNS,
-            Self::Pid => libc::CLONE_NEWPID,
-            Self::Ipc => libc::CLONE_NEWIPC,
-            Self::Uts => libc::CLONE_NEWUTS,
-            Self::Network => libc::CLONE_NEWNET,
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct NamespaceHandle {
-    fd: OwnedFd,
-    identity: DescriptorIdentity,
-}
-
-struct CapturedNamespace {
-    namespace: NamespaceHandle,
-    owner_user: NamespaceHandle,
-}
-
-#[allow(dead_code)]
-enum TrustedNetworkNamespace {
-    Restricted(NamespaceHandle),
-    AlreadyCurrent { identity: DescriptorIdentity },
-}
-
-#[allow(dead_code)]
-struct TrustedNamespaces {
-    owner_user: NamespaceHandle,
-    mount: NamespaceHandle,
-    pid: NamespaceHandle,
-    ipc: NamespaceHandle,
-    uts: NamespaceHandle,
-    network: TrustedNetworkNamespace,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkRestrictionCeiling {
-    Full,
-    Deny,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProcessRestrictionCeiling {
-    network: NetworkRestrictionCeiling,
-    ambient_credentials_protected: bool,
-}
-
-impl ProcessRestrictionCeiling {
-    fn from_spec(spec: &BootstrapSpec) -> Self {
-        Self {
-            network: if spec.network_filter {
-                NetworkRestrictionCeiling::Deny
-            } else {
-                NetworkRestrictionCeiling::Full
-            },
-            ambient_credentials_protected: spec.deny_keyring,
-        }
-    }
-}
-
-#[allow(dead_code)]
-struct TrustedSessionIdentity {
-    outer_pid: libc::pid_t,
-    namespace_init_pid: libc::pid_t,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BlockedNamespaceInitIdentity {
-    pid: libc::pid_t,
-    outer_pid: libc::pid_t,
-    starttime: u64,
-}
-
-#[derive(Default)]
-struct TrustedSessionCleanup {
-    startup_released: bool,
-    authenticated_cleanup: bool,
-    outer_reaped: bool,
-}
-
-#[allow(dead_code)]
-struct TrustedSession {
-    namespaces: TrustedNamespaces,
-    root: OwnedFd,
-    bwrap: File,
-    restrictions: ProcessRestrictionCeiling,
-    identity: TrustedSessionIdentity,
-    cleanup: TrustedSessionCleanup,
-}
-
-#[derive(Serialize, Deserialize)]
-struct NestedWorkerRequest {
-    surface: serde_json::Value,
-    homes: NestedHomes,
-    cwd: Vec<u8>,
-    ambient_env: BTreeMap<String, String>,
-    command: NestedCommand,
-}
-
-#[derive(Serialize, Deserialize)]
-struct NestedHomes {
-    home: Vec<u8>,
-    tmp: Vec<u8>,
-    cache: Vec<u8>,
-    project: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct NestedCommand {
-    program: Vec<u8>,
-    args: Vec<Vec<u8>>,
-    cwd: Vec<u8>,
-    deny_search_roots: Vec<Vec<u8>>,
-}
-
-impl NestedCommand {
-    fn from_spec(spec: CommandSpec) -> io::Result<Self> {
-        let cwd = spec
-            .cwd
-            .ok_or_else(|| invalid_input("nested sandbox command cwd is unresolved"))?;
-        require_absolute_nested_path(&cwd, "command cwd")?;
-        for root in &spec.deny_search_roots {
-            require_absolute_nested_path(root, "deny-search root")?;
-        }
-        Ok(Self {
-            program: spec.program.into_vec(),
-            args: spec.args.into_iter().map(OsString::into_vec).collect(),
-            cwd: cwd.into_os_string().into_vec(),
-            deny_search_roots: spec
-                .deny_search_roots
-                .into_iter()
-                .map(|path| path.into_os_string().into_vec())
-                .collect(),
-        })
-    }
-
-    fn into_spec(self) -> io::Result<CommandSpec> {
-        let cwd = PathBuf::from(OsString::from_vec(self.cwd));
-        require_absolute_nested_path(&cwd, "command cwd")?;
-        let deny_search_roots = self
-            .deny_search_roots
-            .into_iter()
-            .map(|path| {
-                let path = PathBuf::from(OsString::from_vec(path));
-                require_absolute_nested_path(&path, "deny-search root")?;
-                Ok(path)
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        Ok(CommandSpec {
-            program: OsString::from_vec(self.program),
-            args: self.args.into_iter().map(OsString::from_vec).collect(),
-            cwd: Some(cwd),
-            deny_search_roots,
-        })
-    }
-}
-
-fn require_absolute_nested_path(path: &Path, label: &str) -> io::Result<()> {
-    if !path.is_absolute() || path.as_os_str().as_bytes().contains(&0) {
-        return Err(invalid_input(format!(
-            "nested sandbox {label} is not an absolute NUL-free path"
-        )));
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NestedNetworkMode {
-    Full,
-    Restricted,
-}
-
-impl NestedNetworkMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Restricted => "restricted",
-        }
-    }
-
-    fn parse(value: &OsStr) -> io::Result<Self> {
-        match value.as_bytes() {
-            b"full" => Ok(Self::Full),
-            b"restricted" => Ok(Self::Restricted),
-            _ => Err(invalid_data("nested worker network mode is invalid")),
-        }
-    }
-}
-
-enum NestedWorkerNetwork {
-    Restricted(NamespaceHandle),
-    AlreadyCurrent(DescriptorIdentity),
-}
-
-struct NestedWorkerAuthority {
-    root: OwnedFd,
-    root_identity: DescriptorIdentity,
-    bwrap: File,
-    owner_user: NamespaceHandle,
-    mount: NamespaceHandle,
-    pid: NamespaceHandle,
-    ipc: NamespaceHandle,
-    uts: NamespaceHandle,
-    network: NestedWorkerNetwork,
-}
-
-struct NestedWorkerBootstrap {
-    request: OwnedFd,
-    authority: NestedWorkerAuthority,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NestedEntryStage {
-    User,
-    Credentials,
-    Mount,
-    Root,
-    Ipc,
-    Uts,
-    Network,
-    Pid,
-    Fork,
-}
-
-const FULL_NESTED_ENTRY_ORDER: &[NestedEntryStage] = &[
-    NestedEntryStage::User,
-    NestedEntryStage::Credentials,
-    NestedEntryStage::Mount,
-    NestedEntryStage::Root,
-    NestedEntryStage::Ipc,
-    NestedEntryStage::Uts,
-    NestedEntryStage::Pid,
-    NestedEntryStage::Fork,
-];
-const RESTRICTED_NESTED_ENTRY_ORDER: &[NestedEntryStage] = &[
-    NestedEntryStage::User,
-    NestedEntryStage::Credentials,
-    NestedEntryStage::Mount,
-    NestedEntryStage::Root,
-    NestedEntryStage::Ipc,
-    NestedEntryStage::Uts,
-    NestedEntryStage::Network,
-    NestedEntryStage::Pid,
-    NestedEntryStage::Fork,
-];
-
-fn nested_entry_order(mode: NestedNetworkMode) -> &'static [NestedEntryStage] {
-    match mode {
-        NestedNetworkMode::Full => FULL_NESTED_ENTRY_ORDER,
-        NestedNetworkMode::Restricted => RESTRICTED_NESTED_ENTRY_ORDER,
-    }
-}
-
-fn validate_nested_entry_order(
-    mode: NestedNetworkMode,
-    order: &[NestedEntryStage],
-) -> io::Result<()> {
-    if order != nested_entry_order(mode) {
-        return Err(invalid_data(
-            "nested worker namespace entry order is invalid",
-        ));
-    }
-    Ok(())
-}
-
-impl NestedWorkerRequest {
-    fn new(
-        surface: serde_json::Value,
-        homes: crate::matcher::path::Homes,
-        cwd: PathBuf,
-        ambient_env: BTreeMap<String, String>,
-        command: CommandSpec,
-    ) -> io::Result<Self> {
-        for (path, label) in [
-            (&homes.home, "home"),
-            (&homes.tmp, "temporary home"),
-            (&homes.cache, "cache home"),
-            (&homes.project, "project home"),
-            (&cwd, "compile cwd"),
-        ] {
-            require_absolute_nested_path(path, label)?;
-        }
-        Ok(Self {
-            surface,
-            homes: NestedHomes {
-                home: homes.home.into_os_string().into_vec(),
-                tmp: homes.tmp.into_os_string().into_vec(),
-                cache: homes.cache.into_os_string().into_vec(),
-                project: homes.project.into_os_string().into_vec(),
-            },
-            cwd: cwd.into_os_string().into_vec(),
-            ambient_env,
-            command: NestedCommand::from_spec(command)?,
-        })
-    }
-
-    fn encode(&self) -> io::Result<Vec<u8>> {
-        let bytes = serde_json::to_vec(self)
-            .map_err(|error| invalid_input(format!("encoding nested worker request: {error}")))?;
-        if bytes.is_empty() || bytes.len() > MAX_BOOTSTRAP_BYTES {
-            return Err(invalid_input(
-                "nested worker request exceeds the byte budget",
-            ));
-        }
-        Ok(bytes)
-    }
-
-    fn decode(bytes: &[u8]) -> io::Result<Self> {
-        serde_json::from_slice(bytes)
-            .map_err(|error| invalid_data(format!("decoding nested worker request: {error}")))
-    }
-}
-
-impl TrustedSession {
-    fn run_nested_worker(&self, request: NestedWorkerRequest) -> io::Result<std::process::Output> {
-        use std::process::Stdio;
-
-        let request =
-            relocate_fd_at_least(sealed_memfd(&request.encode()?)?, FIRST_NESTED_SOURCE_FD)?;
-        let root = duplicate_fd_at_least(self.root.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
-        let bwrap = duplicate_fd_at_least(self.bwrap.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
-        let owner_user = duplicate_fd_at_least(
-            self.namespaces.owner_user.fd.as_raw_fd(),
-            FIRST_NESTED_SOURCE_FD,
-        )?;
-        let mount =
-            duplicate_fd_at_least(self.namespaces.mount.fd.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
-        let pid =
-            duplicate_fd_at_least(self.namespaces.pid.fd.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
-        let ipc =
-            duplicate_fd_at_least(self.namespaces.ipc.fd.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
-        let uts =
-            duplicate_fd_at_least(self.namespaces.uts.fd.as_raw_fd(), FIRST_NESTED_SOURCE_FD)?;
-        let (mode, network) = match &self.namespaces.network {
-            TrustedNetworkNamespace::Restricted(network) => (
-                NestedNetworkMode::Restricted,
-                Some(duplicate_fd_at_least(
-                    network.fd.as_raw_fd(),
-                    FIRST_NESTED_SOURCE_FD,
-                )?),
-            ),
-            TrustedNetworkNamespace::AlreadyCurrent { .. } => (NestedNetworkMode::Full, None),
-        };
-        let mut remaps = vec![
-            (request.as_raw_fd(), NESTED_REQUEST_FD),
-            (root.as_raw_fd(), NESTED_ROOT_FD),
-            (bwrap.as_raw_fd(), NESTED_BWRAP_FD),
-            (owner_user.as_raw_fd(), NESTED_USER_FD),
-            (mount.as_raw_fd(), NESTED_MOUNT_FD),
-            (pid.as_raw_fd(), NESTED_PID_FD),
-            (ipc.as_raw_fd(), NESTED_IPC_FD),
-            (uts.as_raw_fd(), NESTED_UTS_FD),
-        ];
-        if let Some(network) = &network {
-            remaps.push((network.as_raw_fd(), NESTED_NETWORK_FD));
-        }
-
-        let mut command = Command::new("/proc/self/exe");
-        command
-            .arg(NESTED_WORKER_SENTINEL)
-            .arg(mode.label())
-            .env_clear()
-            .current_dir("/")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            command.pre_exec(move || {
-                mark_inherited_fds_cloexec()?;
-                for &(source, destination) in &remaps {
-                    if libc::dup2(source, destination) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
-        }
-        command.spawn()?.wait_with_output()
-    }
-}
-
-fn nested_worker_main() -> io::Result<i32> {
-    let mut arguments = std::env::args_os();
-    let _program = arguments.next();
-    if arguments.next().as_deref() != Some(OsStr::new(NESTED_WORKER_SENTINEL)) {
-        return Err(invalid_data("nested worker sentinel mismatch"));
-    }
-    let mode = arguments
-        .next()
-        .as_deref()
-        .map(NestedNetworkMode::parse)
-        .transpose()?
-        .ok_or_else(|| invalid_data("nested worker network mode is absent"))?;
-    if arguments.next().is_some() {
-        return Err(invalid_data("nested worker received trailing arguments"));
-    }
-    if std::env::vars_os().next().is_some() {
-        return Err(invalid_data("nested worker environment is not empty"));
-    }
-    require_single_threaded_worker()?;
-
-    let bootstrap = NestedWorkerBootstrap::from_fixed(mode)?;
-    match bootstrap.enter(mode)? {
-        NestedWorkerRole::Parent(child) => wait_nested_worker_child(child),
-        NestedWorkerRole::Child(bootstrap) => {
-            bootstrap.authority.verify_entered()?;
-            let runtime = RuntimeCapability::from_retained_runtime()?;
-            let request = read_sealed_nested_request(bootstrap.request.as_raw_fd())?;
-            run_nested_worker_request(request, runtime, bootstrap.authority.bwrap)
-        }
-    }
-}
-
-impl NestedWorkerBootstrap {
-    fn from_fixed(mode: NestedNetworkMode) -> io::Result<Self> {
-        let request = take_fixed_fd(NESTED_REQUEST_FD, "request")?;
-        let root = take_fixed_fd(NESTED_ROOT_FD, "root")?;
-        let root_stat = descriptor_stat(root.as_raw_fd())?;
-        if root_stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
-            return Err(invalid_data(
-                "nested worker root capability is not a directory",
-            ));
-        }
-        let root_identity = descriptor_identity(root.as_raw_fd())?;
-        // The parent admitted this exact executable before entering the outer
-        // user namespace. Re-check its immutable shape, but do not reinterpret
-        // its mapped uid as host ownership after reentry.
-        let bwrap = File::from(take_fixed_fd(NESTED_BWRAP_FD, "Bubblewrap executable")?);
-        let bwrap_metadata = bwrap.metadata()?;
-        if !bwrap_metadata.is_file()
-            || bwrap_metadata.mode() & 0o111 == 0
-            || bwrap_metadata.mode() & 0o022 != 0
-        {
-            return Err(invalid_data(
-                "nested worker Bubblewrap authority is not an immutable executable file",
-            ));
-        }
-        let owner_user = validate_namespace_fd(
-            take_fixed_fd(NESTED_USER_FD, "owner user namespace")?,
-            NamespaceKind::User,
-        )?;
-        let mount = validate_namespace_fd(
-            take_fixed_fd(NESTED_MOUNT_FD, "mount namespace")?,
-            NamespaceKind::Mount,
-        )?;
-        let pid = validate_namespace_fd(
-            take_fixed_fd(NESTED_PID_FD, "PID namespace")?,
-            NamespaceKind::Pid,
-        )?;
-        let ipc = validate_namespace_fd(
-            take_fixed_fd(NESTED_IPC_FD, "IPC namespace")?,
-            NamespaceKind::Ipc,
-        )?;
-        let uts = validate_namespace_fd(
-            take_fixed_fd(NESTED_UTS_FD, "UTS namespace")?,
-            NamespaceKind::Uts,
-        )?;
-        for (label, namespace) in [
-            ("mount", &mount),
-            ("PID", &pid),
-            ("IPC", &ipc),
-            ("UTS", &uts),
-        ] {
-            require_same_namespace_owner(
-                label,
-                owner_user.identity,
-                namespace_owner_identity(namespace)?,
-            )?;
-        }
-        let network = match mode {
-            NestedNetworkMode::Restricted => {
-                let network = validate_namespace_fd(
-                    take_fixed_fd(NESTED_NETWORK_FD, "network namespace")?,
-                    NamespaceKind::Network,
-                )?;
-                require_same_namespace_owner(
-                    "restricted network",
-                    owner_user.identity,
-                    namespace_owner_identity(&network)?,
-                )?;
-                NestedWorkerNetwork::Restricted(network)
-            }
-            NestedNetworkMode::Full => {
-                require_fixed_fd_absent(NESTED_NETWORK_FD, "full-network namespace")?;
-                NestedWorkerNetwork::AlreadyCurrent(
-                    open_namespace_absolute("/proc/self/ns/net", NamespaceKind::Network)?.identity,
-                )
-            }
-        };
-        Ok(Self {
-            request,
-            authority: NestedWorkerAuthority {
-                root,
-                root_identity,
-                bwrap,
-                owner_user,
-                mount,
-                pid,
-                ipc,
-                uts,
-                network,
-            },
-        })
-    }
-
-    fn enter(self, mode: NestedNetworkMode) -> io::Result<NestedWorkerRole> {
-        let order = nested_entry_order(mode);
-        validate_nested_entry_order(mode, order)?;
-        for stage in order {
-            match stage {
-                NestedEntryStage::User => {
-                    enter_namespace(&self.authority.owner_user, NamespaceKind::User)?
-                }
-                NestedEntryStage::Credentials => reset_nested_worker_credentials()?,
-                NestedEntryStage::Mount => {
-                    enter_namespace(&self.authority.mount, NamespaceKind::Mount)?
-                }
-                NestedEntryStage::Root => self.authority.reanchor_root()?,
-                NestedEntryStage::Ipc => enter_namespace(&self.authority.ipc, NamespaceKind::Ipc)?,
-                NestedEntryStage::Uts => enter_namespace(&self.authority.uts, NamespaceKind::Uts)?,
-                NestedEntryStage::Network => match &self.authority.network {
-                    NestedWorkerNetwork::Restricted(network) => {
-                        enter_namespace(network, NamespaceKind::Network)?
-                    }
-                    NestedWorkerNetwork::AlreadyCurrent(_) => {
-                        return Err(invalid_data(
-                            "full-network worker attempted network namespace entry",
-                        ));
-                    }
-                },
-                NestedEntryStage::Pid => enter_namespace(&self.authority.pid, NamespaceKind::Pid)?,
-                NestedEntryStage::Fork => {
-                    let child = unsafe { libc::fork() };
-                    if child < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    if child == 0 {
-                        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
-                            return Err(io::Error::last_os_error());
-                        }
-                        return Ok(NestedWorkerRole::Child(self));
-                    }
-                    return Ok(NestedWorkerRole::Parent(child));
-                }
-            }
-        }
-        Err(invalid_data(
-            "nested worker entry omitted its fork boundary",
-        ))
-    }
-}
-
-enum NestedWorkerRole {
-    Parent(libc::pid_t),
-    Child(NestedWorkerBootstrap),
-}
-
-fn take_fixed_fd(fd: RawFd, label: &str) -> io::Result<OwnedFd> {
-    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-        return Err(capture_error(
-            &format!("loading nested worker {label} capability"),
-            io::Error::last_os_error(),
-        ));
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-fn require_fixed_fd_absent(fd: RawFd, label: &str) -> io::Result<()> {
-    if unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
-        return Err(invalid_data(format!(
-            "nested worker unexpectedly received a {label} capability"
-        )));
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::EBADF) {
-        Ok(())
-    } else {
-        Err(error)
-    }
-}
-
-fn namespace_owner_identity(namespace: &NamespaceHandle) -> io::Result<DescriptorIdentity> {
-    let owner = unsafe { libc::ioctl(namespace.fd.as_raw_fd(), NS_GET_USERNS) };
-    if owner < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(
-        validate_namespace_fd(unsafe { OwnedFd::from_raw_fd(owner) }, NamespaceKind::User)?
-            .identity,
-    )
-}
-
-fn enter_namespace(namespace: &NamespaceHandle, kind: NamespaceKind) -> io::Result<()> {
-    if unsafe { libc::setns(namespace.fd.as_raw_fd(), kind.clone_flag()) } != 0 {
-        return Err(capture_error(
-            &format!("entering retained {} namespace", kind.name()),
-            io::Error::last_os_error(),
-        ));
-    }
-    Ok(())
-}
-
-fn reset_nested_worker_credentials() -> io::Result<()> {
-    if unsafe { libc::setresgid(0, 0, 0) } != 0 || unsafe { libc::setresuid(0, 0, 0) } != 0 {
-        return Err(capture_error(
-            "resetting nested worker credentials",
-            io::Error::last_os_error(),
-        ));
-    }
-    let mut real_uid = 1;
-    let mut effective_uid = 1;
-    let mut saved_uid = 1;
-    let mut real_gid = 1;
-    let mut effective_gid = 1;
-    let mut saved_gid = 1;
-    if unsafe { libc::getresuid(&mut real_uid, &mut effective_uid, &mut saved_uid) } != 0
-        || unsafe { libc::getresgid(&mut real_gid, &mut effective_gid, &mut saved_gid) } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if [real_uid, effective_uid, saved_uid] != [0; 3]
-        || [real_gid, effective_gid, saved_gid] != [0; 3]
-    {
-        return Err(invalid_data(
-            "nested worker credentials did not reset inside the owner user namespace",
-        ));
-    }
-    Ok(())
-}
-
-impl NestedWorkerAuthority {
-    fn reanchor_root(&self) -> io::Result<()> {
-        if unsafe { libc::fchdir(self.root.as_raw_fd()) } != 0
-            || unsafe { libc::chroot(c".".as_ptr()) } != 0
-            || unsafe { libc::chdir(c"/".as_ptr()) } != 0
-        {
-            return Err(capture_error(
-                "re-anchoring nested worker root capability",
-                io::Error::last_os_error(),
-            ));
-        }
-        let current = open_absolute_owned("/", libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)?;
-        if descriptor_identity(current.as_raw_fd())? != self.root_identity {
-            return Err(invalid_data(
-                "nested worker root does not match the retained root capability",
-            ));
-        }
-        validate_entered_root_device_view(&self.root)
-    }
-
-    fn verify_entered(&self) -> io::Result<()> {
-        require_single_threaded_worker()?;
-        if std::env::vars_os().next().is_some() {
-            return Err(invalid_data(
-                "entered nested worker environment is not empty",
-            ));
-        }
-        require_current_namespace(NamespaceKind::User, self.owner_user.identity)?;
-        require_current_namespace(NamespaceKind::Mount, self.mount.identity)?;
-        require_current_namespace(NamespaceKind::Pid, self.pid.identity)?;
-        require_current_namespace(NamespaceKind::Ipc, self.ipc.identity)?;
-        require_current_namespace(NamespaceKind::Uts, self.uts.identity)?;
-        let expected_network = match &self.network {
-            NestedWorkerNetwork::Restricted(network) => network.identity,
-            NestedWorkerNetwork::AlreadyCurrent(identity) => *identity,
-        };
-        require_current_namespace(NamespaceKind::Network, expected_network)?;
-        let root = open_absolute_owned("/", libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)?;
-        let root = descriptor_identity(root.as_raw_fd())?;
-        if root != self.root_identity {
-            return Err(invalid_data(
-                "forked nested worker escaped the retained root capability",
-            ));
-        }
-        if unsafe { libc::getuid() } != 0
-            || unsafe { libc::getgid() } != 0
-            || unsafe { libc::getpid() } <= 1
-        {
-            return Err(invalid_data(
-                "nested worker credentials or PID namespace identity is invalid",
-            ));
-        }
-        Ok(())
-    }
-}
-
-fn require_current_namespace(kind: NamespaceKind, expected: DescriptorIdentity) -> io::Result<()> {
-    let current =
-        open_namespace_absolute(&format!("/proc/self/ns/{}", kind.name()), kind)?.identity;
-    if current != expected {
-        return Err(invalid_data(format!(
-            "nested worker did not enter the exact retained {} namespace",
-            kind.name()
-        )));
-    }
-    Ok(())
-}
-
-fn require_single_threaded_worker() -> io::Result<()> {
-    let threads = fs::read_dir("/proc/self/task")?.count();
-    if threads != 1 {
-        return Err(invalid_data(format!(
-            "nested worker is not single-threaded ({threads} threads)"
-        )));
-    }
-    Ok(())
-}
-
-fn wait_nested_worker_child(child: libc::pid_t) -> io::Result<i32> {
-    let mut status = 0;
-    loop {
-        let waited = unsafe { libc::waitpid(child, &mut status, 0) };
-        if waited == child {
-            break;
-        }
-        if waited < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-    }
-    if libc::WIFEXITED(status) {
-        return Ok(libc::WEXITSTATUS(status));
-    }
-    if libc::WIFSIGNALED(status) {
-        return Ok(128 + libc::WTERMSIG(status));
-    }
-    Err(invalid_data("nested worker child stopped unexpectedly"))
-}
-
-fn read_sealed_nested_request(fd: RawFd) -> io::Result<NestedWorkerRequest> {
-    validate_fd_kind(
-        fd,
-        libc::S_IFREG,
-        "nested worker request is not a regular file",
-    )?;
-    let seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
-    if seals < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if seals & REQUIRED_BOOTSTRAP_SEALS != REQUIRED_BOOTSTRAP_SEALS {
-        return Err(invalid_data("nested worker request is not fully sealed"));
-    }
-    let stat = fstat(fd)?;
-    let size = usize::try_from(stat.st_size)
-        .map_err(|_| invalid_data("nested worker request size is invalid"))?;
-    if size == 0 || size > MAX_BOOTSTRAP_BYTES {
-        return Err(invalid_data(
-            "nested worker request exceeds the byte budget",
-        ));
-    }
-    let mut bytes = vec![0; size];
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let read = unsafe {
-            libc::pread(
-                fd,
-                bytes[offset..].as_mut_ptr().cast(),
-                bytes.len() - offset,
-                offset as libc::off_t,
-            )
-        };
-        if read > 0 {
-            offset += read as usize;
-        } else if read == 0 {
-            return Err(invalid_data("nested worker request is truncated"));
-        } else {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
-    }
-    NestedWorkerRequest::decode(&bytes)
-}
-
-fn run_nested_worker_request(
-    request: NestedWorkerRequest,
-    runtime: RuntimeCapability,
-    bwrap: File,
-) -> io::Result<i32> {
-    let homes = crate::matcher::path::Homes {
-        home: PathBuf::from(OsString::from_vec(request.homes.home)),
-        tmp: PathBuf::from(OsString::from_vec(request.homes.tmp)),
-        cache: PathBuf::from(OsString::from_vec(request.homes.cache)),
-        project: PathBuf::from(OsString::from_vec(request.homes.project)),
-    };
-    let cwd = PathBuf::from(OsString::from_vec(request.cwd));
-    for (path, label) in [
-        (&homes.home, "home"),
-        (&homes.tmp, "temporary home"),
-        (&homes.cache, "cache home"),
-        (&homes.project, "project home"),
-        (&cwd, "compile cwd"),
-    ] {
-        require_absolute_nested_path(path, label)?;
-    }
-    let context = crate::compiler::CompileCtx::new(homes, cwd, false, request.ambient_env);
-    let policy = crate::compiler::compile(&request.surface, &context)
-        .map_err(|error| io::Error::other(format!("compiling nested policy: {error}")))?;
-    if policy.net.enforce
-        && policy
-            .net
-            .rules
-            .iter()
-            .any(|rule| rule.effect == crate::policy::Effect::Allow)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "nested per-host networking is not implemented",
-        ));
-    }
-    let prepared = super::apply_with_retained_linux_authority(
-        &policy,
-        request.command.into_spec()?,
-        &runtime,
-        bwrap,
-    )
-    .map_err(|degradation| {
-        io::Error::other(degradation.warning().unwrap_or_else(|| {
-            "nested sandbox preparation failed without a diagnostic".to_string()
-        }))
-    })?;
-    if !prepared.degradation.is_full() {
-        return Err(io::Error::other(
-            prepared.degradation.warning().unwrap_or_else(|| {
-                "nested sandbox preparation degraded without a diagnostic".to_string()
-            }),
-        ));
-    }
-    let status = prepared.status()?;
-    if let Some(code) = status.code() {
-        Ok(code)
-    } else {
-        Ok(128 + status.signal().unwrap_or(libc::SIGKILL))
-    }
-}
-
-fn capture_trusted_session(
-    namespace_init_pid: libc::pid_t,
-    outer: &mut Child,
-    bwrap: File,
-    restrictions: ProcessRestrictionCeiling,
-    deadline: Instant,
-) -> io::Result<TrustedSession> {
-    let outer_pid = libc::pid_t::try_from(outer.id())
-        .map_err(|_| invalid_data("Bubblewrap process ID does not fit pid_t"))?;
-    verify_blocked_namespace_init(namespace_init_pid, outer_pid)?;
-
-    let process = open_absolute_owned(
-        &format!("/proc/{namespace_init_pid}"),
-        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-    )
-    .map_err(|error| capture_error("opening the blocked namespace-init proc directory", error))?;
-    let root = wait_for_sandbox_root(&process, outer, deadline)?;
-    let mount = capture_namespace(&process, NamespaceKind::Mount)?;
-    let pid = capture_namespace(&process, NamespaceKind::Pid)?;
-    let ipc = capture_namespace(&process, NamespaceKind::Ipc)?;
-    let uts = capture_namespace(&process, NamespaceKind::Uts)?;
-
-    let shared_owner = mount.owner_user.identity;
-    require_same_namespace_owner("PID", shared_owner, pid.owner_user.identity)?;
-    require_same_namespace_owner("IPC", shared_owner, ipc.owner_user.identity)?;
-    require_same_namespace_owner("UTS", shared_owner, uts.owner_user.identity)?;
-
-    let network = if restrictions.network == NetworkRestrictionCeiling::Deny {
-        let network = capture_namespace(&process, NamespaceKind::Network)?;
-        require_same_namespace_owner(
-            "restricted network",
-            shared_owner,
-            network.owner_user.identity,
-        )?;
-        TrustedNetworkNamespace::Restricted(network.namespace)
-    } else {
-        let network = capture_namespace_handle(&process, NamespaceKind::Network)?;
-        let current = open_namespace_absolute("/proc/self/ns/net", NamespaceKind::Network)?;
-        require_full_network_identity(network.identity, current.identity)?;
-        TrustedNetworkNamespace::AlreadyCurrent {
-            identity: current.identity,
-        }
-    };
-
-    Ok(TrustedSession {
-        namespaces: TrustedNamespaces {
-            owner_user: mount.owner_user,
-            mount: mount.namespace,
-            pid: pid.namespace,
-            ipc: ipc.namespace,
-            uts: uts.namespace,
-            network,
-        },
-        root,
-        bwrap,
-        restrictions,
-        identity: TrustedSessionIdentity {
-            outer_pid,
-            namespace_init_pid,
-        },
-        cleanup: TrustedSessionCleanup::default(),
-    })
-}
-
-fn wait_for_sandbox_root(
-    process: &OwnedFd,
-    outer: &mut Child,
-    deadline: Instant,
-) -> io::Result<OwnedFd> {
-    loop {
-        let root = openat_owned(
-            process.as_raw_fd(),
-            c"root",
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-        .map_err(|error| capture_error("opening the blocked namespace-init root", error));
-        let error = match root.and_then(|root| {
-            validate_root_device_view(&root)
-                .map_err(|error| capture_error("validating the blocked sandbox root", error))?;
-            Ok(root)
-        }) {
-            Ok(root) => return Ok(root),
-            Err(error) => error,
-        };
-        if let Some(status) = outer.try_wait()? {
-            return Err(io::Error::other(format!(
-                "Bubblewrap exited before its blocked sandbox root was ready: {status}; last capture error: {}",
-                error
-            )));
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "timed out waiting for Bubblewrap's blocked sandbox root; last capture error: {}",
-                    error
-                ),
-            ));
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
-fn capture_namespace(process: &OwnedFd, kind: NamespaceKind) -> io::Result<CapturedNamespace> {
-    let namespace = capture_namespace_handle(process, kind)?;
-    let owner = unsafe { libc::ioctl(namespace.fd.as_raw_fd(), NS_GET_USERNS) };
-    if owner < 0 {
-        return Err(capture_error(
-            &format!("deriving the owning user namespace for {}", kind.name()),
-            io::Error::last_os_error(),
-        ));
-    }
-    let owner_user =
-        validate_namespace_fd(unsafe { OwnedFd::from_raw_fd(owner) }, NamespaceKind::User)?;
-    Ok(CapturedNamespace {
-        namespace,
-        owner_user,
-    })
-}
-
-fn capture_namespace_handle(process: &OwnedFd, kind: NamespaceKind) -> io::Result<NamespaceHandle> {
-    let path = CString::new(format!("ns/{}", kind.name()))
-        .map_err(|_| invalid_input("namespace path contains NUL"))?;
-    let namespace = openat_owned(process.as_raw_fd(), &path, libc::O_RDONLY | libc::O_CLOEXEC)
-        .map_err(|error| {
-            capture_error(
-                &format!("opening the blocked {} namespace", kind.name()),
-                error,
-            )
-        })?;
-    validate_namespace_fd(namespace, kind)
-}
-
-fn open_namespace_absolute(path: &str, kind: NamespaceKind) -> io::Result<NamespaceHandle> {
-    validate_namespace_fd(
-        open_absolute_owned(path, libc::O_RDONLY | libc::O_CLOEXEC)?,
-        kind,
-    )
-}
-
-fn validate_namespace_fd(fd: OwnedFd, kind: NamespaceKind) -> io::Result<NamespaceHandle> {
-    let observed = unsafe { libc::ioctl(fd.as_raw_fd(), NS_GET_NSTYPE) };
-    if observed < 0 {
-        return Err(capture_error(
-            &format!("validating {} namespace type", kind.name()),
-            io::Error::last_os_error(),
-        ));
-    }
-    if observed != kind.clone_flag() {
-        return Err(invalid_data(format!(
-            "captured {} namespace has type {observed:#x}, expected {:#x}",
-            kind.name(),
-            kind.clone_flag()
-        )));
-    }
-    Ok(NamespaceHandle {
-        identity: descriptor_identity(fd.as_raw_fd())?,
-        fd,
-    })
-}
-
-fn require_same_namespace_owner(
-    label: &str,
-    expected: DescriptorIdentity,
-    observed: DescriptorIdentity,
-) -> io::Result<()> {
-    if observed != expected {
-        return Err(invalid_data(format!(
-            "captured {label} namespace has a different owning user namespace"
-        )));
-    }
-    Ok(())
-}
-
-fn require_full_network_identity(
-    captured: DescriptorIdentity,
-    current: DescriptorIdentity,
-) -> io::Result<()> {
-    if captured != current {
-        return Err(invalid_data(
-            "full-network sandbox did not retain the trusted parent's current network namespace",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_root_device_view(root: &OwnedFd) -> io::Result<()> {
-    let dev = openat_owned(
-        root.as_raw_fd(),
-        c"dev",
-        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-    )
-    .map_err(|error| capture_error("opening dev below the sandbox root anchor", error))?;
-    let current_dev = open_absolute_owned(
-        "/dev",
-        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-    )?;
-    if descriptor_identity(dev.as_raw_fd())? == descriptor_identity(current_dev.as_raw_fd())? {
-        return Err(invalid_data(
-            "sandbox root did not contain a fresh device filesystem",
-        ));
-    }
-    validate_device_view(root, dev)
-}
-
-fn validate_entered_root_device_view(root: &OwnedFd) -> io::Result<()> {
-    let dev = openat_owned(
-        root.as_raw_fd(),
-        c"dev",
-        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-    )
-    .map_err(|error| capture_error("opening dev below the sandbox root anchor", error))?;
-    validate_device_view(root, dev)
-}
-
-fn validate_device_view(root: &OwnedFd, dev: OwnedFd) -> io::Result<()> {
-    const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
-    let metadata = descriptor_stat(root.as_raw_fd())?;
-    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return Err(invalid_data("sandbox root anchor is not a directory"));
-    }
-    let mut filesystem = MaybeUninit::<libc::statfs>::uninit();
-    if unsafe { libc::fstatfs(dev.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe { filesystem.assume_init() }.f_type != TMPFS_MAGIC {
-        return Err(invalid_data(
-            "sandbox root device filesystem is not a tmpfs",
-        ));
-    }
-    let null = openat_owned(
-        dev.as_raw_fd(),
-        c"null",
-        libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-    )
-    .map_err(|error| capture_error("opening null below the sandbox dev anchor", error))?;
-    let null = descriptor_stat(null.as_raw_fd())?;
-    let canonical = null.st_mode & libc::S_IFMT == libc::S_IFCHR
-        && libc::major(null.st_rdev) == 1
-        && libc::minor(null.st_rdev) == 3;
-    let intentionally_unreadable = null.st_mode & libc::S_IFMT == libc::S_IFREG
-        && null.st_mode & 0o777 == 0
-        && null.st_size == 0;
-    if !canonical && !intentionally_unreadable {
-        return Err(invalid_data(
-            "sandbox root device filesystem omitted the canonical null device",
-        ));
-    }
-    Ok(())
-}
-
-fn verify_blocked_namespace_init(pid: libc::pid_t, outer_pid: libc::pid_t) -> io::Result<()> {
-    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
-    let field = |name: &str| {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(name).map(str::trim))
-    };
-    let outer_pid = outer_pid.to_string();
-    if field("PPid:") != Some(outer_pid.as_str())
-        || !field("NSpid:").is_some_and(|value| value.ends_with("\t1") || value == "1")
-    {
-        return Err(invalid_data(
-            "blocked Bubblewrap namespace init is not the direct PID-namespace reaper",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_blocked_namespace_init_identity(
-    identity: BlockedNamespaceInitIdentity,
-) -> io::Result<()> {
-    verify_blocked_namespace_init(identity.pid, identity.outer_pid)?;
-    if read_host_process_starttime(identity.pid)? != identity.starttime {
-        return Err(invalid_data(
-            "blocked Bubblewrap namespace init changed during identity capture",
-        ));
-    }
-    Ok(())
-}
-
-fn capture_direct_child_identity(
-    pid: libc::pid_t,
-    outer_pid: libc::pid_t,
-) -> io::Result<BlockedNamespaceInitIdentity> {
-    let identity = capture_reported_namespace_init_identity(pid, outer_pid)?;
-    validate_direct_child_identity(identity)?;
-    Ok(identity)
-}
-
-fn capture_reported_namespace_init_identity(
-    pid: libc::pid_t,
-    outer_pid: libc::pid_t,
-) -> io::Result<BlockedNamespaceInitIdentity> {
-    Ok(BlockedNamespaceInitIdentity {
-        pid,
-        outer_pid,
-        starttime: read_host_process_starttime(pid)?,
-    })
-}
-
-fn validate_direct_child_identity(identity: BlockedNamespaceInitIdentity) -> io::Result<()> {
-    verify_direct_child(identity.pid, identity.outer_pid)?;
-    if read_host_process_starttime(identity.pid)? != identity.starttime {
-        return Err(invalid_data(
-            "Bubblewrap child changed during direct-parent validation",
-        ));
-    }
-    verify_direct_child(identity.pid, identity.outer_pid)
-}
-
-fn verify_direct_child(pid: libc::pid_t, outer_pid: libc::pid_t) -> io::Result<()> {
-    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
-    let observed = status
-        .lines()
-        .find_map(|line| line.strip_prefix("PPid:").map(str::trim));
-    let outer_pid = outer_pid.to_string();
-    if observed != Some(outer_pid.as_str()) {
-        return Err(invalid_data(
-            "Bubblewrap child is not directly owned by the expected outer process",
-        ));
-    }
-    Ok(())
-}
-
-fn read_host_process_starttime(pid: libc::pid_t) -> io::Result<u64> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let close = stat
-        .rfind(')')
-        .ok_or_else(|| invalid_data("host process stat record is malformed"))?;
-    stat[close + 2..]
-        .split_whitespace()
-        .nth(19)
-        .ok_or_else(|| invalid_data("host process stat omits starttime"))?
-        .parse::<u64>()
-        .map_err(|_| invalid_data("host process starttime is invalid"))
-}
-
-fn descriptor_stat(fd: RawFd) -> io::Result<libc::stat> {
-    let mut metadata = MaybeUninit::<libc::stat>::uninit();
-    if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { metadata.assume_init() })
-}
-
-fn descriptor_identity(fd: RawFd) -> io::Result<DescriptorIdentity> {
-    let metadata = descriptor_stat(fd)?;
-    Ok(DescriptorIdentity {
-        dev: metadata.st_dev,
-        ino: metadata.st_ino,
-    })
-}
-
-fn open_absolute_owned(path: &str, flags: libc::c_int) -> io::Result<OwnedFd> {
-    let path = CString::new(path).map_err(|_| invalid_input("absolute path contains NUL"))?;
-    let fd = unsafe { libc::open(path.as_ptr(), flags) };
-    if fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-}
-
-fn openat_owned(
-    directory: RawFd,
-    path: &std::ffi::CStr,
-    flags: libc::c_int,
-) -> io::Result<OwnedFd> {
-    let fd = unsafe { libc::openat(directory, path.as_ptr(), flags) };
-    if fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-}
-
-fn capture_error(stage: &str, error: io::Error) -> io::Error {
-    io::Error::new(error.kind(), format!("{stage}: {error}"))
-}
-
 /// Prepared, one-shot authority for starting the retained PID-1 monitor.
 /// Every child-side descriptor is relocated above the protocol's reserved range
 /// before this value is returned.
 pub(crate) struct RetainedMonitorLaunch {
     spec: BootstrapSpec,
-    bwrap: File,
     bootstrap: OwnedFd,
     control_parent: Option<OwnedFd>,
     control_child: Option<OwnedFd>,
@@ -2325,8 +941,6 @@ pub(crate) struct RetainedMonitorLaunch {
     signal_writer: Option<File>,
     info_reader: Option<File>,
     info_writer: Option<File>,
-    block_reader: Option<File>,
-    block_writer: Option<File>,
     bindings: Vec<File>,
     runtime_objects: Vec<RuntimeObject>,
     monitor_program: OsString,
@@ -2334,11 +948,7 @@ pub(crate) struct RetainedMonitorLaunch {
 }
 
 impl RetainedMonitorLaunch {
-    pub(crate) fn new(
-        runtime: &RuntimeCapability,
-        spec: BootstrapSpec,
-        bwrap: &File,
-    ) -> io::Result<Self> {
+    pub(crate) fn new(runtime: &RuntimeCapability, spec: BootstrapSpec) -> io::Result<Self> {
         let image = runtime.materialize()?;
         if spec.executable != image.executable.identity || spec.build_marker != image.build_marker {
             return Err(invalid_input(
@@ -2358,7 +968,6 @@ impl RetainedMonitorLaunch {
         let (release_reader, release_writer) = pipe_files(false)?;
         let (signal_reader, signal_writer) = signal_relay_pipe_files()?;
         let (info_reader, info_writer) = pipe_files(true)?;
-        let (block_reader, block_writer) = pipe_files(false)?;
         let bindings = runtime_bindings(image)?
             .into_iter()
             .map(|file| duplicate_file_at_least(&file, FIRST_UNRESERVED_MONITOR_FD))
@@ -2371,7 +980,6 @@ impl RetainedMonitorLaunch {
         let (monitor_program, monitor_args) = private_monitor_command(image);
         Ok(Self {
             spec,
-            bwrap: duplicate_file_at_least(bwrap, FIRST_UNRESERVED_MONITOR_FD)?,
             bootstrap,
             control_parent: Some(control_parent),
             control_child: Some(relocate_fd_at_least(
@@ -2393,11 +1001,6 @@ impl RetainedMonitorLaunch {
                 info_writer,
                 FIRST_UNRESERVED_MONITOR_FD,
             )?),
-            block_reader: Some(relocate_file_at_least(
-                block_reader,
-                FIRST_UNRESERVED_MONITOR_FD,
-            )?),
-            block_writer: Some(block_writer),
             bindings,
             runtime_objects,
             monitor_program,
@@ -2441,15 +1044,9 @@ impl RetainedMonitorLaunch {
             .info_writer
             .as_ref()
             .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
-        let block = self
-            .block_reader
-            .as_ref()
-            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
         command
             .arg("--info-fd")
             .arg(info.as_raw_fd().to_string())
-            .arg("--block-fd")
-            .arg(block.as_raw_fd().to_string())
             // The retained monitor owns the namespace root and must not inherit
             // an outer cwd that happens to remain reachable through the mount
             // plan. Bubblewrap also derives its implementation-added PWD from
@@ -2492,10 +1089,6 @@ impl RetainedMonitorLaunch {
             .info_writer
             .as_ref()
             .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
-        let block_reader = self
-            .block_reader
-            .as_ref()
-            .ok_or_else(|| invalid_input("sandbox monitor launch was already consumed"))?;
         let remaps = vec![
             (self.bootstrap.as_raw_fd(), BOOTSTRAP_FD),
             (control_child.as_raw_fd(), CONTROL_FD),
@@ -2507,7 +1100,6 @@ impl RetainedMonitorLaunch {
             .iter()
             .map(AsRawFd::as_raw_fd)
             .chain(std::iter::once(info_writer.as_raw_fd()))
-            .chain(std::iter::once(block_reader.as_raw_fd()))
             .chain(caller_setup_fds.iter().copied())
             .collect::<BTreeSet<_>>();
         let deny_keyring = self.spec.deny_keyring;
@@ -2558,9 +1150,6 @@ impl RetainedMonitorLaunch {
         drop(self.release_reader.take());
         drop(self.signal_reader.take());
         drop(self.info_writer.take());
-        drop(self.block_reader.take());
-        let mut reported_namespace_init_pid = None;
-        let mut blocked_namespace_init = None;
         let result = (|| {
             let mut info = self
                 .info_reader
@@ -2570,30 +1159,6 @@ impl RetainedMonitorLaunch {
                 Some(deadline) => read_bwrap_child_pid_until(&mut info, &mut outer, deadline)?,
                 None => read_bwrap_child_pid(&mut info, &mut outer)?,
             };
-            reported_namespace_init_pid = Some(monitor_pid);
-            let outer_pid = libc::pid_t::try_from(outer.id())
-                .map_err(|_| invalid_data("Bubblewrap process ID does not fit pid_t"))?;
-            let identity = capture_reported_namespace_init_identity(monitor_pid, outer_pid)?;
-            blocked_namespace_init = Some(identity);
-            validate_direct_child_identity(identity)?;
-            validate_blocked_namespace_init_identity(identity)?;
-            let restrictions = ProcessRestrictionCeiling::from_spec(&self.spec);
-            let capture_deadline = deadline.unwrap_or_else(|| Instant::now() + DESCRIBE_TIMEOUT);
-            let mut trusted = capture_trusted_session(
-                monitor_pid,
-                &mut outer,
-                duplicate_file_at_least(&self.bwrap, FIRST_NESTED_SOURCE_FD)?,
-                restrictions,
-                capture_deadline,
-            )?;
-            self.block_writer
-                .as_mut()
-                .ok_or_else(|| invalid_input("sandbox Bubblewrap block capability is absent"))?
-                .write_all(&[BWRAP_BLOCK_RELEASE_BYTE])?;
-            drop(self.block_writer.take());
-            blocked_namespace_init = None;
-            reported_namespace_init_pid = None;
-            trusted.cleanup.startup_released = true;
             let control_parent = self
                 .control_parent
                 .take()
@@ -2657,15 +1222,16 @@ impl RetainedMonitorLaunch {
                 control,
                 signal,
                 target_pid,
-                trusted,
+                authenticated_cleanup: false,
+                outer_reaped: false,
             })
         })();
         match result {
             Ok(session) => Ok((outer, session)),
             Err(error) => {
-                // Stock Bubblewrap treats block-fd EOF as release. Retain that
-                // capability until the exact blocked namespace init is dead and
-                // gone, then close the remaining launch capabilities.
+                // Close every surviving launch capability before terminating the
+                // exact outer process. This makes EOF part of the fail-closed path
+                // instead of relying on the launch value's eventual field drops.
                 drop(self.control_parent.take());
                 drop(self.control_child.take());
                 drop(self.release_reader.take());
@@ -2674,13 +1240,7 @@ impl RetainedMonitorLaunch {
                 drop(self.signal_writer.take());
                 drop(self.info_reader.take());
                 drop(self.info_writer.take());
-                drop(self.block_reader.take());
-                match fail_closed_outer_holding_block(
-                    &mut outer,
-                    self.block_writer.take(),
-                    blocked_namespace_init,
-                    reported_namespace_init_pid,
-                ) {
+                match fail_closed_outer(&mut outer) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(io::Error::new(
                         error.kind(),
@@ -2689,124 +1249,6 @@ impl RetainedMonitorLaunch {
                 }
             }
         }
-    }
-}
-
-fn fail_closed_outer_holding_block(
-    outer: &mut Child,
-    block_writer: Option<File>,
-    blocked_namespace_init: Option<BlockedNamespaceInitIdentity>,
-    reported_namespace_init_pid: Option<libc::pid_t>,
-) -> io::Result<()> {
-    if block_writer.is_none() {
-        return fail_closed_outer(outer);
-    }
-
-    let mut first_error = None;
-    let mut identities = blocked_namespace_init.into_iter().collect::<Vec<_>>();
-    if identities.is_empty() {
-        match stop_outer_and_capture_direct_children(outer, reported_namespace_init_pid) {
-            Ok(children) => identities = children,
-            Err(error) => first_error = Some(error),
-        }
-    }
-
-    for identity in &identities {
-        if let Err(error) = terminate_exact_blocked_child(*identity) {
-            first_error.get_or_insert(error);
-        }
-    }
-    if let Err(error) = fail_closed_outer(outer) {
-        first_error.get_or_insert(error);
-    }
-    for identity in &identities {
-        if let Err(error) =
-            wait_for_host_target_exit(identity.pid, identity.starttime, DESCRIBE_TIMEOUT)
-        {
-            first_error.get_or_insert(error);
-        }
-    }
-    drop(block_writer);
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-fn stop_outer_and_capture_direct_children(
-    outer: &mut Child,
-    reported_namespace_init_pid: Option<libc::pid_t>,
-) -> io::Result<Vec<BlockedNamespaceInitIdentity>> {
-    let outer_pid = libc::pid_t::try_from(outer.id())
-        .map_err(|_| invalid_data("Bubblewrap process ID does not fit pid_t"))?;
-    if outer.try_wait()?.is_some() {
-        return capture_reported_child_after_outer_exit(outer_pid, reported_namespace_init_pid);
-    }
-    if unsafe { libc::kill(outer_pid, libc::SIGSTOP) } != 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) && outer.try_wait()?.is_some() {
-            return capture_reported_child_after_outer_exit(outer_pid, reported_namespace_init_pid);
-        }
-        return Err(error);
-    }
-    wait_for_host_process_state(outer_pid, b'T', DESCRIBE_TIMEOUT)?;
-
-    let mut children = fs::read_to_string(format!("/proc/{outer_pid}/task/{outer_pid}/children"))?
-        .split_ascii_whitespace()
-        .map(|value| {
-            value
-                .parse::<libc::pid_t>()
-                .map_err(|_| invalid_data("Bubblewrap child list contains an invalid PID"))
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    if let Some(reported) = reported_namespace_init_pid {
-        children.sort_by_key(|child| *child != reported);
-    }
-    children
-        .into_iter()
-        .map(|pid| capture_direct_child_identity(pid, outer_pid))
-        .collect()
-}
-
-fn capture_reported_child_after_outer_exit(
-    outer_pid: libc::pid_t,
-    reported_namespace_init_pid: Option<libc::pid_t>,
-) -> io::Result<Vec<BlockedNamespaceInitIdentity>> {
-    let Some(pid) = reported_namespace_init_pid else {
-        return Ok(Vec::new());
-    };
-    match read_host_process_starttime(pid) {
-        Ok(starttime) => Ok(vec![BlockedNamespaceInitIdentity {
-            pid,
-            outer_pid,
-            starttime,
-        }]),
-        Err(error) if process_disappeared(&error) => Ok(Vec::new()),
-        Err(error) => Err(error),
-    }
-}
-
-fn terminate_exact_blocked_child(identity: BlockedNamespaceInitIdentity) -> io::Result<()> {
-    if identity.pid <= 0 || identity.outer_pid <= 0 {
-        return Err(invalid_data(
-            "blocked Bubblewrap process identity is invalid",
-        ));
-    }
-    match read_host_process_starttime(identity.pid) {
-        Err(error) if process_disappeared(&error) => return Ok(()),
-        Err(error) => return Err(error),
-        Ok(observed) if observed != identity.starttime => return Ok(()),
-        Ok(_) => {}
-    }
-    let killed = unsafe { libc::kill(identity.pid, libc::SIGKILL) };
-    if killed == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error)
     }
 }
 
@@ -2935,14 +1377,11 @@ pub(crate) struct RetainedMonitorSession {
     control: ControlChannel,
     signal: SignalRelay,
     target_pid: libc::pid_t,
-    trusted: TrustedSession,
+    authenticated_cleanup: bool,
+    outer_reaped: bool,
 }
 
 impl RetainedMonitorSession {
-    fn run_nested_worker(&self, request: NestedWorkerRequest) -> io::Result<std::process::Output> {
-        self.trusted.run_nested_worker(request)
-    }
-
     pub(crate) fn target_pid(&self) -> libc::pid_t {
         self.target_pid
     }
@@ -2952,7 +1391,7 @@ impl RetainedMonitorSession {
     }
 
     pub(crate) fn cleanup_complete(&self) -> bool {
-        self.trusted.cleanup.outer_reaped
+        self.outer_reaped
     }
 
     pub(crate) fn wait(&mut self, outer: &mut Child) -> io::Result<ExitStatus> {
@@ -2991,7 +1430,7 @@ impl RetainedMonitorSession {
         let _ = unsafe { libc::shutdown(self.control.fd.as_raw_fd(), libc::SHUT_RDWR) };
         let result = fail_closed_outer(outer);
         if result.is_ok() {
-            self.trusted.cleanup.outer_reaped = true;
+            self.outer_reaped = true;
         }
         result
     }
@@ -3003,7 +1442,7 @@ impl RetainedMonitorSession {
     ) -> io::Result<T> {
         match result {
             Ok(value) => Ok(value),
-            Err(error) if self.trusted.cleanup.outer_reaped => Err(error),
+            Err(error) if self.outer_reaped => Err(error),
             Err(error) => match self.fail_closed(outer) {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(io::Error::other(format!(
@@ -3087,7 +1526,7 @@ impl RetainedMonitorSession {
             return Err(unexpected_monitor_frame("CleanupComplete", &cleanup));
         }
         original.require_exact_echo(&cleanup.payload)?;
-        self.trusted.cleanup.authenticated_cleanup = true;
+        self.authenticated_cleanup = true;
         match receive_control_until(&mut self.control, deadline) {
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
             Err(error) => return Err(error),
@@ -3099,9 +1538,9 @@ impl RetainedMonitorSession {
             }
         }
         let outer_status = wait_for_child_status_until(outer, deadline)?;
-        self.trusted.cleanup.outer_reaped = true;
+        self.outer_reaped = true;
         self.signal.close();
-        debug_assert!(self.trusted.cleanup.authenticated_cleanup);
+        debug_assert!(self.authenticated_cleanup);
         if outer_status.code() != Some(0) {
             return Err(invalid_data(format!(
                 "retained-monitor outer process exited with {outer_status}, expected code 0"
@@ -3127,7 +1566,7 @@ fn receive_launch_frame(
 
 impl Drop for RetainedMonitorSession {
     fn drop(&mut self) {
-        if !self.trusted.cleanup.outer_reaped {
+        if !self.outer_reaped {
             self.signal.close();
             let _ = unsafe { libc::shutdown(self.control.fd.as_raw_fd(), libc::SHUT_RDWR) };
         }
@@ -7186,176 +5625,10 @@ pub(crate) fn runtime_degradation(error: io::Error) -> Degradation {
     }
 }
 
-/// Harness-only real-kernel exercise for nested retained-view reentry. The
-/// request seam stays private until the remaining lifecycle work is installed.
-#[doc(hidden)]
-pub fn exercise_nested_worker_reentry(
-    runtime: &RuntimeCapability,
-    restricted_network: bool,
-) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let fixture = tempfile::tempdir()?;
-    let project = fixture.path().join("project");
-    let home = project.join("home");
-    let cache = project.join("cache");
-    let allowed = project.join("allowed");
-    fs::create_dir_all(&home)?;
-    fs::create_dir_all(&cache)?;
-    fs::create_dir_all(&allowed)?;
-    let homes = crate::matcher::path::Homes {
-        home,
-        tmp: PathBuf::from("/tmp"),
-        cache,
-        project: project.clone(),
-    };
-    let host_executable = std::env::current_exe()?;
-    let mut outer_env = BTreeMap::new();
-    outer_env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
-    outer_env.insert(
-        "NESTED_TRUSTED_PARENT_ONLY".to_string(),
-        "secret".to_string(),
-    );
-    let outer_context =
-        crate::compiler::CompileCtx::new(homes.clone(), project.clone(), false, outer_env);
-    let outer_surface = serde_json::json!({
-        "fs": ["./", "<tmp>"],
-        "net": !restricted_network,
-        "env": true
-    });
-    let outer_policy = crate::compiler::compile(&outer_surface, &outer_context)
-        .map_err(|error| io::Error::other(format!("compiling outer worker fixture: {error}")))?;
-    let outer = super::apply_with_runtime(
-        &outer_policy,
-        CommandSpec::new("/bin/sleep")
-            .arg("30")
-            .cwd(&project)
-            .deny_search_root(&project),
-        runtime,
-    )
-    .map_err(|degradation| {
-        io::Error::other(
-            degradation
-                .warning()
-                .unwrap_or_else(|| "preparing outer worker fixture failed".to_string()),
-        )
-    })?
-    .spawn()?;
-    let session = outer
-        .retained_monitor
-        .as_ref()
-        .ok_or_else(|| invalid_data("outer worker fixture omitted its retained session"))?;
-
-    let mut child_env = BTreeMap::new();
-    child_env.insert("NESTED_ALLOWED".to_string(), "yes".to_string());
-    let marker = allowed.join(if restricted_network {
-        "restricted"
-    } else {
-        "full"
-    });
-    let apply_request = NestedWorkerRequest::new(
-        serde_json::json!({
-            "fs": ["...", "./", "<tmp>"],
-            "net": true,
-            "env": true
-        }),
-        homes.clone(),
-        project.clone(),
-        child_env.clone(),
-        CommandSpec::new("/bin/sh")
-            .arg("-c")
-            .arg(
-                "test \"$NESTED_ALLOWED\" = yes && test -z \"${NESTED_TRUSTED_PARENT_ONLY+x}\" && test ! -e \"$1\" && printf entered > allowed/result",
-            )
-            .arg("nested-runtime-check")
-            .arg(host_executable.as_os_str())
-            .cwd(&project)
-            .deny_search_root(&project),
-    )?;
-    let applied = session.run_nested_worker(apply_request)?;
-    require_nested_worker_success("nested filesystem apply", &applied)?;
-    fs::rename(allowed.join("result"), &marker)?;
-    if fs::read(&marker)? != b"entered" {
-        return Err(invalid_data(
-            "nested filesystem apply did not create the expected in-view result",
-        ));
-    }
-
-    let mut host_only = tempfile::Builder::new()
-        .prefix("nub-nested-host-only-")
-        .tempfile_in("/tmp")?;
-    host_only.write_all(b"#!/bin/sh\nexit 0\n")?;
-    let host_only_path = host_only.path().to_path_buf();
-    fs::set_permissions(&host_only_path, fs::Permissions::from_mode(0o700))?;
-    let host_view = NestedWorkerRequest::new(
-        serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
-        homes.clone(),
-        project.clone(),
-        child_env.clone(),
-        CommandSpec::new(host_only_path.as_os_str())
-            .cwd(&project)
-            .deny_search_root(&project),
-    )?;
-    let host_view = session.run_nested_worker(host_view)?;
-    require_nested_worker_failure(
-        "host-view executable collision",
-        &host_view,
-        "entry program could not be resolved",
-    )?;
-
-    let missing_path = NestedWorkerRequest::new(
-        serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
-        homes,
-        project.clone(),
-        child_env,
-        CommandSpec::new("sh")
-            .arg("-c")
-            .arg("exit 0")
-            .cwd(&project)
-            .deny_search_root(&project),
-    )?;
-    let missing_path = session.run_nested_worker(missing_path)?;
-    require_nested_worker_failure(
-        "missing caller PATH",
-        &missing_path,
-        "entry program could not be resolved",
-    )?;
-
-    drop(outer);
-    Ok(())
-}
-
-fn require_nested_worker_success(label: &str, output: &std::process::Output) -> io::Result<()> {
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "{label} failed with {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )))
-}
-
-fn require_nested_worker_failure(
-    label: &str,
-    output: &std::process::Output,
-    expected: &str,
-) -> io::Result<()> {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() && stderr.contains(expected) {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "{label} did not fail with {expected:?}: {}\nstdout: {}\nstderr: {stderr}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout)
-    )))
-}
-
 /// Harness-only real-kernel exercise for retained-monitor states 1-5. This is
 /// intentionally separate from the production launcher until runtime
 /// supervision and the remaining session-lifecycle states are installed.
+#[doc(hidden)]
 pub fn exercise_monitor_states_1_to_5(
     runtime: &RuntimeCapability,
     bwrap: impl AsRef<Path>,
@@ -10697,304 +8970,6 @@ mod tests {
         assert!(!valid_private_runtime_path(Path::new(
             "/run/other/nub-monitor"
         )));
-    }
-
-    #[test]
-    fn namespace_type_validation_rejects_a_mismatched_handle() {
-        let mount =
-            open_absolute_owned("/proc/self/ns/mnt", libc::O_RDONLY | libc::O_CLOEXEC).unwrap();
-        let error = validate_namespace_fd(mount, NamespaceKind::Pid).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("expected"));
-    }
-
-    #[test]
-    fn namespace_owner_validation_compares_device_and_inode() {
-        let expected = DescriptorIdentity { dev: 7, ino: 11 };
-        require_same_namespace_owner("PID", expected, expected).unwrap();
-        let error =
-            require_same_namespace_owner("PID", expected, DescriptorIdentity { dev: 8, ino: 11 })
-                .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn full_network_requires_the_exact_current_namespace_identity() {
-        let current = DescriptorIdentity { dev: 5, ino: 13 };
-        require_full_network_identity(current, current).unwrap();
-        let error = require_full_network_identity(DescriptorIdentity { dev: 6, ino: 13 }, current)
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn nested_worker_entry_order_is_exact_and_full_network_skips_setns() {
-        assert_eq!(
-            nested_entry_order(NestedNetworkMode::Restricted),
-            RESTRICTED_NESTED_ENTRY_ORDER
-        );
-        assert_eq!(
-            nested_entry_order(NestedNetworkMode::Full),
-            FULL_NESTED_ENTRY_ORDER
-        );
-        assert!(!nested_entry_order(NestedNetworkMode::Full).contains(&NestedEntryStage::Network));
-        let mut wrong = RESTRICTED_NESTED_ENTRY_ORDER.to_vec();
-        wrong.swap(0, 2);
-        let error = validate_nested_entry_order(NestedNetworkMode::Restricted, &wrong).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn nested_worker_request_requires_resolved_absolute_paths() {
-        let unresolved = NestedCommand::from_spec(CommandSpec::new("/bin/true"))
-            .err()
-            .unwrap();
-        assert_eq!(unresolved.kind(), io::ErrorKind::InvalidInput);
-        let relative = NestedCommand::from_spec(CommandSpec::new("/bin/true").cwd("relative"))
-            .err()
-            .unwrap();
-        assert_eq!(relative.kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn recursive_runtime_authority_rejects_host_view_sources() {
-        let file = File::open("/proc/self/exe").unwrap();
-        let image = RuntimeImage {
-            executable: PinnedObject {
-                identity: FileIdentity::from_file(&file).unwrap(),
-                file,
-                source_path: PathBuf::from("/host/build/tree/nub-monitor"),
-                private_name: OsString::from("nub-monitor"),
-            },
-            kind: RuntimeKind::Static,
-            build_marker: [0; 32],
-        };
-        let error = require_retained_runtime_sources(&image).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("retained private runtime"));
-    }
-
-    #[test]
-    fn host_root_is_rejected_as_a_fresh_device_view() {
-        let root =
-            open_absolute_owned("/", libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC).unwrap();
-        let error = validate_root_device_view(&root).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("fresh device filesystem"));
-    }
-
-    #[test]
-    fn namespace_init_must_be_the_outer_process_direct_reaper() {
-        let pid = unsafe { libc::getpid() };
-        let error = verify_blocked_namespace_init(pid, pid).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("direct PID-namespace reaper"));
-    }
-
-    #[test]
-    fn pre_info_outer_exit_closes_block_capability() {
-        for _ in 0..32 {
-            let (mut block_reader, block_writer) = pipe_files(true).unwrap();
-            let mut outer = Command::new("/bin/false").spawn().unwrap();
-            assert!(!outer.wait().unwrap().success());
-            fail_closed_outer_holding_block(&mut outer, Some(block_writer), None, None).unwrap();
-            let mut byte = [0u8; 1];
-            assert_eq!(block_reader.read(&mut byte).unwrap(), 0);
-        }
-    }
-
-    #[test]
-    fn capture_failure_kills_bwrap_before_block_eof_can_execute_target() {
-        let Some(bwrap) = usable_stock_bwrap() else {
-            return;
-        };
-        let directory = tempfile::tempdir().unwrap();
-        let blocked_marker = directory.path().join("blocked-target-executed");
-        let (mut blocked, block_writer, blocked_identity) =
-            spawn_blocked_bwrap_target(bwrap, directory.path(), &blocked_marker).unwrap();
-        fail_closed_outer_holding_block(
-            &mut blocked,
-            Some(block_writer),
-            Some(blocked_identity),
-            Some(blocked_identity.pid),
-        )
-        .unwrap();
-        wait_for_host_target_exit(
-            blocked_identity.pid,
-            blocked_identity.starttime,
-            DESCRIBE_TIMEOUT,
-        )
-        .unwrap();
-        thread::sleep(Duration::from_millis(100));
-        assert!(
-            !blocked_marker.exists(),
-            "capture failure released Bubblewrap's target before fail-closed cleanup"
-        );
-
-        let early_marker = directory.path().join("pre-identity-target-executed");
-        let (mut early, block_writer, early_identity) =
-            spawn_blocked_bwrap_target(bwrap, directory.path(), &early_marker).unwrap();
-        fail_closed_outer_holding_block(
-            &mut early,
-            Some(block_writer),
-            None,
-            Some(early_identity.pid),
-        )
-        .unwrap();
-        wait_for_host_target_exit(
-            early_identity.pid,
-            early_identity.starttime,
-            DESCRIBE_TIMEOUT,
-        )
-        .unwrap();
-        assert!(
-            !early_marker.exists(),
-            "pre-identity cleanup released Bubblewrap's target through block-fd EOF"
-        );
-
-        let eof_marker = directory.path().join("eof-target-executed");
-        let (mut released, block_writer, released_identity) =
-            spawn_blocked_bwrap_target(bwrap, directory.path(), &eof_marker).unwrap();
-        drop(block_writer);
-        assert!(
-            wait_for_child_status(&mut released, DESCRIBE_TIMEOUT)
-                .unwrap()
-                .success()
-        );
-        wait_for_host_target_exit(
-            released_identity.pid,
-            released_identity.starttime,
-            DESCRIBE_TIMEOUT,
-        )
-        .unwrap();
-        assert!(
-            eof_marker.exists(),
-            "the stock-Bubblewrap control did not execute after block-fd EOF"
-        );
-    }
-
-    fn usable_stock_bwrap() -> Option<&'static Path> {
-        let candidate = ["/usr/bin/bwrap", "/bin/bwrap"]
-            .into_iter()
-            .map(Path::new)
-            .find(|path| path.is_file());
-        let Some(candidate) = candidate else {
-            require_bwrap_or_skip("stock Bubblewrap is unavailable");
-            return None;
-        };
-        let usable = Command::new(candidate)
-            .args([
-                "--die-with-parent",
-                "--unshare-user",
-                "--ro-bind",
-                "/",
-                "/",
-                "--",
-                "/bin/true",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if !usable {
-            require_bwrap_or_skip("stock Bubblewrap cannot create the required user namespace");
-            return None;
-        }
-        Some(candidate)
-    }
-
-    fn require_bwrap_or_skip(reason: &str) {
-        let required = matches!(
-            std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
-            Ok("1") | Ok("true") | Ok("yes")
-        );
-        assert!(!required, "NUB_SANDBOX_REQUIRE_BWRAP set but {reason}");
-    }
-
-    fn spawn_blocked_bwrap_target(
-        bwrap: &Path,
-        writable_directory: &Path,
-        marker: &Path,
-    ) -> io::Result<(Child, File, BlockedNamespaceInitIdentity)> {
-        let (mut info_reader, info_writer) = pipe_files(true)?;
-        let (block_reader, block_writer) = pipe_files(false)?;
-        let info_fd = info_writer.as_raw_fd();
-        let block_fd = block_reader.as_raw_fd();
-        let mut command = Command::new(bwrap);
-        command
-            .env_clear()
-            .args([
-                "--die-with-parent",
-                "--new-session",
-                "--unshare-user",
-                "--unshare-pid",
-                "--as-pid-1",
-                "--ro-bind",
-                "/",
-                "/",
-                "--dev",
-                "/dev",
-                "--proc",
-                "/proc",
-                "--bind",
-            ])
-            .arg(writable_directory)
-            .arg(writable_directory)
-            .arg("--info-fd")
-            .arg(info_fd.to_string())
-            .arg("--block-fd")
-            .arg(block_fd.to_string())
-            .arg("--")
-            .arg("/usr/bin/touch")
-            .arg(marker)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            command.pre_exec(move || {
-                clear_cloexec(info_fd)?;
-                clear_cloexec(block_fd)
-            });
-        }
-        let mut outer = command.spawn()?;
-        drop(info_writer);
-        drop(block_reader);
-        let namespace_init_pid = read_bwrap_child_pid(&mut info_reader, &mut outer)?;
-        let outer_pid = libc::pid_t::try_from(outer.id())
-            .map_err(|_| invalid_data("Bubblewrap process ID does not fit pid_t"))?;
-        let identity = capture_direct_child_identity(namespace_init_pid, outer_pid)?;
-        validate_blocked_namespace_init_identity(identity)?;
-        let process = open_absolute_owned(
-            &format!("/proc/{namespace_init_pid}"),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )?;
-        let _root = wait_for_sandbox_root(&process, &mut outer, Instant::now() + DESCRIBE_TIMEOUT)?;
-        Ok((outer, block_writer, identity))
-    }
-
-    #[test]
-    fn process_restriction_ceiling_preserves_existing_dimensions() {
-        let mut value = bootstrap();
-        value.network_filter = false;
-        value.deny_keyring = true;
-        assert_eq!(
-            ProcessRestrictionCeiling::from_spec(&value),
-            ProcessRestrictionCeiling {
-                network: NetworkRestrictionCeiling::Full,
-                ambient_credentials_protected: true,
-            }
-        );
-        value.network_filter = true;
-        value.deny_keyring = false;
-        assert_eq!(
-            ProcessRestrictionCeiling::from_spec(&value),
-            ProcessRestrictionCeiling {
-                network: NetworkRestrictionCeiling::Deny,
-                ambient_credentials_protected: false,
-            }
-        );
     }
 
     #[test]
