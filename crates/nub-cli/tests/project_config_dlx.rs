@@ -122,7 +122,6 @@ fn global_dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
     );
 
     std::fs::write(cwd.join("explicit.env"), "DLX_CONFIG_VALUE=cli\n").unwrap();
-    write_global(&config_home, r#"{ "dlx": { "env": false } }"#);
     let cli = run_nubx(
         &alias,
         &cwd,
@@ -130,6 +129,109 @@ fn global_dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
         &["--env-file=explicit.env", "print.mjs"],
     );
     assert_eq!(String::from_utf8_lossy(&cli.stdout).trim(), "cli");
+}
+
+#[cfg(unix)]
+#[test]
+fn nubx_node_suppresses_config_env_for_local_and_forced_fetch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let alias = nubx_alias(temp.path());
+    let cwd = temp.path().join("project");
+    let config_home = temp.path().join("config");
+    let bin_dir = cwd.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(cwd.join("package.json"), r#"{ "name": "fixture" }"#).unwrap();
+
+    let local_bin = bin_dir.join("show-dlx-env");
+    std::fs::write(
+        &local_bin,
+        "#!/bin/sh\nprintf '%s\\n' \"${DLX_CONFIG_VALUE:-missing}\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&local_bin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&local_bin, permissions).unwrap();
+
+    let package = cwd.join("forced-tool");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{
+            "name": "forced-tool",
+            "version": "1.0.0",
+            "bin": { "show-dlx-env": "bin.js" }
+        }"#,
+    )
+    .unwrap();
+    let package_bin = package.join("bin.js");
+    std::fs::write(
+        &package_bin,
+        "#!/usr/bin/env node\nconsole.log(process.env.DLX_CONFIG_VALUE ?? 'missing')\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&package_bin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&package_bin, permissions).unwrap();
+
+    let global_root = config_home.join("nub");
+    std::fs::create_dir_all(global_root.join("env")).unwrap();
+    std::fs::write(
+        global_root.join("env/dlx.env"),
+        "DLX_CONFIG_VALUE=configured\n",
+    )
+    .unwrap();
+    write_global(&config_home, r#"{ "dlx": { "env": "./env/dlx.env" } }"#);
+
+    let local_augmented = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
+    assert!(
+        local_augmented.status.success(),
+        "local augmented run failed: {}",
+        String::from_utf8_lossy(&local_augmented.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&local_augmented.stdout).trim(),
+        "configured"
+    );
+
+    let package_spec = format!("file:{}", package.display());
+    let fetched_augmented = run_nubx(
+        &alias,
+        &cwd,
+        &config_home,
+        &["-y", "-p", package_spec.as_str(), "show-dlx-env"],
+    );
+    assert!(
+        fetched_augmented.status.success(),
+        "forced-fetch augmented run failed: {}",
+        String::from_utf8_lossy(&fetched_augmented.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&fetched_augmented.stdout).trim(),
+        "configured"
+    );
+
+    let local = run_nubx(&alias, &cwd, &config_home, &["--node", "show-dlx-env"]);
+    assert!(
+        local.status.success(),
+        "local --node failed: {}",
+        String::from_utf8_lossy(&local.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&local.stdout).trim(), "missing");
+
+    let fetched = run_nubx(
+        &alias,
+        &cwd,
+        &config_home,
+        &["--node", "-y", "-p", package_spec.as_str(), "show-dlx-env"],
+    );
+    assert!(
+        fetched.status.success(),
+        "forced-fetch --node failed: {}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&fetched.stdout).trim(), "missing");
 }
 
 #[cfg(unix)]

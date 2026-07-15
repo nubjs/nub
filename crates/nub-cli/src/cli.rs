@@ -49,6 +49,7 @@ static HIDE_STREAM_PREFIX: AtomicBool = AtomicBool::new(false);
 /// tool, matching `npx`/`pnpm dlx` (local-first, DLX as the fallback).
 static NUBX_DLX_FALLBACK: AtomicBool = AtomicBool::new(false);
 static DLX_ENV_CONTEXT: AtomicBool = AtomicBool::new(false);
+static DLX_FORWARDED_ENV_FILE: AtomicBool = AtomicBool::new(false);
 const DLX_ENV_CONTEXT_MARKER: &str = "__NUB_DLX_ENV_CONTEXT";
 static DLX_ENV_VALUES: OnceLock<Option<std::collections::BTreeMap<String, String>>> =
     OnceLock::new();
@@ -433,6 +434,9 @@ fn dlx_env_context() -> bool {
 }
 
 fn configured_dlx_env() -> Option<std::collections::BTreeMap<String, String>> {
+    if env_file_flag_present() || DLX_FORWARDED_ENV_FILE.load(Ordering::Relaxed) {
+        return None;
+    }
     dlx_env_context()
         .then(|| {
             DLX_ENV_VALUES
@@ -442,10 +446,16 @@ fn configured_dlx_env() -> Option<std::collections::BTreeMap<String, String>> {
         .flatten()
 }
 
-pub(crate) fn dlx_child_env() -> std::collections::BTreeMap<String, String> {
-    let configured = DLX_ENV_VALUES
-        .get_or_init(crate::project_config::effective_dlx_env)
-        .clone();
+/// Build the fetched tool's env overlay. Compat mode drops config-derived
+/// augmentation while preserving an explicit CLI env-file overlay.
+pub(crate) fn dlx_child_env(compat_mode: bool) -> std::collections::BTreeMap<String, String> {
+    let configured = if compat_mode {
+        None
+    } else {
+        DLX_ENV_VALUES
+            .get_or_init(crate::project_config::effective_dlx_env)
+            .clone()
+    };
     let mut values = if no_env_file() || env_file_flag_present() {
         Default::default()
     } else {
@@ -2541,7 +2551,12 @@ fn run_nubx(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
         // Node binds flags-vs-entry. This is the headline #224 fix: a leading Node
         // flag (`--inspect`, `--import x`, `-e`) now reaches Node instead of
         // clap-erroring.
-        crate::nubx_resolve::NubxRoute::File { compat, argv } => {
+        crate::nubx_resolve::NubxRoute::File {
+            compat,
+            argv,
+            explicit_env_file,
+        } => {
+            DLX_FORWARDED_ENV_FILE.store(explicit_env_file, Ordering::Relaxed);
             initialize_config_snapshot(compat, false)?;
             run_file_with_compat(&argv, compat)
         }
@@ -2821,18 +2836,19 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // which suppresses everything. `merge_child_env` applies the gate. --env-file
     // vars apply even in compat mode (explicit user flag); --no-env-file wins.
     let project = nub_core::workspace::detect::detect_project(cwd);
-    let auto_env = if !compat_mode && !no_env_file() {
-        if let Some(values) = configured_dlx_env() {
-            values.into_iter().collect()
+    let auto_env =
+        if !compat_mode && !no_env_file() && !DLX_FORWARDED_ENV_FILE.load(Ordering::Relaxed) {
+            if let Some(values) = configured_dlx_env() {
+                values.into_iter().collect()
+            } else {
+                project
+                    .as_ref()
+                    .map(|p| nub_core::workspace::env::load_env_files(&p.root))
+                    .unwrap_or_default()
+            }
         } else {
-            project
-                .as_ref()
-                .map(|p| nub_core::workspace::env::load_env_files(&p.root))
-                .unwrap_or_default()
-        }
-    } else {
-        Default::default()
-    };
+            Default::default()
+        };
     let mut env_vars = merge_child_env(
         auto_env,
         env_file_flag_present(),
@@ -5229,7 +5245,8 @@ fn run_exec_with_dlx(
             crate::nubx_consent::Decision::Proceed { record } => record,
             crate::nubx_consent::Decision::Refused(code) => return Ok(code),
         };
-        let (code, fetched_ok) = crate::pm_engine::run_dlx_for_nubx(bin, args, &flags)?;
+        let (code, fetched_ok) =
+            crate::pm_engine::run_dlx_for_nubx(bin, args, &flags, compat_mode)?;
         // Record consent ONLY after a confirmed successful fetch+run (`fetched_ok`),
         // never on a 404 / failed install — otherwise a one-time `y` on a
         // not-yet-published spec would become a standing silent run-grant for a name
