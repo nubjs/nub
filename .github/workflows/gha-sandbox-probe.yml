@@ -95,6 +95,54 @@ jobs:
             bwrap --die-with-parent --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev -- /bin/true
           rc=$?; echo "RESULT:nested-container-privileged=$([[ $rc -eq 0 ]] && echo PASS || echo FAIL)"; echo "DETAIL:nested-container-privileged=rc=$rc"
 
+  # ---- ISOLATION: separate userns gate from loopback/net setup ----------------
+  single-level-isolate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+        wa: [none, sysctl-disable]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Single-level isolation (wa=${{ matrix.wa }})
+        run: bash tests/gha-sandbox-probe/single-level-isolate.sh "${{ matrix.wa }}"
+
+  # ---- DEFINITIVE nub D5: build 0.11.2 bwrap, real install.sh, cargo nesting ---
+  nub-d5-real:
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the pinned Bubblewrap 0.11.2 resource (Docker, reproducible)
+        run: |
+          set -e
+          bash scripts/build-bwrap-resource.sh /tmp/bwrapout
+          ls -l /tmp/bwrapout/bwrap
+          /tmp/bwrapout/bwrap --version
+      - name: Run the REAL D5 install.sh (dedicated helper + path-bound profile)
+        run: |
+          set +e
+          SHA=$(sha256sum /tmp/bwrapout/bwrap | awk '{print $1}')
+          echo "built bwrap sha256=$SHA"
+          echo "BWRAP_SHA=$SHA" >> "$GITHUB_ENV"
+          sudo bash crates/nub-sandbox/setup/linux-nesting/install.sh \
+            --bwrap /tmp/bwrapout/bwrap --user "${USER:-runner}" --sha256 "$SHA"
+          echo "install.sh rc=$?"
+          echo "--- installed helper ---"; ls -l /usr/libexec/nub/nub-bwrap
+          echo "--- loaded profile ---"; sudo aa-status 2>/dev/null | grep -i nub_bwrap || echo "(nub_bwrap profile not listed)"
+      - name: Run nub linux_nesting + linux_nested_composition (NUB_SANDBOX_REQUIRE_NESTING=1, under sg)
+        run: |
+          set +e
+          export NUB_BWRAP_SHA256="$BWRAP_SHA"
+          export NUB_BWRAP_VERSION="bubblewrap 0.11.2"
+          # Build the test + harness binaries OUTSIDE the sg subshell (faster, shared target).
+          cargo test -p nub-sandbox --test linux_nesting --test linux_nested_composition --no-run 2>&1 | tail -15
+          echo "== run under sg nub-sandbox with nesting REQUIRED =="
+          sg nub-sandbox -c "NUB_SANDBOX_REQUIRE_NESTING=1 NUB_BWRAP_SHA256='$BWRAP_SHA' NUB_BWRAP_VERSION='bubblewrap 0.11.2' cargo test -p nub-sandbox --test linux_nesting --test linux_nested_composition -- --nocapture" 2>&1 | tail -50
+          echo "RESULT:nub-d5-nesting=exit${PIPESTATUS[0]:-$?}"
+
   # ---- BEST-EFFORT: tie raw findings to nub's ACTUAL single-level tests --------
   nub-single-level-tests:
     continue-on-error: true
