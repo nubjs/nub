@@ -2298,15 +2298,48 @@ fn nub_lockfile_present(dir: &Path) -> bool {
         || dir.join(use_align::NUB_LEGACY_LOCKFILE).is_file()
 }
 
-/// Nub's XDG data root (`$XDG_DATA_HOME/nub` or `~/.local/share/nub`), the
-/// data-dir sibling of `nub_core::node::discovery::cache_dir`.
+/// Nub's XDG data root (`$XDG_DATA_HOME/nub`, `%LOCALAPPDATA%\nub` on Windows,
+/// else `~/.local/share/nub`), the data-dir sibling of
+/// `nub_core::node::discovery::cache_dir`.
+///
+/// The Windows `%LOCALAPPDATA%` branch mirrors the engine's own data-path
+/// resolvers (`aube_store::dirs::store_dir`, `aube_runtime` `data_dir`): without
+/// it the CAS `storeDir` default fell through to the Unix `.local/share` leaf on
+/// Windows (`%USERPROFILE%\.local\share\nub\store`), split from the cache tier at
+/// `%LOCALAPPDATA%\nub\pm` — #451. This feeds the `storeDir` embedder default and
+/// the phantom scanner's store path; both stay consistent because both call here.
 pub(crate) fn nub_data_dir() -> Option<PathBuf> {
-    let base = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs_next::home_dir().map(|h| h.join(".local/share")))?;
-    Some(base.join("nub"))
+    nub_data_dir_from(
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
+        dirs_next::home_dir(),
+        cfg!(windows),
+    )
+}
+
+/// Pure resolver for [`nub_data_dir`] — precedence: `$XDG_DATA_HOME/nub`; then,
+/// on Windows, `%LOCALAPPDATA%\nub`; then `<home>/.local/share/nub`.
+/// `local_app_data` is consulted only when `windows`, so the unix XDG
+/// `.local/share` convention is preserved everywhere else. Split out
+/// env-injected so the precedence is unit-testable off Windows (mirrors
+/// `nub_core::node::discovery::windows_cache_dir`).
+fn nub_data_dir_from(
+    xdg_data_home: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    home: Option<PathBuf>,
+    windows: bool,
+) -> Option<PathBuf> {
+    if let Some(xdg) = xdg_data_home {
+        return Some(xdg.join("nub"));
+    }
+    if windows && let Some(local) = local_app_data {
+        return Some(local.join("nub"));
+    }
+    home.map(|h| h.join(".local/share").join("nub"))
 }
 
 /// Process-env snapshot for `InstallOptions::env_snapshot` — same content as
@@ -2735,6 +2768,38 @@ mod tests {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    // #451: the Windows data root must be %LOCALAPPDATA%\nub, never the Unix
+    // `.local/share` leaf — otherwise the CAS store splits from the cache tier.
+    #[test]
+    fn nub_data_dir_precedence() {
+        let xdg = PathBuf::from("/xdg-data");
+        let lad = PathBuf::from(r"C:\Users\u\AppData\Local");
+        let home = PathBuf::from("/home/u");
+        let call = |x, l, windows| nub_data_dir_from(x, l, Some(home.clone()), windows);
+
+        // XDG_DATA_HOME wins on every platform.
+        assert_eq!(
+            call(Some(xdg.clone()), Some(lad.clone()), true),
+            Some(xdg.join("nub"))
+        );
+        assert_eq!(call(Some(xdg.clone()), None, false), Some(xdg.join("nub")));
+
+        // Windows, no XDG → %LOCALAPPDATA%\nub, never `.local/share`.
+        assert_eq!(call(None, Some(lad.clone()), true), Some(lad.join("nub")));
+
+        // Unix, no XDG → <home>/.local/share/nub; LOCALAPPDATA ignored.
+        assert_eq!(
+            call(None, Some(lad.clone()), false),
+            Some(home.join(".local/share").join("nub"))
+        );
+
+        // Windows with neither XDG nor LOCALAPPDATA → the home fallback.
+        assert_eq!(
+            call(None, None, true),
+            Some(home.join(".local/share").join("nub"))
+        );
     }
 
     #[test]
