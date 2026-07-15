@@ -237,7 +237,13 @@ pub enum NubxRoute {
     /// `-`. Delegate `argv` (with nub's own LEADING `--node` removed) to the file
     /// runner in `compat` mode. The flags reach Node verbatim; Node binds
     /// flags-vs-entry.
-    File { compat: bool, argv: Vec<String> },
+    File {
+        compat: bool,
+        argv: Vec<String>,
+        /// A leading Node env-file flag is forwarded; config env injection must
+        /// stand down so Node can apply that explicit file with CLI precedence.
+        explicit_env_file: bool,
+    },
     /// SCRIPT tier — the bare subject is a package.json script and no registry/dlx
     /// flag is present. Re-dispatch the ORIGINAL argv through `nub run` for its full
     /// flag surface (`--if-present`, `--filter`, `--reporter`, …).
@@ -256,7 +262,11 @@ enum Scan {
     /// `--node` after the subject, and a `--node` consumed as a value-flag's value,
     /// are NOT removed (the scan stops at the subject and skips value tokens, so
     /// they never register as leading flags).
-    NodeTier { compat: bool, argv: Vec<String> },
+    NodeTier {
+        compat: bool,
+        argv: Vec<String>,
+        explicit_env_file: bool,
+    },
     /// A bare subject token that is not a local file. `allow_script` is false when a
     /// registry/dlx flag was seen (those forbid the `nub run` re-dispatch).
     Subject { name: String, allow_script: bool },
@@ -287,6 +297,7 @@ fn scan(
     let mut saw_routing = false; // a workspace/dlx flag → the subject is not a file
     let mut allow_script = true; // a registry/dlx flag forbids the `nub run` route
     let mut compat = false; // nub's `--node` opt-out seen in the leading flag region
+    let mut explicit_env_file = false; // leading Node env-file flag reaches the file tier
     let mut node_idx: Vec<usize> = Vec::new(); // positions of those leading `--node` flags
     let mut i = 0;
     while i < args.len() {
@@ -299,6 +310,7 @@ fn scan(
                 Some(sub) if !saw_routing && is_file(sub) => Scan::NodeTier {
                     compat,
                     argv: file_argv(args, &node_idx),
+                    explicit_env_file,
                 },
                 Some(sub) => Scan::Subject {
                     name: sub.clone(),
@@ -312,6 +324,7 @@ fn scan(
             return Scan::NodeTier {
                 compat,
                 argv: file_argv(args, &node_idx),
+                explicit_env_file,
             };
         }
         // A bare token (no leading `-`) is the subject candidate.
@@ -320,6 +333,7 @@ fn scan(
                 return Scan::NodeTier {
                     compat,
                     argv: file_argv(args, &node_idx),
+                    explicit_env_file,
                 };
             }
             return Scan::Subject {
@@ -340,6 +354,7 @@ fn scan(
             return Scan::NodeTier {
                 compat,
                 argv: file_argv(args, &node_idx),
+                explicit_env_file,
             };
         }
         // `nub run`/workspace routing: not a file; keep scanning for the subject so
@@ -373,6 +388,12 @@ fn scan(
             node_idx.push(i);
             i += 1;
             continue;
+        }
+        if matches!(tok, "--env-file" | "--env-file-if-exists")
+            || tok.starts_with("--env-file=")
+            || tok.starts_with("--env-file-if-exists=")
+        {
+            explicit_env_file = true;
         }
         // A Node value-flag consumes its separate-token value (skip two). The inline
         // `--flag=value` form never reaches here — it isn't in the table verbatim, so
@@ -424,7 +445,15 @@ pub fn classify(
     let extra = extra_value_flags(args, cwd);
 
     match scan(args, &is_file, extra.as_ref()) {
-        Scan::NodeTier { compat, argv } => NubxRoute::File { compat, argv },
+        Scan::NodeTier {
+            compat,
+            argv,
+            explicit_env_file,
+        } => NubxRoute::File {
+            compat,
+            argv,
+            explicit_env_file,
+        },
         Scan::Subject { name, allow_script } => {
             if allow_script && is_script(&name) {
                 NubxRoute::Script
@@ -490,7 +519,15 @@ mod tests {
         let is_file =
             |t: &str| is_path_shaped(t) || matches!(t, "app.js" | "sub/x.js" | "index.ts");
         match scan(&args, &is_file, None) {
-            Scan::NodeTier { compat, argv } => NubxRoute::File { compat, argv },
+            Scan::NodeTier {
+                compat,
+                argv,
+                explicit_env_file,
+            } => NubxRoute::File {
+                compat,
+                argv,
+                explicit_env_file,
+            },
             Scan::Subject { name, allow_script } => {
                 if allow_script && is_script(&name) {
                     NubxRoute::Script
@@ -553,7 +590,9 @@ mod tests {
     fn node_flag_only_stripped_in_leading_position() {
         // Asserts a File route with the exact compat bit AND argv.
         let file = |argv: &[&str], compat: bool, expect_argv: &[&str]| match route(argv) {
-            NubxRoute::File { compat: c, argv: a } => {
+            NubxRoute::File {
+                compat: c, argv: a, ..
+            } => {
                 assert_eq!(c, compat, "compat for {argv:?}");
                 assert_eq!(a, expect_argv, "argv for {argv:?}");
             }
@@ -583,6 +622,25 @@ mod tests {
             true,
             &["app.js", "--node", "x"],
         );
+    }
+
+    #[test]
+    fn leading_env_file_metadata_stops_at_the_file_subject() {
+        let NubxRoute::File {
+            explicit_env_file, ..
+        } = route(&["--require", "./pre.js", "--env-file", "cli.env", "app.js"])
+        else {
+            panic!("expected file route");
+        };
+        assert!(explicit_env_file);
+
+        let NubxRoute::File {
+            explicit_env_file, ..
+        } = route(&["app.js", "--env-file=program-argument.env"])
+        else {
+            panic!("expected file route");
+        };
+        assert!(!explicit_env_file);
     }
 
     #[test]
