@@ -183,7 +183,16 @@ pub(crate) fn preflight(
             lost: vec!["fs-read-deny".to_string()],
             reason: Some(reason),
         })?;
-    if protects_ambient_credentials(policy) {
+    // A nesting-capable launch must keep /proc FULLY VISIBLE: the kernel refuses a
+    // NESTED procfs mount when the template /proc carries a locked bind over a procfs
+    // FILE, so a child inside this sandbox could not create its own PID-isolated
+    // procfs view. The keyring /proc/keys + /proc/key-users metadata masks are exactly
+    // such binds, so they are skipped here when nesting is required. Credential
+    // protection at a nesting level still rests on the keyctl seccomp deny (the
+    // anonymous session-keyring join stays permitted) and the anonymous keyring itself
+    // — only the metadata-read defense-in-depth layer is traded for nestability. A
+    // single-level launch (require_nesting=false) keeps the full mask, byte-identical.
+    if protects_ambient_credentials(policy) && !spec.require_nesting {
         masks.extend(keyring_procfs_masks().map_err(|reason| Degradation {
             lost: vec!["env".to_string()],
             reason: Some(reason),
@@ -194,6 +203,14 @@ pub(crate) fn preflight(
         reason: Some(reason),
     })?);
     masks = merge_masks(masks);
+    if spec.require_nesting {
+        // Any remaining mask WITHIN /proc (e.g. a user `!/proc/...` deny) would also
+        // block a nested child's procfs mount; drop them for a nesting launch. Masks of
+        // ALTERNATE procfs mounts (outside /proc) do not affect /proc visibility and
+        // are retained.
+        let proc_root = Path::new("/proc");
+        masks.retain(|mask| mask.path != proc_root && !mask.path.starts_with("/proc/"));
+    }
     validate_reserved_runtime_view(&cwd, &entry_program, &mount_plan, &masks).map_err(
         |reason| Degradation {
             lost: vec!["process-isolation".to_string()],
@@ -582,6 +599,10 @@ fn admit_bwrap_candidate(
             runtime,
             policy.net.enforce,
             protects_ambient_credentials(policy),
+            // A nesting launch relaxes the probe's inheritance-blind negative controls
+            // (absent /proc/keys masks + a full-network target the inherited ceiling
+            // may still deny) so it verifies the same view the real launch will have.
+            require_nesting,
         )
         .map_err(|error| Degradation {
             lost: vec!["process-isolation".to_string()],
@@ -1441,14 +1462,23 @@ fn open_pinned_bwrap_candidate(
     if metadata.permissions().mode() & 0o111 == 0 {
         return Err("opened candidate is not executable".to_string());
     }
-    // Both the dedicated helper and a trusted system candidate must be root-owned
-    // and unwritable by group/other; the helper additionally must byte-match the
-    // packaged build (the digest pins the exact upstream version).
-    if matches!(
-        origin,
-        BubblewrapOrigin::System | BubblewrapOrigin::DedicatedHelper
-    ) && !trusted_system_candidate_metadata(metadata.uid(), metadata.permissions().mode())
-    {
+    // Both the dedicated helper and a trusted system candidate must be unwritable by
+    // group/other; a system candidate must additionally be exactly root-owned, while
+    // the digest-pinned dedicated helper's owner gate tolerates a nested user
+    // namespace (see `trusted_helper_metadata`). The helper's real integrity guarantee
+    // is the packaged-build digest verified below.
+    let owner_protected = match origin {
+        BubblewrapOrigin::System => {
+            trusted_system_candidate_metadata(metadata.uid(), metadata.permissions().mode())
+        }
+        BubblewrapOrigin::DedicatedHelper => {
+            trusted_helper_metadata(metadata.uid(), metadata.permissions().mode())
+        }
+        // The bundled candidate is a sealed memfd snapshot, digest-verified below; it
+        // carries no on-disk owner to gate here.
+        BubblewrapOrigin::Bundled => true,
+    };
+    if !owner_protected {
         let label = match origin {
             BubblewrapOrigin::DedicatedHelper => "dedicated nesting helper",
             BubblewrapOrigin::System => "system candidate",
@@ -1551,6 +1581,31 @@ fn verify_pinned_helper_digest_against(
 
 fn trusted_system_candidate_metadata(uid: u32, mode: u32) -> bool {
     uid == 0 && mode & 0o022 == 0
+}
+
+/// The dedicated helper's owner gate, tolerant of a nested user namespace. It admits
+/// the host view (root-owned) OR a nested view where the host-root owner is UNMAPPED
+/// and `stat` therefore reports the kernel overflow uid — the exact case a level-2+
+/// composition hits when it opens the same read-only host helper from inside its own
+/// user namespace (root maps to nobody). Group/other write is forbidden in both cases
+/// (mode is not uid-mapped). This owner check is defense-in-depth ONLY: the caller
+/// hard-verifies the pinned helper fd against the packaged-build digest, which is the
+/// actual tamper-evidence and is unaffected by the userns owner mapping — so a
+/// substituted helper is caught by the digest regardless of the reported owner. The
+/// overflow uid can only be observed for a host-root file from a nested userns; in the
+/// initial userns root maps to 0, so this never widens the level-1 (host) admission.
+fn trusted_helper_metadata(uid: u32, mode: u32) -> bool {
+    (uid == 0 || uid == overflow_uid()) && mode & 0o022 == 0
+}
+
+/// The kernel overflow uid (`/proc/sys/kernel/overflowuid`, default 65534) — the owner
+/// `stat` reports for a file whose real owner is not mapped into the current user
+/// namespace.
+fn overflow_uid() -> u32 {
+    fs::read_to_string("/proc/sys/kernel/overflowuid")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(65534)
 }
 
 fn executable_snapshot(source: &File, path: &Path) -> Result<File, String> {
@@ -2054,9 +2109,41 @@ fn build_seccomp_for(
     }
 
     if deny_keyring {
-        for syscall in [syscalls.keyctl, syscalls.add_key, syscalls.request_key] {
+        // add_key/request_key have no legitimate in-sandbox use — deny wholesale.
+        for syscall in [syscalls.add_key, syscalls.request_key] {
             rules.insert(syscall, Vec::new());
         }
+        // keyctl is denied EXCEPT the anonymous session-keyring join
+        // `keyctl(KEYCTL_JOIN_SESSION_KEYRING, NULL)` — the exact isolation primitive
+        // the (possibly NESTED) monitor uses to hand its child a fresh EMPTY session
+        // keyring. Without this carve-out a nested monitor inherits this filter and
+        // cannot establish its own isolation, so nested composition fails closed (the
+        // "inherited keyring seccomp must still permit creating the next monitor"
+        // invariant). The carve-out leaks nothing: a NULL-name join yields an empty
+        // keyring, while every credential read/search/update and any NAMED join (which
+        // could re-attach an ancestor keyring holding credentials) still EPERMs. Rules
+        // are OR'd, so keyctl matches -> EPERM whenever the option is not the join OR
+        // the name pointer is non-NULL; only `(join, NULL)` falls through to Allow.
+        rules.insert(
+            syscalls.keyctl,
+            vec![
+                SeccompRule::new(vec![
+                    SeccompCondition::new(
+                        0,
+                        SeccompCmpArgLen::Dword,
+                        SeccompCmpOp::Ne,
+                        libc::KEYCTL_JOIN_SESSION_KEYRING as u64,
+                    )
+                    .map_err(|e| format!("keyring option condition: {e}"))?,
+                ])
+                .map_err(|e| format!("keyring option rule: {e}"))?,
+                SeccompRule::new(vec![
+                    SeccompCondition::new(1, SeccompCmpArgLen::Qword, SeccompCmpOp::Ne, 0)
+                        .map_err(|e| format!("keyring name condition: {e}"))?,
+                ])
+                .map_err(|e| format!("keyring name rule: {e}"))?,
+            ],
+        );
     }
 
     let program = SeccompFilter::new(
@@ -2337,6 +2424,17 @@ mod tests {
         .unwrap()
     }
 
+    fn seccomp_data_arg1(
+        syscall: u32,
+        audit_arch: u32,
+        argument_zero: u64,
+        argument_one: u64,
+    ) -> [u8; 64] {
+        let mut data = seccomp_data(syscall, audit_arch, argument_zero);
+        data[24..32].copy_from_slice(&argument_one.to_ne_bytes());
+        data
+    }
+
     fn seccomp_data(syscall: u32, audit_arch: u32, argument_zero: u64) -> [u8; 64] {
         let mut data = [0_u8; 64];
         data[0..4].copy_from_slice(&syscall.to_ne_bytes());
@@ -2568,6 +2666,7 @@ mod tests {
                 evaluate_bpf(&network, &seccomp_data(syscall, AUDIT_ARCH_X86_64, 0)),
                 allowed,
             );
+            // keyctl(option 0) is a credential op, not the join — denied like the rest.
             assert_eq!(
                 evaluate_bpf(&keyring, &seccomp_data(syscall, AUDIT_ARCH_X86_64, 0)),
                 denied,
@@ -2575,6 +2674,29 @@ mod tests {
             assert_eq!(
                 evaluate_bpf(&union, &seccomp_data(syscall, AUDIT_ARCH_X86_64, 0)),
                 denied,
+            );
+        }
+        // The nested-monitor carve-out: the ANONYMOUS session-keyring join is the one
+        // keyctl the deny filter must permit (so a nested monitor can isolate its
+        // child), while a NAMED join — which could re-attach an ancestor keyring — and
+        // every other keyctl option stay denied.
+        let join = libc::KEYCTL_JOIN_SESSION_KEYRING as u64;
+        for program in [&keyring, &union] {
+            assert_eq!(
+                evaluate_bpf(
+                    program,
+                    &seccomp_data(KEYCTL as u32, AUDIT_ARCH_X86_64, join)
+                ),
+                allowed,
+                "anonymous session-keyring join must be permitted for nested isolation",
+            );
+            assert_eq!(
+                evaluate_bpf(
+                    program,
+                    &seccomp_data_arg1(KEYCTL as u32, AUDIT_ARCH_X86_64, join, 0x7fff_0000),
+                ),
+                denied,
+                "a NAMED session-keyring join must stay denied",
             );
         }
         for program in [&network, &keyring, &union] {
@@ -3196,6 +3318,22 @@ mod tests {
         assert!(trusted_system_candidate_metadata(0, 0o755));
         assert!(!trusted_system_candidate_metadata(12_345, 0o755));
         assert!(!trusted_system_candidate_metadata(u32::MAX, 0o755));
+    }
+
+    #[test]
+    fn helper_owner_gate_tolerates_the_nested_overflow_owner() {
+        let overflow = overflow_uid();
+        // Host view (root-owned) and the nested view (host-root unmapped → overflow)
+        // both pass the owner gate; the digest verification is the real guarantee.
+        assert!(trusted_helper_metadata(0, 0o750));
+        assert!(trusted_helper_metadata(overflow, 0o750));
+        // Group/other write is still forbidden regardless of the reported owner, and an
+        // arbitrary mapped owner (neither root nor overflow) is still rejected — a
+        // system candidate stays strictly root-only.
+        assert!(!trusted_helper_metadata(0, 0o770));
+        assert!(!trusted_helper_metadata(overflow, 0o757));
+        assert!(!trusted_helper_metadata(1000, 0o750));
+        assert!(!trusted_system_candidate_metadata(overflow, 0o750));
     }
 
     #[test]

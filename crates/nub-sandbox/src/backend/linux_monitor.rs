@@ -394,6 +394,18 @@ fn candidate_probe_main() -> io::Result<()> {
         Some(value) if value == OsStr::new("ambient") => false,
         _ => return Err(invalid_data("candidate probe keyring mode is invalid")),
     };
+    // Whether this launch will itself create nested sandboxes. A nesting launch runs
+    // inside an already-narrowed view, so two negative controls that assume a pristine
+    // (non-inherited) view are relaxed: the /proc/keys metadata masks are intentionally
+    // ABSENT (dropped so /proc stays fully visible for a nested child's procfs mount),
+    // and a FULL-network target may still be unable to open a socket because the outer
+    // seccomp/network ceiling it INHERITS legitimately denies it. The keyring SECCOMP
+    // deny and the restricted-mode denial still hold and are still asserted.
+    let nesting = match arguments.next().as_deref() {
+        Some(value) if value == OsStr::new("nesting") => true,
+        Some(value) if value == OsStr::new("single") => false,
+        _ => return Err(invalid_data("candidate probe nesting mode is invalid")),
+    };
     if arguments.next().is_some() {
         return Err(invalid_data("candidate probe received trailing arguments"));
     }
@@ -476,7 +488,10 @@ fn candidate_probe_main() -> io::Result<()> {
                 }
             }
         }
-    } else {
+    } else if !nesting {
+        // Negative control: without a network filter a socket must open. Skipped for a
+        // nesting launch, whose INHERITED outer ceiling can legitimately deny it while
+        // this level itself adds no filter (outer-deny + inner-full stays denied).
         for (result, family) in [(unix, "AF_UNIX"), (inet, "AF_INET")] {
             match result {
                 Ok(fd) => unsafe {
@@ -489,8 +504,13 @@ fn candidate_probe_main() -> io::Result<()> {
                 }
             }
         }
+    } else {
+        // Nesting full-network target: close any socket that DID open; do not require it.
+        for fd in [unix, inet].into_iter().flatten() {
+            unsafe { libc::close(fd) };
+        }
     }
-    if keyring_protected {
+    if keyring_protected && !nesting {
         for path in ["/proc/keys", "/proc/key-users"] {
             match fs::read(path) {
                 Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
@@ -506,6 +526,10 @@ fn candidate_probe_main() -> io::Result<()> {
                 }
             }
         }
+    }
+    if keyring_protected {
+        // keyctl option 0 is a credential op, not the anonymous session-keyring join the
+        // deny filter permits, so it must still EPERM.
         require_syscall_denied("keyctl", unsafe {
             libc::syscall(libc::SYS_keyctl, 0, 0, 0, 0, 0)
         })?;
@@ -688,6 +712,7 @@ impl BootstrapSpec {
         runtime: &RuntimeCapability,
         network_filter: bool,
         deny_keyring: bool,
+        nesting: bool,
     ) -> io::Result<Self> {
         let image = runtime.materialize()?;
         let (program, mut args) = target_probe_command(image, CANDIDATE_PROBE_SENTINEL);
@@ -701,6 +726,11 @@ impl BootstrapSpec {
         } else {
             "ambient"
         }));
+        // A nesting launch relaxes the inheritance-blind negative controls: the
+        // /proc/keys masks are absent (so /proc stays fully visible) and a full-network
+        // target may be denied a socket by the inherited outer ceiling. The keyring
+        // seccomp deny and the restricted-mode denial still hold.
+        args.push(OsString::from(if nesting { "nesting" } else { "single" }));
         let mut session = [0u8; 32];
         let mut release = [0u8; 32];
         getrandom::getrandom(&mut session)

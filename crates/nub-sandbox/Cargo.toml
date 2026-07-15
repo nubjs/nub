@@ -115,6 +115,16 @@ path = "src/bin/nub-sandbox-monitor-harness.rs"
 test = false
 bench = false
 
+# Direct-nesting composition harness (epic D7/D8): drives three real nested levels
+# through the production apply_with_runtime path. Like the monitor harness it owns a
+# real main so earliest_bootstrap runs before anything else — and it is ALSO the
+# runtime image + PID-1 monitor for every level it launches.
+[[bin]]
+name = "nub-sandbox-nesting-harness"
+path = "src/bin/nub-sandbox-nesting-harness.rs"
+test = false
+bench = false
+
 [[test]]
 name = "windows_ascendant_env"
 harness = false
