@@ -48,6 +48,10 @@ static HIDE_STREAM_PREFIX: AtomicBool = AtomicBool::new(false);
 /// only the user-facing `nubx <tool>` entry point fetches-and-runs an uninstalled
 /// tool, matching `npx`/`pnpm dlx` (local-first, DLX as the fallback).
 static NUBX_DLX_FALLBACK: AtomicBool = AtomicBool::new(false);
+static DLX_ENV_CONTEXT: AtomicBool = AtomicBool::new(false);
+const DLX_ENV_CONTEXT_MARKER: &str = "__NUB_DLX_ENV_CONTEXT";
+static DLX_ENV_VALUES: OnceLock<Option<std::collections::BTreeMap<String, String>>> =
+    OnceLock::new();
 
 /// The `nubx` npx-parity flags that steer the DLX (fetch-and-run) fallback in
 /// [`run_exec`]. Only the `nubx` entry point populates this; plain `nub exec`
@@ -421,6 +425,48 @@ fn apply_env_file_vars(cmd: &mut std::process::Command) {
                 cmd.env(k, v);
             }
         }
+    }
+}
+
+fn dlx_env_context() -> bool {
+    DLX_ENV_CONTEXT.load(Ordering::Relaxed) || env::var_os(DLX_ENV_CONTEXT_MARKER).is_some()
+}
+
+fn configured_dlx_env() -> Option<std::collections::BTreeMap<String, String>> {
+    dlx_env_context()
+        .then(|| {
+            DLX_ENV_VALUES
+                .get_or_init(crate::project_config::effective_dlx_env)
+                .clone()
+        })
+        .flatten()
+}
+
+pub(crate) fn dlx_child_env() -> std::collections::BTreeMap<String, String> {
+    let configured = DLX_ENV_VALUES
+        .get_or_init(crate::project_config::effective_dlx_env)
+        .clone();
+    let mut values = if no_env_file() || env_file_flag_present() {
+        Default::default()
+    } else {
+        configured.clone().unwrap_or_default()
+    };
+    if !no_env_file() {
+        for (key, value) in ENV_FILE_VARS.get().into_iter().flatten() {
+            if env::var_os(key).is_none() {
+                values.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if configured.is_some() {
+        values.insert(DLX_ENV_CONTEXT_MARKER.to_string(), "1".to_string());
+    }
+    values
+}
+
+fn apply_dlx_env(cmd: &mut std::process::Command) {
+    if let Some(values) = configured_dlx_env() {
+        cmd.envs(values).env(DLX_ENV_CONTEXT_MARKER, "1");
     }
 }
 
@@ -2399,6 +2445,7 @@ fn run_nubx(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
     // re-dispatch to `nub run`). The classifier is `crate::nubx_resolve::classify`;
     // this function only maps each route to its runner. See that module for why the
     // two mechanisms are needed (clap fails-closed on a future Node flag).
+    DLX_ENV_CONTEXT.store(true, Ordering::Relaxed);
     let mut args: Vec<String> = env::args().skip(1).collect();
 
     // `--help`/`--version` are nubx's own flags only when they appear BEFORE the
@@ -2775,10 +2822,14 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // vars apply even in compat mode (explicit user flag); --no-env-file wins.
     let project = nub_core::workspace::detect::detect_project(cwd);
     let auto_env = if !compat_mode && !no_env_file() {
-        project
-            .as_ref()
-            .map(|p| nub_core::workspace::env::load_env_files(&p.root))
-            .unwrap_or_default()
+        if let Some(values) = configured_dlx_env() {
+            values.into_iter().collect()
+        } else {
+            project
+                .as_ref()
+                .map(|p| nub_core::workspace::env::load_env_files(&p.root))
+                .unwrap_or_default()
+        }
     } else {
         Default::default()
     };
@@ -2811,6 +2862,9 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
             crate::verify_deps::CHECKED_MARKER.to_string(),
             "1".to_string(),
         );
+    }
+    if !compat_mode && configured_dlx_env().is_some() {
+        env_vars.insert(DLX_ENV_CONTEXT_MARKER.to_string(), "1".to_string());
     }
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
@@ -3933,7 +3987,12 @@ fn build_script_command(
     // outer load freezing the wrong file's values into the process. The explicit
     // `--env-file` FLAG is a distinct, user-set surface and still flows process-
     // wide (overlay below) — it's not auto-discovery. See wiki/runtime/env-loading.md.
-    let mut env_vars: HashMap<String, String> = Default::default();
+    let configured = (!compat_mode).then(configured_dlx_env).flatten();
+    let mut env_vars: HashMap<String, String> =
+        configured.clone().unwrap_or_default().into_iter().collect();
+    if configured.is_some() {
+        env_vars.insert(DLX_ENV_CONTEXT_MARKER.to_string(), "1".to_string());
+    }
     // The explicit `--env-file` FLAG (a user-set surface, captured at startup)
     // still flows process-wide — it is not auto-`.env` discovery and applies in
     // every mode. Shell env still wins; applied here so it flows through the same
@@ -5261,6 +5320,9 @@ fn launch_bin(bin_path: &Path, args: &[String], compat_mode: bool, cwd: &Path) -
     let mut cmd = bin_launcher(bin_path, args);
     // --env-file first (applies in compat too); aug's NODE_OPTIONS/PATH/NODE_PATH
     // are set after so nub's values win over any same-named env-file keys (A19).
+    if !compat_mode {
+        apply_dlx_env(&mut cmd);
+    }
     apply_env_file_vars(&mut cmd);
     if !compat_mode {
         apply_exec_augmentation(&mut cmd, cwd);

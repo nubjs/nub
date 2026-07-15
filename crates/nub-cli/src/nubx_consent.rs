@@ -95,7 +95,7 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
     // already missed every local tier (file/script/bin) to reach here, so we abort
     // with the locked, maintainer-authored two-line message. Reproduce it verbatim.
     if matches!(
-        crate::config::implicit_dlx(),
+        crate::project_config::effective_dlx_consent(),
         crate::config::ImplicitDlx::Never
     ) {
         eprintln!("{NEVER_ABORT_MESSAGE}");

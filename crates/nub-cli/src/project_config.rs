@@ -548,6 +548,80 @@ pub fn effective_config() -> Option<&'static EffectiveConfig> {
     EFFECTIVE_CONFIG.get()
 }
 
+/// The resolved implicit-registry policy. A non-default snapshot value wins;
+/// falling back to the legacy reader preserves `exec.implicitDlx` even when an
+/// otherwise malformed global file could not become a typed layer.
+pub fn effective_dlx_consent() -> ImplicitDlx {
+    let Some(config) = effective_config() else {
+        return crate::config::implicit_dlx();
+    };
+    dlx_consent_for(config, crate::config::implicit_dlx())
+}
+
+fn dlx_consent_for(config: &EffectiveConfig, legacy: ImplicitDlx) -> ImplicitDlx {
+    let source = config.sources.get(&ConfigKey::DlxConsent);
+    if !source.is_some_and(|source| source.kind != ConfigSourceKind::Defaults) {
+        return legacy;
+    }
+    config.values.dlx.consent.unwrap_or(legacy)
+}
+
+/// Load the resolved dlx env-file layer. `None` means no dlx env setting won,
+/// preserving the pre-config behavior; `Some(empty)` is an explicit disable or
+/// empty exclusive source list.
+pub fn effective_dlx_env() -> Option<BTreeMap<String, String>> {
+    let config = effective_config()?;
+    dlx_env_for(config)
+}
+
+fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
+    let setting = config.values.dlx.env.as_ref()?;
+    let source = config.sources.get(&ConfigKey::DlxEnv)?;
+    let mut values = match setting {
+        EnvSetting::Disabled => BTreeMap::new(),
+        EnvSetting::Default => {
+            let root = nub_core::workspace::detect::detect_project(&config.cwd)
+                .map(|project| project.root)
+                .unwrap_or_else(|| config.cwd.clone());
+            nub_core::workspace::env::load_env_files(&root)
+                .into_iter()
+                .collect()
+        }
+        EnvSetting::Sources(paths) => {
+            let mut values = BTreeMap::new();
+            for raw in paths {
+                let mut expansion = std::collections::HashMap::from([(
+                    "__NUB_CONFIG_ENV_PATH".to_string(),
+                    raw.clone(),
+                )]);
+                nub_core::workspace::env::expand_env_map(&mut expansion);
+                let expanded = expansion
+                    .remove("__NUB_CONFIG_ENV_PATH")
+                    .expect("the path expansion entry remains present");
+                let path = Path::new(&expanded);
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    source.root.join(path)
+                };
+                let Some(contents) = nub_core::workspace::env::read_env_file(&path) else {
+                    continue;
+                };
+                for (key, value) in nub_core::workspace::env::parse_env(&contents) {
+                    values.insert(key, value);
+                }
+            }
+            let mut values: std::collections::HashMap<_, _> = values.into_iter().collect();
+            let denied = nub_core::workspace::env::strip_denied_env_file_keys(&mut values);
+            nub_core::workspace::env::warn_denied_env_file_keys(&denied);
+            nub_core::workspace::env::expand_env_map(&mut values);
+            values.into_iter().collect()
+        }
+    };
+    values.retain(|key, _| std::env::var_os(key).is_none());
+    Some(values)
+}
+
 fn resolve_effective_config(
     cwd: &Path,
     global: Option<LoadedConfig>,
@@ -1520,6 +1594,111 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), "{ broken").unwrap();
         assert_eq!(load_project_config(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn dlx_consent_uses_typed_winner_then_legacy_default_fallback() {
+        let defaults = resolve_effective_config(
+            Path::new("/cwd"),
+            None,
+            None,
+            ConfigOverlays {
+                defaults: ProjectConfig::builtin_defaults(),
+                ..ConfigOverlays::default()
+            },
+        );
+        assert_eq!(
+            dlx_consent_for(&defaults, ImplicitDlx::Never),
+            ImplicitDlx::Never
+        );
+
+        let project = LoadedConfig {
+            source: ConfigSource::file(ConfigSourceKind::Project, Path::new("/project/nub.jsonc")),
+            values: ProjectConfig {
+                dlx: DlxConfig {
+                    consent: Some(ImplicitDlx::Prompt),
+                    ..DlxConfig::default()
+                },
+                ..ProjectConfig::default()
+            },
+        };
+        let snapshot = resolve_effective_config(
+            Path::new("/cwd"),
+            None,
+            Some(project),
+            ConfigOverlays {
+                defaults: ProjectConfig::builtin_defaults(),
+                ..ConfigOverlays::default()
+            },
+        );
+        assert_eq!(
+            dlx_consent_for(&snapshot, ImplicitDlx::Never),
+            ImplicitDlx::Prompt
+        );
+    }
+
+    #[test]
+    fn gate_enabled_project_dlx_env_sources_anchor_to_the_winning_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("project");
+        let cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(project_root.join("config")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            project_root.join(FILE_NAME),
+            r#"{ "dlx": { "env": ["./config/first.env", "./config/second.env"] } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("config/first.env"),
+            "DLX_VALUE=first\nCHAIN=$BASE\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("config/second.env"),
+            "DLX_VALUE=second\nBASE=expanded\n",
+        )
+        .unwrap();
+
+        let project = with_project_config_enabled(|| load_project_config(&cwd).unwrap());
+        let snapshot = resolve_effective_config(&cwd, None, project, ConfigOverlays::default());
+        let values = dlx_env_for(&snapshot).expect("project dlx env is active");
+        assert_eq!(values.get("DLX_VALUE").map(String::as_str), Some("second"));
+        assert_eq!(values.get("CHAIN").map(String::as_str), Some("expanded"));
+        assert_eq!(
+            snapshot.sources.get(&ConfigKey::DlxEnv).unwrap().root,
+            project_root
+        );
+    }
+
+    #[test]
+    fn dlx_env_disabled_empty_and_sandbox_only_are_inert() {
+        for (env, expected) in [
+            (Some(EnvSetting::Disabled), Some(BTreeMap::new())),
+            (Some(EnvSetting::Sources(Vec::new())), Some(BTreeMap::new())),
+            (None, None),
+        ] {
+            let snapshot = resolve_effective_config(
+                Path::new("/cwd"),
+                None,
+                Some(LoadedConfig {
+                    source: ConfigSource::file(
+                        ConfigSourceKind::Project,
+                        Path::new("/project/nub.jsonc"),
+                    ),
+                    values: ProjectConfig {
+                        dlx: DlxConfig {
+                            env,
+                            sandbox: Some(SandboxSetting::Enabled),
+                            ..DlxConfig::default()
+                        },
+                        ..ProjectConfig::default()
+                    },
+                }),
+                ConfigOverlays::default(),
+            );
+            assert_eq!(dlx_env_for(&snapshot), expected);
+        }
     }
 
     #[test]
