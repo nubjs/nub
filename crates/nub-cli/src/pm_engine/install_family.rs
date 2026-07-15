@@ -557,7 +557,11 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     // std::process::exit — control does not return here on that path. Output
     // flags quiet the fetch; the run tool's own output is preserved (the
     // silencer registers the saved fd for child stderr).
-    finish_code_quieted(&globals.output, &session, aube::commands::dlx::run(verb))
+    finish_code_quieted(
+        &globals.output,
+        &session,
+        aube::commands::dlx::run_with_child_env(verb, crate::cli::dlx_child_env()),
+    )
 }
 
 /// DLX fallback for the `nubx <tool> [args]` entry point: the bin was absent
@@ -604,7 +608,12 @@ pub fn run_dlx_for_nubx(
     // Ok(None)); `Err` = the fetch/install failed before the tool ran. We surface
     // the Err's report exactly as `finish_code` would, but also report the
     // success bit so the consent caller never records a failed fetch.
-    match session.runtime.block_on(aube::commands::dlx::run(verb)) {
+    match session
+        .runtime
+        .block_on(aube::commands::dlx::run_with_child_env(
+            verb,
+            crate::cli::dlx_child_env(),
+        )) {
         Ok(code) => Ok((code.unwrap_or(0), true)),
         Err(report) => Ok((present::emit_report(&report), false)),
     }

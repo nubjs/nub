@@ -292,6 +292,17 @@ pub(crate) async fn exec_bin(
     exec_bin_with_node_args(cwd, bin_path, bin, args, &[], shell_mode).await
 }
 
+pub(crate) async fn exec_bin_with_env(
+    cwd: &Path,
+    bin_path: &Path,
+    bin: &str,
+    args: &[String],
+    shell_mode: bool,
+    child_env: &std::collections::BTreeMap<String, String>,
+) -> miette::Result<Option<i32>> {
+    exec_bin_with_node_args_and_env(cwd, bin_path, bin, args, &[], shell_mode, child_env).await
+}
+
 /// Run a project-local binary. On a non-zero child exit, returns
 /// `Ok(Some(code))` so the caller can propagate the code up to the binary's
 /// single `std::process::exit` instead of terminating in place — keeping the
@@ -304,6 +315,28 @@ pub(crate) async fn exec_bin_with_node_args(
     args: &[String],
     node_args: &[String],
     shell_mode: bool,
+) -> miette::Result<Option<i32>> {
+    exec_bin_with_node_args_and_env(
+        cwd,
+        bin_path,
+        bin,
+        args,
+        node_args,
+        shell_mode,
+        &Default::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exec_bin_with_node_args_and_env(
+    cwd: &Path,
+    bin_path: &Path,
+    bin: &str,
+    args: &[String],
+    node_args: &[String],
+    shell_mode: bool,
+    child_env: &std::collections::BTreeMap<String, String>,
 ) -> miette::Result<Option<i32>> {
     if !shell_mode && !bin_path.exists() {
         return Err(miette!(
@@ -333,6 +366,7 @@ pub(crate) async fn exec_bin_with_node_args(
         cmd
     };
     let status = command
+        .envs(child_env)
         .current_dir(cwd)
         .stderr(aube_scripts::child_stderr())
         .status()
