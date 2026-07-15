@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Path-bound AppArmor profile for Nub's dedicated Bubblewrap nesting helper.
+#
+# It attaches ONLY to the administrator-installed helper at
+# /usr/libexec/nub/nub-bwrap and grants that exact executable the `userns`
+# permission, so a member of the nub-sandbox group can create the nested user
+# namespaces that direct sandbox composition requires. Every other executable on
+# the host remains subject to the distribution's default unprivileged-user-
+# namespace restriction; this profile changes nothing outside the helper path,
+# and it does not disable the global apparmor_restrict_unprivileged_userns
+# control.
+#
+# Install with the accompanying install.sh, which copies this file to
+# /etc/apparmor.d/nub-bwrap-userns and loads it. Derived from AppArmor's
+# bwrap-userns-restrict profile.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile nub_bwrap /usr/libexec/nub/nub-bwrap flags=(unconfined) {
+  # The distribution's user-namespace restriction recognizes this opted-in
+  # executable; the unconfined flag avoids mediating every target filesystem
+  # call while still requiring the profile to be loaded for the grant to apply.
+  userns,
+
+  # Site-local additions, if any.
+  include if exists <local/nub-bwrap-userns>
+}

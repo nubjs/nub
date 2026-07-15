@@ -21,7 +21,6 @@ use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
-#[cfg(test)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,8 +56,21 @@ const MAX_BUNDLED_BWRAP_BYTES: u64 = 16 * 1024 * 1024;
 const REQUIRED_EXECUTABLE_SNAPSHOT_SEALS: libc::c_int =
     libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
 
+/// The administrator-installed nesting helper. It is the unmodified packaged
+/// Bubblewrap, root-owned and group-executable, with a dedicated path-bound
+/// `userns` AppArmor profile. It is the ONLY candidate that can launch the
+/// outermost sandbox of a nesting chain on an AppArmor-restricted host: a stock
+/// `bwrap//&unpriv_bwrap` outer cannot transition to the helper's more permissive
+/// profile under `no_new_privs`. See `crates/nub-sandbox/setup/linux-nesting/`.
+const DEDICATED_HELPER_PATH: &str = "/usr/libexec/nub/nub-bwrap";
+/// Bounded ceiling for the one-shot nesting feature probe; a correctly set-up
+/// host completes it in well under a second.
+const NESTING_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BubblewrapOrigin {
+    /// The administrator-installed nesting helper at [`DEDICATED_HELPER_PATH`].
+    DedicatedHelper,
     System,
     Bundled,
 }
@@ -215,12 +227,19 @@ pub(crate) fn preflight(
         .filter(|mask| !mask_already_enforced(mask))
         .collect::<Vec<_>>();
     // Open every executable candidate before any real proxy/tmp/CA support
-    // resource exists. The admitted descriptor remains the launch authority.
-    let bwrap_candidates = open_bwrap_candidate_inventory();
+    // resource exists. The admitted descriptor remains the launch authority. When
+    // this launch must be able to nest, the ONLY admissible candidate is the
+    // dedicated helper — never fall back to a stock candidate that cannot nest.
+    let bwrap_candidates = open_bwrap_candidate_inventory(spec.require_nesting);
     if bwrap_candidates.candidates.is_empty() {
+        let reason = if spec.require_nesting {
+            classify_nesting_failure(&bwrap_candidates.failures)
+        } else {
+            classify_bwrap_failures(&bwrap_candidates.failures)
+        };
         return Err(Degradation {
             lost: vec!["fs".to_string()],
-            reason: Some(classify_bwrap_failures(&bwrap_candidates.failures)),
+            reason: Some(reason),
         });
     }
     let (bwrap, ca_placeholder) = admit_bwrap_candidate(
@@ -231,6 +250,7 @@ pub(crate) fn preflight(
         &mount_plan,
         &masks,
         bwrap_candidates,
+        spec.require_nesting,
     )?;
     Ok(LinuxPreflight {
         confined: Some(ConfinedPreflight {
@@ -522,6 +542,7 @@ fn admit_bwrap_candidate(
     mount_plan: &[MountGrant],
     masks: &[Mask],
     inventory: PinnedCandidateInventory,
+    require_nesting: bool,
 ) -> Result<(PinnedBubblewrapCandidate, Option<File>), Degradation> {
     // Candidate admission runs before the real per-launch proxy, CA, or private
     // temporary directory exists. These owned substitutes exercise the same
@@ -604,7 +625,18 @@ fn admit_bwrap_candidate(
         let mut stderr = outer.stderr.take();
         drop(setup_files);
         match retained_monitor.run_candidate_probe(outer, Duration::from_secs(5)) {
-            Ok(()) => return Ok((candidate, probe_ca)),
+            Ok(()) => {
+                if !require_nesting {
+                    return Ok((candidate, probe_ca));
+                }
+                // The single-level monitor probe proves the level-1 launch; a
+                // nesting launch must ALSO prove the host can create a child
+                // sandbox inside it. Gate target release on that bounded probe.
+                match probe_direct_nesting(&candidate, NESTING_PROBE_TIMEOUT) {
+                    Ok(()) => return Ok((candidate, probe_ca)),
+                    Err(reason) => failures.push(reason),
+                }
+            }
             Err(error) => {
                 let mut diagnostic_bytes = Vec::new();
                 if let Some(stderr) = stderr.as_mut() {
@@ -623,9 +655,14 @@ fn admit_bwrap_candidate(
             }
         }
     }
+    let reason = if require_nesting {
+        classify_nesting_failure(&failures)
+    } else {
+        classify_bwrap_failures(&failures)
+    };
     Err(Degradation {
         lost: vec!["fs".to_string()],
-        reason: Some(classify_bwrap_failures(&failures)),
+        reason: Some(reason),
     })
 }
 
@@ -1288,7 +1325,13 @@ struct PinnedCandidateInventory {
     failures: Vec<String>,
 }
 
-fn open_bwrap_candidate_inventory() -> PinnedCandidateInventory {
+fn open_bwrap_candidate_inventory(require_nesting: bool) -> PinnedCandidateInventory {
+    // A nesting launch admits ONLY the dedicated helper: on an AppArmor-restricted
+    // host a stock outer cannot transition to the helper's profile, so falling back
+    // to a system/bundled candidate would silently yield an un-nestable sandbox.
+    if require_nesting {
+        return open_bwrap_candidate_inventory_from([PathBuf::from(DEDICATED_HELPER_PATH)], [], []);
+    }
     let system = [PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")];
     let bundled = std::env::current_exe()
         .ok()
@@ -1300,7 +1343,7 @@ fn open_bwrap_candidate_inventory() -> PinnedCandidateInventory {
             ]
         })
         .unwrap_or_default();
-    open_bwrap_candidate_inventory_from(system, bundled)
+    open_bwrap_candidate_inventory_from([], system, bundled)
 }
 
 /// Validate the Linux resource paired with the running binary before a staged
@@ -1325,13 +1368,20 @@ pub fn validate_adjacent_resource_bundle() -> Result<(), String> {
 }
 
 fn open_bwrap_candidate_inventory_from(
+    dedicated: impl IntoIterator<Item = PathBuf>,
     system: impl IntoIterator<Item = PathBuf>,
     bundled: impl IntoIterator<Item = PathBuf>,
 ) -> PinnedCandidateInventory {
     let mut candidates = Vec::new();
     let mut failures = Vec::new();
     let mut seen = BTreeSet::new();
+    // The dedicated helper is preferred ahead of every stock candidate: it is the
+    // only origin that can launch the outermost sandbox of a nesting chain.
     for (origin, paths) in [
+        (
+            BubblewrapOrigin::DedicatedHelper,
+            dedicated.into_iter().collect::<Vec<_>>(),
+        ),
         (
             BubblewrapOrigin::System,
             system.into_iter().collect::<Vec<_>>(),
@@ -1371,10 +1421,15 @@ fn open_pinned_bwrap_candidate(
         )
     };
     if fd < 0 {
-        return Err(format!(
-            "opening candidate: {}",
-            std::io::Error::last_os_error()
-        ));
+        let error = std::io::Error::last_os_error();
+        // For the dedicated helper an EACCES open is the group-access signal:
+        // the 0750 root:nub-sandbox helper is unopenable by a non-member. Tag it
+        // so the nesting diagnostic can name the missing group access precisely.
+        if origin == BubblewrapOrigin::DedicatedHelper && error.raw_os_error() == Some(libc::EACCES)
+        {
+            return Err(format!("{DEDICATED_HELPER_ACCESS_TAG}: {error}"));
+        }
+        return Err(format!("opening candidate: {error}"));
     }
     let source = unsafe { File::from_raw_fd(fd) };
     let metadata = source
@@ -1386,11 +1441,21 @@ fn open_pinned_bwrap_candidate(
     if metadata.permissions().mode() & 0o111 == 0 {
         return Err("opened candidate is not executable".to_string());
     }
-    if origin == BubblewrapOrigin::System
-        && !trusted_system_candidate_metadata(metadata.uid(), metadata.permissions().mode())
+    // Both the dedicated helper and a trusted system candidate must be root-owned
+    // and unwritable by group/other; the helper additionally must byte-match the
+    // packaged build (the digest pins the exact upstream version).
+    if matches!(
+        origin,
+        BubblewrapOrigin::System | BubblewrapOrigin::DedicatedHelper
+    ) && !trusted_system_candidate_metadata(metadata.uid(), metadata.permissions().mode())
     {
+        let label = match origin {
+            BubblewrapOrigin::DedicatedHelper => "dedicated nesting helper",
+            BubblewrapOrigin::System => "system candidate",
+            BubblewrapOrigin::Bundled => "bundled candidate",
+        };
         return Err(format!(
-            "system candidate is not root-owned and protected from group/other writes (uid={}, mode={:o})",
+            "{label} is not root-owned and protected from group/other writes (uid={}, mode={:o})",
             metadata.uid(),
             metadata.permissions().mode() & 0o7777
         ));
@@ -1404,12 +1469,84 @@ fn open_pinned_bwrap_candidate(
         BubblewrapOrigin::System => relocate_file_at_least(source, FIRST_LAUNCH_DATA_FD)
             .map_err(|error| format!("pinning system candidate descriptor: {error}"))?,
         BubblewrapOrigin::Bundled => executable_snapshot(&source, path)?,
+        // The helper is exec'd through the pinned descriptor (never re-resolved by
+        // path) so a post-verification path swap cannot change what runs; but it is
+        // exec'd from its REAL inode, not a memfd copy, because the path-bound
+        // AppArmor `userns` profile only attaches to the real `/usr/libexec/nub`
+        // path. Verify the opened fd's bytes against the packaged digest, then pin
+        // that same fd for execution.
+        BubblewrapOrigin::DedicatedHelper => {
+            verify_pinned_helper_digest(&source, path)?;
+            relocate_file_at_least(source, FIRST_LAUNCH_DATA_FD)
+                .map_err(|error| format!("pinning dedicated helper descriptor: {error}"))?
+        }
     };
     Ok(PinnedBubblewrapCandidate {
         executable,
         source_path,
         source_identity,
     })
+}
+
+/// Marker prefixed onto a dedicated-helper open failure caused by a group-access
+/// denial (EACCES on the 0750 root:nub-sandbox helper), so the nesting classifier
+/// can attribute it to missing `nub-sandbox` group membership.
+const DEDICATED_HELPER_ACCESS_TAG: &str = "dedicated helper group access denied";
+
+/// Verify the OPENED helper inode byte-for-byte against the packaged digest. Reads
+/// through the already-open descriptor (no path re-resolution), so the bytes hashed
+/// are the exact bytes the pinned descriptor will execute.
+fn verify_pinned_helper_digest(source: &File, path: &Path) -> Result<(), String> {
+    let Some(expected) = option_env!("NUB_BWRAP_SHA256") else {
+        return Err(format!(
+            "the running Nub was built without a packaged Bubblewrap digest, so the dedicated helper cannot be verified: {}",
+            path.display()
+        ));
+    };
+    verify_pinned_helper_digest_against(source, path, expected)
+}
+
+fn verify_pinned_helper_digest_against(
+    source: &File,
+    path: &Path,
+    expected: &str,
+) -> Result<(), String> {
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("packaged Bubblewrap digest is malformed".to_string());
+    }
+    let size = source
+        .metadata()
+        .map_err(|error| format!("statting the dedicated helper: {error}"))?
+        .len();
+    if size > MAX_BUNDLED_BWRAP_BYTES {
+        return Err(format!(
+            "the dedicated helper is unexpectedly large: {}",
+            path.display()
+        ));
+    }
+    let mut hasher = Sha256::new();
+    let mut offset = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    while offset < size {
+        let wanted = usize::try_from((size - offset).min(buffer.len() as u64))
+            .expect("bounded read chunk fits usize");
+        let read = source
+            .read_at(&mut buffer[..wanted], offset)
+            .map_err(|error| format!("reading the dedicated helper: {error}"))?;
+        if read == 0 {
+            return Err("the dedicated helper changed while it was being verified".to_string());
+        }
+        hasher.update(&buffer[..read]);
+        offset += read as u64;
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(format!(
+            "the dedicated helper does not match the packaged Bubblewrap build (digest mismatch): {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn trusted_system_candidate_metadata(uid: u32, mode: u32) -> bool {
@@ -1566,6 +1703,206 @@ fn classify_bwrap_failures(failures: &[String]) -> String {
         return format!("the container policy blocks required Bubblewrap behavior ({detail})");
     }
     format!("Bubblewrap cannot enforce the required process view ({detail})")
+}
+
+/// One bounded direct nested launch. The dedicated helper (exec'd through its
+/// pinned descriptor so the path-bound AppArmor `userns` profile attaches) launches
+/// the dedicated helper AGAIN — by its real path, visible inside the outer view — to
+/// run `/bin/true`. Success proves the host can create a child sandbox inside a
+/// helper sandbox; any failure is handed to [`classify_nesting_failure`] for a
+/// precise setup/profile/host diagnostic. This is a kernel/AppArmor capability
+/// check, NOT the production nested-composition launch path (that is D7/D8).
+fn probe_direct_nesting(
+    candidate: &PinnedBubblewrapCandidate,
+    timeout: Duration,
+) -> Result<(), String> {
+    let helper_fd = candidate.executable.as_raw_fd();
+    let mut command = Command::new(candidate.program());
+    command
+        .env_clear()
+        .args([
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--cap-drop",
+            "ALL",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--clearenv",
+            "--",
+            // The inner helper is invoked by real path: the path-bound AppArmor
+            // profile only attaches to `/usr/libexec/nub/nub-bwrap`.
+            DEDICATED_HELPER_PATH,
+            "--die-with-parent",
+            "--unshare-user",
+            "--unshare-pid",
+            "--cap-drop",
+            "ALL",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--clearenv",
+            "--",
+            "/bin/true",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    // The outer helper is exec'd via `/proc/self/fd/<helper_fd>`; keep that
+    // descriptor open across the child's execve so the magic path resolves.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(helper_fd, libc::F_GETFD);
+            if flags < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(helper_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|error| {
+        format!("the dedicated helper could not start the nesting probe: {error}")
+    })?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stderr = String::new();
+                if let Some(mut handle) = child.stderr.take() {
+                    let _ = handle.read_to_string(&mut stderr);
+                }
+                if status.success() {
+                    return Ok(());
+                }
+                let trimmed = stderr.trim();
+                return Err(if trimmed.is_empty() {
+                    format!("nested launch exited unsuccessfully ({status})")
+                } else {
+                    format!("nested launch failed: {trimmed}")
+                });
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("the bounded nesting probe did not complete in time".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("waiting on the nesting probe failed: {error}"));
+            }
+        }
+    }
+}
+
+/// Turn dedicated-helper admission failures into ONE precise nesting diagnostic,
+/// distinguishing (1) missing `nub-sandbox` group access, (2) helper integrity,
+/// (3) an absent/unloaded AppArmor profile, and (4) a generic host/container
+/// user-namespace failure. Carries no privileged remediation commands.
+fn classify_nesting_failure(failures: &[String]) -> String {
+    let detail = failures.join("; ");
+    let lower = detail.to_ascii_lowercase();
+
+    // (1) group access — the 0750 root:nub-sandbox helper was unopenable.
+    if failures
+        .iter()
+        .any(|failure| failure.contains(DEDICATED_HELPER_ACCESS_TAG))
+    {
+        return format!(
+            "the dedicated Bubblewrap nesting helper at {DEDICATED_HELPER_PATH} is not accessible to this user; add the user to the nub-sandbox group and start a fresh login ({detail})"
+        );
+    }
+    // Helper never installed — an ENOENT on the CANDIDATE OPEN specifically, not
+    // any ENOENT that a later probe stage might surface.
+    if lower.contains("opening candidate: no such file or directory") {
+        return format!(
+            "the dedicated Bubblewrap nesting helper is not installed at {DEDICATED_HELPER_PATH}; complete the documented one-time host setup ({detail})"
+        );
+    }
+    // (2) integrity — root ownership, writability, digest, or build pinning.
+    if lower.contains("digest")
+        || lower.contains("root-owned")
+        || lower.contains("not a regular file")
+        || lower.contains("not executable")
+        || lower.contains("unexpectedly large")
+        || lower.contains("cannot be verified")
+    {
+        return format!(
+            "the dedicated Bubblewrap nesting helper at {DEDICATED_HELPER_PATH} failed its integrity check; reinstall the packaged helper from the documented host setup ({detail})"
+        );
+    }
+    // (4) generic host/container failures disable unprivileged nesting regardless
+    //     of any profile, so they take precedence over the profile signal.
+    if fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+        .is_ok_and(|value| value.trim() == "0")
+    {
+        return format!(
+            "unprivileged user namespaces are disabled on this host, so nested sandboxes cannot be created ({detail})"
+        );
+    }
+    if fs::read_to_string("/proc/sys/kernel/osrelease")
+        .is_ok_and(|value| value.to_ascii_lowercase().contains("microsoft"))
+    {
+        return format!(
+            "nested Bubblewrap cannot create the required namespaces under WSL ({detail})"
+        );
+    }
+    if Path::new("/.dockerenv").exists()
+        || Path::new("/run/.containerenv").exists()
+        || fs::read_to_string("/proc/1/cgroup").is_ok_and(|value| {
+            ["docker", "containerd", "kubepods", "libpod"]
+                .iter()
+                .any(|marker| value.contains(marker))
+        })
+    {
+        return format!(
+            "the container policy blocks the user namespaces required for nested sandboxes ({detail})"
+        );
+    }
+    // (3) profile — the AppArmor user-namespace restriction is active and the
+    //     failure is a namespace/credential denial. A loaded helper profile would
+    //     have permitted the namespace, so on a restricted host this denial means
+    //     the dedicated profile is not effective. (Enumerating loaded profiles via
+    //     securityfs needs privilege, so it is inferred from the denial, not read.)
+    if apparmor_restricts_unprivileged_userns() && is_namespace_denial(&lower) {
+        return format!(
+            "the dedicated Bubblewrap nesting helper's AppArmor profile is not loaded, so the host blocks the user namespaces required for nested sandboxes; complete the documented one-time host setup ({detail})"
+        );
+    }
+    format!("nested Bubblewrap could not create the required namespaces on this host ({detail})")
+}
+
+fn apparmor_restricts_unprivileged_userns() -> bool {
+    fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .is_ok_and(|value| value.trim() == "1")
+}
+
+/// A user-namespace / credential-setup denial in a Bubblewrap failure string. The
+/// exact wording varies by Bubblewrap version ("setting up uid map: Permission
+/// denied", "No permissions to create new namespace").
+fn is_namespace_denial(lower: &str) -> bool {
+    lower.contains("uid map")
+        || lower.contains("gid map")
+        || lower.contains("new namespace")
+        || lower.contains("permission denied")
+        || lower.contains("operation not permitted")
 }
 
 fn executable(path: &Path) -> bool {
@@ -2902,6 +3239,116 @@ mod tests {
         assert!(message.contains("required stock options"), "{message}");
         for banned in ["sudo", "sysctl", "disable AppArmor", "apparmor_parser"] {
             assert!(!message.contains(banned), "{message}");
+        }
+    }
+
+    #[test]
+    fn dedicated_helper_rejects_a_non_root_owner() {
+        // A test-user-owned file can never be the root-owned helper. Ownership is
+        // checked from the OPENED inode, before the digest, so the error names it.
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("nub-bwrap");
+        fs::write(&path, b"not the helper").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+        let error = open_pinned_bwrap_candidate(&path, BubblewrapOrigin::DedicatedHelper)
+            .err()
+            .expect("a non-root-owned helper was admitted");
+        assert!(error.contains("root-owned"), "{error}");
+    }
+
+    #[test]
+    fn dedicated_helper_digest_admits_matching_bytes_and_rejects_tampering() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("nub-bwrap");
+        let packaged = b"the exact packaged bubblewrap bytes";
+        fs::write(&path, packaged).unwrap();
+        let source = File::open(&path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(packaged));
+        verify_pinned_helper_digest_against(&source, &path, &digest)
+            .expect("packaged bytes must verify against their own digest");
+
+        // A single flipped byte fails closed against the pinned digest.
+        let tampered = File::open({
+            let other = directory.path().join("tampered");
+            fs::write(&other, b"the exact packaged bubblewrap byteS").unwrap();
+            other
+        })
+        .unwrap();
+        let error = verify_pinned_helper_digest_against(&tampered, &path, &digest)
+            .expect_err("tampered bytes were accepted");
+        assert!(error.contains("digest"), "{error}");
+    }
+
+    #[test]
+    fn dedicated_helper_digest_rejects_a_malformed_pin() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("nub-bwrap");
+        fs::write(&path, b"bytes").unwrap();
+        let source = File::open(&path).unwrap();
+        let error = verify_pinned_helper_digest_against(&source, &path, "not-64-hex")
+            .expect_err("a malformed digest pin was accepted");
+        assert!(error.contains("malformed"), "{error}");
+    }
+
+    #[test]
+    fn nesting_failure_classifies_group_access_precisely() {
+        let failures = vec![format!(
+            "{DEDICATED_HELPER_ACCESS_TAG}: Permission denied (os error 13)"
+        )];
+        let message = classify_nesting_failure(&failures);
+        assert!(message.contains("nub-sandbox group"), "{message}");
+        assert!(message.contains("fresh login"), "{message}");
+        assert_no_privileged_advice(&message);
+    }
+
+    #[test]
+    fn nesting_failure_classifies_missing_helper() {
+        let failures =
+            vec!["opening candidate: No such file or directory (os error 2)".to_string()];
+        let message = classify_nesting_failure(&failures);
+        assert!(message.contains("not installed"), "{message}");
+        assert!(message.contains(DEDICATED_HELPER_PATH), "{message}");
+        assert_no_privileged_advice(&message);
+    }
+
+    #[test]
+    fn nesting_failure_classifies_integrity() {
+        for detail in [
+            "the dedicated helper does not match the packaged Bubblewrap build (digest mismatch): x",
+            "dedicated nesting helper is not root-owned and protected from group/other writes (uid=1000, mode=755)",
+        ] {
+            let message = classify_nesting_failure(&[detail.to_string()]);
+            assert!(message.contains("integrity check"), "{message}: {detail}");
+            assert_no_privileged_advice(&message);
+        }
+    }
+
+    fn assert_no_privileged_advice(message: &str) {
+        for banned in [
+            "sudo",
+            "sysctl",
+            "disable AppArmor",
+            "apparmor_parser",
+            "groupadd",
+        ] {
+            assert!(!message.contains(banned), "leaked admin command: {message}");
+        }
+    }
+
+    #[test]
+    fn nesting_inventory_admits_only_the_dedicated_helper() {
+        // Without a set-up host the require-nesting inventory yields no candidate
+        // and never falls through to a stock bwrap — the fail-closed guarantee.
+        let inventory = open_bwrap_candidate_inventory(true);
+        if inventory.candidates.is_empty() {
+            return; // CI/dev host: helper absent or unverifiable → fail closed.
+        }
+        for candidate in &inventory.candidates {
+            assert_eq!(
+                candidate.source_path,
+                Path::new(DEDICATED_HELPER_PATH),
+                "a non-helper candidate entered the nesting inventory"
+            );
         }
     }
 }

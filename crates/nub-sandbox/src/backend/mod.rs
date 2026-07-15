@@ -121,6 +121,13 @@ pub struct CommandSpec {
     /// bounded deny globs such as `.env*` and `*.sandbox.json`. The frontend adds
     /// the workspace root and each package root; no backend recursively walks them.
     pub deny_search_roots: Vec<std::path::PathBuf>,
+    /// This launch must be able to create nested sandboxes. On Linux under an
+    /// AppArmor-restricted host that forces the dedicated administrator-installed
+    /// helper as the level-1 launcher (a stock outer cannot transition to the
+    /// helper's profile under `no_new_privs`) and fails the launch closed when the
+    /// host is not set up for nesting. Default `false` leaves single-level launch
+    /// candidate selection unchanged.
+    pub require_nesting: bool,
 }
 
 impl CommandSpec {
@@ -130,6 +137,7 @@ impl CommandSpec {
             args: Vec::new(),
             cwd: None,
             deny_search_roots: Vec::new(),
+            require_nesting: false,
         }
     }
     pub fn arg(mut self, a: impl Into<std::ffi::OsString>) -> Self {
@@ -159,6 +167,10 @@ impl CommandSpec {
     {
         self.deny_search_roots
             .extend(dirs.into_iter().map(Into::into));
+        self
+    }
+    pub fn require_nesting(mut self, require: bool) -> Self {
+        self.require_nesting = require;
         self
     }
 }

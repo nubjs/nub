@@ -142,7 +142,7 @@ request). Every field is `serde`-round-trippable.
 
 | Type | Role |
 | --- | --- |
-| `CommandSpec { program, args, cwd, deny_search_roots }` | the host-provided command plus the bounded workspace/package roots whose existing direct children are checked for deny globs. No recursive discovery occurs in the engine. |
+| `CommandSpec { program, args, cwd, deny_search_roots, require_nesting }` | the host-provided command plus the bounded workspace/package roots whose existing direct children are checked for deny globs (no recursive discovery occurs in the engine). Set `require_nesting` when the launch must be able to create nested sandboxes: on an AppArmor-restricted Linux host it forces the dedicated administrator-installed helper at level 1 and fails closed with a precise setup/integrity/profile diagnostic when the host is not set up for nesting (see `setup/linux-nesting/`). Default `false` leaves single-level candidate selection unchanged. |
 | `Prepared { degradation, .. }` | the private launch plan; launch through `spawn`, `status`, or `output`. It owns Bubblewrap supervision, data descriptors, the egress proxy, private temp state, and the Windows launch plan. |
 | `PreparedChild` | the supervised running child returned by `Prepared::spawn`; it owns runtime resources until wait or drop, while setup-only descriptors close immediately after spawn. |
 | `Degradation { lost, reason }` | which axes degraded (`warning()` → the one-line user string). `Err(Degradation)` = hard fail-closed; a non-empty `lost` on `Ok` = a surfaced partial |
