@@ -38,6 +38,9 @@ impl Fixture {
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
         std::fs::create_dir_all(&config_root).unwrap();
 
+        // The restrictive sandbox value rides along in every route this fixture
+        // exercises: Phase 0 parses it losslessly but activates nothing, so all
+        // assertions below double as the runtime-consumer inertness proof (P6).
         std::fs::write(
             config_root.join("nub.jsonc"),
             r#"{
@@ -48,7 +51,8 @@ impl Fixture {
               "define": { "CONFIG_WORD": "\"defined\"" },
               "loader": { ".blob": "text", ".view": "jsx" },
               "conditions": ["runtime-config"],
-              "tsconfig": "./tsconfig.runtime.jsonc"
+              "tsconfig": "./tsconfig.runtime.jsonc",
+              "sandbox": { "fs": false, "net": false, "env": false }
             }"#,
         )
         .unwrap();

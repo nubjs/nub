@@ -111,9 +111,10 @@ fn global_dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
         "DLX_CONFIG_VALUE=source-root\n",
     )
     .unwrap();
+    // A fully-restrictive dlx sandbox must not affect env sourcing (P6 inertness).
     write_global(
         &config_home,
-        r#"{ "dlx": { "env": "./env/dlx.env", "sandbox": false } }"#,
+        r#"{ "dlx": { "env": "./env/dlx.env", "sandbox": { "fs": false, "net": false, "env": false } } }"#,
     );
     let sourced = run_nubx(&alias, &cwd, &config_home, &["print.mjs"]);
     assert_eq!(

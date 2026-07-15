@@ -1366,6 +1366,21 @@ fn parse_duration(s: &str, path: &str) -> Result<Duration> {
         .ok_or_else(|| invalid("overflows"))
 }
 
+// P5/P6 test packages (separate files; children of this module so they reach
+// the private resolver). `sandbox_shapes` also exports the shared five-shape
+// table pm_engine's install-lowering test reuses.
+#[cfg(test)]
+#[path = "project_config_schema_matrix.rs"]
+mod schema_matrix;
+
+#[cfg(test)]
+#[path = "project_config_precedence_matrix.rs"]
+mod precedence_matrix;
+
+#[cfg(test)]
+#[path = "project_config_sandbox_shapes.rs"]
+pub(crate) mod sandbox_shapes;
+
 #[cfg(test)]
 mod tests {
     use super::*;

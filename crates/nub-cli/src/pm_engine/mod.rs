@@ -2948,7 +2948,7 @@ pub(crate) fn with_fd_captured<T>(_fd: i32, f: impl FnOnce() -> T) -> (T, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_config::{Hoist, InstallConfig, NodeLinker, SandboxSetting};
+    use crate::project_config::{Hoist, InstallConfig, NodeLinker};
 
     fn get<'a>(defaults: &'a [(String, String)], key: &str) -> Option<&'a str> {
         defaults
@@ -3107,17 +3107,23 @@ mod tests {
 
     #[test]
     fn install_sandbox_remains_inert() {
+        // Every policy shape (not just `false`) must lower identically to the
+        // no-sandbox baseline until the sandbox execution slice lands.
         let baseline = lower_native_install_settings(&InstallConfig::default(), &[]).unwrap();
-        let configured = lower_native_install_settings(
-            &InstallConfig {
-                sandbox: Some(SandboxSetting::Disabled),
-                ..InstallConfig::default()
-            },
-            &[],
-        )
-        .unwrap();
-
-        assert_eq!(configured, baseline);
+        for (raw, shape) in crate::project_config::sandbox_shapes::five_shapes() {
+            let configured = lower_native_install_settings(
+                &InstallConfig {
+                    sandbox: Some(shape),
+                    ..InstallConfig::default()
+                },
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                configured, baseline,
+                "install lowering must not react to sandbox shape {raw}"
+            );
+        }
     }
 
     #[test]
