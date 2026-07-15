@@ -650,7 +650,7 @@ export function loadTranspile(url, ext) {
       ? { legacy: true, emitDecoratorMetadata: co?.emitDecoratorMetadata === true }
       : undefined,
   };
-  if (ext === ".tsx" || ext === ".jsx") {
+  if (lang === "tsx" || lang === "jsx") {
     opts.jsx = {
       runtime: co?.jsx === "react" ? "classic" : "automatic",
       importSource: co?.jsxImportSource || "react",

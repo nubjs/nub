@@ -664,11 +664,29 @@ fn dlx_env_for(config: &EffectiveConfig) -> Option<BTreeMap<String, String>> {
 
 pub(crate) fn runtime_config() -> Result<RuntimeConfig> {
     if let Some(serialized) = std::env::var_os(RUNTIME_CONFIG_ENV) {
-        let runtime: RuntimeConfig = serde_json::from_slice(serialized.as_encoded_bytes())
+        let mut runtime: RuntimeConfig = serde_json::from_slice(serialized.as_encoded_bytes())
             .map_err(|error| ConfigError::Value {
                 path: "runtime".to_string(),
                 message: format!("invalid inherited runtime snapshot: {error}"),
             })?;
+        // The inherited snapshot is the source-anchored base for nested shim
+        // launches, but the new invocation's explicit compatibility overlay is
+        // still stronger. P1 has already resolved CLI > environment > files;
+        // preserve every inherited runtime field and replace only nodeCompat
+        // when this invocation supplied one of those two transient layers.
+        if let Some(effective) = effective_config()
+            && effective
+                .sources
+                .get(&ConfigKey::NodeCompat)
+                .is_some_and(|source| {
+                    matches!(
+                        source.kind,
+                        ConfigSourceKind::Cli | ConfigSourceKind::Environment
+                    )
+                })
+        {
+            runtime.node_compat = effective.values.node_compat.unwrap_or(false);
+        }
         return Ok(runtime);
     }
 
