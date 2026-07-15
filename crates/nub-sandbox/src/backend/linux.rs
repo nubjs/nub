@@ -20,7 +20,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -183,6 +183,16 @@ pub(crate) fn preflight(
             lost: vec!["fs-read-deny".to_string()],
             reason: Some(reason),
         })?;
+    // C3 cross-layer: the empty netns confines IP traffic, but a filesystem-path AF_UNIX
+    // socket crosses that boundary — so under net-confinement the known network-equivalent
+    // daemon/bus sockets are force-masked here, making net confinement SELF-CONTAINED
+    // rather than dependent on the fs policy happening to hide them.
+    if policy.net.enforce {
+        masks.extend(net_equivalent_socket_masks().map_err(|reason| Degradation {
+            lost: vec!["net-per-host".to_string()],
+            reason: Some(reason),
+        })?);
+    }
     // A nesting-capable launch must keep /proc FULLY VISIBLE: the kernel refuses a
     // NESTED procfs mount when the template /proc carries a locked bind over a procfs
     // FILE, so a child inside this sandbox could not create its own PID-isolated
@@ -295,6 +305,7 @@ pub(crate) fn preflight(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
@@ -302,6 +313,7 @@ pub fn apply(
     proxy_token: Option<&str>,
     ca_bundle: Option<File>,
     tmp_dir: Option<&Path>,
+    net_bridge_dir: Option<&Path>,
     runtime: Option<&super::linux_monitor::RuntimeCapability>,
     preflight: LinuxPreflight,
 ) -> Result<Prepared, Degradation> {
@@ -310,6 +322,7 @@ pub fn apply(
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
             proxy: None,
+            net_bridge: None,
             _inherited_files: Vec::new(),
             retained_monitor: None,
             _private_tmp: None,
@@ -333,10 +346,18 @@ pub fn apply(
         bwrap,
         ca_placeholder,
     } = confined;
-    let target_env = target_environment(policy, proxy_port, proxy_token, ca_bundle.is_some());
+    // C3: per-host is ACTIVE iff the host bridge started (its socket dir is present to
+    // bind-mount). The empty netns is the boundary either way; when per-host is active the
+    // child reaches the proxy through the in-netns bridge on a FIXED loopback port (not the
+    // parent's proxy port, which the netns cannot route to), and the seccomp socket ceiling
+    // is dropped (the netns confines egress, so the child must be able to create sockets).
+    let per_host = net_bridge_dir.is_some();
+    let child_proxy_port = per_host.then_some(super::linux_monitor::IN_NETNS_PROXY_PORT);
+    let target_env = target_environment(policy, child_proxy_port, proxy_token, ca_bundle.is_some());
     let bootstrap = super::linux_monitor::BootstrapSpec::new(
         runtime,
         policy,
+        per_host,
         &spec,
         entry_program.as_os_str().to_owned(),
         cwd.clone(),
@@ -362,6 +383,22 @@ pub fn apply(
                 "relocating immutable CA-bundle descriptor: {error}"
             )),
         })?;
+    // C3: open + relocate a descriptor to the host bridge socket dir so Bubblewrap can
+    // `--ro-bind-fd` it read-only into the sandbox (fd-based, TOCTOU-free, matching the CA
+    // bundle). The dir itself stays alive on the returned `Prepared`'s `HostNetBridge`, so
+    // this descriptor is valid through the launch.
+    let net_bridge_fd = net_bridge_dir
+        .map(|dir| {
+            File::open(dir)
+                .and_then(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
+        })
+        .transpose()
+        .map_err(|error| Degradation {
+            lost: vec!["net-per-host".to_string()],
+            reason: Some(format!(
+                "opening per-host egress bridge socket dir: {error}"
+            )),
+        })?;
     let RetainedOuterSetup {
         command,
         mut setup_files,
@@ -376,15 +413,18 @@ pub fn apply(
         effective_ca.as_ref(),
         tmp_dir,
         proxy_port,
+        net_bridge_fd.as_ref(),
         &retained_monitor,
     )?;
     setup_files.extend(effective_ca);
+    setup_files.extend(net_bridge_fd);
     setup_files.push(bwrap.executable);
 
     Ok(Prepared {
         command,
         degradation,
         proxy: None,
+        net_bridge: None,
         _inherited_files: setup_files,
         retained_monitor: Some(retained_monitor),
         _private_tmp: None,
@@ -408,6 +448,7 @@ fn configure_retained_outer(
     ca_bundle: Option<&File>,
     tmp_dir: Option<&Path>,
     proxy_port: Option<u16>,
+    net_bridge_fd: Option<&File>,
     retained_monitor: &super::linux_monitor::RetainedMonitorLaunch,
 ) -> Result<RetainedOuterSetup, Degradation> {
     let mut setup = Command::new("");
@@ -503,6 +544,16 @@ fn configure_retained_outer(
             .arg(bundle.as_raw_fd().to_string())
             .arg(super::linux_monitor::PRIVATE_CA_BUNDLE);
     }
+    // C3: read-only bind-mount the host bridge socket dir into the sandbox. The child (and
+    // the monitor's in-netns bridge) reach the loopback proxy ONLY through the UDS inside
+    // it; the read-only mount keeps the untrusted child from unlinking or replacing the
+    // socket (a connect is not a filesystem write, so the in-netns half still connects).
+    if let Some(dir) = net_bridge_fd {
+        setup
+            .arg("--ro-bind-fd")
+            .arg(dir.as_raw_fd().to_string())
+            .arg(super::linux_net_bridge::PRIVATE_NET_ROOT);
+    }
     setup
         .arg("--remount-ro")
         .arg(super::linux_monitor::PRIVATE_SUPPORT_ROOT);
@@ -515,11 +566,18 @@ fn configure_retained_outer(
 
     let mut degradation = Degradation::full();
     if policy.net.enforce {
+        // The empty netns is THE egress boundary at EVERY posture: coarse-deny (no proxy),
+        // per-host (egress reaches only the proxy via the bridge), and even the fallback
+        // below. C3 wires the per-host bridge here; it does NOT weaken `--unshare-net`.
         setup.arg("--unshare-net");
-        if proxy_port.is_some() {
+        // net-per-host degrades ONLY when a proxy was started but its host bridge did not
+        // (`net_bridge_fd` absent) — then per-host collapses to coarse-deny (fail-SAFE:
+        // denies more, not less). A wired bridge is full per-host enforcement.
+        if proxy_port.is_some() && net_bridge_fd.is_none() {
             degradation.lost.push("net-per-host".to_string());
             degradation.reason = Some(
-                "Bubblewrap proxy bridge not yet wired; network was denied completely".to_string(),
+                "per-host egress bridge could not be established; network was denied completely"
+                    .to_string(),
             );
         }
     }
@@ -548,6 +606,7 @@ fn configure_retained_outer(
         .map(AsRawFd::as_raw_fd)
         .chain(std::iter::once(bwrap.executable.as_raw_fd()))
         .chain(ca_bundle.into_iter().map(AsRawFd::as_raw_fd))
+        .chain(net_bridge_fd.into_iter().map(AsRawFd::as_raw_fd))
         .collect::<Vec<_>>();
     retained_monitor
         .install_pre_exec(&mut command, &inherited_fds)
@@ -640,6 +699,7 @@ fn admit_bwrap_candidate(
             probe_ca.as_ref(),
             probe_tmp.as_ref().map(tempfile::TempDir::path),
             None,
+            None,
             &retained_monitor,
         )?;
         command
@@ -702,7 +762,10 @@ fn admit_bwrap_candidate(
 
 fn target_environment(
     policy: &SandboxPolicy,
-    proxy_port: Option<u16>,
+    // The loopback port the CHILD is pointed at — on Linux per-host this is the FIXED
+    // in-netns bridge port (the empty netns cannot route to the parent proxy port), and
+    // `None` for coarse-deny/full (no cooperative proxy env is set).
+    child_proxy_port: Option<u16>,
     proxy_token: Option<&str>,
     ca_bundle: bool,
 ) -> BTreeMap<OsString, OsString> {
@@ -712,7 +775,7 @@ fn target_environment(
         .iter()
         .map(|(key, value)| (OsString::from(key), OsString::from(value)))
         .collect::<BTreeMap<_, _>>();
-    if let Some(port) = proxy_port {
+    if let Some(port) = child_proxy_port {
         super::insert_proxy_env(&mut target_env, port, proxy_token);
     }
     if ca_bundle {
@@ -1147,6 +1210,74 @@ fn validate_cwd_visibility(
         ));
     }
     Ok(())
+}
+
+/// Filesystem-path AF_UNIX sockets whose reach is NETWORK-EQUIVALENT: a child that can
+/// connect to one has egress THROUGH the empty-netns wall, because the daemon or bus on the
+/// far end can itself reach the network or the host (the container runtimes double as a full
+/// host escape). The empty netns does not confine a PATH socket — that channel is scoped to
+/// the MOUNT namespace, not the net namespace — so net confinement must close it at the fs
+/// layer. Under `net.enforce` these are masked unreadable, so per-host and coarse-deny are
+/// SELF-CONTAINED (they do not silently depend on the user's fs policy hiding these paths).
+///
+/// This does NOT touch ABSTRACT-namespace AF_UNIX (scoped to the empty net namespace, so it
+/// can only reach in-sandbox peers) nor the in-netns relay's own UDS (a nub-private
+/// read-only mount, not in this set) — so legit local IPC and the bridge keep working. Only
+/// host-existing sockets are masked (an absent path is unreachable anyway); a regular file
+/// or dir sharing the name is skipped (only a real socket is the network-equivalent hazard).
+fn net_equivalent_socket_masks() -> Result<Vec<Mask>, String> {
+    let mut paths: Vec<PathBuf> = [
+        "/run/docker.sock",
+        "/var/run/docker.sock",
+        "/run/podman/podman.sock",
+        "/var/run/podman/podman.sock",
+        "/run/containerd/containerd.sock",
+        "/var/run/containerd/containerd.sock",
+        "/run/dbus/system_bus_socket",
+        "/var/run/dbus/system_bus_socket",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    // The D-Bus SESSION bus is per-uid; masking it denies the session bus's own
+    // network-reachable services (portals, etc.).
+    let uid = unsafe { libc::getuid() };
+    paths.push(PathBuf::from(format!("/run/user/{uid}/bus")));
+
+    let mut masks = Vec::new();
+    for path in paths {
+        let link = match fs::symlink_metadata(&path) {
+            Ok(link) => link,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "statting network-equivalent socket {}: {error}",
+                    path.display()
+                ));
+            }
+        };
+        let resolved = match fs::canonicalize(&path) {
+            Ok(resolved) => resolved,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "resolving network-equivalent socket {}: {error}",
+                    path.display()
+                ));
+            }
+        };
+        let is_socket = link.file_type().is_socket()
+            || fs::metadata(&resolved).is_ok_and(|meta| meta.file_type().is_socket());
+        if !is_socket {
+            continue;
+        }
+        masks.push(Mask {
+            path: resolved,
+            kind: MaskKind::Unreadable,
+            directory: false,
+        });
+    }
+    Ok(masks)
 }
 
 fn alternate_procfs_masks() -> Result<Vec<Mask>, String> {

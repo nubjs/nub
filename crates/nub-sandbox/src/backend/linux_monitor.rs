@@ -45,6 +45,11 @@ pub(crate) const PRIVATE_RUNTIME_ROOT: &str = "/dev/.nub-sandbox/runtime";
 pub(crate) const PRIVATE_SUPPORT_ROOT: &str = "/dev/.nub-sandbox/support";
 pub(crate) const PRIVATE_CA_BUNDLE: &str = "/dev/.nub-sandbox/support/ca-bundle.pem";
 pub(crate) const CANDIDATE_PROBE_SENTINEL: &str = "__nub-sandbox-candidate-probe-v1";
+/// C3: the FIXED loopback port the in-netns egress bridge binds inside the sandbox, and the
+/// port the child's proxy env points at. Each `--unshare-net` child has a PRIVATE empty
+/// netns, so a fixed port never collides across children or nesting levels; the bridge binds
+/// it before the target is released, so the target can never win the bind race.
+pub(crate) const IN_NETNS_PROXY_PORT: u16 = 47981;
 const LINUX_NSIG: libc::c_int = 65;
 const REQUIRED_BOOTSTRAP_SEALS: libc::c_int =
     libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
@@ -636,7 +641,14 @@ pub(crate) struct BootstrapSpec {
     pub(crate) args: Vec<OsString>,
     pub(crate) cwd: PathBuf,
     pub(crate) env: BTreeMap<OsString, OsString>,
+    // Whether `--unshare-net` was applied — TRUE for BOTH coarse-deny and per-host (the
+    // empty netns is the boundary either way). Governs the parent's private-netns
+    // attestation. DISTINCT from the socket seccomp, which per-host drops (see `per_host`).
     pub(crate) network_filter: bool,
+    // C3: whether the PER-HOST egress bridge is active. When set, the socket-blocking
+    // seccomp is NOT installed (the child must create sockets to reach the in-netns bridge;
+    // the empty netns confines it), while `--unshare-net`/`network_filter` still hold.
+    pub(crate) per_host: bool,
     pub(crate) deny_keyring: bool,
     // Whether the keyring-deny seccomp permits keyctl(KEYCTL_JOIN_SESSION_KEYRING,
     // NULL) — needed ONLY by a nesting launch so a nested monitor can establish its
@@ -677,6 +689,12 @@ impl BootstrapSpec {
     pub(crate) fn new(
         runtime: &RuntimeCapability,
         policy: &SandboxPolicy,
+        // C3: whether the PER-HOST egress bridge is active. Per-host confines egress with
+        // the empty netns alone, so the target must be able to create sockets and reach the
+        // in-netns bridge on loopback — the socket-blocking seccomp filter is therefore NOT
+        // installed for per-host (it IS for coarse-deny, which blocks every family incl.
+        // AF_UNIX). The netns is the boundary in both cases.
+        per_host: bool,
         spec: &CommandSpec,
         program: OsString,
         cwd: PathBuf,
@@ -702,6 +720,7 @@ impl BootstrapSpec {
             cwd,
             env,
             network_filter: policy.net.enforce,
+            per_host,
             deny_keyring: super::linux::protects_ambient_credentials(policy),
             permit_keyring_join: spec.require_nesting,
             hold_before_initial_stop_for_harness: false,
@@ -754,6 +773,7 @@ impl BootstrapSpec {
             cwd: PathBuf::from("/"),
             env: BTreeMap::new(),
             network_filter,
+            per_host: false,
             deny_keyring,
             permit_keyring_join: nesting,
             hold_before_initial_stop_for_harness: false,
@@ -783,7 +803,8 @@ impl BootstrapSpec {
             | (u16::from(self.fail_outer_status_after_cleanup_for_harness) << 6)
             | (u16::from(self.deny_keyring) << 7)
             | (u16::from(self.hold_after_completion_request_for_harness) << 8)
-            | (u16::from(self.permit_keyring_join) << 9);
+            | (u16::from(self.permit_keyring_join) << 9)
+            | (u16::from(self.per_host) << 10);
         put_u16(&mut out, flags);
         out.extend_from_slice(&self.session);
         out.extend_from_slice(&self.release);
@@ -819,7 +840,7 @@ impl BootstrapSpec {
             return Err(invalid_data("unsupported sandbox bootstrap version"));
         }
         let flags = cursor.u16()?;
-        if flags & !0b11_1111_1111 != 0 {
+        if flags & !0b111_1111_1111 != 0 {
             return Err(invalid_data("unknown sandbox bootstrap flags"));
         }
         let session = cursor.array::<32>()?;
@@ -864,6 +885,7 @@ impl BootstrapSpec {
             cwd,
             env,
             network_filter: flags & 1 != 0,
+            per_host: flags & 1024 != 0,
             deny_keyring: flags & 128 != 0,
             permit_keyring_join: flags & 512 != 0,
             hold_before_initial_stop_for_harness: flags & 2 != 0,
@@ -876,8 +898,15 @@ impl BootstrapSpec {
         })
     }
 
+    /// Whether the target installs a seccomp filter. The socket-blocking filter is dropped
+    /// for per-host (the empty netns is the boundary; the child must create sockets), so
+    /// per-host with no keyring deny installs NO filter at all.
+    fn restrict_network_socket(&self) -> bool {
+        self.network_filter && !self.per_host
+    }
+
     fn uses_seccomp(&self) -> bool {
-        self.network_filter || self.deny_keyring
+        self.restrict_network_socket() || self.deny_keyring
     }
 }
 
@@ -4527,6 +4556,15 @@ fn run_target_stopped_state(
             MonitorState::TargetStopped,
             MonitorState::TargetStarting,
         )?;
+        // C3: fork the in-netns egress bridge HERE — AFTER the parent has attested the
+        // monitor's UNIQUE stopped-target child (`read_unique_monitor_child`, which precedes
+        // StartTarget), so the bridge never perturbs that count; and BEFORE the target
+        // resumes and starts dialing the proxy, so the loopback listener is up in time. The
+        // monitor is single-threaded (no fork follows the target fork). Best-effort: a bridge
+        // that can't start leaves the child's egress fail-CLOSED (empty netns), never open —
+        // any bridge process is reaped by the target-tree kill(-1) cleanup and the PID-1
+        // namespace collapse.
+        let _ = spawn_in_netns_bridge();
         target.resume_and_release()?;
         match target.await_exec_outcome(control, Instant::now() + DESCRIBE_TIMEOUT)? {
             TargetExecOutcome::Failed(failure) => {
@@ -4600,7 +4638,7 @@ fn create_stopped_target(
 ) -> io::Result<(StoppedTarget, TargetStoppedAttestation)> {
     let prepared_exec = PreparedTargetExec::new(spec)?;
     let seccomp = super::linux::build_seccomp(
-        spec.network_filter,
+        spec.restrict_network_socket(),
         spec.deny_keyring,
         spec.permit_keyring_join,
     )
@@ -5116,6 +5154,69 @@ unsafe fn child_close_open_fds_from_proc(preserved: &[RawFd]) -> Result<(), libc
         return Err(libc::EIO);
     }
     Ok(())
+}
+
+/// C3: fork the IN-NETNS half of the per-host egress bridge. It exists ONLY when per-host is
+/// active — signalled by the presence of the relay socket, a nub-private READ-ONLY bind mount
+/// the untrusted child cannot forge, probed here BEFORE the target is released. The bridge
+/// runs as a hardened PROCESS (not a monitor thread): a process keeps the single-threaded
+/// monitor's subsequent target fork fork-safe, and it can never be orphaned — the monitor's
+/// PID-1 namespace collapse and its target-tree `kill(-1)` cleanup both reap it. `Ok(None)`
+/// means "not per-host"; a fork/setup failure leaves the child's egress fail-CLOSED (the
+/// empty netns has no route out), never open, so it is non-fatal to the launch.
+fn spawn_in_netns_bridge() -> io::Result<Option<libc::pid_t>> {
+    let sock = Path::new(super::linux_net_bridge::PRIVATE_NET_ROOT)
+        .join(super::linux_net_bridge::SOCK_NAME);
+    if !sock.exists() {
+        return Ok(None);
+    }
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pid == 0 {
+        let code = i32::from(run_in_netns_bridge(&sock).is_err());
+        unsafe { libc::_exit(code) };
+    }
+    Ok(Some(pid))
+}
+
+/// The forked in-netns bridge body: harden, then blind-pump every child loopback connection
+/// to the host bridge's UDS. Never returns on success (the accept loop runs for the target's
+/// whole life); the process is killed at cleanup.
+fn run_in_netns_bridge(sock: &Path) -> io::Result<()> {
+    harden_bridge_child()?;
+    // The empty netns's loopback is brought up by Bubblewrap's own `--unshare-net`
+    // loopback_setup, so a fixed high port binds with no capability.
+    let listener =
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, IN_NETNS_PROXY_PORT))?;
+    let sock = sock.to_path_buf();
+    for conn in listener.incoming() {
+        let Ok(tcp) = conn else { continue };
+        let sock = sock.clone();
+        let _ = std::thread::Builder::new()
+            .name("nub-net-inbridge-conn".into())
+            .spawn(move || {
+                if let Ok(uds) = std::os::unix::net::UnixStream::connect(&sock) {
+                    super::linux_net_bridge::splice_unix_tcp(uds, tcp);
+                }
+            });
+    }
+    Ok(())
+}
+
+/// Harden the forked bridge process (mirrors Codex's `harden_bridge_process`): die with the
+/// monitor (`PR_SET_PDEATHSIG`, belt-and-suspenders to the PID-ns collapse), never dumpable,
+/// and drop every inherited monitor descriptor (the control/release/relay channels) so the
+/// bridge cannot hold the control channel open — only stdio is retained.
+fn harden_bridge_child() -> io::Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    close_all_except(&[libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO])
 }
 
 fn harden_monitor_before_secrets() -> io::Result<()> {
@@ -6040,6 +6141,7 @@ fn exercise_monitor_harness_case(
         cwd: PathBuf::from("/"),
         env,
         network_filter: case.network_filter(),
+        per_host: false,
         deny_keyring: false,
         permit_keyring_join: false,
         hold_before_initial_stop_for_harness: matches!(
@@ -8763,6 +8865,7 @@ mod tests {
                 OsString::from_vec(b"VALUE\xfb".to_vec()),
             )]),
             network_filter: true,
+            per_host: false,
             deny_keyring: true,
             permit_keyring_join: false,
             hold_before_initial_stop_for_harness: false,

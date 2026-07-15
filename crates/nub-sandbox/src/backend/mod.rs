@@ -49,6 +49,9 @@ pub fn validate_adjacent_resource_bundle() -> Result<(), String> {
 mod linux_monitor;
 
 #[cfg(target_os = "linux")]
+mod linux_net_bridge;
+
+#[cfg(target_os = "linux")]
 pub use linux_monitor::{
     RuntimeCapability, earliest_bootstrap, exercise_monitor_state_6, exercise_monitor_state_7,
     exercise_monitor_state_8, exercise_monitor_states_1_to_5,
@@ -191,6 +194,13 @@ pub struct Prepared {
     /// value stops the listener. `None` when net is unconfined or coarse-deny (no
     /// proxy needed). Set by [`apply`], not the per-OS backends.
     pub(crate) proxy: Option<EgressProxy>,
+    /// The host-side per-host egress bridge (C3), when the policy enforces per-host net
+    /// on Linux. It carries the `--unshare-net` child's proxy traffic across the empty
+    /// netns to [`proxy`](Self::proxy), runs in the nub PARENT, and MUST outlive the
+    /// child (same lifetime as `proxy`). `None` off Linux or when net is unconfined /
+    /// coarse-deny. Set by [`apply`], not the per-OS backends.
+    #[cfg(target_os = "linux")]
+    pub(crate) net_bridge: Option<linux_net_bridge::HostNetBridge>,
     /// Files whose descriptors Bubblewrap consumes while constructing the mount
     /// view (currently the empty regular-file source used for exact deny masks).
     /// Keeping them here guarantees they remain open until `command` is spawned.
@@ -221,6 +231,8 @@ pub struct PreparedChild {
     #[cfg(target_os = "linux")]
     retained_monitor: Option<linux_monitor::RetainedMonitorSession>,
     _proxy: Option<EgressProxy>,
+    #[cfg(target_os = "linux")]
+    _net_bridge: Option<linux_net_bridge::HostNetBridge>,
     _private_tmp: Option<tempfile::TempDir>,
 }
 
@@ -312,6 +324,10 @@ impl PreparedChild {
     }
 
     fn release_resources(&mut self) {
+        // Drop order matters: tear the in-netns child down (already reaped by the monitor
+        // by this point), THEN the host bridge, THEN the proxy — nearest the child first.
+        #[cfg(target_os = "linux")]
+        self._net_bridge.take();
         self._proxy.take();
         self._private_tmp.take();
     }
@@ -477,6 +493,8 @@ impl Prepared {
             #[cfg(target_os = "linux")]
             retained_monitor,
             _proxy: self.proxy.take(),
+            #[cfg(target_os = "linux")]
+            _net_bridge: self.net_bridge.take(),
             _private_tmp: self._private_tmp.take(),
         })
     }
@@ -741,6 +759,18 @@ fn apply_inner(
     let private_tmp = make_private_tmp(policy);
     let tmp_dir = private_tmp.as_ref().map(|d| d.path());
 
+    // C3: on Linux, per-host net needs a bridge from the `--unshare-net` child's empty
+    // netns to the loopback proxy — the netns has no route to the parent's proxy port. The
+    // host-side half runs here in the parent; its 0700 socket dir is bind-mounted into the
+    // sandbox and the monitor's in-netns half connects to it. A start failure leaves
+    // `net_bridge` None so the backend fail-SAFE degrades per-host to coarse-deny.
+    #[cfg(target_os = "linux")]
+    let net_bridge = proxy_port.and_then(|port| linux_net_bridge::start(port).ok());
+    #[cfg(target_os = "linux")]
+    let net_bridge_dir = net_bridge
+        .as_ref()
+        .map(linux_net_bridge::HostNetBridge::socket_dir);
+
     #[cfg(target_os = "macos")]
     let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     #[cfg(target_os = "linux")]
@@ -751,6 +781,7 @@ fn apply_inner(
         proxy_token,
         ca_bundle,
         tmp_dir,
+        net_bridge_dir,
         runtime,
         linux_preflight,
     )?;
@@ -774,6 +805,10 @@ fn apply_inner(
     }
 
     prepared.proxy = proxy;
+    #[cfg(target_os = "linux")]
+    {
+        prepared.net_bridge = net_bridge;
+    }
     prepared._private_tmp = private_tmp;
     Ok(prepared)
 }

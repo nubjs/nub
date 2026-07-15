@@ -4,9 +4,10 @@
 > to construct a private mount/PID/network view. Current bounds: unprivileged user
 > namespaces and a stock `setsid` launcher must be usable; each candidate is accepted
 > only after a behavior probe, and each target is released only after its namespaces,
-> zero capability sets, seccomp posture, and session group are verified; per-host proxy
-> bridging is not wired and therefore fails safe to no network; denied globs are expanded
-> only across declared project/workspace/package roots at startup; and an existing denied regular file with multiple hard links fails setup.
+> zero capability sets, seccomp posture, and session group are verified; per-host egress
+> rides an empty-netns + UDS bridge to the loopback proxy, which resolves and allow-lists
+> hostnames; denied globs are expanded only across declared project/workspace/package roots
+> at startup; and an existing denied regular file with multiple hard links fails setup.
 
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
@@ -72,12 +73,39 @@ address. Three halves:
   network-specific NAT64 `/96` is not), and partial coverage would misrepresent the
   guarantee. Same `is_blocked_egress_ip` seam if the threat model later wants it.
 
-### Linux per-host egress is not yet wired
+### Linux per-host egress: cooperative proxy-env redirect
 
-The stock-Bubblewrap backend currently provides full network or a private network
-namespace for deny/restricted policy. The authenticated proxy/control plane required for
-per-host egress is deferred. A per-host policy therefore tightens to no network and is
-reported as `net-per-host`; it never silently widens to unrestricted egress.
+Per-host egress is wired. The child runs in an empty network namespace (`--unshare-net`),
+which is the boundary — nothing leaves the box except through nub's loopback egress proxy.
+A per-run bridge carries the child's proxy traffic across the empty netns to that proxy: a
+loopback listener inside the netns forwards to a filesystem UDS, and a host-side listener
+forwards the UDS to the proxy port. The proxy resolves the hostname (so the allow-list
+matches the name the proxy sees, not a child-resolved IP — no DNS-rebinding confusion),
+enforces the host allow-list, and requires a per-session token. The guarantee: **the program
+can reach allowed hostnames through the proxy, and nothing else leaves the box.** The default
+tier is a CONNECT/SNI allow-list with NO decryption; payload inspection happens only under the
+explicit MITM tier (credential brokering / `proxy: "terminate"`), which is opt-in and announced.
+
+The redirect is the standard proxy environment (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`), so
+the reach is **defined by cooperation, not confinement widening**:
+
+- A program that honors the proxy env reaches allowed hostnames and is refused for the rest.
+- A program that resolves names itself and dials directly IGNORES the proxy env, hits the
+  empty netns, and fails — `ECONNREFUSED`/`ENETUNREACH`. This is the DEFINED, fail-CLOSED
+  behavior of per-host: a non-cooperating program loses egress rather than escaping it. DNS
+  is the same story — the empty netns has no resolver, so a child doing its own `getaddrinfo`
+  fails; resolution is meant to happen at the proxy (proxy-side DNS), reached over the proxy env.
+
+A per-host policy whose bridge cannot be established fails SAFE to coarse deny (reported as
+`net-per-host`), never silently to unrestricted egress. The known network-equivalent daemon
+sockets (`docker.sock`, container-runtime and D-Bus sockets) are force-masked at the fs layer
+under net-confinement, so a generous filesystem policy cannot become a way around the netns.
+
+**FUTURE (not shipped) — transparent redirect.** A robustness upgrade would make a
+non-cooperating program's direct egress work rather than fail: nftables DNAT inside the
+userns-created netns to steer arbitrary outbound TCP at the proxy, plus an in-netns resolver.
+That removes the "must honor the proxy env" caveat but adds materially more machinery; it is
+deferred, and the cooperative redirect above is the shipped tier.
 
 ### Windows per-host egress and MITM are unavailable
 
