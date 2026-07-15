@@ -49,6 +49,7 @@ pub(super) struct LockfileOnlyInput<'a> {
     pub settings_ctx: &'a aube_settings::ResolveCtx<'a>,
     pub dependency_policy: &'a aube_resolver::DependencyPolicy,
     pub lockfile_pre_parse: Option<&'a (LockfileGraph, LockfileKind)>,
+    pub revalidate_release_policy: bool,
     pub lockfile_conflict_marker_warning_emitted: bool,
     pub existing_for_resolver: Option<&'a LockfileGraph>,
     pub source_kind_before: Option<LockfileKind>,
@@ -83,6 +84,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         settings_ctx,
         dependency_policy,
         lockfile_pre_parse,
+        revalidate_release_policy,
         lockfile_conflict_marker_warning_emitted,
         existing_for_resolver,
         source_kind_before,
@@ -164,7 +166,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     // other drift — same rule as pnpm's lockfile-config mismatch.
     let (effective_patch_paths, effective_patch_hashes) =
         crate::patches::effective_patch_config(cwd)?;
-    let fresh = !force_resolve
+    let fresh = !(force_resolve || revalidate_release_policy && matches!(mode, FrozenMode::Prefer))
         && matches!(
             parsed,
             Ok((g, k))
@@ -395,6 +397,7 @@ pub(super) struct SelectLockfileInput<'a> {
     pub workspace_catalogs: &'a crate::commands::CatalogMap,
     pub is_workspace_project: bool,
     pub lockfile_pre_parse: Option<&'a (LockfileGraph, LockfileKind)>,
+    pub revalidate_release_policy: bool,
 }
 
 pub(super) fn select_lockfile_result(
@@ -412,6 +415,7 @@ pub(super) fn select_lockfile_result(
         workspace_catalogs,
         is_workspace_project,
         lockfile_pre_parse,
+        revalidate_release_policy,
     } = input;
     if !lockfile_enabled {
         tracing::debug!("lockfile=false: skipping lockfile parse, re-resolving");
@@ -477,6 +481,12 @@ pub(super) fn select_lockfile_result(
             Ok(parsed)
         }
         FrozenMode::Prefer => {
+            if revalidate_release_policy {
+                tracing::debug!(
+                    "active release-age policy requires lockfile-pick revalidation; re-resolving..."
+                );
+                return Ok(Err(aube_lockfile::Error::NotFound(cwd.to_path_buf())));
+            }
             // Use the lockfile when fresh, otherwise pretend there isn't one
             // so the existing "no lockfile → resolve" branch handles it.
             // Reuse `lockfile_pre_parse` instead of parsing the same file

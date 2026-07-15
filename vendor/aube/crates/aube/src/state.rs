@@ -277,6 +277,21 @@ pub fn check_needs_install_with_flags(
     check_needs_install_inner(project_dir, Some(cli_flags))
 }
 
+/// Whether the resolved install settings differ from the last successful
+/// install. This is a narrow post-warm-miss probe for embedders that must
+/// distinguish policy/config drift from unrelated work (manifest edits,
+/// missing modules, lockfile changes). Missing legacy state returns `false`.
+pub(crate) fn install_settings_changed_since_last_run(
+    project_dir: &Path,
+    cli_flags: &[(String, String)],
+) -> bool {
+    let (_, state_path) = resolve_paths(project_dir);
+    let Some(state) = read_or_migrate_fresh_state(&state_path) else {
+        return false;
+    };
+    hash_settings(project_dir, cli_flags) != state.settings_hash
+}
+
 fn check_needs_install_inner(
     project_dir: &Path,
     cli_flags: Option<&[(String, String)]>,
