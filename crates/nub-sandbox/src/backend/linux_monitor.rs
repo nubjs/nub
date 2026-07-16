@@ -5163,32 +5163,106 @@ unsafe fn child_close_open_fds_from_proc(preserved: &[RawFd]) -> Result<(), libc
 /// PID-1 namespace collapse and its target-tree `kill(-1)` cleanup both reap it. `Ok(None)`
 /// means "not per-host"; a fork/setup failure leaves the child's egress fail-CLOSED (the
 /// empty netns has no route out), never open, so it is non-fatal to the launch.
+///
+/// READINESS HANDSHAKE. The caller releases the target immediately after this returns, and
+/// the target dials the bridge's fixed loopback port (`HTTP_PROXY`) as soon as it runs — so
+/// if this returned before the forked child had actually bound that port, the target's first
+/// connect would race the child's fork/harden/bind and lose under scheduling contention
+/// (observed empirically: the child's harden step + bind is fast but not instant, and a
+/// loaded host reorders it after the resumed target). A pipe closes that window: the child
+/// signals (one byte) right after a successful bind, or falls silent and its exit closes the
+/// pipe (EOF) on any setup failure; either unblocks this read. Bounded by a short deadline so
+/// a wedged child can't hang the launch — on timeout the launch still proceeds best-effort
+/// (egress stays fail-CLOSED regardless: a non-listening bridge means the empty netns has no
+/// route out; "proceed" is about launch-liveness, never about opening egress).
 fn spawn_in_netns_bridge() -> io::Result<Option<libc::pid_t>> {
     let sock = Path::new(super::linux_net_bridge::PRIVATE_NET_ROOT)
         .join(super::linux_net_bridge::SOCK_NAME);
     if !sock.exists() {
         return Ok(None);
     }
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
+    let mut ready_pipe = [0 as RawFd; 2];
+    if unsafe { libc::pipe(ready_pipe.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    let [ready_read, ready_write] = ready_pipe;
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(ready_read);
+            libc::close(ready_write);
+        }
+        return Err(error);
+    }
     if pid == 0 {
-        let code = i32::from(run_in_netns_bridge(&sock).is_err());
+        unsafe { libc::close(ready_read) };
+        let code = i32::from(run_in_netns_bridge(&sock, ready_write).is_err());
         unsafe { libc::_exit(code) };
     }
+    unsafe { libc::close(ready_write) };
+    wait_for_bridge_ready(ready_read);
+    unsafe { libc::close(ready_read) };
     Ok(Some(pid))
 }
 
-/// The forked in-netns bridge body: harden, then blind-pump every child loopback connection
-/// to the host bridge's UDS. Never returns on success (the accept loop runs for the target's
-/// whole life); the process is killed at cleanup.
-fn run_in_netns_bridge(sock: &Path) -> io::Result<()> {
-    harden_bridge_child()?;
+/// Block until the in-netns bridge child signals it has bound its loopback listener (one
+/// byte), its pipe closes (EOF — setup failed and the process exited), or a short deadline
+/// passes. Never returns an error: every outcome here is "proceed with the launch" (see the
+/// best-effort contract on [`spawn_in_netns_bridge`]) — a poll/read error, a timeout, and EOF are all
+/// treated the same as a positive signal so a bridge-startup hiccup can never hang the
+/// target's launch.
+fn wait_for_bridge_ready(read_fd: RawFd) {
+    const BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(2);
+    let deadline = Instant::now() + BRIDGE_READY_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let timeout = remaining.as_millis().clamp(1, libc::c_int::MAX as u128) as libc::c_int;
+        let mut pollfd = libc::pollfd {
+            fd: read_fd,
+            events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+            revents: 0,
+        };
+        let polled = unsafe { libc::poll(&mut pollfd, 1, timeout) };
+        if polled < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        if polled == 0 {
+            return; // deadline elapsed
+        }
+        let mut byte = [0u8; 1];
+        let read = unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), 1) };
+        // A ready byte, EOF (child closed/exited), or a transient error all mean "stop
+        // waiting" — only EINTR loops.
+        if read >= 0 {
+            return;
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+/// The forked in-netns bridge body: harden, bind, signal readiness, then blind-pump every
+/// child loopback connection to the host bridge's UDS. Never returns on success (the accept
+/// loop runs for the target's whole life); the process is killed at cleanup.
+fn run_in_netns_bridge(sock: &Path, ready_write: RawFd) -> io::Result<()> {
+    harden_bridge_child(ready_write)?;
     // The empty netns's loopback is brought up by Bubblewrap's own `--unshare-net`
     // loopback_setup, so a fixed high port binds with no capability.
     let listener =
         std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, IN_NETNS_PROXY_PORT))?;
+    // Signal the monitor that the loopback port is bound and accepting — see the readiness
+    // handshake note on `spawn_in_netns_bridge`. Best-effort: the monitor also proceeds on
+    // EOF (this process exiting), so a failed write here just falls back to that.
+    let _ = unsafe { libc::write(ready_write, [1u8].as_ptr().cast(), 1) };
+    unsafe { libc::close(ready_write) };
     let sock = sock.to_path_buf();
     for conn in listener.incoming() {
         let Ok(tcp) = conn else { continue };
@@ -5207,15 +5281,21 @@ fn run_in_netns_bridge(sock: &Path) -> io::Result<()> {
 /// Harden the forked bridge process (mirrors Codex's `harden_bridge_process`): die with the
 /// monitor (`PR_SET_PDEATHSIG`, belt-and-suspenders to the PID-ns collapse), never dumpable,
 /// and drop every inherited monitor descriptor (the control/release/relay channels) so the
-/// bridge cannot hold the control channel open — only stdio is retained.
-fn harden_bridge_child() -> io::Result<()> {
+/// bridge cannot hold the control channel open — only stdio and the readiness pipe's write
+/// end (closed by `run_in_netns_bridge` once it has signalled) are retained.
+fn harden_bridge_child(ready_write: RawFd) -> io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    close_all_except(&[libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO])
+    close_all_except(&[
+        libc::STDIN_FILENO,
+        libc::STDOUT_FILENO,
+        libc::STDERR_FILENO,
+        ready_write,
+    ])
 }
 
 fn harden_monitor_before_secrets() -> io::Result<()> {
