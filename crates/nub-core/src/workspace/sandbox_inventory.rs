@@ -32,7 +32,6 @@ pub fn discover(cwd: &Path) -> Result<Vec<PathBuf>, String> {
     let mut roots = BTreeSet::from([cwd.clone()]);
     let mut project_root = None;
     let mut workspace: Option<(PathBuf, Vec<String>)> = None;
-    let mut nearer_pm: Option<String> = None;
 
     for (depth, dir) in cwd.ancestors().enumerate() {
         if depth >= MAX_ANCESTORS {
@@ -44,9 +43,6 @@ pub fn discover(cwd: &Path) -> Result<Vec<PathBuf>, String> {
             if project_root.is_none() {
                 project_root = Some(dir.to_path_buf());
             }
-            if nearer_pm.is_none() {
-                nearer_pm = declared_pm_name(manifest);
-            }
 
             let neutral = neutral_workspace_patterns(manifest)?;
             let has_neutral_workspace = manifest.get("workspaces").is_some();
@@ -56,12 +52,19 @@ pub fn discover(cwd: &Path) -> Result<Vec<PathBuf>, String> {
             }
         }
 
-        let pnpm_allowed = match nearer_pm.as_deref() {
-            Some("pnpm") => true,
-            Some(_) => false,
-            None => super::filter::pnpm_is_incumbent(dir),
-        };
-        if pnpm_allowed {
+        // The deny-mask root set must EQUAL the monorepo the PM resolves — never a
+        // subset (a missed member root = a leaked `.env`) nor a superset. The gate
+        // here is IDENTICAL to nub's real workspace resolution — `detect_project`
+        // (detect.rs) and `discover_members` (filter.rs) both read a dir's
+        // `pnpm-workspace.yaml`, and break the ancestor walk on it, ONLY when
+        // `pnpm_is_incumbent` (a committed `pnpm-lock.yaml`, the on-disk incumbent
+        // signal), regardless of the declared `packageManager`. Matching that
+        // exactly is load-bearing in BOTH directions: a project that declares npm
+        // but carries a pnpm lockfile IS a pnpm workspace to the PM, so its members
+        // must be masked; and a declared-pnpm dir with no lockfile yet is NOT a
+        // workspace root to the PM, so breaking the walk there would strand the
+        // real (outer) workspace's other members unmasked.
+        if super::filter::pnpm_is_incumbent(dir) {
             let yaml_path = dir.join("pnpm-workspace.yaml");
             if path_is_file_strict(&yaml_path)? {
                 let mut patterns = manifest
@@ -130,30 +133,6 @@ fn path_is_file_strict(path: &Path) -> Result<bool, String> {
             path.display()
         )),
     }
-}
-
-fn declared_pm_name(manifest: &Value) -> Option<String> {
-    if let Some(spec) = manifest.get("packageManager").and_then(Value::as_str) {
-        let name = spec
-            .trim()
-            .split_once('@')
-            .map_or(spec.trim(), |(name, _)| name);
-        return (!name.is_empty()).then(|| name.to_string());
-    }
-    let declaration = manifest.get("devEngines")?.get("packageManager")?;
-    let declaration = match declaration {
-        Value::Array(entries) => entries
-            .iter()
-            .rev()
-            .find(|entry| entry.get("name").and_then(Value::as_str).is_some())?,
-        declaration => declaration,
-    };
-    declaration
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
 }
 
 fn neutral_workspace_patterns(manifest: &Value) -> Result<Vec<String>, String> {
@@ -419,23 +398,47 @@ mod tests {
     }
 
     #[test]
-    fn reads_pnpm_workspace_only_for_proven_pnpm_incumbent() {
-        let npm = tempdir().unwrap();
+    fn reads_pnpm_workspace_only_when_a_lockfile_marks_pnpm_incumbent() {
+        // The gate is EXACTLY the PM's (`detect_project`/`discover_members` →
+        // `pnpm_is_incumbent`): a committed `pnpm-lock.yaml` — NOT the declared
+        // `packageManager`. A contradictory manifest that declares npm but carries
+        // a pnpm lockfile is resolved as a pnpm workspace by the PM, so the mask
+        // must read the pnpm-workspace here too (else its members' `.env` would
+        // leak) — proven by the strict parser rejecting the malformed file.
+        let npm_but_pnpm_lock = tempdir().unwrap();
         write(
-            &npm.path().join("package.json"),
+            &npm_but_pnpm_lock.path().join("package.json"),
             r#"{"packageManager":"npm@11.0.0"}"#,
         );
-        write(&npm.path().join("pnpm-workspace.yaml"), "not: [valid");
-        write(&npm.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'");
-        assert!(discover(npm.path()).is_ok());
-
-        let pnpm = tempdir().unwrap();
         write(
-            &pnpm.path().join("package.json"),
+            &npm_but_pnpm_lock.path().join("pnpm-workspace.yaml"),
+            "not: [valid",
+        );
+        write(
+            &npm_but_pnpm_lock.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'",
+        );
+        assert!(discover(npm_but_pnpm_lock.path()).is_err());
+
+        // Declared pnpm but NO lockfile yet: NOT read — the PM does not treat this
+        // dir as a workspace root, so neither does the mask. (Reading it here would
+        // break the ancestor walk early and strand an outer workspace's members.)
+        let pnpm_no_lock = tempdir().unwrap();
+        write(
+            &pnpm_no_lock.path().join("package.json"),
             r#"{"packageManager":"pnpm@10.0.0"}"#,
         );
-        write(&pnpm.path().join("pnpm-workspace.yaml"), "not: [valid");
-        assert!(discover(pnpm.path()).is_err());
+        write(
+            &pnpm_no_lock.path().join("pnpm-workspace.yaml"),
+            "not: [valid",
+        );
+        assert!(discover(pnpm_no_lock.path()).is_ok());
+
+        // No pnpm signal at all: a stray pnpm-workspace.yaml is not read.
+        let no_signal = tempdir().unwrap();
+        write(&no_signal.path().join("package.json"), r#"{}"#);
+        write(&no_signal.path().join("pnpm-workspace.yaml"), "not: [valid");
+        assert!(discover(no_signal.path()).is_ok());
 
         let fallback = tempdir().unwrap();
         write(&fallback.path().join("package.json"), "{}");
@@ -509,5 +512,165 @@ mod tests {
         }
         fs::create_dir_all(&cwd).unwrap();
         assert!(discover(&cwd).is_err());
+    }
+
+    // The maintainer-decided scope for the `.env*` secret floor: the deny mask
+    // covers env files at the workspace root and EVERY sub-project (member) root
+    // — "exactly equivalent to resolving the monorepo" — and does NOT reach into
+    // arbitrary non-project nested directories (intentionally out of scope). The
+    // three tests below encode that contract so a future reader does not "fix" it
+    // by adding a recursive walk (which would over-mask non-members) or by
+    // dropping the pnpm gate (which would under-mask and leak a member's `.env`).
+
+    /// The mask root set for a bounded monorepo is EXACTLY the PM's resolution:
+    /// `{workspace root} ∪ {member roots discover_members() returns}`. Asserted
+    /// for npm (`workspaces`), pnpm (`pnpm-workspace.yaml` + lockfile), and yarn
+    /// (`workspaces`), each with a nested member and a mid-glob member.
+    #[test]
+    fn mask_root_set_equals_the_pm_monorepo_resolution() {
+        use crate::workspace::filter::discover_members;
+
+        // Expected = {root} ∪ canonicalized member dirs the PM resolves; with
+        // cwd == root, discover() returns exactly that (cwd/project == root).
+        let expect_equivalence = |root: &Path| {
+            let mut expected = BTreeSet::from([fs::canonicalize(root).unwrap()]);
+            for member in discover_members(root) {
+                expected.insert(fs::canonicalize(&member.dir).unwrap());
+            }
+            let got: BTreeSet<_> = discover(root).unwrap().into_iter().collect();
+            assert_eq!(got, expected, "sandbox mask set must equal PM resolution");
+            assert!(!expected.is_empty());
+        };
+
+        let npm = tempdir().unwrap();
+        write(
+            &npm.path().join("package.json"),
+            r#"{"workspaces":["packages/*","examples/*/demo"]}"#,
+        );
+        write(
+            &npm.path().join("packages/a/package.json"),
+            r#"{"name":"a"}"#,
+        );
+        write(
+            &npm.path().join("packages/b/package.json"),
+            r#"{"name":"b"}"#,
+        );
+        write(
+            &npm.path().join("examples/one/demo/package.json"),
+            r#"{"name":"demo"}"#,
+        );
+        expect_equivalence(npm.path());
+
+        let pnpm = tempdir().unwrap();
+        write(&pnpm.path().join("package.json"), r#"{"name":"root"}"#);
+        write(
+            &pnpm.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        );
+        write(
+            &pnpm.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n  - examples/*/demo\n",
+        );
+        write(
+            &pnpm.path().join("packages/a/package.json"),
+            r#"{"name":"a"}"#,
+        );
+        write(
+            &pnpm.path().join("examples/one/demo/package.json"),
+            r#"{"name":"demo"}"#,
+        );
+        expect_equivalence(pnpm.path());
+
+        let yarn = tempdir().unwrap();
+        write(
+            &yarn.path().join("package.json"),
+            r#"{"packageManager":"yarn@4.0.0","workspaces":["packages/*"]}"#,
+        );
+        write(&yarn.path().join("yarn.lock"), "");
+        write(
+            &yarn.path().join("packages/a/package.json"),
+            r#"{"name":"a"}"#,
+        );
+        write(
+            &yarn.path().join("packages/b/package.json"),
+            r#"{"name":"b"}"#,
+        );
+        expect_equivalence(yarn.path());
+    }
+
+    /// A `.env`-bearing directory that is NOT a workspace member (an arbitrary
+    /// nested non-project subdir) is intentionally OUT of the mask root set — the
+    /// maintainer-decided boundary against a recursive walk.
+    #[test]
+    fn non_project_nested_dir_is_not_a_mask_root() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write(
+            &root.join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        );
+        write(&root.join("packages/a/package.json"), r#"{"name":"a"}"#);
+        // A deep non-member dir holding a .env — not a package, not a member.
+        fs::create_dir_all(root.join("packages/a/config/secrets")).unwrap();
+        let roots: BTreeSet<_> = discover(root).unwrap().into_iter().collect();
+        assert!(roots.contains(&fs::canonicalize(root.join("packages/a")).unwrap()));
+        assert!(
+            !roots.contains(&fs::canonicalize(root.join("packages/a/config/secrets")).unwrap()),
+            "non-project nested dir must not be a mask root (monorepo scope, not recursive)"
+        );
+    }
+
+    /// A declared-pnpm subdir with NO lockfile, nested inside an outer npm
+    /// workspace, must NOT break the ancestor walk early: the walk reaches the
+    /// real (npm) workspace root and masks ALL its members — not just the subdir.
+    /// (The gate keys on `pnpm_is_incumbent`, not the declaration, so the subdir
+    /// is not mistaken for a workspace root and no sibling member's `.env` leaks.)
+    #[test]
+    fn declared_pnpm_subdir_without_lockfile_does_not_strand_outer_members() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write(
+            &root.join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        );
+        write(&root.join("packages/b/package.json"), r#"{"name":"b"}"#);
+        // The nested member declares pnpm and carries a pnpm-workspace.yaml but no
+        // pnpm-lock.yaml — pnpm is not incumbent here, so it is a plain member.
+        write(
+            &root.join("packages/a/package.json"),
+            r#"{"name":"a","packageManager":"pnpm@10.0.0"}"#,
+        );
+        write(
+            &root.join("packages/a/pnpm-workspace.yaml"),
+            "packages:\n  - inner/*\n",
+        );
+        let roots: BTreeSet<_> = discover(&root.join("packages/a"))
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert!(
+            roots.contains(&fs::canonicalize(root).unwrap()),
+            "outer root"
+        );
+        assert!(
+            roots.contains(&fs::canonicalize(root.join("packages/b")).unwrap()),
+            "sibling member packages/b must be masked, not stranded by an early break"
+        );
+    }
+
+    /// A workspace declared with an unbounded pattern the bounded grammar rejects
+    /// (`**`, a partial-segment glob, a brace group) fails CLOSED — discover()
+    /// errors so `run_sandboxed` aborts, never running with a silent under-mask.
+    #[test]
+    fn unbounded_member_patterns_fail_closed_not_silently_undermasked() {
+        for pattern in ["packages/**", "pkg-*", "{apps,libs}/*"] {
+            let temp = tempdir().unwrap();
+            write(
+                &temp.path().join("package.json"),
+                &format!(r#"{{"workspaces":[{pattern:?}]}}"#),
+            );
+            write(&temp.path().join("pkg-a/package.json"), r#"{"name":"a"}"#);
+            assert!(discover(temp.path()).is_err(), "pattern {pattern:?}");
+        }
     }
 }

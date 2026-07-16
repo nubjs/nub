@@ -240,6 +240,16 @@ responsibility, not an engine mechanism nub supplies.
 - **Linux deny-glob inventory is bounded.** Only current cwd, the nearest project,
   the containing workspace, and declared current-existing package roots are enumerated.
   Enumeration is immediate per root; project contents are never recursively scanned.
+- **The `.env*` secret floor masks the monorepo, not the tree.** The deny mask covers
+  env files at the workspace root and at every sub-project (member) root — exactly the
+  packages the package manager resolves for the monorepo (`workspaces` for npm/yarn,
+  `pnpm-workspace.yaml` when a `pnpm-lock.yaml` marks pnpm the incumbent). It does not
+  mask `.env` in an arbitrary non-project subdirectory: a `.env` under a member that is
+  not itself a workspace package stays readable inside the sandbox. The member inventory
+  uses a bounded pattern grammar — a `*` segment matches one directory level, literal
+  segments match exactly. A workspace declared with an unbounded pattern (`packages/**`,
+  a partial-segment glob like `pkg-*`, or a brace group like `{apps,libs}/*`) is rejected:
+  the run fails closed rather than proceeding with a partial mask.
 - **Linux denied hardlinks fail setup.** A currently existing denied regular file with more than one hard link aborts setup rather than masking one pathname while an allowed alias can read the same bytes. The check only examines denied startup objects; it does not scan for aliases or reject unrelated dependency-store hardlinks.
 - **Linux derive→mount TOCTOU.** Mount and mask planning canonicalizes paths before
   Bubblewrap installs the view. A same-uid local process that can replace a path during
