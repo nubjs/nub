@@ -499,6 +499,20 @@ impl Prepared {
         })
     }
 
+    /// Test/debug-only: this run's host bridge socket dir, when per-host net (C3) is
+    /// active. Exists so integration tests can assert the EXACT dir a specific bridge
+    /// instance created is gone after teardown — scanning the shared OS temp dir by this
+    /// process's pid is not hermetic across concurrently-running test threads, which all
+    /// share one pid (only the trailing nonce in `nub-net-<pid>-<nonce>` differs). Not
+    /// part of the stable API.
+    #[cfg(target_os = "linux")]
+    #[doc(hidden)]
+    pub fn debug_net_bridge_dir(&self) -> Option<&std::path::Path> {
+        self.net_bridge
+            .as_ref()
+            .map(linux_net_bridge::HostNetBridge::socket_dir)
+    }
+
     /// Launch the prepared child and wait for it, returning its exit status. The
     /// UNIFORM launch verb across backends: mac/linux/skeleton spawn `command`;
     /// Windows runs its AppContainer launcher (ACL setup → `CreateProcessW` under a

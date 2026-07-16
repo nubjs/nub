@@ -415,16 +415,29 @@ fn no_bridge_survives_and_socket_dir_is_cleaned() {
         return;
     };
 
+    // Each case captures ITS OWN bridge's exact socket-dir path via the `#[doc(hidden)]`
+    // debug accessor and asserts that exact path is gone — not a scan of the shared OS
+    // temp dir by this process's pid. Sibling tests in this binary run concurrently and
+    // share one pid, so `nub-net-<pid>-*` names collide across tests (only the trailing
+    // nonce differs); a temp-dir-wide scan sees live sibling bridges too and flakes.
+
     // NORMAL exit: a per-host child runs to completion; afterward the per-run socket dir is
     // gone (host bridge torn down on Drop) — no orphaned path to the proxy remains. The
     // in-netns bridge process died with the collapsed sandbox PID namespace.
+    let policy = compile(&net_policy(), &f.ctx()).expect("compiles");
+    let spec = CommandSpec::new(&probe).args(["abstract"]).cwd(&f.proj);
+    let prepared = apply_with_runtime(&policy, spec, runtime()).expect("apply");
+    let normal_dir = prepared
+        .debug_net_bridge_dir()
+        .expect("per-host net policy starts a bridge")
+        .to_path_buf();
     assert_eq!(
-        f.run(net_policy(), &probe, &["abstract"]),
+        prepared.status().expect("spawn").code().unwrap_or(-1),
         0,
         "a per-host child runs to completion"
     );
     assert!(
-        net_socket_dirs().is_empty(),
+        !normal_dir.exists(),
         "the per-run socket dir must be cleaned after a normal exit"
     );
 
@@ -433,6 +446,10 @@ fn no_bridge_survives_and_socket_dir_is_cleaned() {
     let policy = compile(&net_policy(), &f.ctx()).expect("compiles");
     let spec = CommandSpec::new(&probe).args(["sleep", "10"]).cwd(&f.proj);
     let prepared = apply_with_runtime(&policy, spec, runtime()).expect("apply");
+    let killed_dir = prepared
+        .debug_net_bridge_dir()
+        .expect("per-host net policy starts a bridge")
+        .to_path_buf();
     let mut child = prepared
         .spawn_with_signal_target(|target| {
             if let PreparedSignalTarget::Direct(pid) = target {
@@ -447,25 +464,9 @@ fn no_bridge_survives_and_socket_dir_is_cleaned() {
     let _ = child.wait();
     drop(child);
     assert!(
-        net_socket_dirs().is_empty(),
+        !killed_dir.exists(),
         "the per-run socket dir must be cleaned after the child is killed"
     );
-}
-
-/// This process's surviving per-run bridge socket dirs (`<tmp>/nub-net-<pid>-*`). After a
-/// run each should be gone: the host bridge removes its dir on Drop, and a crash-orphaned
-/// dir is GC'd on the next `start`.
-fn net_socket_dirs() -> Vec<PathBuf> {
-    let prefix = format!("nub-net-{}-", std::process::id());
-    let mut dirs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                dirs.push(entry.path());
-            }
-        }
-    }
-    dirs
 }
 
 // Exit codes: rawconnect 0=ok 1=fail; proxyget 0=200 3=refused(403) 1=err; proxynoauth
