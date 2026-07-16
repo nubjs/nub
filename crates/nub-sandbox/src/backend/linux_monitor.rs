@@ -156,7 +156,7 @@ pub struct RuntimeCapability {
 enum RuntimeSource {
     Current {
         authority: EarlyRuntimeAuthority,
-        image: OnceLock<Result<RuntimeImage, CaptureFailure>>,
+        image: Box<OnceLock<Result<RuntimeImage, CaptureFailure>>>,
     },
     Explicit(RuntimeImage),
 }
@@ -228,7 +228,7 @@ impl RuntimeCapability {
         Ok(Self {
             source: RuntimeSource::Current {
                 authority: capture_early_current_authority()?,
-                image: OnceLock::new(),
+                image: Box::new(OnceLock::new()),
             },
         })
     }
@@ -1585,7 +1585,7 @@ impl RetainedMonitorSession {
             original.encode()?,
             Some(deadline),
         )?;
-        shutdown_control_write(&mut self.control)?;
+        shutdown_control_write(&self.control)?;
         let cleanup = receive_control_until(&mut self.control, deadline)?;
         if cleanup.kind != FrameKind::CleanupComplete {
             return Err(unexpected_monitor_frame("CleanupComplete", &cleanup));
@@ -2227,7 +2227,7 @@ fn parse_elf_interpreter(file: &File) -> io::Result<Option<Vec<u8>>> {
         }
         let file_offset = le_u64(&ph[8..16]);
         let file_size = le_u64(&ph[32..40]);
-        if interpreter.is_some() || file_size < 2 || file_size > 4096 {
+        if interpreter.is_some() || !(2..=4096).contains(&file_size) {
             return Err(invalid_data("invalid sandbox monitor ELF PT_INTERP"));
         }
         let mut bytes = vec![0u8; file_size as usize];
@@ -2283,7 +2283,7 @@ fn parse_elf(file: &File) -> io::Result<ParsedElf> {
                 }
             }
             3 => {
-                if interpreter.is_some() || file_size < 2 || file_size > 4096 {
+                if interpreter.is_some() || !(2..=4096).contains(&file_size) {
                     return Err(invalid_data("invalid sandbox monitor ELF PT_INTERP"));
                 }
                 let mut bytes = vec![0u8; file_size as usize];
@@ -3007,10 +3007,11 @@ fn capture_child_bounded(mut child: std::process::Child) -> io::Result<BoundedOu
             if status.is_none() {
                 status = child.try_wait()?;
             }
-            if stdout_eof && stderr_eof {
-                if let Some(status) = status {
-                    break Ok(status);
-                }
+            if stdout_eof
+                && stderr_eof
+                && let Some(status) = status
+            {
+                break Ok(status);
             }
             let now = Instant::now();
             if now >= deadline {
@@ -6537,16 +6538,16 @@ fn exercise_monitor_harness_case(
                 }
             }
             runtime_case if runtime_case.is_runtime() => {
-                exercise_monitor_runtime_case(
-                    runtime_case,
-                    &mut control,
-                    &mut signal_writer,
-                    &mut child,
+                exercise_monitor_runtime_case(RuntimeCaseArgs {
+                    case: runtime_case,
+                    control: &mut control,
+                    signal_writer: &mut signal_writer,
+                    child: &mut child,
                     target_pid,
                     monitor_pid,
                     attestation,
-                    &spec,
-                )?;
+                    spec: &spec,
+                })?;
             }
             State5HarnessCase::ExitRace | State5HarnessCase::SignalRace => {
                 control.send(FrameKind::StartTarget, attestation.encode())?;
@@ -6639,16 +6640,30 @@ fn exercise_monitor_harness_case(
     result
 }
 
-fn exercise_monitor_runtime_case(
+/// Grouped arguments for [`exercise_monitor_runtime_case`] (pure grouping to stay under
+/// clippy's arg-count lint; each field is used exactly as the corresponding parameter was).
+struct RuntimeCaseArgs<'a> {
     case: State5HarnessCase,
-    control: &mut ControlChannel,
-    signal_writer: &mut Option<File>,
-    child: &mut std::process::Child,
+    control: &'a mut ControlChannel,
+    signal_writer: &'a mut Option<File>,
+    child: &'a mut std::process::Child,
     target_pid: libc::pid_t,
     monitor_pid: libc::pid_t,
     attestation: TargetStoppedAttestation,
-    spec: &BootstrapSpec,
-) -> io::Result<()> {
+    spec: &'a BootstrapSpec,
+}
+
+fn exercise_monitor_runtime_case(args: RuntimeCaseArgs<'_>) -> io::Result<()> {
+    let RuntimeCaseArgs {
+        case,
+        control,
+        signal_writer,
+        child,
+        target_pid,
+        monitor_pid,
+        attestation,
+        spec,
+    } = args;
     control.send(FrameKind::StartTarget, attestation.encode())?;
     let accepted = control.receive()?;
     if accepted.kind != FrameKind::ExecAccepted || !accepted.payload.is_empty() {

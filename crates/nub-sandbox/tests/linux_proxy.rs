@@ -348,29 +348,27 @@ fn af_unix_cross_layer_daemon_socket_denied_local_ipc_preserved() {
     let runtime_dir_writable = std::fs::metadata(format!("/run/user/{uid}"))
         .is_ok_and(|m| m.is_dir())
         && !rootless.exists();
-    if runtime_dir_writable {
-        if let Ok(listener) = UnixListener::bind(&rootless) {
-            let _guard = RemoveOnDrop(rootless.clone());
-            assert_eq!(
-                f.run(
-                    json!({ "fs": true, "net": ["127.0.0.0/8"] }),
-                    &probe,
-                    &["udsconnect", rootless.to_str().unwrap()]
-                ),
-                1,
-                "the rootless container-runtime socket is force-masked under net-confinement"
-            );
-            assert_eq!(
-                f.run(
-                    json!({ "fs": true, "net": true }),
-                    &probe,
-                    &["udsconnect", rootless.to_str().unwrap()]
-                ),
-                0,
-                "neg-control: unenforced net reaches the rootless runtime socket"
-            );
-            drop(listener);
-        }
+    if runtime_dir_writable && let Ok(listener) = UnixListener::bind(&rootless) {
+        let _guard = RemoveOnDrop(rootless.clone());
+        assert_eq!(
+            f.run(
+                json!({ "fs": true, "net": ["127.0.0.0/8"] }),
+                &probe,
+                &["udsconnect", rootless.to_str().unwrap()]
+            ),
+            1,
+            "the rootless container-runtime socket is force-masked under net-confinement"
+        );
+        assert_eq!(
+            f.run(
+                json!({ "fs": true, "net": true }),
+                &probe,
+                &["udsconnect", rootless.to_str().unwrap()]
+            ),
+            0,
+            "neg-control: unenforced net reaches the rootless runtime socket"
+        );
+        drop(listener);
     }
 }
 

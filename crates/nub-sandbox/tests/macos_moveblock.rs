@@ -31,8 +31,10 @@ use tempfile::TempDir;
 const MARKER: &str = "TOPSECRETxMOVExRELOCATExMARKER";
 
 fn fs_policy(entries: Vec<FsRule>) -> SandboxPolicy {
-    let mut p = SandboxPolicy::default();
-    p.env = EnvPolicy::resolved(std::env::vars().collect());
+    let mut p = SandboxPolicy {
+        env: EnvPolicy::resolved(std::env::vars().collect()),
+        ..Default::default()
+    };
     p.fs.rules = FsRuleSet {
         entries,
         default_effect: Effect::Deny,
