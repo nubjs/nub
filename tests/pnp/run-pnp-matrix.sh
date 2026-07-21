@@ -96,6 +96,12 @@ $(echo "$2" | sed 's/^/    /')"
   # the bin via require() (zip-safe) instead of as a node entry, mirroring `yarn
   # exec`. `nub exec` and the `nubx` argv0 alias share this run_exec path.
   check exec "$(run "$bin" "$NUB" exec cowsay hi)" "< hi >"
+  # run-fallback: a scriptless name falls back to the PnP-resolved bin via the
+  # runner's --probe + run branch — the same pnpapi resolution as `exec`, owned
+  # by `nub run`. run-bin-miss pins the probe-silent double miss: `nub run`'s
+  # missing-script error owns it, NOT the runner's 127 not-found message.
+  check run-bin     "$(run "$bin" "$NUB" run cowsay hi)"   "< hi >"
+  check run-bin-miss "$(run "$bin" "$NUB" run nosuchtool)"  "missing script"
 
   # ── Workspace (monorepo), run from a member subdir ──────────────────────────────
   # ws-esm/ws-cjs: resolve a workspace sibling + an external dep from the member.
@@ -109,6 +115,7 @@ $(echo "$2" | sed 's/^/    /')"
   # ws-run: `nub run <script>` from a member (PnP augmentation injected from a subdir).
   # ws-scoped-bin: nubx a SCOPED package's string bin (named after its unscoped tail).
   check ws-run        "$(runws "$bin" "$NUB" run start)"          "WS-RUN-OK"
+  check ws-run-bin    "$(runws "$bin" "$NUB" run cowsay wsmember)" "< wsmember >"
   check ws-scoped-bin "$(runws "$bin" "$NUB" exec tool)"          "SCOPED-STRING-BIN-OK"
 
   printf "%-12s %d/%d %s\n" "v$nv" "$ok" "$tot" "$line"

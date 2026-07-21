@@ -24,7 +24,7 @@ audit-json       same, --json
 audit-dev        same, --dev
 audit-level      same, --audit-level high
 outdated         outdated deps present → exit 1 (conventional)
-run-missing-script  missing script → exit 1 (correct; pnpm also errors WITHOUT --if-present)
+run-missing-script  missing script → exit 1 (correct; pnpm also errors WITHOUT --if-present). Since the .bin fallback, exit 1 also requires the bin lookup to miss — __nub_conformance_no_such_script__ names no installed bin, so the pin holds
 add-dep          monorepo root refuses bare add (needs -W) → exit 1 (correct guard)
 add-dev          same, -D
 remove-dep       removing an absent dep → non-zero (correct)
