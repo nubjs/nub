@@ -3,6 +3,12 @@
 // `--require .pnp.cjs`, so `findPnpApi` is set up and the zipfs `fs` patch is live.
 //
 // Invoked as:  nub <this> <binName> [args...]
+//              nub <this> --probe <binName>   (resolve-only: exit 0 found, 1 not
+//                                             found, printing nothing — `nub run`'s
+//                                             .bin fallback uses it to keep a PnP bin
+//                                             miss silent so its missing-script error
+//                                             owns the double-miss case, not this
+//                                             runner's 127)
 //
 // Two things matter:
 //   1. PnP has no `node_modules/.bin`, so we find the bin by walking the top-level
@@ -21,15 +27,16 @@ const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
 const { cwdIssuer } = require("./pnp-util.cjs");
 
-const want = process.argv[2];
-const rest = process.argv.slice(3);
+const probe = process.argv[2] === "--probe";
+const want = probe ? process.argv[3] : process.argv[2];
+const rest = probe ? process.argv.slice(4) : process.argv.slice(3);
 
 // `require("pnpapi")` throws for an out-of-tree issuer (this file lives in nub's
 // install dir); `findPnpApi` resolves by the queried path, so it works here.
 const api = require("node:module").findPnpApi(cwdIssuer());
 if (!api) {
-  process.stderr.write("nubx: not a Yarn PnP project\n");
-  process.exit(127);
+  if (!probe) process.stderr.write("nubx: not a Yarn PnP project\n");
+  process.exit(probe ? 1 : 127);
 }
 
 // bin name -> relative script path. A string `bin` is named after the package
@@ -67,12 +74,15 @@ for (const [name, reference] of top.packageDependencies) {
 }
 
 if (!script) {
+  if (probe) process.exit(1);
   process.stderr.write(
     `nubx: '${want}' not found in Yarn PnP dependencies.\n` +
       `      add it (yarn add ${want}), or run it ad-hoc with: yarn dlx ${want}\n`,
   );
   process.exit(127);
 }
+
+if (probe) process.exit(0);
 
 // Run the bin as if it were the entry: present its own argv, then load it via the
 // zip-safe CJS path. Fall back to dynamic import for an ESM bin.

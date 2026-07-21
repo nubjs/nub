@@ -2803,13 +2803,24 @@ fn run_script(
             nub_core::workspace::detect::detect_project(&ws_root).ok_or_else(|| {
                 anyhow::anyhow!("--workspace-root: no package.json at {}", ws_root.display())
             })?;
-        let cmd = nub_core::workspace::scripts::resolve_script(&root_project.manifest, script)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing script: \"{script}\" in the workspace root\n\nAvailable scripts:\n{}",
+        let cmd = match nub_core::workspace::scripts::resolve_script(&root_project.manifest, script)
+        {
+            Some(cmd) => cmd,
+            None => {
+                // The same `.bin` fallback as the single-package path, resolved
+                // against the workspace root's chain (see `run_selected_scripts`).
+                if let Some(code) =
+                    run_bin_fallback_for_plain_name(script, &ws_root, compat_mode, args)?
+                {
+                    return Ok(code);
+                }
+                let bin_note = bin_miss_note(script);
+                anyhow::bail!(
+                    "missing script: \"{script}\" in the workspace root{bin_note}\n\nAvailable scripts:\n{}",
                     list_scripts(&root_project.manifest)
-                )
-            })?;
+                );
+            }
+        };
         let exec = ScriptExecOpts {
             ignore_scripts: ws.ignore_scripts,
             script_shell: ws.script_shell.as_deref(),
@@ -2846,11 +2857,20 @@ fn run_selected_scripts(
             bail!("RegExp flags are not supported in script command selector");
         }
         ScriptSelection::None => {
+            // A plain (non-regex) name that matches no script may still name a
+            // local binary: the bun/aube-style `.bin` fallback, tried BEFORE
+            // `--if-present` (a bin on disk is "present" — aube's order).
+            if let Some(code) =
+                run_bin_fallback_for_plain_name(selector, &project.root, compat_mode, args)?
+            {
+                return Ok(code);
+            }
             if ws.if_present {
                 return Ok(0);
             }
+            let bin_note = bin_miss_note(selector);
             bail!(
-                "missing script: \"{selector}\"\n\nAvailable scripts:\n{}",
+                "missing script: \"{selector}\"{bin_note}\n\nAvailable scripts:\n{}",
                 list_scripts(&project.manifest)
             );
         }
@@ -4842,6 +4862,86 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
 
 fn run_exec(bin: &str, compat_mode: bool, args: &[String]) -> Result<i32> {
     run_exec_with_dlx(bin, compat_mode, args, None)
+}
+
+/// The `.bin` fallback gated to plain names: a `/regex/` selector never falls
+/// back (a bin name can't contain the selector's slashes).
+fn run_bin_fallback_for_plain_name(
+    name: &str,
+    dir: &Path,
+    compat_mode: bool,
+    args: &[String],
+) -> Result<Option<i32>> {
+    if name.starts_with('/') {
+        return Ok(None);
+    }
+    try_run_bin_fallback(name, dir, compat_mode, args)
+}
+
+/// The missing-script error's `.bin` addendum — empty for a regex selector,
+/// which never consulted `.bin`.
+fn bin_miss_note(name: &str) -> String {
+    if name.starts_with('/') {
+        String::new()
+    } else {
+        format!(" (and no node_modules/.bin/{name})")
+    }
+}
+
+/// `nub run <name>` fallback tier: when `<name>` matches no package.json
+/// script, resolve it as a local binary instead of erroring — bun/aube parity
+/// (aube's run.md: "If no script matches, aube falls back to
+/// node_modules/.bin/<name>"). Resolution reuses the `nub exec` machinery
+/// verbatim: `find_bin` walks up (a hoisted workspace-root `.bin` counts) and
+/// `launch_bin` runs the entry shebang-aware; on a Yarn PnP tree (no
+/// node_modules) the pnp-bin-run runner resolves via pnpapi. Local only — a
+/// miss NEVER falls through to the registry (that is `nubx`/`dlx` territory);
+/// the caller turns `Ok(None)` into `--if-present` or the missing-script
+/// error. No lifecycle hooks or `npm_lifecycle_*` env: a bin is not a script.
+fn try_run_bin_fallback(
+    name: &str,
+    dir: &Path,
+    compat_mode: bool,
+    args: &[String],
+) -> Result<Option<i32>> {
+    // Echo the same `$ <cmd>` preamble a script run prints (stderr, `--silent`
+    // suppresses) so a fallback run reads like the script run it replaces.
+    // Args display sh-escaped for token boundaries; the launch itself passes
+    // argv directly, no shell involved.
+    let echo = || {
+        if !SILENT.load(Ordering::Relaxed) {
+            let mut display = name.to_string();
+            for a in args {
+                display.push(' ');
+                display.push_str(&nub_core::workspace::shell_escape::sh(a));
+            }
+            eprintln!("$ {display}");
+        }
+    };
+
+    if let Some(bin_path) = nub_core::workspace::scripts::find_bin(name, dir) {
+        echo();
+        return launch_bin(&bin_path, args, compat_mode, dir).map(Some);
+    }
+
+    // Yarn PnP: no node_modules/.bin, so probe then run through the pnp
+    // runner, exactly as `nub exec` does. The probe keeps a bin MISS silent
+    // here — the runner itself exits 127 with its own not-found message,
+    // which would shadow the missing-script error the caller owns.
+    if !compat_mode && nub_core::pnp::detect(dir).is_some() {
+        if let Some(runner) = pnp_bin_runner_path() {
+            let probe_args = vec![runner.clone(), "--probe".to_string(), name.to_string()];
+            if run_file_in_dir(&probe_args, compat_mode, dir, false)? != 0 {
+                return Ok(None);
+            }
+            echo();
+            let mut cmd_args = vec![runner, name.to_string()];
+            cmd_args.extend(args.iter().cloned());
+            return run_file_in_dir(&cmd_args, compat_mode, dir, true).map(Some);
+        }
+    }
+
+    Ok(None)
 }
 
 /// `run_exec`, plus the `nubx` npx-parity flags that steer the DLX fallback.

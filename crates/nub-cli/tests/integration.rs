@@ -6559,6 +6559,317 @@ fn run_prefers_local_node_modules_bin_over_system_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Spawn `nub run <args>` in an arbitrary (temp) directory — the `run_in`
+/// fixture-dir helper's sibling for runtime-built projects (node_modules is
+/// gitignored, so `.bin` fixtures must be created at runtime).
+fn run_in_dir(dir: &Path, args: &[&str]) -> (String, String, i32) {
+    let out = Command::new(nub_binary())
+        .arg("run")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("spawn nub run");
+    (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// Write a platform-shaped `node_modules/.bin` entry: a bare shebang file on
+/// Unix (0o755), plus the `.cmd` shim npm/pnpm write on Windows — `find_bin`
+/// only matches the executable extensions there. The `.cmd` runs
+/// `node <bare> %*` so args forward and the node-shebang body executes.
+fn write_local_bin(dir: &Path, name: &str, body: &str) {
+    let bin_dir = dir.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let bare = bin_dir.join(name);
+    std::fs::write(&bare, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bare, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    std::fs::write(
+        bin_dir.join(format!("{name}.cmd")),
+        format!("@ECHO off\nnode \"%~dp0\\{name}\" %*\n"),
+    )
+    .unwrap();
+}
+
+/// A temp single-package project for the run-.bin-fallback tests.
+fn run_bin_project(tag: &str, package_json: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("nub-runbin-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), package_json).unwrap();
+    dir
+}
+
+const NODE_BIN_BODY: &str =
+    "#!/usr/bin/env node\nconsole.log('BIN:' + JSON.stringify(process.argv.slice(2)));\n";
+
+/// bun/aube parity: `nub run <name>` with no matching script falls back to
+/// `node_modules/.bin/<name>` and forwards trailing args, so a locally
+/// installed CLI (astro, vite, wrangler) runs without a pass-through script.
+#[test]
+fn run_bin_fallback_runs_local_bin_and_forwards_args() {
+    let dir = run_bin_project(
+        "basic",
+        r#"{"name":"t","scripts":{"build":"node -e \"console.log('BUILD')\""}}"#,
+    );
+    write_local_bin(&dir, "greet", NODE_BIN_BODY);
+
+    let (stdout, stderr, code) = run_in_dir(&dir, &["greet", "a", "b c"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("BIN:[\"a\",\"b c\"]"),
+        "the bin runs with args forwarded: {stdout}"
+    );
+    // Same `$ <cmd>` preamble a script run prints, args sh-escaped for display.
+    assert!(
+        stderr.contains("$ greet a 'b c'"),
+        "the preamble echoes the bin launch: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A same-named script always wins over the bin — the manifest is the
+/// explicit surface, the bin only the fallback.
+#[test]
+fn run_bin_fallback_script_wins_over_same_named_bin() {
+    let dir = run_bin_project(
+        "wins",
+        r#"{"name":"t","scripts":{"greet":"node -e \"console.log('SCRIPT')\""}}"#,
+    );
+    write_local_bin(&dir, "greet", NODE_BIN_BODY);
+
+    let (stdout, stderr, code) = run_in_dir(&dir, &["greet"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("SCRIPT"), "the script must run: {stdout}");
+    assert!(
+        !stdout.contains("BIN:"),
+        "the bin must not shadow the script: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The fallback is shebang-aware (via `launch_bin`): a non-node `#!/bin/sh`
+/// tool execs directly rather than choking on `node <path>`. Unix-only, same
+/// platform split as `exec_runs_node_and_non_node_bins`.
+#[cfg(unix)]
+#[test]
+fn run_bin_fallback_runs_non_node_bin() {
+    let dir = run_bin_project("nonode", r#"{"name":"t","scripts":{}}"#);
+    write_local_bin(&dir, "shtool", "#!/bin/sh\necho \"SH:$*\"\n");
+
+    let (stdout, stderr, code) = run_in_dir(&dir, &["shtool", "x", "y"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("SH:x y"), "the sh bin runs: {stdout}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `find_bin` walks up, so a member without its own `.bin` still resolves the
+/// workspace ROOT's hoisted entry — the pnpm-isolated-layout case.
+#[test]
+fn run_bin_fallback_walks_up_to_workspace_root() {
+    let dir = run_bin_project(
+        "walkup",
+        r#"{"name":"ws","workspaces":["packages/*"],"scripts":{}}"#,
+    );
+    write_local_bin(&dir, "greet", NODE_BIN_BODY);
+    let member = dir.join("packages").join("app");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"app","scripts":{}}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_in_dir(&member, &["greet"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("BIN:"),
+        "the hoisted root bin resolves from a member: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--silent` suppresses the fallback's `$ <name>` preamble exactly as it
+/// suppresses a script's `$ <cmd>` echo.
+#[test]
+fn run_bin_fallback_silent_suppresses_preamble() {
+    let dir = run_bin_project("silent", r#"{"name":"t","scripts":{}}"#);
+    write_local_bin(&dir, "greet", NODE_BIN_BODY);
+
+    let (stdout, stderr, code) = run_in_dir(&dir, &["--silent", "greet"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("BIN:"), "the bin still runs: {stdout}");
+    assert!(
+        !stderr.contains("$ greet"),
+        "--silent suppresses the preamble: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--if-present` treats a resolvable bin as present (bin on disk runs);
+/// with neither script nor bin it exits 0 silently, as before.
+#[test]
+fn run_bin_fallback_if_present() {
+    let dir = run_bin_project("ifpresent", r#"{"name":"t","scripts":{}}"#);
+    write_local_bin(&dir, "greet", NODE_BIN_BODY);
+
+    let (stdout, stderr, code) = run_in_dir(&dir, &["--if-present", "greet"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("BIN:"),
+        "a bin on disk is 'present' and runs: {stdout}"
+    );
+
+    let (stdout, stderr, code) = run_in_dir(&dir, &["--if-present", "nope"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        !stderr.contains("missing script"),
+        "--if-present stays silent when nothing resolves: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A bin is not a lifecycle: `pre<name>`/`post<name>` scripts must NOT fire
+/// around a bin fallback, even when they exist in the manifest.
+#[test]
+fn run_bin_fallback_skips_pre_post_lifecycle() {
+    let dir = run_bin_project(
+        "hooks",
+        r#"{"name":"t","scripts":{"pregreet":"node -e \"console.log('PRE')\"","postgreet":"node -e \"console.log('POST')\""}}"#,
+    );
+    write_local_bin(&dir, "greet", NODE_BIN_BODY);
+
+    let (stdout, stderr, code) = run_in_dir(&dir, &["greet"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("BIN:"), "the bin runs: {stdout}");
+    assert!(
+        !stdout.contains("PRE") && !stdout.contains("POST"),
+        "no lifecycle hooks fire for a bin: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Double miss (no script, no bin): the missing-script error keeps exit 1
+/// and its available-scripts list, now noting the `.bin` lookup also failed.
+/// Local only — never a registry fetch (that is `nubx`/`dlx` territory).
+#[test]
+fn run_bin_fallback_double_miss_keeps_missing_script_error() {
+    let dir = run_bin_project(
+        "miss",
+        r#"{"name":"t","scripts":{"build":"node -e \"console.log('BUILD')\""}}"#,
+    );
+
+    let (_, stderr, code) = run_in_dir(&dir, &["nope"]);
+    assert_eq!(code, 1, "missing script stays exit 1: {stderr}");
+    assert!(
+        stderr.contains("missing script: \"nope\""),
+        "the missing-script shape is preserved: {stderr}"
+    );
+    assert!(
+        stderr.contains("node_modules/.bin/nope"),
+        "the error notes the failed .bin lookup: {stderr}"
+    );
+    assert!(
+        stderr.contains("build"),
+        "available scripts are still listed: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `/regex/` selector never triggers the fallback — a no-match regex keeps
+/// its plain missing-script error even when a like-named bin exists.
+#[test]
+fn run_bin_fallback_regex_selector_never_falls_back() {
+    let dir = run_bin_project("regex", r#"{"name":"t","scripts":{}}"#);
+    write_local_bin(&dir, "greet", NODE_BIN_BODY);
+
+    let (stdout, stderr, code) = run_in_dir(&dir, &["/greet/"]);
+    assert_eq!(code, 1, "a no-match regex still errors: {stderr}");
+    assert!(
+        !stdout.contains("BIN:"),
+        "the bin must not run for a regex selector: {stdout}"
+    );
+    assert!(
+        stderr.contains("missing script"),
+        "the regex keeps its missing-script error: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `-w` applies the same `.bin` fallback against the workspace ROOT package's
+/// chain: from a member, a scriptless name resolves the root's bin.
+#[test]
+fn run_bin_fallback_workspace_root() {
+    let dir = run_bin_project(
+        "wsroot",
+        r#"{"name":"ws","workspaces":["packages/*"],"scripts":{}}"#,
+    );
+    write_local_bin(&dir, "roottool", NODE_BIN_BODY);
+    let member = dir.join("packages").join("app");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name":"app","scripts":{"roottool":"node -e \"console.log('MEMBER')\""}}"#,
+    )
+    .unwrap();
+
+    // The member's own script must NOT win: -w targets only the root, whose
+    // bin is the fallback.
+    let (stdout, stderr, code) = run_in_dir(&member, &["-w", "roottool"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("BIN:"),
+        "the root bin runs under -w: {stdout}"
+    );
+    assert!(
+        !stdout.contains("MEMBER"),
+        "-w never touches the member's script: {stdout}"
+    );
+
+    // A root script still wins over the root bin.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"ws","workspaces":["packages/*"],"scripts":{"roottool":"node -e \"console.log('ROOT-SCRIPT')\""}}"#,
+    )
+    .unwrap();
+    let (stdout, stderr, code) = run_in_dir(&member, &["-w", "roottool"]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("ROOT-SCRIPT"),
+        "the root script wins over the root bin: {stdout}"
+    );
+
+    // Double miss keeps the workspace-root error, extended with the bin note.
+    let (_, stderr, code) = run_in_dir(&member, &["-w", "nope"]);
+    assert_eq!(code, 1, "missing root script stays exit 1: {stderr}");
+    assert!(
+        stderr.contains("missing script: \"nope\" in the workspace root"),
+        "the workspace-root error shape is preserved: {stderr}"
+    );
+    assert!(
+        stderr.contains("node_modules/.bin/nope"),
+        "the error notes the failed .bin lookup: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// npm/pnpm set `$NODE` to the node binary running the script so `$NODE child.js`
 /// invokes "the same Node." nub points it at the PATH-shim node (→ nub) so an
 /// absolute-path `$NODE` re-enters nub and the child stays augmented (it used to be
