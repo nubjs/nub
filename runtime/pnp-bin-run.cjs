@@ -34,10 +34,19 @@ const rest = probe ? process.argv.slice(4) : process.argv.slice(3);
 // `require("pnpapi")` throws for an out-of-tree issuer (this file lives in nub's
 // install dir); `findPnpApi` resolves by the queried path, so it works here.
 const api = require("node:module").findPnpApi(cwdIssuer());
-if (!api) {
-  if (!probe) process.stderr.write("nubx: not a Yarn PnP project\n");
-  process.exit(probe ? 1 : 127);
+if (!api && !probe) {
+  process.stderr.write("nubx: not a Yarn PnP project\n");
+  process.exit(127);
 }
+
+// No explicit process.exit() anywhere on the probe path: on Windows, exit()
+// with piped stdio races libuv's handle teardown and can abort on the
+// UV_HANDLE_CLOSING assert, surfacing a crash code instead of the intended
+// 0/1 — nub then reads a bin HIT as a miss (the windows-latest PnP leg caught
+// this). Set exitCode and let the event loop drain instead.
+const probeMiss = () => {
+  process.exitCode = 1;
+};
 
 // bin name -> relative script path. A string `bin` is named after the package
 // (its unscoped tail); an object maps explicit names.
@@ -49,53 +58,58 @@ function binsOf(pkg) {
 }
 
 let script = null;
-// Anchor on the package that OWNS cwd — a workspace member, or the project root for a
-// single-package install. Its dependencies are the bins runnable here, matching
-// `yarn bin`. Using `api.topLevel` (the workspace ROOT) would, in a monorepo, list
-// only the member packages and miss a member's own dep/devDep bins. `findPackageLocator`
-// falls back to topLevel for the single-package case (cwd === root).
-const locator = api.findPackageLocator(cwdIssuer()) || api.topLevel;
-const top = api.getPackageInformation(locator);
-for (const [name, reference] of top.packageDependencies) {
-  if (reference == null) continue;
-  const info = api.getPackageInformation(api.getLocator(name, reference));
-  if (!info) continue;
-  let pkg;
-  try {
-    pkg = JSON.parse(fs.readFileSync(path.join(info.packageLocation, "package.json"), "utf8"));
-  } catch {
-    continue;
-  }
-  const rel = binsOf(pkg)[want];
-  if (rel) {
-    script = path.join(info.packageLocation, rel);
-    break;
+if (api) {
+  // Anchor on the package that OWNS cwd — a workspace member, or the project root for a
+  // single-package install. Its dependencies are the bins runnable here, matching
+  // `yarn bin`. Using `api.topLevel` (the workspace ROOT) would, in a monorepo, list
+  // only the member packages and miss a member's own dep/devDep bins. `findPackageLocator`
+  // falls back to topLevel for the single-package case (cwd === root).
+  const locator = api.findPackageLocator(cwdIssuer()) || api.topLevel;
+  const top = api.getPackageInformation(locator);
+  for (const [name, reference] of top.packageDependencies) {
+    if (reference == null) continue;
+    const info = api.getPackageInformation(api.getLocator(name, reference));
+    if (!info) continue;
+    let pkg;
+    try {
+      pkg = JSON.parse(fs.readFileSync(path.join(info.packageLocation, "package.json"), "utf8"));
+    } catch {
+      continue;
+    }
+    const rel = binsOf(pkg)[want];
+    if (rel) {
+      script = path.join(info.packageLocation, rel);
+      break;
+    }
   }
 }
 
 if (!script) {
-  if (probe) process.exit(1);
-  process.stderr.write(
-    `nubx: '${want}' not found in Yarn PnP dependencies.\n` +
-      `      add it (yarn add ${want}), or run it ad-hoc with: yarn dlx ${want}\n`,
-  );
-  process.exit(127);
-}
-
-if (probe) process.exit(0);
-
-// Run the bin as if it were the entry: present its own argv, then load it via the
-// zip-safe CJS path. Fall back to dynamic import for an ESM bin.
-process.argv = [process.argv[0], script, ...rest];
-try {
-  require(script);
-} catch (e) {
-  if (e && e.code === "ERR_REQUIRE_ESM") {
-    import(pathToFileURL(script).href).catch((err) => {
-      console.error(err);
-      process.exit(1);
-    });
+  if (probe) {
+    probeMiss();
   } else {
-    throw e;
+    process.stderr.write(
+      `nubx: '${want}' not found in Yarn PnP dependencies.\n` +
+        `      add it (yarn add ${want}), or run it ad-hoc with: yarn dlx ${want}\n`,
+    );
+    process.exit(127);
+  }
+} else if (probe) {
+  process.exitCode = 0;
+} else {
+  // Run the bin as if it were the entry: present its own argv, then load it
+  // via the zip-safe CJS path. Fall back to dynamic import for an ESM bin.
+  process.argv = [process.argv[0], script, ...rest];
+  try {
+    require(script);
+  } catch (e) {
+    if (e && e.code === "ERR_REQUIRE_ESM") {
+      import(pathToFileURL(script).href).catch((err) => {
+        console.error(err);
+        process.exit(1);
+      });
+    } else {
+      throw e;
+    }
   }
 }
