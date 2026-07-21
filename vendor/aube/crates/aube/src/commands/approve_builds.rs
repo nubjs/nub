@@ -1,15 +1,23 @@
 //! `aube approve-builds` — flip packages to `true` in the workspace
-//! yaml's `allowBuilds` map so their install scripts run on the next
-//! `aube install`. Writes to `aube-workspace.yaml` by default, or
-//! mutates an existing `pnpm-workspace.yaml` in place.
+//! yaml's `allowBuilds` map and run their install scripts in the same
+//! invocation. Writes to `aube-workspace.yaml` by default, or mutates
+//! an existing `pnpm-workspace.yaml` in place.
 //!
 //! Walks the lockfile via `ignored_builds::collect_ignored`, presents an
 //! interactive multi-select picker (or approves everything under
-//! `--all`), then merges the selections into the workspace yaml's
-//! `allowBuilds` map. Matches pnpm v11, which collapsed the old
-//! allow/deny list keys into one review map. Entries are added as bare
-//! package names so a future resolution of the same dep under a
-//! different version keeps working without re-prompting.
+//! `--all`), merges the selections into the workspace yaml's
+//! `allowBuilds` map, then runs a rebuild scoped to the approved names
+//! (dep scripts only; root lifecycle hooks stay untouched). Matches
+//! pnpm v11, which collapsed the old allow/deny list keys into one
+//! review map and builds approved packages as part of `approve-builds`
+//! itself. Entries are added as bare package names so a future
+//! resolution of the same dep under a different version keeps working
+//! without re-prompting.
+//!
+//! The global path stays write-only: pnpm 11 removed `approve-builds
+//! --global` outright, so there is no reference behavior to mirror,
+//! and each global install dir would need its own retargeted rebuild —
+//! the printed hint keeps that flow explicit instead.
 
 use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
@@ -43,22 +51,63 @@ pub async fn run(args: ApproveBuildsArgs) -> miette::Result<()> {
     }
 
     let cwd = crate::dirs::project_root()?;
-    let _lock = super::take_project_lock(&cwd)?;
-    run_project(&cwd, args.all, args.packages)
+    // The lock covers only the config write. It is dropped before the
+    // build step: rebuild does not take the project lock, and holding a
+    // write lock across arbitrarily long lifecycle scripts would block
+    // every other engine command on the project for the whole build.
+    let approved = {
+        let _lock = super::take_project_lock(&cwd)?;
+        run_project(&cwd, args.all, args.packages)?
+    };
+    if approved.is_empty() {
+        return Ok(());
+    }
+    // pnpm parity: the same invocation runs the just-approved packages'
+    // scripts. The scoped form of rebuild is exactly the right shape —
+    // it runs only the named deps' scripts, skips the root lifecycle
+    // hooks, and treats the explicit names as the policy opt-in.
+    super::rebuild::run(
+        super::rebuild::RebuildArgs { packages: approved },
+        aube_workspace::selector::EffectiveFilter::default(),
+    )
+    .await
 }
 
-fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<()> {
+/// Approve builds for the current project and return the approved
+/// names (empty when nothing was ignored, nothing was selected, or the
+/// interactive confirmation was declined — the caller skips the build
+/// step in all three cases).
+fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<Vec<String>> {
     let ignored = super::ignored_builds::collect_ignored(cwd)?;
     if ignored.is_empty() {
         println!("No ignored builds to approve.");
-        return Ok(());
+        return Ok(Vec::new());
     }
 
+    let interactive = !all && packages.is_empty();
     let selected = select_project(&ignored, all, packages)?;
 
     if selected.is_empty() {
         println!("No packages selected.");
-        return Ok(());
+        return Ok(Vec::new());
+    }
+
+    // The picker only toggles names; scripts running is a separate
+    // consent. pnpm gates the interactive path behind the same
+    // default-No confirmation (`--all` and positional approvals are
+    // themselves the explicit consent, so they build straight away).
+    if interactive {
+        let confirmed = demand::Confirm::new(format!(
+            "The next packages will now be built: {}. Do you approve?",
+            selected.join(", ")
+        ))
+        .selected(false)
+        .run()
+        .into_diagnostic()
+        .wrap_err("failed to read approve-builds confirmation")?;
+        if !confirmed {
+            return Ok(Vec::new());
+        }
     }
 
     let written = aube_manifest::workspace::add_to_allow_builds(cwd, &selected)
@@ -73,12 +122,7 @@ fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<(
     for name in &selected {
         println!("  {name}");
     }
-    println!(
-        "Run `{}` (or `{}`) to execute their scripts.",
-        aube_util::cmd("install"),
-        aube_util::cmd("rebuild")
-    );
-    Ok(())
+    Ok(selected)
 }
 
 fn run_global(args: ApproveBuildsArgs) -> miette::Result<()> {

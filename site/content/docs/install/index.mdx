@@ -362,11 +362,13 @@ The two compose: `nub pm shim` routes bare `npm` / `pnpm` / `yarn` through the p
 Some dependencies run build steps on install — `preinstall`, `install`, and `postinstall` scripts declared in their own `package.json` (across pnpm, npm, and Bun). Nub ships a **deny-by-default** posture: it does not run them indiscriminately the way npm does. You control which packages build.
 
 ```bash
-nub approve-builds                # interactively approve packages to build
+nub approve-builds                # approve packages to build, then build them
 nub add --allow-build=<pkg> <pkg> # pre-approve its build scripts as you add it
 nub rebuild                       # re-run scripts for already-approved packages
 nub install --ignore-scripts      # skip dependency build scripts this install
 ```
+
+Approval takes effect immediately: `nub approve-builds` records the decision and runs the just-approved packages' build scripts in the same invocation, matching pnpm — no follow-up `nub install` or `nub rebuild` needed.
 
 Which manifest field grants permission tracks the inferred incumbent: pnpm projects use `pnpm.onlyBuiltDependencies` / `pnpm.allowBuilds`, Bun projects use `trustedDependencies`, and the neutral `allowBuilds` field plus `nub approve-builds` apply in any project. An explicit denial (`allowBuilds: { pkg: false }`, `neverBuiltDependencies`) always wins. A package that wants to build but isn't allowed is skipped, with `WARN_NUB_IGNORED_BUILD_SCRIPTS` naming it and `nub approve-builds` as the remedy.
 

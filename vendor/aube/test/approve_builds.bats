@@ -3,8 +3,9 @@
 # Tests for `aube approve-builds` and `aube ignored-builds`. Uses the
 # same `aube-test-builds-marker` fixture package as `allow_builds.bats`:
 # it declares a `postinstall` that writes a marker file, so its
-# presence after a second install proves the approve-builds write
-# round-tripped into the project's `allowBuilds`.
+# presence right after `approve-builds` proves the approval both
+# round-tripped into the project's `allowBuilds` and triggered the
+# in-invocation build of the approved packages.
 
 setup() {
 	load 'test_helper/common_setup'
@@ -140,7 +141,13 @@ JSON
 	run grep -q 'onlyBuiltDependencies' package.json
 	assert_failure
 
-	# A re-install should run the previously-ignored postinstall.
+	# approve-builds runs the approved postinstall in the same
+	# invocation (pnpm parity) — no follow-up install required.
+	assert_file_exists aube-builds-marker.txt
+
+	# And a later install still honors the written policy.
+	rm aube-builds-marker.txt
+	rm -rf node_modules
 	run aube install
 	assert_success
 	assert_file_exists aube-builds-marker.txt
@@ -185,10 +192,8 @@ JSON
 	run grep -q '"aube-test-builds-marker": true' package.json
 	assert_success
 
-	# Round-trip: a re-install must honor the policy and run the
-	# previously-skipped postinstall.
-	run aube install
-	assert_success
+	# The workspace member's approved postinstall ran in the same
+	# invocation (pnpm parity) — no follow-up install required.
 	assert_file_exists aube-builds-marker.txt
 }
 
