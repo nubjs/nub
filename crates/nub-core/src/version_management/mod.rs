@@ -549,16 +549,24 @@ mod tests {
     /// connection is handled on its own thread — the checksum fetch and the
     /// tarball download arrive CONCURRENTLY by design. The daemon accept loop
     /// dies with the test process.
-    fn serve_dist(shasums: String, tarball_name: String, tarball: Vec<u8>) -> String {
+    fn serve_dist(
+        shasums: String,
+        tarball_name: String,
+        tarball: Vec<u8>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{Read as _, Write as _};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        // Counts tarball GETs — the retry-behavior tests assert on it.
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_out = hits.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let shasums = shasums.clone();
                 let tarball_name = tarball_name.clone();
                 let tarball = tarball.clone();
+                let hits = hits.clone();
                 std::thread::spawn(move || {
                     let mut req = [0u8; 2048];
                     let n = stream.read(&mut req).unwrap_or(0);
@@ -567,6 +575,7 @@ mod tests {
                     let (status, body): (&str, Vec<u8>) = if path.ends_with("/SHASUMS256.txt") {
                         ("200 OK", shasums.into_bytes())
                     } else if path.ends_with(&tarball_name) {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         ("200 OK", tarball)
                     } else {
                         ("404 Not Found", Vec::new())
@@ -580,7 +589,7 @@ mod tests {
                 });
             }
         });
-        base
+        (base, hits_out)
     }
 
     /// A tiny but valid Node-shaped `.tar.xz` (top dir with `bin/node`) built in
@@ -614,7 +623,7 @@ mod tests {
         let version = ver("99.99.99");
         let name = "node-v99.99.99-linux-x64";
         let (tarball, sha) = node_fixture_tar_xz(name);
-        let base = serve_dist(
+        let (base, _hits) = serve_dist(
             format!("{sha}  {name}.tar.xz\n"),
             format!("{name}.tar.xz"),
             tarball,
@@ -647,7 +656,7 @@ mod tests {
         let name = "node-v99.99.98-linux-x64";
         let (tarball, _sha) = node_fixture_tar_xz(name);
         let wrong = "0".repeat(64);
-        let base = serve_dist(
+        let (base, _hits) = serve_dist(
             format!("{wrong}  {name}.tar.xz\n"),
             format!("{name}.tar.xz"),
             tarball,
@@ -670,6 +679,47 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "work dir leaked: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    /// A mid-stream extraction failure (corrupt archive under a truthful
+    /// Content-Length) must surface the EXTRACTION error, fail fast (one
+    /// download attempt, no transient retry), and leave nothing behind. Guards
+    /// the exit-reason precedence in `download_and_extract_tar_xz`: without it,
+    /// the extractor's early exit reads as a short body and retries 3× with a
+    /// misleading error. The body is sized well past the channel's backpressure
+    /// window so the extractor provably dies while bytes are still unread.
+    #[test]
+    fn provision_fails_fast_on_mid_stream_corruption() {
+        let h = host(NodeOs::Linux, NodeArch::X64, false);
+        let version = ver("99.99.97");
+        let name = "node-v99.99.97-linux-x64";
+        // Valid xz magic, then 4 MiB of garbage — the decoder errors on the
+        // first chunk while the download still has megabytes unread.
+        let mut corrupt = b"\xfd7zXZ\x00".to_vec();
+        corrupt.extend(std::iter::repeat_n(0xAAu8, 4 << 20));
+        use sha2::{Digest, Sha256};
+        let sha = format!("{:x}", Sha256::digest(&corrupt));
+        let (base, hits) = serve_dist(
+            format!("{sha}  {name}.tar.xz\n"),
+            format!("{name}.tar.xz"),
+            corrupt,
+        );
+        let store = std::env::temp_dir().join(format!("nub-prov-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+
+        let err = provision_node_from(&version, &h, &store, None, &base).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("short response body"),
+            "the extraction error must not be masked as a short body: {msg}"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a corrupt archive is fatal — it must not be re-downloaded"
+        );
+        assert!(!store.join("node").join(version.to_string()).exists());
         let _ = std::fs::remove_dir_all(&store);
     }
 

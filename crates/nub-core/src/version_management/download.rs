@@ -356,10 +356,22 @@ fn try_download_extract(
         })
     };
 
+    let join_extractor = |h: std::thread::JoinHandle<Result<PathBuf>>| -> Result<PathBuf> {
+        h.join()
+            .unwrap_or_else(|_| bail!("extractor thread panicked unpacking {source_name}"))
+    };
+
+    let mut extractor = Some(extractor);
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut written = 0u64;
     let mut transport: std::result::Result<(), Attempt> = Ok(());
+    // Set when the extractor exits before the body ends (a send fails). A tar
+    // reader legitimately stops at the end-of-archive marker, before trailing
+    // padding — then we keep DRAINING the body so the hash covers every byte;
+    // an extraction FAILURE stops the download (its error is the story, and the
+    // rest of the body is wasted bandwidth).
+    let mut early: Option<Result<PathBuf>> = None;
     loop {
         let n = match resp.read(&mut buf) {
             Ok(n) => n,
@@ -377,30 +389,39 @@ fn try_download_extract(
         hasher.update(&buf[..n]);
         written += n as u64;
         progress(written, total);
-        if tx.send(buf[..n].to_vec()).is_err() {
-            // The extractor exited early — its join result carries the real error.
-            break;
+        if early.is_none() && tx.send(buf[..n].to_vec()).is_err() {
+            // A failed send means the receiver is gone, i.e. the extractor
+            // thread already returned — join is immediate.
+            let result = join_extractor(extractor.take().expect("joined once"));
+            let failed = result.is_err();
+            early = Some(result);
+            if failed {
+                break;
+            }
         }
     }
     drop(tx); // signals EOF to the extractor
-    let extracted = extractor.join();
+    let extracted = match early {
+        Some(r) => r,
+        None => join_extractor(extractor.take().expect("joined once")),
+    };
 
     // Precedence: a transport fault outranks the extractor's (symptomatic,
-    // truncated-stream) error; then a short-but-cleanly-closed body retries too.
+    // truncated-stream) error; a genuine extraction failure outranks the
+    // short-body check (the body IS short because we stopped downloading — a
+    // transient retry would just re-download and re-fail, masking the cause);
+    // a short-but-cleanly-closed body retries.
     transport?;
     if let Some(t) = total {
-        if written != t {
+        if written != t && extracted.is_ok() {
             return Err(Attempt::transient(anyhow::anyhow!(
                 "short response body: got {written} of {t} bytes"
             )));
         }
     }
     match extracted {
-        Ok(Ok(top)) => Ok((hex_lower(&hasher.finalize()), top)),
-        Ok(Err(e)) => Err(Attempt::fatal(e)),
-        Err(_) => Err(Attempt::fatal(anyhow::anyhow!(
-            "extractor thread panicked unpacking {source_name}"
-        ))),
+        Ok(top) => Ok((hex_lower(&hasher.finalize()), top)),
+        Err(e) => Err(Attempt::fatal(e)),
     }
 }
 
@@ -414,7 +435,10 @@ struct ChannelReader {
 
 impl Read for ChannelReader {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        if self.pos >= self.buf.len() {
+        // `while` (not `if`): an empty chunk must never read as EOF — the
+        // download side doesn't send them, but a clean EOF here is load-bearing
+        // enough not to rest on that invariant alone.
+        while self.pos >= self.buf.len() {
             match self.rx.recv() {
                 Ok(chunk) => {
                     self.buf = chunk;
