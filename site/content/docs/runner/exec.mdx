@@ -11,7 +11,7 @@ nub exec tsc --noEmit
 nub exec vitest run --coverage
 ```
 
-The `nub exec` command resolves an executable on the `node_modules/.bin` chain — the nearest `node_modules/.bin`, then up through parent directories to the workspace root — and exec's it directly. It never reaches the registry: when nothing matches, it prints an install hint and exits 127. For a name that might need fetching, use [`nubx`](/docs/runner), which falls through to the registry instead.
+The `nub exec` command resolves an executable on the `node_modules/.bin` chain — the nearest `node_modules/.bin`, then up through parent directories to the workspace root — and exec's it directly. It never reaches the registry: when nothing matches, it prints an install hint and exits 127. For a name that might need fetching, use [`nubx`](/docs/runner), which falls through to the registry instead. (`nub run` also resolves these bins, but only as a fallback when no script matches — `exec` is the explicit form, and the one to use in scripts where a coincidental script name would otherwise win.)
 
 The walk-up happens in Rust, so the wrapper overhead that `npx` and `pnpm exec` pay on every call — a full Node bootstrap — approximately disappears.
 

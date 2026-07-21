@@ -22,7 +22,7 @@ A few flags behave differently. The `--report-summary` flag streams results live
 
 ## `nub run <script>`
 
-Pass the script name after `run`. The name must match a key in your `package.json`'s `"scripts"` field.
+Pass the script name after `run`. The name matches a key in your `package.json`'s `"scripts"` field — or, failing that, a binary in `node_modules/.bin`.
 
 ```bash
 nub run build
@@ -31,6 +31,19 @@ nub run test
 ```
 
 Running a script is always `nub run <script>` — barewords like `nub dev` do not fall through to scripts. (If you type `nub build` and `build` is a real script, Nub's error tells you to type `nub run build`.) See [Running files](/docs/runtime) for how `nub <file>` works.
+
+### Local binaries
+
+When the name matches no script, Nub resolves `node_modules/.bin/<name>` — walking up to the workspace root, so a hoisted install counts — and runs it with your arguments forwarded. Locally installed CLIs just work, no pass-through script required:
+
+```bash
+nub run astro dev        # no "astro": "astro" boilerplate in package.json
+nub run tsc --noEmit     # args forward exactly as with a script
+```
+
+A script always wins over a same-named bin, and the fallback is local-only: it never fetches from the registry (that is [`nubx`](/docs/runner/dlx) territory). On Yarn PnP projects the bin resolves through the PnP runtime instead of `node_modules`. A bin is not a lifecycle, so `pre<name>`/`post<name>` hooks do not fire and no `npm_lifecycle_*` variables are set. `--if-present` treats a resolvable bin as present. When neither script nor bin exists, the error is the same `missing script` you already know, noting the `.bin` lookup too.
+
+This is the one place `nub run` deliberately goes beyond `pnpm run`/`npm run`, matching `bun run` instead — everywhere else the drop-in contract holds.
 
 Dispatch is handled in Rust with no Node bootstrap in the wrapper, so the runner adds only a few milliseconds before your script's first byte — faster than Node's own `node --run`:
 
