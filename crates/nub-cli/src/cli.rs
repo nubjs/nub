@@ -5250,15 +5250,16 @@ fn suggest_package_manager(cwd: &Path) -> String {
 const RELEASE_REPO: &str = "nubjs/nub";
 
 /// Internal, test-only override for the GitHub *releases-download* base
-/// (`https://github.com/<repo>/releases/download`). When set, `tarball_url` /
+/// (`https://github.com/<repo>/releases/download`). When set, `archive_url` /
 /// `checksum_url` point at it instead of github.com, so the self-owned
 /// download+verify+swap path can be driven against a local `file://` fixture
 /// with no network. UNSET in all normal operation (default behavior is
 /// byte-identical); this is NOT a documented user knob — it exists purely so the
 /// upgrade flow is end-to-end testable without publishing a real release. The
 /// value is used verbatim as a URL prefix: the artifact for `v<version>` /
-/// `<target>` is `<base>/v<version>/nub-<target>.tar.gz` (mirroring GitHub's
-/// release-asset layout), so a fixture must reproduce that path shape.
+/// `<target>` is `<base>/v<version>/nub-<target>.<ext>` (`.zip` for win32
+/// targets, `.tar.gz` otherwise — mirroring GitHub's release-asset layout), so
+/// a fixture must reproduce that path shape.
 const RELEASE_DOWNLOAD_BASE_ENV: &str = "NUB_RELEASE_BASE_URL";
 
 /// Internal, test-only override for the "resolve `latest`" endpoint
@@ -5288,6 +5289,11 @@ fn release_latest_api() -> String {
 /// third-party package — emitting it would clobber a working install, so every
 /// npm-channel command must target the scoped `@nubjs/nub`.
 const NPM_PACKAGE: &str = "@nubjs/nub";
+
+/// On-disk file name of the nub executable inside a self-owned install's
+/// `bin/` — `nub.exe` on Windows, `nub` elsewhere (same fact install.ps1 /
+/// install.sh encode).
+const NUB_EXE: &str = if cfg!(windows) { "nub.exe" } else { "nub" };
 
 /// How the running `nub` binary got onto disk. Detection is a single rung: the
 /// canonicalized path of the binary matched against known install-layout shapes.
@@ -5344,16 +5350,17 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
 }
 
 /// The release-artifact platform token for the current build, mirroring
-/// install.sh's `uname -ms` → target mapping. `None` on a platform Nub doesn't
-/// publish a tarball for (the self-owned channel then falls back to a clear
-/// error rather than fetching a 404). musl vs glibc on Linux is a runtime
-/// distinction install.sh makes via `ldd`/`/etc/alpine-release`; we encode the
-/// glibc default here and document musl as the known gap (see note below).
+/// install.sh's `uname -ms` → target mapping (install.ps1's OSArchitecture
+/// switch on Windows). `None` on a platform Nub doesn't publish an archive for
+/// (the self-owned channel then falls back to a clear error rather than
+/// fetching a 404). musl vs glibc on Linux is a runtime distinction install.sh
+/// makes via `ldd`/`/etc/alpine-release`; we encode the glibc default here and
+/// document musl as the known gap (see note below).
 pub(crate) fn platform_target() -> Option<&'static str> {
     // NOTE: a glibc build and a musl build of the same arch are the same Rust
     // `target_env` only under `target_env = "musl"`, so this distinguishes them
     // correctly when Nub itself is built for musl. The detection matches the
-    // tarball names release.yml publishes.
+    // archive names release.yml publishes.
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Some("darwin-arm64"),
         ("macos", "x86_64") => Some("darwin-x64"),
@@ -5361,6 +5368,8 @@ pub(crate) fn platform_target() -> Option<&'static str> {
         ("linux", "x86_64") => Some("linux-x64"),
         ("linux", "aarch64") if cfg!(target_env = "musl") => Some("linux-arm64-musl"),
         ("linux", "aarch64") => Some("linux-arm64"),
+        ("windows", "x86_64") => Some("win32-x64"),
+        ("windows", "aarch64") => Some("win32-arm64"),
         _ => None,
     }
 }
@@ -5412,19 +5421,36 @@ fn npm_upgrade_command_invocation(target: &str) -> std::process::Command {
     }
 }
 
-/// GitHub release tarball URL for a resolved version + platform target. Mirrors
-/// install.sh's `url=` line so the self-owned channel pulls the same artifact
-/// the installer did. The base is [`release_download_base`] so the test seam can
-/// redirect it to a local fixture; unset → the canonical github.com URL.
-fn tarball_url(version: &str, target: &str) -> String {
-    format!("{}/v{version}/nub-{target}.tar.gz", release_download_base())
+/// Release-archive extension for a platform token: the win32 targets publish
+/// portable `.zip` (release.yml), every other target a `.tar.gz`. Keyed on the
+/// target STRING rather than `cfg!` so the URL builders stay pure and testable
+/// on any host.
+fn archive_ext(target: &str) -> &'static str {
+    if target.starts_with("win32-") {
+        "zip"
+    } else {
+        "tar.gz"
+    }
 }
 
-/// SHA-256 checksum sidecar URL for the tarball. release.yml publishes a
+/// GitHub release archive URL for a resolved version + platform target. Mirrors
+/// install.sh's `url=` line (install.ps1's on Windows) so the self-owned channel
+/// pulls the same artifact the installer did. The base is
+/// [`release_download_base`] so the test seam can redirect it to a local
+/// fixture; unset → the canonical github.com URL.
+fn archive_url(version: &str, target: &str) -> String {
+    format!(
+        "{}/v{version}/nub-{target}.{}",
+        release_download_base(),
+        archive_ext(target)
+    )
+}
+
+/// SHA-256 checksum sidecar URL for the archive. release.yml publishes a
 /// `<archive>.sha256` next to each archive; the self-owned channel fetches it
 /// and verifies the download before extracting.
 fn checksum_url(version: &str, target: &str) -> String {
-    format!("{}.sha256", tarball_url(version, target))
+    format!("{}.sha256", archive_url(version, target))
 }
 
 fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> {
@@ -5450,13 +5476,6 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                     "would upgrade to {target} via self-owned ({})",
                     install_dir.display()
                 );
-                if cfg!(windows) {
-                    println!(
-                        "  note: a real self-owned upgrade is unsupported on Windows; \
-                         reinstall via `{}` instead.",
-                        npm_upgrade_command("latest")
-                    );
-                }
                 match platform_target() {
                     Some(plat) => {
                         // Resolve `latest` to a concrete tag so the printed URL is
@@ -5473,12 +5492,12 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                             println!("  (could not resolve `latest`; showing literal)");
                         }
                         println!("  platform: {plat}");
-                        println!("  tarball:  {}", tarball_url(ver, plat));
+                        println!("  archive:  {}", archive_url(ver, plat));
                         println!("  sha256:   {}", checksum_url(ver, plat));
                         println!("  install:  {}", install_dir.display());
                     }
                     None => println!(
-                        "  (no published tarball for this platform: {}/{})",
+                        "  (no published archive for this platform: {}/{})",
                         std::env::consts::OS,
                         std::env::consts::ARCH
                     ),
@@ -5583,27 +5602,7 @@ fn resolve_version(spec: &str) -> Result<String> {
     Ok(tag.trim_start_matches('v').to_string())
 }
 
-/// The actionable message shown when a self-owned (`~/.nub`) upgrade is attempted
-/// on Windows, where renaming `bin/`+`runtime/` out from under the running
-/// `nub.exe` is unsafe (ERROR_SHARING_VIOLATION). Pure (takes `is_windows`
-/// explicitly) so the fail-fast contract is unit-testable on any host: returns
-/// `Some(msg)` to refuse, `None` to proceed. Self-owned only — npm/homebrew
-/// channels delegate to a package manager and are not affected.
-fn windows_selfowned_unsupported(is_windows: bool) -> Option<String> {
-    if !is_windows {
-        return None;
-    }
-    Some(format!(
-        "nub upgrade: self-upgrade isn't supported on Windows yet.\n\
-         A running nub.exe can't replace its own files in place, so swapping the \
-         install would risk leaving it half-updated.\n\
-         To update, reinstall instead:\n  \
-         npm install -g {NPM_PACKAGE}@latest\n\
-         or re-run the Windows installer."
-    ))
-}
-
-/// Download + SHA-256-verify + atomic-swap a release tarball into a self-owned
+/// Download + SHA-256-verify + atomic-swap a release archive into a self-owned
 /// `~/.nub` install. Mirrors install.sh's layout exactly: the archive contains
 /// `bin/` + `runtime/`, extracted into `<install_dir>` after replacing the prior
 /// `bin/`+`runtime/`.
@@ -5612,38 +5611,29 @@ fn windows_selfowned_unsupported(is_windows: bool) -> Option<String> {
 /// existing install is untouched. We stage the extraction in a sibling temp dir
 /// on the same filesystem, verify the SHA-256 before extracting, then swap the
 /// new `bin`/`runtime` into place via directory rename (atomic per-dir on POSIX);
-/// the prior dirs move aside to `.old` first and are GC'd on success.
+/// the prior dirs move aside to `.old` first and are GC'd on success. Windows
+/// cannot take the directory-rename path at all — see [`swap_bin_files_windows`]
+/// for the per-file rename dance and its own all-or-nothing contract.
 ///
 /// MANUAL-VERIFICATION NOTE: the download/verify/rename path is network- and
 /// release-artifact-hard to unit-test (it needs a live GitHub release + a real
 /// platform tarball). It is verified ad hoc via `nub upgrade --dry-run` (which
 /// prints channel, URL, sha source, and install dir) and by running a real
 /// `nub upgrade` against a published release once one exists. The pure pieces —
-/// `detect_channel`, `tarball_url`, `checksum_url`, `platform_target`,
+/// `detect_channel`, `archive_url`, `checksum_url`, `platform_target`,
 /// `sha256_hex`, and sidecar parsing — are individually exercised; the glue here
 /// is kept deliberately linear and small so its correctness is reviewable by eye.
 fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<()> {
-    // Windows fail-fast: the self-owned swap renames `bin/` out from under the
-    // running `nub.exe`. A running executable cannot be renamed or deleted while
-    // in use on Windows (ERROR_SHARING_VIOLATION), so the swap can fail mid-flight
-    // and leave a half-replaced — potentially unbootable — install. We do not yet
-    // implement the rename-self-to-`.old` dance that would
-    // make this safe, so refuse BEFORE touching the filesystem. See
-    // upgrade.md#windows. This guards the real swap only; the npm/homebrew
-    // channels (which shell out to a package manager) are unaffected.
-    if let Some(msg) = windows_selfowned_unsupported(cfg!(windows)) {
-        bail!("{msg}");
-    }
     let target = platform_target().ok_or_else(|| {
         anyhow::anyhow!(
-            "nub upgrade: no published tarball for this platform ({}/{}). \
+            "nub upgrade: no published archive for this platform ({}/{}). \
              Reinstall via the install script instead.",
             std::env::consts::OS,
             std::env::consts::ARCH
         )
     })?;
     let version = resolve_version(version_spec)?;
-    let url = tarball_url(&version, target);
+    let url = archive_url(&version, target);
     let sha_url = checksum_url(&version, target);
 
     println!("upgrading to v{version} ({target})");
@@ -5654,7 +5644,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         .prefix(".nub-upgrade-")
         .tempdir_in(install_dir)
         .context("nub upgrade: could not create staging directory")?;
-    let archive_path = staging.path().join("nub.tar.gz");
+    let archive_path = staging.path().join(format!("nub.{}", archive_ext(target)));
 
     curl_download(&url, &archive_path)
         .with_context(|| format!("nub upgrade: failed to download {url}"))?;
@@ -5674,19 +5664,14 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // matching install.sh's `tar -xzf … -C $install_dir`.
     let staged_root = staging.path().join("staged");
     std::fs::create_dir_all(&staged_root)?;
-    let tar_status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&archive_path)
-        .arg("-C")
-        .arg(&staged_root)
-        .status()
+    let extracted = extract_release_archive(&archive_path, target, &staged_root)
         .context("nub upgrade: failed to invoke tar")?;
-    if !tar_status.success() {
+    if !extracted {
         bail!("nub upgrade: failed to extract archive {url}");
     }
     let new_bin = staged_root.join("bin");
-    if !new_bin.join("nub").is_file() {
-        bail!("nub upgrade: downloaded archive did not contain bin/nub");
+    if !new_bin.join(NUB_EXE).is_file() {
+        bail!("nub upgrade: downloaded archive did not contain bin/{NUB_EXE}");
     }
 
     // RESILIENCE CONTRACT: `bin/nub` is the ONLY component an upgrade hard-requires.
@@ -5702,6 +5687,9 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // satisfy old upgraders — see release.yml); either way the embedded-runtime
     // binary ignores ~/.nub/runtime, so any prior runtime/ is dead weight removed
     // best-effort for hygiene (mirrors install.sh / install.ps1).
+    #[cfg(windows)]
+    swap_bin_files_windows(install_dir, &new_bin)?;
+    #[cfg(not(windows))]
     swap_dir(install_dir, "bin", &new_bin)?;
     let _ = std::fs::remove_dir_all(install_dir.join("runtime"));
 
@@ -5711,8 +5699,10 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // installs with its own `chmod +x`; the self-owned upgrade path must do the
     // same or every upgrade leaves `~/.nub/bin/nub` as `-rw-r--r--` and the next
     // invocation is "command not found" / a silent fall-back to a stale npm binary.
-    // Set +x on the freshly-swapped-in binary before it can be invoked.
-    ensure_bin_executable(&install_dir.join("bin").join("nub"))?;
+    // Set +x on the freshly-swapped-in binary before it can be invoked. (Not a
+    // Windows concern — executability there is by extension, not a mode bit.)
+    #[cfg(not(windows))]
+    ensure_bin_executable(&install_dir.join("bin").join(NUB_EXE))?;
 
     // Recreate the `nubx` alias install.sh creates (relative symlink → nub; the CLI
     // dispatches on argv[0], so only the alias NAME matters — see Argv0::detect).
@@ -5720,7 +5710,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // and executable, so `nub` works regardless. nubx is a derived convenience —
     // its recreation failing (an exotic FS, a permissions quirk) must NOT abort an
     // otherwise-successful upgrade; warn and continue rather than bail. POSIX-only:
-    // Windows self-owned upgrades already bailed at the top of this fn.
+    // on Windows the nubx COPY is refreshed inside `swap_bin_files_windows`.
     #[cfg(unix)]
     {
         let nubx = install_dir.join("bin").join("nubx");
@@ -5738,9 +5728,77 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     Ok(())
 }
 
+/// The Windows half of the swap: per-FILE renames instead of the POSIX
+/// directory rename. Two Windows filesystem facts shape it (upgrade.md#windows):
+/// a memory-mapped (running) executable cannot be deleted or overwritten, but
+/// its directory ENTRY can be renamed — and a directory containing a mapped
+/// executable cannot be renamed at all, which rules out [`swap_dir`] here
+/// entirely. So: move the live `nub.exe` aside to `nub.exe.old` (succeeds even
+/// mid-run; rustup and uv ride the same fact), rename the staged binary into
+/// place, then refresh the `nubx.exe` COPY from it (install.ps1 ships nubx as a
+/// copy — symlinks need admin/Developer Mode).
+///
+/// All-or-nothing (the upgrade.md#atomicity contract, per-file form): if the
+/// first rename fails the install is untouched; if the second fails the old
+/// binary is rolled back into place. The `.old` files cannot be deleted while
+/// the old binary is still executing (this very process), so they are left
+/// behind and GC'd best-effort at the START of the next upgrade — deliberately
+/// never on the hot run path, which stays free of upgrade bookkeeping. The
+/// pre-GC also clears the way for the rename: `std::fs::rename` on Windows
+/// replaces an existing destination only when it isn't locked, and a stale
+/// `.old` still held by a long-lived pre-upgrade process would otherwise block
+/// the dance (the error message says to close old nub processes and retry).
+#[cfg(windows)]
+fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
+    let bin_dir = install_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("could not create {}", bin_dir.display()))?;
+    let nub = bin_dir.join("nub.exe");
+    let nub_old = bin_dir.join("nub.exe.old");
+    let nubx = bin_dir.join("nubx.exe");
+    let nubx_old = bin_dir.join("nubx.exe.old");
+
+    let _ = std::fs::remove_file(&nub_old);
+    let _ = std::fs::remove_file(&nubx_old);
+
+    if nub.exists() {
+        std::fs::rename(&nub, &nub_old).with_context(|| {
+            format!(
+                "nub upgrade: could not move the running {} aside. If a stale \
+                 nub.exe.old is held open by another running nub process, close \
+                 it and retry; the install has not been modified.",
+                nub.display()
+            )
+        })?;
+    }
+    if let Err(e) = std::fs::rename(staged_bin.join("nub.exe"), &nub) {
+        // Roll the old binary back so the install keeps working.
+        let _ = std::fs::rename(&nub_old, &nub);
+        return Err(e).with_context(|| format!("nub upgrade: could not install {}", nub.display()));
+    }
+
+    // nubx refresh is BEST-EFFORT per the resilience contract: `nub` is already
+    // swapped and authoritative. A running nubx.exe blocks the delete but not
+    // the rename-aside; if even that fails, warn and leave the stale copy.
+    if nubx.exists() && std::fs::remove_file(&nubx).is_err() {
+        let _ = std::fs::rename(&nubx, &nubx_old);
+    }
+    if let Err(e) = std::fs::copy(&nub, &nubx) {
+        eprintln!(
+            "nub upgrade: warning: could not refresh the nubx alias at {} ({e}); \
+             `nub` is upgraded and usable. Re-run the installer to restore nubx.",
+            nubx.display()
+        );
+    }
+    Ok(())
+}
+
 /// Atomically replace `<install_dir>/<name>` with `new_src` via rename: move any
 /// existing dir to a `.old` sibling (which we then remove), rename the staged dir
-/// into place. Same-filesystem, so each rename is atomic on POSIX.
+/// into place. Same-filesystem, so each rename is atomic on POSIX. (Unix-only:
+/// on Windows renaming a directory that contains the running executable fails —
+/// see [`swap_bin_files_windows`].)
+#[cfg(not(windows))]
 fn swap_dir(install_dir: &Path, name: &str, new_src: &Path) -> Result<()> {
     let dest = install_dir.join(name);
     if dest.exists() {
@@ -5761,9 +5819,9 @@ fn swap_dir(install_dir: &Path, name: &str, new_src: &Path) -> Result<()> {
 /// Set the executable bit (0o755) on a freshly-installed binary. The release
 /// archive ships the binary at 0o644 — CI's upload/download-artifact round-trip
 /// strips the +x install.sh would otherwise rely on — so the self-owned upgrade
-/// path must re-apply it or the upgraded `nub` is non-executable. No-op on
-/// Windows (executability is by extension, not a mode bit).
-#[cfg_attr(windows, allow(unused_variables, clippy::unnecessary_wraps))]
+/// path must re-apply it or the upgraded `nub` is non-executable. Not compiled
+/// on Windows (executability is by extension, not a mode bit).
+#[cfg(not(windows))]
 fn ensure_bin_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -5777,6 +5835,28 @@ fn ensure_bin_executable(path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Extract a release archive into `dest` by shelling to `tar`, returning whether
+/// tar succeeded (spawn failure is the `Err`). Handles both artifact formats:
+/// `.tar.gz` under `-xzf`, and the win32 `.zip` under plain `-xf` — `tar` on
+/// Windows IS bsdtar (in System32 since Windows 10 1803, alongside the curl.exe
+/// this channel already requires), which auto-detects zip on read, so no unzip
+/// dependency is needed. `-z` stays on the tar.gz path only because GNU tar
+/// (Linux) does not auto-detect under an explicit `-z` mismatch.
+fn extract_release_archive(archive: &Path, target: &str, dest: &Path) -> Result<bool> {
+    let status = std::process::Command::new("tar")
+        .arg(if archive_ext(target) == "zip" {
+            "-xf"
+        } else {
+            "-xzf"
+        })
+        .arg(archive)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .context("failed to invoke tar")?;
+    Ok(status.success())
 }
 
 /// Download `url` to `dest` via curl (the same tool install.sh uses — keeps Nub
@@ -5830,15 +5910,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// The nub binary's filename inside a release archive's `bin/` dir.
-fn nub_release_bin_name() -> &'static str {
-    if cfg!(windows) { "nub.exe" } else { "nub" }
-}
-
 /// Provision an exact nub version into the version-addressed self store and return
 /// the path to its `bin/nub` — the delegated-artifact half of the self-shim
 /// (`self_shim.rs` owns the decision). Reuses the `nub upgrade` release channel:
-/// download `<base>/v<ver>/nub-<target>.tar.gz`, SHA-256-verify it against the
+/// download `<base>/v<ver>/nub-<target>.<ext>`, SHA-256-verify it against the
 /// published `.sha256` sidecar BEFORE extracting, then confirm the extracted
 /// binary reports the expected version before it is trusted for a default-on exec.
 ///
@@ -5851,7 +5926,7 @@ fn nub_release_bin_name() -> &'static str {
 fn provision_self(version: &str) -> Result<PathBuf> {
     let store = pm_store_root()?.join("self");
     let final_dir = store.join(version);
-    let bin = final_dir.join("bin").join(nub_release_bin_name());
+    let bin = final_dir.join("bin").join(NUB_EXE);
     if bin.is_file() {
         return Ok(bin); // verified store hit — silent, no network
     }
@@ -5867,7 +5942,7 @@ fn provision_self(version: &str) -> Result<PathBuf> {
             std::env::consts::ARCH
         )
     })?;
-    let url = tarball_url(version, target);
+    let url = archive_url(version, target);
     let sha_url = checksum_url(version, target);
 
     std::fs::create_dir_all(&store)
@@ -5886,7 +5961,7 @@ fn provision_self(version: &str) -> Result<PathBuf> {
         .prefix(&format!(".self-{version}-"))
         .tempdir_in(&store)
         .context("creating a staging dir for the pinned-nub provision")?;
-    let archive = staging.path().join("nub.tar.gz");
+    let archive = staging.path().join(format!("nub.{}", archive_ext(target)));
 
     eprintln!("nub: provisioning pinned nub@{version} ({target})...");
     curl_download(&url, &archive).map_err(|_| {
@@ -5917,28 +5992,24 @@ fn provision_self(version: &str) -> Result<PathBuf> {
 
     let staged = staging.path().join("staged");
     std::fs::create_dir_all(&staged)?;
-    let tar_status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&staged)
-        .status()
+    let extracted = extract_release_archive(&archive, target, &staged)
         .context("invoking tar to extract the pinned nub")?;
-    if !tar_status.success() {
+    if !extracted {
         bail!(
             "{ERR_NUB_SELF_SHIM}: failed to extract the pinned nub@{version} archive. \
              Set NUB_SELF_SHIM=0 to run with your installed nub."
         );
     }
-    let staged_bin = staged.join("bin").join(nub_release_bin_name());
+    let staged_bin = staged.join("bin").join(NUB_EXE);
     if !staged_bin.is_file() {
         bail!(
-            "{ERR_NUB_SELF_SHIM}: the pinned nub@{version} archive did not contain bin/nub. \
+            "{ERR_NUB_SELF_SHIM}: the pinned nub@{version} archive did not contain bin/{NUB_EXE}. \
              Set NUB_SELF_SHIM=0 to run with your installed nub."
         );
     }
     // CI's upload/download-artifact round-trip strips +x from the archived binary
     // (see perform_selfowned_upgrade) — re-apply it before the version probe.
+    #[cfg(not(windows))]
     ensure_bin_executable(&staged_bin)?;
 
     // Provision-then-verify: a version-mismatched or corrupt artifact hard-errors
@@ -5961,7 +6032,7 @@ fn provision_self(version: &str) -> Result<PathBuf> {
         }
     }
     eprintln!("nub: provisioned nub@{version}");
-    Ok(final_dir.join("bin").join(nub_release_bin_name()))
+    Ok(final_dir.join("bin").join(NUB_EXE))
 }
 
 /// Run the freshly-provisioned binary's `--version` and confirm it reports the
@@ -8214,7 +8285,7 @@ fn shim_relink_reminder() -> Option<String> {
 /// shim family in place right after the swap (best-effort: a failure downgrades
 /// to the reminder). Covers both the PM shims and the persistent `node` shim.
 fn relink_shims_after_selfowned(install_dir: &Path) {
-    let new_bin = install_dir.join("bin").join("nub");
+    let new_bin = install_dir.join("bin").join(NUB_EXE);
     if let Ok(dir) = nub_core::pm::shim::shim_dir()
         && dir.is_dir()
     {
@@ -9162,7 +9233,10 @@ mod tests {
     // The critical repeat-upgrade invariant: a self-owned upgrade swaps only bin/,
     // so the `.nub-receipt` marker MUST survive it — otherwise the NEXT upgrade
     // would fail to re-detect a relocated install as self-owned. Exercises the real
-    // `swap_dir` the upgrade uses.
+    // `swap_dir` the upgrade uses (Unix-only, like the fn — the Windows per-file
+    // dance never touches anything outside bin/, and its e2e twin in
+    // tests/upgrade_windows.rs asserts against a receipt-marked install).
+    #[cfg(not(windows))]
     #[test]
     fn install_receipt_survives_a_selfowned_bin_swap() {
         let tmp = tempfile::tempdir().unwrap();
@@ -9207,34 +9281,22 @@ mod tests {
         );
     }
 
-    // Fail-fast contract: on Windows the self-owned swap must refuse before any
-    // filesystem op (a running nub.exe can't replace its own files), and the
-    // message must hand the user a concrete recovery path. On non-Windows the
-    // guard is a no-op so the real swap proceeds. Tested via the pure helper so
-    // both branches run regardless of the host OS.
-    #[test]
-    fn windows_selfowned_upgrade_is_refused_with_recovery_steps() {
-        assert!(windows_selfowned_unsupported(false).is_none());
-        let msg = windows_selfowned_unsupported(true).expect("must refuse on Windows");
-        assert!(msg.contains("isn't supported on Windows"));
-        assert!(msg.contains("npm install -g @nubjs/nub@latest"));
-        assert!(msg.contains("re-run the Windows installer"));
-    }
-
     /// Serializes the tests that read or mutate the release-URL env seams
     /// (`NUB_RELEASE_BASE_URL` / `NUB_RELEASE_LATEST_URL`). Those vars are
     /// process-global, so a test that sets them mustn't run concurrently with one
     /// that asserts the unset-default URL shape.
     static RELEASE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    // Verification correctness: the checksum sidecar URL is the tarball URL plus
-    // `.sha256`, and the digest helper matches the well-known empty-input vector.
-    // Asserts the DEFAULT (env-seam unset) URLs, so it holds the release-env lock
-    // to never observe the seam mid-override from the e2e test below.
+    // Verification correctness: the checksum sidecar URL is the archive URL plus
+    // `.sha256`, the win32 targets resolve to the `.zip` artifacts release.yml
+    // actually publishes (everything else `.tar.gz`), and the digest helper
+    // matches the well-known empty-input vector. Asserts the DEFAULT (env-seam
+    // unset) URLs, so it holds the release-env lock to never observe the seam
+    // mid-override from the e2e test below.
     #[test]
-    fn tarball_and_checksum_urls_pair_up() {
+    fn archive_and_checksum_urls_pair_up_per_platform() {
         let _g = RELEASE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let url = tarball_url("0.0.6", "darwin-arm64");
+        let url = archive_url("0.0.6", "darwin-arm64");
         assert_eq!(
             url,
             "https://github.com/nubjs/nub/releases/download/v0.0.6/nub-darwin-arm64.tar.gz"
@@ -9242,6 +9304,14 @@ mod tests {
         assert_eq!(
             checksum_url("0.0.6", "darwin-arm64"),
             format!("{url}.sha256")
+        );
+        assert_eq!(
+            archive_url("0.0.6", "win32-x64"),
+            "https://github.com/nubjs/nub/releases/download/v0.0.6/nub-win32-x64.zip"
+        );
+        assert_eq!(
+            checksum_url("0.0.6", "win32-arm64"),
+            "https://github.com/nubjs/nub/releases/download/v0.0.6/nub-win32-arm64.zip.sha256"
         );
         // SHA-256 of the empty string — pins the digest formatting (lowercase hex).
         assert_eq!(
@@ -9261,9 +9331,10 @@ mod tests {
     // invocation is OS-correct for the resolved version. A wrong-checksum sub-case
     // proves the verify step actually rejects a tampered artifact.
     //
-    // Unix-only: the self-owned swap path (symlink, mode bits, the Windows
-    // fail-fast bail) is POSIX; the Windows arm is covered by
-    // `windows_selfowned_upgrade_is_refused_with_recovery_steps`.
+    // Unix-only: the self-owned swap path here (symlink, mode bits, dir rename)
+    // is POSIX; the Windows per-file rename dance is exercised end-to-end —
+    // against the REAL running binary — by `tests/upgrade_windows.rs` on the
+    // windows-latest CI leg.
     #[cfg(unix)]
     #[test]
     fn self_owned_upgrade_runs_end_to_end_against_a_local_fake_release() {
