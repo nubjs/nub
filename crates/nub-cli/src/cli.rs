@@ -1515,12 +1515,14 @@ fn run_nub() -> Result<i32> {
             _ => {
                 // Check if this is the first positional and matches a subcommand
                 // (nub-native, a verb registered to the embedded PM engine, or
-                // the engine's hidden node-gyp re-entry verb — its lazy shims
-                // re-invoke current_exe() with it mid-lifecycle-script).
+                // a hidden re-entry verb: the engine's lazy node-gyp shims and
+                // the macOS parent-death watcher both re-invoke current_exe()
+                // with theirs).
                 if rest.is_empty()
                     && !arg.starts_with('-')
                     && (SUBCOMMANDS.contains(&arg.as_str())
                         || arg == "__node-gyp-bootstrap"
+                        || (cfg!(unix) && arg == "__pdeath-watch")
                         || crate::pm_engine::lookup_verb(arg).is_some())
                 {
                     subcommand_found = true;
@@ -1952,6 +1954,14 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // to the engine's bootstrap entry point.
     if subcommand == "__node-gyp-bootstrap" {
         return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
+    }
+
+    // The macOS parent-death watcher (#480) re-invokes current_exe() with this
+    // hidden verb; intercept before clap and run the minimal watcher loop
+    // directly (see nub_core::node::spawn::spawn_group_reaper).
+    #[cfg(unix)]
+    if subcommand == "__pdeath-watch" {
+        return Ok(nub_core::node::spawn::run_pdeath_watch(&rest[1..]));
     }
 
     // Compatibility alias: npm and pnpm treat `install <pkg>` / `i <pkg>` (and
@@ -4456,6 +4466,10 @@ fn spawn_script_prefixed(
     // Relay docker stop / Ctrl-C to the streamed child's whole process group too
     // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
     nub_core::node::spawn::track_child_group(child.id());
+    // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; held across
+    // the wait below, dropped (disarmed) on return.
+    #[cfg(unix)]
+    let _reaper = nub_core::node::spawn::spawn_group_reaper(child.id());
     let mut output_buf = String::new();
 
     let stdout = child.stdout.take();

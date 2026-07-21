@@ -428,6 +428,230 @@ pub fn group_on_spawn(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// The disarm byte [`GroupReaper::drop`] writes on the NORMAL teardown path, so
+/// the watcher can tell "Nub reaped the workload and is shutting down cleanly"
+/// (leave any deliberate background survivors alone, matching what plain
+/// node/sh leave behind) from "Nub died" (bare EOF — tear the group down).
+#[cfg(unix)]
+const PDEATH_DISARM: u8 = b'D';
+
+/// macOS backstop for the one signal the forwarder structurally cannot relay
+/// and that Linux's pdeathsig (see [`group_on_spawn`]) covers kernel-side:
+/// SIGKILL of the Nub leader — or of Nub's whole process group — must not
+/// orphan the workload (#480). macOS has no `PR_SET_PDEATHSIG`, so Nub instead
+/// plants a tiny WATCHER process inside the CHILD's process group:
+///
+/// - The watcher holds the read end of a pipe whose only write end lives in
+///   Nub (both ends CLOEXEC; the read end is re-armed by `dup2` for the
+///   watcher alone, so the workload never sees either fd). It blocks in
+///   `read(2)`.
+/// - Nub dying by ANY means — including SIGKILL, where the kernel closes its
+///   fds — delivers EOF, and the watcher SIGTERMs the child's group (the same
+///   signal pdeathsig delivers on Linux) and exits. EOF is level-triggered, so
+///   unlike pdeathsig there is no died-before-registration TOCTOU window to
+///   re-check.
+/// - Living in the CHILD's group is what makes it SIGKILL-proof: a supervisor's
+///   group-kill aimed at Nub's group cannot touch it. Membership also PINS the
+///   pgid — a process group cannot be recycled while a member lives — so the
+///   group kill can never land on a reused pgid.
+///
+/// On the normal path the guard writes [`PDEATH_DISARM`] before closing, and
+/// the watcher exits without signaling anyone. The guard then reaps the
+/// watcher, so nub processes that spawn many sequential children (workspace
+/// `-r` runs) don't accumulate zombies. (`nub watch` is NOT covered: its
+/// spawn path predates `group_on_spawn` entirely, so it has neither pdeathsig
+/// nor this reaper — a pre-existing gap on both platforms.)
+///
+/// Returns `None` off macOS (Linux is already covered kernel-side; a second
+/// mechanism would be redundant) and on any setup failure — the backstop
+/// degrades to the status quo rather than failing the run. Known residual
+/// windows, both milliseconds wide and of the same class as pdeathsig's
+/// fork→prctl gap:
+/// - a group-kill landing between the workload spawn and the watcher's own
+///   `setpgid` still orphans (the watcher dies in Nub's group);
+/// - macOS has no `pipe2(O_CLOEXEC)`, so a CONCURRENT `Command::spawn` on
+///   another thread (workspace `--parallel`) forking between `pipe()` and the
+///   `fcntl` below can duplicate the write end into an unrelated workload,
+///   deferring the watcher's EOF until that workload also dies. The disarm
+///   path is unaffected (the byte travels regardless of extra writers).
+///
+/// Divergence note: on Nub death this TERMs the whole GROUP (matching what
+/// the forwarder does for catchable signals), while Linux's pdeathsig TERMs
+/// only the direct child — a deliberate background survivor outlives a
+/// force-killed nub on Linux but not on macOS. Group scope is what #480 asks
+/// for; the asymmetry is accepted.
+#[cfg(unix)]
+pub fn spawn_group_reaper(child_pid: u32) -> Option<GroupReaper> {
+    use std::os::unix::process::CommandExt;
+    // cfg!(test) guard: nub-core's own in-process unit tests call the spawn
+    // paths directly, where current_exe() is the libtest harness — re-invoking
+    // THAT with watcher argv would re-run any test whose name substring-matches
+    // the argv. The integration suite (pdeath_watch.rs) spawns the real `nub`
+    // binary and exercises the watcher fully.
+    if !cfg!(target_os = "macos") || cfg!(test) {
+        return None;
+    }
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: pipe(2) into a local array; F_SETFD on the two fresh fds.
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            return None;
+        }
+        for fd in fds {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    let close_both = || {
+        // SAFETY: closing the two fds this function just opened.
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        close_both();
+        return None;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.arg("__pdeath-watch")
+        .arg(child_pid.to_string())
+        .arg("3")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let pgid = child_pid as libc::pid_t;
+    // SAFETY: setpgid / signal / dup2 / fcntl between fork and exec are
+    // async-signal-safe and touch no parent state.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Join the WORKLOAD's group. It exists while its leader lives; if
+            // the workload already exited there is nothing left to protect and
+            // the watcher's membership self-check exits it immediately.
+            libc::setpgid(0, pgid);
+            // Ignore, HERE rather than after exec, everything the watcher can
+            // be hit with as a group member: the forwarder's terminating set
+            // (a docker-stop relay landing before the watcher's main ran would
+            // otherwise kill it and silently drop the backstop — SIG_IGN
+            // dispositions survive execve, unlike handlers) and the job-control
+            // stops (a TTY Ctrl-Z would otherwise STOP it, and the guard's
+            // reaping wait() would then hang on a stopped, never-dead child).
+            for sig in [
+                libc::SIGINT,
+                libc::SIGTERM,
+                libc::SIGHUP,
+                libc::SIGUSR1,
+                libc::SIGUSR2,
+                libc::SIGQUIT,
+                libc::SIGTSTP,
+                libc::SIGTTIN,
+                libc::SIGTTOU,
+            ] {
+                libc::signal(sig, libc::SIG_IGN);
+            }
+            // Re-arm ONLY the read end across the exec, at a fixed fd. dup2
+            // clears CLOEXEC on the destination — except when src == dst, where
+            // it is a no-op and the flag must be cleared explicitly.
+            if read_fd == 3 {
+                if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(read_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    match spawn_with_eagain_retry(&mut cmd) {
+        Ok(watcher) => {
+            // SAFETY: Nub's copy of the read end; the watcher holds its own.
+            unsafe { libc::close(read_fd) };
+            Some(GroupReaper { write_fd, watcher })
+        }
+        Err(_) => {
+            close_both();
+            None
+        }
+    }
+}
+
+/// Keeps the parent-death watcher's pipe write end open for the workload's
+/// lifetime — hold it across `wait()`, drop it after. See [`spawn_group_reaper`].
+#[cfg(unix)]
+pub struct GroupReaper {
+    write_fd: libc::c_int,
+    watcher: std::process::Child,
+}
+
+#[cfg(unix)]
+impl Drop for GroupReaper {
+    fn drop(&mut self) {
+        // Normal teardown: disarm (so deliberate background survivors in the
+        // workload's group are left running, exactly as plain node/sh leave
+        // them), close Nub's sole write end, and reap the watcher — it exits
+        // within microseconds of the EOF, and reaping here keeps a long-lived
+        // `nub watch` loop from accumulating zombies.
+        // SAFETY: write/close on the fd this guard owns.
+        unsafe {
+            let byte = [PDEATH_DISARM];
+            // EINTR-retry: a lost disarm byte would read as bare EOF — Nub
+            // "died" — and TERM deliberate background survivors on a NORMAL
+            // exit, the exact additivity break the byte exists to prevent.
+            while libc::write(self.write_fd, byte.as_ptr().cast(), 1) < 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+            {}
+            libc::close(self.write_fd);
+        }
+        let _ = self.watcher.wait();
+    }
+}
+
+/// The `__pdeath-watch` hidden-verb entry: `<child-pgid> <read-fd>` — the
+/// watcher half of [`spawn_group_reaper`]. Returns the process exit code.
+#[cfg(unix)]
+pub fn run_pdeath_watch(args: &[String]) -> i32 {
+    let (Some(pgid), Some(fd)) = (
+        args.first().and_then(|s| s.parse::<libc::pid_t>().ok()),
+        args.get(1).and_then(|s| s.parse::<libc::c_int>().ok()),
+    ) else {
+        return 2;
+    };
+    // SAFETY: getpgrp/read/kill FFI on values this process owns.
+    unsafe {
+        // Signal dispositions were already set in the spawner's pre_exec (they
+        // survive execve): the forwarded terminating set and the job-control
+        // stops are all SIG_IGN, so the watcher acts on exactly one stimulus —
+        // the pipe — and exits on its own. (SIGKILL still takes it down with
+        // the group, as it should.)
+        //
+        // Membership self-check: pre_exec's setpgid can only have failed if the
+        // workload group was already gone — nothing to protect. Being a member
+        // is load-bearing (SIGKILL immunity + pgid pinning, see
+        // `spawn_group_reaper`), so never watch from outside the group.
+        if libc::getpgrp() != pgid {
+            return 0;
+        }
+        let mut buf = [0u8; 1];
+        loop {
+            let n = libc::read(fd, buf.as_mut_ptr().cast(), 1);
+            if n == 1 && buf[0] == PDEATH_DISARM {
+                // Nub reaped the workload and is exiting cleanly: stand down
+                // without signaling, leaving any deliberate background
+                // survivors exactly as plain node/sh would.
+                return 0;
+            }
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            // EOF (Nub died) — or an unreadable pipe, where killing beats
+            // orphaning.
+            break;
+        }
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    0
+}
+
 /// Spawn `cmd` in its own process group and wait, forwarding terminating signals
 /// to the whole group while it runs — the signal-faithful, subtree-reaching
 /// equivalent of `cmd.status()` for a `sh -c <script>` child. Use for the `nub
@@ -437,6 +661,10 @@ pub fn status_forwarding_signals(cmd: &mut Command) -> std::io::Result<ExitStatu
     group_on_spawn(cmd);
     let mut child = spawn_with_eagain_retry(cmd)?;
     track_child_group(child.id());
+    // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; see
+    // `spawn_group_reaper`. Held across the wait, dropped (disarmed) after.
+    #[cfg(unix)]
+    let _reaper = spawn_group_reaper(child.id());
     // Interactive path (stdin is a TTY + inherited stdio): hand the terminal
     // foreground to the child so a full-screen TUI can read it / receive Ctrl-C
     // (issue #27); the guard restores nub's foreground group on drop. No-op off a
@@ -942,6 +1170,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // negative target signals the child and its descendants exactly once.
     // (No-op off Unix.)
     track_child_group(child.id());
+
+    // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; see
+    // `spawn_group_reaper`. Held across the wait, dropped (disarmed) after.
+    #[cfg(unix)]
+    let _reaper = spawn_group_reaper(child.id());
 
     // Interactive path: hand the terminal foreground to the child (issue #27) so a
     // `nub <file>` that draws a full-screen TUI can read the terminal and receive
