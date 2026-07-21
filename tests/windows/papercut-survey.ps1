@@ -557,7 +557,7 @@ Invoke-Check -id "node-uninstall" -label "nub node uninstall 22 (remove from cac
 
 Invoke-Check -id "upgrade-dry-run" -label "nub upgrade --dry-run (observe, no actual upgrade)" `
     -severity "minor" `
-    -note "Self-owned channel upgrade is documented as unsupported on Windows; npm channel must work" -Body {
+    -note "Dry-run must detect the channel; the self-owned channel upgrades in place on Windows via the rename dance (#481)" -Body {
     $r = Invoke-Process $NubBin @("upgrade", "--dry-run")
     @{
         stdout    = $r.stdout
