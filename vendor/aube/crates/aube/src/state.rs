@@ -1078,7 +1078,22 @@ impl InstallLayoutState {
             };
             let entries = deps
                 .iter()
-                .map(|dep| relative_path_or_original(&modules_base.join(&dep.name), project_dir))
+                .map(|dep| {
+                    // In hoisted mode a member's direct dep may have hoisted
+                    // out of `<importer>/node_modules/<name>` to the shared
+                    // workspace root (or nested under a different member), so
+                    // verify it at its ACTUAL placement — otherwise the
+                    // warm-path check reports it permanently "missing" and
+                    // re-installs on every run. `placements` is `Some` only
+                    // for hoisted; a `link:` sibling created by the post-pass
+                    // (absent from `placements`) and every isolated-mode dep
+                    // fall back to the `<importer>/node_modules/<name>` path.
+                    let path = placements
+                        .and_then(|p| p.package_dir(&dep.dep_path))
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| modules_base.join(&dep.name));
+                    relative_path_or_original(&path, project_dir)
+                })
                 .collect();
             direct_entries.insert(importer.clone(), entries);
         }
@@ -1311,6 +1326,17 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     hasher.update(b"hoisting_limits=");
     hasher.update(format!("{hoisting_limits:?}").as_bytes());
     hasher.update(b"\0");
+    // Hoisted-layout algorithm version. A multi-importer workspace under
+    // `nodeLinker=hoisted` now plans ONE shared tree (hoist to the
+    // workspace root) instead of a full per-importer closure. The graph
+    // hash is otherwise identical across the change, so without this a
+    // tree materialized by the old per-importer algorithm would be treated
+    // as current and never relinked. Bump on any future hoisted-layout
+    // change. Gated on the hoisted linker so isolated installs are
+    // unaffected.
+    if matches!(node_linker, aube_settings::resolved::NodeLinker::Hoisted) {
+        hasher.update(b"hoisted_layout_algo=2\0");
+    }
     let dedupe_direct_deps = aube_settings::resolved::dedupe_direct_deps(&ctx);
     hasher.update(format!("dedupe_direct_deps={dedupe_direct_deps}\0").as_bytes());
     let symlink = aube_settings::resolved::symlink(&ctx);
@@ -1664,6 +1690,79 @@ mod tests {
             layout.direct_entries.get("packages/svc"),
             Some(&vec!["packages/svc/node_modules/zod".to_string()])
         );
+    }
+
+    #[test]
+    fn from_graph_tracks_hoisted_member_dep_at_its_shared_root_location() {
+        // Regression guard (issue #484 follow-up): under nodeLinker=hoisted a
+        // member's direct dep hoists to the shared workspace-root
+        // node_modules, so its warm-path entry must point THERE, not at the
+        // (now empty) <member>/node_modules/<dep>. Tracking the assumed
+        // member path would make verify_install_layout report it missing on
+        // every warm install and re-link forever.
+        let project_dir = temp_project_dir("layout-hoisted-shared");
+        let root_nm = project_dir.join("node_modules");
+        std::fs::create_dir_all(root_nm.join("react")).unwrap();
+        std::fs::write(
+            root_nm.join("react/package.json"),
+            "{\"name\":\"react\",\"version\":\"19.2.7\"}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project_dir.join("packages/app/node_modules")).unwrap();
+
+        let dep = |name: &str, dep_path: &str| aube_lockfile::DirectDep {
+            name: name.to_string(),
+            dep_path: dep_path.to_string(),
+            dep_type: aube_lockfile::DepType::Production,
+            specifier: None,
+        };
+        let mut importers = BTreeMap::new();
+        importers.insert(".".to_string(), vec![]);
+        importers.insert(
+            "packages/app".to_string(),
+            vec![dep("react", "react@19.2.7")],
+        );
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            "react@19.2.7".to_string(),
+            aube_lockfile::LockedPackage {
+                name: "react".to_string(),
+                version: "19.2.7".to_string(),
+                dep_path: "react@19.2.7".to_string(),
+                ..Default::default()
+            },
+        );
+        let graph = aube_lockfile::LockfileGraph {
+            importers,
+            packages,
+            ..Default::default()
+        };
+
+        let placements = aube_linker::HoistedPlacements::from_graph(
+            &project_dir,
+            &graph,
+            "node_modules",
+            aube_linker::HoistingLimits::None,
+        )
+        .unwrap();
+
+        let layout = InstallLayoutState::from_graph(
+            &project_dir,
+            &graph,
+            aube_linker::NodeLinker::Hoisted,
+            "node_modules",
+            &root_nm.join(".aube"),
+            120,
+            Some(&placements),
+        );
+
+        // The member's react is tracked at the SHARED ROOT, where it hoisted.
+        assert_eq!(
+            layout.direct_entries.get("packages/app"),
+            Some(&vec!["node_modules/react".to_string()])
+        );
+        // And the warm-path check passes: the root react dir exists.
+        assert!(verify_install_layout(&project_dir, Some(&layout)).is_none());
     }
 
     #[test]

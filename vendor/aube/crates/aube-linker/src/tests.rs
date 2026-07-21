@@ -1141,6 +1141,109 @@ fn test_hoisted_duplicates_same_dep_path_at_multiple_sites() {
 }
 
 #[test]
+fn test_hoisted_workspace_shares_dep_at_root_and_nests_conflict() {
+    // Issue #484: under `nodeLinker=hoisted` a workspace must plan ONE
+    // shared tree, not a full closure per member. Two members share
+    // `shared@1.0.0` (materializes ONCE at the workspace root, never under a
+    // member) while `left` conflicts (root+a want 1.0.0 → root; b wants
+    // 2.0.0 → nests under b). The pre-fix per-importer planner duplicated
+    // the shared dep under every member — two module identities → the
+    // reporter's invalid React hooks.
+    let dir = tempfile::tempdir().unwrap();
+    let root_dir = dir.path().join("ws");
+    for member in ["packages/a", "packages/b"] {
+        std::fs::create_dir_all(root_dir.join(member)).unwrap();
+    }
+
+    let store = Store::at(dir.path().join("store/files"));
+    let mut indices = BTreeMap::new();
+    for (dp, pj, body) in [
+        (
+            "shared@1.0.0",
+            "{\"name\":\"shared\",\"version\":\"1.0.0\"}",
+            "module.exports='shared@1';",
+        ),
+        (
+            "left@1.0.0",
+            "{\"name\":\"left\",\"version\":\"1.0.0\"}",
+            "module.exports='left@1';",
+        ),
+        (
+            "left@2.0.0",
+            "{\"name\":\"left\",\"version\":\"2.0.0\"}",
+            "module.exports='left@2';",
+        ),
+    ] {
+        indices.insert(dp.to_string(), package_index(&store, pj, body));
+    }
+
+    let pkg = |name: &str, version: &str| LockedPackage {
+        name: name.to_string(),
+        version: version.to_string(),
+        dep_path: format!("{name}@{version}"),
+        ..Default::default()
+    };
+    let mut packages = BTreeMap::new();
+    for dp in ["shared@1.0.0", "left@1.0.0", "left@2.0.0"] {
+        let (name, version) = dp.split_once('@').unwrap();
+        packages.insert(dp.to_string(), pkg(name, version));
+    }
+
+    let dep = |name: &str, dep_path: &str| DirectDep {
+        name: name.to_string(),
+        dep_path: dep_path.to_string(),
+        dep_type: DepType::Production,
+        specifier: None,
+    };
+    let mut importers = BTreeMap::new();
+    importers.insert(".".to_string(), vec![dep("left", "left@1.0.0")]);
+    importers.insert(
+        "packages/a".to_string(),
+        vec![dep("shared", "shared@1.0.0"), dep("left", "left@1.0.0")],
+    );
+    importers.insert(
+        "packages/b".to_string(),
+        vec![dep("shared", "shared@1.0.0"), dep("left", "left@2.0.0")],
+    );
+    let graph = LockfileGraph {
+        importers,
+        packages,
+        ..Default::default()
+    };
+
+    let linker = Linker::new(&store, LinkStrategy::Copy).with_node_linker(NodeLinker::Hoisted);
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .unwrap();
+
+    let root_nm = root_dir.join("node_modules");
+    let a_nm = root_dir.join("packages/a/node_modules");
+    let b_nm = root_dir.join("packages/b/node_modules");
+    // The shared single-version dep is hoisted once, to the workspace root.
+    assert_eq!(
+        std::fs::read_to_string(root_nm.join("shared/index.js")).unwrap(),
+        "module.exports='shared@1';"
+    );
+    assert!(
+        !a_nm.join("shared").exists() && !b_nm.join("shared").exists(),
+        "the shared dep must NOT be duplicated under any member"
+    );
+    // The conflict: majority left@1 at root, minority left@2 nested under b.
+    assert_eq!(
+        std::fs::read_to_string(root_nm.join("left/index.js")).unwrap(),
+        "module.exports='left@1';"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b_nm.join("left/index.js")).unwrap(),
+        "module.exports='left@2';"
+    );
+    assert!(
+        !a_nm.join("left").exists(),
+        "member a's left hoisted to root — no member-local copy"
+    );
+}
+
+#[test]
 fn test_global_virtual_store_is_populated() {
     let dir = tempfile::tempdir().unwrap();
     let project_dir = dir.path().join("project");

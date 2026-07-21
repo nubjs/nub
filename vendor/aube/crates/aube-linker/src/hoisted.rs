@@ -72,27 +72,11 @@ impl HoistedPlacements {
         hoisting_limits: HoistingLimits,
     ) -> Result<Self, Error> {
         let mut placements = Self::default();
-        let importer_nm = |importer_path: &str| -> PathBuf {
-            if importer_path == "." {
-                root_dir.join(modules_dir_name)
-            } else {
-                // Match the link path's lexical `..` collapse so a
-                // `../sibling` importer key recomputes the same on-disk dir.
-                aube_util::path::normalize_lexical(
-                    &root_dir.join(importer_path).join(modules_dir_name),
-                )
-            }
-        };
-        let physical: Vec<(&String, &Vec<DirectDep>)> = graph
-            .importers
-            .iter()
-            .filter(|(p, _)| crate::is_physical_importer(p))
-            .collect();
+        // Same seeds the installer derives, so the recomputed paths match
+        // what `link_workspace_hoisted` put on disk (see
+        // `workspace_importer_seeds`).
+        let seeds = workspace_importer_seeds(root_dir, graph, modules_dir_name);
 
-        // Match the linker: the default (`None`) hoists a multi-importer
-        // workspace into ONE shared tree; every other case plans per
-        // importer. Recomputing with the wrong planner would return paths
-        // that don't exist on disk.
         let record = |plan: &PlacementPlan, placements: &mut Self| {
             for node in &plan.nodes {
                 let (Some(dep_path), Some(pkg_dir)) = (&node.dep_path, &node.pkg_dir) else {
@@ -103,24 +87,17 @@ impl HoistedPlacements {
                 }
             }
         };
-        if matches!(hoisting_limits, HoistingLimits::None) && physical.len() > 1 {
-            let mut importers: Vec<(PathBuf, Vec<DirectDep>)> =
-                Vec::with_capacity(physical.len());
-            // Root first, so it becomes the arena root in `plan_workspace`.
-            if let Some((_, deps)) = physical.iter().find(|(p, _)| p.as_str() == ".") {
-                importers.push((importer_nm("."), (*deps).clone()));
-            }
-            for (path, deps) in &physical {
-                if path.as_str() != "." {
-                    importers.push((importer_nm(path), (*deps).clone()));
-                }
-            }
-            let plan = plan_workspace(&importers, graph)?;
+
+        // Mirror the installer's dispatch: the default (`None`) hoists a
+        // multi-importer workspace into ONE shared tree; every other case
+        // plans per importer. Recomputing with the wrong planner would
+        // return paths that don't exist on disk.
+        if matches!(hoisting_limits, HoistingLimits::None) && seeds.len() > 1 {
+            let plan = plan_workspace(&seeds, graph)?;
             record(&plan, &mut placements);
         } else {
-            for (importer_path, deps) in physical {
-                let nm = importer_nm(importer_path);
-                let plan = plan_importer(&nm, deps, graph, hoisting_limits)?;
+            for (nm, deps) in &seeds {
+                let plan = plan_importer(nm, deps, graph, hoisting_limits)?;
                 record(&plan, &mut placements);
             }
         }
@@ -236,7 +213,8 @@ impl PlacementPlan {
     }
 
     /// Package names placed directly in importer node `idx`'s
-    /// `node_modules/`. Drives the per-importer stale-entry sweep.
+    /// `node_modules/`. Drives the per-importer stale-entry sweep in
+    /// `materialize_plan`.
     pub(crate) fn child_names_of(&self, idx: usize) -> impl Iterator<Item = &str> {
         self.nodes[idx].children.keys().map(|s| s.as_str())
     }
@@ -297,6 +275,18 @@ impl PlacementPlan {
         }
 
         let parent_nm = self.nodes[candidate].nm_dir.clone();
+        // Never displace an existing occupant of `candidate`'s slot: the
+        // placement walk stops at the shallowest ancestor NOT already
+        // hosting `name`, so `candidate.children[name]` must be vacant. A
+        // violation means a different version was pre-seated in a slot the
+        // requester also claims and can't nest below (the root importer's
+        // own direct dep vs a preplaced member version) — a correctness bug,
+        // not something to silently overwrite. `preferred_root_versions`
+        // prevents it by giving the root importer's direct deps priority.
+        debug_assert!(
+            !self.nodes[candidate].children.contains_key(name),
+            "place() would overwrite an occupied slot for {name} at node {candidate}"
+        );
         let pkg_dir = parent_nm.join(name);
         let nm_dir = pkg_dir.join("node_modules");
         let new_idx = self.nodes.len();
@@ -340,12 +330,6 @@ impl PlacementPlan {
             .insert(name.to_string(), new_idx);
         new_idx
     }
-
-    /// Names placed directly in the importer root's `node_modules/`.
-    /// Drives the stale-entry sweep in `link_hoisted_importer`.
-    pub(crate) fn root_names(&self) -> impl Iterator<Item = &str> {
-        self.child_names_of(self.root_idx)
-    }
 }
 
 fn is_ancestor_or_self(nodes: &[TreeNode], ancestor: usize, mut node: usize) -> bool {
@@ -374,12 +358,21 @@ fn is_ancestor_or_self(nodes: &[TreeNode], ancestor: usize, mut node: usize) -> 
 /// own their name's slot; ties broken by dep_path for determinism).
 /// Single-version names are omitted — the plain BFS already hoists them right.
 ///
-/// `root_deps` is every seed edge competing for the root slot. For a
-/// single importer that is its direct deps; for a workspace-spanning
-/// plan it is the union of every importer's direct deps, so the argmax
-/// is taken over consumer edges across the whole workspace.
+/// Two priority tiers of direct edge:
+/// - `root_direct` — the ROOT importer's own direct deps. The root package
+///   resolves these from the top-level `node_modules`, so its declared
+///   version MUST own the root slot; a member's differing version of the
+///   same name nests under the member (npm/pnpm/yarn-nm guarantee). These
+///   outrank everything.
+/// - `other_direct` — every non-root importer's direct deps. They own a
+///   name's root slot only when root does not itself declare that name; a
+///   plurality/lexical contest picks the winner among them.
+///
+/// For a single importer, all its direct deps are `root_direct` and
+/// `other_direct` is empty.
 fn preferred_root_versions<'a>(
-    root_deps: impl IntoIterator<Item = &'a DirectDep>,
+    root_direct: &[DirectDep],
+    other_direct: impl IntoIterator<Item = &'a DirectDep>,
     graph: &LockfileGraph,
 ) -> Vec<(String, String)> {
     // name -> dep_path -> consumer-edge count over the reachable graph.
@@ -387,22 +380,35 @@ fn preferred_root_versions<'a>(
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
 
-    // A direct dep must own the root slot for its name regardless of how many
-    // transitive consumers a rival version has — the importer resolves it from
-    // root. Weight direct edges so they always win the argmax.
+    // Weight tiers so the argmax respects priority: a ROOT direct edge beats
+    // any number of member direct edges, which beat any number of transitive
+    // consumers. `1<<60` dominates `member_count * (1<<40)` for any realistic
+    // workspace (>1e6 members before it could be caught), and neither tier
+    // can overflow u64 when summed.
+    const ROOT_DIRECT_WEIGHT: u64 = 1 << 60;
     const DIRECT_WEIGHT: u64 = 1 << 40;
-    for dep in root_deps {
+    let seed_direct = |dep: &DirectDep,
+                       weight: u64,
+                       counts: &mut BTreeMap<String, BTreeMap<String, u64>>,
+                       seen: &mut BTreeSet<String>,
+                       queue: &mut VecDeque<String>| {
         if !graph.packages.contains_key(&dep.dep_path) {
-            continue;
+            return;
         }
         *counts
             .entry(dep.name.clone())
             .or_default()
             .entry(dep.dep_path.clone())
-            .or_default() += DIRECT_WEIGHT;
+            .or_default() += weight;
         if seen.insert(dep.dep_path.clone()) {
             queue.push_back(dep.dep_path.clone());
         }
+    };
+    for dep in root_direct {
+        seed_direct(dep, ROOT_DIRECT_WEIGHT, &mut counts, &mut seen, &mut queue);
+    }
+    for dep in other_direct {
+        seed_direct(dep, DIRECT_WEIGHT, &mut counts, &mut seen, &mut queue);
     }
     while let Some(dep_path) = queue.pop_front() {
         let Some(pkg) = graph.packages.get(&dep_path) else {
@@ -483,16 +489,18 @@ fn enqueue_transitives(
 /// version wins the slot and only minority versions nest. Without this
 /// the BFS arrival-order winner can be a low-use version, exploding the
 /// widely-used one into dozens of nested copies (see
-/// `preferred_root_versions`). No-op when nothing conflicts. `seed_deps`
-/// is the same competing-edge set passed to `preferred_root_versions`.
+/// `preferred_root_versions`). No-op when nothing conflicts. `root_direct`
+/// and `other_direct` carry the two priority tiers documented on
+/// `preferred_root_versions`.
 fn preplace_root_winners<'a>(
     plan: &mut PlacementPlan,
     queue: &mut VecDeque<(usize, usize, String, String)>,
-    seed_deps: impl IntoIterator<Item = &'a DirectDep>,
+    root_direct: &[DirectDep],
+    other_direct: impl IntoIterator<Item = &'a DirectDep>,
     graph: &LockfileGraph,
 ) {
     let root_idx = plan.root_idx;
-    for (name, dep_path) in preferred_root_versions(seed_deps, graph) {
+    for (name, dep_path) in preferred_root_versions(root_direct, other_direct, graph) {
         let node_idx = plan.preplace_root_child(&name, &dep_path);
         let Some(pkg) = graph.packages.get(&dep_path) else {
             continue;
@@ -515,7 +523,8 @@ pub(crate) fn plan_importer(
         hoisting_limits,
         HoistingLimits::None | HoistingLimits::Workspaces
     ) {
-        preplace_root_winners(&mut plan, &mut queue, root_deps, graph);
+        // Single importer: all its direct deps own their own root slot.
+        preplace_root_winners(&mut plan, &mut queue, root_deps, std::iter::empty(), graph);
     }
 
     // Seed the queue with the importer's direct deps in declaration
@@ -583,23 +592,30 @@ pub(crate) fn plan_workspace(
         seeds.push((idx, deps.as_slice()));
     }
 
-    // Deterministic root winner over consumer edges across ALL importers,
-    // then seed each importer's direct deps under its own node with
+    // Deterministic root winner. The root importer's OWN direct deps own
+    // their root slot unconditionally (a member's differing version nests
+    // under the member); members' direct deps only win a name root doesn't
+    // declare. Then seed each importer's direct deps under its own node with
     // `floor = root` so shared deps hoist to the single shared root.
-    let all_seed_deps = seeds.iter().flat_map(|(_, deps)| deps.iter());
-    preplace_root_winners(&mut plan, &mut queue, all_seed_deps, graph);
+    let member_direct = seeds.iter().skip(1).flat_map(|(_, deps)| deps.iter());
+    preplace_root_winners(&mut plan, &mut queue, root_deps, member_direct, graph);
 
     for (importer_idx, deps) in &seeds {
         for dep in *deps {
-            if !graph.packages.contains_key(&dep.dep_path) {
+            let Some(pkg) = graph.packages.get(&dep.dep_path) else {
                 continue;
-            }
-            queue.push_back((
-                *importer_idx,
-                plan.root_idx,
-                dep.name.clone(),
-                dep.dep_path.clone(),
-            ));
+            };
+            // A `link:` workspace sibling stays in the requiring member's
+            // own `node_modules` (its target owns its deps; Node resolves
+            // through the live symlink), matching pnpm's hoistWorkspacePackages
+            // layout — do NOT hoist it to the shared root. A registry dep gets
+            // `floor = root` so it hoists workspace-wide.
+            let floor = if matches!(pkg.local_source.as_ref(), Some(LocalSource::Link(_))) {
+                *importer_idx
+            } else {
+                plan.root_idx
+            };
+            queue.push_back((*importer_idx, floor, dep.name.clone(), dep.dep_path.clone()));
         }
     }
 
@@ -615,6 +631,57 @@ pub(crate) fn plan_workspace(
     }
 
     Ok(plan)
+}
+
+/// Physical importers as `(node_modules_dir, direct_deps)` in the
+/// canonical order [`plan_workspace`] expects — ROOT first, then the
+/// remaining physical importers in `graph.importers` (BTreeMap) order.
+///
+/// Both the installer ([`link_hoisted_importer`]'s workspace caller) and
+/// the on-disk recompute ([`HoistedPlacements::from_graph`]) derive the
+/// workspace plan from THIS, so they agree on the tree deterministically.
+/// Deps are passed raw: the planners skip edges absent from
+/// `graph.packages` (workspace siblings, dev-stripped deps), so no
+/// pre-filter is needed here.
+pub(crate) fn workspace_importer_seeds(
+    root_dir: &Path,
+    graph: &LockfileGraph,
+    modules_dir_name: &str,
+) -> Vec<(PathBuf, Vec<DirectDep>)> {
+    let importer_nm = |importer_path: &str| -> PathBuf {
+        if importer_path == "." {
+            root_dir.join(modules_dir_name)
+        } else {
+            // Collapse `..` lexically so a parent-relative importer key
+            // (`../sibling`, when `pnpm-workspace.yaml#packages` uses
+            // `../**`) recomputes the same on-disk dir the linker writes.
+            aube_util::path::normalize_lexical(&root_dir.join(importer_path).join(modules_dir_name))
+        }
+    };
+    let physical: Vec<(&String, &Vec<DirectDep>)> = graph
+        .importers
+        .iter()
+        .filter(|(p, _)| crate::is_physical_importer(p))
+        .collect();
+    // The workspace root (`.`) must be an importer: `plan_workspace` treats
+    // the first seed as the arena root, so its absence would silently root
+    // the whole shared tree under a member's node_modules. The root package
+    // is always an importer in every install path today.
+    debug_assert!(
+        physical.iter().any(|(p, _)| p.as_str() == "."),
+        "workspace_importer_seeds: no '.' importer to anchor the shared tree"
+    );
+    let mut seeds: Vec<(PathBuf, Vec<DirectDep>)> = Vec::with_capacity(physical.len());
+    // Root first: it becomes the arena root in `plan_workspace`.
+    if let Some((_, deps)) = physical.iter().find(|(p, _)| p.as_str() == ".") {
+        seeds.push((importer_nm("."), (*deps).clone()));
+    }
+    for (path, deps) in &physical {
+        if path.as_str() != "." {
+            seeds.push((importer_nm(path), (*deps).clone()));
+        }
+    }
+    seeds
 }
 
 /// Materialize a planned tree onto disk for a single importer.
@@ -800,7 +867,15 @@ pub(crate) fn link_hoisted_importer(
 ) -> Result<(), Error> {
     let nm = dirs.importer.join(linker.modules_dir_name());
     let plan = plan_importer(&nm, root_deps, graph, linker.hoisting_limits)?;
-    materialize_plan(linker, dirs.root, &plan, graph, package_indices, stats, placements)
+    materialize_plan(
+        linker,
+        dirs.root,
+        &plan,
+        graph,
+        package_indices,
+        stats,
+        placements,
+    )
 }
 
 /// Materialize a whole placement plan onto disk and record every placed
@@ -969,6 +1044,262 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn workspace_shared_dep_hoists_to_root_once() {
+        // Two members both directly depend on is-odd@3.0.1. Real pnpm's
+        // hoisted default (`hoistingLimits=none`) hoists it ONCE to the
+        // workspace root; each member resolves it via Node's
+        // parent-directory walk. The old per-importer planner duplicated
+        // it under every member — issue #484: react duplicated across
+        // members → two React module identities → invalid-hook errors.
+        let root_nm = PathBuf::from("/ws/node_modules");
+        let a_nm = PathBuf::from("/ws/packages/a/node_modules");
+        let b_nm = PathBuf::from("/ws/packages/b/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .packages
+            .insert("is-odd@3.0.1".into(), pkg("is-odd", "3.0.1", &[]));
+        let seeds = vec![
+            (root_nm.clone(), vec![]),
+            (a_nm.clone(), vec![dep("is-odd", "is-odd@3.0.1")]),
+            (b_nm, vec![dep("is-odd", "is-odd@3.0.1")]),
+        ];
+
+        let plan = plan_workspace(&seeds, &graph).unwrap();
+
+        assert_eq!(package_dir(&plan, "is-odd@3.0.1"), root_nm.join("is-odd"));
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .filter(|n| n.dep_path.as_deref() == Some("is-odd@3.0.1"))
+                .count(),
+            1,
+            "a dep shared across members must materialize once at root, not per member"
+        );
+    }
+
+    #[test]
+    fn workspace_version_conflict_nests_under_requiring_member() {
+        // root + member a want left-pad@1.3.0; member b wants @1.1.3. The
+        // majority (1.3.0, two direct consumers) wins the shared root; the
+        // minority nests under member b only — matching pnpm, which keeps
+        // the shared version at root and nests the conflict.
+        let root_nm = PathBuf::from("/ws/node_modules");
+        let a_nm = PathBuf::from("/ws/packages/a/node_modules");
+        let b_nm = PathBuf::from("/ws/packages/b/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .packages
+            .insert("left-pad@1.3.0".into(), pkg("left-pad", "1.3.0", &[]));
+        graph
+            .packages
+            .insert("left-pad@1.1.3".into(), pkg("left-pad", "1.1.3", &[]));
+        let seeds = vec![
+            (root_nm.clone(), vec![dep("left-pad", "left-pad@1.3.0")]),
+            (a_nm, vec![dep("left-pad", "left-pad@1.3.0")]),
+            (b_nm.clone(), vec![dep("left-pad", "left-pad@1.1.3")]),
+        ];
+
+        let plan = plan_workspace(&seeds, &graph).unwrap();
+
+        assert_eq!(
+            package_dir(&plan, "left-pad@1.3.0"),
+            root_nm.join("left-pad")
+        );
+        assert_eq!(
+            package_dir(&plan, "left-pad@1.1.3"),
+            b_nm.join("left-pad"),
+            "the conflicting minority version nests under the member that needs it"
+        );
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .filter(|n| n.dep_path.as_deref() == Some("left-pad@1.3.0"))
+                .count(),
+            1,
+            "the shared majority version exists once, at root"
+        );
+    }
+
+    #[test]
+    fn workspace_shared_transitive_hoists_to_root() {
+        // member a → foo → shared; member b → bar → shared. `shared` is a
+        // transitive of two different members at a single version, so it
+        // hoists once to the shared root rather than duplicating under
+        // each member's own tree.
+        let root_nm = PathBuf::from("/ws/node_modules");
+        let a_nm = PathBuf::from("/ws/packages/a/node_modules");
+        let b_nm = PathBuf::from("/ws/packages/b/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph.packages.insert(
+            "foo@1.0.0".into(),
+            pkg("foo", "1.0.0", &[("shared", "1.0.0")]),
+        );
+        graph.packages.insert(
+            "bar@1.0.0".into(),
+            pkg("bar", "1.0.0", &[("shared", "1.0.0")]),
+        );
+        graph
+            .packages
+            .insert("shared@1.0.0".into(), pkg("shared", "1.0.0", &[]));
+        let seeds = vec![
+            (root_nm.clone(), vec![]),
+            (a_nm, vec![dep("foo", "foo@1.0.0")]),
+            (b_nm, vec![dep("bar", "bar@1.0.0")]),
+        ];
+
+        let plan = plan_workspace(&seeds, &graph).unwrap();
+
+        assert_eq!(package_dir(&plan, "foo@1.0.0"), root_nm.join("foo"));
+        assert_eq!(package_dir(&plan, "bar@1.0.0"), root_nm.join("bar"));
+        assert_eq!(package_dir(&plan, "shared@1.0.0"), root_nm.join("shared"));
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .filter(|n| n.dep_path.as_deref() == Some("shared@1.0.0"))
+                .count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn workspace_root_direct_dep_owns_root_slot_over_member_version() {
+        // The root importer directly depends on left@1.0.0; a member depends
+        // on left@2.0.0. The ROOT's declared version must own the shared root
+        // slot (the root package resolves `left` from there) and the member's
+        // version nests under the member. Regression guard: an earlier
+        // revision gave every direct edge equal weight, so a member's version
+        // could win the cross-importer contest (here 2.0.0 wins the lexical
+        // tiebreak) and displace root's — producing a SECOND node writing
+        // `root_nm/left`, i.e. a duplicate racing on one directory.
+        let root_nm = PathBuf::from("/ws/node_modules");
+        let a_nm = PathBuf::from("/ws/packages/a/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .packages
+            .insert("left@1.0.0".into(), pkg("left", "1.0.0", &[]));
+        graph
+            .packages
+            .insert("left@2.0.0".into(), pkg("left", "2.0.0", &[]));
+        let seeds = vec![
+            (root_nm.clone(), vec![dep("left", "left@1.0.0")]),
+            (a_nm.clone(), vec![dep("left", "left@2.0.0")]),
+        ];
+
+        let plan = plan_workspace(&seeds, &graph).unwrap();
+
+        // Exactly one node writes root_nm/left, and it is the root's 1.0.0.
+        let root_left: Vec<&str> = plan
+            .nodes
+            .iter()
+            .filter(|n| n.pkg_dir == Some(root_nm.join("left")))
+            .filter_map(|n| n.dep_path.as_deref())
+            .collect();
+        assert_eq!(
+            root_left,
+            vec!["left@1.0.0"],
+            "root's declared version owns the root slot, with no duplicate node"
+        );
+        // The member's conflicting version nests under the member.
+        assert_eq!(package_dir(&plan, "left@2.0.0"), a_nm.join("left"));
+    }
+
+    #[test]
+    fn workspace_link_sibling_stays_member_local() {
+        // A `link:` workspace sibling must NOT hoist to the shared root: it
+        // is symlinked into the requiring member's own `node_modules` (its
+        // target owns its deps), matching pnpm's hoistWorkspacePackages
+        // layout. A registry dep of the same member still hoists to root.
+        // Regression guard: an earlier revision hoisted `link:` siblings to
+        // the workspace root, emptying the member's `node_modules` and
+        // diverging from pnpm (issue #484 super-calendar: @super-calendar/*
+        // landed at root instead of under packages/native).
+        let root_nm = PathBuf::from("/ws/node_modules");
+        let a_nm = PathBuf::from("/ws/packages/a/node_modules");
+        let mut graph = LockfileGraph::default();
+        let mut core = pkg("@scope/core", "0.0.0", &[]);
+        core.dep_path = "@scope/core@0.0.0".into();
+        core.local_source = Some(LocalSource::Link(PathBuf::from("packages/core")));
+        graph.packages.insert("@scope/core@0.0.0".into(), core);
+        graph
+            .packages
+            .insert("date-fns@4.0.0".into(), pkg("date-fns", "4.0.0", &[]));
+        let seeds = vec![
+            (root_nm.clone(), vec![]),
+            (
+                a_nm.clone(),
+                vec![
+                    dep("@scope/core", "@scope/core@0.0.0"),
+                    dep("date-fns", "date-fns@4.0.0"),
+                ],
+            ),
+        ];
+
+        let plan = plan_workspace(&seeds, &graph).unwrap();
+
+        // The link: sibling stays under the member; the registry dep hoists.
+        assert_eq!(
+            package_dir(&plan, "@scope/core@0.0.0"),
+            a_nm.join("@scope/core"),
+            "a link: sibling must stay in the requiring member's node_modules"
+        );
+        assert_eq!(
+            package_dir(&plan, "date-fns@4.0.0"),
+            root_nm.join("date-fns")
+        );
+        // Nothing named @scope/core at the workspace root.
+        assert!(
+            !plan.nodes.iter().any(|n| n.parent == Some(plan.root_idx)
+                && n.dep_path.as_deref() == Some("@scope/core@0.0.0")),
+            "the link: sibling must not be hoisted to the workspace root"
+        );
+    }
+
+    #[test]
+    fn from_graph_recomputes_workspace_spanning_hoist() {
+        // `from_graph` (rebuild/prune's on-disk recompute) must dispatch to
+        // the SAME workspace-spanning planner the installer uses under the
+        // `none` default, or it would look for a shared dep under a member
+        // where the installer never wrote it.
+        let root = tempfile::tempdir().unwrap();
+        let root_nm = root.path().join("node_modules");
+        let lodash_dir = root_nm.join("lodash");
+        std::fs::create_dir_all(&lodash_dir).unwrap();
+        // Member dirs exist but hold no lodash — it hoisted to the root.
+        std::fs::create_dir_all(root.path().join("packages/a/node_modules")).unwrap();
+        std::fs::create_dir_all(root.path().join("packages/b/node_modules")).unwrap();
+
+        let mut graph = LockfileGraph::default();
+        graph.importers.insert(".".into(), vec![]);
+        graph
+            .importers
+            .insert("packages/a".into(), vec![dep("lodash", "lodash@4.0.0")]);
+        graph
+            .importers
+            .insert("packages/b".into(), vec![dep("lodash", "lodash@4.0.0")]);
+        graph
+            .packages
+            .insert("lodash@4.0.0".into(), pkg("lodash", "4.0.0", &[]));
+
+        let placements = HoistedPlacements::from_graph(
+            root.path(),
+            &graph,
+            "node_modules",
+            HoistingLimits::None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            placements.package_dir("lodash@4.0.0"),
+            Some(lodash_dir.as_path())
+        );
+        assert_eq!(
+            placements.all_package_dirs("lodash@4.0.0").len(),
+            1,
+            "recompute must find the shared dep once, at the workspace root"
+        );
     }
 
     #[test]
