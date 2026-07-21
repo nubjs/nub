@@ -1,0 +1,12 @@
+# hawk (astral-sh/hawk) visibility-lint config.
+# vendor/aube is NOT a workspace member (own workspace, path deps) so hawk
+# treats it as external and never lints it — aube stays byte-for-byte untouched.
+
+[[production]]
+package = "nub-cli"
+bin = "nub"
+reason = "the shipped nub CLI binary"
+
+[[feature-profile]]
+name = "all"
+all-features = true
