@@ -967,14 +967,18 @@ fn apply_config_scope(
     // Scope the override sources to the role's dialect.
     let tagged = config_scope::gather_tagged_overrides(&manifest);
     let (effective, ignored) = config_scope::scope_overrides(role, major, minor, &tagged);
+    // Scope packageExtensions the same way: the top-level home is nub's neutral
+    // surface, honored only under nub identity and dropped under a compat role
+    // whose incumbent ignores it (see `scope_package_extensions`).
+    let (effective_pe, pe_ignored) = config_scope::scope_package_extensions(role, &manifest);
 
-    // Register the scoped source as the engine's sole override source, and
-    // the trusted-deps toggle (only bun honors `trustedDependencies`). Both
-    // are idempotent OnceLocks.
+    // Register the scoped sources as the engine's sole override / packageExtensions
+    // sources, and the trusted-deps toggle (only bun honors `trustedDependencies`).
     let trusted = config_scope::honors_trusted_dependencies(role);
     aube_util::update_engine_context(|c| {
         c.embedder_overrides = Some(effective);
         c.trusted_dependencies_honored = trusted;
+        c.embedder_package_extensions = Some(effective_pe);
     });
 
     if noise == ConfigScopeNoise::Warn {
@@ -986,6 +990,8 @@ fn apply_config_scope(
         {
             return Err(catalog_unsupported_error(role, &spec));
         }
+        let mut ignored = ignored;
+        ignored.extend(pe_ignored);
         emit_scope_warnings(role, &ignored);
 
         // Curated unsupported-config scan: FATAL-abort on the genuinely-hard
@@ -1672,6 +1678,13 @@ pub(crate) fn engine_brand_preflight() {
         // bool because that posture defaults `true` in standalone aube, which
         // would activate the feature there and break default-preservation.
         c.named_registries_enabled = read_branded_pnpm_config;
+        // nub treats packageExtensions as a checksummed, drift-enforced config
+        // like pnpm: it stamps `packageExtensionsChecksum` on its own generic
+        // lockfile (nub.lock) and re-resolves / frozen-fails on a mismatch.
+        // Unconditional (not surface-gated) — harmless under lockfile kinds that
+        // carry no checksum (npm/yarn/bun locks), where stored and computed both
+        // resolve to `None`. Standalone aube leaves the default `false`.
+        c.enforce_package_extensions_checksum = true;
     });
     match surface {
         ConfigSurface::NubIdentity(dir) => {

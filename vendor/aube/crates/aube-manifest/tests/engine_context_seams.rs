@@ -25,17 +25,24 @@ fn embedder_overrides_and_trusted_deps_gates_route_through_engine_context() {
         r#"{
             "name": "t",
             "resolutions": { "lodash": "4.17.21" },
-            "pnpm": { "overrides": { "minimist": "1.2.8" } },
+            "pnpm": {
+                "overrides": { "minimist": "1.2.8" },
+                "packageExtensions": { "foo@*": { "dependencies": { "bar": "1.0.0" } } }
+            },
+            "packageExtensions": { "baz@*": { "peerDependencies": { "qux": "2.0.0" } } },
             "trustedDependencies": ["esbuild"]
         }"#,
     );
 
     // --- upstream-neutral default: both gates open ---
-    // overrides_map folds every source; trusted_dependencies honors the array.
+    // overrides_map folds every source; trusted_dependencies honors the array;
+    // package_extensions merges pnpm.* and top-level.
     let folded = pkg.overrides_map();
     assert_eq!(folded.get("lodash").map(String::as_str), Some("4.17.21"));
     assert_eq!(folded.get("minimist").map(String::as_str), Some("1.2.8"));
     assert_eq!(pkg.trusted_dependencies(), vec!["esbuild".to_string()]);
+    let pe = pkg.package_extensions();
+    assert!(pe.contains_key("foo@*") && pe.contains_key("baz@*"));
 
     // --- embedder_overrides: a scoped map replaces the fold verbatim ---
     let scoped: BTreeMap<String, String> = [("only-this".to_string(), "9.9.9".to_string())]
@@ -55,14 +62,33 @@ fn embedder_overrides_and_trusted_deps_gates_route_through_engine_context() {
         "a non-Bun incumbent suppresses trustedDependencies entirely"
     );
 
-    // --- restore the upstream-neutral context, confirm both gates reopen ---
+    // --- embedder_package_extensions: a scoped map replaces the walk verbatim ---
+    let scoped_pe: BTreeMap<String, serde_json::Value> = [(
+        "only-ext@*".to_string(),
+        serde_json::json!({ "dependencies": { "dep": "1.0.0" } }),
+    )]
+    .into_iter()
+    .collect();
+    update_engine_context(|c| c.embedder_package_extensions = Some(scoped_pe.clone()));
+    assert_eq!(
+        pkg.package_extensions(),
+        scoped_pe,
+        "a Some(map) packageExtensions source is returned verbatim, skipping the walk"
+    );
+
+    // --- restore the upstream-neutral context, confirm every gate reopens ---
     update_engine_context(|c| {
         c.embedder_overrides = None;
         c.trusted_dependencies_honored = true;
+        c.embedder_package_extensions = None;
     });
     assert!(
         pkg.overrides_map().contains_key("lodash"),
         "clearing embedder_overrides restores the manifest fold"
     );
     assert_eq!(pkg.trusted_dependencies(), vec!["esbuild".to_string()]);
+    assert!(
+        pkg.package_extensions().contains_key("baz@*"),
+        "clearing embedder_package_extensions restores the manifest walk"
+    );
 }
