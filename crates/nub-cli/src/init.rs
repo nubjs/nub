@@ -42,12 +42,17 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
     let interactive =
         !opts.yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
-    let default_name = sanitize_name(
+    // A basename that sanitizes to nothing (non-Latin script, all-symbol) must
+    // not become `"name": ""` — an invalid manifest that fails silently later.
+    let default_name = match sanitize_name(
         cwd.file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
             .as_str(),
-    );
+    ) {
+        s if s.is_empty() => "app".to_string(),
+        s => s,
+    };
 
     // ── answers: flags win, then prompts (TTY), then defaults ───────────
     let name = match (&opts.name, interactive) {

@@ -248,10 +248,10 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         family: Family::Install,
         aube_args: "commands::create::CreateArgs",
     },
-    // `init` is deliberately NOT registered: the spelling is reserved for
-    // nub's own project init (the maintainer owns the verb), not the engine's
-    // npm-style manifest scaffold. cli.rs answers `nub init` with a
-    // "nub's own init is coming" note instead of a PM redirect.
+    // `init` is deliberately NOT registered: the spelling belongs to nub's
+    // own project scaffold (src/init.rs, a clap subcommand), not the engine's
+    // npm-style manifest write — the fourth deliberate pnpm-compat exception
+    // (AGENTS.md); design record in wiki/commands/init.md.
     // Workspace fanout meta-verb. Registered so it errors with the honest
     // "use -r on the verb" message rather than the generic not-a-command
     // fallback (install_family::run_verb).

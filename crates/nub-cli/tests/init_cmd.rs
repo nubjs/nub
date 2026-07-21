@@ -145,6 +145,19 @@ fn rejects_positionals_with_a_create_hint() {
 }
 
 #[test]
+fn empty_sanitizing_directory_name_falls_back_to_app() {
+    // A non-Latin basename sanitizes to nothing; the manifest must never
+    // carry an invalid `"name": ""`.
+    let dir = tmpdir("unicode").join("中文项目");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = run_init(&dir, &["-y", "--no-install", "--no-git"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let pkg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(pkg["name"], "app");
+}
+
+#[test]
 fn non_tty_without_yes_takes_defaults_and_never_hangs() {
     // No `-y`: with piped stdin the prompts must self-skip to defaults —
     // the CI/piped contract.

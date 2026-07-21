@@ -9869,11 +9869,11 @@ mod tests {
         assert!(msg.contains("-r"), "{msg}");
     }
 
-    // `init` reservation: the registry exclusion is asserted in
-    // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs
-    // and the bareword arm's "nub's own init is coming" answer is covered
-    // through the spawned binary in tests/pm_verbs.rs (the arm lives inside
-    // run_nub's argv pre-parse, which has no injectable entry point here).
+    // `init`: the engine-registry exclusion is asserted in
+    // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs;
+    // the command itself (src/init.rs, a clap subcommand since it shipped) is
+    // covered through the spawned binary in tests/init_cmd.rs and
+    // tests/pm_verbs.rs.
 
     /// A project dir whose `.npmrc` points the registry at an unroutable port, so
     /// any code path that should NOT reach the network fails fast (connection
