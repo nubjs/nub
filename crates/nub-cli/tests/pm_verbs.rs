@@ -512,6 +512,73 @@ fn yarn_gate_refuses_mutating_verbs_and_names_the_remedy() {
     );
 }
 
+/// Workspace `link:` deps must not surface in dedupe's diff (#494): the
+/// lockfile parser synthesizes `<name>@link+<hash>` package entries that a
+/// fresh resolve never produces, so dedupe reported every workspace link as
+/// "removed" on each run — while the lockfile stayed byte-identical (the
+/// writer never serializes links) and `--check` failed forever. Offline by
+/// construction: the fixture's only deps are workspace members.
+#[test]
+fn dedupe_ignores_workspace_links_and_check_passes() {
+    let dir = pm_tmpdir("dedupe-ws");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"fixture","private":true,"devDependencies":{"@repro/a":"workspace:*"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pnpm-workspace.yaml"),
+        "packages:\n  - packages/*\n",
+    )
+    .unwrap();
+    for (rel, manifest) in [
+        (
+            "packages/a",
+            r#"{"name":"@repro/a","version":"1.0.0","dependencies":{"@repro/b":"workspace:*"}}"#,
+        ),
+        ("packages/b", r#"{"name":"@repro/b","version":"1.0.0"}"#),
+    ] {
+        let pkg = dir.join(rel);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), manifest).unwrap();
+    }
+
+    let (xdg_data, xdg_cache) = (pm_tmpdir("dedupe-ws-data"), pm_tmpdir("dedupe-ws-cache"));
+    let install = run_nub_with(&dir, &["install"], &xdg_data, &xdg_cache);
+    assert_eq!(
+        install.code, 0,
+        "stdout: {}\nstderr: {}",
+        install.stdout, install.stderr
+    );
+    let lock_before = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+
+    let dedupe = run_nub_with(&dir, &["dedupe"], &xdg_data, &xdg_cache);
+    assert_eq!(
+        dedupe.code, 0,
+        "stdout: {}\nstderr: {}",
+        dedupe.stdout, dedupe.stderr
+    );
+    assert!(
+        dedupe.combined().contains("already deduped"),
+        "workspace links must not be reported as dedupe changes: {}",
+        dedupe.combined()
+    );
+    dedupe.assert_brand_clean();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap(),
+        lock_before,
+        "dedupe must not change the lockfile"
+    );
+
+    let check = run_nub_with(&dir, &["dedupe", "--check"], &xdg_data, &xdg_cache);
+    assert_eq!(
+        check.code,
+        0,
+        "dedupe --check must pass on a deduped workspace: {}",
+        check.combined()
+    );
+}
+
 /// `nub import` converts a foreign lockfile to pnpm-lock.yaml (nub's
 /// canonical format — never aube-lock.yaml), refuses a second run without
 /// `--force`, and works fully offline.
