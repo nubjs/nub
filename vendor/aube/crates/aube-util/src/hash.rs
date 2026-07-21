@@ -254,6 +254,11 @@ pub const INSTALL_SHAPE_FIELDS: &[&str] = &[
     "name",
     "optionalDependencies",
     "overrides",
+    // `packageExtensions` extends a package's declared deps/optionalDeps/
+    // peerDeps/peerDependenciesMeta at resolve time, so an edit reshapes the
+    // resolved graph — it must invalidate the install, else the fast path
+    // silently skips the re-resolve the new extension demands.
+    "packageExtensions",
     "peerDependencies",
     "peerDependenciesMeta",
     "pnpm",
@@ -463,6 +468,24 @@ mod tests {
             serde_json::from_str(r#"{"dependencies":{"esbuild":"0.24.0"}}"#).unwrap();
         let b: serde_json::Value = serde_json::from_str(
             r#"{"dependencies":{"esbuild":"0.24.0"},"trustedDependencies":["esbuild"]}"#,
+        )
+        .unwrap();
+        assert_ne!(
+            manifest_install_shape_digest(&a),
+            manifest_install_shape_digest(&b)
+        );
+    }
+
+    #[test]
+    fn manifest_digest_reacts_to_package_extensions_change() {
+        // A top-level `packageExtensions` edit reshapes the resolved graph
+        // (here marking a peer optional), so the shape digest must change —
+        // otherwise the install fast path treats the edit as cosmetic and
+        // skips the re-resolve.
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"dependencies":{"is-positive":"3.1.0"}}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(
+            r#"{"dependencies":{"is-positive":"3.1.0"},"packageExtensions":{"is-positive@3.1.0":{"peerDependenciesMeta":{"react":{"optional":true}}}}}"#,
         )
         .unwrap();
         assert_ne!(

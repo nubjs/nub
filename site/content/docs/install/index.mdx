@@ -156,6 +156,7 @@ Under its own identity, Nub reads only neutral, cross-tool config — never anot
         { code: '.npmrc', ok: true },
         { code: 'overrides', ok: true },
         { code: 'resolutions', ok: true },
+        { code: 'packageExtensions', ok: true },
         { code: 'patchedDependencies', ok: true },
         { code: 'catalog:', ok: true },
         { code: 'workspace:', ok: true },
@@ -176,7 +177,7 @@ The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` exactly 
 A project is Nub's own in three cases: it declares Nub through `nub pm use nub`, `nub.lock` is the only lockfile signal, or a fresh project has no declaration and no lockfile. The switch aligns the manifest and lockfile, migrates pnpm workspace config into neutral `package.json` fields, and moves the project onto a neutral surface:
 
 - **Lockfile:** `nub.lock` — the pnpm v9 schema byte-for-byte, under Nub's own basename
-- **Package fields:** `workspaces`, `overrides`, `resolutions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
+- **Package fields:** `workspaces`, `overrides`, `resolutions`, `packageExtensions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
 - **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
 - **Install state:** `node_modules/.store/`, `.nub-state`, and the global store under Nub's own directories
 
@@ -220,6 +221,25 @@ Under Nub identity, `nub.lock` beside a foreign lockfile is the ambiguity error.
 <Callout title="Inference vs the pinned PM">
 This inference picks the *install engine's* incumbent — the format Nub reads and writes. It is separate from the version `nub pm` provisions: the meta-manager resolves a *pin* (`.yarnrc.yml` `yarnPath` → `packageManager` → `devEngines`) to fetch and run an exact PM binary. Same signals, different questions: "which format do I install in?" versus "which PM binary do I run?".
 </Callout>
+
+### Package extensions
+
+A published package sometimes declares a peer dependency it doesn't actually need, or is missing one it does — and its `package.json` isn't yours to edit. A top-level `packageExtensions` field patches a dependency's manifest at resolve time, adding to its `dependencies`, `optionalDependencies`, `peerDependencies`, or `peerDependenciesMeta`. The selector is a package name, optionally pinned to a version range:
+
+```json
+// package.json
+{
+  "packageExtensions": {
+    "react-server-dom-webpack@19.2.7": {
+      "peerDependenciesMeta": {
+        "react": { "optional": true }   // relax a peer the package over-declares
+      }
+    }
+  }
+}
+```
+
+An extension only *adds* what's missing — it never overrides a range the package already declares. To change the version of a dependency a package does declare, use `overrides` instead. The semantics match pnpm's `packageExtensions`, so a project moving off pnpm keeps the same escape hatch under a neutral field.
 
 ### Compat mode
 
