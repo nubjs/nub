@@ -328,7 +328,14 @@ fn read_tag_resolution(
     semver::Version::parse(version).ok()?;
     let at = entry.get("at")?.as_u64()?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let age = Duration::from_secs(now.saturating_sub(at));
+    // A future-dated record (clock skew at write, a hand-edited file) must not
+    // read as maximally fresh until wall-clock catches up — treat it as stale.
+    // The offline fallback still honors it; only freshness is denied.
+    let age = if at > now {
+        Duration::MAX
+    } else {
+        Duration::from_secs(now - at)
+    };
     Some((version.to_string(), age))
 }
 
@@ -969,17 +976,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store);
     }
 
+    /// A loopback registry answering EVERY request with 200 + a pnpm@9.9.9
+    /// version manifest whose dist.tarball points back at the mock (where a GET
+    /// yields this same JSON — never a valid tarball, so any install attempt
+    /// against it fails on integrity). This makes the tag-cache tests
+    /// DISCRIMINATING: a run that consults the registry observably resolves
+    /// 9.9.9 (and then fails to install it), which a cache short-circuit never
+    /// does. The accept loop rides a detached thread for the remaining test
+    /// process — a few KB, no cleanup needed.
+    fn mock_registry_serving_pnpm_9_9_9() -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = format!(
+            r#"{{ "name": "pnpm", "version": "9.9.9", "bin": {{ "pnpm": "bin/pnpm.cjs" }},
+                 "dist": {{ "tarball": "http://127.0.0.1:{port}/pnpm-9.9.9.tgz", "integrity": "sha512-AAAA" }} }}"#
+        );
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let mut buf = [0u8; 4096];
+                let _ = conn.read(&mut buf); // drain the request head
+                let _ = conn.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
     #[test]
     fn fresh_tag_resolution_short_circuits_the_registry() {
         if ambient_registry_override() {
-            return; // env registry outranks the dead-registry .npmrc — see helper
+            return; // env registry outranks the test .npmrc — see helper
         }
         // A recorded, TTL-fresh `latest` → 9.5.0 with the version installed must
-        // exec with ZERO network — the dead-registry .npmrc proves it (a resolve
-        // would error against 127.0.0.1:1). This is the #491 warm path.
+        // return WITHOUT consulting the registry. The registry is a live mock
+        // that resolves `latest` to a DIFFERENT version (9.9.9, uninstallable),
+        // so a run that consults it cannot produce Ok(9.5.0) — the assertion
+        // distinguishes the short-circuit from the offline-fallback path, which
+        // a dead registry alone could not.
         let store = offline_store_with("tag-fresh", "9.5.0");
+        let mock = mock_registry_serving_pnpm_9_9_9();
+        std::fs::write(store.join(".npmrc"), format!("registry={mock}\n")).unwrap();
         let pm_store = store.join("pm").join("pnpm");
-        record_tag_resolution(&pm_store, "http://127.0.0.1:1/", "latest", "9.5.0");
+        record_tag_resolution(&pm_store, &mock, "latest", "9.5.0");
 
         let pin = PmPin {
             pm: Pm::Pnpm,
@@ -995,13 +1041,50 @@ mod tests {
                 seen.borrow_mut().push(v.to_string());
             }),
         )
-        .expect("fresh tag record + cached install resolves offline");
+        .expect("fresh tag record + cached install must not consult the registry");
         assert_eq!(prov.version, "9.5.0");
         assert_eq!(
             *seen.borrow(),
             vec!["9.5.0".to_string()],
             "the shim-header hook still fires on the tag-cache hit"
         );
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn stale_tag_resolution_is_not_trusted_for_freshness() {
+        if ambient_registry_override() {
+            return; // env registry outranks the test .npmrc — see helper
+        }
+        // The TTL boundary: an EXPIRED record must NOT short-circuit — the
+        // resolve must run. Against the live mock, `latest` resolves to 9.9.9
+        // whose "tarball" is JSON, so the run fails at install; a wrongly-firing
+        // short-circuit would instead return Ok(9.5.0). Future-dated records
+        // (at > now) are equally untrusted.
+        let store = offline_store_with("tag-expired", "9.5.0");
+        let mock = mock_registry_serving_pnpm_9_9_9();
+        std::fs::write(store.join(".npmrc"), format!("registry={mock}\n")).unwrap();
+        let pm_store = store.join("pm").join("pnpm");
+        for at in [1u64, u64::MAX] {
+            std::fs::write(
+                tag_cache_file(&pm_store),
+                format!(
+                    "{{\"{}\": {{\"version\": \"9.5.0\", \"at\": {at}}}}}",
+                    tag_cache_key(&mock, "latest")
+                ),
+            )
+            .unwrap();
+            let pin = PmPin {
+                pm: Pm::Pnpm,
+                version: Some("latest".to_string()),
+            };
+            let result = provision_pm(&pin, &store, &store, None);
+            assert!(
+                result.is_err(),
+                "an untrusted record (at={at}) must re-resolve, reaching the mock's \
+                 uninstallable 9.9.9 — got {result:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&store);
     }
 

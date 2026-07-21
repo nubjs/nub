@@ -603,10 +603,12 @@ const CORGI_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 /// default re-resolves `latest` on real invocations and paying a whole packument
 /// per call was the dominant cost of #491 (25 MB, uncompressed, per `npx` run).
 /// Only a RANGE needs the version-enumerating packument, fetched with the corgi
-/// `Accept`. A registry that doesn't implement the version endpoint answers with
-/// an HTTP error → fall back to the packument; a TRANSPORT failure (host
-/// unreachable) propagates instead, since the packument fetch would only re-run
-/// the same doomed connect (and take its own retries doing it).
+/// `Accept`. A registry that doesn't implement the version endpoint — an HTTP
+/// error, or a 200 whose body isn't a usable manifest (a path-prefix proxy
+/// serving the whole packument, an HTML error page) — falls back to the
+/// packument, so no registry the packument path handled regresses. A TRANSPORT
+/// failure (host unreachable) propagates instead, since the packument fetch
+/// would only re-run the same doomed connect (and take its own retries doing it).
 pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
     let spec = spec.trim();
     let base = cfg.base.trim_end_matches('/');
@@ -616,12 +618,13 @@ pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Re
         let url = format!("{base}/{pkg}/{spec}");
         match download::fetch_text_accept_auth(&url, None, cfg.auth.as_ref()) {
             Ok(body) => {
-                let meta: Value = serde_json::from_str(&body)
-                    .with_context(|| format!("parsing version manifest {url}"))?;
-                let mut dist = resolve_dist_from_version_manifest(&meta)
-                    .with_context(|| format!("resolving {pkg}@{spec}"))?;
-                dist.tarball = rewrite_tarball_origin(&dist.tarball, &cfg.base);
-                return Ok(dist);
+                if let Ok(meta) = serde_json::from_str::<Value>(&body)
+                    && let Ok(mut dist) = resolve_dist_from_version_manifest(&meta)
+                {
+                    dist.tarball = rewrite_tarball_origin(&dist.tarball, &cfg.base);
+                    return Ok(dist);
+                }
+                // 200 but not a version manifest → packument fallback below.
             }
             Err(e) if e.status.is_none() => {
                 return Err(e.error).with_context(|| format!("fetching {url}"));

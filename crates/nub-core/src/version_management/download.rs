@@ -290,7 +290,14 @@ fn try_download(
     auth: Option<&Auth>,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> std::result::Result<String, Attempt> {
+    // Integrity is verified over the on-disk bytes, so the wire body must BE the
+    // published artifact. The client's `gzip` feature (wanted for packument
+    // fetches) would otherwise advertise `Accept-Encoding: gzip` here and
+    // transparently decompress a `Content-Encoding`d response — inviting a proxy
+    // to re-encode an already-compressed tarball and fail the checksum. Ask for
+    // identity: artifacts gain nothing from transfer compression.
     let resp = with_auth(client.get(url), auth)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .send()
         .map_err(Attempt::from_send)?;
     let mut resp = resp.error_for_status().map_err(Attempt::from_status)?;
