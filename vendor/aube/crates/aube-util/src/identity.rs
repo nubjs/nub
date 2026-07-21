@@ -329,6 +329,15 @@ pub struct Embedder {
     /// repaint, no leftover frame, no flash) is unconditional — only *whether
     /// the animated renderer is the default* is gated here.
     pub tty_progress: bool,
+    /// When `true`, `update --interactive` uses the tri-state table picker:
+    /// one row per outdated direct dep, with horizontal radio cells cycling
+    /// keep → in-range target → dist-tag latest, every row defaulting to
+    /// "keep" so an update is an explicit opt-in. When `false` (aube's
+    /// default), the original `demand::MultiSelect` picker (flat labels,
+    /// everything pre-selected) is used, so standalone aube's interactive
+    /// output and selection semantics are byte-for-byte unchanged.
+    /// Embedder-fixed: the host's interactive UX call, not a user knob.
+    pub rich_update_picker: bool,
     /// When `false` (aube's default), a lockfile entry whose dependency
     /// source the reader can't resolve (a `git`/`jsr`/unknown protocol in a
     /// yarn.lock or bun.lock) keeps aube's prior best-effort behavior:
@@ -442,6 +451,9 @@ pub const AUBE: Embedder = Embedder {
     // `AUBE_TTY_PROGRESS` opt-in for standalone aube, so default output is
     // unchanged.
     tty_progress: false,
+    // Standalone aube keeps the demand::MultiSelect update picker, so its
+    // `update -i` UX is unchanged on the default path.
+    rich_update_picker: false,
     // Standalone aube keeps its prior best-effort source handling
     // (warn+drop for berry, reclassify-to-registry for classic/bun) so its
     // default install behavior is byte-identical.
@@ -645,6 +657,7 @@ mod tests {
         assert_eq!(id.config_env_prefix, Some("AUBE"));
         assert_eq!(id.primer_ttl, None);
         assert!(!id.tty_progress);
+        assert!(!id.rich_update_picker);
         assert_eq!(id.trust_policy_ignore_after_default, None);
         assert!(id.extra_settings_fingerprint.is_none());
     }

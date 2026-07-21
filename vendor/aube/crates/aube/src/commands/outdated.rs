@@ -510,7 +510,11 @@ impl OutdatedArgs {
 ///
 /// The padding is added on the *raw* string before color codes so
 /// downstream column alignment isn't thrown off by invisible escapes.
-fn colorize_diff(current: &str, target: &str, width: usize) -> String {
+///
+/// `on_stderr` selects the stream whose TTY state gates color emission:
+/// `outdated`'s table prints on stdout (`false`), while the interactive
+/// update picker renders on stderr (`true`).
+pub(crate) fn colorize_diff(current: &str, target: &str, width: usize, on_stderr: bool) -> String {
     use clx::style;
     let plain = format!("{target:<width$}");
     if current == target {
@@ -573,12 +577,20 @@ fn colorize_diff(current: &str, target: &str, width: usize) -> String {
     // looking at a TTY on stdout. clx 1.3 only ships `nred`/`ncyan`
     // directly, so green and magenta come from `nstyle(...).green()`
     // / `.magenta()` — same effect, just the chain is explicit.
-    let painted = match head_color {
-        SemverDiff::Major => style::nstyle(tail).red().to_string(),
-        SemverDiff::Minor => style::nstyle(tail).cyan().to_string(),
-        SemverDiff::Patch => style::nstyle(tail).green().to_string(),
-        SemverDiff::Prerelease => style::nstyle(tail).magenta().to_string(),
+    // The picker path renders on stderr and passes `on_stderr: true` for
+    // the symmetric `estyle` gating.
+    let base = if on_stderr {
+        style::estyle(tail)
+    } else {
+        style::nstyle(tail)
     };
+    let painted = match head_color {
+        SemverDiff::Major => base.red(),
+        SemverDiff::Minor => base.cyan(),
+        SemverDiff::Patch => base.green(),
+        SemverDiff::Prerelease => base.magenta(),
+    }
+    .to_string();
     format!("{head}{painted}{trailing_pad}")
 }
 
@@ -622,9 +634,9 @@ fn render_table(rows: &[Row], long: bool) {
     let painted: Vec<(String, String)> = rows
         .iter()
         .map(|r| {
-            let wanted = colorize_diff(&r.current, &r.wanted, want_w);
+            let wanted = colorize_diff(&r.current, &r.wanted, want_w, false);
             let latest = if r.latest_known {
-                colorize_diff(&r.current, &r.latest, latest_w)
+                colorize_diff(&r.current, &r.latest, latest_w, false)
             } else {
                 format!("{:<latest_w$}", r.latest)
             };
@@ -740,7 +752,7 @@ mod colorize_tests {
 
     #[test]
     fn equal_versions_render_plain() {
-        let painted = colorize_diff("1.2.3", "1.2.3", 6);
+        let painted = colorize_diff("1.2.3", "1.2.3", 6, false);
         assert_eq!(strip_ansi(&painted).trim_end(), "1.2.3");
     }
 
@@ -749,7 +761,7 @@ mod colorize_tests {
         // ANSI escapes only appear when clx's color detection picks a
         // colored output mode (TTY/`CLICOLOR_FORCE`); the test runs
         // headless so we assert on visible content only.
-        let painted = colorize_diff("1.2.3", "2.0.0", 6);
+        let painted = colorize_diff("1.2.3", "2.0.0", 6, false);
         assert_eq!(strip_ansi(&painted).trim_end(), "2.0.0");
     }
 
@@ -758,7 +770,7 @@ mod colorize_tests {
         // The leading `1.2.` prefix matches the current version and
         // must always render plain — only the trailing component is
         // a candidate for color when a colored terminal is in play.
-        let painted = colorize_diff("1.2.3", "1.2.4", 6);
+        let painted = colorize_diff("1.2.3", "1.2.4", 6, false);
         let visible = strip_ansi(&painted);
         assert_eq!(visible.trim_end(), "1.2.4");
         assert!(painted.starts_with("1.2."), "head should render plain");
@@ -774,7 +786,7 @@ mod colorize_tests {
         // when tail would be empty; here we just assert the visible
         // version is correct (color presence depends on the
         // ambient TTY mode, which is off in unit tests).
-        let painted = colorize_diff("1.2.3-rc.1", "1.2.3", 6);
+        let painted = colorize_diff("1.2.3-rc.1", "1.2.3", 6, false);
         assert_eq!(strip_ansi(&painted).trim_end(), "1.2.3");
     }
 
@@ -782,7 +794,7 @@ mod colorize_tests {
     fn unparseable_versions_fall_back_to_plain() {
         // dist-tags ("latest") and other non-semver strings should
         // skip colorization rather than panic. Width still applies.
-        let painted = colorize_diff("1.2.3", "latest", 8);
+        let painted = colorize_diff("1.2.3", "latest", 8, false);
         assert_eq!(painted, "latest  ");
     }
 

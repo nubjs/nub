@@ -71,6 +71,7 @@ pub mod undeprecate;
 pub mod unlink;
 pub mod unpublish;
 pub mod update;
+mod update_picker;
 pub mod version;
 pub mod view;
 pub mod whoami;
