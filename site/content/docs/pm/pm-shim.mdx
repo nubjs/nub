@@ -43,3 +43,7 @@ and node_modules.
 ```
 
 Runner commands stay transparent. The `npx` and `pnpx` tools and the `init` / `create` / `dlx` / `exec` verbs fall through to the system tool whatever the pin, so `npm create vite` works in a pnpm project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.
+
+## No manager on PATH
+
+An unpinned invocation falls through to the system manager. When there is none — a fresh machine, a minimal container — the shim runs a dynamic default instead of failing: the version family the committed lockfile implies, or the registry `latest` when there is no lockfile. It announces the choice on stderr and writes no pin. The `latest` resolution is remembered for 24 hours, so repeat invocations dispatch with no registry round-trip, and when the registry is unreachable the last resolved version keeps working.

@@ -7868,11 +7868,11 @@ fn shim_plan(
             };
             // A name-only pin (devEngines.packageManager without a version)
             // constrains the NAME, not the version — prefer the user's own
-            // matching PM on PATH: zero network (a spec like "latest" or a
-            // lockfile family re-resolves against the registry on EVERY
-            // invocation) and no run-to-run drift as new versions publish.
-            // Provision the lockfile-implied family / registry latest only on
-            // a true PATH miss.
+            // matching PM on PATH: zero network (a lockfile-family range still
+            // re-resolves against the registry per invocation; "latest" is
+            // TTL-cached but pays a resolve on expiry) and no run-to-run drift
+            // as new versions publish. Provision the lockfile-implied family /
+            // registry latest only on a true PATH miss.
             if pin.version.is_none() {
                 let shim_dir = shim::shim_dir()?;
                 if let Some(system) = shim::find_system_pm(invoked.as_str(), &shim_dir) {
@@ -7917,12 +7917,15 @@ fn shim_plan(
                     env: Vec::new(),
                 });
             }
-            // True PATH miss: provision a dynamic default of the INVOKED PM —
+            // True PATH miss: run a dynamic default of the INVOKED PM —
             // announced, never a baked version, and the shim never writes a pin.
+            // "using", not "provisioning": with the dist-tag TTL cache a warm
+            // call resolves and execs with zero network, and the install path
+            // prints its own Installing…/Installed… lines when it does run.
             let root = shim_lockfile_root(cwd);
             let (spec, why) = dynamic_default_spec(invoked.pm(), &root)?;
             eprintln!(
-                "nub: no {} on PATH — provisioning {}@{spec} ({why}); one-time default, no pin written",
+                "nub: no {} on PATH — using {}@{spec} ({why}); one-time default, no pin written",
                 invoked.as_str(),
                 invoked.pm()
             );

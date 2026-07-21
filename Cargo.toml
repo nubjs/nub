@@ -147,7 +147,11 @@ blake3 = "1"
 # blocking + rustls (no OpenSSL/cross-compile pain), native roots so corporate
 # MITM CAs work, socks for SOCKS proxies. reqwest gives HTTP(S)_PROXY/NO_PROXY
 # for free. NOT async — provisioning is a short at-most-once-per-version step.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots", "socks"] }
+# gzip: without it reqwest sends no Accept-Encoding, so the registry serves
+# packuments identity-encoded (the full `npm` packument is ~25 MB raw vs ~6 MB
+# gzipped — a per-invocation cost on unpinned shim calls, #491). Tarballs are
+# unaffected: registries serve .tgz without Content-Encoding.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots", "socks", "gzip"] }
 # xz extraction of the dist tarball. liblzma's "static" vendors its own C liblzma
 # (no system dependency, no shell-out to tar/xz); the maintained xz2 successor.
 liblzma = { version = "0.4", features = ["static"] }

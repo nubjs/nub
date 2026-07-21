@@ -126,18 +126,52 @@ pub fn fetch_text(url: &str) -> Result<String> {
 /// [`fetch_text`] with an optional private-registry `Authorization` header and the
 /// bounded transient-failure retry.
 pub fn fetch_text_auth(url: &str, auth: Option<&Auth>) -> Result<String> {
-    let client = client()?;
+    fetch_text_accept_auth(url, None, auth).map_err(|e| e.error)
+}
+
+/// A failed text fetch, split by WHERE it failed: `status` carries the HTTP
+/// status when the server ANSWERED with a non-2xx (after retries) — the signal a
+/// caller can use to fall back to a different endpoint on the same host — and is
+/// `None` for a transport-level failure (unreachable host, TLS, timeout), where
+/// any sibling-endpoint fallback would only re-run the same doomed connect.
+pub struct FetchTextError {
+    pub status: Option<u16>,
+    pub error: anyhow::Error,
+}
+
+/// [`fetch_text_auth`] with an optional `Accept` header (the npm registry varies
+/// its packument representation on it) and a status-carrying error so callers can
+/// distinguish "endpoint said no" from "host unreachable".
+pub fn fetch_text_accept_auth(
+    url: &str,
+    accept: Option<&str>,
+    auth: Option<&Auth>,
+) -> std::result::Result<String, FetchTextError> {
+    let client = match client() {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(FetchTextError {
+                status: None,
+                error: e,
+            });
+        }
+    };
     let mut attempt = 0;
     loop {
         attempt += 1;
         let last = attempt >= MAX_ATTEMPTS;
-        match try_fetch_text(&client, url, auth) {
+        match try_fetch_text(&client, url, accept, auth) {
             Ok(body) => return Ok(body),
             Err(e) if !last && e.transient => {
                 backoff(attempt);
                 continue;
             }
-            Err(e) => return Err(e.error).with_context(|| format!("GET {url}")),
+            Err(e) => {
+                return Err(FetchTextError {
+                    status: e.status,
+                    error: e.error.context(format!("GET {url}")),
+                });
+            }
         }
     }
 }
@@ -147,20 +181,26 @@ pub fn fetch_text_auth(url: &str, auth: Option<&Auth>) -> Result<String> {
 fn try_fetch_text(
     client: &reqwest::blocking::Client,
     url: &str,
+    accept: Option<&str>,
     auth: Option<&Auth>,
 ) -> std::result::Result<String, Attempt> {
-    let resp = with_auth(client.get(url), auth)
-        .send()
-        .map_err(Attempt::from_send)?;
+    let mut req = with_auth(client.get(url), auth);
+    if let Some(media_type) = accept {
+        req = req.header(reqwest::header::ACCEPT, media_type);
+    }
+    let resp = req.send().map_err(Attempt::from_send)?;
     let resp = resp.error_for_status().map_err(Attempt::from_status)?;
     resp.text()
         .map_err(|e| Attempt::transient(anyhow::Error::new(e)))
 }
 
-/// A failed attempt plus whether the retry loop should try again.
+/// A failed attempt plus whether the retry loop should try again. `status` is
+/// the HTTP status when the server answered non-2xx (`None` for transport
+/// failures) — surfaced through [`FetchTextError`] for endpoint fallback.
 struct Attempt {
     error: anyhow::Error,
     transient: bool,
+    status: Option<u16>,
 }
 
 impl Attempt {
@@ -168,12 +208,14 @@ impl Attempt {
         Self {
             error,
             transient: true,
+            status: None,
         }
     }
     fn fatal(error: anyhow::Error) -> Self {
         Self {
             error,
             transient: false,
+            status: None,
         }
     }
     /// A send/connect/timeout failure (no HTTP status yet).
@@ -182,14 +224,17 @@ impl Attempt {
         Self {
             error: anyhow::Error::new(err),
             transient,
+            status: None,
         }
     }
     /// A non-2xx status from `error_for_status`: only 5xx/429 retry.
     fn from_status(err: reqwest::Error) -> Self {
         let transient = err.status().map(status_is_transient).unwrap_or(false);
+        let status = err.status().map(|s| s.as_u16());
         Self {
             error: anyhow::Error::new(err),
             transient,
+            status,
         }
     }
 }
