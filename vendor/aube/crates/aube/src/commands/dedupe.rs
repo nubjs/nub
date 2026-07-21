@@ -126,15 +126,18 @@ pub async fn run(args: DedupeArgs) -> miette::Result<()> {
 /// present in `old` but not `new`, and vice versa. Versions that are in both
 /// are omitted (they're untouched).
 ///
-/// Only packages the lockfile writer actually serializes participate.
-/// `link:`/`exec:` entries are excluded because the two graphs represent
-/// them asymmetrically: the parser synthesizes a `<name>@link+<hash>`
-/// package for every workspace link it reads back, while a fresh resolve
-/// binds workspace members by version and records no package entry at
-/// all. Since the writer skips them on both paths, they can never be a
-/// real lockfile change — diffing them reported workspace links as
-/// "removed" on every run while the lockfile stayed byte-identical, and
-/// `--check` failed forever.
+/// Only packages the lockfile writer actually serializes participate:
+/// `link:`/`exec:` entries are excluded, exactly mirroring the writer's
+/// skip set for the `packages:`/`snapshots:` sections (`pnpm/write.rs`),
+/// so a key that can never reach the lockfile can never be reported as a
+/// change. The case that made this bite is workspace-member links, where
+/// the two graphs are also asymmetric: the parser synthesizes a
+/// `<name>@link+<hash>` package for every workspace link it reads back,
+/// while a fresh resolve binds members by version and records no package
+/// entry at all — so dedupe reported them as "removed" on every run
+/// while the lockfile stayed byte-identical, and `--check` failed
+/// forever. (`exec:` and non-member `link:` deps resolve symmetrically;
+/// they are excluded on the writer-parity ground alone.)
 fn diff_graphs(
     existing: Option<&aube_lockfile::LockfileGraph>,
     new: &aube_lockfile::LockfileGraph,
