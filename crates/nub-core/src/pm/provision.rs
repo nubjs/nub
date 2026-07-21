@@ -1044,9 +1044,8 @@ mod tests {
         // Round-trip, preserving a sibling registry's entry.
         record_tag_resolution(&pm_store, "https://registry.npmjs.org/", "latest", "12.0.1");
         record_tag_resolution(&pm_store, "https://mirror.example.com", "latest", "11.9.9");
-        let (version, age) =
-            read_tag_resolution(&pm_store, "https://registry.npmjs.org", "latest")
-                .expect("fresh record reads back");
+        let (version, age) = read_tag_resolution(&pm_store, "https://registry.npmjs.org", "latest")
+            .expect("fresh record reads back");
         assert_eq!(version, "12.0.1");
         assert!(age <= TAG_TTL, "a just-written record is fresh");
         assert_eq!(
