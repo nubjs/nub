@@ -6870,6 +6870,40 @@ fn run_bin_fallback_workspace_root() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The fallback never resolves path-shaped names: `../evil` must NOT traverse
+/// out of `.bin` via the walk-up, and `sub/tool` must not reach a nested file
+/// (real .bin entries are always flat). Both keep the missing-script error.
+#[test]
+fn run_bin_fallback_never_resolves_path_shaped_names() {
+    let dir = run_bin_project("traversal", r#"{"name":"t","scripts":{}}"#);
+    // A node-shebang file OUTSIDE .bin that a naive `.bin.join("../evil")`
+    // would resolve, and a nested file a `.bin.join("sub/tool")` would reach.
+    write_local_bin(&dir, "tool", NODE_BIN_BODY);
+    std::fs::write(
+        dir.join("node_modules").join("evil.js"),
+        "#!/usr/bin/env node\nconsole.log('TRAVERSED');\n",
+    )
+    .unwrap();
+    let nested = dir.join("node_modules").join(".bin").join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("tool"), NODE_BIN_BODY).unwrap();
+
+    for name in ["../evil.js", "sub/tool"] {
+        let (stdout, stderr, code) = run_in_dir(&dir, &[name]);
+        assert_eq!(code, 1, "{name} must not resolve: {stdout}{stderr}");
+        assert!(
+            !stdout.contains("TRAVERSED") && !stdout.contains("BIN:"),
+            "{name} must not execute anything: {stdout}"
+        );
+        assert!(
+            stderr.contains("missing script"),
+            "{name} keeps the missing-script error: {stderr}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// npm/pnpm set `$NODE` to the node binary running the script so `$NODE child.js`
 /// invokes "the same Node." nub points it at the PATH-shim node (→ nub) so an
 /// absolute-path `$NODE` re-enters nub and the child stays augmented (it used to be

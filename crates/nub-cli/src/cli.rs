@@ -4864,27 +4864,33 @@ fn run_exec(bin: &str, compat_mode: bool, args: &[String]) -> Result<i32> {
     run_exec_with_dlx(bin, compat_mode, args, None)
 }
 
-/// The `.bin` fallback gated to plain names: a `/regex/` selector never falls
-/// back (a bin name can't contain the selector's slashes).
+/// A name the `.bin` fallback may resolve: no path separators, so a
+/// `/regex/` selector never falls back and `../foo` can't traverse out of
+/// `.bin` via the walk-up (bin names on disk are always flat).
+fn is_plain_bin_name(name: &str) -> bool {
+    !name.contains('/') && !name.contains('\\')
+}
+
+/// The `.bin` fallback gated to plain names (see `is_plain_bin_name`).
 fn run_bin_fallback_for_plain_name(
     name: &str,
     dir: &Path,
     compat_mode: bool,
     args: &[String],
 ) -> Result<Option<i32>> {
-    if name.starts_with('/') {
+    if !is_plain_bin_name(name) {
         return Ok(None);
     }
     try_run_bin_fallback(name, dir, compat_mode, args)
 }
 
-/// The missing-script error's `.bin` addendum — empty for a regex selector,
-/// which never consulted `.bin`.
+/// The missing-script error's `.bin` addendum — empty for a name the fallback
+/// never consulted (regex selector, path-shaped).
 fn bin_miss_note(name: &str) -> String {
-    if name.starts_with('/') {
-        String::new()
-    } else {
+    if is_plain_bin_name(name) {
         format!(" (and no node_modules/.bin/{name})")
+    } else {
+        String::new()
     }
 }
 
