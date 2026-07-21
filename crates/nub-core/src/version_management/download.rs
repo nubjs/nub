@@ -15,7 +15,7 @@
 //! number of times ([`MAX_ATTEMPTS`]); 4xx and integrity failures fail fast.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -278,6 +278,156 @@ fn try_download(
     }
     file.flush().ok();
     Ok(hex_lower(&hasher.finalize()))
+}
+
+/// Download a `.tar.xz` and extract it WHILE it streams in (#496): the response
+/// bytes are hashed and fed through a bounded channel to an extractor thread, so
+/// the wall clock is max(download, decode+extract) instead of their sum. The
+/// extraction lands under `stage_parent` (the provisioner's quarantine `.tmp-`
+/// work dir) — the caller MUST verify the returned SHA-256 against
+/// `SHASUMS256.txt` before committing the tree anywhere, and must discard the
+/// work dir on mismatch (`provision_node`'s `WorkGuard` covers every exit path).
+/// Returns `(sha256_hex, extracted_top_dir)`.
+///
+/// Retry mirrors [`download_to_file_auth`]: a mid-stream transport fault or a
+/// short body (known `Content-Length`, connection closed early) retries from
+/// scratch with a fresh stage dir; an extraction failure (corrupt xz, bomb-cap
+/// trip, disk error) is fatal — TLS already guarantees stream integrity, so
+/// corrupt bytes won't improve on a retry.
+pub fn download_and_extract_tar_xz(
+    url: &str,
+    stage_parent: &Path,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<(String, PathBuf)> {
+    let client = client()?;
+    let source_name = url.rsplit('/').next().unwrap_or(url).to_string();
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let last = attempt >= MAX_ATTEMPTS;
+        match try_download_extract(&client, url, &source_name, stage_parent, &mut progress) {
+            Ok(ok) => return Ok(ok),
+            Err(e) if !last && e.transient => {
+                backoff(attempt);
+                continue;
+            }
+            Err(e) => return Err(e.error).with_context(|| format!("downloading {url}")),
+        }
+    }
+}
+
+/// One streamed download+extract attempt. The stage dir is wiped at the top so a
+/// retry never extracts on top of a partial tree.
+fn try_download_extract(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    source_name: &str,
+    stage_parent: &Path,
+    progress: &mut impl FnMut(u64, Option<u64>),
+) -> std::result::Result<(String, PathBuf), Attempt> {
+    let resp = with_auth(client.get(url), None)
+        .send()
+        .map_err(Attempt::from_send)?;
+    let mut resp = resp.error_for_status().map_err(Attempt::from_status)?;
+    let total = resp.content_length();
+
+    let stage = stage_parent.join("stream-extract");
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)
+        .with_context(|| format!("create {}", stage.display()))
+        .map_err(Attempt::fatal)?;
+
+    // Bounded channel = backpressure: at most 16 × 64 KiB in flight, so a slow
+    // disk can't balloon memory and a fast disk never starves the socket.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+    let extractor = {
+        let stage = stage.clone();
+        let name = source_name.to_string();
+        std::thread::spawn(move || {
+            crate::version_management::extract::extract_tar_xz_stream(
+                ChannelReader {
+                    rx,
+                    buf: Vec::new(),
+                    pos: 0,
+                },
+                &name,
+                &stage,
+            )
+        })
+    };
+
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut written = 0u64;
+    let mut transport: std::result::Result<(), Attempt> = Ok(());
+    loop {
+        let n = match resp.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                // Mid-stream transport drop → retry (after collecting the thread).
+                transport = Err(Attempt::transient(
+                    anyhow::Error::new(e).context("reading response body"),
+                ));
+                break;
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        written += n as u64;
+        progress(written, total);
+        if tx.send(buf[..n].to_vec()).is_err() {
+            // The extractor exited early — its join result carries the real error.
+            break;
+        }
+    }
+    drop(tx); // signals EOF to the extractor
+    let extracted = extractor.join();
+
+    // Precedence: a transport fault outranks the extractor's (symptomatic,
+    // truncated-stream) error; then a short-but-cleanly-closed body retries too.
+    transport?;
+    if let Some(t) = total {
+        if written != t {
+            return Err(Attempt::transient(anyhow::anyhow!(
+                "short response body: got {written} of {t} bytes"
+            )));
+        }
+    }
+    match extracted {
+        Ok(Ok(top)) => Ok((hex_lower(&hasher.finalize()), top)),
+        Ok(Err(e)) => Err(Attempt::fatal(e)),
+        Err(_) => Err(Attempt::fatal(anyhow::anyhow!(
+            "extractor thread panicked unpacking {source_name}"
+        ))),
+    }
+}
+
+/// `Read` over the download→extractor channel: each `recv` hands the next chunk,
+/// a disconnected sender is EOF. (The download side never sends an empty chunk.)
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.buf.len() {
+            match self.rx.recv() {
+                Ok(chunk) => {
+                    self.buf = chunk;
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.buf.len() - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
 }
 
 /// SHA-256 (lowercase hex) of a file already on disk.

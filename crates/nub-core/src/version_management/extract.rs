@@ -1,4 +1,5 @@
-//! Extract a verified Node dist archive into nub's store.
+//! Extract a Node dist archive into nub's store (or its quarantine temp dir,
+//! for the streamed path — commit into the store stays gated on the checksum).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,9 +11,10 @@ use anyhow::{Context, Result, bail};
 /// `aube_store::MAX_TARBALL_DECOMPRESSED_BYTES`. A stock Node dist tarball
 /// unpacks to well under 100 MiB, so this sits an order of magnitude above any
 /// real artifact while stopping a malicious/mirror-served small-compressed /
-/// huge-decompressed payload from exhausting disk or memory. The download is
-/// already checksum-verified against `SHASUMS256.txt` before extraction, so this
-/// is defense-in-depth against a MITM/mirror that also forged the checksum.
+/// huge-decompressed payload from exhausting disk or memory. On the streamed
+/// path extraction overlaps the download, so these caps are the live guard while
+/// bytes are still unverified; the SHA-256 gate then decides whether the
+/// extracted tree is COMMITTED into the store at all (`provision_node`).
 ///
 /// The cap is wired through the `_capped` extractor variants as a parameter
 /// rather than read from this const directly, so a bomb test can inject a tiny
@@ -106,6 +108,25 @@ pub fn extract_tar_xz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     )
 }
 
+/// [`extract_tar_xz`] over an arbitrary byte stream instead of a file on disk —
+/// the seam the streamed download path (#496) feeds while the tarball is still
+/// arriving. `source_name` only labels error messages (there is no file path).
+/// Same caps, same traversal guard; the CALLER owns gating any commit of the
+/// extracted tree on checksum verification (see `provision_node`).
+pub(crate) fn extract_tar_xz_stream(
+    reader: impl Read,
+    source_name: &str,
+    dest_parent: &Path,
+) -> Result<PathBuf> {
+    extract_tar_xz_reader_capped(
+        reader,
+        Path::new(source_name),
+        dest_parent,
+        MAX_ARCHIVE_DECOMPRESSED_BYTES,
+        MAX_ARCHIVE_ENTRIES,
+    )
+}
+
 /// [`extract_tar_xz`] with the decompression + entry-count caps as explicit
 /// parameters — the seam a bomb test uses to inject tiny caps (the public entry
 /// uses the prod constants).
@@ -117,6 +138,18 @@ fn extract_tar_xz_capped(
 ) -> Result<PathBuf> {
     let file =
         std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
+    extract_tar_xz_reader_capped(file, archive, dest_parent, decompressed_cap, max_entries)
+}
+
+/// The shared extractor body: xz-decode + unpack any `Read`, capped. `archive`
+/// only labels error messages (a file path, or a URL basename for the stream).
+fn extract_tar_xz_reader_capped(
+    reader: impl Read,
+    archive: &Path,
+    dest_parent: &Path,
+    decompressed_cap: u64,
+    max_entries: usize,
+) -> Result<PathBuf> {
     // Cap the DECOMPRESSED stream against a decompression bomb (N2). Node
     // tarballs legitimately ship intra-tree symlinks (`bin/npm → ../lib/…`), so
     // unlike the PM-tgz extractor this path allows them — `Entry::unpack_in`
@@ -133,7 +166,7 @@ fn extract_tar_xz_capped(
     // canonicalization (unreachable — Windows Node ships as `.zip`, handled by
     // `extract_zip`). File data, exec bits, symlink targets, and the `..`/absolute
     // traversal guard are all preserved by `unpack_in`.
-    let decoder = CappedReader::new(liblzma::read::XzDecoder::new(file), decompressed_cap);
+    let decoder = CappedReader::new(liblzma::read::XzDecoder::new(reader), decompressed_cap);
     let mut tar = tar::Archive::new(decoder);
     std::fs::create_dir_all(dest_parent)
         .with_context(|| format!("create {}", dest_parent.display()))?;
@@ -319,6 +352,32 @@ mod tests {
         assert_eq!(top.file_name().unwrap(), "top");
         assert!(top.join("bin").join("node").is_file());
         assert!(top.join("README").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The streamed variant must behave identically to the file one on the same
+    /// bytes — build the archive in memory and feed it through a plain `Read`.
+    #[test]
+    fn extract_tar_xz_stream_matches_the_file_path() {
+        let mut bytes = Vec::new();
+        {
+            let enc = liblzma::write::XzEncoder::new(&mut bytes, 6);
+            let mut builder = tar::Builder::new(enc);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(3);
+            h.set_mode(0o755);
+            h.set_cksum();
+            builder
+                .append_data(&mut h, "top/bin/node", &b"#!\n"[..])
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("nub-xz-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let top =
+            extract_tar_xz_stream(std::io::Cursor::new(bytes), "sample.tar.xz", &dir).unwrap();
+        assert_eq!(top.file_name().unwrap(), "top");
+        assert!(top.join("bin").join("node").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
