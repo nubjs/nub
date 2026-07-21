@@ -155,6 +155,24 @@ fn emit_ndjson_summary(passed: usize, failed: usize) {
 /// dependency spun up a thread during init (A19). Set once; never mutated after.
 static ENV_FILE_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
+/// Raw (unexpanded, un-stripped) merge of the explicit `--env-file` contents —
+/// the values Node's own `--env-file` parser delivers. The watch path forwards
+/// the explicit files to the watched Node (#479) and compares [`ENV_FILE_VARS`]
+/// against this map to inject only keys whose `${VAR}` expansion changed the
+/// raw value (see [`watch_inject_vars`]); every plain var is left to Node's
+/// re-read so it live-reloads across restarts.
+static ENV_FILE_VARS_RAW: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Explicit `--env-file` / `--env-file-if-exists` paths in command-line order
+/// (absolutized against the scan-time cwd — the directory `read_env_file`
+/// resolved them from), tagged with the if-exists flavor. Retained for the
+/// watch path, which forwards them to the watched Node as `--env-file*` args
+/// so Node watches each file and every restarted child re-reads it (#479);
+/// the parsed values in [`ENV_FILE_VARS`] alone would freeze at their startup
+/// snapshot because the long-lived watch supervisor never restarts. Non-watch
+/// paths never read this.
+static ENV_FILE_PATHS: OnceLock<Vec<(PathBuf, bool)>> = OnceLock::new();
+
 /// Whether at least one `--env-file` flag was present on the command line.
 /// Distinct from `ENV_FILE_VARS` being empty: a user may pass `--env-file` to an
 /// empty file (zero vars) yet still have signalled intent. When set, nub's eager
@@ -271,25 +289,58 @@ fn watch_inject_vars<'a>(
         .collect()
 }
 
-/// Render an auto-discovered watch env file for Node's platform-specific watcher.
-/// Node 20.11 on Linux rejects absolute `--env-file` paths even when the file
-/// exists. Node 24's Windows watcher also aborts when an argv path contains an
-/// 8.3 component (for example `RUNNER~1`) but the filesystem event arrives with
-/// the long spelling. Keep Windows absolute and expand only short components;
-/// make Unix cwd-relative without canonicalizing so symlink and watch identity
-/// stay unchanged.
-fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool) -> Result<String> {
+/// Whether the watch path forwards the explicit `--env-file` flags to the
+/// watched Node (#479): the pinned Node must accept every flag flavor present —
+/// `--env-file` landed in 20.6.0, `--env-file-if-exists` in 22.9.0. All-or-
+/// nothing per run: mixing forwarded and injected explicit files would corrupt
+/// last-writer-wins precedence. Below the floor the watch path falls back to
+/// whole-map injection (values freeze at startup — the pre-#479 behavior).
+fn should_forward_explicit_env_files(
+    version: &nub_core::node::version::NodeVersion,
+    explicit: &[(PathBuf, bool)],
+) -> bool {
+    use nub_core::node::version::NodeVersion;
+    if explicit.is_empty() {
+        return false;
+    }
+    let needs_if_exists = explicit.iter().any(|(_, if_exists)| *if_exists);
+    *version >= NodeVersion::new(20, 6, 0)
+        && (!needs_if_exists || *version >= NodeVersion::new(22, 9, 0))
+}
+
+/// Render a forwarded watch env file (auto-discovered or explicit) for Node's
+/// platform-specific watcher. Node 20.11 on Linux rejects absolute `--env-file`
+/// paths even when the file exists. Node 24's Windows watcher also aborts when
+/// an argv path contains an 8.3 component (for example `RUNNER~1`) but the
+/// filesystem event arrives with the long spelling. Keep Windows absolute and
+/// expand only short components; make Unix cwd-relative without canonicalizing
+/// so symlink and watch identity stay unchanged. `if_exists` picks the
+/// `--env-file-if-exists` spelling (and tolerates an absent file, which that
+/// flag's semantics allow).
+fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool, if_exists: bool) -> Result<String> {
+    let flag = if if_exists {
+        "--env-file-if-exists"
+    } else {
+        "--env-file"
+    };
     if !path.is_absolute() || !cwd.is_absolute() {
         bail!("watch env-file paths and cwd must be absolute");
     }
 
     if windows {
-        let path = windows_long_watch_path(path)?;
+        // GetLongPathNameW fails on a nonexistent path; an absent if-exists
+        // target is legal (Node silently no-ops), so forward it verbatim — an
+        // unwatchable file has no event for the 8.3-spelling mismatch to bite.
+        let path = if if_exists && !path.exists() {
+            path.to_path_buf()
+        } else {
+            windows_long_watch_path(path)?
+        };
         let path = path
             .to_str()
             .context("watch env-file path is not valid UTF-8")?;
         let path = strip_windows_verbatim_prefix(path);
-        return Ok(format!("--env-file={path}"));
+        return Ok(format!("{flag}={path}"));
     }
 
     for (parent_count, ancestor) in cwd.ancestors().enumerate() {
@@ -307,7 +358,7 @@ fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool) -> Result<String> 
         let relative = relative
             .to_str()
             .context("watch env-file relative path is not valid UTF-8")?;
-        return Ok(format!("--env-file={relative}"));
+        return Ok(format!("{flag}={relative}"));
     }
 
     bail!(
@@ -1340,6 +1391,11 @@ fn run_nub() -> Result<i32> {
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
+    // Parallel raw (pre-expansion) merge + the flag paths themselves, retained
+    // for the watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
+    // ENV_FILE_PATHS.
+    let mut env_file_raw_vars: std::collections::HashMap<String, String> = Default::default();
+    let mut env_file_paths: Vec<(PathBuf, bool)> = Vec::new();
     // Tracks whether any `--env-file` flag appeared, independent of whether it
     // yielded vars (an empty file still counts as intent). Drives suppression of
     // the eager `.env*` auto-discovery.
@@ -1452,17 +1508,35 @@ fn run_nub() -> Result<i32> {
                 };
                 if !file_path.is_empty() {
                     let path = std::path::Path::new(&file_path);
+                    // Absolutize against the CURRENT cwd — the directory
+                    // read_env_file resolves the relative path from right below
+                    // (this scan runs before any `--cwd` chdir) — so the watch
+                    // path's forwarding names the same file the parse read.
+                    let abs_path = if path.is_absolute() {
+                        Some(path.to_path_buf())
+                    } else {
+                        env::current_dir().ok().map(|d| d.join(path))
+                    };
                     // `--env-file-if-exists`: a non-existent file is a silent no-op
                     // (Node's whole reason for the flag). A file that DOES exist but
                     // can't be read still surfaces the error, matching Node — only
                     // the missing-file case is suppressed.
                     if if_exists && !path.exists() {
-                        // silent no-op
+                        // Silent no-op for values — but still retained for watch
+                        // forwarding: Node's own `--env-file-if-exists` no-ops on
+                        // an absent file too, and a restarted child picks the file
+                        // up if it appears later (parity).
+                        if let Some(abs) = abs_path {
+                            env_file_paths.push((abs, if_exists));
+                        }
                     } else if let Some(content) =
                         // read_env_file refuses non-regular files (e.g. /dev/zero) and
                         // oversized files, so a hostile --env-file can't hang or OOM.
                         nub_core::workspace::env::read_env_file(path)
                     {
+                        if let Some(abs) = abs_path {
+                            env_file_paths.push((abs, if_exists));
+                        }
                         // Route through parse_env (not dotenvy directly) so the
                         // explicit --env-file flag strips backtick-quoted values
                         // like Node's parser, matching the .env auto-load path.
@@ -1472,9 +1546,13 @@ fn run_nub() -> Result<i32> {
                             // variables defined in previous files" (doc/api/cli.md).
                             // Shell env still wins over all of them — enforced later
                             // in `overlay_env_file_vars` (skips keys already set).
+                            env_file_raw_vars.insert(k.clone(), v.clone());
                             env_file_vars.insert(k, v);
                         }
                     } else {
+                        // Warn-and-continue (softer than Node's hard error) — and do
+                        // NOT retain the path: forwarding an unreadable file would
+                        // turn the warning into a per-restart child error under watch.
                         eprintln!("nub: cannot read env file: {file_path}");
                     }
                 }
@@ -1568,6 +1646,13 @@ fn run_nub() -> Result<i32> {
     // dep threads during init. Shell-wins / `.env`-override precedence is applied
     // at each spawn site via overlay_env_file_vars / apply_env_file_vars.
     let _ = ENV_FILE_VARS.set(env_file_vars);
+    // Raw values + flag paths for the watch path's --env-file forwarding (#479).
+    // The raw map deliberately keeps denied keys: watch_inject_vars iterates the
+    // stripped ENV_FILE_VARS side, so a denied key is never injected, and the
+    // forwarded file's copy is neutralized by the watch env guard's placeholder
+    // pinning (Node's --env-file never overrides an already-set var).
+    let _ = ENV_FILE_VARS_RAW.set(env_file_raw_vars);
+    let _ = ENV_FILE_PATHS.set(env_file_paths);
     // Record flag presence so the run/watch paths can suppress eager `.env*`
     // auto-discovery when the user named explicit env file(s).
     let _ = ENV_FILE_PRESENT.set(env_file_present);
@@ -4604,12 +4689,20 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
             .unwrap_or_default()
     };
+    // Explicit `--env-file` flags forward to the watched Node too (#479), so
+    // each file is watched and re-read per restart exactly like the autos —
+    // these are the candidates; the per-version gate lives below.
+    let explicit_env_files: &[(PathBuf, bool)] = if env_file_present && !no_env_file {
+        ENV_FILE_PATHS.get().map(|v| v.as_slice()).unwrap_or(&[])
+    } else {
+        &[]
+    };
     // A raw env-file path arms the child guard for the watch lifetime. Validate
     // its serialized ambient state before Node discovery: an uncached
     // `node --version` probe inherits NODE_OPTIONS, so waiting until command
     // assembly would let invalid bytes fail with an unrelated Node error first.
     if !compat_mode
-        && !env_file_paths.is_empty()
+        && (!env_file_paths.is_empty() || !explicit_env_files.is_empty())
         && env::var_os("NODE_OPTIONS").is_some_and(|value| value.to_str().is_none())
     {
         bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
@@ -4680,12 +4773,27 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // single read (rather than `load_env_files` + a second `load_env_files_raw`)
     // avoids re-parsing every file twice and closes the TOCTOU window where a file
     // changing between two reads could spuriously inject a plain var.
+    // Forward the explicit `--env-file` files only when the pinned Node accepts
+    // every flag flavor present (#479). All-or-nothing: mixing forwarded and
+    // injected explicit files would corrupt last-writer-wins precedence (an
+    // injected earlier file, arriving via the inherited env, would beat a
+    // forwarded later one — Node's `--env-file` never overrides an already-set
+    // var). Below the gate, fall back to whole-map injection: values freeze at
+    // their startup snapshot (the pre-#479 behavior — degraded, never broken).
+    let forward_explicit = should_forward_explicit_env_files(&node.version, explicit_env_files);
     let raw_env = if env_file_present || no_env_file {
-        // `--env-file` suppresses auto-discovery: no auto `--env-file` args reach
-        // Node, so injection is the only delivery channel — leave `raw_env` empty
-        // so the inject loop injects every var (see `watch_inject_vars`). Under
-        // `--no-env-file` `merge_child_env` returns empty, so nothing is injected.
-        HashMap::new()
+        if forward_explicit {
+            // The explicit files reach Node as `--env-file` args below, so the
+            // inject loop must skip everything Node delivers identically — hand
+            // it the raw (unexpanded) explicit merge, same as the auto path.
+            ENV_FILE_VARS_RAW.get().cloned().unwrap_or_default()
+        } else {
+            // No `--env-file` args reach Node, so injection is the only delivery
+            // channel — leave `raw_env` empty so the inject loop injects every
+            // var (see `watch_inject_vars`). Under `--no-env-file`
+            // `merge_child_env` returns empty, so nothing is injected.
+            HashMap::new()
+        }
     } else {
         project
             .as_ref()
@@ -4734,7 +4842,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for path in env_file_paths.iter().rev() {
         // `cmd` inherits `cwd`; the helper chooses the path form required by the
         // platform watcher without changing cwd or file precedence.
-        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows))?);
+        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
+    }
+    // Explicit `--env-file` files forward in USER order — no reverse: Node is
+    // last-writer-wins and nub's parse across repeated flags is last-wins too,
+    // so the orders already agree (#479).
+    if forward_explicit {
+        for (path, if_exists) in explicit_env_files {
+            node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), *if_exists)?);
+        }
     }
 
     if let Some(preload) = &preload_path {
@@ -4764,8 +4880,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // older bundled versions abort on the mismatch. Align only this raw-env
     // watch path's supervisor cwd; GetLongPathNameW preserves symlink/junction
     // identity and non-Windows behavior stays byte-for-byte unchanged.
+    // Whether ANY env file (auto-discovered or explicit) reaches Node as a raw
+    // `--env-file` arg — the trigger for the per-child guard machinery below.
+    let any_env_forwarded = !env_file_paths.is_empty() || forward_explicit;
     #[cfg(windows)]
-    if !env_file_paths.is_empty() {
+    if any_env_forwarded {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
     }
     // Inject ONLY the .env* vars whose `${VAR}` expansion changed the raw value
@@ -4776,14 +4895,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for (k, v) in watch_inject_vars(&env_vars, &raw_env) {
         cmd.env(k, v);
     }
-    // Node receives the auto-discovered files as raw `--env-file` paths and
-    // re-reads them in each watched child. Keep canonical placeholders in the
-    // preload-free supervisor so startup consumers cannot act on file values;
-    // an early child-only `--require` then removes every non-ambient denied
-    // spelling and restores the sanitized ambient NODE_OPTIONS before user
-    // preloads run. Arming by path presence, rather than current contents, keeps
-    // edits made after startup behind the same boundary.
-    if !env_file_paths.is_empty() {
+    // Node receives the forwarded files (auto-discovered + explicit) as raw
+    // `--env-file` paths and re-reads them in each watched child. Keep canonical
+    // placeholders in the preload-free supervisor so startup consumers cannot
+    // act on file values; an early child-only `--require` then removes every
+    // non-ambient denied spelling and restores the sanitized ambient
+    // NODE_OPTIONS before user preloads run. Arming by path presence, rather
+    // than current contents, keeps edits made after startup behind the same
+    // boundary.
+    if any_env_forwarded {
         if node_options_os.is_some() && node_options.is_none() {
             bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
         }
@@ -8368,8 +8488,9 @@ mod tests {
             "an expansion-changed var must be injected with its expanded value; got {injected:?}"
         );
 
-        // Explicit `--env-file` case: `raw_env` is empty (Node gets no `--env-file`
-        // args), so injection is the only delivery channel — inject everything.
+        // Below-floor fallback (explicit `--env-file` on a Node without the flag):
+        // `raw_env` is empty — no `--env-file` args reach Node, so injection is
+        // the only delivery channel and everything is injected (frozen).
         let all: HashMap<_, _> = watch_inject_vars(&env_vars, &HashMap::new())
             .into_iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -8385,21 +8506,86 @@ mod tests {
     fn watch_env_file_arg_is_relative_to_the_watcher_cwd() {
         let root = std::env::temp_dir().join("nub-watch-env-arg-root");
         assert_eq!(
-            watch_env_file_arg(&root.join(".env"), &root, false).unwrap(),
+            watch_env_file_arg(&root.join(".env"), &root, false, false).unwrap(),
             "--env-file=.env"
         );
 
         let member = root.join("packages").join("app");
         let one_level = Path::new("..").join(".env.local");
         assert_eq!(
-            watch_env_file_arg(&root.join("packages").join(".env.local"), &member, false,).unwrap(),
+            watch_env_file_arg(
+                &root.join("packages").join(".env.local"),
+                &member,
+                false,
+                false
+            )
+            .unwrap(),
             format!("--env-file={}", one_level.to_str().unwrap())
         );
         let two_levels = Path::new("..").join("..").join(".env");
         assert_eq!(
-            watch_env_file_arg(&root.join(".env"), &member, false).unwrap(),
+            watch_env_file_arg(&root.join(".env"), &member, false, false).unwrap(),
             format!("--env-file={}", two_levels.to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn watch_env_file_arg_spells_the_if_exists_flag() {
+        let root = std::env::temp_dir().join("nub-watch-env-arg-if-exists");
+        // Unix: same cwd-relative form, if-exists spelling (#479).
+        assert_eq!(
+            watch_env_file_arg(&root.join("custom.env"), &root, false, true).unwrap(),
+            "--env-file-if-exists=custom.env"
+        );
+        // Windows: an ABSENT if-exists target must not fail long-path expansion —
+        // Node itself silently no-ops on it, so the arg forwards verbatim.
+        let arg = watch_env_file_arg(&root.join("missing.env"), &root, true, true).unwrap();
+        assert!(arg.starts_with("--env-file-if-exists="), "{arg}");
+        assert!(arg.ends_with("missing.env"), "{arg}");
+    }
+
+    #[test]
+    fn explicit_env_file_forwarding_gates_on_node_version() {
+        use nub_core::node::version::NodeVersion;
+        let plain = vec![(PathBuf::from("/p/custom.env"), false)];
+        let if_exists = vec![(PathBuf::from("/p/custom.env"), true)];
+        let mixed = vec![
+            (PathBuf::from("/p/a.env"), false),
+            (PathBuf::from("/p/b.env"), true),
+        ];
+
+        // No explicit files → nothing to forward.
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(26, 0, 0),
+            &[]
+        ));
+        // `--env-file` needs Node 20.6.0.
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(20, 5, 0),
+            &plain
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(20, 6, 0),
+            &plain
+        ));
+        // `--env-file-if-exists` needs Node 22.9.0 — and one if-exists flag
+        // gates the whole set (all-or-nothing preserves precedence).
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(22, 8, 0),
+            &if_exists
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(22, 9, 0),
+            &if_exists
+        ));
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(21, 0, 0),
+            &mixed
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(26, 0, 0),
+            &mixed
+        ));
     }
 
     #[test]
@@ -8409,7 +8595,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&path, "A=1\n").unwrap();
-        let arg = watch_env_file_arg(&path, &root, true).unwrap();
+        let arg = watch_env_file_arg(&path, &root, true, false).unwrap();
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(arg.starts_with("--env-file="), "{arg}");
@@ -8462,8 +8648,10 @@ mod tests {
     #[test]
     fn watch_env_file_arg_rejects_relative_inputs() {
         let absolute = std::env::temp_dir().join("nub-watch-env-arg-absolute");
-        assert!(watch_env_file_arg(Path::new(".env"), &absolute, false).is_err());
-        assert!(watch_env_file_arg(&absolute.join(".env"), Path::new("project"), true).is_err());
+        assert!(watch_env_file_arg(Path::new(".env"), &absolute, false, false).is_err());
+        assert!(
+            watch_env_file_arg(&absolute.join(".env"), Path::new("project"), true, false).is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -8476,19 +8664,19 @@ mod tests {
         let ancestor = base.join(&non_utf8);
         let cwd = ancestor.join("member");
         assert_eq!(
-            watch_env_file_arg(&ancestor.join(".env"), &cwd, false).unwrap(),
+            watch_env_file_arg(&ancestor.join(".env"), &cwd, false, false).unwrap(),
             format!("--env-file={}", Path::new("..").join(".env").display())
         );
 
         let non_utf8_file = cwd.join(std::ffi::OsString::from_vec(vec![b'.', 0xff]));
         assert!(
-            watch_env_file_arg(&non_utf8_file, &cwd, false)
+            watch_env_file_arg(&non_utf8_file, &cwd, false, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not valid UTF-8")
         );
         assert!(
-            watch_env_file_arg(&non_utf8_file, &cwd, true)
+            watch_env_file_arg(&non_utf8_file, &cwd, true, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not valid UTF-8")
