@@ -1,0 +1,109 @@
+---
+title: Creating a project
+description: Scaffold a new TypeScript-first project — manifest, tsconfig, entry file, git, and installed type packages — in one command.
+---
+
+Running `nub init` scaffolds a minimal TypeScript project that runs and typechecks immediately. It writes five files, initializes git, and installs the two type packages the editor needs:
+
+```console
+$ nub init -y
+created my-app
+  package.json
+  tsconfig.json
+  index.ts
+  .gitignore
+  README.md
+  .git/ initialized
+
+devDependencies:
++ @nubjs/types@0.4.13
++ @types/node@26.1.1
+
+next: nub index.ts
+```
+
+The scaffold has zero runtime dependencies — the entry file runs right away:
+
+```console
+$ nub index.ts
+Hello from Nub
+```
+
+## What it writes
+
+The manifest declares the project as a Nub project from birth — the same `packageManager` pin and `devEngines` range that [`nub pm pin`](/docs/pm#nub-pm-pin) writes — and carries the two type packages as devDependencies:
+
+```json
+{
+  "name": "my-app",
+  "version": "0.0.1",
+  "type": "module",
+  "packageManager": "nub@0.4.13",
+  "devEngines": {
+    "packageManager": { "name": "nub", "version": "^0.4.13", "onFail": "warn" }
+  },
+  "scripts": {
+    "start": "nub index.ts"
+  },
+  "devDependencies": {
+    "@nubjs/types": "^0.4.13",
+    "@types/node": "^26"
+  }
+}
+```
+
+The tsconfig targets Node's own TypeScript semantics — `nodenext` resolution, `verbatimModuleSyntax`, strict mode, `noEmit` (Nub handles transpilation) — and wires the installed type packages:
+
+```jsonc
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2024",
+    "lib": ["es2024"],
+    "types": ["node", "@nubjs/types"],
+    "strict": true,
+    "noEmit": true
+    // ...
+  }
+}
+```
+
+The generated project is not locked to Nub: everything runs on plain Node too (the `devEngines` policy is `warn`, not a hard block), and swapping the start script to a plain `node` invocation is the only change a non-Nub user would make.
+
+## Prompts
+
+In a terminal, `nub init` asks three questions — project name, TypeScript or JavaScript, and whether to initialize git. Every prompt has a sensible default; `-y` skips them all. Outside a terminal (CI, piped stdin) the defaults apply automatically, so the command never hangs.
+
+## Flags
+
+| Flag | Effect |
+|---|---|
+| `-y`, `--yes` | Skip all prompts, take the defaults. |
+| `--js` | JavaScript variant: writes `index.js`, no tsconfig, no type devDependencies. |
+| `--name <name>` | Project name (default: the directory name, sanitized). |
+| `--no-git` | Skip `git init`. |
+| `--no-install` | Skip the install step. |
+| `--force` | Overwrite existing files. |
+
+## Existing files
+
+When any target file already exists, init refuses and names the conflicts — nothing is partially written:
+
+```console
+$ nub init -y
+Error: nub: refusing to overwrite existing files: package.json, tsconfig.json, index.ts, .gitignore, README.md
+  (pass --force to overwrite)
+```
+
+Passing `--force` overwrites the listed files. An existing `.git/` is never touched — init skips `git init` inside an existing repository.
+
+## Templates
+
+Framework templates are not init's job. The command takes no arguments and points template scaffolding at the ecosystem's `create-*` convention:
+
+```console
+$ nub init vite
+Error: nub: `init` does not accept arguments (got "vite")
+  (to scaffold from a template: nubx create-vite)
+```

@@ -790,6 +790,42 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    // nub's own project init, not the engine's npm-style manifest write —
+    // deliberately excluded from ENGINE_VERBS; design record in
+    // wiki/commands/init.md. (The doc comment below is user-facing `--help`
+    // text: no internal references.)
+    /// Scaffold a new TypeScript-first project.
+    Init {
+        /// Non-interactive: skip all prompts and take the defaults.
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// JavaScript variant: `index.js`, no tsconfig.json, no type devDeps.
+        #[arg(long)]
+        js: bool,
+
+        /// Project name (default: the directory name, sanitized).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// Skip `git init`.
+        #[arg(long = "no-git")]
+        no_git: bool,
+
+        /// Skip the `nub install` step.
+        #[arg(long = "no-install")]
+        no_install: bool,
+
+        /// Overwrite existing files (default: refuse and list conflicts).
+        #[arg(long)]
+        force: bool,
+
+        /// Rejected with a `nubx create-<template>` hint — `init` takes no
+        /// positionals (pnpm parity).
+        #[arg(trailing_var_arg = true, hide = true)]
+        args: Vec<String>,
+    },
+
     /// Upgrade Nub to the latest version.
     Upgrade {
         /// Target version (default: latest).
@@ -1085,7 +1121,7 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci",
+    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci", "init",
 ];
 
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
@@ -1680,17 +1716,6 @@ fn run_nub() -> Result<i32> {
         if is_node_passthrough {
             run_file_with_compat(&rest, compat)
         } else {
-            // `init` is reserved for nub's own project init (not the PM
-            // engine's npm-style manifest scaffold) — deliberately absent
-            // from ENGINE_VERBS, answered with a "coming" note rather than
-            // a PM redirect so nobody scaffolds the wrong shape meanwhile.
-            if first == "init" {
-                bail!(
-                    "nub: \"init\" is reserved — nub's own project init is coming and \
-                     hasn't shipped yet\n\
-                     \x20\x20(to run a package.json script named init: nub run init)"
-                );
-            }
             // No magic auto-run (deliberate divergence from pnpm/bun, which run
             // `<pm> dev` as the dev script). But when the bareword is almost
             // certainly a script — it's defined in the local package.json#scripts,
@@ -2264,6 +2289,23 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 }
             }
         }
+        Some(Command::Init {
+            yes,
+            js,
+            name,
+            no_git,
+            no_install,
+            force,
+            args,
+        }) => crate::init::run_init(crate::init::InitOptions {
+            yes,
+            js,
+            name,
+            no_git,
+            no_install,
+            force,
+            args,
+        }),
         Some(Command::Upgrade {
             version,
             dry_run,
@@ -6048,7 +6090,7 @@ fn print_version() {
 
 /// Native clap subcommands whose `--help` is rendered by clap directly.
 const CLAP_HELP_COMMANDS: &[&str] = &[
-    "run", "watch", "exec", "nubx", "upgrade", "install", "i", "ci",
+    "run", "watch", "exec", "nubx", "upgrade", "install", "i", "ci", "init",
 ];
 
 /// True for any word `nub <word> -h` / `nub help <word>` can route to a real help
@@ -6154,6 +6196,7 @@ nub {v} — the all-in-one Node.js toolkit
   run <script>                run a package.json script
   watch <file>                run a file and restart on changes
   nubx <pkg>                  fetch and run a package binary
+  init                        scaffold a new project
 
 {runtime}
   -                           read script from stdin
@@ -6250,6 +6293,9 @@ nub {v} — the all-in-one Node.js toolkit
     exec <bin> / nubx <bin>  run a node_modules/.bin binary
     dlx <pkg> / x <pkg>      fetch-and-run a package's bin (also: nubx)
     watch <file>             run a file in watch mode
+
+  Start a project:
+    init                     scaffold a new project (TypeScript-first)
 
   Manage dependencies:
     install, i               install from package.json + lockfile
@@ -9756,7 +9802,7 @@ mod tests {
         // to native verbs (the embedded aube engine, src/pm_engine/) — they
         // must stay native and out of the registry.
         for verb in [
-            "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci",
+            "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci", "init",
         ] {
             assert!(
                 SUBCOMMANDS.contains(&verb),

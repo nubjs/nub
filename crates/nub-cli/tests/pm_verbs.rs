@@ -667,18 +667,20 @@ fn verb_help_is_rebranded_and_exits_zero() {
     }
 }
 
-/// `init` is reserved for nub's own project init: not an engine verb, not a
-/// PM redirect — the answer names the coming nub feature and nothing else.
+/// `init` is nub's own project scaffolder (src/init.rs), never an engine verb
+/// or a PM redirect. In a dir that already has a manifest it refuses with
+/// nub's own conflict message — no engine routing, no "pnpm init" spelling.
+/// The scaffold contract itself lives in tests/init_cmd.rs.
 #[test]
-fn init_is_reserved_and_answers_with_the_coming_note() {
+fn init_is_nub_own_and_never_redirects_to_a_pm() {
     let dir = pm_tmpdir("init");
     std::fs::write(dir.join("package.json"), r#"{"name":"init-fixture"}"#).unwrap();
-    let out = run_nub(&dir, &["init"]);
-    assert_ne!(out.code, 0, "init must error until nub's own init ships");
+    let out = run_nub(&dir, &["init", "-y", "--no-install"]);
+    assert_ne!(out.code, 0, "init must refuse over an existing manifest");
     out.assert_brand_clean();
     assert!(
-        out.stderr.contains("nub's own project init is coming"),
-        "the message must name the coming nub feature: {}",
+        out.stderr.contains("refusing to overwrite"),
+        "the refusal is nub's own conflict message: {}",
         out.stderr
     );
     assert!(
