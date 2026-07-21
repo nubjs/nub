@@ -20,23 +20,37 @@ pub mod ticket_cache;
 /// reqwest's rustls-platform-verifier OS trust store active.
 ///
 /// reqwest 0.13 can merge extra roots with the platform verifier on Unix
-/// (except Android) and Windows. On other targets, leave the builder alone
-/// so client construction does not fail at runtime.
+/// (except Android) and Windows. On Android the platform verifier resolves
+/// the OS trust store through JNI and aborts without a JVM (`ndk-context:
+/// android context was not initialized`) — the Termux/CLI case, where no
+/// app context exists — so there the webpki roots become the ONLY trust
+/// roots (`tls_certs_only`), bypassing the verifier entirely. Hickory DNS
+/// is disabled on Android for the same reason: reqwest's `hickory-dns`
+/// feature defaults the resolver on for every client, and hickory reads
+/// Android's DNS config through the same JNI surface. On other targets,
+/// leave the builder alone so client construction does not fail at runtime.
 pub fn with_webpki_root_fallback(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    #[cfg(any(unix, target_os = "windows"))]
+    let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|cert| {
+            reqwest::Certificate::from_der(cert.as_ref())
+                // webpki-root-certs is generated as valid DER; failure means the dependency is corrupt.
+                .expect("webpki root certificate must be valid DER")
+        })
+        .collect::<Vec<_>>();
+
     #[cfg(any(all(unix, not(target_os = "android")), target_os = "windows"))]
     {
-        let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
-            .iter()
-            .map(|cert| {
-                reqwest::Certificate::from_der(cert.as_ref())
-                    // webpki-root-certs is generated as valid DER; failure means the dependency is corrupt.
-                    .expect("webpki root certificate must be valid DER")
-            })
-            .collect::<Vec<_>>();
         builder.tls_certs_merge(certs)
     }
 
-    #[cfg(not(any(all(unix, not(target_os = "android")), target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        builder.tls_certs_only(certs).no_hickory_dns()
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
     {
         builder
     }

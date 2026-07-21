@@ -87,7 +87,10 @@ fn resolve_home() -> miette::Result<PathBuf> {
     platform_default()
 }
 
-#[cfg(target_os = "linux")]
+// Android is the Termux/CLI case: bionic userland with a Linux-shaped
+// HOME/XDG layout, so it shares the linux default rather than needing
+// its own arm.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn platform_default() -> miette::Result<PathBuf> {
     if let Some(xdg) = aube_util::env::xdg_data_home() {
         return Ok(xdg.join("pnpm"));

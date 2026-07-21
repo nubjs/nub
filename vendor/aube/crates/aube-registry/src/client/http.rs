@@ -193,8 +193,11 @@ fn build_http_client_inner(
         // In-process DNS caching via hickory-dns. The system resolver
         // does not cache and uses a thread pool for `getaddrinfo`,
         // which serializes the first cold lookup per origin. hickory
-        // resolves async + caches for the process lifetime.
-        .hickory_dns(true)
+        // resolves async + caches for the process lifetime. Not on
+        // Android: hickory reads the OS DNS config through JNI and
+        // aborts without a JVM (Termux/CLI builds), so the getaddrinfo
+        // resolver stays in place there.
+        .hickory_dns(cfg!(not(target_os = "android")))
         // `strict-ssl=false` disables cert validation entirely. This
         // is a security hole on purpose: corporate registries should
         // prefer per-registry `ca` / `cafile` so validation stays on.
