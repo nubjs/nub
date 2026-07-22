@@ -261,6 +261,22 @@ pub struct EngineContext {
     /// (default) keeps the ambient-`node` fallback — upstream behavior.
     pub runtime_node_bin: Option<PathBuf>,
 
+    /// The version of that node, bare (`22.15.0`, no `v`). Same provenance as
+    /// [`runtime_node_bin`](Self::runtime_node_bin) — an embedder that owns Node
+    /// provisioning already holds it, so aube neither probes nor re-derives it.
+    /// `engines::effective_node_version` consults this at the resolver's tier:
+    /// below an explicit `node-version` `.npmrc` override (pnpm's
+    /// validation-only knob), above the ambient `node --version` PATH probe.
+    ///
+    /// Load-bearing beyond the `engines.node` check: this version's major is the
+    /// GVS engine fingerprint (`<os>-<arch>-node<major>`) folded into the
+    /// virtual-store path of every subtree containing a build-allowed package.
+    /// Under `runtime_switching = false` the resolver is inert, so without this
+    /// the fingerprint would record the ambient shell node while lifecycle
+    /// scripts compiled against the embedder's — two majors sharing one store
+    /// entry. `None` (default) keeps the PATH probe — upstream behavior.
+    pub runtime_node_version: Option<String>,
+
     /// Replacement lifecycle `npm_config_user_agent` product token. `None`
     /// (default) falls back to the compile-time [`Embedder::user_agent`] —
     /// standalone aube reports `aube/<version>`. An embedder sets `Some` when
@@ -366,6 +382,7 @@ impl Default for EngineContext {
             env_overlay: Vec::new(),
             runtime_node_dir: None,
             runtime_node_bin: None,
+            runtime_node_version: None,
             lifecycle_user_agent_product: None,
             npm_save_prefix_on_bare_exact: false,
             named_registries_enabled: false,
@@ -436,6 +453,7 @@ mod tests {
         assert!(ctx.env_overlay.is_empty());
         assert_eq!(ctx.runtime_node_dir, None);
         assert_eq!(ctx.runtime_node_bin, None);
+        assert_eq!(ctx.runtime_node_version, None);
         assert_eq!(ctx.lifecycle_user_agent_product, None);
         assert!(!ctx.npm_save_prefix_on_bare_exact);
         assert!(!ctx.named_registries_enabled);

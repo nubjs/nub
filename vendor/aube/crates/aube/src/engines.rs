@@ -95,7 +95,16 @@ pub fn resolve_node_version(override_: Option<&str>) -> Option<String> {
 /// 2. otherwise the resolved runtime context's version — engines must
 ///    validate the node scripts will actually run on, not whatever
 ///    PATH happened to carry;
-/// 3. otherwise the memoized `node --version` probe.
+/// 3. otherwise the version an embedder provisioned
+///    ([`EngineContext::runtime_node_version`]) — the same rule as (2)
+///    for a host that owns provisioning itself and so leaves the
+///    resolver inert;
+/// 4. otherwise the memoized `node --version` probe.
+///
+/// Also the source of the GVS engine fingerprint, so a wrong answer
+/// here mis-keys virtual-store paths, not just the warning text.
+///
+/// [`EngineContext::runtime_node_version`]: aube_util::EngineContext::runtime_node_version
 pub fn effective_node_version(override_: Option<&str>) -> Option<String> {
     if override_.is_some() {
         return resolve_node_version(override_);
@@ -104,6 +113,9 @@ pub fn effective_node_version(override_: Option<&str>) -> Option<String> {
         && let Some(v) = &rt.version
     {
         return Some(v.clone());
+    }
+    if let Some(v) = aube_util::engine_context().runtime_node_version {
+        return Some(v);
     }
     resolve_node_version(None)
 }
@@ -784,6 +796,28 @@ mod tests {
             result.is_err(),
             "permission-denied read must propagate, got {result:?}"
         );
+    }
+
+    #[test]
+    fn embedder_node_version_outranks_probe_but_not_override() {
+        // An embedder that owns Node provisioning leaves aube's resolver inert,
+        // so without this tier `effective_node_version` falls to the ambient
+        // PATH probe — and the GVS engine fingerprint keyed off it then names a
+        // different node than the one lifecycle scripts build against. The
+        // `.npmrc` `node-version` knob still outranks it (pnpm semantics).
+        let prev = aube_util::engine_context().runtime_node_version;
+        aube_util::update_engine_context(|c| c.runtime_node_version = Some("18.19.0".into()));
+        assert_eq!(
+            effective_node_version(None).as_deref(),
+            Some("18.19.0"),
+            "the embedder's provisioned version must win over the PATH probe"
+        );
+        assert_eq!(
+            effective_node_version(Some("v20.11.0")).as_deref(),
+            Some("20.11.0"),
+            "an explicit `node-version` override must still win"
+        );
+        aube_util::update_engine_context(|c| c.runtime_node_version = prev);
     }
 
     #[test]
