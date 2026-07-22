@@ -216,35 +216,64 @@ impl Layout {
         }
     }
 
-    // Full raw cell widths (glyph + label + padded version), zero when no
-    // row carries that cell so the column is omitted entirely.
+    // Full raw cell DISPLAY widths (glyph + label + padded version), zero
+    // when no row carries that cell so the column is omitted entirely.
+    // Counted in chars, not bytes — the `■`/`□` glyphs are multibyte.
     fn range_cell_w(&self) -> usize {
         if self.range_w == 0 {
             0
         } else {
-            "( ) range ".len() + self.range_w
+            "□ range ".chars().count() + self.range_w
         }
     }
     fn latest_cell_w(&self) -> usize {
         if self.latest_w == 0 {
             0
         } else {
-            "( ) latest ".len() + self.latest_w
+            "□ latest ".chars().count() + self.latest_w
         }
     }
 }
 
-/// Render one radio cell. The unselected glyph/label are dimmed so the
-/// chosen state pops; the version keeps whatever coloring the caller
-/// computed (semver-diff colors carry meaning regardless of selection).
-fn cell(label: &str, version: &str, selected: bool) -> String {
+/// Marker color for a selected update cell: the same severity the version
+/// tail carries (pnpm's colorize-semver-diff palette), so the filled box
+/// reads as "how big is this jump" at a glance — the treatment bun's
+/// interactive updater uses for its checkbox. Falls back to plain when
+/// either side doesn't parse.
+fn severity_box(current: &str, target: &str) -> String {
+    use clx::style;
+    let (Ok(cur), Ok(new)) = (
+        node_semver::Version::parse(current),
+        node_semver::Version::parse(target),
+    ) else {
+        return "■".to_string();
+    };
+    let styled = style::estyle("■");
+    if cur.major != new.major {
+        styled.red()
+    } else if cur.minor != new.minor {
+        styled.cyan()
+    } else if cur.patch != new.patch {
+        styled.green()
+    } else {
+        styled.magenta()
+    }
+    .to_string()
+}
+
+/// Render one radio cell. Selected cells carry a filled box (`■`, colored
+/// by bump severity for update cells — bun's checkbox glyphs); unselected
+/// cells get a dimmed hollow box and label. The version keeps whatever
+/// coloring the caller computed (semver-diff colors carry meaning
+/// regardless of selection).
+fn cell(label: &str, version: &str, selected: bool, marker: Option<&str>) -> String {
     use clx::style;
     if selected {
-        format!("(•) {label} {version}")
+        format!("{} {label} {version}", marker.unwrap_or("■"))
     } else {
         format!(
             "{} {} {version}",
-            style::estyle("( )").dim(),
+            style::estyle("□").dim(),
             style::estyle(label).dim(),
         )
     }
@@ -267,7 +296,7 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
     };
     let mut line = format!(
         "{cursor}  {name}  {}",
-        cell("keep", &keep_version, keep_selected)
+        cell("keep", &keep_version, keep_selected, None)
     );
     if layout.range_cell_w() > 0 {
         line.push_str("  ");
@@ -275,7 +304,13 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
             Some(target) => {
                 let version =
                     super::outdated::colorize_diff(&row.current, target, layout.range_w, true);
-                line.push_str(&cell("range", &version, state == PickState::Range));
+                let marker = severity_box(&row.current, target);
+                line.push_str(&cell(
+                    "range",
+                    &version,
+                    state == PickState::Range,
+                    Some(&marker),
+                ));
             }
             None => line.push_str(&" ".repeat(layout.range_cell_w())),
         }
@@ -286,7 +321,13 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
             Some(target) => {
                 let version =
                     super::outdated::colorize_diff(&row.current, target, layout.latest_w, true);
-                line.push_str(&cell("latest", &version, state == PickState::Latest));
+                let marker = severity_box(&row.current, target);
+                line.push_str(&cell(
+                    "latest",
+                    &version,
+                    state == PickState::Latest,
+                    Some(&marker),
+                ));
             }
             None => line.push_str(&" ".repeat(layout.latest_cell_w())),
         }
@@ -654,18 +695,27 @@ mod tests {
                     .into_owned()
             })
             .collect();
-        let keep_cols: Vec<usize> = rendered.iter().map(|l| l.find(" keep ").unwrap()).collect();
-        assert!(keep_cols.windows(2).all(|w| w[0] == w[1]), "{rendered:#?}");
-        let update_cols: Vec<usize> = rendered
+        // Column positions in CHARS (display cells), not bytes — the
+        // `■`/`□` markers are multibyte, so byte offsets differ between a
+        // row with a real cell and one with a blank-filled column even
+        // when the columns line up on screen.
+        let char_col = |l: &str, needle: &str| -> Option<usize> {
+            l.find(needle).map(|b| l[..b].chars().count())
+        };
+        let keep_cols: Vec<usize> = rendered
             .iter()
-            .filter_map(|l| l.find(" range ").or_else(|| l.find(" latest ")))
+            .map(|l| char_col(l, " keep ").unwrap())
             .collect();
-        assert_eq!(update_cols.len(), 3);
+        assert!(keep_cols.windows(2).all(|w| w[0] == w[1]), "{rendered:#?}");
         // range and latest cells each occupy their own fixed column; a row
         // without a range cell blank-fills it so its latest cell still lands
         // in the latest column.
-        let range_col = rendered[2].find(" range ").unwrap();
-        let latest_cols: Vec<usize> = rendered.iter().filter_map(|l| l.find(" latest ")).collect();
+        let range_col = char_col(&rendered[2], " range ").unwrap();
+        let latest_cols: Vec<usize> = rendered
+            .iter()
+            .filter_map(|l| char_col(l, " latest "))
+            .collect();
+        assert_eq!(latest_cols.len(), 2);
         assert!(
             latest_cols.windows(2).all(|w| w[0] == w[1]),
             "{rendered:#?}"
