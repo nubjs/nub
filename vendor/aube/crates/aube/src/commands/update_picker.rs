@@ -263,45 +263,18 @@ const HDR_KEEP: &str = "keep";
 const HDR_RANGE: &str = "latest in range";
 const HDR_LATEST: &str = "latest";
 
-/// Marker color for a selected update cell: the same severity the version
-/// tail carries (pnpm's colorize-semver-diff palette), so the filled box
-/// reads as "how big is this jump" at a glance — the treatment bun's
-/// interactive updater uses for its checkbox. Falls back to plain when
-/// either side doesn't parse.
-fn severity_box(current: &str, target: &str) -> String {
-    use clx::style;
-    let (Ok(cur), Ok(new)) = (
-        node_semver::Version::parse(current),
-        node_semver::Version::parse(target),
-    ) else {
-        return "■".to_string();
-    };
-    let styled = style::estyle("■");
-    if cur.major != new.major {
-        styled.red()
-    } else if cur.minor != new.minor {
-        styled.cyan()
-    } else if cur.patch != new.patch {
-        styled.green()
-    } else {
-        styled.magenta()
-    }
-    .to_string()
-}
-
 /// Render one radio cell: box + version, no label (the column heading
-/// carries the label). Selected cells get a filled box (`■`, colored by
-/// bump severity for update cells — bun's checkbox glyphs); unselected
-/// cells a dimmed hollow box. The version keeps whatever coloring the
-/// caller computed (semver-diff colors carry meaning regardless of
-/// selection). `raw_w`/`col_w` are display widths: the version is already
-/// padded to the column's version width, so the trailing pad tops the
-/// cell up to the full column width.
-fn cell(version: &str, raw_w: usize, col_w: usize, selected: bool, marker: Option<&str>) -> String {
+/// carries the label). Selected cells get a plain filled box (`■`);
+/// unselected cells a dimmed hollow box — bun's checkbox glyphs. The
+/// version keeps whatever coloring the caller computed (the semver-diff
+/// colors carry the severity signal). `raw_w`/`col_w` are display widths:
+/// the version is already padded to the column's version width, so the
+/// trailing pad tops the cell up to the full column width.
+fn cell(version: &str, raw_w: usize, col_w: usize, selected: bool) -> String {
     use clx::style;
     let pad = " ".repeat(col_w.saturating_sub(raw_w));
     if selected {
-        format!("{} {version}{pad}", marker.unwrap_or("■"))
+        format!("■ {version}{pad}")
     } else {
         format!("{} {version}{pad}", style::estyle("□").dim())
     }
@@ -337,8 +310,7 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
             &keep_version,
             2 + layout.cur_w,
             layout.keep_col_w(),
-            keep_selected,
-            None
+            keep_selected
         )
     );
     if layout.range_col_w() > 0 {
@@ -347,13 +319,11 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
             Some(target) => {
                 let version =
                     super::outdated::colorize_diff(&row.current, target, layout.range_w, true);
-                let marker = severity_box(&row.current, target);
                 line.push_str(&cell(
                     &version,
                     2 + layout.range_w,
                     layout.range_col_w(),
                     state == PickState::Range,
-                    Some(&marker),
                 ));
             }
             None => line.push_str(&" ".repeat(layout.range_col_w())),
@@ -365,13 +335,11 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
             Some(target) => {
                 let version =
                     super::outdated::colorize_diff(&row.current, target, layout.latest_w, true);
-                let marker = severity_box(&row.current, target);
                 line.push_str(&cell(
                     &version,
                     2 + layout.latest_w,
                     layout.latest_col_w(),
                     state == PickState::Latest,
-                    Some(&marker),
                 ));
             }
             None => line.push_str(&" ".repeat(layout.latest_col_w())),

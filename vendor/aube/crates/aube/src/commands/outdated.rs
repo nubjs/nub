@@ -502,11 +502,13 @@ impl OutdatedArgs {
 }
 
 /// Render `target` left-padded to `width`, with the portion that
-/// changed relative to `current` colored. Mirrors pnpm's
-/// `@pnpm/colorize-semver-diff` palette: red for major bumps, cyan
-/// for minor, green for patch, magenta for prerelease changes.
-/// Falls back to the plain string when either side fails to parse
-/// as semver or `target == current`.
+/// changed relative to `current` colored on the traffic-light ramp:
+/// red for major bumps, yellow for minor, green for patch — a natural
+/// severity progression within the portable ANSI-16 palette (and the
+/// same ramp pnpm's own interactive updater uses) — plus magenta for
+/// prerelease-only changes, deliberately outside the ramp. Falls back
+/// to the plain string when either side fails to parse as semver or
+/// `target == current`.
 ///
 /// The padding is added on the *raw* string before color codes so
 /// downstream column alignment isn't thrown off by invisible escapes.
@@ -574,9 +576,8 @@ pub(crate) fn colorize_diff(current: &str, target: &str, width: usize, on_stderr
     // The `e*` family in clx checks stderr's TTY state and would
     // either inject ANSI escapes into a piped report file or
     // suppress color when stderr is redirected but the user is
-    // looking at a TTY on stdout. clx 1.3 only ships `nred`/`ncyan`
-    // directly, so green and magenta come from `nstyle(...).green()`
-    // / `.magenta()` — same effect, just the chain is explicit.
+    // looking at a TTY on stdout. The colors chain off the base
+    // (`nstyle(...).red()` etc.) so the stream choice stays explicit.
     // The picker path renders on stderr and passes `on_stderr: true` for
     // the symmetric `estyle` gating.
     let base = if on_stderr {
@@ -586,7 +587,7 @@ pub(crate) fn colorize_diff(current: &str, target: &str, width: usize, on_stderr
     };
     let painted = match head_color {
         SemverDiff::Major => base.red(),
-        SemverDiff::Minor => base.cyan(),
+        SemverDiff::Minor => base.yellow(),
         SemverDiff::Patch => base.green(),
         SemverDiff::Prerelease => base.magenta(),
     }
