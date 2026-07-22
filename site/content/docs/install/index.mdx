@@ -311,6 +311,7 @@ Re-resolves dependencies within their ranges; `--latest` rewrites the `package.j
 nub update                 # up — refresh all deps within range
 nub update <pkg>           # update a single dependency
 nub update <pkg>@<version> # pin one dep to a version, keeping its ^/~ operator
+nub update <pkg>@<tag>     # move one dep to a dist-tag (beta, next) as an exact pin
 nub update -L              # --latest: move past the manifest range
 nub update -E -L           # pin the rewritten range to an exact version
 nub update -D              # devDependencies only

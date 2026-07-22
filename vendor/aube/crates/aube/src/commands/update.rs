@@ -143,15 +143,17 @@ pub async fn run(
     reject_unsupported_pkg_specs(&args.packages)?;
     // Parse `<pkg>@<spec>` arg syntax into a per-key target spec. A
     // concrete version or range (`foo@3.0.1`, `foo@~2`) pins the named
-    // entry to that spec (`pnpm update foo@3.0.1`); `@latest` is the
-    // dist-tag bump-past-range case (`pnpm update foo@latest`). Both are
+    // entry to that spec (`pnpm update foo@3.0.1`); a dist-tag
+    // (`foo@latest`, `foo@beta`) is the bump-past-range case. Both are
     // honored by injecting the spec as the resolver range for that key
-    // below, then gluing the manifest's existing operator back onto the
-    // resolved version — so `^3.0.0` + `foo@3.0.1` yields `^3.0.1`,
-    // matching pnpm (the arg's own operator, if any, is discarded). The
-    // `latest` dist-tag is just one possible spec value; the separate
-    // `--latest` FLAG (`args.latest`, whole-project scope) keeps its
-    // own `preserve_pin` downgrade guard below.
+    // below. Version/range args and `@latest` then glue the manifest's
+    // existing operator back onto the resolved version — `^3.0.0` +
+    // `foo@3.0.1` yields `^3.0.1`, matching pnpm (the arg's own operator,
+    // if any, is discarded) — while a non-`latest` dist-tag writes an
+    // exact pin (see the rewrite loop). The `latest` dist-tag is just one
+    // possible spec value; the separate `--latest` FLAG (`args.latest`,
+    // whole-project scope) keeps its own `preserve_pin` downgrade guard
+    // below.
     let mut explicit_specs: BTreeMap<String, String> = BTreeMap::new();
     let parsed_packages: Vec<String> = args
         .packages
@@ -758,7 +760,15 @@ pub async fn run(
             else {
                 continue;
             };
-            let new_spec = rewrite_specifier(&original, &real_name, &resolved, args.exact);
+            // A non-`latest` dist-tag arg writes an exact pin, matching pnpm
+            // (`pnpm update typescript@beta` from `~5.3.0` → `"6.0.0-beta"`,
+            // verified against pnpm 10.15.1); `@latest` and concrete
+            // version/range args keep the operator-gluing path.
+            let exact_pin = args.exact
+                || explicit_specs
+                    .get(key)
+                    .is_some_and(|s| s != "latest" && node_semver::Range::parse(s).is_err());
+            let new_spec = rewrite_specifier(&original, &real_name, &resolved, exact_pin);
             if new_spec == original {
                 continue;
             }
@@ -1597,7 +1607,8 @@ fn split_pkg_arg(arg: &str) -> (&str, Option<&str>) {
 ///     `foo@>=1`) — injected as the resolver range for that entry, then
 ///     glued back onto the manifest's existing operator (matching
 ///     `pnpm update foo@3.0.1`).
-///   - the `latest` dist-tag (`foo@latest`) — bump past the range.
+///   - a dist-tag (`foo@latest`, `foo@beta`, `foo@next`) — bump to
+///     whatever the registry's tag currently names, past the range.
 ///   - an empty spec (`foo@`) — pnpm treats this as a bare in-range
 ///     update (`foo`); the parse loop leaves it unmapped so it flows
 ///     the bare path.
@@ -1609,22 +1620,39 @@ fn split_pkg_arg(arg: &str) -> (&str, Option<&str>) {
 /// `github:u/r`, a tarball URL) carry no plain semver target, so pinning
 /// one would corrupt the manifest/lockfile — wrong package (an `npm:`
 /// alias loses its real-name intent) or a bogus `^0.0.0` — while exiting
-/// 0. Non-`latest` dist-tags (`next`, `beta`) are likewise rejected: the
-/// update path only ever honored `latest`. The check reuses
-/// `node_semver::Range::parse`, so the allowlist tracks exactly what the
-/// resolver can consume (every protocol/alias/URL form fails to parse).
+/// 0. Non-`latest` dist-tags (`next`, `beta`) are ACCEPTED and resolve
+/// through the registry's dist-tags, mirroring pnpm
+/// (`pnpm update typescript@beta` works); a tag that doesn't exist fails
+/// in the resolver with its no-matching-version diagnostic. The
+/// protocol/alias/URL rejection keys on syntax a registry tag name can
+/// never contain (`:`, `/`, `+`), so the allowlist still excludes every
+/// form the resolver can't consume.
 fn reject_unsupported_pkg_specs(packages: &[String]) -> miette::Result<()> {
     for raw in packages {
         let (name, spec) = split_pkg_arg(raw);
         let Some(s) = spec else { continue };
-        let supported = s.is_empty() || s == "latest" || node_semver::Range::parse(s).is_ok();
+        let supported = s.is_empty()
+            || s == "latest"
+            || node_semver::Range::parse(s).is_ok()
+            || is_dist_tag_spec(s);
         if !supported {
             return Err(miette!(
-                "package spec '{name}@{s}' is not supported by `update` — pass a version, range, or `latest` (e.g. `{name}@3.0.1`, `{name}@^2`, `{name}@latest`)",
+                "package spec '{name}@{s}' is not supported by `update` — pass a version, range, or dist-tag (e.g. `{name}@3.0.1`, `{name}@^2`, `{name}@latest`, `{name}@beta`)",
             ));
         }
     }
     Ok(())
+}
+
+/// A registry dist-tag shape: a plain identifier-ish token (`beta`,
+/// `next`, `rc`, `nightly`). Protocol/alias/URL syntax (`:`, `/`, `+`,
+/// whitespace) never appears in a tag name, so anything carrying it stays
+/// on the rejection path above. Callers check `Range::parse` first — a
+/// token that parses as a version/range is a version, not a tag.
+fn is_dist_tag_spec(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Rewrite a direct-dep specifier to pin `resolved_version`, preserving:
@@ -2041,8 +2069,20 @@ mod tests {
                 "{ok} should be accepted"
             );
         }
-        // Alias/protocol/URL forms and non-`latest` dist-tags carry no
-        // plain semver target — pinning them would silently corrupt the
+        // Dist-tags resolve through the registry's tags, matching pnpm.
+        for ok in [
+            "is-odd@next",
+            "is-odd@beta",
+            "is-odd@nightly-2026",
+            "is-odd@rc_1",
+        ] {
+            assert!(
+                reject_unsupported_pkg_specs(&[ok.to_string()]).is_ok(),
+                "{ok} should be accepted as a dist-tag"
+            );
+        }
+        // Alias/protocol/URL forms carry no plain semver target and no
+        // registry tag — pinning them would silently corrupt the
         // manifest, so they must hard-error (the pre-pin safety net).
         for bad in [
             "is-odd@npm:is-even@1.0.0",
@@ -2054,7 +2094,6 @@ mod tests {
             "is-odd@github:a/b",
             "is-odd@git+https://example.com/a/b.git",
             "is-odd@https://example.com/is-odd-3.0.1.tgz",
-            "is-odd@next",
         ] {
             assert!(
                 reject_unsupported_pkg_specs(&[bad.to_string()]).is_err(),
