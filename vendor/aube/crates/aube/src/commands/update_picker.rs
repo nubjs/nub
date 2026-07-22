@@ -19,10 +19,11 @@ use std::io::Write;
 
 use console::{Key, Term};
 
-/// One pickable dependency. `range_target` is always populated (with
-/// `current` itself when there is no in-range drift — duplication keeps
-/// the rows cycling in unison); `latest_target` only when the `latest`
-/// dist-tag is a real upgrade. A row offering no real change at all is
+/// One pickable dependency. Both targets are always populated on a row
+/// that exists — `range_target` with `current` itself when there is no
+/// in-range drift, `latest_target` with the range value when the real
+/// `latest` is downgrade-guarded — so every row carries a box in every
+/// column and cycles in unison. A row offering no real change at all is
 /// filtered out by [`build_row`].
 #[derive(Debug, Clone)]
 pub(crate) struct PickerRow {
@@ -66,11 +67,13 @@ impl PickerSelection {
 ///   every row's cells in the same columns and cycling in unison; a
 ///   no-op "latest in range" pick simply re-resolves to the same version.
 /// - `latest_target` = the `latest` dist-tag when it is a strict semver
-///   upgrade over `current`. A `latest` at-or-below `current` (the
-///   prerelease-pin case: current `4.0.0-beta.59`, latest `0.64.0`) is
-///   dropped rather than offered as a downgrade — the per-cell form of the
-///   `preserve_pin` guard. An unparseable `current` also drops the cell,
-///   since the ordering can't be established.
+///   upgrade over `current`; otherwise it DUPLICATES the range value so
+///   the cell (and its box) always renders. The duplicate keeps the
+///   downgrade guard: a `latest` at-or-below `current` (the prerelease-pin
+///   case: current `4.0.0-beta.59`, latest `0.64.0`) is never shown, and
+///   [`build_selection`] routes a value-equal latest pick through the
+///   in-range machinery so the `latest` dist-tag can't be applied through
+///   the duplicate. An unparseable `current` is treated the same way.
 pub(crate) fn build_row(
     key: &str,
     bucket: &'static str,
@@ -91,26 +94,25 @@ pub(crate) fn build_row(
         .filter(|w| !semver_downgrade(w))
         .unwrap_or(current)
         .to_string();
-    let latest_target = latest
-        .filter(|l| {
-            let (Ok(cur), Ok(new)) = (
-                node_semver::Version::parse(current),
-                node_semver::Version::parse(l),
-            ) else {
-                return false;
-            };
-            new > cur
-        })
-        .map(str::to_owned);
-    if range_target == current && latest_target.is_none() {
+    let real_latest = latest.filter(|l| {
+        let (Ok(cur), Ok(new)) = (
+            node_semver::Version::parse(current),
+            node_semver::Version::parse(l),
+        ) else {
+            return false;
+        };
+        new > cur
+    });
+    if range_target == current && real_latest.is_none() {
         return None;
     }
+    let latest_target = real_latest.unwrap_or(&range_target).to_string();
     Some(PickerRow {
         key: key.to_string(),
         bucket,
         current: current.to_string(),
         range_target: Some(range_target),
-        latest_target,
+        latest_target: Some(latest_target),
     })
 }
 
@@ -568,6 +570,13 @@ pub(crate) fn run(mut rows: Vec<PickerRow>) -> std::io::Result<Option<PickerSele
 /// The confirmed contract: keep-rows drop out entirely, range-rows land in
 /// `in_range` (bare-arg semantics), latest-rows land in `to_latest` (the
 /// caller routes them as explicit `<pkg>@latest` specs).
+///
+/// A latest pick whose cell merely duplicates the range value routes as
+/// in-range instead: on a downgrade-guarded row the shown version came
+/// from the range side, and applying the real `latest` dist-tag there
+/// would downgrade past what the cell displayed. (When range and latest
+/// genuinely resolve to the same version the two routes are equivalent,
+/// so the value check is safe for both duplicate shapes.)
 fn build_selection(rows: &[PickerRow], states: &[PickState]) -> PickerSelection {
     let mut selection = PickerSelection::default();
     for (row, state) in rows.iter().zip(states) {
@@ -577,7 +586,11 @@ fn build_selection(rows: &[PickerRow], states: &[PickState]) -> PickerSelection 
                 selection.in_range.insert(row.key.clone());
             }
             PickState::Latest => {
-                selection.to_latest.insert(row.key.clone());
+                if row.latest_target == row.range_target {
+                    selection.in_range.insert(row.key.clone());
+                } else {
+                    selection.to_latest.insert(row.key.clone());
+                }
             }
         }
     }
@@ -619,10 +632,11 @@ mod tests {
     }
 
     #[test]
-    fn build_row_hides_latest_downgrade_for_prerelease_pin() {
+    fn build_row_masks_latest_downgrade_with_range_duplicate() {
         // The bun screenshot case: current 4.0.0-beta.59, latest dist-tag
-        // 0.64.0 — the latest cell must not offer the downgrade, while the
-        // in-range prerelease refresh is still offered.
+        // 0.64.0 — the latest cell must never show the downgrade. It
+        // duplicates the in-range refresh instead, so the row still has a
+        // box in every column.
         let r = row(
             "@effect/opentelemetry",
             "dependencies",
@@ -632,7 +646,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.range_target.as_deref(), Some("4.0.0-beta.60"));
-        assert_eq!(r.latest_target, None);
+        assert_eq!(r.latest_target.as_deref(), Some("4.0.0-beta.60"));
     }
 
     #[test]
@@ -647,11 +661,12 @@ mod tests {
         // A lockfile pinned above the manifest range must not get the lower
         // in-range max offered as an update.
         assert!(row("a", "dependencies", "2.1.0", Some("1.9.0"), None).is_none());
-        // Unparseable current: latest is dropped (no ordering), but the
-        // range cell stays on plain inequality — the resolver may move it.
+        // Unparseable current: the real latest can't be ordered so the
+        // latest cell duplicates the range value, which stays on plain
+        // inequality — the resolver may move it.
         let r = row("a", "dependencies", "git-pin", Some("1.2.3"), Some("9.9.9")).unwrap();
         assert_eq!(r.range_target.as_deref(), Some("1.2.3"));
-        assert_eq!(r.latest_target, None);
+        assert_eq!(r.latest_target.as_deref(), Some("1.2.3"));
     }
 
     #[test]
@@ -675,28 +690,46 @@ mod tests {
         assert_eq!(sel.to_latest.iter().collect::<Vec<_>>(), vec!["latesty"]);
         assert!(!sel.is_empty());
         assert!(build_selection(&rows, &[PickState::Keep; 3]).is_empty());
+
+        // A latest pick on a downgrade-guarded row (latest cell duplicates
+        // the range value) routes through the in-range machinery — applying
+        // the real `latest` dist-tag there would downgrade past the version
+        // the cell displayed.
+        let guarded = vec![
+            row(
+                "pinned",
+                "dependencies",
+                "4.0.0-beta.90",
+                Some("4.0.0-beta.100"),
+                Some("0.64.0"),
+            )
+            .unwrap(),
+        ];
+        let sel = build_selection(&guarded, &[PickState::Latest]);
+        assert_eq!(sel.in_range.iter().collect::<Vec<_>>(), vec!["pinned"]);
+        assert!(sel.to_latest.is_empty());
     }
 
     #[test]
-    fn state_cycle_wraps_and_skips_missing_latest() {
-        // Downgrade-guarded row: latest hidden, so the cycle is keep↔range.
-        let guarded = row(
-            "a",
-            "dependencies",
-            "4.0.0-beta.90",
-            Some("4.0.0-beta.100"),
-            Some("0.64.0"),
-        )
-        .unwrap();
-        assert_eq!(guarded.next_state(PickState::Keep), PickState::Range);
-        assert_eq!(guarded.next_state(PickState::Range), PickState::Keep);
-        assert_eq!(guarded.prev_state(PickState::Keep), PickState::Range);
-
-        let both = row("b", "dependencies", "1.0.0", Some("1.5.0"), Some("2.0.0")).unwrap();
-        assert_eq!(both.next_state(PickState::Keep), PickState::Range);
-        assert_eq!(both.next_state(PickState::Range), PickState::Latest);
-        assert_eq!(both.next_state(PickState::Latest), PickState::Keep);
-        assert_eq!(both.prev_state(PickState::Keep), PickState::Latest);
+    fn state_cycle_walks_all_three_states_on_every_row() {
+        // Even a downgrade-guarded row cycles through all three states —
+        // its latest cell duplicates the range value instead of vanishing.
+        for r in [
+            row(
+                "a",
+                "dependencies",
+                "4.0.0-beta.90",
+                Some("4.0.0-beta.100"),
+                Some("0.64.0"),
+            )
+            .unwrap(),
+            row("b", "dependencies", "1.0.0", Some("1.5.0"), Some("2.0.0")).unwrap(),
+        ] {
+            assert_eq!(r.next_state(PickState::Keep), PickState::Range);
+            assert_eq!(r.next_state(PickState::Range), PickState::Latest);
+            assert_eq!(r.next_state(PickState::Latest), PickState::Keep);
+            assert_eq!(r.prev_state(PickState::Keep), PickState::Latest);
+        }
     }
 
     #[test]
@@ -764,21 +797,17 @@ mod tests {
                 .map(|(i, _)| i)
                 .collect()
         };
-        // Every box sits exactly on its column start. The chalk row has no
-        // in-range drift, so its range cell duplicates `current` but still
-        // renders (unison); the beta pin's latest cell is downgrade-guarded
-        // and blank-fills so nothing shifts.
-        assert_eq!(
-            boxes(&rendered[0]),
-            vec![keep_col, range_col, latest_col],
-            "{rendered:#?}"
-        );
-        assert_eq!(boxes(&rendered[1]), vec![keep_col, range_col]); // beta pin: no latest cell
-        assert_eq!(
-            boxes(&rendered[2]),
-            vec![keep_col, range_col, latest_col],
-            "{rendered:#?}"
-        );
+        // Every box sits exactly on its column start, and EVERY row has a
+        // box in every column: the chalk row's range cell duplicates
+        // `current` (no in-range drift) and the beta pin's latest cell
+        // duplicates its range value (downgrade-guarded).
+        for line in &rendered {
+            assert_eq!(
+                boxes(line),
+                vec![keep_col, range_col, latest_col],
+                "{rendered:#?}"
+            );
+        }
         // The heading labels sit on the same columns as the boxes below them.
         let header = header_line(&layout);
         let char_col = |l: &str, b: usize| l[..b].chars().count();
