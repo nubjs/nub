@@ -29,6 +29,9 @@ use console::{Key, Term};
 pub(crate) struct PickerRow {
     pub key: String,
     pub bucket: &'static str,
+    /// The manifest specifier (`^4.1.0`, `~7.5.0`), rendered as a dim
+    /// annotation column between the name and the cells.
+    pub spec: String,
     pub current: String,
     pub range_target: Option<String>,
     pub latest_target: Option<String>,
@@ -77,6 +80,7 @@ impl PickerSelection {
 pub(crate) fn build_row(
     key: &str,
     bucket: &'static str,
+    spec: &str,
     current: &str,
     wanted: Option<&str>,
     latest: Option<&str>,
@@ -110,6 +114,7 @@ pub(crate) fn build_row(
     Some(PickerRow {
         key: key.to_string(),
         bucket,
+        spec: spec.to_string(),
         current: current.to_string(),
         range_target: Some(range_target),
         latest_target: Some(latest_target),
@@ -198,6 +203,7 @@ fn cycle_all(rows: &[PickerRow], states: &mut [PickState], visible: &[usize]) {
 /// columns.
 struct Layout {
     name_w: usize,
+    spec_w: usize,
     cur_w: usize,
     range_w: usize,
     latest_w: usize,
@@ -208,6 +214,7 @@ impl Layout {
         let max = |it: &mut dyn Iterator<Item = usize>| it.max().unwrap_or(0);
         Layout {
             name_w: max(&mut rows.iter().map(|r| r.key.len())),
+            spec_w: max(&mut rows.iter().map(|r| r.spec.len())),
             cur_w: max(&mut rows.iter().map(|r| r.current.len())),
             range_w: max(&mut rows
                 .iter()
@@ -299,6 +306,12 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
         "  ".to_string()
     };
     let name = format!("{:<w$}", row.key, w = layout.name_w);
+    let spec_col = if layout.spec_w == 0 {
+        String::new()
+    } else {
+        let padded = format!("{:<w$}", row.spec, w = layout.spec_w);
+        format!("{}  ", style::estyle(padded).dim())
+    };
     let current_padded = format!("{:<w$}", row.current, w = layout.cur_w);
     let keep_selected = state == PickState::Keep;
     let keep_version = if keep_selected {
@@ -307,7 +320,7 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
         style::estyle(current_padded).dim().to_string()
     };
     let mut line = format!(
-        "{cursor}  {name}  {}",
+        "{cursor}  {name}  {spec_col}{}",
         cell(
             &keep_version,
             2 + layout.cur_w,
@@ -358,7 +371,12 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
 /// The dim column-heading line rendered once under the title: blank over
 /// the name column, then each existing column's label at its cells' start.
 fn header_line(layout: &Layout) -> String {
-    let mut line = " ".repeat(4 + layout.name_w + 2);
+    let spec_gap = if layout.spec_w == 0 {
+        0
+    } else {
+        layout.spec_w + 2
+    };
+    let mut line = " ".repeat(4 + layout.name_w + 2 + spec_gap);
     line.push_str(&format!("{:<w$}", HDR_KEEP, w = layout.keep_col_w()));
     if layout.range_col_w() > 0 {
         line.push_str("  ");
@@ -608,7 +626,7 @@ mod tests {
         wanted: Option<&str>,
         latest: Option<&str>,
     ) -> Option<PickerRow> {
-        build_row(key, bucket, current, wanted, latest)
+        build_row(key, bucket, "^1.0.0", current, wanted, latest)
     }
 
     #[test]
@@ -787,7 +805,7 @@ mod tests {
         // `■`/`□` markers are multibyte, so byte offsets differ between a
         // row with a real cell and one with a blank-filled column even
         // when the columns line up on screen.
-        let keep_col = 4 + layout.name_w + 2;
+        let keep_col = 4 + layout.name_w + 2 + layout.spec_w + 2;
         let range_col = keep_col + layout.keep_col_w() + 2;
         let latest_col = range_col + layout.range_col_w() + 2;
         let boxes = |l: &str| -> Vec<usize> {

@@ -1263,9 +1263,17 @@ async fn pick_update_rich(
         let wanted = super::max_satisfying_version(packument, spec)
             .or_else(|| packument.dist_tags.get(spec).cloned());
         let registry_latest = packument.dist_tags.get("latest").map(String::as_str);
+        // The displayed spec is always the MANIFEST's (the dim annotation
+        // answers "what does package.json say today"), even when an
+        // explicit CLI spec drives the targets.
+        let manifest_spec = specifiers
+            .get(key.as_str())
+            .map(String::as_str)
+            .unwrap_or("");
         if let Some(row) = update_picker::build_row(
             key,
             dep_bucket(manifest, key),
+            manifest_spec,
             &current,
             wanted.as_deref(),
             registry_latest,
