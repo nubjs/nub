@@ -3618,14 +3618,15 @@ fn no_env_file_wins_over_env_file_if_exists() {
     );
 }
 
-/// The standalone `nubx` binary forwards `--env-file` to Node itself (it is a
-/// Node value-flag, not captured by nub's own arg loop), so `--no-env-file` must
-/// win by STRIPPING the leading `--env-file*` before Node sees it — otherwise the
-/// flag loses on this one surface. Runs the binary AS `nubx` (argv0 dispatch) to
-/// exercise `run_nubx`. Unix-only (symlink).
+/// The `Nubx` clap grammar carries no env-file flags, so `run_nubx` consumes
+/// `--no-env-file` in the leading region itself — otherwise clap rejects it as
+/// unknown. Pins that the flag survives that hand-off and still suppresses the
+/// auto `.env` for the launched bin. Runs the binary AS `nubx` (argv0 dispatch) to
+/// exercise `run_nubx`. Unix-only (symlink + mode bits).
 #[cfg(unix)]
 #[test]
-fn no_env_file_wins_over_env_file_on_standalone_nubx() {
+fn no_env_file_is_honored_on_standalone_nubx() {
+    use std::os::unix::fs::PermissionsExt as _;
     let dir = unique_test_cache();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3633,16 +3634,20 @@ fn no_env_file_wins_over_env_file_on_standalone_nubx() {
     std::os::unix::fs::symlink(nub_binary(), &nubx).expect("symlink nub -> nubx");
     std::fs::write(dir.join("package.json"), r#"{"name":"nubx-noenvfile"}"#).unwrap();
     std::fs::write(dir.join(".env"), "SECRET=from-dotenv\n").unwrap();
-    std::fs::write(dir.join("custom.env"), "FROMCUSTOM=custom-val\n").unwrap();
+
+    // A local bin — the only tier nubx resolves — reporting what it inherited.
+    let bin_dir = dir.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let bin = bin_dir.join("showenv");
     std::fs::write(
-        dir.join("check.js"),
-        "console.log('SECRET=[' + (process.env.SECRET ?? '') + ']');\n\
-         console.log('FROMCUSTOM=[' + (process.env.FROMCUSTOM ?? '') + ']');\n",
+        &bin,
+        "#!/usr/bin/env node\nconsole.log('SECRET=[' + (process.env.SECRET ?? '') + ']');\n",
     )
     .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let out = Command::new(&nubx)
-        .args(["--no-env-file", "--env-file=custom.env", "check.js"])
+        .args(["--no-env-file", "showenv"])
         .current_dir(&dir)
         .env("XDG_CACHE_HOME", dir.join("cache"))
         .output()
@@ -3655,10 +3660,6 @@ fn no_env_file_wins_over_env_file_on_standalone_nubx() {
     assert!(
         stdout.contains("SECRET=[]"),
         "standalone nubx --no-env-file must suppress auto `.env`: {stdout}"
-    );
-    assert!(
-        stdout.contains("FROMCUSTOM=[]"),
-        "standalone nubx --no-env-file must win over a forwarded --env-file: {stdout}"
     );
 }
 
@@ -5641,37 +5642,12 @@ fn nub_dlx_is_not_consent_gated() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// SCRIPT tier: `nubx <name>` runs a `package.json` script of that name — nub's
-/// addition over npx (which only resolves bins). A local script must win over the
-/// registry: no download, no prompt, even in CI / non-TTY.
+/// The removed unified tiers: `nubx <name>` resolves BINS ONLY. A `package.json`
+/// script and a verbatim file of the same name must both be ignored — the token is
+/// a bin/package name, so it falls through to the consent-gated registry (and
+/// fails closed under CI). Files are `nub <file>`; scripts are `nub run <script>`.
 #[test]
-fn nubx_resolves_a_local_script() {
-    let (nubx, dir) = nubx_alias();
-    std::fs::write(
-        dir.join("package.json"),
-        r#"{"name":"t","scripts":{"greet":"node -e \"console.log('FROM-SCRIPT')\""}}"#,
-    )
-    .unwrap();
-    let out = Command::new(&nubx)
-        .arg("greet")
-        .current_dir(&dir)
-        .env("CI", "1") // a script never reaches the gate
-        .output()
-        .expect("spawn nubx greet");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("FROM-SCRIPT"),
-        "nubx must run the local script: stdout={stdout} stderr={stderr}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// FILE beats SCRIPT: when a token is both a verbatim-existing file and a script
-/// name, the file wins (precedence file > script, matching run/mux). The file is
-/// extensionless `greet`; the file runner runs it through Node.
-#[test]
-fn nubx_file_wins_over_script() {
+fn nubx_ignores_local_files_and_scripts() {
     let (nubx, dir) = nubx_alias();
     std::fs::write(
         dir.join("package.json"),
@@ -5688,193 +5664,15 @@ fn nubx_file_wins_over_script() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("FROM-FILE") && !stdout.contains("FROM-SCRIPT"),
-        "the verbatim file must win over the same-named script: stdout={stdout} stderr={stderr}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The nubx flag/argv resolution spec (`wiki/research/nubx-flag-env-resolution.md`
-/// §3 edge-case table). nubx is a pure pass-through runner: it locates the SUBJECT
-/// token, decides its TIER by precedence (file > script > bin > registry), then
-/// hands the RAW remaining argv to that tier's runner. This drives the table as
-/// real argv0 invocations and asserts each lands in the right tier with the right
-/// raw argv — the file tier (the headline #224 fix), the `-r`/`-p` collision
-/// rulings, and the SCRIPT re-dispatch to `nub run`. Registry/consent rows live in
-/// their own focused tests above.
-#[test]
-fn nubx_resolution_spec() {
-    let (nubx, dir) = nubx_alias();
-    // `app.js` echoes the argv + execArgv Node actually received, so a delegated
-    // file invocation is verified by what reached Node — not just exit codes.
-    std::fs::write(
-        dir.join("app.js"),
-        "console.log('ARGV='+JSON.stringify(process.argv.slice(2))+\
-         ' EXEC='+JSON.stringify(process.execArgv));\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(dir.join("sub")).unwrap();
-    std::fs::write(dir.join("sub/x.js"), "console.log('SUBX');\n").unwrap();
-    std::fs::write(
-        dir.join("package.json"),
-        r#"{"name":"t","scripts":{"build":"node -e \"console.log('SCRIPT-BUILD')\""}}"#,
-    )
-    .unwrap();
-    // A real `node_modules/.bin` entry is platform-shaped: a bare shebang file on
-    // POSIX, but on Windows `find_bin` only matches `.cmd`/`.exe`/`.bat`/`.ps1`, so
-    // a Windows bin needs a `.cmd` shim alongside the JS (exactly what npm/pnpm
-    // write, and what the nubx-test fixture's `hello`+`hello.cmd` pair does). The
-    // `.cmd` runs `node <bare-file> %*` so args forward; the bare file's shebang is
-    // stripped by Node. Without the shim, the Bin tier misses on Windows and falls
-    // through to the gated registry — the windows-latest-only failure this fixes.
-    let bin_dir = dir.join("node_modules/.bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    std::fs::write(
-        bin_dir.join("mytool"),
-        "#!/usr/bin/env node\nconsole.log('BIN '+JSON.stringify(process.argv.slice(2)));\n",
-    )
-    .unwrap();
-    #[cfg(windows)]
-    std::fs::write(
-        bin_dir.join("mytool.cmd"),
-        "@ECHO off\nnode \"%~dp0\\mytool\" %*\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(
-            bin_dir.join("mytool"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-    }
-
-    let nx = |args: &[&str]| -> (String, String, i32) {
-        let out = Command::new(&nubx)
-            .args(args)
-            .current_dir(&dir)
-            .env("CI", "1") // pin the non-TTY registry branch deterministically
-            .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
-            .output()
-            .expect("spawn nubx");
-        (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-            out.status.code().unwrap_or(-1),
-        )
-    };
-
-    // ── FILE tier — a leading Node flag, eval, stdin, `--`, and `--node` compat
-    // all reach Node; the raw argv (minus nub's own `--node`) is preserved. This is
-    // the half #224 broke: clap used to reject any Node flag before the file.
-    //
-    // Augmentation PREPENDS nub's own execArgv (the preload + experimental flags)
-    // and APPENDS the user's verbatim, so the user's leading flags are the TAIL of
-    // execArgv, in their original order. Assert that tail — NOT an exact-from-start
-    // match, which only holds when augmentation is off (the trap that masked this
-    // locally: a worktree target dir outside the tree can't find runtime/, so the
-    // dev binary ran un-augmented while CI ran augmented).
-    let (o, e, _) = nx(&["--inspect-port=0", "--enable-source-maps", "app.js"]);
-    assert!(
-        o.contains(r#""--inspect-port=0","--enable-source-maps"]"#),
-        "leading Node flags must reach Node verbatim, in order, as the execArgv tail: {o}{e}"
-    );
-    let (o, _, _) = nx(&["--import", "./app.js", "app.js", "tail"]); // value-flag skips its value
-    assert!(
-        o.contains(r#"ARGV=["tail"]"#),
-        "a Node value-flag consumes its value; the next bare token is the subject: {o}"
+        !stdout.contains("FROM-FILE") && !stdout.contains("FROM-SCRIPT"),
+        "nubx must not resolve a local file or script: stdout={stdout} stderr={stderr}"
     );
     assert!(
-        nx(&["-e", "console.log(2+2)"]).0.contains('4'),
-        "`-e` eval is the Node tier"
+        !out.status.success() && stderr.contains("refusing to download"),
+        "the token must reach the gated registry tier and fail closed in CI: \
+         status={:?} stderr={stderr}",
+        out.status.code()
     );
-    // `--` is PRESERVED into Node's argv (not stripped) — node `app.js -- --foo`
-    // keeps `--` as a program arg.
-    assert!(
-        nx(&["app.js", "--", "--foo"])
-            .0
-            .contains(r#"ARGV=["--","--foo"]"#),
-        "the first `--` after a file must reach Node, not be stripped"
-    );
-    assert!(
-        nx(&["--node", "app.js"]).0.contains(r#"EXEC=[]"#),
-        "`--node` is stripped + forces compat: no augmentation flags in execArgv"
-    );
-    // The review's P0 re-confirm: a relative / bare path that EXISTS resolves as a
-    // FILE, never falling through to the registry.
-    assert!(
-        nx(&["./app.js"]).0.contains("ARGV="),
-        "`./app.js` runs as a file"
-    );
-    assert!(
-        nx(&["sub/x.js"]).0.contains("SUBX"),
-        "a bare relative path that exists runs as a file"
-    );
-    assert!(
-        nx(&["app.js"]).0.contains("ARGV="),
-        "a bare filename that exists runs as a file"
-    );
-
-    // ── SCRIPT tier — a bare script re-dispatches to `nub run`, gaining its full
-    // flag surface. A run-only flag (`--if-present`) now works; a Node flag on a
-    // script is a clean clap error, never a silent registry fetch.
-    assert!(
-        nx(&["build"]).0.contains("SCRIPT-BUILD"),
-        "a bare script runs via `nub run`"
-    );
-    assert!(
-        nx(&["--if-present", "build"]).0.contains("SCRIPT-BUILD"),
-        "`--if-present` reaches `nub run` (the script tier's full grammar)"
-    );
-    let (_, e, code) = nx(&["--inspect", "build"]);
-    assert!(
-        code != 0 && e.contains("--inspect") && !e.to_lowercase().contains("download"),
-        "a Node flag on a script is a clean error from `nub run`, not a registry attempt: {e}"
-    );
-
-    // ── BIN tier — flags after the bin reach the bin; the post-target `--` is
-    // KEPT verbatim (Option A, decided 2026-06-28 — = pnpm 10 exec / node).
-    assert!(
-        nx(&["mytool", "a1"]).0.contains(r#"BIN ["a1"]"#),
-        "a local bin runs with its args"
-    );
-    assert!(
-        nx(&["mytool", "--help"]).0.contains(r#"BIN ["--help"]"#),
-        "a flag after the bin reaches it"
-    );
-    assert!(
-        nx(&["mytool", "--", "--fix"])
-            .0
-            .contains(r#"BIN ["--","--fix"]"#),
-        "the bin's post-target `--` is kept verbatim (Option A)"
-    );
-
-    // ── Collisions (decided): `-p` = `--package` (registry force, NOT Node print);
-    // `-r` = `--recursive` (workspace, NOT Node `--require`).
-    let (_, e, _) = nx(&["-p", "cowsay", "mytool"]);
-    assert!(
-        e.to_lowercase().contains("download") || e.to_lowercase().contains("ci"),
-        "`-p` forces the registry tier even with a local `mytool`: {e}"
-    );
-    let (_, e, code) = nx(&["-p", "cowsay", "--no-install", "mytool"]);
-    assert!(
-        code == 127 && e.contains("--no-install"),
-        "`-p`+`--no-install` errors 127, no fetch: {e}"
-    );
-    let (_, e, code) = nx(&["-r", "build"]);
-    assert!(
-        code != 0 && e.to_lowercase().contains("workspace"),
-        "`-r` is `--recursive` (workspace run), never Node's `--require`: {e}"
-    );
-
-    // ── No subject at all → the missing-name bail (registry consent never fires).
-    let (_, e, code) = nx(&["--node"]);
-    assert!(
-        code != 0 && e.contains("missing binary name"),
-        "no subject bails: {e}"
-    );
-
     let _ = std::fs::remove_dir_all(&dir);
 }
 

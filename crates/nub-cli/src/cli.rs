@@ -822,7 +822,9 @@ pub enum Command {
         #[arg(short = 'q', long)]
         quiet: bool,
 
-        /// Accepted for `npx` parity; a no-op — nubx never prompts before fetching.
+        /// Consent up-front to the implicit registry fetch (`npx -y`): skips the
+        /// first-fetch prompt and is the escape hatch out of the CI / non-TTY
+        /// fail-closed default.
         #[arg(short = 'y', long)]
         yes: bool,
 
@@ -2387,28 +2389,17 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                     &ws_opts,
                 )
             } else {
-                // Unified-runner resolution chain: file → script → (bin →
-                // registry). The file/script tiers are nub's addition over npx's
-                // bins-only model; the bin→registry tail lives in
-                // `run_exec_with_dlx`. The order matches `run`/`mux` so a token
-                // means the same thing on every nub surface (file > script > bin),
-                // and scripts beat bins. A `-p`/`--package` spec is an explicit
-                // "fetch this package", so it skips local resolution entirely
-                // (npx behaves the same — a local bin never shadows `-p`).
-                if package.is_empty()
-                    && let Some(result) = nubx_resolve_local(&bin, node, &args)
-                {
-                    result
-                } else {
-                    let dlx_flags = NubxDlxFlags {
-                        package,
-                        // `--no` is npx's alias for `--no-install`: refuse to fetch.
-                        no_install: no_install || no_fetch,
-                        quiet,
-                        yes,
-                    };
-                    run_exec_with_dlx(&bin, node, &args, Some(&dlx_flags))
-                }
+                // Local bin → registry, npx's model. `run_exec_with_dlx` owns the
+                // tail: it resolves `node_modules/.bin` first and only a miss reaches
+                // the consent-gated fetch.
+                let dlx_flags = NubxDlxFlags {
+                    package,
+                    // `--no` is npx's alias for `--no-install`: refuse to fetch.
+                    no_install: no_install || no_fetch,
+                    quiet,
+                    yes,
+                };
+                run_exec_with_dlx(&bin, node, &args, Some(&dlx_flags))
             }
         }
         Some(Command::Init {
@@ -2518,24 +2509,25 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 }
 
 fn run_nubx() -> Result<i32> {
-    // nubx is a PURE PASS-THROUGH runner: locate the SUBJECT token, decide its TIER
-    // by precedence (file > script > bin > registry), then hand the RAW remaining
-    // argv to that tier's existing runner unchanged. Subject location is asymmetric
-    // — the open-ended Node/FILE tier scans a baked Node arity table while the
-    // closed nub-owned tiers resolve through clap (the `Nubx` grammar, or a
-    // re-dispatch to `nub run`). The classifier is `crate::nubx_resolve::classify`;
-    // this function only maps each route to its runner. See that module for why the
-    // two mechanisms are needed (clap fails-closed on a future Node flag).
+    // `nubx <bin> [args...]` is nub's `npx`: a locally-installed bin runs out of
+    // `node_modules/.bin` with no network, and a local miss falls back to fetching
+    // the tool and running it. Resolution is BINS-ONLY — a file is `nub <file>`, a
+    // script is `nub run <script>`. (nubx briefly resolved those tiers too; that was
+    // reverted, so a bare token here is always a bin/package name.)
+    //
+    // The registry fallthrough is IMPLICIT, so it is consent-gated where it happens
+    // in `run_exec_with_dlx`: prompt once per spec in a terminal, fail closed in CI
+    // and any non-TTY, `-y` to bypass. Explicit `nub dlx` skips the gate entirely.
+    //
+    // Three-position rule: a flag BEFORE the bin (`nubx --node eslint`, `nubx -p
+    // left-pad pad`) is nubx's; a flag AFTER it reaches the bin verbatim.
     let mut args: Vec<String> = env::args().skip(1).collect();
 
-    // `--help`/`--version` are nubx's own flags only when they appear BEFORE the
-    // subject (the three-position rule: a flag after the subject reaches the
-    // resolved runner verbatim — `nubx eslint --help` is eslint's help). When no
-    // subject has been seen yet and one of these leading flags appears, honor it
-    // like `nub --help`/`nub --version`.
+    // `--help`/`--version` are nubx's own only BEFORE the bin positional — after it
+    // they belong to the bin (`nubx eslint --help` is eslint's help).
     for arg in &args {
         if arg == "--" || !arg.starts_with('-') {
-            break; // subject (or its `--` separator) — stop scanning
+            break; // bin positional (or its `--` separator) — stop scanning
         }
         match arg.as_str() {
             "--help" | "-h" => {
@@ -2550,15 +2542,12 @@ fn run_nubx() -> Result<i32> {
         }
     }
 
-    // `--no-env-file` in the LEADING region. Because it WINS over `--env-file`,
-    // and the standalone-nubx File tier would otherwise FORWARD a leading
-    // `--env-file`/`--env-file-if-exists` to Node (which loads it), the whole
-    // `--env-file*` family is stripped alongside `--no-env-file` — otherwise
-    // `--no-env-file` fails to win on this surface (the Nub-entry path already
-    // captures those flags itself, so the leak is nubx-only). Both scans below
-    // account for the space-form value token so a flag's value is never taken as
-    // the subject; the leading-only scope preserves a post-subject occurrence as
-    // the program's own arg.
+    // `--no-env-file` in the LEADING region. The `Nubx` clap grammar carries no
+    // env-file flags, so this family has to be consumed here or clap rejects it as
+    // unknown. `--no-env-file` WINS over `--env-file`, so the whole `--env-file*`
+    // family is stripped alongside it. Both scans account for the space-form value
+    // token so a flag's value is never mistaken for the bin; the leading-only scope
+    // preserves a post-bin occurrence as the program's own arg.
     let is_env_file_value_flag = |a: &str| a == "--env-file" || a == "--env-file-if-exists";
     let mut no_env_file_seen = false;
     let mut idx = 0;
@@ -2604,88 +2593,20 @@ fn run_nubx() -> Result<i32> {
         args = stripped;
     }
 
-    let cwd = env::current_dir().ok();
-    // `is_script` is injected so the classifier stays filesystem-light: it reports
-    // whether a bare subject is a package.json script (the script tier, which beats
-    // bins and re-dispatches to `nub run` for the full run-flag surface).
-    let is_script = |token: &str| {
-        cwd.as_deref()
-            .and_then(nub_core::workspace::detect::detect_project)
-            .and_then(|p| nub_core::workspace::scripts::resolve_script(&p.manifest, token))
-            .is_some()
-    };
-
-    match crate::nubx_resolve::classify(&args, cwd.as_deref(), &is_script) {
-        // FILE/Node tier — a file subject, an `-e`/`--eval`/`--print` eval, or stdin.
-        // Delegate the raw argv (nub's `--node` already stripped) to the file runner;
-        // Node binds flags-vs-entry. This is the headline #224 fix: a leading Node
-        // flag (`--inspect`, `--import x`, `-e`) now reaches Node instead of
-        // clap-erroring.
-        crate::nubx_resolve::NubxRoute::File { compat, argv } => {
-            run_file_with_compat(&argv, compat)
-        }
-        // SCRIPT tier — re-dispatch the original argv through `nub run`, whose full
-        // grammar (`--if-present`, `--filter`, `--reporter`, …) the `Nubx` grammar
-        // lacks. The subject was confirmed a script, so `run` resolves it directly.
-        crate::nubx_resolve::NubxRoute::Script => {
-            let mut rest = vec!["run".to_string()];
-            rest.extend(args);
-            dispatch_subcommand(rest)
-        }
-        // BIN / REGISTRY / workspace-bin tier, a `-p`-forced fetch, or no subject —
-        // the existing `Nubx` clap dispatch. Arm the DLX fallback (a local miss
-        // fetches-and-runs, gated) exactly as before.
-        crate::nubx_resolve::NubxRoute::Owned => {
-            if args.is_empty() || args.iter().all(|a| a.starts_with('-') && a != "--") {
-                bail!(
-                    "nubx: missing binary name\nUsage: nubx [-p <spec>] [--node] [--no-install] <bin> [args...]"
-                );
-            }
-            NUBX_DLX_FALLBACK.store(true, Ordering::Relaxed);
-            let mut rest = vec!["nubx".to_string()];
-            rest.extend(args);
-            dispatch_subcommand(rest)
-        }
-    }
-}
-
-/// The local tiers of `nubx`'s unified resolution chain — FILE then SCRIPT —
-/// tried before the bin → registry tail in [`run_exec_with_dlx`]. Returns
-/// `Some(result)` when a tier matched and ran; `None` to fall through. Only the
-/// bare single-tool path reaches here (`-p` and the workspace flags never do).
-///
-/// Precedence is file > script, matching `run`/`mux` so a token resolves the same
-/// way on every nub surface; scripts then beat bins in the tail. The local tiers
-/// never touch the network — only a full local miss reaches the gated registry.
-fn nubx_resolve_local(token: &str, compat_mode: bool, args: &[String]) -> Option<Result<i32>> {
-    let cwd = env::current_dir().ok()?;
-
-    // FILE tier: a path-shaped token, or a file by that exact name in cwd. The
-    // verbatim-existence check (not extension sniffing) runs an extensionless
-    // `./cli` or a bare `index.ts` when it is a real file — mirroring `mux`. A
-    // path-shaped token is a file *intent* even when missing: let the file runner
-    // emit the not-found rather than misread `./foo` as a script/bin/package.
-    if crate::nubx_resolve::is_path_shaped(token) || cwd.join(token).is_file() {
-        let mut file_args = Vec::with_capacity(args.len() + 1);
-        file_args.push(token.to_string());
-        file_args.extend(args.iter().cloned());
-        return Some(run_file_with_compat(&file_args, compat_mode));
+    if args.is_empty() || args.iter().all(|a| a.starts_with('-') && a != "--") {
+        // No bin name at all (empty, or only leading flags like `nubx --node`).
+        bail!(
+            "nubx: missing binary name\nUsage: nubx [-p <spec>] [--node] [--no-install] <bin> [args...]"
+        );
     }
 
-    // SCRIPT tier: a package.json script named exactly `token`, run through the
-    // same single-script path `nub run <script>` uses (lifecycle hooks + the
-    // `$ <cmd>` echo intact). Scripts beat bins — consistency with run/mux, and a
-    // colliding script is far easier to rename than a dependency's `.bin` name.
-    let project = nub_core::workspace::detect::detect_project(&cwd)?;
-    let cmd = nub_core::workspace::scripts::resolve_script(&project.manifest, token)?;
-    Some(run_single_script(
-        token,
-        &cmd,
-        &project,
-        compat_mode,
-        args,
-        &ScriptExecOpts::default(),
-    ))
+    // Arm the registry fallback for the exec path below — `nub exec` itself stays
+    // no-network, so only the `nubx` entry point can reach the gated registry tier.
+    NUBX_DLX_FALLBACK.store(true, Ordering::Relaxed);
+
+    let mut rest = vec!["nubx".to_string()];
+    rest.extend(args);
+    dispatch_subcommand(rest)
 }
 
 fn run_as_node() -> Result<i32> {
@@ -3782,9 +3703,9 @@ fn run_single_script(
     exec: &ScriptExecOpts,
 ) -> Result<i32> {
     // Pre-run dependency-freshness gate (#252) for direct callers that bypass
-    // `run_script` — the `nubx`/`nub x` script tier (`nubx_resolve_local`). A
-    // `nub run` already gated at `run_script`, and a workspace fan-out gated at
-    // its root, so the once-per-process latch makes this a no-op there.
+    // `run_script`. A `nub run` already gated at `run_script`, and a workspace
+    // fan-out gated at its root, so the once-per-process latch makes this a no-op
+    // there.
     if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
         return Ok(code);
     }
