@@ -760,14 +760,8 @@ pub async fn run(
             else {
                 continue;
             };
-            // A non-`latest` dist-tag arg writes an exact pin, matching pnpm
-            // (`pnpm update typescript@beta` from `~5.3.0` → `"6.0.0-beta"`,
-            // verified against pnpm 10.15.1); `@latest` and concrete
-            // version/range args keep the operator-gluing path.
-            let exact_pin = args.exact
-                || explicit_specs
-                    .get(key)
-                    .is_some_and(|s| s != "latest" && node_semver::Range::parse(s).is_err());
+            let exact_pin =
+                args.exact || explicit_specs.get(key).is_some_and(|s| spec_pins_exact(s));
             let new_spec = rewrite_specifier(&original, &real_name, &resolved, exact_pin);
             if new_spec == original {
                 continue;
@@ -1655,6 +1649,15 @@ fn is_dist_tag_spec(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Whether an explicit `<pkg>@<spec>` arg writes an exact pin instead of
+/// gluing the manifest's operator back on. A non-`latest` dist-tag does
+/// (`pnpm update typescript@beta` from `~5.3.0` → `"6.0.0-beta"`, verified
+/// against pnpm 10.15.1); `@latest` and concrete version/range args keep
+/// the operator-gluing path (`chalk@latest` from `^4.1.0` → `^5.6.2`).
+fn spec_pins_exact(s: &str) -> bool {
+    s != "latest" && node_semver::Range::parse(s).is_err()
+}
+
 /// Rewrite a direct-dep specifier to pin `resolved_version`, preserving:
 ///   - `npm:<alias>@…` aliases round-trip through the `npm:` prefix.
 ///   - The leading range operator (`^`, `~`, `>=`, `<`, `=`), or `^`
@@ -2080,6 +2083,15 @@ mod tests {
                 reject_unsupported_pkg_specs(&[ok.to_string()]).is_ok(),
                 "{ok} should be accepted as a dist-tag"
             );
+        }
+        // The pin classification behind the rewrite: a non-`latest`
+        // dist-tag writes an exact pin; `latest` and version/range args
+        // glue the manifest's operator back on (pnpm 10.15.1 parity).
+        for exact in ["beta", "next", "nightly-2026"] {
+            assert!(spec_pins_exact(exact), "{exact} should pin exact");
+        }
+        for glued in ["latest", "3.0.1", "^2", "~3.0", ">=1.0.0", "1.2.3-rc.0"] {
+            assert!(!spec_pins_exact(glued), "{glued} should keep the operator");
         }
         // Alias/protocol/URL forms carry no plain semver target and no
         // registry tag — pinning them would silently corrupt the
