@@ -104,16 +104,16 @@ Passing `--force` overwrites the listed files. An existing `.git/` is never touc
 
 ## Templates: nub create
 
-Framework templates are not init's job — they belong to `nub create`. It resolves the ecosystem's `create-*` convention (`vite` → `create-vite`, `@scope/foo` → `@scope/create-foo`), fetches the scaffolder, and runs it:
+Framework templates are not init's job — they belong to `nub create`. It resolves the ecosystem's `create-*` convention (`vue` → `create-vue`, `@scope/foo` → `@scope/create-foo`), fetches the scaffolder, and runs it. Scaffolders that detect the invoking package manager answer with Nub commands:
 
 ```console
-$ nub create vite my-app --template vanilla
-dependencies:
-+ create-vite@9.1.1
+$ nub create vue my-app --default
 
-◇  Scaffolding project in /home/me/my-app...
-│
-└  Done.
+└  Done. Now run:
+
+   cd my-app
+   nub install
+   nub run dev
 ```
 
 Everything after the template name is passed through to the scaffolder, so each `create-*` tool's own flags work unchanged.
