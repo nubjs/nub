@@ -5,6 +5,7 @@
 // so allow it.
 #![allow(clippy::collapsible_if)]
 
+pub mod compile;
 pub mod config_cache;
 pub mod node;
 pub mod pm;

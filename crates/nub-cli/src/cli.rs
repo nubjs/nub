@@ -848,6 +848,37 @@ pub enum Command {
     // wiki/commands/init.md. (The doc comment below is user-facing `--help`
     // text: no internal references.)
     /// Scaffold a new TypeScript-first project.
+    /// Compile a file to a standalone executable (spike — host triple only).
+    ///
+    /// Bundles the entry (Rolldown, in-process), embeds a Node for the target
+    /// (default shape), and emits one self-contained binary. `--smol` embeds no
+    /// Node — it discovers or provisions one at first run.
+    Compile {
+        /// Entry file (TS/JS) to bundle and compile.
+        entry: String,
+
+        /// Output path. Default: ./<entry-stem>.
+        #[arg(long, value_name = "PATH")]
+        out: Option<String>,
+
+        /// No embedded Node: discover or provision one at runtime.
+        #[arg(long)]
+        smol: bool,
+
+        /// Node version to target: down-level target + embedded/provisioned
+        /// version. Accepts a concrete version, a major, or an alias (`lts`).
+        #[arg(long, value_name = "VERSION", default_value = "24")]
+        target: String,
+
+        /// Target triple. Spike: host triple only; a foreign triple errors.
+        #[arg(long, value_name = "TRIPLE")]
+        platform: Option<String>,
+
+        /// Disable minification (default: minify on).
+        #[arg(long = "no-minify")]
+        no_minify: bool,
+    },
+
     Init {
         /// Non-interactive: skip all prompts and take the defaults.
         #[arg(short = 'y', long)]
@@ -2400,6 +2431,34 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                     yes,
                 };
                 run_exec_with_dlx(&bin, node, &args, Some(&dlx_flags))
+            }
+        }
+        Some(Command::Compile {
+            entry,
+            out,
+            smol,
+            target,
+            platform,
+            no_minify,
+        }) => {
+            #[cfg(feature = "compile")]
+            {
+                crate::compile::run(crate::compile::CompileOptions {
+                    entry,
+                    out,
+                    smol,
+                    target,
+                    platform,
+                    minify: !no_minify,
+                })
+            }
+            #[cfg(not(feature = "compile"))]
+            {
+                let _ = (entry, out, smol, target, platform, no_minify);
+                anyhow::bail!(
+                    "this build of nub was compiled without `nub compile` support \
+                     (rebuild with `--features compile`)"
+                )
             }
         }
         Some(Command::Init {

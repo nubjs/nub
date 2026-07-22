@@ -1,0 +1,43 @@
+# nub-launcher — the runtime half of `nub compile`. A deliberately minimal
+# per-triple binary: it links ONLY nub-core's Node logic (flags/discovery/spawn)
+# plus a section reader + a pure-Rust zstd decoder. NO package manager, NO
+# transpiler/addon, NO bundler, NO clap. Its OWN workspace (like nub-native) so
+# it gets a size-tuned release profile independent of the root workspace.
+#
+# nub-core is linked with default features; the launcher only ever calls its pure
+# paths (flag computation, discovery, signal-forwarding spawn), so fat LTO drops
+# the reqwest/liblzma network stack from the final binary even though nub-core
+# compiles it. `--smol` provisioning is a curl/wget/tar shell-out (below), NOT
+# nub-core's in-process HTTP path — the design's no-in-binary-TLS rule.
+[package]
+name = "nub-launcher"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "nub-launcher"
+path = "src/main.rs"
+
+[dependencies]
+nub-core = { path = "../nub-core" }
+# Reads the embedded payload from the launcher's own Mach-O `__SUI` segment at
+# runtime (`find_section`). The Mach-O writer + signer libsui also provides is
+# used compile-time in nub-cli, not here — fat LTO drops it.
+libsui = "0.16"
+# Pure-Rust zstd DECODER for the embedded Node (matches nub-core's runtime
+# extraction). Decode-only keeps the C zstd out of the launcher.
+ruzstd = "0.7"
+anyhow = "1"
+libc = "0.2"
+
+# Own workspace root: excluded from the nub root workspace so this profile
+# (size-first) governs the shipped launcher independently.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

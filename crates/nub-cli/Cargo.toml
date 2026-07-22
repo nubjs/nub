@@ -17,9 +17,25 @@ path = "src/main.rs"
 # and `make install-dev` keep walking to the in-repo `runtime/`. CI release builds
 # pass `--features embed-runtime`.
 embed-runtime = ["nub-core/embed-runtime"]
+# `nub compile` (spike): the in-process Rolldown bundler + Mach-O section
+# injection/signing (libsui) + zstd-19 Node compression. OFF by default — these
+# are large, compile-time-only deps (Rolldown pulls its own oxc ^0.140, a dual-oxc
+# build alongside nub-phantom's =0.132), so the everyday build and CI cheap gates
+# don't carry them. `tokio/full` gives the bundler a full async runtime.
+compile = ["dep:rolldown", "dep:rolldown_common", "dep:libsui", "dep:zstd", "tokio/full"]
 
 [dependencies]
 nub-core = { path = "../nub-core" }
+# `nub compile` compile-time pipeline (behind the `compile` feature). The Rolldown
+# crates are pinned EXACT — they explicitly disclaim semver (rolldown.rs/apis/
+# rust-crates), so every bump is a reviewed change gated on a round-trip test.
+rolldown = { version = "=1.2.0", optional = true }
+rolldown_common = { version = "=1.2.0", optional = true }
+# Mach-O section injection + pure-Rust ad-hoc signing of the launcher output.
+libsui = { version = "0.16", optional = true }
+# zstd-19 compression of the embedded Node (encode side; the launcher decodes with
+# pure-Rust ruzstd).
+zstd = { version = "0.13", optional = true }
 # Shared phantom-classification primitives (specifier extraction + guard modeling
 # + builtin/name classification) for the pre-run phantom scan (src/phantom_scan.rs).
 # Depends on the LEAN oxc parser subset, not the full `oxc` umbrella — see the
