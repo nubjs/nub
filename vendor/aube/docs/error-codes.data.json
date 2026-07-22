@@ -669,6 +669,12 @@
       "exit_code": null
     },
     {
+      "name": "WARN_AUBE_PATCH_KEY_ALIAS_NAME",
+      "category": "Settings / config validation",
+      "description": "A `patchedDependencies` key named an npm alias. Patches resolve against a package's registry name, so the entry matched nothing.",
+      "exit_code": null
+    },
+    {
       "name": "WARN_AUBE_INVALID_PEER_PATTERN",
       "category": "Settings / config validation",
       "description": "A `peerDependencyRules` pattern was unparseable and skipped.",
@@ -690,6 +696,12 @@
       "name": "WARN_AUBE_MANAGED_CONFIG_ENFORCED",
       "category": "Settings / config validation",
       "description": "Managed hardening config enforced a stricter value than local config, env, or CLI requested.",
+      "exit_code": null
+    },
+    {
+      "name": "WARN_AUBE_INVALID_NAMED_REGISTRY_URL",
+      "category": "Settings / config validation",
+      "description": "A `namedRegistries` alias mapped to a value that is not a valid http(s) URL. The alias was dropped.",
       "exit_code": null
     },
     {

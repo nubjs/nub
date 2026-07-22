@@ -382,9 +382,39 @@ pub fn record_patches_on_graph(cwd: &Path, graph: &mut aube_lockfile::LockfileGr
     // invalid range already errored inside `effective_patch_config`.
     aube_lockfile::patch_groups::resolve_patched_by_version(&paths, &graph.packages)
         .map_err(map_patch_resolve_err)?;
+    warn_alias_only_patch_keys(&paths, graph);
     graph.patched_dependencies = paths;
     graph.patched_dependency_hashes = hashes;
     Ok(())
+}
+
+/// Report a `patchedDependencies` key that names an npm alias. pnpm
+/// matches patches on a package's registry name, so such a key applies
+/// to nothing — and the patch it points at silently never lands. Warn
+/// rather than fail: the install itself is valid, and the user needs the
+/// registry-name spelling, not a stopped install.
+fn warn_alias_only_patch_keys(
+    paths: &BTreeMap<String, String>,
+    graph: &aube_lockfile::LockfileGraph,
+) {
+    let Ok(dead) = aube_lockfile::patch_groups::alias_only_patch_keys(
+        paths.keys().map(String::as_str),
+        &graph.packages,
+    ) else {
+        return;
+    };
+    for (source_key, alias, registry_name) in dead {
+        // The selector's version part is whatever the user wrote (exact,
+        // range, `*`, or absent); swapping only the name prefix keeps it
+        // so the suggestion is a drop-in replacement.
+        let suggested = format!("{registry_name}{}", &source_key[alias.len()..]);
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_PATCH_KEY_ALIAS_NAME,
+            "patch key {source_key:?} matched no package — patches resolve against a \
+             package's registry name, not the npm alias it is installed as; \
+             declare it as {suggested:?}"
+        );
+    }
 }
 
 /// Drop an entry from `patchedDependencies` in whichever file declares
