@@ -4036,6 +4036,63 @@ fn watch_filters_late_runtime_control_env_keys_but_reloads_ordinary_vars() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// #479: an explicit `--env-file` forwards to the watched Node, so an edit both
+/// triggers the restart (no `--watch-path` needed) and is re-read by the
+/// restarted child — matching `node --env-file --watch` — instead of freezing at
+/// the startup snapshot.
+#[test]
+fn watch_reloads_explicit_env_file_across_restarts() {
+    if !node_reloads_watched_env_files() {
+        eprintln!("skipping: target Node does not restart on --env-file edits");
+        return;
+    }
+
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Named outside the `.env*` cascade (and no package.json), so the explicit
+    // channel alone is what reloads — auto-discovery never enters the picture.
+    std::fs::write(dir.join("custom.env"), "ORDINARY=one\n").unwrap();
+    let snapshots = dir.join("snapshots.ndjson");
+    let stderr = dir.join("stderr.txt");
+    std::fs::write(
+        dir.join("probe.cjs"),
+        format!(
+            "const fs = require('fs');\n\
+             const snapshot = {{ ordinary: process.env.ORDINARY, added: process.env.ADDED ?? null }};\n\
+             fs.appendFileSync({path:?}, JSON.stringify(snapshot) + '\\n');\n",
+            path = snapshots.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let stderr_file = std::fs::File::create(&stderr).unwrap();
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(["--env-file=custom.env", "--watch", "probe.cjs"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file));
+    remove_ambient_watch_control_vars(&mut cmd);
+    let mut child = spawn_watch_probe(&mut cmd);
+
+    let first = wait_for_watch_snapshot(&snapshots, r#""ordinary":"one""#, &mut child, &stderr);
+    assert!(first.contains(r#""added":null"#), "first child: {first}");
+
+    // Changed values AND keys added after startup must both reach the
+    // restarted child (the #479 failure froze the startup snapshot).
+    std::fs::write(dir.join("custom.env"), "ORDINARY=two\nADDED=three\n").unwrap();
+    let reloaded = wait_for_watch_snapshot(&snapshots, r#""ordinary":"two""#, &mut child, &stderr);
+    finish_watch_probe(&mut child);
+
+    assert!(
+        reloaded.contains(r#""added":"three""#),
+        "reloaded: {reloaded}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Ambient runtime-control values remain shell-wins. The cleanup preload must run
 /// before the user's ambient preload and restore the sanitized NODE_OPTIONS text
 /// rather than exposing Nub's temporary guard token.
