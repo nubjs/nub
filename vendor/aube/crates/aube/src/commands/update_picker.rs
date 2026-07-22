@@ -19,9 +19,11 @@ use std::io::Write;
 
 use console::{Key, Term};
 
-/// One pickable dependency. `range_target` / `latest_target` are only
-/// populated when they represent a real, non-downgrade change from
-/// `current`; a row with neither is filtered out by [`build_row`].
+/// One pickable dependency. `range_target` is always populated (with
+/// `current` itself when there is no in-range drift — duplication keeps
+/// the rows cycling in unison); `latest_target` only when the `latest`
+/// dist-tag is a real upgrade. A row offering no real change at all is
+/// filtered out by [`build_row`].
 #[derive(Debug, Clone)]
 pub(crate) struct PickerRow {
     pub key: String,
@@ -56,19 +58,19 @@ impl PickerSelection {
 /// Build a picker row from the resolved facts about one dependency, or
 /// `None` when there is nothing to offer:
 ///
-/// - `range_target` = the in-range max when it differs from `current` and
-///   is not a semver downgrade (a lockfile pinned above the manifest range
-///   would otherwise get a downgrade offered as "range"). When either side
-///   fails to parse, plain inequality decides — the resolver may still
-///   move it, so hiding it would lie.
+/// - The row exists iff the in-range max is a real (non-downgrade) change
+///   from `current`, or the `latest` dist-tag is a strict upgrade.
+/// - `range_target` is then ALWAYS populated — with `current` itself when
+///   the in-range max is current (or would be a downgrade: a lockfile
+///   pinned above the manifest range). Duplicating the keep value keeps
+///   every row's cells in the same columns and cycling in unison; a
+///   no-op "latest in range" pick simply re-resolves to the same version.
 /// - `latest_target` = the `latest` dist-tag when it is a strict semver
 ///   upgrade over `current`. A `latest` at-or-below `current` (the
 ///   prerelease-pin case: current `4.0.0-beta.59`, latest `0.64.0`) is
 ///   dropped rather than offered as a downgrade — the per-cell form of the
 ///   `preserve_pin` guard. An unparseable `current` also drops the cell,
 ///   since the ordering can't be established.
-/// - When both targets are the same version the row collapses to a single
-///   `latest` cell (the more informative label).
 pub(crate) fn build_row(
     key: &str,
     bucket: &'static str,
@@ -85,9 +87,10 @@ pub(crate) fn build_row(
             (Ok(cur), Ok(new)) if new <= cur
         )
     };
-    let mut range_target = wanted
-        .filter(|w| *w != current && !semver_downgrade(w))
-        .map(str::to_owned);
+    let range_target = wanted
+        .filter(|w| !semver_downgrade(w))
+        .unwrap_or(current)
+        .to_string();
     let latest_target = latest
         .filter(|l| {
             let (Ok(cur), Ok(new)) = (
@@ -99,17 +102,14 @@ pub(crate) fn build_row(
             new > cur
         })
         .map(str::to_owned);
-    if latest_target.is_some() && latest_target == range_target {
-        range_target = None;
-    }
-    if range_target.is_none() && latest_target.is_none() {
+    if range_target == current && latest_target.is_none() {
         return None;
     }
     Some(PickerRow {
         key: key.to_string(),
         bucket,
         current: current.to_string(),
-        range_target,
+        range_target: Some(range_target),
         latest_target,
     })
 }
@@ -605,9 +605,16 @@ mod tests {
     }
 
     #[test]
-    fn build_row_collapses_equal_targets_to_latest() {
+    fn build_row_duplicates_equal_targets_and_backfills_range() {
+        // wanted == latest: both cells show the same version, so the row
+        // cycles through all three states like every other row.
         let r = row("a", "dependencies", "1.2.3", Some("2.0.0"), Some("2.0.0")).unwrap();
-        assert_eq!(r.range_target, None);
+        assert_eq!(r.range_target.as_deref(), Some("2.0.0"));
+        assert_eq!(r.latest_target.as_deref(), Some("2.0.0"));
+        // No in-range drift: the range cell duplicates `current` (a no-op
+        // pick) rather than going missing.
+        let r = row("a", "dependencies", "1.2.3", Some("1.2.3"), Some("2.0.0")).unwrap();
+        assert_eq!(r.range_target.as_deref(), Some("1.2.3"));
         assert_eq!(r.latest_target.as_deref(), Some("2.0.0"));
     }
 
@@ -671,11 +678,19 @@ mod tests {
     }
 
     #[test]
-    fn state_cycle_wraps_and_skips_missing_states() {
-        let r = row("a", "dependencies", "1.0.0", None, Some("2.0.0")).unwrap();
-        assert_eq!(r.next_state(PickState::Keep), PickState::Latest);
-        assert_eq!(r.next_state(PickState::Latest), PickState::Keep);
-        assert_eq!(r.prev_state(PickState::Keep), PickState::Latest);
+    fn state_cycle_wraps_and_skips_missing_latest() {
+        // Downgrade-guarded row: latest hidden, so the cycle is keep↔range.
+        let guarded = row(
+            "a",
+            "dependencies",
+            "4.0.0-beta.90",
+            Some("4.0.0-beta.100"),
+            Some("0.64.0"),
+        )
+        .unwrap();
+        assert_eq!(guarded.next_state(PickState::Keep), PickState::Range);
+        assert_eq!(guarded.next_state(PickState::Range), PickState::Keep);
+        assert_eq!(guarded.prev_state(PickState::Keep), PickState::Range);
 
         let both = row("b", "dependencies", "1.0.0", Some("1.5.0"), Some("2.0.0")).unwrap();
         assert_eq!(both.next_state(PickState::Keep), PickState::Range);
@@ -685,16 +700,18 @@ mod tests {
     }
 
     #[test]
-    fn cycle_all_walks_keep_conservative_aggressive() {
+    fn cycle_all_walks_keep_conservative_aggressive_in_unison() {
         let rows = vec![
             row("a", "dependencies", "1.0.0", Some("1.5.0"), Some("2.0.0")).unwrap(),
+            // No in-range drift: the range phase is a no-op duplicate for
+            // this row, but it still moves column-in-unison with the rest.
             row("b", "dependencies", "1.0.0", None, Some("3.0.0")).unwrap(),
         ];
         let mut states = vec![PickState::Keep; rows.len()];
         let visible: Vec<usize> = (0..rows.len()).collect();
 
         cycle_all(&rows, &mut states, &visible);
-        assert_eq!(states, vec![PickState::Range, PickState::Latest]);
+        assert_eq!(states, vec![PickState::Range, PickState::Range]);
         cycle_all(&rows, &mut states, &visible);
         assert_eq!(states, vec![PickState::Latest, PickState::Latest]);
         cycle_all(&rows, &mut states, &visible);
@@ -747,9 +764,15 @@ mod tests {
                 .map(|(i, _)| i)
                 .collect()
         };
-        // Every box sits exactly on its column start; rows missing a cell
-        // blank-fill it so the later boxes still land on their columns.
-        assert_eq!(boxes(&rendered[0]), vec![keep_col, latest_col]); // chalk: no range cell
+        // Every box sits exactly on its column start. The chalk row has no
+        // in-range drift, so its range cell duplicates `current` but still
+        // renders (unison); the beta pin's latest cell is downgrade-guarded
+        // and blank-fills so nothing shifts.
+        assert_eq!(
+            boxes(&rendered[0]),
+            vec![keep_col, range_col, latest_col],
+            "{rendered:#?}"
+        );
         assert_eq!(boxes(&rendered[1]), vec![keep_col, range_col]); // beta pin: no latest cell
         assert_eq!(
             boxes(&rendered[2]),
