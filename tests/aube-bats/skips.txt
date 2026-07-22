@@ -33,6 +33,7 @@ add.bats|aube add -W: adds to workspace root when opted in|fresh projects write 
 update.bats|aube update --latest: preserves catalog manifest specifiers|fresh projects write pnpm-lock.yaml
 update.bats|aube update preserves cross-platform optional deps in lockfile|fresh projects write pnpm-lock.yaml
 lockfile_settings.bats|lockfileIncludeTarballUrl=true embeds tarball URLs in aube-lock.yaml|fresh projects write pnpm-lock.yaml
+lockfile_settings.bats|registry dist.shasum with no dist.integrity is derived, not left tarball-only|greps aube-lock.yaml; fresh projects write pnpm-lock.yaml. The derivation itself (aube resolve/driver.rs) is unit-covered and unaffected
 
 # ── verb/flag collisions where nub's own surface wins (settled policy) ──────
 install.bats|aube run auto-reinstalls after --dev install|'run' is nub's native script runner (collision policy); no PM auto-reinstall
