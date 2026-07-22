@@ -234,6 +234,40 @@ impl<'a> PatchGroups<'a> {
         }
         Ok(group.all)
     }
+
+    /// Resolve a graph package, layering the npm-alias rule on top of
+    /// [`Self::resolve`]. pnpm has no separate node for an aliased
+    /// install — `odd-alias: npm:is-odd@3.0.1` resolves to the
+    /// `is-odd@3.0.1` node and `getPatchInfo` matches it on the REAL
+    /// manifest name — so a key declared against the registry name has
+    /// to patch the alias too, or nub silently skips a patch pnpm
+    /// applies. Aube keeps the alias as its own `LockedPackage` (the
+    /// linker needs it to place `node_modules/<alias>`), so the rule
+    /// becomes a second lookup here rather than falling out of the
+    /// graph shape.
+    ///
+    /// PRECEDENCE: the declared name is tried first and its whole group
+    /// wins. pnpm can never match an alias-name key (no manifest is
+    /// named `odd-alias`), so such a key is a nub-only spelling with no
+    /// pnpm behavior to preserve; letting it lose to a registry-name key
+    /// would turn it into silently dead config, and it is the more
+    /// specific of the two — it names exactly one installed folder.
+    /// Group-level, not entry-level: a bare `odd-alias` beats an exact
+    /// `is-odd@3.0.1`, because pnpm's exact > range > all priority is
+    /// defined *within* one name's group and mixing the two groups would
+    /// have no pnpm rule to follow.
+    pub fn resolve_package(
+        &self,
+        pkg: &crate::LockedPackage,
+    ) -> Result<Option<&'a str>, PatchKeyConflict> {
+        if let Some(source_key) = self.resolve(&pkg.name, &pkg.version)? {
+            return Ok(Some(source_key));
+        }
+        match pkg.alias_of.as_deref() {
+            Some(registry_name) => self.resolve(registry_name, &pkg.version),
+            None => Ok(None),
+        }
+    }
 }
 
 /// Either failure mode of resolving a whole graph's patches — an
@@ -272,7 +306,7 @@ pub fn resolve_patched_by_version<V: Clone>(
             continue;
         }
         if let Some(source_key) = groups
-            .resolve(&pkg.name, &pkg.version)
+            .resolve_package(pkg)
             .map_err(PatchResolveError::Conflict)?
             && let Some(value) = source.get(source_key)
         {
@@ -457,6 +491,74 @@ mod tests {
             resolved.len(),
             3,
             "peer-context variant must collapse to one entry"
+        );
+    }
+
+    fn mk_alias(alias: &str, registry_name: &str, version: &str) -> crate::LockedPackage {
+        crate::LockedPackage {
+            name: alias.into(),
+            version: version.into(),
+            alias_of: Some(registry_name.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_by_version_aliased_package_inherits_registry_name_patch() {
+        let mut packages = BTreeMap::new();
+        packages.insert("is-odd@3.0.1".to_string(), mk_pkg("is-odd", "3.0.1"));
+        packages.insert(
+            "odd-alias@3.0.1".to_string(),
+            mk_alias("odd-alias", "is-odd", "3.0.1"),
+        );
+        let source: BTreeMap<String, String> = [(
+            "is-odd@3.0.1".to_string(),
+            "patches/is-odd@3.0.1.patch".to_string(),
+        )]
+        .into();
+
+        let resolved = resolve_patched_by_version(&source, &packages).unwrap();
+        // The alias entry is keyed by the ALIAS spec_key — what the
+        // linker's `Patches` map and the graph-hash fold look up — not by
+        // the registry name the selector was written against.
+        assert_eq!(
+            resolved.get("odd-alias@3.0.1").map(String::as_str),
+            Some("patches/is-odd@3.0.1.patch"),
+            "an aliased install must inherit its registry name's patch (pnpm has no separate alias node)"
+        );
+        assert_eq!(
+            resolved.get("is-odd@3.0.1").map(String::as_str),
+            Some("patches/is-odd@3.0.1.patch")
+        );
+    }
+
+    #[test]
+    fn resolve_by_version_alias_name_key_beats_registry_name_key() {
+        let mut packages = BTreeMap::new();
+        packages.insert("is-odd@3.0.1".to_string(), mk_pkg("is-odd", "3.0.1"));
+        packages.insert(
+            "odd-alias@3.0.1".to_string(),
+            mk_alias("odd-alias", "is-odd", "3.0.1"),
+        );
+        // A BARE alias key against an EXACT registry key: the alias group
+        // wins as a whole, so neither declaration is dead config.
+        let source: BTreeMap<String, String> = [
+            ("odd-alias".to_string(), "patches/alias.patch".to_string()),
+            (
+                "is-odd@3.0.1".to_string(),
+                "patches/registry.patch".to_string(),
+            ),
+        ]
+        .into();
+
+        let resolved = resolve_patched_by_version(&source, &packages).unwrap();
+        assert_eq!(
+            resolved.get("odd-alias@3.0.1").map(String::as_str),
+            Some("patches/alias.patch")
+        );
+        assert_eq!(
+            resolved.get("is-odd@3.0.1").map(String::as_str),
+            Some("patches/registry.patch")
         );
     }
 

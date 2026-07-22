@@ -5047,3 +5047,116 @@ fn npm_to_pnpm_conversion_omits_phantom_member_links_on_empty_root() {
         "member importers must still be emitted:\n{written}"
     );
 }
+
+/// pnpm resolves an npm-aliased dep to the REAL package's node
+/// (`odd-alias: npm:is-odd@3.0.1` → the `is-odd@3.0.1` snapshot), so a
+/// patch declared on the registry name applies to the aliased install.
+/// Aube keeps the alias as its own `LockedPackage` — the linker needs it
+/// to place `node_modules/odd-alias` — so parity has to be carried by the
+/// patch-group resolution rule that the linker, the graph hash, the drift
+/// check, and this writer all key off. Without it the alias node is
+/// materialized unpatched AND the native-pnpm write emits a second,
+/// undecorated `is-odd@3.0.1` snapshot alongside the patched one.
+///
+/// Also pins the reader half: pnpm's `(patch_hash=…)` is a write-time
+/// spelling, so it must not survive into aube's dep_path model or the
+/// alias key on reparse becomes `odd-alias@3.0.1(patch_hash=…)`, which no
+/// `<alias>@<version>` lookup reproduces.
+#[test]
+fn pnpm_patch_on_registry_name_applies_to_npm_alias_and_round_trips() {
+    const HASH: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    let yaml = format!(
+        r#"lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+patchedDependencies:
+  is-odd@3.0.1:
+    path: patches/is-odd@3.0.1.patch
+    hash: {HASH}
+
+importers:
+
+  .:
+    dependencies:
+      odd-alias:
+        specifier: npm:is-odd@3.0.1
+        version: is-odd@3.0.1(patch_hash={HASH})
+
+packages:
+
+  is-odd@3.0.1:
+    resolution: {{integrity: sha512-odd}}
+
+snapshots:
+
+  is-odd@3.0.1(patch_hash={HASH}): {{}}
+"#
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, &yaml).unwrap();
+
+    let graph = parse(&path).unwrap();
+
+    assert_eq!(
+        graph.packages.keys().collect::<Vec<_>>(),
+        vec!["is-odd@3.0.1", "odd-alias@3.0.1"],
+        "the write-time patch marker must not leak into aube dep_paths"
+    );
+    let alias = graph
+        .packages
+        .get("odd-alias@3.0.1")
+        .expect("alias package");
+    assert_eq!(alias.alias_of.as_deref(), Some("is-odd"));
+    assert_eq!(graph.importers["."][0].dep_path, "odd-alias@3.0.1");
+
+    // The single rule every consumer keys off: both nodes resolve to the
+    // one declared patch, each under its own `spec_key()`.
+    let applied = crate::patch_groups::resolve_patched_by_version(
+        &graph.patched_dependency_hashes,
+        &graph.packages,
+    )
+    .unwrap();
+    assert_eq!(
+        applied.get("odd-alias@3.0.1").map(String::as_str),
+        Some(HASH)
+    );
+    assert_eq!(applied.get("is-odd@3.0.1").map(String::as_str), Some(HASH));
+
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("pnpm-lock.yaml");
+    let manifest = PackageJson {
+        name: Some("alias-patch".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("odd-alias".to_string(), "npm:is-odd@3.0.1".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    write(&out, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out).unwrap();
+
+    let snapshots = &written[written.find("\nsnapshots:").expect("snapshots")..];
+    assert!(
+        snapshots.contains(&format!("is-odd@3.0.1(patch_hash={HASH}):")),
+        "the aliased node must serialize as patched:\n{written}"
+    );
+    assert!(
+        !snapshots.contains("\n  is-odd@3.0.1:"),
+        "an unpatched duplicate snapshot means the alias resolved no patch:\n{written}"
+    );
+
+    let reparsed = parse(&out).unwrap();
+    assert_eq!(
+        reparsed
+            .packages
+            .get("odd-alias@3.0.1")
+            .unwrap_or_else(|| panic!("alias package lost after reparse:\n{written}"))
+            .alias_of
+            .as_deref(),
+        Some("is-odd")
+    );
+}

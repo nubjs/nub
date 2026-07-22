@@ -1,5 +1,6 @@
 use super::dep_path::{
-    dep_path_tail, parse_dep_path, peerless_dep_path, rewrite_peer_suffix, version_to_dep_path,
+    dep_path_tail, parse_dep_path, peerless_dep_path, rewrite_peer_suffix, strip_patch_hash_suffix,
+    version_to_dep_path,
 };
 use super::format::reformat_for_pnpm_parity;
 use crate::{DepType, Error, LocalSource, LockfileGraph};
@@ -26,18 +27,6 @@ enum WritablePatchedDependency {
     HashAndPath { hash: String, path: String },
     HashOnly { hash: String },
     PathOnly(String),
-}
-
-fn strip_patch_hash_suffix(value: &str) -> String {
-    let mut out = value.to_string();
-    while let Some(start) = out.find("(patch_hash=") {
-        let Some(rel_end) = out[start..].find(')') else {
-            break;
-        };
-        let end = start + rel_end + 1;
-        out.replace_range(start..end, "");
-    }
-    out
 }
 
 /// Stamp pnpm's `(patch_hash=<hash>)` marker onto a dep-path tail or
@@ -147,11 +136,10 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
         // Resolve exactly the way `patch_groups::resolve_patched_by_version`
         // does — that is the single rule the linker, graph hash, and drift
         // check key off, and a suffix the linker won't honor is a lockfile
-        // that lies about what landed in node_modules. Notably an ALIAS
-        // resolves under its alias name, never the registry name it shadows.
+        // that lies about what landed in node_modules.
         let source_key =
             patch_groups
-                .resolve(&pkg.name, &pkg.version)
+                .resolve_package(pkg)
                 .map_err(|c| Error::PatchKeyConflict {
                     message: c.message(),
                     hint: c.hint(),

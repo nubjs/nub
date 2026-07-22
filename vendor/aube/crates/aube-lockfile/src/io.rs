@@ -279,41 +279,33 @@ fn lockfile_write_is_noop(
     // (selector `name@version` → sha256 hex), matching how the link /
     // materialize paths derive their patch fingerprints.
     // The declared keys carried into `patched_dependency_hashes` may be
-    // ranges / `*` / bare names, so a package's fold hash is found by
-    // resolving its concrete `name@version` through the patch groups,
-    // not by a direct `name@version` lookup. An invalid range here means
-    // the graph is unwritable as-is — return `false` (treat as NOT
+    // ranges / `*` / bare names (and an npm-aliased package matches under
+    // the registry name it shadows), so each graph is folded through
+    // `resolve_patched_by_version` — the one rule the linker, writer, and
+    // drift check share — rather than a direct `name@version` lookup or a
+    // second copy of the matching logic here. The result is keyed by
+    // `spec_key()`, which is exactly what the hasher hands the closure.
+    // An unresolvable set (invalid range, or a per-package conflict)
+    // means the graph is unwritable as-is — return `false` (treat as NOT
     // equivalent) so the caller proceeds to the real write, which
     // surfaces the branded error rather than silently suppressing it.
-    // A per-package conflict resolves to `None` (swallowed): the two
-    // graphs then fold differently and the write proceeds, again
-    // deferring the error to the writer.
-    let Ok(graph_groups) = crate::patch_groups::PatchGroups::build(
-        graph.patched_dependency_hashes.keys().map(String::as_str),
+    let Ok(graph_patches) = crate::patch_groups::resolve_patched_by_version(
+        &graph.patched_dependency_hashes,
+        &graph.packages,
     ) else {
         return false;
     };
-    let Ok(existing_groups) = crate::patch_groups::PatchGroups::build(
-        existing
-            .patched_dependency_hashes
-            .keys()
-            .map(String::as_str),
+    let Ok(existing_patches) = crate::patch_groups::resolve_patched_by_version(
+        &existing.patched_dependency_hashes,
+        &existing.packages,
     ) else {
         return false;
     };
     let graph_patch = |name: &str, version: &str| -> Option<String> {
-        graph_groups
-            .resolve(name, version)
-            .ok()
-            .flatten()
-            .and_then(|source_key| graph.patched_dependency_hashes.get(source_key).cloned())
+        graph_patches.get(&format!("{name}@{version}")).cloned()
     };
     let existing_patch = |name: &str, version: &str| -> Option<String> {
-        existing_groups
-            .resolve(name, version)
-            .ok()
-            .flatten()
-            .and_then(|source_key| existing.patched_dependency_hashes.get(source_key).cloned())
+        existing_patches.get(&format!("{name}@{version}")).cloned()
     };
     crate::graph_hash::graph_identity_hash_with_patches(graph, &no_build, &graph_patch)
         == crate::graph_hash::graph_identity_hash_with_patches(

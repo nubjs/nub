@@ -1,9 +1,10 @@
 use super::dep_path::{
-    dep_path_tail, parse_dep_path, peerless_alias_target, rewrite_peer_suffix,
-    rewrite_snapshot_alias_deps, version_to_dep_path,
+    PATCH_HASH_MARKER, dep_path_tail, parse_dep_path, peerless_alias_target, rewrite_peer_suffix,
+    rewrite_snapshot_alias_deps, strip_patch_hash_suffix, version_to_dep_path,
 };
 use super::raw::{
-    RawBinSpec, RawDepSpec, RawRuntimeVariant, local_source_from_resolution, parse_raw_lockfile,
+    RawBinSpec, RawDepSpec, RawPnpmLockfile, RawRuntimeVariant, local_source_from_resolution,
+    parse_raw_lockfile,
 };
 use crate::{
     CatalogEntry, DepType, DirectDep, Error, LocalSource, LockedPackage, LockfileGraph,
@@ -37,10 +38,63 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
     parse_with_options(path, ParseOptions::default())
 }
 
+/// Erase pnpm's `(patch_hash=…)` markers from every key and dep-path
+/// value the graph is built out of, before any of it is interpreted.
+///
+/// The marker is a write-time spelling of a patched package's identity,
+/// not part of aube's dep_path model: the resolver never emits one, and
+/// the writer re-derives every occurrence from
+/// `patched_dependency_hashes`. Carrying it into the graph would key a
+/// patched project's package table differently from the freshly
+/// resolved graph it is compared against — the identity hash could
+/// never match, so the no-churn write guard could never fire — and the
+/// npm-alias synthesis would derive a marked alias key that no later
+/// `<alias>@<version>` lookup reproduces.
+fn strip_patch_hash_markers(raw: &mut RawPnpmLockfile) {
+    // A key collision can only come from a hand-merged lockfile holding
+    // both spellings of one package; first-wins keeps it deterministic.
+    fn rekey<V>(map: &mut BTreeMap<String, V>) {
+        if !map.keys().any(|k| k.contains(PATCH_HASH_MARKER)) {
+            return;
+        }
+        for (key, value) in std::mem::take(map) {
+            map.entry(strip_patch_hash_suffix(&key)).or_insert(value);
+        }
+    }
+
+    for importer in raw.importers.values_mut() {
+        let specs = [
+            &mut importer.dependencies,
+            &mut importer.dev_dependencies,
+            &mut importer.optional_dependencies,
+            &mut importer.skipped_optional_dependencies,
+        ];
+        for spec in specs.into_iter().flatten().flat_map(BTreeMap::values_mut) {
+            if spec.version.contains(PATCH_HASH_MARKER) {
+                spec.version = strip_patch_hash_suffix(&spec.version);
+            }
+        }
+    }
+    rekey(&mut raw.packages);
+    rekey(&mut raw.snapshots);
+    for snapshot in raw.snapshots.values_mut() {
+        let deps = [
+            &mut snapshot.dependencies,
+            &mut snapshot.optional_dependencies,
+        ];
+        for value in deps.into_iter().flatten().flat_map(BTreeMap::values_mut) {
+            if value.contains(PATCH_HASH_MARKER) {
+                *value = strip_patch_hash_suffix(value);
+            }
+        }
+    }
+}
+
 pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<LockfileGraph, Error> {
     let content = crate::read_lockfile(path)?;
-    let raw = parse_raw_lockfile(&content)
+    let mut raw = parse_raw_lockfile(&content)
         .map_err(|e| Error::parse_yaml_err(path, content.clone(), &e))?;
+    strip_patch_hash_markers(&mut raw);
 
     // Parse importers (direct deps of each workspace package).
     // We track synthesized LockedPackages for local (`file:` / `link:`)
