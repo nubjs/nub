@@ -2368,23 +2368,51 @@ fn find_preload(nub_binary: &Path) -> Option<String> {
         })
     }
 
-    // Dev / feature-off: walk up from the binary's directory to find
-    // runtime/preload.mjs (the in-repo, live-editable sidecar).
+    // Dev / feature-off: locate runtime/preload.mjs (the in-repo, live-editable
+    // sidecar) by two independent routes, so a dev binary augments identically to
+    // CI no matter which target dir the build landed in.
+    //
+    // Route 1 — walk up from the binary's directory. Hits the sidecar when the
+    // target dir sits under the repo (a plain `cargo build` into `<repo>/target`,
+    // which is what CI does).
+    //
+    // Route 2 — the source tree that COMPILED this binary (`CARGO_MANIFEST_DIR` →
+    // `<repo>/runtime`). A build routed to a target dir with no `runtime/` ancestor
+    // — the shared cross-worktree dir (`~/.cache/nub/shared-target`) that
+    // `scripts/rust-build.sh` uses on the fast path — has no sidecar to walk to, so
+    // route 1 fails and the binary would otherwise run WHOLLY un-augmented. That
+    // silent local/CI behavior split is exactly the gap that let a
+    // lifecycle-augmentation hang survive the whole suite (#528); route 2 is
+    // layout-agnostic and closes it.
+    //
+    // Both routes compile ONLY here: the shipped binary is built with
+    // `embed-runtime` and resolves its preload from the embedded blob above, never
+    // reaching this branch — so the compile-time source path can never leak into a
+    // released nub.
     #[cfg(not(feature = "embed-runtime"))]
     {
-        let mut dir = nub_binary.parent()?.to_path_buf();
-        for _ in 0..5 {
-            let candidate = dir.join("runtime").join("preload.mjs");
-            if candidate.is_file() {
-                // Strip the `\\?\` verbatim prefix `fs::canonicalize` adds on Windows so
-                // the path is usable in NODE_PATH and convertible to a valid file:// URL.
-                return candidate.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
-            }
-            if !dir.pop() {
-                break;
+        if let Some(mut dir) = nub_binary.parent().map(Path::to_path_buf) {
+            for _ in 0..5 {
+                let candidate = dir.join("runtime").join("preload.mjs");
+                if candidate.is_file() {
+                    // Strip the `\\?\` verbatim prefix `fs::canonicalize` adds on Windows so
+                    // the path is usable in NODE_PATH and convertible to a valid file:// URL.
+                    return candidate.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
+                }
+                if !dir.pop() {
+                    break;
+                }
             }
         }
-        tracing::warn!("preload not found relative to nub binary");
+        // `canonicalize` doubles as the existence check and resolves the `../..`
+        // (and any symlink) so NODE_OPTIONS / the file:// URL carry a clean absolute
+        // path, matching route 1's output shape.
+        let source_preload =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/preload.mjs");
+        if let Ok(canon) = fs::canonicalize(&source_preload) {
+            return canon.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
+        }
+        tracing::warn!("preload not found relative to nub binary or source root");
         None
     }
 }
