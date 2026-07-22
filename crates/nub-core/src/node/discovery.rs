@@ -456,7 +456,7 @@ pub fn check_min_version(node: &ResolvedNode) -> Result<(), DiscoveryError> {
 /// conflict.) Precedence #1, `package.json#devEngines.runtime`, sits ABOVE all
 /// three and #5, `package.json#engines.node`, BELOW them — [`resolve_pin_chain`]
 /// orders all five; this helper is only the pin-file middle of the chain.
-pub fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
+fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
     let home = dirs_next::home_dir();
     let mut dir = cwd.to_path_buf();
     let max_depth = 16;
@@ -714,7 +714,7 @@ pub struct PinChain {
     /// `onFail: "warn"`, present-but-unusable version specs) — printed once per
     /// invocation by the entry point ([`discover_node`], or the `nub node`
     /// verbs when they resolve the chain themselves).
-    pub warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 /// The pin-source chain in spec precedence order

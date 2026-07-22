@@ -36,34 +36,20 @@ pub enum Verdict {
     SelfRef,
 }
 
-impl Verdict {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Verdict::HardPhantom => "hard-phantom",
-            Verdict::SoftPhantom => "soft-phantom",
-            Verdict::DeclaredOptionalPeer => "declared-optional-peer",
-            Verdict::DeclaredPeer => "declared-peer",
-            Verdict::Declared => "declared",
-            Verdict::Builtin => "builtin",
-            Verdict::SelfRef => "self",
-        }
-    }
-}
-
 /// One classified package reference.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
     pub package: String,
     pub verdict: Verdict,
     /// True if every occurrence was guarded (try/catch or a conditional branch).
-    pub soft: bool,
+    soft: bool,
     /// Reachable from the package's main entry surface.
-    pub from_main: bool,
+    pub(crate) from_main: bool,
     /// Reachable from a non-`.` `exports` subpath (the adapter surface).
-    pub from_subpath: bool,
+    pub(crate) from_subpath: bool,
     /// Reachable from the `.d.ts` TYPE surface — a DECLARED PEER with this set is
     /// the nub#450 peer-type class (its `@types/<peer>` must be project-local).
-    pub from_types: bool,
+    pub(crate) from_types: bool,
     /// Example raw specifiers (deduped) showing how it was referenced.
     pub specifiers: Vec<String>,
 }

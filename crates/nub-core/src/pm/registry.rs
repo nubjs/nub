@@ -2,7 +2,7 @@
 //! (exact / dist-tag / range), the tarball URL, and the dist integrity that gates
 //! extraction. Mirrors `version_management::node_index`'s split — a PURE resolver
 //! over already-fetched metadata ([`resolve_dist`]) plus a thin networked wrapper
-//! ([`resolve_version`]) — so the resolution logic is unit-tested offline.
+//! ([`resolve_version_authed`]) — so the resolution logic is unit-tested offline.
 //!
 //! Trust model: HTTPS authenticates that the packument came from the registry;
 //! the per-version `dist.integrity` (sha512) authenticates the tarball before it
@@ -29,7 +29,7 @@ pub struct VersionDist {
     pub integrity: Integrity,
     /// The bin entry's path relative to the package root (`bin/pnpm.cjs`). For a
     /// PM the resolver picks the entry whose name matches the package.
-    pub bin_subpath: PathBuf,
+    pub(crate) bin_subpath: PathBuf,
 }
 
 /// The dist checksum that gates extraction. sha512 (the modern `dist.integrity`
@@ -45,7 +45,7 @@ pub enum Integrity {
 
 /// The public npm registry — the floor of the precedence stack and the marker
 /// for "no mirror configured" (the tarball-origin rewrite is a no-op against it).
-pub const PUBLIC_REGISTRY: &str = "https://registry.npmjs.org";
+const PUBLIC_REGISTRY: &str = "https://registry.npmjs.org";
 
 /// The resolved registry for PM downloads: its base URL plus any auth that
 /// applies to the base's host. Carries enough to fetch the packument AND the
@@ -57,7 +57,7 @@ pub struct RegistryConfig {
     /// Trailing-slash-trimmed base URL — callers concatenate `/<pkg>`.
     pub base: String,
     /// The `Authorization` credential for `base`'s host, if any.
-    pub auth: Option<Auth>,
+    auth: Option<Auth>,
 }
 
 /// The registry base URL, in precedence order:
@@ -308,7 +308,7 @@ fn strip_scheme(url: &str) -> &str {
 /// the configured registry's. Only rewritten when a NON-public registry is
 /// configured; a public-registry config leaves the URL untouched (the common
 /// case, and the safe one — never redirect a public tarball).
-pub fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
+fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
     // No rewrite when the configured registry is the public one.
     if origin_of(registry_base) == Some(origin_of(PUBLIC_REGISTRY).unwrap()) {
         return tarball.to_string();
@@ -370,7 +370,7 @@ fn origin_of(url: &str) -> Option<&str> {
 /// write) separates them by space. [`normalize_range`] bridges the two so a
 /// `>=9 <11` pin resolves rather than erroring. The `||` OR operator is NOT
 /// supported (Cargo's `semver` has no OR) — vanishingly rare in a PM pin.
-pub fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
+fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
     let spec = spec.trim();
     let versions = packument
         .get("versions")
@@ -565,22 +565,6 @@ pub(crate) fn named_bin_subpath(meta: &Value, entry: &str) -> Option<PathBuf> {
         return safe_bin_subpath(path);
     }
     safe_bin_subpath(bin.as_object()?.get(entry)?.as_str()?)
-}
-
-/// Networked wrapper over a bare base URL (no auth): fetch the packument from
-/// `base` and resolve `spec` against it. `pkg` is the package name (`pnpm`, `npm`,
-/// `yarn`). Retained for the no-auth `nub pm use` caller; provisioning goes through
-/// [`resolve_version_authed`], which carries the host auth and rewrites the tarball
-/// origin onto a configured mirror.
-pub fn resolve_version(base: &str, pkg: &str, spec: &str) -> Result<VersionDist> {
-    resolve_version_authed(
-        &RegistryConfig {
-            base: base.trim_end_matches('/').to_string(),
-            auth: None,
-        },
-        pkg,
-        spec,
-    )
 }
 
 /// npm's abbreviated ("corgi") packument media type. Same `dist-tags` /

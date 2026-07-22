@@ -16,7 +16,7 @@
 //! `wiki/research/node-provisioning-implementation.md`).
 
 pub mod download;
-pub mod extract;
+pub(crate) mod extract;
 pub mod manage;
 pub mod node_index;
 
@@ -52,16 +52,16 @@ pub enum NodeArch {
 /// a musl host must route to unofficial-builds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostTarget {
-    pub os: NodeOs,
-    pub arch: NodeArch,
+    os: NodeOs,
+    arch: NodeArch,
     /// Linux/musl host — official dist has no musl build, so the address routes
     /// to unofficial-builds and the token gains a `-musl` suffix.
-    pub musl: bool,
+    musl: bool,
 }
 
 impl HostTarget {
     /// Detect the host. Returns `None` for an OS/arch nodejs.org doesn't publish.
-    pub fn detect() -> Option<Self> {
+    pub(crate) fn detect() -> Option<Self> {
         let os = match std::env::consts::OS {
             "macos" => NodeOs::Darwin,
             "linux" => NodeOs::Linux,
@@ -83,7 +83,7 @@ impl HostTarget {
 
     /// The `<platform>-<arch>` token in a dist filename, e.g. `darwin-arm64`,
     /// `linux-x64`, `linux-x64-musl`, `win-arm64`.
-    pub fn platform_token(&self) -> String {
+    fn platform_token(&self) -> String {
         let os = match self.os {
             NodeOs::Darwin => "darwin",
             NodeOs::Linux => "linux",
@@ -107,7 +107,7 @@ impl HostTarget {
     /// Archive extension dist uses for this OS: `zip` on Windows, `tar.xz`
     /// elsewhere. (`.tar.xz` is also published for Windows, but `.zip` needs no
     /// xz support — the extractor picks per this.)
-    pub fn archive_ext(&self) -> &'static str {
+    fn archive_ext(&self) -> &'static str {
         match self.os {
             NodeOs::Windows => "zip",
             _ => "tar.xz",
@@ -142,16 +142,16 @@ fn detect_musl() -> bool {
 /// one-line `format!` to reconstruct if the deferred best-effort GPG layer lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeArtifact {
-    pub tarball_url: String,
-    pub shasums_url: String,
+    tarball_url: String,
+    shasums_url: String,
     /// The tarball's basename — the key to find its line in `SHASUMS256.txt`.
-    pub tarball_filename: String,
+    tarball_filename: String,
 }
 
 /// Build the dist addresses for `version` on `host`, rooted at `base` (the mirror
 /// base URL, e.g. `https://nodejs.org/dist` — or unofficial-builds for musl; see
 /// [`resolve_mirror_base`]). Pure: no network, no env.
-pub fn node_artifact(version: &NodeVersion, host: &HostTarget, base: &str) -> NodeArtifact {
+pub(crate) fn node_artifact(version: &NodeVersion, host: &HostTarget, base: &str) -> NodeArtifact {
     let base = base.trim_end_matches('/');
     let filename = format!(
         "node-v{version}-{}.{}",
@@ -169,7 +169,7 @@ pub fn node_artifact(version: &NodeVersion, host: &HostTarget, base: &str) -> No
 /// The mirror base for `host`: the ecosystem-standard `NODEJS_ORG_MIRROR` env
 /// override (the nodenv / `n` convention — NODE-namespaced, not a brand
 /// violation) if set, else `nodejs.org/dist` (glibc) or unofficial-builds (musl).
-pub fn resolve_mirror_base(host: &HostTarget) -> String {
+pub(crate) fn resolve_mirror_base(host: &HostTarget) -> String {
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     resolve_mirror_base_in(host, &root)
 }
@@ -188,7 +188,7 @@ pub fn resolve_mirror_base(host: &HostTarget) -> String {
 /// An explicit mirror (env or key) overrides BOTH libc flavors — it's a user
 /// override, trusted as given; musl users need their mirror to carry the
 /// unofficial-builds layout (documented on the site).
-pub fn resolve_mirror_base_in(host: &HostTarget, project_root: &std::path::Path) -> String {
+fn resolve_mirror_base_in(host: &HostTarget, project_root: &std::path::Path) -> String {
     if let Ok(m) = std::env::var("NODEJS_ORG_MIRROR") {
         let m = m.trim_end_matches('/');
         if !m.is_empty() {
@@ -254,7 +254,7 @@ impl Drop for WorkGuard {
 /// Windows `.zip` needs random access, so it keeps download-then-extract
 /// (still with the overlapped checksum fetch). An already-installed version
 /// short-circuits with no network + no output.
-pub fn provision_node(
+pub(crate) fn provision_node(
     version: &NodeVersion,
     host: &HostTarget,
     store_root: &Path,

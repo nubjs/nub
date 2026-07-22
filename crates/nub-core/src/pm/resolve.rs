@@ -86,7 +86,7 @@ pub struct PmTargetResolution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PmPinResolution {
     pub pin: PmPin,
-    pub source: PinSource,
+    source: PinSource,
     pub warnings: Vec<PinWarning>,
 }
 
@@ -592,7 +592,7 @@ fn root_manifest(cwd: &Path) -> Option<std::sync::Arc<serde_json::Value>> {
 /// write — `nub pm update`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredPmWrite {
-    pub path: PathBuf,
+    path: PathBuf,
     pub dev_engines_range: Option<String>,
 }
 
@@ -853,7 +853,7 @@ fn pin_target_dir(cwd: &Path) -> PathBuf {
 ///
 /// Public so the CLI's pin consumers parse through the SAME pin parser the
 /// `packageManager` reader uses — there is no second spec parser.
-pub fn parse_spec(spec: &str) -> Result<PmPin> {
+fn parse_spec(spec: &str) -> Result<PmPin> {
     let spec = spec.trim();
     let (name, version) = spec.split_once('@').with_context(|| {
         format!("packageManager \"{spec}\" must be in name@version form (e.g. pnpm@9.1.0)")

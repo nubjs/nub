@@ -36,22 +36,22 @@ const FROM_TYPES: u8 = 0b100;
 #[derive(Debug, Clone)]
 pub struct Reference {
     /// Package name the specifier resolves to (`@scope/name` or `name`).
-    pub package: String,
+    pub(crate) package: String,
     /// The raw specifier (kept for the report — shows the exact subpath).
-    pub raw: String,
+    pub(crate) raw: String,
     /// Guarded (try/catch or a conditional branch) at every occurrence collapses
     /// to soft; a single unguarded occurrence makes the package hard.
-    pub soft: bool,
+    pub(crate) soft: bool,
     /// Reachable from the main entry surface.
-    pub from_main: bool,
+    pub(crate) from_main: bool,
     /// Reachable from a non-`.` `exports` subpath — the "consumer opts into
     /// `<pkg>/<subpath>`" adapter surface. A hard phantom reachable ONLY from a
     /// subpath (not main) is the subpath-adapter class.
-    pub from_subpath: bool,
+    pub(crate) from_subpath: bool,
     /// Reachable from the `.d.ts` TYPE surface. A DECLARED PEER reached only via
     /// this surface is the nub#450 peer-type class: its `@types/<peer>` must be
     /// project-local for the type-checker's realpath walk to reach it.
-    pub from_types: bool,
+    pub(crate) from_types: bool,
 }
 
 /// Result of the reachable-module walk.
@@ -182,7 +182,7 @@ pub fn walk(root: &Path, entry_points: &[Entry]) -> Walk {
 /// tree (both drive [`walk_generic`]) for all real package layouts; see
 /// [`normalize_rel_join`] for the one accepted divergence on malformed
 /// (escape-and-re-enter-by-root-name) specifiers that never appear in practice.
-pub fn walk_index(files: &[(String, PathBuf)], entry_points: &[Entry]) -> Walk {
+pub(crate) fn walk_index(files: &[(String, PathBuf)], entry_points: &[Entry]) -> Walk {
     let map: BTreeMap<String, PathBuf> = files.iter().cloned().collect();
     walk_generic(&IndexSource { files: map }, entry_points)
 }

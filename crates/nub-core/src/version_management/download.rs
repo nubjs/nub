@@ -119,7 +119,7 @@ fn backoff(attempt: u32) {
 }
 
 /// GET a small text resource (e.g. `SHASUMS256.txt`), fail-closed on non-2xx.
-pub fn fetch_text(url: &str) -> Result<String> {
+pub(crate) fn fetch_text(url: &str) -> Result<String> {
     fetch_text_auth(url, None)
 }
 
@@ -243,7 +243,7 @@ impl Attempt {
 /// returning the SHA-256 (lowercase hex) of the bytes written. `progress` is
 /// called as chunks arrive with `(bytes_so_far, total_len_if_known)` so callers
 /// can render a stderr progress line.
-pub fn download_to_file(
+pub(crate) fn download_to_file(
     url: &str,
     dest: &Path,
     progress: impl FnMut(u64, Option<u64>),
@@ -506,8 +506,10 @@ impl Read for ChannelReader {
     }
 }
 
-/// SHA-256 (lowercase hex) of a file already on disk.
-pub fn sha256_file(path: &Path) -> Result<String> {
+/// SHA-256 (lowercase hex) of a file already on disk. The production path hashes
+/// the stream during download; tests use this to independently verify the result.
+#[cfg(test)]
+fn sha256_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
@@ -534,7 +536,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// Find the expected SHA-256 for `filename` in a `SHASUMS256.txt` body. Each line
 /// is `<64-hex>  <filename>` (sha256sum format — two spaces). Returns the
 /// lowercase hex, or `None` when the file isn't listed.
-pub fn checksum_for(shasums: &str, filename: &str) -> Option<String> {
+fn checksum_for(shasums: &str, filename: &str) -> Option<String> {
     shasums.lines().find_map(|line| {
         let (hash, rest) = line.split_once(char::is_whitespace)?;
         let name = rest.trim_start(); // collapse the leading space(s) before the name
@@ -545,7 +547,11 @@ pub fn checksum_for(shasums: &str, filename: &str) -> Option<String> {
 
 /// Verify a downloaded artifact's SHA-256 against `SHASUMS256.txt`. Fail-closed:
 /// errors when `filename` isn't listed or the hashes differ.
-pub fn verify_checksum(actual_sha256_hex: &str, shasums: &str, filename: &str) -> Result<()> {
+pub(crate) fn verify_checksum(
+    actual_sha256_hex: &str,
+    shasums: &str,
+    filename: &str,
+) -> Result<()> {
     let expected = checksum_for(shasums, filename)
         .with_context(|| format!("{filename} is not listed in SHASUMS256.txt — refusing"))?;
     if actual_sha256_hex.eq_ignore_ascii_case(&expected) {

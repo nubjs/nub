@@ -24,7 +24,7 @@ pub(crate) const MAX_ARCHIVE_DECOMPRESSED_BYTES: u64 = 1 << 30;
 
 /// Maximum bytes for a single archive entry (zip per-file cap). 512 MiB, the
 /// same shape as `aube_store::MAX_TARBALL_ENTRY_BYTES`.
-pub(crate) const MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 << 20;
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 << 20;
 
 /// Maximum number of entries in a single archive — the third aube-store cap
 /// (`aube_store::MAX_TARBALL_ENTRIES`), bounding the per-entry `File::create`
@@ -99,7 +99,7 @@ pub(crate) fn single_top_dir(dest_parent: &Path, archive: &Path) -> Result<PathB
 /// Decode a `.tar.xz` and unpack it under `dest_parent`, returning the single
 /// top-level directory it created (the `node-v<ver>-<plat>` dir). The `tar` crate
 /// guards against path-traversal (`..` / absolute entries) during `unpack`.
-pub fn extract_tar_xz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
+fn extract_tar_xz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     extract_tar_xz_capped(
         archive,
         dest_parent,
@@ -206,7 +206,7 @@ fn extract_tar_xz_reader_capped(
 /// runnable automatically). Stock Node `.zip`s carry POSIX modes in their extra
 /// fields, so a unix build extracting one keeps `node.exe` readable; the normal
 /// Windows-only path doesn't depend on it.
-pub fn extract_zip(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
+fn extract_zip(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     extract_zip_capped(
         archive,
         dest_parent,
@@ -303,7 +303,7 @@ fn extract_zip_capped(
 /// paths verify the archive against its published SHA-256 before this call (see
 /// `provision_node`) and unpack in-process — no `tar`/`xz`/`Expand-Archive`
 /// shell-out — so the same verify-then-extract guarantee holds on every host.
-pub fn extract_archive(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
+pub(crate) fn extract_archive(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     let name = archive
         .file_name()
         .and_then(|n| n.to_str())

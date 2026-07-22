@@ -103,7 +103,7 @@ static EXTRACTED: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// process (OnceLock), returning a cheap clone afterward. `None` only on a
 /// genuinely unusable environment (no writable cache dir) — the caller then runs
 /// without augmentation, exactly as it would for a not-found sidecar.
-pub fn ensure_runtime() -> Option<PathBuf> {
+pub(crate) fn ensure_runtime() -> Option<PathBuf> {
     EXTRACTED.get_or_init(extract_once).clone()
 }
 
