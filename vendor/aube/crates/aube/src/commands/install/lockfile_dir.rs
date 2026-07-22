@@ -28,37 +28,27 @@ pub(super) fn lockfile_graph_for_write(
     }
 }
 
-/// Read a lockfile from `lockfile_dir` and remap its importer key
-/// for the current project from the project's relative-path key to
-/// `"."`, so the rest of the install pipeline can keep treating the
-/// project as the root importer. No-op when `importer_key == "."`.
-pub(super) fn parse_lockfile_dir_remapped(
-    lockfile_dir: &std::path::Path,
-    importer_key: &str,
-    manifest: &aube_manifest::PackageJson,
-) -> Result<aube_lockfile::LockfileGraph, aube_lockfile::Error> {
-    let mut graph = aube_lockfile::parse_lockfile(lockfile_dir, manifest)?;
+fn remap_lockfile_importer(graph: &mut aube_lockfile::LockfileGraph, importer_key: &str) {
     if importer_key != "."
         && let Some(deps) = graph.importers.remove(importer_key)
     {
         graph.importers.insert(".".to_string(), deps);
     }
-    Ok(graph)
 }
 
-/// Same as [`parse_lockfile_dir_remapped`] but preserves the detected
-/// kind for callers that need format-aware behavior.
-pub(super) fn parse_lockfile_dir_remapped_with_kind(
+/// Read a lockfile from `lockfile_dir`, preserve the detected kind,
+/// and remap its importer key for the current project from the
+/// project's relative-path key to `"."`. No-op when
+/// `importer_key == "."`.
+pub(super) fn parse_lockfile_dir_remapped_with_kind_and_options(
     lockfile_dir: &std::path::Path,
     importer_key: &str,
     manifest: &aube_manifest::PackageJson,
+    options: aube_lockfile::ParseOptions,
 ) -> Result<(aube_lockfile::LockfileGraph, aube_lockfile::LockfileKind), aube_lockfile::Error> {
-    let (mut graph, kind) = aube_lockfile::parse_lockfile_with_kind(lockfile_dir, manifest)?;
-    if importer_key != "."
-        && let Some(deps) = graph.importers.remove(importer_key)
-    {
-        graph.importers.insert(".".to_string(), deps);
-    }
+    let (mut graph, kind) =
+        aube_lockfile::parse_lockfile_with_kind_and_options(lockfile_dir, manifest, options)?;
+    remap_lockfile_importer(&mut graph, importer_key);
     Ok((graph, kind))
 }
 

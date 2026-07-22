@@ -29,8 +29,8 @@ pub async fn run(args: DedupeArgs) -> miette::Result<()> {
     args.network.install_overrides();
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
-    let cwd = crate::dirs::project_root()?;
-    let _lock = super::take_project_lock(&cwd)?;
+    let cwd = crate::dirs::workspace_or_project_root()?;
+    let lock = super::take_project_lock(&cwd)?;
 
     let manifest = super::load_manifest(&cwd.join("package.json"))?;
 
@@ -114,9 +114,10 @@ pub async fn run(args: DedupeArgs) -> miette::Result<()> {
     super::write_and_log_lockfile(&cwd, &graph, &manifest)?;
 
     // Resync node_modules against the new lockfile.
-    install::run(install::InstallOptions::with_mode(
-        super::chained_frozen_mode(install::FrozenMode::Prefer),
-    ))
+    install::run_with_project_lock(
+        install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Prefer)),
+        &lock,
+    )
     .await?;
 
     Ok(())

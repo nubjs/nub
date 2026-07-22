@@ -242,13 +242,26 @@ impl DefaultTrustFloor {
 /// (allows, denies, `dangerouslyAllowAllBuilds`), the floor on
 /// `Unspecified`. Returns `Unspecified` when neither layer decides —
 /// the caller's default-deny + unreviewed warning applies.
+///
+/// The explicit layer is consulted with the package's source and
+/// git-repository approval keys, so a bare name approval cannot vouch
+/// for `file:`/git/tarball-backed bytes — the same call
+/// `run_dep_lifecycle_scripts` makes, which is what keeps the runner
+/// and the unreviewed-builds warning from disagreeing.
 pub(crate) fn decide_with_floor(
     policy: &aube_scripts::BuildPolicy,
     floor: &DefaultTrustFloor,
     pkg: &aube_lockfile::LockedPackage,
     times: &BTreeMap<String, String>,
 ) -> AllowDecision {
-    match policy.decide(pkg.registry_name(), &pkg.version) {
+    let source_key = pkg.source_approval_key();
+    let git_repository_key = pkg.git_repository_approval_key();
+    match policy.decide_package_with_git_repository(
+        pkg.registry_name(),
+        &pkg.version,
+        source_key.as_deref(),
+        git_repository_key.as_deref(),
+    ) {
         AllowDecision::Unspecified if floor.trusts(pkg, times) => AllowDecision::Allow,
         decision => decision,
     }

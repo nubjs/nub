@@ -203,7 +203,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "aube"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "ambient-id",
  "aube-codes",
@@ -251,6 +251,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
@@ -260,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "aube-codes"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -268,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "aube-linker"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-lockfile",
@@ -295,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "aube-lockfile"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -319,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "aube-manifest"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-util",
@@ -336,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "aube-registry"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -361,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "aube-resolver"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-lockfile",
@@ -389,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "aube-runtime"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -412,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "aube-scripts"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -431,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "aube-settings"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-util",
@@ -443,11 +444,12 @@ dependencies = [
 
 [[package]]
 name = "aube-store"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-util",
  "base64",
  "blake3",
+ "decmpfs",
  "flate2",
  "hex",
  "libc",
@@ -467,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "aube-util"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "blake3",
@@ -487,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "aube-workspace"
-version = "1.25.1"
+version = "1.32.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -1156,6 +1158,18 @@ name = "data-encoding"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
+
+[[package]]
+name = "decmpfs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "651715809b4119e14ba1ba88650756d8a7012686473a32ec14c0e602e90fc47f"
+dependencies = [
+ "libc",
+ "sha2 0.10.9",
+ "windows-sys 0.59.0",
+ "zstd",
+]
 
 [[package]]
 name = "demand"
@@ -4305,16 +4319,15 @@ dependencies = [
 
 [[package]]
 name = "sigstore-bundle"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a86d28a25d9e6107e02ca60fc60dfeb7cdc2b98251950d6fcd055f2afa31acb"
+checksum = "5948e95f63e900fa92936ecf72c7f2251f83d27560a35a4aae560cc745f8b687"
 dependencies = [
  "base64",
  "hex",
  "serde",
  "serde_json",
  "sigstore-crypto",
- "sigstore-merkle",
  "sigstore-rekor",
  "sigstore-tsa",
  "sigstore-types",
@@ -4323,9 +4336,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-crypto"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cdc66f1480e176533425cc880bc5f8a8e0d88ae1fe2701e98de4fb68984b71c"
+checksum = "22f27364b37bec104a904f10a675c8cdf05d5e48a980569368f0cd0c119b2652"
 dependencies = [
  "aws-lc-rs",
  "base64",
@@ -4345,9 +4358,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-fulcio"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78654d1d908925ff3c0634a8bc5199587b6d37ec7b777fedda86687924f088e0"
+checksum = "823d3f43c29500feb1ccacec68552f8e2bcecd62ec99c5284570a623bcf0c921"
 dependencies = [
  "base64",
  "reqwest 0.13.4",
@@ -4362,9 +4375,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-merkle"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4dbea5d8d5f293dfc2ed6abd06dc26a5ef017af126e53e3e36a6b2f7b7dac8c"
+checksum = "0ee85fd9fb550efd7c8a59447cb0ef4eb02f1258f3ffa80c88d38427c3930af3"
 dependencies = [
  "base64",
  "hex",
@@ -4375,9 +4388,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-oidc"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e2146f7779690f14313299bc3f2ec87af26cbb96c44a77a4a61dec4422b0007"
+checksum = "0fdb57c6e3af8a17d535a06084353d8e0bd32bb70f4807262f51b6cd009c9b4f"
 dependencies = [
  "ambient-id",
  "base64",
@@ -4395,9 +4408,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-rekor"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbe0bf948de89bed9b3b5c9d62940264a4da60db3518006b952b107d0e71926f"
+checksum = "9b97c5a866f849a9445ae657bef0caa2db053a82827e6dae3a2b3de9c15a6a1a"
 dependencies = [
  "base64",
  "hex",
@@ -4413,9 +4426,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-sign"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d21f5037998997f2e79f568efd48fc16649a78580e0eb45390a0b7a6a3871b6"
+checksum = "df33672126088b7fa9d5827e79fe0cd87eda607efa0d28c1366e61bbb47f423a"
 dependencies = [
  "base64",
  "serde_json",
@@ -4433,9 +4446,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-trust-root"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54fdf65b1207f96d4b1e5b44028fe3e078d40a50f6316715f6ad97ae21b0bfeb"
+checksum = "389b54d1b8ace20ba86fdf90e5e655495f65f1abbc7d5d0eb7494defa9ad32f0"
 dependencies = [
  "base64",
  "hex",
@@ -4444,6 +4457,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sigstore-crypto",
+ "sigstore-tuf",
  "sigstore-types",
  "thiserror 2.0.18",
  "x509-cert",
@@ -4451,9 +4465,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-tsa"
-version = "0.8.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "860eb6a645e0a22fa316031b06e9e87f9310c21915743bfa83901472dd3e7146"
+checksum = "b58fe92d4d8cf4b7215b927b70bc1245b6e0d70d801febdfe0cd265ad97ebf8b"
 dependencies = [
  "aws-lc-rs",
  "base64",
@@ -4476,10 +4490,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "sigstore-types"
-version = "0.8.0"
+name = "sigstore-tuf"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fb0334b69834c1f29757e57ade7e9bdbc42f5383cc22d003256d4d2df47af13"
+checksum = "eedac50883a917b7b434db22e2e6e853ace8c00f4a9c27f53e1e9c87e6d89fe4"
+dependencies = [
+ "globset",
+ "hex",
+ "jiff",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sigstore-crypto",
+ "sigstore-types",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "sigstore-types"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "236474c535a3157839926a0ae18f9c0c22b151e49634da6e5b18ad7cac8a3b69"
 dependencies = [
  "base64",
  "hex",
@@ -4982,6 +5018,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -5817,6 +5854,15 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

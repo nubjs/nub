@@ -119,7 +119,10 @@ pub async fn run(
     }
 
     let bin_path = super::project_modules_dir(&cwd).join(".bin").join(&bin);
-    exec_bin(&cwd, &bin_path, &bin, &args, shell_mode).await
+    // Non-recursive `aube exec` is a terminal single-tool run with no
+    // post-run work, so the standalone binary hands off via image
+    // replacement; embedded hosts / Windows fall back to a supervised child.
+    exec_bin_terminal(&cwd, &bin_path, &bin, &args, shell_mode).await
 }
 
 async fn run_filtered(
@@ -306,12 +309,77 @@ pub(crate) async fn exec_bin_with_node_args(
     shell_mode: bool,
 ) -> miette::Result<Option<i32>> {
     if !shell_mode && !bin_path.exists() {
-        return Err(miette!(
-            "binary not found: {bin}\nTry running `{}` first, or check that the package providing '{bin}' is in your dependencies.",
-            aube_util::cmd("install")
-        ));
+        return Err(bin_not_found_error(bin));
     }
 
+    let command = build_bin_command(cwd, bin_path, bin, args, node_args, shell_mode);
+    let status = crate::process_guard::spawn_and_wait(command)
+        .await
+        .into_diagnostic()
+        .wrap_err("failed to execute binary")?;
+
+    if !status.success() {
+        return Ok(Some(aube_scripts::exit_code_from_status(status)));
+    }
+
+    Ok(None)
+}
+
+/// Run a single terminal tool for the *standalone* binary by replacing the
+/// process image with it (`execvp`), so the tool inherits aube's pid. With
+/// no separate aube process left to outlive, any signal — including an
+/// uncatchable `SIGKILL` — reaches the tool directly, so no supervisor or
+/// `PR_SET_PDEATHSIG` is needed and the macOS `SIGKILL` gap doesn't apply.
+///
+/// Only sound where nothing runs after the tool and aube owns the whole
+/// process: an embedded host must not have its image blown away, and Windows
+/// has no `execvp`. Both fall back to the supervised spawn in `exec_bin`.
+/// Use only from terminal call sites with no post-run cleanup (no dlx scratch
+/// dir, not the recursive workspace loop).
+pub(crate) async fn exec_bin_terminal(
+    cwd: &Path,
+    bin_path: &Path,
+    bin: &str,
+    args: &[String],
+    shell_mode: bool,
+) -> miette::Result<Option<i32>> {
+    #[cfg(unix)]
+    if aube_util::embedder().name == aube_util::AUBE.name {
+        use std::os::unix::process::CommandExt;
+        if !shell_mode && !bin_path.exists() {
+            return Err(bin_not_found_error(bin));
+        }
+        let mut command = build_bin_command(cwd, bin_path, bin, args, &[], shell_mode);
+        // `exec` only returns on failure; on success the tool has replaced us.
+        let err = command.as_std_mut().exec();
+        return Err(miette!(
+            code = aube_codes::errors::ERR_AUBE_SHIM_EXEC_FAILED,
+            "failed to exec `{bin}`: {err}"
+        ));
+    }
+    // Embedded host or Windows: replacing the image is unsafe or unsupported,
+    // so run the tool as a supervised child instead.
+    exec_bin(cwd, bin_path, bin, args, shell_mode).await
+}
+
+fn bin_not_found_error(bin: &str) -> miette::Report {
+    miette!(
+        "binary not found: {bin}\nTry running `{}` first, or check that the package providing '{bin}' is in your dependencies.",
+        aube_util::cmd("install")
+    )
+}
+
+/// Assemble the `tokio::process::Command` that runs `bin`, shared by the
+/// supervised (`spawn_and_wait`) and image-replacing (`exec_bin_terminal`)
+/// paths. Callers own the bin-exists check.
+fn build_bin_command(
+    cwd: &Path,
+    bin_path: &Path,
+    bin: &str,
+    args: &[String],
+    node_args: &[String],
+    shell_mode: bool,
+) -> tokio::process::Command {
     let mut command = if let Some(cmd) = node_bin_command(bin_path, args, node_args, shell_mode) {
         cmd
     } else if shell_mode {
@@ -330,21 +398,21 @@ pub(crate) async fn exec_bin_with_node_args(
         let exec_path = resolve_exec_shim(bin_path);
         let mut cmd = tokio::process::Command::new(exec_path);
         cmd.args(args);
+        // `#!/usr/bin/env node` shebangs resolve through the child's PATH —
+        // put the switched runtime ahead of the inherited one so the bin
+        // (and, on the image-replacing path, the exec'd shim) honors the
+        // project's `.nvmrc` / `devEngines` instead of the ambient node.
+        let runtime_dirs = crate::runtime::path_entries();
+        if !runtime_dirs.is_empty() {
+            cmd.env("PATH", aube_scripts::prepend_paths(&runtime_dirs));
+        }
         cmd
     };
-    let status = command
+    crate::runtime::apply_child_env(&mut command);
+    command
         .current_dir(cwd)
-        .stderr(aube_scripts::child_stderr())
-        .status()
-        .await
-        .into_diagnostic()
-        .wrap_err("failed to execute binary")?;
-
-    if !status.success() {
-        return Ok(Some(aube_scripts::exit_code_from_status(status)));
-    }
-
-    Ok(None)
+        .stderr(aube_scripts::child_stderr());
+    command
 }
 
 pub(crate) async fn exec_bin_status(

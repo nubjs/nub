@@ -830,7 +830,7 @@ where
             let row = progress.map(|p| p.start_fetch(&display_name, &version));
             let bytes_progress = progress.cloned();
 
-            handles.spawn(async move {
+            handles.spawn(crate::dep_chain::scope_current(async move {
                 let _row = row;
                 let task_start = std::time::Instant::now();
                 let permit = sem.acquire().await;
@@ -1038,7 +1038,7 @@ where
                 );
 
                 Ok::<_, miette::Report>((dep_path, index, computed_integrity))
-            });
+            }));
         }
 
         while let Some(joined) = handles.join_next().await {

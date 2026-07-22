@@ -257,6 +257,98 @@ NODE
 	assert_success
 }
 
+# Regression for discussion #979 Bug 1: a registry version whose
+# packument carries only the legacy `dist.shasum` (hex sha1) and no
+# modern `dist.integrity`. aube must derive `sha1-<base64>` from the
+# shasum the way npm's classic client does, write a verifiable lockfile
+# entry, and re-read it — instead of writing an unverifiable tarball-only
+# resolution the parser then rejects with ERR_AUBE_LOCKFILE_PARSE.
+@test "registry dist.shasum with no dist.integrity is derived, not left tarball-only" {
+	mkdir -p package
+	cat >package/package.json <<-'EOF'
+		{
+		  "name": "shasum-pkg",
+		  "version": "1.0.0"
+		}
+	EOF
+	tar -czf shasum-pkg-1.0.0.tgz package
+	shasum="$(node -e "const crypto = require('node:crypto'); const fs = require('node:fs'); console.log(crypto.createHash('sha1').update(fs.readFileSync('shasum-pkg-1.0.0.tgz')).digest('hex'))")"
+
+	cat >shasum-registry.mjs <<'NODE'
+import http from 'node:http';
+import fs from 'node:fs';
+
+const shasum = process.env.SHASUM_PKG_SHASUM;
+const tarball = fs.readFileSync('shasum-pkg-1.0.0.tgz');
+const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/shasum-pkg') {
+    const tarballUrl = `http://${req.headers.host}/shasum-pkg/-/shasum-pkg-1.0.0.tgz`;
+    res.setHeader('content-type', 'application/json');
+    // Note: `dist` has `shasum` but deliberately no `integrity`.
+    res.end(JSON.stringify({
+      name: 'shasum-pkg',
+      'dist-tags': { latest: '1.0.0' },
+      versions: {
+        '1.0.0': {
+          name: 'shasum-pkg',
+          version: '1.0.0',
+          dist: { tarball: tarballUrl, shasum }
+        }
+      },
+      time: { '1.0.0': '2024-01-01T00:00:00.000Z' }
+    }));
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/shasum-pkg/-/shasum-pkg-1.0.0.tgz') {
+    res.setHeader('content-type', 'application/octet-stream');
+    res.end(tarball);
+    return;
+  }
+  res.statusCode = 404;
+  res.end('{}');
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync('shasum-registry-port', String(server.address().port));
+});
+NODE
+	SHASUM_PKG_SHASUM="$shasum" node shasum-registry.mjs &
+	SPLIT_REGISTRY_PID=$!
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		[ -f shasum-registry-port ] && break
+		sleep 0.1
+	done
+	registry="http://127.0.0.1:$(cat shasum-registry-port)"
+
+	cat >package.json <<-'EOF'
+		{
+		  "name": "test-shasum-fallback",
+		  "version": "1.0.0",
+		  "dependencies": { "shasum-pkg": "1.0.0" }
+		}
+	EOF
+	cat >.npmrc <<-EOF
+		registry=$registry
+	EOF
+
+	run aube install --no-frozen-lockfile
+	assert_success
+
+	# The lockfile records a verifiable sha1 SRI derived from the shasum,
+	# not a bare tarball-only resolution.
+	run grep -F "sha1-" aube-lock.yaml
+	assert_success
+
+	# A re-read (here via a frozen install after clearing the store) must
+	# parse the entry rather than failing with ERR_AUBE_LOCKFILE_PARSE.
+	rm -rf node_modules "$XDG_DATA_HOME/aube/store" "$XDG_CACHE_HOME/aube/packuments-v1"
+
+	run aube install --frozen-lockfile
+	kill "$SPLIT_REGISTRY_PID"
+	wait "$SPLIT_REGISTRY_PID" 2>/dev/null || true
+	unset SPLIT_REGISTRY_PID
+	assert_success
+}
+
 @test "lockfileIncludeTarballUrl=false (default) omits tarball URLs" {
 	cat >package.json <<-'EOF'
 		{

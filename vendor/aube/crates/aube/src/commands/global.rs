@@ -87,6 +87,13 @@ fn resolve_home() -> miette::Result<PathBuf> {
     platform_default()
 }
 
+/// Resolve the global prefix root. This is distinct from `globalBinDir`:
+/// users may point global bin symlinks somewhere else while the prefix
+/// itself still comes from `AUBE_HOME` / `PNPM_HOME` / the platform default.
+pub fn prefix_dir() -> miette::Result<PathBuf> {
+    resolve_home()
+}
+
 // Android is the Termux/CLI case: bionic userland with a Linux-shaped
 // HOME/XDG layout, so it shares the linux default rather than needing
 // its own arm.

@@ -33,7 +33,7 @@ pub(super) fn try_install_fast_path(
     opts: &InstallOptions,
     mode: FrozenMode,
     modules_cache_sweep_default: bool,
-) -> bool {
+) -> miette::Result<Option<usize>> {
     let dangerously_allow_all_builds = resolve_dangerously_allow_all_builds(cwd, opts);
     if !install_fast_path_eligible(
         cwd,
@@ -42,10 +42,20 @@ pub(super) fn try_install_fast_path(
         modules_cache_sweep_default,
         dangerously_allow_all_builds,
     ) {
-        return false;
+        return Ok(None);
     }
+    opts.control.check_cancelled()?;
     emit_up_to_date(cwd);
-    true
+    let total = state::read_state_package_content_hashes(cwd)
+        .map(|packages| packages.len())
+        .or_else(|| {
+            let manifest = super::super::load_manifest_or_default(cwd).ok()?;
+            aube_lockfile::parse_lockfile_with_kind(cwd, &manifest)
+                .ok()
+                .map(|(graph, _)| graph.packages.len())
+        })
+        .unwrap_or_default();
+    Ok(Some(total))
 }
 
 fn resolve_dangerously_allow_all_builds(cwd: &Path, opts: &InstallOptions) -> bool {
@@ -154,12 +164,20 @@ pub(super) fn merge_branch_lockfiles_if_needed(
                     filenames.join(", ")
                 );
                 if !report.conflicts.is_empty() {
-                    crate::progress::safe_eprintln(&format!(
-                        "warn: {} conflict(s) resolved during branch-lockfile merge:",
-                        report.conflicts.len()
-                    ));
+                    super::control::output(
+                        super::InstallOutputLevel::Warning,
+                        None,
+                        format!(
+                            "{} conflict(s) resolved during branch-lockfile merge:",
+                            report.conflicts.len()
+                        ),
+                    );
                     for c in &report.conflicts {
-                        crate::progress::safe_eprintln(&format!("warn:   {c}"));
+                        super::control::output(
+                            super::InstallOutputLevel::Warning,
+                            None,
+                            format!("  {c}"),
+                        );
                     }
                 }
             } else {
@@ -175,13 +193,17 @@ pub(super) fn merge_branch_lockfiles_if_needed(
 
 pub(super) fn warn_accepted_noop_install_settings(settings_ctx: &aube_settings::ResolveCtx<'_>) {
     if super::settings::resolve_use_running_store_server(settings_ctx) {
-        eprintln!(
-            "warning: aube has no store server; useRunningStoreServer=true is accepted but has no effect"
+        super::control::output(
+            super::InstallOutputLevel::Warning,
+            None,
+            "aube has no store server; useRunningStoreServer=true is accepted but has no effect",
         );
     }
     if !super::settings::resolve_symlink(settings_ctx) {
-        eprintln!(
-            "warning: aube's isolated layout requires symlinks; symlink=false is accepted but has no effect"
+        super::control::output(
+            super::InstallOutputLevel::Warning,
+            None,
+            "aube's isolated layout requires symlinks; symlink=false is accepted but has no effect",
         );
     }
 }

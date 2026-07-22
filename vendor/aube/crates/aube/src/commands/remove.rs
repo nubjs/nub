@@ -68,7 +68,7 @@ pub async fn run(
     }
 
     let cwd = crate::dirs::project_root()?;
-    let _lock = super::take_project_lock(&cwd)?;
+    let lock = super::take_install_project_lock(&cwd)?;
     let manifest_path = cwd.join("package.json");
 
     let mut manifest = super::load_manifest(&manifest_path)?;
@@ -176,7 +176,7 @@ pub async fn run(
     let mut opts =
         install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Fix));
     opts.ignore_scripts = args.ignore_scripts;
-    install::run(opts).await?;
+    install::run_with_project_lock(opts, &lock).await?;
 
     Ok(())
 }

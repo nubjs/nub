@@ -23,14 +23,14 @@
 </p>
 
 <p align="center">
-  Sponsored by <a href="https://37signals.com">37signals</a>.<br>
-  <a href="https://en.dev/sponsors.html">View all sponsors</a>.
+  Sponsored by <a href="https://entire.io">entire.io</a> and <a href="https://37signals.com">37signals</a>.<br>
+  <a href="https://jdx.dev/sponsors.html">View all sponsors</a>.
 </p>
 
 ## Why Try It
 
 <!-- BENCH_RATIOS:START -->
-**[Fast installs](https://aube.jdx.dev/benchmarks).** Warm installs are about 3x faster than pnpm and ~1.3x faster than Bun in the current benchmarks. Repeat test commands run up to 39x faster than pnpm and up to 6x faster than Bun.
+**[Fast installs](https://aube.jdx.dev/benchmarks).** Warm installs are about 3x faster than pnpm and ~1.5x faster than Bun in the current benchmarks. Repeat test commands run up to 32x faster than pnpm and up to 4x faster than Bun.
 <!-- BENCH_RATIOS:END -->
 
 **[Existing lockfiles](https://aube.jdx.dev/package-manager/lockfiles).** Reads and writes `pnpm-lock.yaml`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, and `bun.lock` in place.

@@ -24,7 +24,7 @@ fi
 status=0
 ./test/bats/bin/bats \
 	--jobs "$jobs" \
-	--parallel-binary-name parallel \
+	--parallel-binary-name rush \
 	--no-parallelize-within-files \
 	--filter-tags "!serial" \
 	"${targets[@]}" || status=$?

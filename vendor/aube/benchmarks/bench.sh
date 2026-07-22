@@ -744,7 +744,7 @@ TOOLS_CSV=$(
 BENCH_TOOLS="$TOOLS_CSV" BENCH_SCENARIOS="$BENCH_SCENARIOS" node "$SCRIPT_DIR/generate-results.js" "$BENCH_DIR" "$RESULTS_MD"
 if [ -s "$PHASES_FILE" ]; then
 	echo ""
-	node "$SCRIPT_DIR/generate-phase-results.mjs" "$PHASES_FILE" "$BENCH_DIR/aube-install-phases.md"
+	node "$SCRIPT_DIR/generate-phase-results.mts" "$PHASES_FILE" "$BENCH_DIR/aube-install-phases.md"
 fi
 echo ""
 echo "Results saved to: $RESULTS_MD"

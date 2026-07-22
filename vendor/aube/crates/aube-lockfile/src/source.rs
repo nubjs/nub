@@ -209,14 +209,17 @@ impl LocalSource {
     /// Internal FS-safe dep_path used as the key in
     /// `LockfileGraph.packages` and as the `.aube/` subdir name.
     ///
-    /// Distinct paths must map to distinct keys (otherwise the
+    /// Distinct normalized paths must map to distinct keys (otherwise the
     /// linker would silently mix files between two local packages),
     /// and the result must be a single filesystem component — no
     /// `/`, `\`, `:`, or `..`. Ad-hoc character substitution trips
     /// over cases like `../vendor` vs `__/vendor` or `a.b` vs `a_b`
-    /// collapsing to the same string, so we hash the raw path bytes
-    /// and suffix the first 16 hex chars (64 bits — more than enough
-    /// to avoid collisions inside a single project).
+    /// collapsing to the same string, so we hash the lexically normalized
+    /// path bytes and suffix the first 16 hex chars (64 bits — more than
+    /// enough to avoid collisions inside a single project). Normalization
+    /// also makes equivalent spellings such as `./vendor` and `vendor`
+    /// share one package identity without changing their serialized
+    /// specifiers.
     ///
     /// The hash input is the POSIX-form path string so a checked-in
     /// lockfile resolves to the same key regardless of which
@@ -237,7 +240,15 @@ impl LocalSource {
             LocalSource::RemoteTarball(t) => {
                 hasher.update(t.url.as_bytes());
             }
-            _ => hasher.update(self.path_posix().as_bytes()),
+            LocalSource::Directory(path)
+            | LocalSource::Tarball(path)
+            | LocalSource::Link(path)
+            | LocalSource::Portal(path)
+            | LocalSource::Exec(path) => {
+                let normalized = aube_util::path::normalize_lexical(path);
+                let posix = normalized.to_string_lossy().replace('\\', "/");
+                hasher.update(posix.as_bytes());
+            }
         }
         let digest = hasher.finalize();
         let short: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
@@ -284,10 +295,9 @@ impl LocalSource {
             ("link", r)
         } else if let Some(r) = spec.strip_prefix("portal:") {
             ("portal", r)
-        } else if let Some(r) = spec.strip_prefix("exec:") {
-            return Some(LocalSource::Exec(PathBuf::from(r)));
         } else {
-            return None;
+            let r = spec.strip_prefix("exec:")?;
+            return Some(LocalSource::Exec(PathBuf::from(r)));
         };
         let rel = PathBuf::from(rest);
         let abs = project_root.join(&rel);
@@ -1277,6 +1287,15 @@ mod tests {
             subpath: Some("packages/b".to_string()),
         });
         assert_ne!(a.dep_path("dep"), b.dep_path("dep"));
+    }
+
+    #[test]
+    fn dep_path_normalizes_equivalent_local_paths() {
+        let root = LocalSource::Directory(PathBuf::from("./injected/lib-b"));
+        let transitive = LocalSource::Directory(PathBuf::from("injected/lib-a/../lib-b"));
+
+        assert_eq!(root.dep_path("lib-b"), transitive.dep_path("lib-b"));
+        assert_eq!(root.specifier(), "file:./injected/lib-b");
     }
 
     const SHARED_SHA: &str = "0123456789abcdef0123456789abcdef01234567";

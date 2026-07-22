@@ -4842,6 +4842,51 @@ async fn fresh_resolve_preserves_npm_alias_as_folder_name() {
     assert_eq!(root[0].dep_path, "odd-alias@3.0.1");
 }
 
+// Catalog expansion happens before npm alias parsing. A versionless
+// scoped alias such as `npm:@popperjs/core` must treat the leading `@`
+// as the scope sigil and default its range to `latest`; otherwise the
+// remainder (`popperjs/core`) is mistaken for GitHub shorthand.
+#[tokio::test]
+async fn fresh_resolve_handles_versionless_scoped_npm_alias_from_catalog() {
+    let popper = make_packument("@popperjs/core", &["2.11.8"], "2.11.8");
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut catalogs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    catalogs
+        .entry("default".to_string())
+        .or_default()
+        .insert("popper2".to_string(), "npm:@popperjs/core".to_string());
+    let mut resolver = Resolver::new(client).with_catalogs(catalogs);
+    resolver.cache.insert("@popperjs/core".to_string(), popper);
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("popper2".to_string(), "catalog:".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect("versionless scoped catalog alias should resolve from npm");
+
+    let pkg = graph
+        .packages
+        .get("popper2@2.11.8")
+        .expect("catalog alias must retain its user-facing package name");
+    assert_eq!(pkg.name, "popper2");
+    assert_eq!(pkg.version, "2.11.8");
+    assert_eq!(pkg.alias_of.as_deref(), Some("@popperjs/core"));
+    assert_eq!(pkg.registry_name(), "@popperjs/core");
+    assert!(!graph.packages.contains_key("@popperjs/core@2.11.8"));
+
+    let catalog = graph.catalogs.get("default").unwrap();
+    let entry = catalog.get("popper2").unwrap();
+    assert_eq!(entry.specifier, "npm:@popperjs/core");
+    assert_eq!(entry.version, "2.11.8");
+}
+
 // Catalog-aliased dep + selector override targeting the original
 // (alias) name with a bare-range replacement. Reproduces the
 // pnpm/pnpm `js-yaml: npm:@zkochan/js-yaml@0.0.11` + `js-yaml@<3.14.2:
@@ -5070,6 +5115,112 @@ fn pick_version_exact_pin_not_hijacked_by_dist_tag() {
         |_, _| false,
     )
     .unwrap();
+    assert_eq!(result.version, "1.0.0");
+}
+
+/// Packument with a `time` map: `old` versions dated 2020, `fresh` ones
+/// dated 2099 — deterministically before/after any wall-clock cutoff a
+/// test-sized `minutes` value produces.
+fn make_timed_packument(name: &str, old: &[&str], fresh: &[&str], latest: &str) -> Packument {
+    let all: Vec<&str> = old.iter().chain(fresh.iter()).copied().collect();
+    let mut packument = make_packument(name, &all, latest);
+    for v in old {
+        packument
+            .time
+            .insert(v.to_string(), "2020-01-01T00:00:00.000Z".to_string());
+    }
+    for v in fresh {
+        packument
+            .time
+            .insert(v.to_string(), "2099-01-01T00:00:00.000Z".to_string());
+    }
+    packument
+}
+
+fn mra(minutes: u64, strict: bool, exclude: &[&str]) -> MinimumReleaseAge {
+    let rules: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
+    let (exclude, errors) = crate::trust::PackageVersionPolicy::parse_lossy(rules);
+    assert!(errors.is_empty(), "test exclude rules must parse");
+    MinimumReleaseAge {
+        minutes,
+        exclude,
+        strict,
+    }
+}
+
+#[test]
+fn pick_version_for_add_steers_gated_latest_to_mature_version() {
+    // The freshly published version is the one tagged `latest` — the
+    // classic supply-chain scenario minimumReleaseAge exists for.
+    let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    let gate = mra(1440, false, &[]);
+    let result = pick_version_for_add(&packument, "foo", "*", Some(&gate)).unwrap();
+    assert_eq!(result.version, "1.0.0");
+}
+
+#[test]
+fn pick_version_for_add_prefers_mature_latest_tag() {
+    // A mature `latest` tag wins over a higher untagged fresh version,
+    // matching the resolver's dist-tag preference.
+    let packument = make_timed_packument("foo", &["1.0.0"], &["2.0.0"], "1.0.0");
+    let gate = mra(1440, false, &[]);
+    let result = pick_version_for_add(&packument, "foo", "*", Some(&gate)).unwrap();
+    assert_eq!(result.version, "1.0.0");
+}
+
+#[test]
+fn pick_version_for_add_lenient_fallback_admits_exact_pin() {
+    // An exact pin of a fresh version has no older alternative; the
+    // lenient (default) mode honors it, same as full resolution.
+    let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    let gate = mra(1440, false, &[]);
+    let result = pick_version_for_add(&packument, "foo", "1.1.0", Some(&gate)).unwrap();
+    assert_eq!(result.version, "1.1.0");
+}
+
+#[test]
+fn pick_version_for_add_strict_refuses_gated_pick() {
+    let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    let gate = mra(1440, true, &[]);
+    assert!(matches!(
+        pick_version_for_add(&packument, "foo", "1.1.0", Some(&gate)),
+        PickResult::AgeGated
+    ));
+}
+
+#[test]
+fn pick_version_for_add_exclude_exempts_registry_name() {
+    let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    let gate = mra(1440, false, &["foo"]);
+    let result = pick_version_for_add(&packument, "foo", "*", Some(&gate)).unwrap();
+    assert_eq!(result.version, "1.1.0");
+}
+
+#[test]
+fn pick_version_for_add_without_gate_keeps_latest_preference() {
+    let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    let result = pick_version_for_add(&packument, "foo", "*", None).unwrap();
+    assert_eq!(result.version, "1.1.0");
+}
+
+#[test]
+fn pick_version_for_add_normalizes_gated_latest_range() {
+    // `latest` passed verbatim under an active gate must be normalized at
+    // the API boundary — pick_version's internal dist-tag fallback would
+    // otherwise turn it into the tagged version's exact range, whose
+    // lenient fallback admits the fresh publish.
+    let packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    let gate = mra(1440, false, &[]);
+    let result = pick_version_for_add(&packument, "foo", "latest", Some(&gate)).unwrap();
+    assert_eq!(result.version, "1.0.0");
+}
+
+#[test]
+fn pick_version_for_add_gated_latest_survives_missing_dist_tag() {
+    let mut packument = make_timed_packument("foo", &["1.0.0"], &["1.1.0"], "1.1.0");
+    packument.dist_tags.remove("latest");
+    let gate = mra(1440, false, &[]);
+    let result = pick_version_for_add(&packument, "foo", "latest", Some(&gate)).unwrap();
     assert_eq!(result.version, "1.0.0");
 }
 

@@ -37,8 +37,8 @@ impl LockfileGraph {
     /// `"lodash": "catalog:"` override reads as stale against a
     /// lockfile that recorded the resolved `"lodash": "4.17.21"`.
     ///
-    /// Lockfile formats that don't record specifiers (npm, yarn, bun) always
-    /// return `Fresh` since we have no way to detect drift without re-resolving.
+    /// Importers that don't record specifiers return `Fresh` since we have no
+    /// way to detect manifest drift without re-resolving.
     ///
     /// [`check_drift_workspace`]: Self::check_drift_workspace
     pub fn check_drift(
@@ -1461,8 +1461,8 @@ mod drift_tests {
 
     #[test]
     fn fresh_when_no_specifiers_recorded() {
-        // Non-pnpm formats (npm/yarn/bun) don't store specifiers, so we can't
-        // detect drift — we treat them as fresh and let the resolver decide.
+        // Some lockfile importers don't store specifiers, so we can't detect
+        // drift — we treat them as fresh and let the resolver decide.
         let manifest = make_manifest(&[("lodash", "^4.17.0")]);
         let graph = LockfileGraph {
             importers: {

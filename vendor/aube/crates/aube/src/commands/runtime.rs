@@ -128,10 +128,20 @@ async fn run_set(args: RuntimeSetArgs) -> miette::Result<()> {
         install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Prefer));
     install::run(opts).await?;
 
-    let ctx = crate::runtime::current();
-    if let Some(ctx) = ctx
-        && let Some(version) = &ctx.version
-    {
+    // Install runtime state is invocation-scoped so concurrent projects cannot
+    // replace one another. Re-read the manifest rather than using the process
+    // cache, which may still contain the pre-edit package.json, then resolve the
+    // now-installed, lockfile-pinned runtime for the follow-up status message.
+    let manifest = aube_manifest::PackageJson::from_path(&manifest_path)
+        .map_err(miette::Report::new)
+        .wrap_err("failed to read updated package.json")?;
+    let parse_options = super::with_settings_ctx(&project_dir, |ctx| aube_lockfile::ParseOptions {
+        strict_store_integrity: aube_settings::resolved::strict_store_integrity(ctx)
+            || aube_settings::resolved::paranoid(ctx),
+    });
+    let pin = crate::runtime::lockfile_node_pin(&project_dir, &manifest, parse_options);
+    let ctx = crate::runtime::ensure(&project_dir, Some(&manifest), settings, pin.as_ref()).await?;
+    if let Some(version) = &ctx.version {
         println!("node {version} ready ({})", ctx.provenance.label());
     }
     Ok(())

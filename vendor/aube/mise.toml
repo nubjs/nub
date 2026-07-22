@@ -11,6 +11,11 @@ hk = "latest"
 node = "24"
 pitchfork = "latest"
 pkl = "latest"
+# Parallel-job driver for `mise run test:bats`. bats-core natively
+# supports shenwei356/rush as a GNU-parallel alternative, and unlike GNU
+# parallel (a Perl script with no clean mise backend) rush ships static
+# linux+darwin binaries, so contributors get it with no manual install.
+rush = "latest"
 shellcheck = "latest"
 shfmt = "latest"
 usage = "latest"
@@ -94,7 +99,7 @@ env = {
 run = [
   "cargo build --release",
   "mise x aqua:sharkdp/hyperfine@latest github:pnpm/pnpm@latest npm:@yarnpkg/cli-dist@latest bun@latest deno@latest npm:vlt@latest node@24 -- bash benchmarks/bench.sh",
-  "node benchmarks/update-readme.mjs",
+  "node benchmarks/update-readme.mts",
 ]
 
 [tasks."build:pgo"]

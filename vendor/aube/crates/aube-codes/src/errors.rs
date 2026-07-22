@@ -39,6 +39,7 @@ pub const ERR_AUBE_PEER_CONTEXT_NOT_CONVERGED: &str = "ERR_AUBE_PEER_CONTEXT_NOT
 
 // ── registry / network ──────────────────────────────────────────────
 pub const ERR_AUBE_PACKAGE_NOT_FOUND: &str = "ERR_AUBE_PACKAGE_NOT_FOUND";
+pub const ERR_AUBE_ACCESS_ENTITY_NOT_FOUND: &str = "ERR_AUBE_ACCESS_ENTITY_NOT_FOUND";
 pub const ERR_AUBE_VERSION_NOT_FOUND: &str = "ERR_AUBE_VERSION_NOT_FOUND";
 pub const ERR_AUBE_UNAUTHORIZED: &str = "ERR_AUBE_UNAUTHORIZED";
 pub const ERR_AUBE_FORBIDDEN: &str = "ERR_AUBE_FORBIDDEN";
@@ -96,6 +97,7 @@ pub const ERR_AUBE_REMOVE_PRIOR_INSTALL_DIR: &str = "ERR_AUBE_REMOVE_PRIOR_INSTA
 pub const ERR_AUBE_CONFIG_NESTED_AUBE_KEY: &str = "ERR_AUBE_CONFIG_NESTED_AUBE_KEY";
 pub const ERR_AUBE_NO_BRANDED_CONFIG_FILE: &str = "ERR_AUBE_NO_BRANDED_CONFIG_FILE";
 pub const ERR_AUBE_CONFLICTING_BUILD_FLAGS: &str = "ERR_AUBE_CONFLICTING_BUILD_FLAGS";
+pub const ERR_AUBE_ACCESS_INVALID_ARGUMENT: &str = "ERR_AUBE_ACCESS_INVALID_ARGUMENT";
 pub const ERR_AUBE_SHIM_CREATE_FAILED: &str = "ERR_AUBE_SHIM_CREATE_FAILED";
 pub const ERR_AUBE_SHIM_EXEC_FAILED: &str = "ERR_AUBE_SHIM_EXEC_FAILED";
 
@@ -109,9 +111,18 @@ pub const ERR_AUBE_RUNTIME_EXTRACT_FAILED: &str = "ERR_AUBE_RUNTIME_EXTRACT_FAIL
 #[rustfmt::skip] pub const ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM: &str = "ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM";
 pub const ERR_AUBE_RUNTIME_IO: &str = "ERR_AUBE_RUNTIME_IO";
 
-// ── misc tracing::error! sites (non-fatal but high-severity) ────────
+// ── misc / safety ──────────────────────────────────────────────────
+pub const ERR_AUBE_INSTALL_CANCELLED: &str = "ERR_AUBE_INSTALL_CANCELLED";
 pub const ERR_AUBE_PATCHES_TRACKING_WRITE: &str = "ERR_AUBE_PATCHES_TRACKING_WRITE";
 pub const ERR_AUBE_UNSAFE_SHEBANG_INTERPRETER: &str = "ERR_AUBE_UNSAFE_SHEBANG_INTERPRETER";
+pub const ERR_AUBE_EMBED_INVALID_PROJECT: &str = "ERR_AUBE_EMBED_INVALID_PROJECT";
+pub const ERR_AUBE_EMBED_INSTALL_FAILED: &str = "ERR_AUBE_EMBED_INSTALL_FAILED";
+pub const ERR_AUBE_EMBED_INVALID_SETTING: &str = "ERR_AUBE_EMBED_INVALID_SETTING";
+pub const ERR_AUBE_EMBED_ALREADY_INITIALIZED: &str = "ERR_AUBE_EMBED_ALREADY_INITIALIZED";
+pub const ERR_AUBE_FFI_INVALID_ARGUMENT: &str = "ERR_AUBE_FFI_INVALID_ARGUMENT";
+pub const ERR_AUBE_FFI_UNKNOWN_HANDLE: &str = "ERR_AUBE_FFI_UNKNOWN_HANDLE";
+pub const ERR_AUBE_FFI_RUNTIME: &str = "ERR_AUBE_FFI_RUNTIME";
+pub const ERR_AUBE_FFI_PANIC: &str = "ERR_AUBE_FFI_PANIC";
 
 /// Stable category labels that group codes in the generated docs and
 /// in `EXIT_TABLE`'s 10-wide allocation ranges. Public so the docs
@@ -243,7 +254,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_TRUST_EXCLUDE_INVALID_VERSION_UNION,
         category: category::RESOLVER,
-        description: "A `trustPolicyExclude` pattern had a non-exact version.",
+        description: "A `trustPolicyExclude` pattern had an invalid semver range.",
         exit_code: None,
     },
     CodeMeta {
@@ -295,6 +306,12 @@ pub const ALL: &[CodeMeta] = &[
         category: category::REGISTRY_NETWORK,
         description: "Registry returned 404 for the package name.",
         exit_code: Some(40),
+    },
+    CodeMeta {
+        name: ERR_AUBE_ACCESS_ENTITY_NOT_FOUND,
+        category: category::REGISTRY_NETWORK,
+        description: "Registry returned 404 for an access user, organization, or team.",
+        exit_code: None,
     },
     CodeMeta {
         name: ERR_AUBE_VERSION_NOT_FOUND,
@@ -527,6 +544,12 @@ pub const ALL: &[CodeMeta] = &[
         exit_code: None,
     },
     CodeMeta {
+        name: ERR_AUBE_ACCESS_INVALID_ARGUMENT,
+        category: category::ENGINE_CLI,
+        description: "`aube access` received an invalid access setting, permission level, team, or package argument.",
+        exit_code: None,
+    },
+    CodeMeta {
         name: ERR_AUBE_SHIM_CREATE_FAILED,
         category: category::ENGINE_CLI,
         description: "`aube activate <shell>` couldn't create or refresh an executable shim in aube's shim directory.",
@@ -589,6 +612,12 @@ pub const ALL: &[CodeMeta] = &[
     },
     // Misc / safety
     CodeMeta {
+        name: ERR_AUBE_INSTALL_CANCELLED,
+        category: category::MISC_SAFETY,
+        description: "An in-process install was cooperatively cancelled by its embedding host. Cancellation is observed at safe install boundaries so an in-flight filesystem phase is not abandoned mid-mutation.",
+        exit_code: None,
+    },
+    CodeMeta {
         name: ERR_AUBE_UNSAFE_INDEX_KEY,
         category: category::MISC_SAFETY,
         description: "A package index key tried to escape its directory (path traversal defense in depth).",
@@ -599,6 +628,54 @@ pub const ALL: &[CodeMeta] = &[
         category: category::MISC_SAFETY,
         description: "A `#!` shebang named an unsafe interpreter when generating a shim — substituted with `node` instead. Surfaced as `tracing::error!` but install continues.",
         exit_code: Some(91),
+    },
+    CodeMeta {
+        name: ERR_AUBE_EMBED_INVALID_PROJECT,
+        category: category::MISC_SAFETY,
+        description: "An in-process embedder was given a project directory that could not be created, inspected, or resolved.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_EMBED_INSTALL_FAILED,
+        category: category::MISC_SAFETY,
+        description: "An in-process embedder could not initialize its host callback or received an install failure without a more specific stable code.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_EMBED_INVALID_SETTING,
+        category: category::MISC_SAFETY,
+        description: "An in-process embedder passed a setting default whose name is not a canonical aube setting.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_EMBED_ALREADY_INITIALIZED,
+        category: category::MISC_SAFETY,
+        description: "An in-process embedder tried to register setting defaults after the process already initialized its embedder profile.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_FFI_INVALID_ARGUMENT,
+        category: category::MISC_SAFETY,
+        description: "A C ABI call received a null pointer, invalid UTF-8, malformed JSON, or an unsupported option value.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_FFI_UNKNOWN_HANDLE,
+        category: category::MISC_SAFETY,
+        description: "A C ABI wait or cancellation call referenced an unknown or already-consumed operation handle.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_FFI_RUNTIME,
+        category: category::MISC_SAFETY,
+        description: "The C ABI could not initialize or use its internal asynchronous runtime.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_FFI_PANIC,
+        category: category::MISC_SAFETY,
+        description: "A panic was caught at the C ABI boundary before it could cross into the host process.",
+        exit_code: None,
     },
     CodeMeta {
         name: ERR_AUBE_UNSAFE_PACKAGE_NAME,

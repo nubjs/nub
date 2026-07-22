@@ -3,6 +3,7 @@ use crate::config::{FetchPolicy, NpmConfig};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+mod access;
 mod body;
 mod cache;
 mod dist_tags;

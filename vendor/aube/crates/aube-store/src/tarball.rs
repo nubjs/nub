@@ -1,6 +1,161 @@
 use crate::{Error, PackageIndex, Store, StoredFile};
 use std::path::Path;
 
+/// Deterministic fingerprint of a directory imported as a `file:` package.
+///
+/// This deliberately mirrors [`Store::import_directory`]: `.git` and
+/// `node_modules` directories are skipped, non-files are ignored, and each
+/// relative path, content hash, and executable bit contributes to the result.
+/// The install freshness check uses it without writing the files to the CAS.
+pub fn directory_content_fingerprint(dir: &Path) -> Result<String, Error> {
+    let entries = collect_directory_fingerprints(dir, true)?;
+    Ok(content_fingerprint(&entries))
+}
+
+/// Metadata-only fingerprint for the same tree as
+/// [`directory_content_fingerprint`]. This stats every included file but does
+/// not read its contents, letting warm install checks avoid unbounded file I/O
+/// when the source tree is unchanged.
+pub fn directory_metadata_fingerprint(dir: &Path) -> Result<String, Error> {
+    let entries = collect_directory_fingerprints(dir, false)?;
+    Ok(metadata_fingerprint(&entries))
+}
+
+/// Compute content and metadata fingerprints in one directory walk.
+///
+/// State writes need both values. Combining them avoids a second traversal
+/// after reading the source files for the authoritative content fingerprint.
+pub fn directory_fingerprints(dir: &Path) -> Result<(String, String), Error> {
+    let entries = collect_directory_fingerprints(dir, true)?;
+    Ok((
+        content_fingerprint(&entries),
+        metadata_fingerprint(&entries),
+    ))
+}
+
+#[derive(Debug)]
+struct DirectoryFileFingerprint {
+    path: String,
+    content_hash: Option<String>,
+    executable: bool,
+    size: u64,
+    mtime_secs: i64,
+    mtime_nanos: u32,
+}
+
+fn content_fingerprint(entries: &[DirectoryFileFingerprint]) -> String {
+    let mut entries: Vec<(&str, &str, bool)> = entries
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry.path.as_str(),
+                entry.content_hash.as_deref()?,
+                entry.executable,
+            ))
+        })
+        .collect();
+    entries.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for (path, hex_hash, executable) in entries {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(hex_hash.as_bytes());
+        hasher.update(if executable { b"\x01" } else { b"\x00" });
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn metadata_fingerprint(entries: &[DirectoryFileFingerprint]) -> String {
+    let mut entries: Vec<&DirectoryFileFingerprint> = entries.iter().collect();
+    entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    let mut hasher = blake3::Hasher::new();
+    for entry in entries {
+        hasher.update(entry.path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&entry.size.to_le_bytes());
+        hasher.update(&entry.mtime_secs.to_le_bytes());
+        hasher.update(&entry.mtime_nanos.to_le_bytes());
+        hasher.update(if entry.executable { b"\x01" } else { b"\x00" });
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn collect_directory_fingerprints(
+    dir: &Path,
+    hash_content: bool,
+) -> Result<Vec<DirectoryFileFingerprint>, Error> {
+    let mut entries = Vec::new();
+    collect_directory_fingerprints_recursive(dir, dir, hash_content, &mut entries)?;
+    Ok(entries)
+}
+
+fn collect_directory_fingerprints_recursive(
+    base: &Path,
+    current: &Path,
+    hash_content: bool,
+    entries: &mut Vec<DirectoryFileFingerprint>,
+) -> Result<(), Error> {
+    let dir_entries = std::fs::read_dir(current)
+        .map_err(|e| Error::Tar(format!("read_dir {}: {e}", current.display())))?;
+    for entry in dir_entries {
+        let entry = entry.map_err(|e| Error::Tar(format!("read_dir entry: {e}")))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| Error::Tar(format!("file_type: {e}")))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(name.as_ref(), ".git" | "node_modules") {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_directory_fingerprints_recursive(base, &path, hash_content, entries)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|e| Error::Tar(format!("metadata {}: {e}", path.display())))?;
+        let content_hash = if hash_content {
+            let content = std::fs::read(&path)
+                .map_err(|e| Error::Tar(format!("read {}: {e}", path.display())))?;
+            Some(blake3::hash(&content).to_hex().to_string())
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = false;
+        let rel = path
+            .strip_prefix(base)
+            .map_err(|e| Error::Tar(format!("strip_prefix: {e}")))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        let (mtime_secs, mtime_nanos) = modified
+            .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos()))
+            .unwrap_or((0, 0));
+        entries.push(DirectoryFileFingerprint {
+            path: rel,
+            content_hash,
+            executable,
+            size: metadata.len(),
+            mtime_secs,
+            mtime_nanos,
+        });
+    }
+    Ok(())
+}
+
 impl Store {
     /// Import every file under a directory into the store, producing a
     /// `PackageIndex` keyed by paths relative to `dir`. Used by `file:`
@@ -52,12 +207,12 @@ impl Store {
             };
             #[cfg(not(unix))]
             let executable = false;
-            let stored = self.import_bytes(&content, executable)?;
             let rel = path
                 .strip_prefix(base)
                 .map_err(|e| Error::Tar(format!("strip_prefix: {e}")))?
                 .to_string_lossy()
                 .replace('\\', "/");
+            let stored = self.import_bytes_gated(&rel, &content, executable)?;
             index.insert(rel, stored);
         }
         Ok(())
@@ -151,7 +306,7 @@ impl Store {
             let chunk_t0 = std::time::Instant::now();
             if parallel_disabled || chunk.len() < PARALLEL_IMPORT_THRESHOLD {
                 for (rel_path, content, executable) in chunk {
-                    let stored = self.import_bytes(&content, executable)?;
+                    let stored = self.import_bytes_gated(&rel_path, &content, executable)?;
                     index.insert(rel_path, stored);
                 }
             } else {
@@ -172,7 +327,7 @@ impl Store {
                     .into_par_iter()
                     .with_min_len(RAYON_TASK_MIN_LEN)
                     .map(|(rel_path, content, executable)| {
-                        self.import_bytes(&content, executable)
+                        self.import_bytes_gated(&rel_path, &content, executable)
                             .map(|stored| (rel_path, stored))
                     })
                     .collect();
@@ -607,3 +762,39 @@ pub(crate) const MAX_TARBALL_ENTRY_BYTES: u64 = 1 << 20;
 pub(crate) const MAX_TARBALL_ENTRIES: usize = 200_000;
 #[cfg(test)]
 pub(crate) const MAX_TARBALL_ENTRIES: usize = 64;
+
+#[cfg(test)]
+mod directory_fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn directory_fingerprint_matches_imported_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(source.join("lib")).unwrap();
+        std::fs::create_dir_all(source.join("node_modules/ignored")).unwrap();
+        std::fs::write(source.join("package.json"), br#"{"name":"local"}"#).unwrap();
+        std::fs::write(source.join("lib/index.js"), b"module.exports = 'v1';\n").unwrap();
+        std::fs::write(source.join("node_modules/ignored/index.js"), b"ignored\n").unwrap();
+
+        let store = Store::at(temp.path().join("store"));
+        let index = store.import_directory(&source).unwrap();
+        let (content_hash, metadata_hash) = directory_fingerprints(&source).unwrap();
+        assert_eq!(content_hash, crate::index_content_fingerprint(&index));
+        assert_eq!(
+            metadata_hash,
+            directory_metadata_fingerprint(&source).unwrap()
+        );
+
+        let before_content = content_hash;
+        std::fs::write(source.join("lib/index.js"), b"module.exports = 'v2';\n").unwrap();
+        let after_content = directory_content_fingerprint(&source).unwrap();
+        assert_ne!(before_content, after_content);
+
+        std::fs::write(source.join("lib/added.js"), b"added\n").unwrap();
+        assert_ne!(
+            metadata_hash,
+            directory_metadata_fingerprint(&source).unwrap()
+        );
+    }
+}

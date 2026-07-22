@@ -2,20 +2,29 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+interface PhaseRow {
+  scenario: string
+  total_ms?: number | null
+  packages: number
+  cached: number
+  fetched: number
+  phases_ms?: Record<string, number | null | undefined>
+}
+
 const input = process.argv[2]
 const outputFile = process.argv[3]
 
 if (!input || !outputFile) {
-  console.error('usage: node benchmarks/generate-phase-results.mjs <jsonl> <markdown>')
+  console.error('usage: node benchmarks/generate-phase-results.mts <jsonl> <markdown>')
   process.exit(1)
 }
 
-const labels = {
+const labels: Record<string, string> = {
   'gvs-warm': 'Fresh install (warm cache)',
   'gvs-cold': 'Fresh install (cold cache)',
 }
 
-const phaseOrder = [
+const phaseOrder: string[] = [
   'root_preinstall',
   'resolve',
   'fetch',
@@ -30,17 +39,17 @@ const phaseOrder = [
   'sweep',
 ]
 
-function fmt(ms) {
+function fmt(ms: number | null | undefined): string {
   if (ms == null) return ''
   return `${ms}ms`
 }
 
-const rows = readFileSync(input, 'utf8')
+const rows: PhaseRow[] = readFileSync(input, 'utf8')
   .split('\n')
   .filter(Boolean)
   .map((line) => JSON.parse(line))
 
-const byScenario = new Map()
+const byScenario = new Map<string, PhaseRow>()
 for (const row of rows) {
   if (byScenario.has(row.scenario)) {
     console.warn(`Warning: duplicate scenario '${row.scenario}' - keeping last entry`)

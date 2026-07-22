@@ -127,6 +127,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // diagnostic). Settings-file values flow through the generated typed
     // accessor, which collapses unknown values to `None` so they behave
     // like an absent setting.
+    super::control::check_cancelled()?;
     let strategy = resolve_link_strategy(cwd, settings_ctx, planned_gvs)?;
     if let Some(p) = prog_ref {
         p.set_phase("linking");
@@ -344,14 +345,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         } else {
             let engine = node_version.map(aube_lockfile::graph_hash::engine_name_default);
             let allow = |pkg: &aube_lockfile::LockedPackage| {
-                matches!(
-                    build_policy.decide_package(
-                        pkg.registry_name(),
-                        &pkg.version,
-                        pkg.source_approval_key().as_deref(),
-                    ),
-                    aube_scripts::AllowDecision::Allow
-                )
+                super::package_build_is_allowed(build_policy, pkg)
             };
             aube_lockfile::graph_hash::compute_graph_hashes_full(
                 graph_for_link,

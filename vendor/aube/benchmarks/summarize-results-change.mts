@@ -1,40 +1,52 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs'
 
+interface ResultsRow {
+  key: string
+  label: string
+  values: Record<string, number | null | undefined>
+}
+
+interface Results {
+  rows: ResultsRow[]
+  managers?: string[]
+  versions: Record<string, string | undefined>
+}
+
 const [beforePath, afterPath] = process.argv.slice(2)
 if (!beforePath || !afterPath) {
-  console.error('usage: summarize-results-change.mjs <before-results.json> <after-results.json>')
+  console.error('usage: summarize-results-change.mts <before-results.json> <after-results.json>')
   process.exit(1)
 }
 
-const before = JSON.parse(readFileSync(beforePath, 'utf8'))
-const after = JSON.parse(readFileSync(afterPath, 'utf8'))
+const before: Results = JSON.parse(readFileSync(beforePath, 'utf8'))
+const after: Results = JSON.parse(readFileSync(afterPath, 'utf8'))
 
 const beforeRows = new Map(before.rows.map((row) => [row.key, row]))
 const afterRows = new Map(after.rows.map((row) => [row.key, row]))
 const tools = (after.managers || ['aube', 'bun', 'pnpm'])
   .filter((tool) => before.managers?.includes(tool) !== false)
 
-function ms(value) {
+function ms(value: number | null | undefined): string {
   if (value == null) return 'n/a'
   return `${value}ms`
 }
 
-function pct(beforeValue, afterValue) {
+function pct(beforeValue: number | null | undefined, afterValue: number | null | undefined): string {
   if (beforeValue == null || afterValue == null) return 'n/a'
   const change = ((afterValue - beforeValue) / beforeValue) * 100
   const sign = change > 0 ? '+' : ''
   return `${sign}${Math.round(change)}%`
 }
 
-function ratio(row, tool) {
+function ratio(row: ResultsRow, tool: string): string | null {
   const values = row.values
   if (values[tool] == null || values.aube == null) return null
   const speedup = values[tool] / values.aube
   return speedup < 2 ? `${speedup.toFixed(1)}x` : `${Math.round(speedup)}x`
 }
 
-function ratioChange(key, tool) {
+function ratioChange(key: string, tool: string): string | null {
   const beforeRow = beforeRows.get(key)
   const afterRow = afterRows.get(key)
   if (!beforeRow || !afterRow) return null

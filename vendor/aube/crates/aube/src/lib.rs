@@ -3,13 +3,10 @@
 //! The `aube` / `aubr` / `aubx` binaries are thin wrappers over
 //! [`cli_main`]; everything else lives here so the command layer can be
 //! embedded by other tools — e.g. constructing
-//! [`commands::install::InstallOptions`] and calling
-//! [`commands::install::run`] in-process instead of shelling out to the
-//! CLI. The public surface is deliberately small: [`commands`] (command
-//! implementations and their args/options structs), [`cli_args`] (the
-//! shared clap argument groups flattened into command args), and
-//! [`cli_main`]. Everything else is crate-private plumbing shared by the
-//! commands.
+//! [`embed::InstallOptions`] and calling [`embed::install`] in-process instead
+//! of shelling out to the CLI. Embedding hosts should use [`embed`], which is
+//! the stable facade over the lower-level [`commands`] modules. [`cli_args`]
+//! and [`cli_main`] remain public for hosts that wrap aube's complete CLI.
 //!
 //! The library makes no global-allocator choice — the mimalloc opt-in
 //! lives in `src/main.rs` so embedders keep control of their own
@@ -21,9 +18,11 @@ pub mod commands;
 mod dep_chain;
 mod deprecations;
 mod dirs;
+pub mod embed;
 mod engines;
 mod patches;
 mod pnpmfile;
+mod process_guard;
 mod progress;
 mod runtime;
 mod self_version;
@@ -341,6 +340,8 @@ enum Commands {
     /// Bootstrap aube's cached node-gyp and print the executable path.
     #[command(name = "__node-gyp-bootstrap", hide = true)]
     NodeGypBootstrap { project_dir: PathBuf },
+    /// Manage package access and visibility on the registry
+    Access(commands::access::AccessArgs),
     /// Emit shell activation code for runtime tool shims
     Activate(commands::activate::ActivateArgs),
     /// Add a dependency
@@ -357,6 +358,9 @@ enum Commands {
     /// Print the path to `node_modules/.bin`
     #[command(after_long_help = commands::bin::AFTER_LONG_HELP)]
     Bin(commands::bin::BinArgs),
+    /// Open package bug tracker URLs
+    #[command(visible_alias = "issues", after_long_help = commands::bugs::AFTER_LONG_HELP)]
+    Bugs(commands::bugs::BugsArgs),
     /// Inspect and manage the packument metadata cache
     Cache(commands::cache::CacheArgs),
     /// Print a file from the global store by integrity or hex hash
@@ -472,6 +476,9 @@ enum Commands {
     /// Manage package.json entries (not implemented — use `npm pkg`)
     #[command(hide = true)]
     Pkg(commands::npm_fallback::FallbackArgs),
+    /// Print the current package prefix directory
+    #[command(after_long_help = commands::prefix::AFTER_LONG_HELP)]
+    Prefix(commands::prefix::PrefixArgs),
     /// Remove extraneous packages from project `node_modules`.
     ///
     /// Reads the lockfile, computes the packages still reachable from each
@@ -480,6 +487,7 @@ enum Commands {
     #[command(after_long_help = commands::prune::AFTER_LONG_HELP)]
     Prune(commands::prune::PruneArgs),
     /// Publish the current package to the registry
+    #[cfg(feature = "publish")]
     Publish(commands::publish::PublishArgs),
     /// Alias for `clean` — remove `node_modules` across every workspace project.
     ///
@@ -519,7 +527,7 @@ enum Commands {
     /// Set a `package.json` script (not implemented — use `npm set-script`)
     #[command(hide = true, name = "set-script")]
     SetScript(commands::npm_fallback::FallbackArgs),
-    /// Show the companies sponsoring aube and the jdx.dev project family
+    /// Show the companies sponsoring aube and the jdx.dev open source tools
     Sponsors(commands::sponsors::SponsorsArgs),
     /// Stage packages for publishing (not implemented — use `npm stage`)
     Stage(commands::npm_fallback::FallbackArgs),
@@ -898,6 +906,7 @@ async fn async_main(cli: Cli) -> miette::Result<Option<i32>> {
         Some(Commands::NodeGypBootstrap { project_dir }) => {
             commands::install::node_gyp_bootstrap::print_bootstrapped_binary(&project_dir).await?
         }
+        Some(Commands::Access(args)) => commands::access::run(args).await?,
         Some(Commands::Activate(args)) => commands::activate::run(args)?,
         Some(Commands::Add(args)) => {
             commands::add::run(args, effective_filter.clone()).await?;
@@ -909,6 +918,7 @@ async fn async_main(cli: Cli) -> miette::Result<Option<i32>> {
             }
         }
         Some(Commands::Bin(args)) => commands::bin::run(args).await?,
+        Some(Commands::Bugs(args)) => commands::bugs::run(args).await?,
         Some(Commands::Cache(args)) => commands::cache::run(args).await?,
         Some(Commands::CatFile(args)) => commands::cat_file::run(args).await?,
         Some(Commands::CatIndex(args)) => commands::cat_index::run(args).await?,
@@ -1005,7 +1015,9 @@ async fn async_main(cli: Cli) -> miette::Result<Option<i32>> {
         Some(Commands::Pkg(args)) => {
             return Ok(Some(commands::npm_fallback::run("pkg", &args)?));
         }
+        Some(Commands::Prefix(args)) => commands::prefix::run(args).await?,
         Some(Commands::Prune(args)) => commands::prune::run(args).await?,
+        #[cfg(feature = "publish")]
         Some(Commands::Publish(args)) => {
             commands::publish::run(args, effective_filter.clone()).await?
         }
@@ -1062,6 +1074,7 @@ async fn async_main(cli: Cli) -> miette::Result<Option<i32>> {
                         return Ok(Some(code));
                     }
                 }
+                #[cfg(feature = "publish")]
                 Some(Commands::Publish(args)) => {
                     commands::publish::run(args, nested_filter).await?
                 }
@@ -1386,6 +1399,46 @@ mod cli_spec_tests {
     }
 
     #[test]
+    fn add_accepts_dangerously_allow_all_builds_after_package() {
+        let cli = Cli::try_parse_from([
+            "aube",
+            "add",
+            "--global",
+            "opencode-ai@1.17.13",
+            "--dangerously-allow-all-builds",
+        ])
+        .expect("add --dangerously-allow-all-builds should parse after a package");
+
+        let Some(Commands::Add(add_args)) = cli.command else {
+            panic!("expected add subcommand");
+        };
+        assert!(add_args.global);
+        assert!(add_args.dangerously_allow_all_builds);
+        assert_eq!(add_args.packages, ["opencode-ai@1.17.13"]);
+    }
+
+    #[test]
+    fn add_rejects_deny_build_with_dangerously_allow_all_builds() {
+        let err = match Cli::try_parse_from([
+            "aube",
+            "add",
+            "some-package",
+            "--deny-build=some-package",
+            "--dangerously-allow-all-builds",
+        ]) {
+            Ok(_) => panic!("deny-build should conflict with dangerously-allow-all-builds"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains(
+                "'--deny-build=<PKG>' cannot be used with '--dangerously-allow-all-builds'"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn lifter_does_not_eat_lifted_flag_as_kept_flag_value() {
         // Regression: `aube --dir /tmp --frozen-lockfile install` would
         // previously lose `--frozen-lockfile` if `--dir`'s value was
@@ -1425,6 +1478,29 @@ mod cli_spec_tests {
 
         let cli = Cli::try_parse_from(["aube", "w", "react"]).expect("w should parse as why");
         assert!(matches!(cli.command, Some(Commands::Why(_))));
+    }
+
+    #[test]
+    fn bin_accepts_workspace_root_flag() {
+        // pnpm parity: `aube bin -w` / `--workspace-root` prints the
+        // workspace-root bin dir. See discussion #988.
+        for flag in ["-w", "--workspace-root", "--workspace"] {
+            let cli = Cli::try_parse_from(["aube", "bin", flag])
+                .unwrap_or_else(|e| panic!("`aube bin {flag}` should parse: {e}"));
+            let Some(Commands::Bin(args)) = cli.command else {
+                panic!("`aube bin {flag}` should dispatch to bin");
+            };
+            assert!(args.workspace_root, "{flag} should set workspace_root");
+            assert!(!args.global);
+        }
+    }
+
+    #[test]
+    fn bin_global_conflicts_with_workspace_root() {
+        assert!(
+            Cli::try_parse_from(["aube", "bin", "-g", "-w"]).is_err(),
+            "`aube bin -g -w` should be rejected as conflicting"
+        );
     }
 
     #[test]
@@ -1775,6 +1851,12 @@ mod package_manager_guard_tests {
             package_manager_guard_mode(cli.command.as_ref()),
             PackageManagerGuardMode::Error
         );
+    }
+
+    #[test]
+    fn prefix_skips_package_manager_guard() {
+        let cli = Cli::try_parse_from(["aube", "prefix"]).expect("prefix should parse");
+        assert!(!command_needs_package_manager_guard(cli.command.as_ref()));
     }
 
     #[test]

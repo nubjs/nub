@@ -18,11 +18,13 @@ several more available as one-line opt-ins. Full reference:
 | Setting | Default | What it protects against |
 | --- | --- | --- |
 | `blockExoticSubdeps` | `true` | Transitive deps from `git+`, `file:`, or raw tarball URLs |
-| `allowBuilds` (deny-by-default) | `true` | Lifecycle scripts running without explicit approval |
+| `allowBuilds` | deny all dep scripts | Lifecycle scripts running without explicit approval |
 | `trustPolicy` | `"no-downgrade"` | Versions that lost provenance or trusted-publisher evidence |
 | `minimumReleaseAge` | `1440` (24h) | Newly published versions before they have aged in the registry |
-| `jailBuilds` | `false` (planned `true` in v2) | Approved scripts with full filesystem / network / env |
-| `paranoid` | `false` | Master switch — forces `jailBuilds`, `trustPolicy=no-downgrade`, `minimumReleaseAgeStrict`, `strictStoreIntegrity`, `strictDepBuilds` |
+| `advisoryCheck` | `"on"` | Known-malicious packages (OSV `MAL-*` advisories) on `aube add` and fresh-resolution installs |
+| `lowDownloadThreshold` | `1000` | Typosquats — `aube add` prompts on packages with near-zero weekly downloads |
+| `jailBuilds` | `false` (planned `true` in the next major) | Approved scripts getting full filesystem / network / env |
+| `paranoid` | `false` | Master switch — forces `jailBuilds`, `trustPolicy=no-downgrade`, `minimumReleaseAgeStrict`, `strictStoreIntegrity`, `strictDepBuilds`, `advisoryCheck=required` |
 | Tarball integrity (SHA-512) | always on | Tampered tarballs in the registry or proxy cache |
 | Content-addressed store (BLAKE3) | always on | Drift between the store and the linked `node_modules` |
 | `aube audit` | n/a | Known CVEs against the resolved dependency tree |

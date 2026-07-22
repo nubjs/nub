@@ -22,6 +22,17 @@ pub(crate) fn configure_script_settings(
     // falls back to the ambient `node` on PATH so `npm_node_execpath` /
     // `NODE` are populated for lifecycle scripts the way pnpm/npm do.
     let runtime = crate::runtime::current();
+    // Resolve the proxy the same way the registry client does, so a
+    // dependency's install script honors it too. `httpProxy` inherits
+    // from the resolved `httpsProxy` (npm/pnpm parity: a lone
+    // `https-proxy=` line configures both schemes) — replicate that
+    // fallback here, since the generated accessors only walk each
+    // setting's own sources. `noProxy` has no cross-setting inheritance.
+    let https_proxy = aube_settings::resolved::https_proxy(ctx).and_then(non_empty_string);
+    let http_proxy = aube_settings::resolved::http_proxy(ctx)
+        .and_then(non_empty_string)
+        .or_else(|| https_proxy.clone());
+    let no_proxy = aube_settings::resolved::no_proxy(ctx).and_then(non_empty_string);
     // Source the embedder-owned overlay from the engine context: an embedder
     // (e.g. nub) populates `env_overlay` / `path_prepends` on the context, and
     // this settings pass copies them into `ScriptSettings` for the spawn path
@@ -35,8 +46,9 @@ pub(crate) fn configure_script_settings(
         script_shell,
         unsafe_perm,
         shell_emulator,
-        node_bin_dir: runtime.and_then(|r| r.bin_dir.clone()),
+        node_bin_dir: runtime.as_ref().and_then(|r| r.bin_dir.clone()),
         node_exe: runtime
+            .as_ref()
             .and_then(|r| r.node_bin.clone())
             .or_else(aube_runtime::node_on_path),
         env_overlay: overlay.env_overlay,
@@ -56,6 +68,9 @@ pub(crate) fn configure_script_settings(
             let r = aube_registry::config::NpmConfig::load(cwd).registry;
             (!r.is_empty()).then_some(r)
         },
+        http_proxy,
+        https_proxy,
+        no_proxy,
     });
 }
 

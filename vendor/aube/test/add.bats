@@ -213,6 +213,19 @@ EOF
 	assert_output --partial 'JSR packages must be scoped'
 }
 
+@test "aube add jsr: rejects package names that escape npm name shape" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-add-jsr-bad-shape",
+  "version": "0.0.0",
+  "dependencies": {}
+}
+EOF
+	run aube add jsr:@std/../collections
+	assert_failure
+	assert_output --partial 'invalid jsr: spec'
+}
+
 @test "aube add: adds multiple packages" {
 	cat >package.json <<'EOF'
 {

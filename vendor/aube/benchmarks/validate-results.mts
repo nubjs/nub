@@ -2,11 +2,21 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+interface BenchmarkRow {
+  key: string
+  label: string
+  values: Record<string, number | null | undefined>
+}
+
+interface Results {
+  rows: BenchmarkRow[]
+}
+
 const resultsPath = resolve(process.argv[2] ?? 'benchmarks/results.json')
-const results = JSON.parse(readFileSync(resultsPath, 'utf8'))
+const results: Results = JSON.parse(readFileSync(resultsPath, 'utf8'))
 const rows = new Map(results.rows.map((row) => [row.key, row]))
 
-const claims = [
+const claims: Array<[string, string, string]> = [
   ['gvs-warm', 'bun', 'landing page hero and README warm installs'],
   ['gvs-warm', 'pnpm', 'landing page hero and README warm installs'],
   ['install-test', 'bun', 'README repeat test commands'],

@@ -351,7 +351,7 @@ pub fn write(
             "libc",
         ];
         for (k, v) in &pkg.extra_meta {
-            if MODELED_META_KEYS.contains(&k.as_str()) {
+            if MODELED_META_KEYS.contains(&k.as_str()) || k == crate::EXTRA_PRESERVE_TARBALL_URL {
                 continue;
             }
             meta.insert(k.clone(), v.clone());

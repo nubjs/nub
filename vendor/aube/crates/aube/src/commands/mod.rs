@@ -1,9 +1,11 @@
+pub mod access;
 pub mod activate;
 pub mod add;
 pub mod add_supply_chain;
 pub mod approve_builds;
 pub mod audit;
 pub mod bin;
+pub mod bugs;
 pub mod cache;
 pub mod cat_file;
 pub mod cat_index;
@@ -48,8 +50,11 @@ pub mod patch_commit;
 pub mod patch_remove;
 pub mod peers;
 pub mod pkg;
+pub mod prefix;
 pub mod prune;
+#[cfg(feature = "publish")]
 pub mod publish;
+#[cfg(feature = "publish")]
 pub mod publish_provenance;
 pub mod query;
 pub mod rebuild;
@@ -115,6 +120,7 @@ pub(crate) use manifest_io::{
 pub(crate) use package_spec::{
     encode_package_name, max_satisfying_version, resolve_version, split_name_spec,
 };
+pub(crate) use project_lock::take_install_project_lock;
 pub(crate) use project_lock::take_project_lock;
 pub(crate) use script_settings::{configure_script_settings, configure_script_settings_for_cwd};
 pub(crate) use settings_context::{
@@ -122,13 +128,13 @@ pub(crate) use settings_context::{
     default_lockfile_kind_for_cwd, ensure_registry_auth_for_package, expand_setting_path,
     global_frozen_override, global_output_flags, global_virtual_store_flags,
     load_global_config_yaml, load_npm_config, make_client, open_store, packument_cache_dir,
-    packument_full_cache_dir, project_modules_dir, resolve_fetch_policy,
-    resolve_lockfile_kind_for_write, resolve_modules_dir_name_for_cwd, resolve_virtual_store_dir,
-    resolve_virtual_store_dir_for_cwd, resolve_virtual_store_dir_max_length,
-    resolve_virtual_store_dir_max_length_for_cwd, resolved_cache_dir, resolved_store_dir,
-    run_pnpmfile_pre_resolution, set_fetch_cli_overrides, set_global_frozen_override,
-    set_global_output_flags, set_global_virtual_store_flags, set_registry_override,
-    set_skip_auto_install_on_package_manager_mismatch,
+    packument_cache_dir_for_cwd, packument_full_cache_dir, packument_full_cache_dir_for_cwd,
+    project_modules_dir, resolve_fetch_policy, resolve_lockfile_kind_for_write,
+    resolve_modules_dir_name_for_cwd, resolve_virtual_store_dir, resolve_virtual_store_dir_for_cwd,
+    resolve_virtual_store_dir_max_length, resolve_virtual_store_dir_max_length_for_cwd,
+    resolved_cache_dir, resolved_store_dir, run_pnpmfile_pre_resolution, set_fetch_cli_overrides,
+    set_global_frozen_override, set_global_output_flags, set_global_virtual_store_flags,
+    set_registry_override, set_skip_auto_install_on_package_manager_mismatch,
     skip_auto_install_on_package_manager_mismatch, with_settings_ctx,
 };
 pub(crate) use workspace_helpers::{

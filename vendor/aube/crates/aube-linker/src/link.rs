@@ -224,6 +224,24 @@ impl Linker {
                 continue;
             };
             let aube_entry = aube_dir.join(self.aube_dir_entry_name(dep_path));
+            // `file:` directories and portals are mutable while their
+            // dep_path is intentionally stable (it identifies the source
+            // path, not one generation of its contents). A full install has
+            // just re-imported the current tree, so replace the existing
+            // materialization instead of treating the path-keyed entry as a
+            // cache hit. The install-state warm path prevents this work when
+            // the source fingerprint is unchanged.
+            if matches!(local, LocalSource::Directory(_) | LocalSource::Portal(_)) {
+                try_remove_entry(&aube_entry);
+                if aube_entry.exists() {
+                    return Err(Error::Io(
+                        aube_entry,
+                        std::io::Error::other(
+                            "failed to remove stale local dependency materialization",
+                        ),
+                    ));
+                }
+            }
             if !aube_entry.exists() {
                 self.materialize_into(
                     &aube_dir,
@@ -967,6 +985,17 @@ impl Linker {
                 continue;
             };
             let aube_entry = aube_dir.join(self.aube_dir_entry_name(dep_path));
+            if matches!(local, LocalSource::Directory(_) | LocalSource::Portal(_)) {
+                try_remove_entry(&aube_entry);
+                if aube_entry.exists() {
+                    return Err(Error::Io(
+                        aube_entry,
+                        std::io::Error::other(
+                            "failed to remove stale local dependency materialization",
+                        ),
+                    ));
+                }
+            }
             if aube_entry.exists() {
                 stats.packages_cached += 1;
                 continue;

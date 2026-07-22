@@ -1,7 +1,10 @@
 use super::layout::package_name_from_install_path;
 use super::source::local_git_source_from_resolved;
 use super::*;
-use crate::{DepType, DirectDep, Error, GitSource, LocalSource, LockedPackage, LockfileGraph};
+use crate::{
+    DepType, DirectDep, DriftStatus, Error, GitSource, LocalSource, LockedPackage, LockfileGraph,
+    LockfileKind,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -96,6 +99,52 @@ fn test_parse_simple() {
     let bar_dep = root.iter().find(|d| d.name == "bar").unwrap();
     assert_eq!(bar_dep.dep_type, DepType::Dev);
     assert_eq!(bar_dep.specifier.as_deref(), Some("^2.0.0"));
+}
+
+#[test]
+fn test_parse_root_specifiers_drive_drift() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "test",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "test",
+                    "version": "1.0.0",
+                    "dependencies": { "@raycast/api": "^1.104.13" }
+                },
+                "node_modules/@raycast/api": {
+                    "version": "1.104.20",
+                    "integrity": "sha512-aaa"
+                }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let root = &graph.importers["."];
+    let raycast = root.iter().find(|d| d.name == "@raycast/api").unwrap();
+    assert_eq!(raycast.specifier.as_deref(), Some("^1.104.13"));
+
+    let manifest = aube_manifest::PackageJson {
+        dependencies: [("@vicinae/api".to_string(), "^0.21.5".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    assert_eq!(
+        graph.check_drift_for_kind(
+            &manifest,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            LockfileKind::Npm,
+        ),
+        DriftStatus::Stale {
+            reason: "manifest adds @vicinae/api@^0.21.5".to_string()
+        }
+    );
 }
 
 /// `npm install --prefix <proj>` invoked from a different cwd writes

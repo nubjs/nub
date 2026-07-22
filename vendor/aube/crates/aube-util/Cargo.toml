@@ -24,6 +24,14 @@ reqwest = { workspace = true }
 webpki-root-certs = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# No TLS backend by default so embedders control when reqwest/rustls is
+# enabled; aube-registry's default features turn it on for the aube binary.
+# rustls is the only supported backend (no OpenSSL / native-tls — see the
+# TLS policy in CLAUDE.md).
+default = []
+rustls = ["reqwest/rustls"]
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

@@ -4,7 +4,7 @@
 # dir that was populated earlier by a warm run using config.warm.yaml.
 # This makes the "cold cache" benchmark scenario deterministic: every
 # tarball fetch hits the local disk (or a throttling proxy in front,
-# see benchmarks/throttle-proxy.mjs) rather than npmjs, so the numbers
+# see benchmarks/throttle-proxy.mts) rather than npmjs, so the numbers
 # measure aube's code path rather than CDN jitter.
 #
 # Storage lives at ~/.cache/aube-bench/registry/storage/ by default

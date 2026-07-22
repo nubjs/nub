@@ -1,0 +1,16 @@
+{
+  "name": "@jdxcode/aube-node",
+  "version": "0.0.0-placeholder",
+  "description": "Node-API bindings for embedding the aube package manager",
+  "license": "MIT",
+  "repository": "https://github.com/jdx/aube",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "default": "./index.js" },
+    "./bun-plugin": { "types": "./bun-plugin.d.ts", "default": "./bun-plugin.js" }
+  },
+  "files": ["index.js", "index.d.ts", "bun-plugin.js", "bun-plugin.d.ts", "README.md"],
+  "preferUnplugged": true,
+  "engines": { "node": ">=18" }
+}

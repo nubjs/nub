@@ -105,7 +105,7 @@
     {
       "name": "ERR_AUBE_TRUST_EXCLUDE_INVALID_VERSION_UNION",
       "category": "Resolver",
-      "description": "A `trustPolicyExclude` pattern had a non-exact version.",
+      "description": "A `trustPolicyExclude` pattern had an invalid semver range.",
       "exit_code": null
     },
     {
@@ -155,6 +155,12 @@
       "category": "Registry / network",
       "description": "Registry returned 404 for the package name.",
       "exit_code": 40
+    },
+    {
+      "name": "ERR_AUBE_ACCESS_ENTITY_NOT_FOUND",
+      "category": "Registry / network",
+      "description": "Registry returned 404 for an access user, organization, or team.",
+      "exit_code": null
     },
     {
       "name": "ERR_AUBE_VERSION_NOT_FOUND",
@@ -379,6 +385,12 @@
       "exit_code": null
     },
     {
+      "name": "ERR_AUBE_ACCESS_INVALID_ARGUMENT",
+      "category": "Engine / CLI",
+      "description": "`aube access` received an invalid access setting, permission level, team, or package argument.",
+      "exit_code": null
+    },
+    {
       "name": "ERR_AUBE_SHIM_CREATE_FAILED",
       "category": "Engine / CLI",
       "description": "`aube activate <shell>` couldn't create or refresh an executable shim in aube's shim directory.",
@@ -439,6 +451,12 @@
       "exit_code": null
     },
     {
+      "name": "ERR_AUBE_INSTALL_CANCELLED",
+      "category": "Misc / safety",
+      "description": "An in-process install was cooperatively cancelled by its embedding host. Cancellation is observed at safe install boundaries so an in-flight filesystem phase is not abandoned mid-mutation.",
+      "exit_code": null
+    },
+    {
       "name": "ERR_AUBE_UNSAFE_INDEX_KEY",
       "category": "Misc / safety",
       "description": "A package index key tried to escape its directory (path traversal defense in depth).",
@@ -449,6 +467,54 @@
       "category": "Misc / safety",
       "description": "A `#!` shebang named an unsafe interpreter when generating a shim — substituted with `node` instead. Surfaced as `tracing::error!` but install continues.",
       "exit_code": 91
+    },
+    {
+      "name": "ERR_AUBE_EMBED_INVALID_PROJECT",
+      "category": "Misc / safety",
+      "description": "An in-process embedder was given a project directory that could not be created, inspected, or resolved.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_EMBED_INSTALL_FAILED",
+      "category": "Misc / safety",
+      "description": "An in-process embedder could not initialize its host callback or received an install failure without a more specific stable code.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_EMBED_INVALID_SETTING",
+      "category": "Misc / safety",
+      "description": "An in-process embedder passed a setting default whose name is not a canonical aube setting.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_EMBED_ALREADY_INITIALIZED",
+      "category": "Misc / safety",
+      "description": "An in-process embedder tried to register setting defaults after the process already initialized its embedder profile.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_FFI_INVALID_ARGUMENT",
+      "category": "Misc / safety",
+      "description": "A C ABI call received a null pointer, invalid UTF-8, malformed JSON, or an unsupported option value.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_FFI_UNKNOWN_HANDLE",
+      "category": "Misc / safety",
+      "description": "A C ABI wait or cancellation call referenced an unknown or already-consumed operation handle.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_FFI_RUNTIME",
+      "category": "Misc / safety",
+      "description": "The C ABI could not initialize or use its internal asynchronous runtime.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_FFI_PANIC",
+      "category": "Misc / safety",
+      "description": "A panic was caught at the C ABI boundary before it could cross into the host process.",
+      "exit_code": null
     },
     {
       "name": "ERR_AUBE_UNSAFE_PACKAGE_NAME",

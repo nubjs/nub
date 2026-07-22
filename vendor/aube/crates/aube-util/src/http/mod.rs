@@ -29,8 +29,13 @@ pub mod ticket_cache;
 /// feature defaults the resolver on for every client, and hickory reads
 /// Android's DNS config through the same JNI surface. On other targets,
 /// leave the builder alone so client construction does not fail at runtime.
+///
+/// Compiled to a no-op when the `rustls` feature is not enabled — reqwest's
+/// `Certificate`/`tls_certs_merge` APIs only exist with a TLS backend, and
+/// this crate leaves that choice to the final binary (the aube binary selects
+/// rustls via aube-registry's defaults).
 pub fn with_webpki_root_fallback(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    #[cfg(any(unix, target_os = "windows"))]
+    #[cfg(all(feature = "rustls", any(unix, target_os = "windows")))]
     let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
         .map(|cert| {
@@ -40,17 +45,20 @@ pub fn with_webpki_root_fallback(builder: reqwest::ClientBuilder) -> reqwest::Cl
         })
         .collect::<Vec<_>>();
 
-    #[cfg(any(all(unix, not(target_os = "android")), target_os = "windows"))]
+    #[cfg(all(
+        feature = "rustls",
+        any(all(unix, not(target_os = "android")), target_os = "windows")
+    ))]
     {
         builder.tls_certs_merge(certs)
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(all(feature = "rustls", target_os = "android"))]
     {
         builder.tls_certs_only(certs).no_hickory_dns()
     }
 
-    #[cfg(not(any(unix, target_os = "windows")))]
+    #[cfg(not(all(feature = "rustls", any(unix, target_os = "windows"))))]
     {
         builder
     }

@@ -1,4 +1,12 @@
 pub(super) fn print_already_up_to_date() {
+    match super::control::current().output_mode() {
+        super::InstallOutputMode::Events => {
+            super::control::output(super::InstallOutputLevel::Info, None, "Already up to date");
+            return;
+        }
+        super::InstallOutputMode::Silent => return,
+        super::InstallOutputMode::Human => {}
+    }
     if clx::progress::output() == clx::progress::ProgressOutput::Text {
         return;
     }
@@ -69,7 +77,9 @@ fn direct_dependency_importer_label(
 
 pub(super) fn should_print_human_install_summary() -> bool {
     let flags = super::super::global_output_flags();
-    !flags.silent && !flags.ndjson
+    super::control::current().output_mode() == super::InstallOutputMode::Human
+        && !flags.silent
+        && !flags.ndjson
 }
 
 fn print_direct_dependency_section(

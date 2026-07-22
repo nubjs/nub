@@ -192,7 +192,7 @@ pub async fn run(
     {
         cwd = root;
     }
-    let _lock = super::take_project_lock(&cwd)?;
+    let lock = super::take_install_project_lock(&cwd)?;
     let manifest_path = cwd.join("package.json");
 
     let mut manifest = aube_manifest::PackageJson::from_path(&manifest_path)
@@ -823,7 +823,7 @@ pub async fn run(
     // tree stays as-is. Mirrors `aube install --lockfile-only` and
     // closes the gap with `npm update --package-lock-only`.
     chained.lockfile_only = args.lockfile_only;
-    install::run(chained).await?;
+    install::run_with_project_lock(chained, &lock).await?;
 
     Ok(None)
 }

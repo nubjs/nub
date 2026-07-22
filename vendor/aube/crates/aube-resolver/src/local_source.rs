@@ -343,6 +343,61 @@ fn hosted_git_local_source(
     }
 }
 
+fn read_git_package_manifest(
+    name: &str,
+    pkg_root: &Path,
+    location: &str,
+    subpath: Option<&str>,
+) -> Result<(String, BTreeMap<String, String>), Error> {
+    let where_ = subpath.map(|s| format!(" at /{s}")).unwrap_or_default();
+    let meta = std::fs::metadata(pkg_root).map_err(|e| {
+        Error::Registry(
+            name.to_string(),
+            format!("stat git package root in {location}{where_}: {e}"),
+        )
+    })?;
+    if !meta.is_dir() {
+        return Err(Error::Registry(
+            name.to_string(),
+            format!(
+                "git package root in {location}{where_} is not a directory: {}",
+                pkg_root.display()
+            ),
+        ));
+    }
+
+    let manifest_path = pkg_root.join("package.json");
+    let manifest_bytes = match std::fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                package = name,
+                root = %pkg_root.display(),
+                "git dependency has no package.json; resolving as version 0.0.0 with no dependencies",
+            );
+            return Ok(("0.0.0".to_string(), BTreeMap::new()));
+        }
+        Err(e) => {
+            return Err(Error::Registry(
+                name.to_string(),
+                format!("read package.json in {location}{where_}: {e}"),
+            ));
+        }
+    };
+    let pj: aube_manifest::PackageJson = sonic_rs::from_slice(&manifest_bytes)
+        .or_else(|_| serde_json::from_slice(&manifest_bytes))
+        .map_err(|e| {
+            Error::Registry(
+                name.to_string(),
+                format!("parse package.json in {location}{where_}: {e}"),
+            )
+        })?;
+    Ok((
+        pj.version.unwrap_or_else(|| "0.0.0".to_string()),
+        pj.dependencies,
+    ))
+}
+
 /// Turn a raw `GitSource` (committish parsed from the user's
 /// specifier, empty `resolved`) into a fully-resolved one by either
 /// fetching a hosted-tarball over HTTPS (github / gitlab / bitbucket
@@ -436,19 +491,12 @@ pub(crate) async fn resolve_git_source(
             Some(sub) => clone_dir.join(sub),
             None => clone_dir.clone(),
         };
-        let manifest_bytes = std::fs::read(pkg_root.join("package.json")).map_err(|e| {
-            let where_ = subpath
-                .as_deref()
-                .map(|s| format!(" at /{s}"))
-                .unwrap_or_default();
-            Error::Registry(
-                name.to_string(),
-                format!("read package.json in cached codeload extract{where_}: {e}"),
-            )
-        })?;
-        let pj: aube_manifest::PackageJson = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| Error::Registry(name.to_string(), e.to_string()))?;
-        let version = pj.version.unwrap_or_else(|| "0.0.0".to_string());
+        let (version, deps) = read_git_package_manifest(
+            name,
+            &pkg_root,
+            "cached codeload extract",
+            subpath.as_deref(),
+        )?;
         return Ok((
             hosted_git_local_source(
                 original_url,
@@ -459,7 +507,7 @@ pub(crate) async fn resolve_git_source(
                 codeload_url.as_deref(),
             ),
             version,
-            pj.dependencies,
+            deps,
             integrity,
         ));
     }
@@ -500,21 +548,13 @@ pub(crate) async fn resolve_git_source(
                         Some(sub) => clone_dir.join(sub),
                         None => clone_dir.clone(),
                     };
-                    let manifest_bytes =
-                        std::fs::read(pkg_root.join("package.json")).map_err(|e| {
-                            let where_ = subpath_for_extract
-                                .as_deref()
-                                .map(|s| format!(" at /{s}"))
-                                .unwrap_or_default();
-                            Error::Registry(
-                                name_for_extract.clone(),
-                                format!("read package.json in codeload extract{where_}: {e}"),
-                            )
-                        })?;
-                    let pj: aube_manifest::PackageJson = serde_json::from_slice(&manifest_bytes)
-                        .map_err(|e| Error::Registry(name_for_extract.clone(), e.to_string()))?;
-                    let version = pj.version.unwrap_or_else(|| "0.0.0".to_string());
-                    Ok((resolved, version, pj.dependencies))
+                    let (version, deps) = read_git_package_manifest(
+                        &name_for_extract,
+                        &pkg_root,
+                        "codeload extract",
+                        subpath_for_extract.as_deref(),
+                    )?;
+                    Ok((resolved, version, deps))
                 })
                 .await
                 .map_err(|e| {
@@ -581,19 +621,12 @@ pub(crate) async fn resolve_git_source(
             Some(sub) => clone_dir.join(sub),
             None => clone_dir.clone(),
         };
-        let manifest_bytes = std::fs::read(pkg_root.join("package.json")).map_err(|e| {
-            let where_ = subpath_for_clone
-                .as_deref()
-                .map(|s| format!(" at /{s}"))
-                .unwrap_or_default();
-            Error::Registry(
-                name_for_clone.clone(),
-                format!("read package.json in clone{where_}: {e}"),
-            )
-        })?;
-        let pj: aube_manifest::PackageJson = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| Error::Registry(name_for_clone.clone(), e.to_string()))?;
-        let version = pj.version.unwrap_or_else(|| "0.0.0".to_string());
+        let (version, deps) = read_git_package_manifest(
+            &name_for_clone,
+            &pkg_root,
+            "clone",
+            subpath_for_clone.as_deref(),
+        )?;
         Ok((
             LocalSource::Git(aube_lockfile::GitSource {
                 url: original_url_for_lockfile,
@@ -603,7 +636,7 @@ pub(crate) async fn resolve_git_source(
                 subpath: subpath_for_clone,
             }),
             version,
-            pj.dependencies,
+            deps,
         ))
     })
     .await
@@ -924,5 +957,55 @@ mod hosted_git_local_source_tests {
             }
             other => panic!("expected Git, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod git_package_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn missing_git_package_json_defaults_to_empty_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("schema.json"), "{}").unwrap();
+
+        let (version, deps) =
+            read_git_package_manifest("asset-only", temp.path(), "clone", None).unwrap();
+
+        assert_eq!(version, "0.0.0");
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn invalid_git_package_json_still_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("package.json"), "{").unwrap();
+
+        let err = read_git_package_manifest("broken", temp.path(), "clone", None).unwrap_err();
+
+        assert!(
+            err.to_string().contains("parse package.json in clone"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn missing_git_subpath_still_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("packages/missing");
+
+        let err = read_git_package_manifest(
+            "missing-subpath",
+            &missing,
+            "clone",
+            Some("packages/missing"),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("stat git package root in clone at /packages/missing"),
+            "{err}"
+        );
     }
 }

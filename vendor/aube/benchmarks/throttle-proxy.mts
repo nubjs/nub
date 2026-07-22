@@ -23,7 +23,7 @@
 // tools dependency of this repo.
 //
 // Usage:
-//   node throttle-proxy.mjs --port 4875 --upstream http://127.0.0.1:4874 --rate 50mbit --latency 50ms
+//   node throttle-proxy.mts --port 4875 --upstream http://127.0.0.1:4874 --rate 50mbit --latency 50ms
 //
 // --rate units:
 //   <n>bit, <n>kbit, <n>mbit, <n>gbit   — bits/sec
@@ -36,8 +36,13 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { Transform } from 'node:stream';
 
-function parseArgs(argv) {
-	const out = {};
+interface SharedBucket {
+	take(n: number): Promise<number>;
+	shutdown(): void;
+}
+
+function parseArgs(argv: string[]): Record<string, string | undefined> {
+	const out: Record<string, string | undefined> = {};
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a.startsWith('--')) {
@@ -48,7 +53,7 @@ function parseArgs(argv) {
 }
 
 // Returns bytes/sec.
-function parseRate(raw) {
+function parseRate(raw: string | undefined): number {
 	if (!raw) throw new Error('missing --rate');
 	const m = String(raw).trim().toLowerCase().match(/^(\d+(?:\.\d+)?)\s*([a-z]*)$/);
 	if (!m) throw new Error(`cannot parse rate: ${raw}`);
@@ -79,7 +84,7 @@ function parseRate(raw) {
 }
 
 // Returns milliseconds.
-function parseLatency(raw) {
+function parseLatency(raw: string | undefined): number {
 	if (!raw) return 0;
 	const m = String(raw).trim().toLowerCase().match(/^(\d+(?:\.\d+)?)\s*(ms|s)?$/);
 	if (!m) throw new Error(`cannot parse latency: ${raw}`);
@@ -96,20 +101,20 @@ function parseLatency(raw) {
 // bench timing, which runs in hundreds of ms minimum.
 const REFILL_MS = 100;
 
-function createSharedBucket(bytesPerSec) {
+function createSharedBucket(bytesPerSec: number): SharedBucket {
 	const capacity = Math.max(1, Math.floor(bytesPerSec / (1000 / REFILL_MS)));
 	let tokens = capacity;
-	const waiters = [];
+	const waiters: Array<() => void> = [];
 	const timer = setInterval(() => {
 		tokens = capacity;
 		while (waiters.length && tokens > 0) {
-			waiters.shift()();
+			waiters.shift()!();
 		}
 	}, REFILL_MS);
 	timer.unref();
 
 	return {
-		take(n) {
+		take(n: number): Promise<number> {
 			return new Promise((resolve) => {
 				const tryTake = () => {
 					if (tokens <= 0) {
@@ -132,9 +137,9 @@ function createSharedBucket(bytesPerSec) {
 // Per-response Transform that draws from the shared bucket. Chunks
 // the incoming stream so backpressure is honored even for large
 // tarball responses.
-function createThrottleStream(bucket) {
+function createThrottleStream(bucket: SharedBucket): Transform {
 	return new Transform({
-		async transform(chunk, _enc, cb) {
+		async transform(chunk: Buffer, _enc, cb) {
 			try {
 				let offset = 0;
 				while (offset < chunk.length) {
@@ -150,7 +155,7 @@ function createThrottleStream(bucket) {
 	});
 }
 
-function main() {
+function main(): void {
 	const args = parseArgs(process.argv.slice(2));
 	const port = Number(args.port || 4875);
 	const upstreamRaw = args.upstream;

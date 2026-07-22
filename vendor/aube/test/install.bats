@@ -83,6 +83,29 @@ YAML
 	assert_failure
 }
 
+@test "cold-install lockfile is byte-identical with the write-overlap on vs off" {
+	# The cold-install lockfile write runs overlapped with the link phase
+	# on a background thread by default; AUBE_DISABLE_LOCKFILE_WRITE_OVERLAP
+	# reverts to the inline serial write. The two paths must produce the
+	# exact same bytes on disk — the overlap changes *when* the write runs,
+	# never *what* it writes. Drive a fresh resolve (no lockfile) both ways
+	# and diff the result.
+	cp "$PROJECT_ROOT/fixtures/basic/package.json" .
+
+	run aube install
+	assert_success
+	assert_file_exists aube-lock.yaml
+	cp aube-lock.yaml overlapped.yaml
+
+	rm -rf node_modules aube-lock.yaml
+	AUBE_DISABLE_LOCKFILE_WRITE_OVERLAP=1 run aube install
+	assert_success
+	assert_file_exists aube-lock.yaml
+
+	run diff overlapped.yaml aube-lock.yaml
+	assert_success
+}
+
 @test "aube install warm path works in CI frozen mode" {
 	_setup_basic_fixture
 	export CI=1

@@ -163,10 +163,21 @@ impl JailBuildPolicy {
         )
     }
 
-    fn should_jail(&self, name: &str, version: &str, source_key: Option<&str>) -> bool {
+    fn should_jail(
+        &self,
+        name: &str,
+        version: &str,
+        source_key: Option<&str>,
+        git_repository_key: Option<&str>,
+    ) -> bool {
         self.enabled
             && !matches!(
-                self.denylist.decide_package(name, version, source_key),
+                self.denylist.decide_package_with_git_repository(
+                    name,
+                    version,
+                    source_key,
+                    git_repository_key,
+                ),
                 aube_scripts::AllowDecision::Deny
             )
     }
@@ -176,10 +187,11 @@ impl JailBuildPolicy {
         name: &str,
         version: &str,
         source_key: Option<&str>,
+        git_repository_key: Option<&str>,
         package_dir: &std::path::Path,
         project_dir: &std::path::Path,
     ) -> Option<aube_scripts::ScriptJail> {
-        if !self.should_jail(name, version, source_key) {
+        if !self.should_jail(name, version, source_key, git_repository_key) {
             return None;
         }
         let mut env = Vec::new();
@@ -410,6 +422,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         registry_name: String,
         version: String,
         source_key: Option<String>,
+        git_repository_key: Option<String>,
         package_dir: std::path::PathBuf,
         /// Directory containing the dep package and its sibling
         /// symlinks — i.e. `package_dir`'s enclosing `node_modules/`.
@@ -454,7 +467,13 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             // `defaultTrust` floor as a belt-and-suspenders arm that only
             // fires on `Unspecified`, so explicit entries always win.
             let source_key = pkg.source_approval_key();
-            match policy.decide_package(pkg.registry_name(), &pkg.version, source_key.as_deref()) {
+            let git_repository_key = pkg.git_repository_approval_key();
+            match policy.decide_package_with_git_repository(
+                pkg.registry_name(),
+                &pkg.version,
+                source_key.as_deref(),
+                git_repository_key.as_deref(),
+            ) {
                 aube_scripts::AllowDecision::Allow => {}
                 aube_scripts::AllowDecision::Unspecified if floor.trusts(pkg, &graph.times) => {
                     via_floor = true;
@@ -539,6 +558,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             registry_name: pkg.registry_name().to_string(),
             version: pkg.version.clone(),
             source_key: pkg.source_approval_key(),
+            git_repository_key: pkg.git_repository_approval_key(),
             package_dir,
             dep_modules_dir,
             manifest: dep_manifest,
@@ -606,7 +626,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         let modules_dir_name = modules_dir_name.clone();
         let node_gyp_bin_dir = node_gyp_bin_dir.clone();
         let jail_policy = jail_policy.clone();
-        set.spawn(async move {
+        let task = crate::dep_chain::scope_current(async move {
             let _permit = sem.acquire().await.unwrap();
             if should_restore_side_effects_cache && let Some(cache_entry) = job.cache_entry.clone()
             {
@@ -669,6 +689,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                 &job.registry_name,
                 &job.version,
                 job.source_key.as_deref(),
+                job.git_repository_key.as_deref(),
                 &job.package_dir,
                 &project_dir,
             );
@@ -732,6 +753,9 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             }
             Ok(ran_here)
         });
+        let task = crate::runtime::scope_current(task);
+        let task = aube_scripts::scope_current(task);
+        set.spawn(task);
     }
 
     let mut ran = 0usize;
@@ -1257,7 +1281,8 @@ pub(super) fn unreviewed_dep_builds(
         // A package the `defaultTrust` floor vouches for is not
         // unreviewed — its scripts ran. Same decision seam as
         // `run_dep_lifecycle_scripts` so the warning and the runner
-        // can never disagree about a package's status.
+        // can never disagree about a package's status; the seam itself
+        // consults the source / git-repository approval keys.
         if !matches!(
             super::default_trust::decide_with_floor(policy, floor, pkg, &graph.times),
             aube_scripts::AllowDecision::Unspecified

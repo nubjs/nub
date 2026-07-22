@@ -87,7 +87,7 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
@@ -153,10 +153,25 @@ jobs:
             pkg-config \
             jq
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
+      - name: Resolve minimum supported Rust version
+        run: |
+          MSRV=$(cargo metadata --no-deps --format-version 1 |
+            jq -er '
+              [.packages[] | select(.rust_version == null) | .name] as $missing |
+              if ($missing | length) > 0 then
+                error("workspace packages missing rust-version: \($missing | join(", "))")
+              else
+                [.packages[].rust_version] | unique |
+                if length == 1 then .[0]
+                else error("workspace packages have inconsistent rust-version values")
+                end
+              end')
+
+          if [[ ! "$MSRV" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Cargo metadata returned an invalid MSRV: '$MSRV'"
+            exit 1
+          fi
+          echo "MSRV=${MSRV}" >> "$GITHUB_ENV"
 
       - name: Vendor Rust dependencies
         run: |
@@ -222,7 +237,7 @@ jobs:
           Section: utils
           Priority: optional
           Maintainer: ${MAINTAINER_NAME} <${MAINTAINER_EMAIL}>
-          Build-Depends: debhelper-compat (= 13), rustc (>= 1.93), cargo, libssl-dev, pkgconf, cmake
+          Build-Depends: debhelper-compat (= 13), rustc (>= ${MSRV}), cargo, libssl-dev, pkgconf, cmake
           Standards-Version: 4.6.2
           Homepage: https://aube.jdx.dev
           Vcs-Git: https://github.com/jdx/aube.git
@@ -315,8 +330,8 @@ jobs:
            -- ${MAINTAINER_NAME} <${MAINTAINER_EMAIL}>  $(date -R)
           EOF
 
-            # -d skips build-dep checks since we only need the source package.
-            # TODO: drop -d once the runner's default Rust toolchain >= 1.93.
+            # -d skips build-dep checks since we only need the source package;
+            # Launchpad checks the generated Build-Depends before building.
             debuild -d
 
             mkdir -p "/tmp/packages"

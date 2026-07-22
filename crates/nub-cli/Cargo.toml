@@ -53,7 +53,20 @@ aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
 # aube's `mimalloc` feature only swaps the allocator in aube's own dead main.rs
 # — nub sets its own mimalloc global allocator in nub-cli's main.rs. Dropping
 # config-tui removes ratatui + crossterm from the binary's dependency graph.
-aube = { path = "../../vendor/aube/crates/aube", default-features = false }
+#
+# `rustls` and `publish` are NOT optional for nub even though they are default
+# features upstream: aube v1.32 (jdx/aube#1068, #1069) feature-gated the TLS
+# backend and the publish/sigstore stack so embedders can drop them, so with
+# `default-features = false` they must be re-named here. `rustls` is the crate's
+# only TLS backend (upstream: "embedders depend with default-features = false,
+# features = [\"rustls\"]"); `publish` gates `commands::publish`, which
+# pm_engine/publish_family.rs calls directly. `hickory-dns` stays OFF
+# deliberately — reqwest's hickory-dns feature flips the default DNS resolver
+# for every client in the final binary, nub's included.
+aube = { path = "../../vendor/aube/crates/aube", default-features = false, features = [
+    "rustls",
+    "publish",
+] }
 # `EffectiveFilter` for the workspace-aware engine verbs (`nub publish
 # --filter/-r`); same type aube's own dispatch passes to publish/list/etc.
 aube-workspace = { path = "../../vendor/aube/crates/aube-workspace" }
@@ -63,7 +76,17 @@ aube-workspace = { path = "../../vendor/aube/crates/aube-workspace" }
 aube-settings = { path = "../../vendor/aube/crates/aube-settings" }
 # Registry URL normalization helpers for translating incumbent Bun config into
 # the engine's existing `.npmrc`-shaped registry/auth model.
-aube-registry = { path = "../../vendor/aube/crates/aube-registry" }
+#
+# `hickory-dns` is named explicitly to PRESERVE pre-v1.32 behavior, not to add
+# any: this crate used to call `.hickory_dns(cfg!(not(target_os = "android")))`
+# unconditionally, and jdx/aube#1068 moved it behind a non-default feature so
+# embedders can opt out. Leaving it off would silently drop the in-process DNS
+# cache and serialize the first cold lookup per origin. The Android carve-out
+# (hickory reads OS DNS config via JNI and aborts without a JVM on Termux)
+# still lives inside the gate.
+aube-registry = { path = "../../vendor/aube/crates/aube-registry", features = [
+    "hickory-dns",
+] }
 # Engine error-code constants + the bespoke exit-code table; consumed by the
 # presentation layer (src/pm_engine/present.rs) for the ERR_AUBE_→ERR_NUB_
 # rewrite and the cli_main-compatible exit mapping.

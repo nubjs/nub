@@ -226,7 +226,9 @@ pub(crate) struct BuiltArchive {
     pub filename: String,
     /// Forward-slash project-relative paths included in the tarball.
     pub files: Vec<String>,
-    /// Sum of unpacked file sizes.
+    /// Sum of unpacked file sizes. Only read by `aube publish` (upload
+    /// metadata); dead when the `publish` feature is disabled.
+    #[cfg_attr(not(feature = "publish"), allow(dead_code))]
     pub unpacked_size: u64,
     /// Gzipped tar bytes, ready to write to disk or POST to a registry.
     pub tarball: Vec<u8>,

@@ -331,10 +331,10 @@ Packages exempt from the minimumReleaseAge requirement.
 
 Use for trusted internal packages that need to be rolled out immediately
 without waiting for the age gate. Each entry is a bare name (`react`), a
-`*` name glob (`@myorg/*`), or a name with an exact-version union
-(`nx@21.6.5`, `webpack@4.47.0 || 5.102.1`); ranges like `^1.0.0` are not
-allowed. Once `aube audit --fix` learns to record patched versions, it
-will append them to this list automatically.
+`*` name glob (`@myorg/*`), or a name with a semver range union
+(`nx@21.6.5`, `webpack@^4.47.0 || >=5.102.1 <6`). Once
+`aube audit --fix` learns to record patched versions, it will append
+them to this list automatically.
 
 ### `minimumReleaseAgeStrict` {#setting-minimumreleaseagestrict}
 
@@ -653,8 +653,8 @@ Packages exempt from `trustPolicy` checks.
 - Workspace YAML keys: `trustPolicyExclude`
 - Managed policy: `managedWins`
 
-Patterns: `name`, `name@1.0.0`, `name@1.0.0 || 1.0.1` (exact versions only —
-no `^`/`~`/`>=`), `is-*` (name glob, no version), `@scope/name@1.0.0`.
+Patterns: `name`, `name@1.0.0`, `name@^1.0.0 || >=2 <3`, `is-*`
+(name glob, no version), `@scope/name@1.0.0`.
 Empty list disables user-provided exclusions; aube still applies its built-in
 exclusions for known registry provenance metadata churn.
 

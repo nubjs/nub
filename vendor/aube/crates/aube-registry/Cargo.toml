@@ -31,6 +31,20 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 zip = { workspace = true }
 
+[features]
+# Default is rustls only. hickory-dns is deliberately NOT default:
+# reqwest's hickory-dns cargo feature flips the default DNS resolver for
+# every reqwest client in the final binary via feature unification, so an
+# embedder (mise) that pulls aube-registry transitively — even through
+# aube-resolver / aube-store — would silently get hickory forced on. The
+# aube binary re-enables it explicitly (see the aube crate's default
+# features); embedders opt in only if they want it. rustls is the only
+# supported TLS backend (no OpenSSL / native-tls — see CLAUDE.md) and is
+# required; without it the crate fails to compile.
+default = ["rustls"]
+rustls = ["reqwest/rustls", "aube-util/rustls"]
+hickory-dns = ["reqwest/hickory-dns"]
+
 [dev-dependencies]
 tempfile = "3"
 flate2 = { workspace = true }

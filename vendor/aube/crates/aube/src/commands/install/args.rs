@@ -308,6 +308,8 @@ impl InstallArgs {
             // `advisoryCheckEveryInstall` setting flips it on for
             // every install — neither needs the caller to opt in.
             osv_transitive_check: false,
+            control: super::InstallControl::default(),
+            embedder_node_bin_dir: None,
         }
     }
 }
@@ -438,6 +440,17 @@ pub struct InstallOptions {
     /// picked a `(name, version)` pair the lockfile didn't
     /// already pin.
     pub osv_transitive_check: bool,
+    /// Invocation-scoped output, progress reporting, and cooperative
+    /// cancellation. Standalone CLI callers use the default human output;
+    /// embedders can select structured events or silence independently for
+    /// each concurrent install.
+    pub control: super::InstallControl,
+    /// Directory containing the `node` executable an embedding host wants
+    /// lifecycle scripts to run on. When set, it seeds the install's runtime
+    /// slot ([`crate::runtime::seed_embedder_node`]) so scripts spawn on that
+    /// node and find it on PATH — aube does no runtime resolution of its own.
+    /// `None` keeps aube's normal runtime switching / PATH fallback.
+    pub embedder_node_bin_dir: Option<std::path::PathBuf>,
 }
 
 impl InstallOptions {
@@ -481,6 +494,8 @@ impl InstallOptions {
             // routing (fresh-resolution detection / mirror
             // fallback) instead of an unconditional API hit.
             osv_transitive_check: false,
+            control: super::InstallControl::default(),
+            embedder_node_bin_dir: None,
         }
     }
 }

@@ -26,6 +26,21 @@ pub enum LockfileKind {
     Bun,
 }
 
+/// Options that affect lockfile parsing without changing the graph
+/// shape. Defaults preserve the historic strict parser behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOptions {
+    pub strict_store_integrity: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            strict_store_integrity: true,
+        }
+    }
+}
+
 impl LockfileKind {
     pub fn filename(self) -> &'static str {
         match self {
@@ -230,7 +245,10 @@ fn lockfile_write_is_noop(
     if !path.exists() {
         return false;
     }
-    let Ok(existing) = parse_one(path, kind, manifest) else {
+    // Strict integrity is what this guard had unconditionally before
+    // jdx/aube#995 made it an option: a lockfile we cannot strictly parse falls
+    // through to `return false`, i.e. gets rewritten rather than suppressed.
+    let Ok(existing) = parse_one(path, kind, manifest, ParseOptions::default()) else {
         return false;
     };
     // Under an enforcing embedder (nub), a differing `packageExtensionsChecksum`
@@ -477,13 +495,23 @@ pub fn parse_lockfile_with_kind(
     project_dir: &Path,
     manifest: &aube_manifest::PackageJson,
 ) -> Result<(LockfileGraph, LockfileKind), Error> {
+    parse_lockfile_with_kind_and_options(project_dir, manifest, ParseOptions::default())
+}
+
+/// Like [`parse_lockfile_with_kind`] but lets callers opt into parser
+/// behavior driven by resolved install settings.
+pub fn parse_lockfile_with_kind_and_options(
+    project_dir: &Path,
+    manifest: &aube_manifest::PackageJson,
+    options: ParseOptions,
+) -> Result<(LockfileGraph, LockfileKind), Error> {
     reject_bun_binary(project_dir)?;
     for (path, kind) in lockfile_candidates(project_dir, /*include_aube=*/ true) {
         if !path.exists() {
             continue;
         }
         let kind = refine_yarn_kind(&path, kind);
-        let graph = parse_one(&path, kind, manifest)?;
+        let graph = parse_one(&path, kind, manifest, options)?;
         return Ok((graph, kind));
     }
     Err(Error::NotFound(project_dir.to_path_buf()))
@@ -505,7 +533,7 @@ pub fn parse_for_import(
             continue;
         }
         let kind = refine_yarn_kind(&path, kind);
-        let graph = parse_one(&path, kind, manifest)?;
+        let graph = parse_one(&path, kind, manifest, ParseOptions::default())?;
         return Ok((graph, kind));
     }
     Err(Error::NotFound(project_dir.to_path_buf()))
@@ -587,6 +615,7 @@ fn parse_one(
     path: &Path,
     kind: LockfileKind,
     manifest: &aube_manifest::PackageJson,
+    options: ParseOptions,
 ) -> Result<LockfileGraph, Error> {
     let _diag = aube_util::diag::Span::new(aube_util::diag::Category::Lockfile, "parse_one")
         .with_meta_fn(|| {
@@ -607,7 +636,7 @@ fn parse_one(
         // now — same parser, same writer — so we piggyback on the pnpm
         // module. Keeping the variant distinct lets detection/import
         // treat the two differently even though the bytes are the same.
-        LockfileKind::Aube | LockfileKind::Pnpm => pnpm::parse(path),
+        LockfileKind::Aube | LockfileKind::Pnpm => pnpm::parse_with_options(path, options),
         // yarn.rs::parse peeks the file for `__metadata:` and
         // dispatches between classic (v1) and berry (v2+) internally,
         // so we can hand both kinds to the same entry point. The

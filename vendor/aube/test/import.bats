@@ -104,6 +104,16 @@ teardown() {
 	assert_success
 }
 
+@test "aube install applies yarn berry patch with ~/ project-root path" {
+	cp -R "$PROJECT_ROOT/fixtures/import-yarn-patch-tilde/." .
+
+	run aube install --ignore-scripts
+	assert_success
+
+	run node -e 'const isNumber = require("is-number"); if (isNumber(41) || !isNumber(42)) process.exit(1)'
+	assert_success
+}
+
 @test "aube install supports yarn berry portal and exec protocols" {
 	cp -R "$PROJECT_ROOT/fixtures/import-yarn-portal-exec/." .
 

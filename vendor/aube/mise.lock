@@ -72,43 +72,43 @@ checksum = "sha256:89706aa5215c164d8d091597a470fee72308ac87e8553af395ea77db844a8
 url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-x86_64-pc-windows-msvc.zip"
 
 [[tools.communique]]
-version = "1.1.2"
+version = "1.2.3"
 backend = "github:jdx/communique"
 
 [tools.communique."platforms.linux-arm64"]
-checksum = "sha256:7bb0843207fc3d7b5df2a5c0198bb10539cf13a6b247b4adfbf6b302a68f03de"
-url = "https://github.com/jdx/communique/releases/download/v1.1.2/communique-aarch64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/405964161"
+checksum = "sha256:083e1dd1a0c3894118af9b80d9feea11ed7470f7161964719d8073905fc9e4aa"
+url = "https://github.com/jdx/communique/releases/download/v1.2.3/communique-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/477186422"
 provenance = "github-attestations"
 
 [tools.communique."platforms.linux-arm64-musl"]
-checksum = "sha256:b663407be77a370c209df40307b82e436f56a6bc23d4e423510d62ac6e1fedf4"
-url = "https://github.com/jdx/communique/releases/download/v1.1.2/communique-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/405964743"
+checksum = "sha256:bab19453334ca0df1de46e7b33dda2f26abc7bae132aaf5d2ba629462c9c468f"
+url = "https://github.com/jdx/communique/releases/download/v1.2.3/communique-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/477186389"
 provenance = "github-attestations"
 
 [tools.communique."platforms.linux-x64"]
-checksum = "sha256:5e74ead7037f42940c7dba4f6aa4ed968920cbb55a047aa0d291b0c675c65676"
-url = "https://github.com/jdx/communique/releases/download/v1.1.2/communique-x86_64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/405963914"
+checksum = "sha256:180f970282986f27f7fa9ee216e4971e8dec3624869d4222f22f3e2535fccc58"
+url = "https://github.com/jdx/communique/releases/download/v1.2.3/communique-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/477186105"
 provenance = "github-attestations"
 
 [tools.communique."platforms.linux-x64-musl"]
-checksum = "sha256:01a6a8b49e635a5a209fdaf6c7b2e976374debc2db1c846c033f567fdba0d86c"
-url = "https://github.com/jdx/communique/releases/download/v1.1.2/communique-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/405964691"
+checksum = "sha256:23010d19c9dc0bb09fefc43916b03b7b16f0d07761980bb54166170ce85d9112"
+url = "https://github.com/jdx/communique/releases/download/v1.2.3/communique-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/477186277"
 provenance = "github-attestations"
 
 [tools.communique."platforms.macos-arm64"]
-checksum = "sha256:459993e31a6c4ccbd09882f5679a2bc1ea5d9068701ecefc411a00fb69ce82e6"
-url = "https://github.com/jdx/communique/releases/download/v1.1.2/communique-aarch64-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/405964098"
+checksum = "sha256:668683480d8b8d62de9616c3a2258f802daf6ce3440d2fa6cf1f7d72eecade89"
+url = "https://github.com/jdx/communique/releases/download/v1.2.3/communique-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/477186196"
 provenance = "github-attestations"
 
 [tools.communique."platforms.windows-x64"]
-checksum = "sha256:3cc0e880ac2168aed3163223627bbd1eee62e07a9901cb85cb507c6c8927bc93"
-url = "https://github.com/jdx/communique/releases/download/v1.1.2/communique-x86_64-pc-windows-msvc.zip"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/405964430"
+checksum = "sha256:63f2370f9c6ff97b31f9be266d8860dd65dce0aafb269c492de7cdbb9d29d782"
+url = "https://github.com/jdx/communique/releases/download/v1.2.3/communique-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/477186666"
 provenance = "github-attestations"
 
 [[tools."github:bnjbvr/cargo-machete"]]
@@ -298,6 +298,45 @@ url = "https://github.com/apple/pkl/releases/download/0.31.1/pkl-macos-amd64"
 [tools.pkl."platforms.windows-x64"]
 checksum = "sha256:a8834481667325b44c539dbb758d7365a16389070f343c04b639bbe525ede013"
 url = "https://github.com/apple/pkl/releases/download/0.31.1/pkl-windows-amd64.exe"
+
+[[tools.rush]]
+version = "0.9.0"
+backend = "aqua:shenwei356/rush"
+
+[tools.rush."platforms.linux-arm64"]
+checksum = "sha256:e8cf6a45eab9e67b952650ea90eb87f457ac1a95a2d7e338eea88a4da488da7b"
+url = "https://github.com/shenwei356/rush/releases/download/v0.9.0/rush_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/shenwei356/rush/releases/assets/391416978"
+
+[tools.rush."platforms.linux-arm64-musl"]
+checksum = "sha256:e8cf6a45eab9e67b952650ea90eb87f457ac1a95a2d7e338eea88a4da488da7b"
+url = "https://github.com/shenwei356/rush/releases/download/v0.9.0/rush_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/shenwei356/rush/releases/assets/391416978"
+
+[tools.rush."platforms.linux-x64"]
+checksum = "sha256:436d935bcd0dc263d20674201cd3e9c85059d331d8641f970e1e8958ad0af4fc"
+url = "https://github.com/shenwei356/rush/releases/download/v0.9.0/rush_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/shenwei356/rush/releases/assets/391416899"
+
+[tools.rush."platforms.linux-x64-musl"]
+checksum = "sha256:436d935bcd0dc263d20674201cd3e9c85059d331d8641f970e1e8958ad0af4fc"
+url = "https://github.com/shenwei356/rush/releases/download/v0.9.0/rush_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/shenwei356/rush/releases/assets/391416899"
+
+[tools.rush."platforms.macos-arm64"]
+checksum = "sha256:f5cd118ee7a04c70849c891e172ed1d3fb85fc5c14a7dacddb1d5c210b0f0613"
+url = "https://github.com/shenwei356/rush/releases/download/v0.9.0/rush_darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/shenwei356/rush/releases/assets/391416669"
+
+[tools.rush."platforms.macos-x64"]
+checksum = "sha256:85c43308b935bef7f09922c98dc9f1d304843457c8c0daa06a1a22ae16393f9e"
+url = "https://github.com/shenwei356/rush/releases/download/v0.9.0/rush_darwin_amd64.tar.gz"
+url_api = "https://api.github.com/repos/shenwei356/rush/releases/assets/391416568"
+
+[tools.rush."platforms.windows-x64"]
+checksum = "sha256:4ed40a085fa19ccdb02af418d639f9ef3dba11289454695aef7609a6431ef07e"
+url = "https://github.com/shenwei356/rush/releases/download/v0.9.0/rush_windows_amd64.exe.tar.gz"
+url_api = "https://api.github.com/repos/shenwei356/rush/releases/assets/391417091"
 
 [[tools.shellcheck]]
 version = "0.11.0"

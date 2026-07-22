@@ -1,6 +1,6 @@
 name aube
 bin aube
-version "1.25.1"
+version "1.32.0"
 about "A fast Node.js package manager"
 usage "Usage: aube [OPTIONS] [COMMAND]"
 flag "-C --dir --cd --prefix" help="Change to directory before running (like `make -C` or `mise --cd`)" global=#true {
@@ -77,6 +77,66 @@ flag "-y --yes" help="Automatically answer yes to prompts" hide=#true global=#tr
 cmd __node-gyp-bootstrap hide=#true help="Bootstrap aube's cached node-gyp and print the executable path" {
     arg <PROJECT_DIR>
 }
+cmd access subcommand_required=#true help="Manage package access and visibility on the registry" {
+    flag --json help="Emit registry responses as JSON when the subcommand has a result"
+    flag --otp help="One-time password from a 2FA authenticator; sent as `npm-otp`" {
+        arg <OTP>
+    }
+    flag --fetch-retries help="Number of retry attempts for failed registry fetches" {
+        long_help "Number of retry attempts for failed registry fetches.\n\nOverrides `fetchRetries` / `fetch-retries` from `.npmrc` / `aube-workspace.yaml` when set. Pair with `--fetch-timeout` to fail fast in scripted test runs."
+        arg <N>
+    }
+    flag --fetch-retry-factor help="Exponential backoff factor between retry attempts" {
+        long_help "Exponential backoff factor between retry attempts.\n\nOverrides `fetchRetryFactor` / `fetch-retry-factor` from `.npmrc` / `aube-workspace.yaml` when set. Integer-only — the underlying `FetchPolicy.retry_factor` is `u32`. Fractional values like `1.5` are rejected by clap."
+        arg <N>
+    }
+    flag --fetch-retry-maxtimeout help="Upper bound (ms) on the computed retry backoff" {
+        long_help "Upper bound (ms) on the computed retry backoff.\n\nOverrides `fetchRetryMaxtimeout` / `fetch-retry-maxtimeout` from `.npmrc` / `aube-workspace.yaml` when set."
+        arg <MS>
+    }
+    flag --fetch-retry-mintimeout help="Lower bound (ms) on the computed retry backoff" {
+        long_help "Lower bound (ms) on the computed retry backoff.\n\nOverrides `fetchRetryMintimeout` / `fetch-retry-mintimeout` from `.npmrc` / `aube-workspace.yaml` when set."
+        arg <MS>
+    }
+    flag --fetch-timeout help="Per-request HTTP timeout in milliseconds" {
+        long_help "Per-request HTTP timeout in milliseconds.\n\nOverrides `fetchTimeout` / `fetch-timeout` from `.npmrc` / `aube-workspace.yaml` when set. Applied via `reqwest`'s `.timeout()` so it covers headers + body together."
+        arg <MS>
+    }
+    flag --registry help="Override the default registry URL for this invocation" {
+        long_help "Override the default registry URL for this invocation.\n\nUse this npm registry URL for package metadata, tarballs, audit requests, dist-tags, and registry writes."
+        arg <URL>
+    }
+    cmd get subcommand_required=#true help="Get package visibility status" {
+        cmd status help="Get a package's public or restricted status" {
+            arg <PACKAGE> help="Package name"
+        }
+    }
+    cmd grant help="Grant a team read-only or read-write access to a package" {
+        arg <PERMISSIONS> help="`read-only` or `read-write`"
+        arg <TEAM> help="Team in `@scope:team` form"
+        arg <PACKAGE> help="Package name"
+    }
+    cmd list subcommand_required=#true help="List packages visible to a user, organization, or team" {
+        cmd collaborators help="List collaborators for a package, optionally filtering to one user" {
+            arg <PACKAGE> help="Package name"
+            arg "[USER]" help="Optional user name" required=#false
+        }
+        cmd packages help="List packages visible to the current user or an optional entity" {
+            arg "[ENTITY]" help="User, `@organization`, or `@scope:team`" required=#false
+        }
+    }
+    cmd ls help="Alias for `list packages`" {
+        arg "[ENTITIES]…" help="User, `@organization`, or `@scope:team`. Also accepts pnpm's `packages [ENTITY]` compatibility form. Accepted forms are `aube access ls [ENTITY]` and `aube access ls packages [ENTITY]`" required=#false var=#true
+    }
+    cmd revoke help="Revoke a team's access to a package" {
+        arg <TEAM> help="Team in `@scope:team` form"
+        arg <PACKAGE> help="Package name"
+    }
+    cmd set help="Set package visibility or a publish MFA requirement" {
+        arg <SETTING> help="`status=public|private|restricted` or `mfa=none|publish|automation`"
+        arg <PACKAGE> help="Package name"
+    }
+}
 cmd activate help="Emit shell activation code for runtime tool shims" {
     arg <SHELL> help="Shell to emit activation code for" {
         choices bash fish zsh
@@ -97,8 +157,11 @@ cmd add help="Add a dependency" {
     flag --allow-low-downloads help="Bypass the [`lowDownloadThreshold`] confirm prompt / refusal for this invocation" {
         long_help "Bypass the [`lowDownloadThreshold`] confirm prompt / refusal for this invocation.\n\n`aube add` looks up each candidate's weekly download count and prompts (interactive) or fails (CI) when the count is below [`lowDownloadThreshold`]. The flag is intended for the cases where you've already verified the package out-of-band — adding a brand-new niche tool, a fresh fork, an internal scratch package — and don't want the prompt to interrupt scripted workflows. Does not affect the OSV malicious-package check, which remains a hard block."
     }
+    flag --dangerously-allow-all-builds help="Allow every dependency's lifecycle scripts to run" {
+        long_help "Allow every dependency's lifecycle scripts to run.\n\nBypasses the `allowBuilds` allowlist for this invocation. Do not use in CI. Mirrors pnpm's `--dangerously-allow-all-builds`."
+    }
     flag --deny-build help="Mark a dependency's lifecycle scripts as reviewed and denied" var=#true {
-        long_help "Mark a dependency's lifecycle scripts as reviewed and denied.\n\nWrites `allowBuilds: { <pkg>: false }` into the workspace yaml (or `package.json#aube.allowBuilds`) before the install runs, so the named package's lifecycle scripts stay skipped without tripping `strictDepBuilds=true`. Repeatable — pass the flag once per package.\n\nConflicts with `--no-save`, which only snapshots `package.json` and the lockfile and would leave an orphaned denial in the workspace yaml on restore. Also conflicts with `--allow-build` for the same package name."
+        long_help "Mark a dependency's lifecycle scripts as reviewed and denied.\n\nWrites `allowBuilds: { <pkg>: false }` into the workspace yaml (or `package.json#aube.allowBuilds`) before the install runs, so the named package's lifecycle scripts stay skipped without tripping `strictDepBuilds=true`. Repeatable — pass the flag once per package.\n\nConflicts with `--no-save`, which only snapshots `package.json` and the lockfile and would leave an orphaned denial in the workspace yaml on restore. Also conflicts with `--allow-build` for the same package name and with `--dangerously-allow-all-builds`."
         arg <PKG>
     }
     flag --ignore-scripts help="Skip lifecycle scripts (no-op; aube already skips by default)" hide=#true
@@ -223,8 +286,40 @@ cmd audit help="Check installed packages against the registry advisory DB" {
     }
 }
 cmd bin help="Print the path to `node_modules/.bin`" {
-    after_long_help "Examples:\n\n  $ aube bin\n  /home/user/project/node_modules/.bin\n\n  $ aube bin -g\n  /home/user/.local/share/aube/global/node_modules/.bin\n\n  # Extend PATH with the project bin directory\n  $ export PATH=\"$(aube bin):$PATH\"\n"
+    after_long_help "Examples:\n\n  $ aube bin\n  /home/user/project/node_modules/.bin\n\n  $ aube bin -g\n  /home/user/.local/share/aube/global/node_modules/.bin\n\n  # From a workspace package, -w prints the workspace-root bin directory\n  $ cd packages/app\n  $ aube bin\n  /home/user/project/packages/app/node_modules/.bin\n  $ aube bin -w\n  /home/user/project/node_modules/.bin\n\n  # Extend PATH with the project bin directory\n  $ export PATH=\"$(aube bin):$PATH\"\n"
     flag "-g --global" help="Print the global bin directory instead of the project's"
+    flag "-w --workspace-root --workspace" help="Print the workspace-root bin directory instead of the current package's" {
+        long_help "Print the workspace-root bin directory instead of the current package's.\n\nMirrors `pnpm bin -w`: from a sub-package, resolves the enclosing workspace root and prints its `node_modules/.bin`. No-op when no workspace root exists above cwd (single-project install), so the flag is safe to leave in shell aliases."
+    }
+}
+cmd bugs help="Open package bug tracker URLs" {
+    alias issues
+    after_long_help "Examples:\n\n  $ aube bugs\n\n  $ aube bugs react\n\n  $ aube issues react react-dom\n"
+    flag --fetch-retries help="Number of retry attempts for failed registry fetches" {
+        long_help "Number of retry attempts for failed registry fetches.\n\nOverrides `fetchRetries` / `fetch-retries` from `.npmrc` / `aube-workspace.yaml` when set. Pair with `--fetch-timeout` to fail fast in scripted test runs."
+        arg <N>
+    }
+    flag --fetch-retry-factor help="Exponential backoff factor between retry attempts" {
+        long_help "Exponential backoff factor between retry attempts.\n\nOverrides `fetchRetryFactor` / `fetch-retry-factor` from `.npmrc` / `aube-workspace.yaml` when set. Integer-only — the underlying `FetchPolicy.retry_factor` is `u32`. Fractional values like `1.5` are rejected by clap."
+        arg <N>
+    }
+    flag --fetch-retry-maxtimeout help="Upper bound (ms) on the computed retry backoff" {
+        long_help "Upper bound (ms) on the computed retry backoff.\n\nOverrides `fetchRetryMaxtimeout` / `fetch-retry-maxtimeout` from `.npmrc` / `aube-workspace.yaml` when set."
+        arg <MS>
+    }
+    flag --fetch-retry-mintimeout help="Lower bound (ms) on the computed retry backoff" {
+        long_help "Lower bound (ms) on the computed retry backoff.\n\nOverrides `fetchRetryMintimeout` / `fetch-retry-mintimeout` from `.npmrc` / `aube-workspace.yaml` when set."
+        arg <MS>
+    }
+    flag --fetch-timeout help="Per-request HTTP timeout in milliseconds" {
+        long_help "Per-request HTTP timeout in milliseconds.\n\nOverrides `fetchTimeout` / `fetch-timeout` from `.npmrc` / `aube-workspace.yaml` when set. Applied via `reqwest`'s `.timeout()` so it covers headers + body together."
+        arg <MS>
+    }
+    flag --registry help="Override the default registry URL for this invocation" {
+        long_help "Override the default registry URL for this invocation.\n\nUse this npm registry URL for package metadata, tarballs, audit requests, dist-tags, and registry writes."
+        arg <URL>
+    }
+    arg "[PACKAGES]…" help="Packages to open bug trackers for. Defaults to the current project" required=#false var=#true
 }
 cmd cache subcommand_required=#true help="Inspect and manage the packument metadata cache" {
     cmd delete help="Delete metadata cache for the specified package(s)" {
@@ -1350,6 +1445,10 @@ cmd pkg hide=#true help="Manage package.json entries (not implemented — use `n
     }
     arg "[ARGS]…" help="Unused; captured so `aube <cmd> foo bar` parses instead of erroring on unexpected args before the fallback message prints" required=#false double_dash=automatic var=#true hide=#true
 }
+cmd prefix help="Print the current package prefix directory" {
+    after_long_help "Examples:\n\n  $ aube prefix\n  /home/user/project\n\n  $ aube prefix -g\n  /home/user/.local/share/pnpm\n"
+    flag "-g --global" help="Print the global prefix directory instead of the project's root"
+}
 cmd prune help="Remove extraneous packages from project `node_modules`" {
     long_help "Remove extraneous packages from project `node_modules`.\n\nReads the lockfile, computes the packages still reachable from each importer, and removes stale top-level links, stale virtual-store entries, and dangling .bin links. Does not modify package.json or the lockfile."
     after_long_help "Global store cleanup: use `aube store prune` to clean unreferenced files from the global\ncontent-addressable store."
@@ -1684,7 +1783,7 @@ cmd set-script hide=#true help="Set a `package.json` script (not implemented —
     }
     arg "[ARGS]…" help="Unused; captured so `aube <cmd> foo bar` parses instead of erroring on unexpected args before the fallback message prints" required=#false double_dash=automatic var=#true hide=#true
 }
-cmd sponsors help="Show the companies sponsoring aube and the jdx.dev project family"
+cmd sponsors help="Show the companies sponsoring aube and the jdx.dev open source tools"
 cmd stage help="Stage packages for publishing (not implemented — use `npm stage`)" {
     flag --fetch-retries help="Number of retry attempts for failed registry fetches" {
         long_help "Number of retry attempts for failed registry fetches.\n\nOverrides `fetchRetries` / `fetch-retries` from `.npmrc` / `aube-workspace.yaml` when set. Pair with `--fetch-timeout` to fail fast in scripted test runs."

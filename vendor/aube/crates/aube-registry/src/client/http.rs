@@ -154,7 +154,13 @@ fn build_http_client_inner(
             std::env::consts::ARCH
         )
     });
+    // Pin rustls explicitly instead of relying on reqwest's default backend
+    // selection: if an embedder's dependency graph also turns on reqwest's
+    // native-tls feature, reqwest's default silently becomes native-tls,
+    // which would mismatch the rustls `Identity` built below and the
+    // session-ticket wiring in the aube binary.
     let mut builder = aube_util::http::with_webpki_root_fallback(reqwest::Client::builder())
+        .use_rustls_tls()
         .user_agent(user_agent)
         // Wire-level decompression for packument JSON. Tarball
         // requests explicitly send `Accept-Encoding: identity`
@@ -188,16 +194,22 @@ fn build_http_client_inner(
     } else {
         builder = builder.http1_only();
     }
+    // In-process DNS caching via hickory-dns. The system resolver
+    // does not cache and uses a thread pool for `getaddrinfo`,
+    // which serializes the first cold lookup per origin. hickory
+    // resolves async + caches for the process lifetime. Feature-gated
+    // so embedders that keep their host binary on getaddrinfo (reqwest's
+    // hickory-dns cargo feature flips the default for every client in
+    // the binary) can opt out; default features keep it on for aube.
+    // Not on Android even when the feature is on: hickory reads the OS
+    // DNS config through JNI and aborts without a JVM (Termux/CLI
+    // builds), so the getaddrinfo resolver stays in place there.
+    #[cfg(feature = "hickory-dns")]
+    {
+        builder = builder.hickory_dns(cfg!(not(target_os = "android")));
+    }
     builder = builder
         .tcp_keepalive(std::time::Duration::from_secs(60))
-        // In-process DNS caching via hickory-dns. The system resolver
-        // does not cache and uses a thread pool for `getaddrinfo`,
-        // which serializes the first cold lookup per origin. hickory
-        // resolves async + caches for the process lifetime. Not on
-        // Android: hickory reads the OS DNS config through JNI and
-        // aborts without a JVM (Termux/CLI builds), so the getaddrinfo
-        // resolver stays in place there.
-        .hickory_dns(cfg!(not(target_os = "android")))
         // `strict-ssl=false` disables cert validation entirely. This
         // is a security hole on purpose: corporate registries should
         // prefer per-registry `ca` / `cafile` so validation stays on.
@@ -294,13 +306,7 @@ fn build_http_client_inner(
             "per-registry",
         );
         if let (Some(cert), Some(key)) = (&registry_config.tls.cert, &registry_config.tls.key) {
-            let mut pem = Vec::with_capacity(cert.len() + key.len() + 1);
-            pem.extend_from_slice(cert.as_bytes());
-            if !cert.ends_with('\n') {
-                pem.push(b'\n');
-            }
-            pem.extend_from_slice(key.as_bytes());
-            match reqwest::Identity::from_pem(&pem) {
+            match client_identity(cert, key) {
                 Ok(identity) => builder = builder.identity(identity),
                 Err(e) => tracing::warn!(
                     code = aube_codes::warnings::WARN_AUBE_INVALID_CLIENT_CERT,
@@ -311,6 +317,20 @@ fn build_http_client_inner(
     }
 
     builder.build().expect("failed to build HTTP client")
+}
+
+/// Build a client-cert identity from `.npmrc` `cert` / `key` values.
+/// rustls' `Identity::from_pem` takes cert and key concatenated in a single
+/// PEM buffer and accepts both PKCS#8 (`BEGIN PRIVATE KEY`) and PKCS#1
+/// (`BEGIN RSA PRIVATE KEY`) keys.
+fn client_identity(cert: &str, key: &str) -> reqwest::Result<reqwest::Identity> {
+    let mut pem = Vec::with_capacity(cert.len() + key.len() + 1);
+    pem.extend_from_slice(cert.as_bytes());
+    if !cert.ends_with('\n') {
+        pem.push(b'\n');
+    }
+    pem.extend_from_slice(key.as_bytes());
+    reqwest::Identity::from_pem(&pem)
 }
 
 /// BATS-fixture escape hatch: ask the registry for the unabbreviated

@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.32.0](https://github.com/jdx/aube/compare/v1.31.0...v1.32.0) - 2026-07-22
+
+### Added
+
+- *(embed)* let hosts supply the node runtime for lifecycle scripts ([#1079](https://github.com/jdx/aube/pull/1079))
+
+### Other
+
+- refresh benchmarks for v1.31.0 ([#1072](https://github.com/jdx/aube/pull/1072))
+
+## [1.31.0](https://github.com/jdx/aube/compare/v1.30.0...v1.31.0) - 2026-07-21
+
+### Added
+
+- *(aube)* make the crate embeddable without the publish/DNS stack ([#1069](https://github.com/jdx/aube/pull/1069))
+
+## [1.30.0](https://github.com/jdx/aube/compare/v1.29.1...v1.30.0) - 2026-07-20
+
+### Added
+
+- make library crates embeddable at MSRV 1.91 with backend-agnostic features ([#1068](https://github.com/jdx/aube/pull/1068))
+- *(exec)* image-replace the tool on standalone terminal runs ([#1067](https://github.com/jdx/aube/pull/1067))
+
+### Fixed
+
+- *(dlx)* tear down spawned tool when aube is terminated ([#1065](https://github.com/jdx/aube/pull/1065))
+
+### Other
+
+- satisfy nightly clippy (question_mark, fetch_update) ([#1066](https://github.com/jdx/aube/pull/1066))
+- refresh benchmarks for v1.29.1 ([#1060](https://github.com/jdx/aube/pull/1060))
+
+## [1.29.1](https://github.com/jdx/aube/compare/v1.29.0...v1.29.1) - 2026-07-16
+
+### Fixed
+
+- *(add)* honor minimumReleaseAge when pinning manifest versions ([#1056](https://github.com/jdx/aube/pull/1056))
+
+## [1.29.0](https://github.com/jdx/aube/compare/v1.28.0...v1.29.0) - 2026-07-16
+
+### Other
+
+- refresh benchmarks for v1.28.0 ([#1050](https://github.com/jdx/aube/pull/1050))
+
+## [1.28.0](https://github.com/jdx/aube/compare/v1.27.0...v1.28.0) - 2026-07-16
+
+### Added
+
+- *(packaging)* add production Node-API embedding ([#1025](https://github.com/jdx/aube/pull/1025))
+- add stable Rust embedding API ([#1042](https://github.com/jdx/aube/pull/1042))
+- *(install)* add embedder control hooks ([#1036](https://github.com/jdx/aube/pull/1036))
+
+### Fixed
+
+- *(install)* refresh changed file directory dependencies ([#1034](https://github.com/jdx/aube/pull/1034))
+
+### Other
+
+- refresh benchmarks for v1.27.0 ([#1041](https://github.com/jdx/aube/pull/1041))
+
+## [1.27.0](https://github.com/jdx/aube/compare/v1.26.0...v1.27.0) - 2026-07-13
+
+### Added
+
+- *(access)* manage registry package access ([#1012](https://github.com/jdx/aube/pull/1012))
+- *(scripts)* allow git repository build approvals ([#1010](https://github.com/jdx/aube/pull/1010))
+
+### Fixed
+
+- *(publish)* redact inline registry credentials ([#1009](https://github.com/jdx/aube/pull/1009))
+- *(install)* ignore stale pnpm patch entries ([#1022](https://github.com/jdx/aube/pull/1022))
+- *(add)* accept dangerously-allow-all-builds ([#1016](https://github.com/jdx/aube/pull/1016))
+
+### Other
+
+- *(install)* isolate runtime and script state ([#1027](https://github.com/jdx/aube/pull/1027))
+- *(install)* make explicit installs reentrant ([#1026](https://github.com/jdx/aube/pull/1026))
+- refresh benchmarks for v1.26.0 ([#1002](https://github.com/jdx/aube/pull/1002))
+
+## [1.26.0](https://github.com/jdx/aube/compare/v1.25.2...v1.26.0) - 2026-07-06
+
+### Added
+
+- *(scripts)* pass resolved proxy to lifecycle scripts ([#996](https://github.com/jdx/aube/pull/996))
+- *(bin)* accept pnpm's -w/--workspace-root flag ([#993](https://github.com/jdx/aube/pull/993))
+- add bugs command ([#992](https://github.com/jdx/aube/pull/992))
+- add prefix command ([#991](https://github.com/jdx/aube/pull/991))
+
+### Fixed
+
+- *(lockfile)* gate tarball integrity parse errors on strict mode ([#995](https://github.com/jdx/aube/pull/995))
+- *(resolver)* reject malformed jsr package names ([#990](https://github.com/jdx/aube/pull/990))
+
+### Other
+
+- Update sponsor references for jdx.dev ([#978](https://github.com/jdx/aube/pull/978))
+- refresh benchmarks for v1.25.2 ([#975](https://github.com/jdx/aube/pull/975))
+
+## [1.25.2](https://github.com/jdx/aube/compare/v1.25.1...v1.25.2) - 2026-07-01
+
+### Other
+
+- refresh benchmarks for v1.25.1 ([#962](https://github.com/jdx/aube/pull/962))
+- *(install)* overlap cold-install lockfile write with the link tail ([#961](https://github.com/jdx/aube/pull/961))
+
 ## [1.25.1](https://github.com/jdx/aube/compare/v1.25.0...v1.25.1) - 2026-06-25
 
 ### Other

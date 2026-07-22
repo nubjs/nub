@@ -249,8 +249,8 @@ fn cutoff_iso8601(minutes_ago: u64) -> Option<String> {
 /// Parsed `trustPolicyExclude` rules. Mirrors pnpm's
 /// `createPackageVersionPolicy` (config/version-policy/src/index.ts).
 /// Each rule is `<name>` (matches all versions, supports `*` glob in
-/// the name) or `<name>@<exact-version>[ || <exact-version>]…` (no
-/// ranges, no name globs combined with versions).
+/// the name) or `<name>@<semver-range>[ || <semver-range>]…` (no name
+/// globs combined with versions).
 pub const DEFAULT_TRUST_POLICY_EXCLUDES: &[&str] = &[
     "chokidar",
     "eslint-config-prettier",
@@ -260,11 +260,12 @@ pub const DEFAULT_TRUST_POLICY_EXCLUDES: &[&str] = &[
     "reselect",
     "semver",
     "ua-parser-js",
+    "undici",
     "undici-types",
     "vite",
 ];
 
-/// A parsed package-version policy: a set of `<name>[@<exact-version>…]`
+/// A parsed package-version policy: a set of `<name>[@<semver-range>…]`
 /// rules with `*` name globs. pnpm backs both `trustPolicyExclude` and
 /// `minimumReleaseAgeExclude` with the same `createPackageVersionPolicy`
 /// engine, so we do too — `TrustExcludeRules` is the neutral
@@ -297,8 +298,8 @@ impl Default for TrustExcludeRules {
 struct TrustExcludeRule {
     name_matcher: NameMatcher,
     /// `None` → rule matches every version of any name match.
-    /// `Some(versions)` → rule matches only those exact versions.
-    exact_versions: Option<Vec<node_semver::Version>>,
+    /// `Some(ranges)` → rule matches any version satisfying one range.
+    version_ranges: Option<Vec<node_semver::Range>>,
 }
 
 #[derive(Debug, Clone)]
@@ -320,9 +321,7 @@ struct GlobMatcher {
 // the specific setting the bad entry came from.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum TrustExcludeParseError {
-    #[error(
-        "invalid exclude pattern `{pattern}`: only exact versions are allowed in version unions, ranges (^/~/>=) are not supported"
-    )]
+    #[error("invalid exclude pattern `{pattern}`: version selectors must be valid semver ranges")]
     #[diagnostic(code(ERR_AUBE_TRUST_EXCLUDE_INVALID_VERSION_UNION))]
     InvalidVersionUnion { pattern: String },
     #[error(
@@ -355,7 +354,7 @@ impl TrustExcludeRules {
                 .iter()
                 .map(|name| TrustExcludeRule {
                     name_matcher: NameMatcher::compile(name),
-                    exact_versions: None,
+                    version_ranges: None,
                 })
                 .collect(),
         }
@@ -414,10 +413,10 @@ impl TrustExcludeRules {
             if !rule.name_matcher.matches(name) {
                 continue;
             }
-            match &rule.exact_versions {
+            match &rule.version_ranges {
                 None => return true,
-                Some(versions) => {
-                    if versions.iter().any(|v| v == version) {
+                Some(ranges) => {
+                    if ranges.iter().any(|r| version.satisfies(r)) {
                         return true;
                     }
                 }
@@ -433,18 +432,19 @@ impl TrustExcludeRules {
     pub(crate) fn matches_name_only(&self, name: &str) -> bool {
         self.rules
             .iter()
-            .any(|r| r.exact_versions.is_none() && r.name_matcher.matches(name))
+            .any(|r| r.version_ranges.is_none() && r.name_matcher.matches(name))
     }
 
     /// True when `name` is matched by at least one *version-pinned* rule
-    /// (a rule carrying an exact-version union). Callers use this to know
-    /// the cutoff must be evaluated per-candidate version rather than
-    /// skipped wholesale — a name-only match is handled by
+    /// (a rule carrying a version-range union — jdx/aube#989 generalized the
+    /// former exact-version list to ranges; the predicate is unchanged).
+    /// Callers use this to know the cutoff must be evaluated per-candidate
+    /// version rather than skipped wholesale — a name-only match is handled by
     /// [`Self::matches_name_only`] instead.
     pub(crate) fn has_versioned_match(&self, name: &str) -> bool {
         self.rules
             .iter()
-            .any(|r| r.exact_versions.is_some() && r.name_matcher.matches(name))
+            .any(|r| r.version_ranges.is_some() && r.name_matcher.matches(name))
     }
 }
 
@@ -461,7 +461,7 @@ fn parse_one(pattern: &str) -> Result<TrustExcludeRule, TrustExcludeParseError> 
         None => (pattern, None),
     };
 
-    let exact_versions = match versions_part {
+    let version_ranges = match versions_part {
         None => None,
         Some(versions_str) => {
             if name_part.contains('*') {
@@ -477,12 +477,12 @@ fn parse_one(pattern: &str) -> Result<TrustExcludeRule, TrustExcludeParseError> 
                         pattern: pattern.to_string(),
                     });
                 }
-                let v = node_semver::Version::parse(trimmed).map_err(|_| {
+                let r = node_semver::Range::parse(trimmed).map_err(|_| {
                     TrustExcludeParseError::InvalidVersionUnion {
                         pattern: pattern.to_string(),
                     }
                 })?;
-                parsed.push(v);
+                parsed.push(r);
             }
             Some(parsed)
         }
@@ -490,7 +490,7 @@ fn parse_one(pattern: &str) -> Result<TrustExcludeRule, TrustExcludeParseError> 
 
     Ok(TrustExcludeRule {
         name_matcher: NameMatcher::compile(name_part),
-        exact_versions,
+        version_ranges,
     })
 }
 
@@ -1280,14 +1280,22 @@ mod tests {
     }
 
     #[test]
-    fn exclude_rejects_range_operators() {
-        for bad in ["foo@^1.0.0", "foo@~1.0.0", "foo@>=1.0.0"] {
-            let err = TrustExcludeRules::parse([bad]).expect_err(bad);
-            assert!(matches!(
-                err,
-                TrustExcludeParseError::InvalidVersionUnion { .. }
-            ));
-        }
+    fn exclude_parses_version_ranges() {
+        let r = TrustExcludeRules::parse(["foo@^1.0.0 || ~2.1.0 || >=3.0.0 <4.0.0"]).unwrap();
+        assert!(r.matches("foo", &node_semver::Version::parse("1.2.3").unwrap()));
+        assert!(r.matches("foo", &node_semver::Version::parse("2.1.9").unwrap()));
+        assert!(r.matches("foo", &node_semver::Version::parse("3.5.0").unwrap()));
+        assert!(!r.matches("foo", &node_semver::Version::parse("2.2.0").unwrap()));
+        assert!(!r.matches("foo", &node_semver::Version::parse("4.0.0").unwrap()));
+    }
+
+    #[test]
+    fn exclude_rejects_invalid_version_ranges() {
+        let err = TrustExcludeRules::parse(["foo@definitely-not-a-range"]).expect_err("bad range");
+        assert!(matches!(
+            err,
+            TrustExcludeParseError::InvalidVersionUnion { .. }
+        ));
     }
 
     #[test]
@@ -1303,7 +1311,7 @@ mod tests {
     fn parse_lossy_keeps_valid_drops_invalid() {
         let (rules, errors) = TrustExcludeRules::parse_lossy([
             "good",
-            "bad@^1.0.0",
+            "bad@definitely-not-a-range",
             "@scope/also-good@1.0.0",
             "is-*@nope",
         ]);

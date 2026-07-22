@@ -39,7 +39,7 @@ bench = []
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
-criterion = { version = "0.5", default-features = false }
+criterion = { version = "0.8", default-features = false }
 
 [[bench]]
 name = "dep_path_filename"
@@ -47,5 +47,10 @@ harness = false
 
 [[bench]]
 name = "pnpm_lock_parse"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "pnpm_lock_write"
 harness = false
 required-features = ["bench"]

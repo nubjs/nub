@@ -20,14 +20,16 @@ pub(crate) use cas::blake3_hex;
 pub(crate) use cas::cas_file_matches_len;
 use cas::copy_dir_recursive;
 #[cfg(test)]
+pub(crate) use cas::parse_compress_store_gate;
+#[cfg(test)]
 use git::{
     codeload_cache_paths, extract_codeload_tarball_at, git_commit_matches, validate_git_positional,
 };
 pub use index::{PackageIndex, StoredFile, index_content_fingerprint};
 pub use integrity::{
     SHA512_INTEGRITY_PREFIX, integrity_to_hex, sha512_integrity, sha512_integrity_from_digest,
-    validate_and_encode_name, validate_pkg_content, validate_version, verify_integrity,
-    verify_precomputed_sha512,
+    shasum_to_sri, validate_and_encode_name, validate_pkg_content, validate_version,
+    verify_integrity, verify_precomputed_sha512,
 };
 pub(crate) use phantom_hook::run_extract_hook;
 pub use phantom_hook::set_extract_hook;
@@ -35,6 +37,9 @@ pub use phantom_hook::set_extract_hook;
 pub(crate) use tarball::normalize_tar_entry_path;
 pub(crate) use tarball::{
     CappedReader, MAX_TARBALL_DECOMPRESSED_BYTES, MAX_TARBALL_ENTRIES, MAX_TARBALL_ENTRY_BYTES,
+};
+pub use tarball::{
+    directory_content_fingerprint, directory_fingerprints, directory_metadata_fingerprint,
 };
 
 #[cfg(test)]
@@ -567,6 +572,191 @@ mod tests {
         // Importing same content returns same hash (idempotent)
         let stored2 = store.import_bytes(content, false).unwrap();
         assert_eq!(stored.hex_hash, stored2.hex_hash);
+    }
+
+    // ---- store-compression gate (AUBE_COMPRESS_STORE) ----------------
+
+    #[test]
+    fn parse_compress_store_gate_affirmative_is_default_node_glob() {
+        for val in ["1", "true", "on", "yes", ""] {
+            let gate = parse_compress_store_gate(val).expect("affirmative → gate");
+            assert_eq!(gate.glob(), Some("**/*.node"));
+            assert_eq!(gate.size(), None);
+        }
+    }
+
+    #[test]
+    fn parse_compress_store_gate_reads_glob_and_size_directives() {
+        let gate = parse_compress_store_gate("glob:**/*.dylib;size:>= 1MB").unwrap();
+        assert_eq!(gate.glob(), Some("**/*.dylib"));
+        assert!(gate.matches("a/b.dylib", 2_000_000));
+        assert!(!gate.matches("a/b.dylib", 500_000));
+
+        // size: alone keeps the default glob.
+        let gate = parse_compress_store_gate("size:> 100").unwrap();
+        assert_eq!(gate.glob(), Some("**/*.node"));
+        assert!(gate.matches("x.node", 200));
+        assert!(!gate.matches("x.node", 50));
+
+        // An unrecognized directive falls back to the default gate.
+        assert!(parse_compress_store_gate("garbage").is_some());
+    }
+
+    #[test]
+    fn parse_compress_store_gate_fails_closed_on_bad_size() {
+        // A malformed size predicate disables compression rather than
+        // widening the gate.
+        assert!(parse_compress_store_gate("size:< 1MB").is_none());
+        assert!(parse_compress_store_gate("size:nonsense").is_none());
+    }
+
+    #[test]
+    fn import_bytes_gated_off_is_byte_identical_to_import_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("files"));
+
+        // A fake addon (ELF magic so a backend would attempt to compress
+        // it on a supporting FS).
+        let mut content = vec![0x7f, b'E', b'L', b'F'];
+        content.extend_from_slice(&[7u8; 9000]);
+
+        let plain = store.import_bytes(&content, false).unwrap();
+        // gate=None → exact same CAS key and bytes.
+        let gated = store
+            .import_bytes_with_gate("build/Release/x.node", &content, false, None)
+            .unwrap();
+        assert_eq!(plain.hex_hash, gated.hex_hash);
+        assert_eq!(gated.size, Some(content.len() as u64));
+        assert_eq!(std::fs::read(&gated.store_path).unwrap(), content);
+    }
+
+    #[test]
+    fn import_bytes_gated_stores_node_addon_transparently() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("files"));
+        store.ensure_shards_exist().unwrap();
+
+        let mut content = vec![0x7f, b'E', b'L', b'F'];
+        content.extend_from_slice(&[0x5au8; 12_000]);
+        let gate = decmpfs::Gate::default();
+
+        let stored = store
+            .import_bytes_with_gate("build/Release/addon.node", &content, false, Some(&gate))
+            .unwrap();
+
+        // Whether the FS compressed it or fell back to a plain write, the
+        // file MUST land with the exact bytes and the logical size — the
+        // kernel-transparent contract `cas_file_matches_len` relies on.
+        assert!(stored.store_path.exists(), "addon landed in the CAS");
+        assert_eq!(stored.size, Some(content.len() as u64));
+        assert!(cas_file_matches_len(
+            &stored.store_path,
+            content.len() as u64
+        ));
+        assert_eq!(std::fs::read(&stored.store_path).unwrap(), content);
+        // CAS key is the BLAKE3 of the stored (logical) content.
+        assert_eq!(stored.hex_hash, blake3_hex(&content));
+    }
+
+    #[test]
+    fn import_bytes_gated_excludes_non_node_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("files"));
+        store.ensure_shards_exist().unwrap();
+
+        let content = b"module.exports = 1;\n".to_vec();
+        let gate = decmpfs::Gate::default();
+        // A `.js` file does not match `**/*.node` → plain CAS path, but
+        // still lands with the same key as the ungated import.
+        let gated = store
+            .import_bytes_with_gate("index.js", &content, false, Some(&gate))
+            .unwrap();
+        assert_eq!(gated.hex_hash, blake3_hex(&content));
+        assert_eq!(std::fs::read(&gated.store_path).unwrap(), content);
+    }
+
+    #[test]
+    fn import_bytes_gated_unwraps_a_napi_compress_hybrid() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("files"));
+        store.ensure_shards_exist().unwrap();
+
+        // The raw addon the hybrid wraps.
+        let raw = {
+            let mut v = vec![0x7f, b'E', b'L', b'F'];
+            v.extend_from_slice(&[0x66u8; 6000]);
+            v
+        };
+        let hybrid = synth_elf_hybrid(&raw);
+
+        let gate = decmpfs::Gate::default();
+        let stored = store
+            .import_bytes_with_gate("build/Release/native.node", &hybrid, false, Some(&gate))
+            .unwrap();
+
+        // The CAS stores the UNWRAPPED raw addon, not the hybrid wrapper.
+        assert_eq!(stored.size, Some(raw.len() as u64));
+        assert_eq!(stored.hex_hash, blake3_hex(&raw));
+        assert_eq!(std::fs::read(&stored.store_path).unwrap(), raw);
+    }
+
+    /// Build a synthetic napi `--compress` hybrid: a minimal ELF64 with a
+    /// `.PRESSED_DATA` section holding the bin-infra pressed-data blob for
+    /// `raw`. Mirrors decmpfs's own addon round-trip fixture.
+    #[cfg(test)]
+    fn synth_elf_hybrid(raw: &[u8]) -> Vec<u8> {
+        use sha2::{Digest as _, Sha512};
+
+        // Pressed-data blob: magic + sizes + cache key + platform +
+        // SHA-512(payload) + has_config=0 + zstd payload.
+        const MAGIC: &[u8; 32] = b"__SMOL_PRESSED_DATA_MAGIC_MARKER";
+        let payload = zstd::stream::encode_all(raw, 3).unwrap();
+        let mut hasher = Sha512::new();
+        hasher.update(&payload);
+        let hash = hasher.finalize();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(MAGIC);
+        blob.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        blob.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        blob.extend_from_slice(&[b'a'; 16]); // cache key
+        blob.extend_from_slice(&[1u8, 1u8, 255u8]); // platform/arch/libc
+        blob.extend_from_slice(&hash);
+        blob.push(0u8); // has_config = 0
+        blob.extend_from_slice(&payload);
+
+        // Minimal ELF64: ehdr + strtab + 2 section headers + blob.
+        let shentsize = 64usize;
+        let mut strtab = vec![0u8];
+        let shstrtab_name = strtab.len() as u32;
+        strtab.extend_from_slice(b".shstrtab\0");
+        let pressed_name = strtab.len() as u32;
+        strtab.extend_from_slice(b".PRESSED_DATA\0");
+
+        let ehdr_len = 64usize;
+        let strtab_off = ehdr_len;
+        let shoff = strtab_off + strtab.len();
+        let blob_off = shoff + 2 * shentsize;
+
+        let mut bin = vec![0u8; blob_off];
+        bin[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        bin[4] = 2; // EI_CLASS = 64-bit
+        bin[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+        bin[58..60].copy_from_slice(&(shentsize as u16).to_le_bytes());
+        bin[60..62].copy_from_slice(&2u16.to_le_bytes());
+        bin[62..64].copy_from_slice(&0u16.to_le_bytes()); // e_shstrndx = 0
+        bin[strtab_off..strtab_off + strtab.len()].copy_from_slice(&strtab);
+
+        let sh0 = shoff;
+        bin[sh0..sh0 + 4].copy_from_slice(&shstrtab_name.to_le_bytes());
+        bin[sh0 + 24..sh0 + 32].copy_from_slice(&(strtab_off as u64).to_le_bytes());
+        bin[sh0 + 32..sh0 + 40].copy_from_slice(&(strtab.len() as u64).to_le_bytes());
+
+        let sh1 = shoff + shentsize;
+        bin[sh1..sh1 + 4].copy_from_slice(&pressed_name.to_le_bytes());
+        bin[sh1 + 24..sh1 + 32].copy_from_slice(&(blob_off as u64).to_le_bytes());
+        bin[sh1 + 32..sh1 + 40].copy_from_slice(&(blob.len() as u64).to_le_bytes());
+        bin.extend_from_slice(&blob);
+        bin
     }
 
     #[test]

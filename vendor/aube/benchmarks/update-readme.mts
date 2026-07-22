@@ -7,24 +7,35 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+interface ResultsRow {
+  key: string
+  values: Record<string, number>
+}
+
+interface Results {
+  rows: ResultsRow[]
+}
+
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const results = JSON.parse(readFileSync(`${repo}/benchmarks/results.json`, 'utf8'))
+const results: Results = JSON.parse(readFileSync(`${repo}/benchmarks/results.json`, 'utf8'))
 
-const byKey = Object.fromEntries(results.rows.map((r) => [r.key, r.values]))
+const byKey: Record<string, Record<string, number>> = Object.fromEntries(
+  results.rows.map((r) => [r.key, r.values]),
+)
 
-function row(key) {
+function row(key: string): Record<string, number> {
   const v = byKey[key]
   if (!v) throw new Error(`results.json missing row with key='${key}'`)
   return v
 }
 
-function ratio(key, tool, { approximate = false } = {}) {
+function ratio(key: string, tool: string, { approximate = false }: { approximate?: boolean } = {}): string {
   const speedup = row(key)[tool] / row(key).aube
   const label = speedup < 2 ? `${speedup.toFixed(1)}x` : `${Math.round(speedup)}x`
   return approximate && speedup < 2 ? `~${label}` : label
 }
 
-function about(label) {
+function about(label: string): string {
   return label.startsWith('~') ? label : `about ${label}`
 }
 

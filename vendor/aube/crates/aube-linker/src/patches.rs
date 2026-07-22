@@ -111,11 +111,12 @@ pub(crate) fn wipe_changed_patched_entries(
     }
 }
 
-/// Apply a git-style multi-file unified diff to a package directory.
+/// Apply a multi-file unified diff to a package directory.
 ///
-/// The patch text is split on `diff --git ` boundaries; each section
-/// is parsed as a single-file unified diff and applied to the matching
-/// file under `pkg_dir`. We deliberately unlink the destination
+/// The patch text is split on git-style or plain unified-diff file
+/// boundaries; each section is parsed as a single-file unified diff and
+/// applied to the matching file under `pkg_dir`. We deliberately unlink
+/// the destination
 /// before writing, because the linker materializes files via reflink
 /// or hardlink — modifying the file in place would corrupt the global
 /// content-addressed store the linked file points to.
@@ -173,7 +174,7 @@ fn ensure_no_symlink_in_chain(pkg_dir: &Path, rel: &str) -> Result<(), String> {
 pub(crate) fn apply_multi_file_patch(pkg_dir: &Path, patch_text: &str) -> Result<(), String> {
     let sections = split_patch_sections(patch_text);
     if sections.is_empty() {
-        return Err("patch contained no `diff --git` sections".to_string());
+        return Err("patch contained no parseable file sections".to_string());
     }
     for section in sections {
         let rel = section
@@ -578,11 +579,9 @@ struct PatchSection {
     is_deletion: bool,
 }
 
-/// Split a git-style multi-file patch into one section per file.
-/// We look for `diff --git a/<path> b/<path>` markers, pull the path
-/// out of the `b/...` half (post-edit name), and capture everything
-/// from the next `--- ` line until the following `diff --git ` (or
-/// EOF) as the single-file diff body.
+/// Split a multi-file patch into one section per file. Git-style patches
+/// use `diff --git` boundaries; plain unified diffs use completed hunk
+/// counts to distinguish the next `---` file header from hunk content.
 fn parse_diff_git_b_path(rest: &str) -> Option<String> {
     if let Some(after) = rest.strip_prefix("\"a/") {
         let end_a = after.find("\" \"b/")?;
@@ -669,12 +668,40 @@ fn unescape_git_quoted(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+fn unified_header_path(header: &str) -> Option<String> {
+    let path = header
+        .split_once('\t')
+        .map_or(header, |(path, _timestamp)| path);
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(
+        path.strip_prefix("a/")
+            .or_else(|| path.strip_prefix("b/"))
+            .unwrap_or(path)
+            .to_string(),
+    )
+}
+
+fn hunk_line_counts(header: &str) -> Option<(usize, usize)> {
+    let ranges = header.strip_prefix("@@ -")?.split_once(" @@")?.0;
+    let (old, new) = ranges.split_once(" +")?;
+    let count = |range: &str| {
+        range
+            .split_once(',')
+            .map_or(Some(1), |(_, count)| count.parse().ok())
+    };
+    Some((count(old)?, count(new)?))
+}
+
 fn split_patch_sections(text: &str) -> Vec<PatchSection> {
     let mut out: Vec<PatchSection> = Vec::new();
     let mut current_path: Option<String> = None;
     let mut body = String::new();
     let mut in_body = false;
     let mut is_deletion = false;
+    let mut hunk_remaining: Option<(usize, usize)> = None;
+    let mut old_header_path: Option<String> = None;
 
     let flush = |out: &mut Vec<PatchSection>,
                  path: &mut Option<String>,
@@ -697,42 +724,72 @@ fn split_patch_sections(text: &str) -> Vec<PatchSection> {
             // New file boundary — flush whatever we were collecting.
             flush(&mut out, &mut current_path, &mut body, &mut is_deletion);
             in_body = false;
+            hunk_remaining = None;
+            old_header_path = None;
             // Parse `a/<path> b/<path>` and prefer the post-edit
             // (`b/`) path so renames land on the new name.
             current_path = parse_diff_git_b_path(rest);
             continue;
         }
-        if !in_body {
-            if stripped.starts_with("--- ") {
-                in_body = true;
-                // Rewrite `--- /dev/null` (file addition) to `--- a/<path>`
-                // so the body still carries a valid `--- ` anchor. The
-                // original file content we apply against is empty for
-                // additions, which the hunk applier handles directly.
-                if stripped == "--- /dev/null"
-                    && let Some(rel) = current_path.as_deref()
-                {
-                    body.push_str(&format!("--- a/{rel}\n"));
-                } else {
-                    body.push_str(stripped);
-                    body.push('\n');
-                }
+        let at_section_boundary = !in_body || hunk_remaining.is_none();
+        if at_section_boundary && let Some(header) = stripped.strip_prefix("--- ") {
+            if in_body {
+                flush(&mut out, &mut current_path, &mut body, &mut is_deletion);
             }
+            in_body = true;
+            hunk_remaining = None;
+            old_header_path = unified_header_path(header);
+            body.push_str(stripped);
+            body.push('\n');
+            continue;
+        }
+        if !in_body {
             // Skip git's `index ...` / `new file mode ...` /
             // `similarity index ...` decorations — the hunk parser
             // doesn't need them once we know the target path.
             continue;
         }
-        if stripped == "+++ /dev/null" {
-            // File deletion — note it and drop this header line. The
-            // linker will `remove_file` and skip the hunk applier
-            // entirely, so the rest of the body (the hunk that empties
-            // the file) is intentionally discarded.
-            is_deletion = true;
-            continue;
+        if let Some(header) = stripped.strip_prefix("+++ ") {
+            if current_path.is_none() {
+                current_path = unified_header_path(header).or_else(|| old_header_path.clone());
+            }
+            if header == "/dev/null" {
+                // File deletion — note it and drop this header line. The
+                // linker will `remove_file` and skip the hunk applier
+                // entirely, so the rest of the body (the hunk that empties
+                // the file) is intentionally discarded.
+                is_deletion = true;
+                continue;
+            }
+            // `--- /dev/null` (file addition) carries no old path, so
+            // rewrite the anchor to `--- a/<path>`. The original content
+            // applied against is empty for additions, which the hunk
+            // applier handles directly.
+            if old_header_path.is_none()
+                && let Some(rel) = current_path.as_deref()
+            {
+                body.clear();
+                body.push_str(&format!("--- a/{rel}\n"));
+            }
         }
         body.push_str(stripped);
         body.push('\n');
+        if let Some(counts) = hunk_line_counts(stripped) {
+            hunk_remaining = (counts != (0, 0)).then_some(counts);
+        } else if let Some((old, new)) = hunk_remaining.as_mut() {
+            match stripped.as_bytes().first() {
+                Some(b' ') => {
+                    *old = old.saturating_sub(1);
+                    *new = new.saturating_sub(1);
+                }
+                Some(b'-') => *old = old.saturating_sub(1),
+                Some(b'+') => *new = new.saturating_sub(1),
+                _ => {}
+            }
+            if *old == 0 && *new == 0 {
+                hunk_remaining = None;
+            }
+        }
     }
     flush(&mut out, &mut current_path, &mut body, &mut is_deletion);
     out
@@ -834,6 +891,144 @@ mod tests {
             std::fs::read_to_string(pkg.join("index.js")).unwrap(),
             "module.exports = 'new';\n"
         );
+    }
+
+    #[test]
+    fn applies_plain_unified_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("index.js"), "module.exports = 'old';\n").unwrap();
+
+        let patch = "--- a/index.js\n\
+                     +++ b/index.js\n\
+                     @@ -1 +1 @@\n\
+                     -module.exports = 'old';\n\
+                     +module.exports = 'new';\n";
+        apply_multi_file_patch(&pkg, patch).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("index.js")).unwrap(),
+            "module.exports = 'new';\n"
+        );
+    }
+
+    #[test]
+    fn applies_plain_unified_patch_with_bare_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("index.js"), "old\n").unwrap();
+
+        let patch = "--- index.js\t2026-07-11 00:00:00\n\
+                     +++ index.js\t2026-07-11 00:00:01\n\
+                     @@ -1 +1 @@\n\
+                     -old\n\
+                     +new\n";
+        apply_multi_file_patch(&pkg, patch).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("index.js")).unwrap(),
+            "new\n"
+        );
+    }
+
+    #[test]
+    fn applies_multi_hunk_plain_unified_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("index.js"), "one\ntwo\nthree\nfour\n").unwrap();
+
+        let patch = "--- a/index.js\n\
+                     +++ b/index.js\n\
+                     @@ -1 +1 @@\n\
+                     -one\n\
+                     +ONE\n\
+                     @@ -4 +4 @@\n\
+                     -four\n\
+                     +FOUR\n";
+        apply_multi_file_patch(&pkg, patch).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("index.js")).unwrap(),
+            "ONE\ntwo\nthree\nFOUR\n"
+        );
+    }
+
+    #[test]
+    fn applies_multi_file_plain_unified_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("a.js"), "a\n").unwrap();
+        std::fs::write(pkg.join("b.js"), "b\n").unwrap();
+
+        let patch = "--- a/a.js\n\
+                     +++ b/a.js\n\
+                     @@ -1 +1 @@\n\
+                     -a\n\
+                     +A\n\
+                     --- a/b.js\n\
+                     +++ b/b.js\n\
+                     @@ -1 +1 @@\n\
+                     -b\n\
+                     +B\n";
+        apply_multi_file_patch(&pkg, patch).unwrap();
+        assert_eq!(std::fs::read_to_string(pkg.join("a.js")).unwrap(), "A\n");
+        assert_eq!(std::fs::read_to_string(pkg.join("b.js")).unwrap(), "B\n");
+    }
+
+    #[test]
+    fn plain_unified_patch_adds_and_deletes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("old.js"), "old\n").unwrap();
+
+        let patch = "--- /dev/null\n\
+                     +++ b/new.js\n\
+                     @@ -0,0 +1 @@\n\
+                     +new\n\
+                     --- a/old.js\n\
+                     +++ /dev/null\n\
+                     @@ -1 +0,0 @@\n\
+                     -old\n";
+        apply_multi_file_patch(&pkg, patch).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("new.js")).unwrap(),
+            "new\n"
+        );
+        assert!(!pkg.join("old.js").exists());
+    }
+
+    #[test]
+    fn plain_unified_patch_path_cannot_escape_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let patch = "--- a/index.js\n\
+                     +++ b/../../outside.js\n\
+                     @@ -0,0 +1 @@\n\
+                     +pwned\n";
+
+        let result = apply_multi_file_patch(&pkg, patch);
+        assert!(result.is_err());
+        assert!(!dir.path().join("outside.js").exists());
+    }
+
+    #[test]
+    fn zero_count_hunk_does_not_hide_next_file_boundary() {
+        let patch = "--- a/empty.js\n\
+                     +++ b/empty.js\n\
+                     @@ -0,0 +0,0 @@\n\
+                     --- a/index.js\n\
+                     +++ b/index.js\n\
+                     @@ -1 +1 @@\n\
+                     -old\n\
+                     +new\n";
+
+        let sections = split_patch_sections(patch);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].rel_path.as_deref(), Some("empty.js"));
+        assert_eq!(sections[1].rel_path.as_deref(), Some("index.js"));
     }
 
     #[test]

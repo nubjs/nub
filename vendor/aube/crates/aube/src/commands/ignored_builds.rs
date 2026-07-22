@@ -158,17 +158,13 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
     let mut out: Vec<IgnoredEntry> = Vec::new();
 
     for pkg in graph.packages.values() {
-        if !seen.insert((pkg.name.clone(), pkg.version.clone())) {
-            continue;
-        }
         // Match on registry_name, not pkg.name. Allowlist pins the
         // real pkg name. npm: alias would sneak past otherwise. Same
         // fix as every other policy.decide callsite.
-        let source_key = pkg.source_approval_key();
-        if matches!(
-            policy.decide_package(pkg.registry_name(), &pkg.version, source_key.as_deref()),
-            aube_scripts::AllowDecision::Allow
-        ) {
+        if super::install::package_build_is_allowed(&policy, pkg) {
+            continue;
+        }
+        if !seen.insert((pkg.name.clone(), pkg.version.clone())) {
             continue;
         }
         let read_key = pkg.integrity.as_deref().or_else(|| {
