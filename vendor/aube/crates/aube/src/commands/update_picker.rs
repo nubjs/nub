@@ -122,6 +122,17 @@ pub(crate) fn build_row(
 }
 
 impl PickerRow {
+    /// Display width of the title column: `name@spec` (the `@spec` part
+    /// renders dim), or just the name when there is no spec.
+    fn title_w(&self) -> usize {
+        self.key.len()
+            + if self.spec.is_empty() {
+                0
+            } else {
+                1 + self.spec.len()
+            }
+    }
+
     fn has(&self, state: PickState) -> bool {
         match state {
             PickState::Keep => true,
@@ -203,7 +214,6 @@ fn cycle_all(rows: &[PickerRow], states: &mut [PickState], visible: &[usize]) {
 /// columns.
 struct Layout {
     name_w: usize,
-    spec_w: usize,
     cur_w: usize,
     range_w: usize,
     latest_w: usize,
@@ -213,8 +223,7 @@ impl Layout {
     fn of(rows: &[PickerRow]) -> Self {
         let max = |it: &mut dyn Iterator<Item = usize>| it.max().unwrap_or(0);
         Layout {
-            name_w: max(&mut rows.iter().map(|r| r.key.len())),
-            spec_w: max(&mut rows.iter().map(|r| r.spec.len())),
+            name_w: max(&mut rows.iter().map(|r| r.title_w())),
             cur_w: max(&mut rows.iter().map(|r| r.current.len())),
             range_w: max(&mut rows
                 .iter()
@@ -305,12 +314,15 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
     } else {
         "  ".to_string()
     };
-    let name = format!("{:<w$}", row.key, w = layout.name_w);
-    let spec_col = if layout.spec_w == 0 {
-        String::new()
+    let title_pad = " ".repeat(layout.name_w.saturating_sub(row.title_w()));
+    let name = if row.spec.is_empty() {
+        format!("{}{title_pad}", row.key)
     } else {
-        let padded = format!("{:<w$}", row.spec, w = layout.spec_w);
-        format!("{}  ", style::estyle(padded).dim())
+        format!(
+            "{}{}{title_pad}",
+            row.key,
+            style::estyle(format!("@{}", row.spec)).dim()
+        )
     };
     let current_padded = format!("{:<w$}", row.current, w = layout.cur_w);
     let keep_selected = state == PickState::Keep;
@@ -320,7 +332,7 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
         style::estyle(current_padded).dim().to_string()
     };
     let mut line = format!(
-        "{cursor}  {name}  {spec_col}{}",
+        "{cursor}  {name}  {}",
         cell(
             &keep_version,
             2 + layout.cur_w,
@@ -371,12 +383,7 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
 /// The dim column-heading line rendered once under the title: blank over
 /// the name column, then each existing column's label at its cells' start.
 fn header_line(layout: &Layout) -> String {
-    let spec_gap = if layout.spec_w == 0 {
-        0
-    } else {
-        layout.spec_w + 2
-    };
-    let mut line = " ".repeat(4 + layout.name_w + 2 + spec_gap);
+    let mut line = " ".repeat(4 + layout.name_w + 2);
     line.push_str(&format!("{:<w$}", HDR_KEEP, w = layout.keep_col_w()));
     if layout.range_col_w() > 0 {
         line.push_str("  ");
@@ -805,7 +812,7 @@ mod tests {
         // `■`/`□` markers are multibyte, so byte offsets differ between a
         // row with a real cell and one with a blank-filled column even
         // when the columns line up on screen.
-        let keep_col = 4 + layout.name_w + 2 + layout.spec_w + 2;
+        let keep_col = 4 + layout.name_w + 2;
         let range_col = keep_col + layout.keep_col_w() + 2;
         let latest_col = range_col + layout.range_col_w() + 2;
         let boxes = |l: &str| -> Vec<usize> {
