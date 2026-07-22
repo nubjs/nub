@@ -1,0 +1,12 @@
+# Which jdx/aube commit this vendored tree derives from.
+#
+# Read this FIRST when bumping (see .claude/skills/aube-bump/SKILL.md). It is the
+# merge base for the next 3-way merge, and getting it wrong is the difference
+# between a cheap bump and a brutal one: the v1.32 bump saw 72 files / 205 hunks
+# against a stale base and 23 files / 48 hunks against the correct one.
+#
+# UPDATE THIS IN THE SAME COMMIT that changes the vendored tree's upstream base.
+
+commit = 9f2f5f8255
+tag    = v1.32.0
+venue  = nubjs/aube nub-fork
