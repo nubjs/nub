@@ -126,6 +126,54 @@ fn normal_exit_leaves_no_watcher_process() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The watcher is re-invoked through `current_exe()`, which carries whatever
+/// NAME nub is running under — `node` for anything spawned through nub's own
+/// PATH shim, not `nub`. So the hidden verb must be honored under EVERY argv0
+/// identity nub answers to. When it hung off the `nub`-only argv0 arm, a
+/// shim-named re-invocation ran `__pdeath-watch` as a script, spawning a
+/// workload (and thus another watcher) per level until the process table was
+/// exhausted (regression from #504).
+#[test]
+fn pdeath_watch_verb_is_honored_under_every_argv0() {
+    // Alongside the binary, so the aliases can be HARDLINKS — same-filesystem,
+    // no 78MB copy per name, and the same shape as nub's real PATH shims.
+    let nub = nub_binary();
+    let dir = nub
+        .parent()
+        .unwrap()
+        .join(format!("nub-pdw-argv0-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // `getpgrp() + 1` can never equal the child's own group (children inherit
+    // ours), so the watcher deterministically takes its membership self-check
+    // exit. That keeps the assertion on "the verb was RECOGNIZED" alone — no
+    // pipe timing, and it never reaches the group kill.
+    let foreign_pgid = (unsafe { libc::getpgrp() } + 1).to_string();
+    for name in ["nub", "node", "nubx", "npm"] {
+        let aliased = dir.join(name);
+        std::fs::hard_link(&nub, &aliased).unwrap();
+        let out = std::process::Command::new(&aliased)
+            .args(["__pdeath-watch", &foreign_pgid, "3"])
+            .output()
+            .expect("spawn aliased nub");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "nub invoked as `{name}` did not honor __pdeath-watch (stderr: {})",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stdout.is_empty() && out.stderr.is_empty(),
+            "nub invoked as `{name}` ran __pdeath-watch as a workload instead of \
+             the watcher loop (stdout: {}, stderr: {})",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The disarm half of the contract: a background process the script
 /// DELIBERATELY leaves behind survives nub's normal exit, exactly as it would
 /// under plain sh/node — the watcher must stand down, not sweep the group.

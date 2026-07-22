@@ -1079,6 +1079,26 @@ pub enum ColorWhen {
 
 /// Top-level entry point. Returns the process exit code.
 pub fn run() -> Result<i32> {
+    // The macOS parent-death watcher (#480) re-invokes `current_exe()` with this
+    // hidden verb — and `current_exe()` is whatever NAME nub is running under,
+    // which for any workload spawned through nub's own PATH shim is `node`, not
+    // `nub`. Dispatching it here, BEFORE `Argv0::detect()`, is what makes the
+    // verb argv0-independent. Routing it through the argv0 match instead let
+    // `Argv0::Node` treat `__pdeath-watch` as a SCRIPT to run, which spawned a
+    // workload — and therefore another watcher — per level, an unbounded
+    // self-replicating chain that exhausted the process table (regression from #504).
+    //
+    // Landing above the guards below is also deliberate: the watcher must not
+    // reclaim or reap PATH shim dirs, which belong to the nub that spawned it.
+    #[cfg(unix)]
+    {
+        let mut args = env::args().skip(1);
+        if args.next().as_deref() == Some("__pdeath-watch") {
+            let rest: Vec<String> = args.collect();
+            return Ok(nub_core::node::spawn::run_pdeath_watch(&rest));
+        }
+    }
+
     // Reclaim the active PATH shim temp dir exactly once, on return. The shim
     // is created lazily/idempotently by the spawn paths and is process-wide; it
     // must outlive every — possibly parallel — child, so
@@ -1629,14 +1649,14 @@ fn run_nub() -> Result<i32> {
             _ => {
                 // Check if this is the first positional and matches a subcommand
                 // (nub-native, a verb registered to the embedded PM engine, or
-                // a hidden re-entry verb: the engine's lazy node-gyp shims and
-                // the macOS parent-death watcher both re-invoke current_exe()
-                // with theirs).
+                // the engine's hidden node-gyp re-entry verb — its lazy shims
+                // re-invoke current_exe() with it mid-lifecycle-script). The
+                // parent-death watcher's verb is handled in `run()`, above
+                // argv0 dispatch, so it never reaches here.
                 if rest.is_empty()
                     && !arg.starts_with('-')
                     && (SUBCOMMANDS.contains(&arg.as_str())
                         || arg == "__node-gyp-bootstrap"
-                        || (cfg!(unix) && arg == "__pdeath-watch")
                         || crate::pm_engine::lookup_verb(arg).is_some())
                 {
                     subcommand_found = true;
@@ -2064,14 +2084,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // to the engine's bootstrap entry point.
     if subcommand == "__node-gyp-bootstrap" {
         return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
-    }
-
-    // The macOS parent-death watcher (#480) re-invokes current_exe() with this
-    // hidden verb; intercept before clap and run the minimal watcher loop
-    // directly (see nub_core::node::spawn::spawn_group_reaper).
-    #[cfg(unix)]
-    if subcommand == "__pdeath-watch" {
-        return Ok(nub_core::node::spawn::run_pdeath_watch(&rest[1..]));
     }
 
     // Compatibility alias: npm and pnpm treat `install <pkg>` / `i <pkg>` (and
