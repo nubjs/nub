@@ -216,24 +216,34 @@ impl Layout {
         }
     }
 
-    // Full raw cell DISPLAY widths (glyph + label + padded version), zero
-    // when no row carries that cell so the column is omitted entirely.
-    // Counted in chars, not bytes — the `■`/`□` glyphs are multibyte.
-    fn range_cell_w(&self) -> usize {
+    // Full column DISPLAY widths (box + space + padded version), floored
+    // by the column's header label so a short version column never
+    // squeezes its heading. Zero when no row carries that cell, so the
+    // column (and its header) is omitted entirely. Counted in chars, not
+    // bytes — the `■`/`□` glyphs are multibyte.
+    fn keep_col_w(&self) -> usize {
+        (2 + self.cur_w).max(HDR_KEEP.len())
+    }
+    fn range_col_w(&self) -> usize {
         if self.range_w == 0 {
             0
         } else {
-            "□ range ".chars().count() + self.range_w
+            (2 + self.range_w).max(HDR_RANGE.len())
         }
     }
-    fn latest_cell_w(&self) -> usize {
+    fn latest_col_w(&self) -> usize {
         if self.latest_w == 0 {
             0
         } else {
-            "□ latest ".chars().count() + self.latest_w
+            (2 + self.latest_w).max(HDR_LATEST.len())
         }
     }
 }
+
+// Column headings; the cells below them carry only box + version.
+const HDR_KEEP: &str = "keep";
+const HDR_RANGE: &str = "latest in range";
+const HDR_LATEST: &str = "latest";
 
 /// Marker color for a selected update cell: the same severity the version
 /// tail carries (pnpm's colorize-semver-diff palette), so the filled box
@@ -261,21 +271,21 @@ fn severity_box(current: &str, target: &str) -> String {
     .to_string()
 }
 
-/// Render one radio cell. Selected cells carry a filled box (`■`, colored
-/// by bump severity for update cells — bun's checkbox glyphs); unselected
-/// cells get a dimmed hollow box and label. The version keeps whatever
-/// coloring the caller computed (semver-diff colors carry meaning
-/// regardless of selection).
-fn cell(label: &str, version: &str, selected: bool, marker: Option<&str>) -> String {
+/// Render one radio cell: box + version, no label (the column heading
+/// carries the label). Selected cells get a filled box (`■`, colored by
+/// bump severity for update cells — bun's checkbox glyphs); unselected
+/// cells a dimmed hollow box. The version keeps whatever coloring the
+/// caller computed (semver-diff colors carry meaning regardless of
+/// selection). `raw_w`/`col_w` are display widths: the version is already
+/// padded to the column's version width, so the trailing pad tops the
+/// cell up to the full column width.
+fn cell(version: &str, raw_w: usize, col_w: usize, selected: bool, marker: Option<&str>) -> String {
     use clx::style;
+    let pad = " ".repeat(col_w.saturating_sub(raw_w));
     if selected {
-        format!("{} {label} {version}", marker.unwrap_or("■"))
+        format!("{} {version}{pad}", marker.unwrap_or("■"))
     } else {
-        format!(
-            "{} {} {version}",
-            style::estyle("□").dim(),
-            style::estyle(label).dim(),
-        )
+        format!("{} {version}{pad}", style::estyle("□").dim())
     }
 }
 
@@ -296,9 +306,15 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
     };
     let mut line = format!(
         "{cursor}  {name}  {}",
-        cell("keep", &keep_version, keep_selected, None)
+        cell(
+            &keep_version,
+            2 + layout.cur_w,
+            layout.keep_col_w(),
+            keep_selected,
+            None
+        )
     );
-    if layout.range_cell_w() > 0 {
+    if layout.range_col_w() > 0 {
         line.push_str("  ");
         match &row.range_target {
             Some(target) => {
@@ -306,16 +322,17 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
                     super::outdated::colorize_diff(&row.current, target, layout.range_w, true);
                 let marker = severity_box(&row.current, target);
                 line.push_str(&cell(
-                    "range",
                     &version,
+                    2 + layout.range_w,
+                    layout.range_col_w(),
                     state == PickState::Range,
                     Some(&marker),
                 ));
             }
-            None => line.push_str(&" ".repeat(layout.range_cell_w())),
+            None => line.push_str(&" ".repeat(layout.range_col_w())),
         }
     }
-    if layout.latest_cell_w() > 0 {
+    if layout.latest_col_w() > 0 {
         line.push_str("  ");
         match &row.latest_target {
             Some(target) => {
@@ -323,14 +340,31 @@ fn format_row(row: &PickerRow, state: PickState, layout: &Layout, focused: bool)
                     super::outdated::colorize_diff(&row.current, target, layout.latest_w, true);
                 let marker = severity_box(&row.current, target);
                 line.push_str(&cell(
-                    "latest",
                     &version,
+                    2 + layout.latest_w,
+                    layout.latest_col_w(),
                     state == PickState::Latest,
                     Some(&marker),
                 ));
             }
-            None => line.push_str(&" ".repeat(layout.latest_cell_w())),
+            None => line.push_str(&" ".repeat(layout.latest_col_w())),
         }
+    }
+    line
+}
+
+/// The dim column-heading line rendered once under the title: blank over
+/// the name column, then each existing column's label at its cells' start.
+fn header_line(layout: &Layout) -> String {
+    let mut line = " ".repeat(4 + layout.name_w + 2);
+    line.push_str(&format!("{:<w$}", HDR_KEEP, w = layout.keep_col_w()));
+    if layout.range_col_w() > 0 {
+        line.push_str("  ");
+        line.push_str(&format!("{:<w$}", HDR_RANGE, w = layout.range_col_w()));
+    }
+    if layout.latest_col_w() > 0 {
+        line.push_str("  ");
+        line.push_str(HDR_LATEST);
     }
     line
 }
@@ -383,6 +417,10 @@ fn render_frame(
         style::estyle("Choose dependency updates")
             .bold()
             .to_string(),
+        &mut out,
+    );
+    push_line(
+        style::estyle(header_line(layout)).dim().to_string(),
         &mut out,
     );
     let mut prev_bucket: Option<&str> = None;
@@ -695,31 +733,40 @@ mod tests {
                     .into_owned()
             })
             .collect();
-        // Column positions in CHARS (display cells), not bytes — the
+        // Expected column starts in CHARS (display cells), not bytes — the
         // `■`/`□` markers are multibyte, so byte offsets differ between a
         // row with a real cell and one with a blank-filled column even
         // when the columns line up on screen.
-        let char_col = |l: &str, needle: &str| -> Option<usize> {
-            l.find(needle).map(|b| l[..b].chars().count())
+        let keep_col = 4 + layout.name_w + 2;
+        let range_col = keep_col + layout.keep_col_w() + 2;
+        let latest_col = range_col + layout.range_col_w() + 2;
+        let boxes = |l: &str| -> Vec<usize> {
+            l.chars()
+                .enumerate()
+                .filter(|(_, c)| *c == '■' || *c == '□')
+                .map(|(i, _)| i)
+                .collect()
         };
-        let keep_cols: Vec<usize> = rendered
-            .iter()
-            .map(|l| char_col(l, " keep ").unwrap())
-            .collect();
-        assert!(keep_cols.windows(2).all(|w| w[0] == w[1]), "{rendered:#?}");
-        // range and latest cells each occupy their own fixed column; a row
-        // without a range cell blank-fills it so its latest cell still lands
-        // in the latest column.
-        let range_col = char_col(&rendered[2], " range ").unwrap();
-        let latest_cols: Vec<usize> = rendered
-            .iter()
-            .filter_map(|l| char_col(l, " latest "))
-            .collect();
-        assert_eq!(latest_cols.len(), 2);
-        assert!(
-            latest_cols.windows(2).all(|w| w[0] == w[1]),
+        // Every box sits exactly on its column start; rows missing a cell
+        // blank-fill it so the later boxes still land on their columns.
+        assert_eq!(boxes(&rendered[0]), vec![keep_col, latest_col]); // chalk: no range cell
+        assert_eq!(boxes(&rendered[1]), vec![keep_col, range_col]); // beta pin: no latest cell
+        assert_eq!(
+            boxes(&rendered[2]),
+            vec![keep_col, range_col, latest_col],
             "{rendered:#?}"
         );
-        assert!(range_col < latest_cols[0]);
+        // The heading labels sit on the same columns as the boxes below them.
+        let header = header_line(&layout);
+        let char_col = |l: &str, b: usize| l[..b].chars().count();
+        assert_eq!(char_col(&header, header.find(HDR_KEEP).unwrap()), keep_col);
+        assert_eq!(
+            char_col(&header, header.find(HDR_RANGE).unwrap()),
+            range_col
+        );
+        assert_eq!(
+            char_col(&header, header.rfind(HDR_LATEST).unwrap()),
+            latest_col
+        );
     }
 }
