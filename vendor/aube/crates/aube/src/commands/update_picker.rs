@@ -56,7 +56,11 @@ impl PickerSelection {
 /// Build a picker row from the resolved facts about one dependency, or
 /// `None` when there is nothing to offer:
 ///
-/// - `range_target` = the in-range max when it differs from `current`.
+/// - `range_target` = the in-range max when it differs from `current` and
+///   is not a semver downgrade (a lockfile pinned above the manifest range
+///   would otherwise get a downgrade offered as "range"). When either side
+///   fails to parse, plain inequality decides — the resolver may still
+///   move it, so hiding it would lie.
 /// - `latest_target` = the `latest` dist-tag when it is a strict semver
 ///   upgrade over `current`. A `latest` at-or-below `current` (the
 ///   prerelease-pin case: current `4.0.0-beta.59`, latest `0.64.0`) is
@@ -72,7 +76,18 @@ pub(crate) fn build_row(
     wanted: Option<&str>,
     latest: Option<&str>,
 ) -> Option<PickerRow> {
-    let mut range_target = wanted.filter(|w| *w != current).map(str::to_owned);
+    let semver_downgrade = |target: &str| {
+        matches!(
+            (
+                node_semver::Version::parse(current),
+                node_semver::Version::parse(target),
+            ),
+            (Ok(cur), Ok(new)) if new <= cur
+        )
+    };
+    let mut range_target = wanted
+        .filter(|w| *w != current && !semver_downgrade(w))
+        .map(str::to_owned);
     let latest_target = latest
         .filter(|l| {
             let (Ok(cur), Ok(new)) = (
@@ -464,23 +479,30 @@ pub(crate) fn run(mut rows: Vec<PickerRow>) -> std::io::Result<Option<PickerSele
             }
             Key::Enter => {
                 term.clear_last_lines(last_lines)?;
-                let mut selection = PickerSelection::default();
-                for (row, state) in rows.iter().zip(&states) {
-                    match state {
-                        PickState::Keep => {}
-                        PickState::Range => {
-                            selection.in_range.insert(row.key.clone());
-                        }
-                        PickState::Latest => {
-                            selection.to_latest.insert(row.key.clone());
-                        }
-                    }
-                }
-                return Ok(Some(selection));
+                return Ok(Some(build_selection(&rows, &states)));
             }
             _ => {}
         }
     }
+}
+
+/// The confirmed contract: keep-rows drop out entirely, range-rows land in
+/// `in_range` (bare-arg semantics), latest-rows land in `to_latest` (the
+/// caller routes them as explicit `<pkg>@latest` specs).
+fn build_selection(rows: &[PickerRow], states: &[PickState]) -> PickerSelection {
+    let mut selection = PickerSelection::default();
+    for (row, state) in rows.iter().zip(states) {
+        match state {
+            PickState::Keep => {}
+            PickState::Range => {
+                selection.in_range.insert(row.key.clone());
+            }
+            PickState::Latest => {
+                selection.to_latest.insert(row.key.clone());
+            }
+        }
+    }
+    selection
 }
 
 #[cfg(test)]
@@ -532,6 +554,41 @@ mod tests {
         let r = row("a", "dependencies", "7.5.4", Some("7.5.9"), Some("7.8.5")).unwrap();
         assert_eq!(r.range_target.as_deref(), Some("7.5.9"));
         assert_eq!(r.latest_target.as_deref(), Some("7.8.5"));
+    }
+
+    #[test]
+    fn build_row_hides_range_downgrade_but_keeps_unparseable_drift() {
+        // A lockfile pinned above the manifest range must not get the lower
+        // in-range max offered as an update.
+        assert!(row("a", "dependencies", "2.1.0", Some("1.9.0"), None).is_none());
+        // Unparseable current: latest is dropped (no ordering), but the
+        // range cell stays on plain inequality — the resolver may move it.
+        let r = row("a", "dependencies", "git-pin", Some("1.2.3"), Some("9.9.9")).unwrap();
+        assert_eq!(r.range_target.as_deref(), Some("1.2.3"));
+        assert_eq!(r.latest_target, None);
+    }
+
+    #[test]
+    fn selection_splits_states_into_range_and_latest_sets() {
+        let rows = vec![
+            row("keepme", "dependencies", "1.0.0", Some("1.1.0"), None).unwrap(),
+            row(
+                "rangey",
+                "dependencies",
+                "1.0.0",
+                Some("1.1.0"),
+                Some("2.0.0"),
+            )
+            .unwrap(),
+            row("latesty", "dependencies", "1.0.0", None, Some("3.0.0")).unwrap(),
+        ];
+        let states = vec![PickState::Keep, PickState::Range, PickState::Latest];
+        let sel = build_selection(&rows, &states);
+        assert!(!sel.in_range.contains("keepme") && !sel.to_latest.contains("keepme"));
+        assert_eq!(sel.in_range.iter().collect::<Vec<_>>(), vec!["rangey"]);
+        assert_eq!(sel.to_latest.iter().collect::<Vec<_>>(), vec!["latesty"]);
+        assert!(!sel.is_empty());
+        assert!(build_selection(&rows, &[PickState::Keep; 3]).is_empty());
     }
 
     #[test]

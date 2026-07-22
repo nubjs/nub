@@ -471,8 +471,14 @@ pub async fn run(
                 // Picker cancelled (Ctrl-C / Esc): exit 130 via the return path.
                 RichPick::Cancelled => return Ok(Some(130)),
                 RichPick::NothingOutdated => {
-                    eprintln!("All dependencies up to date.");
-                    return Ok(None);
+                    if indirect_arg_names.is_empty() {
+                        eprintln!("All dependencies up to date.");
+                        return Ok(None);
+                    }
+                    // Named indirect deps still update even when no direct dep
+                    // has an offerable row: fall through with an empty direct
+                    // selection, matching the demand path's empty-set return.
+                    manifest_keys_to_update.clear();
                 }
                 RichPick::Selected(sel) => {
                     if sel.is_empty() && indirect_arg_names.is_empty() {
