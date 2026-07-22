@@ -129,7 +129,7 @@ Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENT
 
 **`crates/nub-native`** — the N-API addon (a cdylib loaded into the user's Node process). The oxc-based transpiler + resolver: `transform.rs` (TS/JSX transform), `resolve.rs` (module resolution), `tsconfig.rs`, `cache.rs` (transpile cache), `detect.rs`.
 
-**`vendor/aube`** — the vendored aube package-manager engine (plain in-tree files since Pattern B, vendored from `nubjs/aube`). Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process. NEVER a subprocess. From a build standpoint it's just part of the workspace — `cargo build` compiles it as a dependency. Changes to it are normal nub edits/PRs touching `vendor/aube/*` (no pin, no submodule). For pulling FROM / pushing TO upstream `jdx/aube`, see the `aube-sync` skill.
+**`vendor/aube`** — the vendored aube package-manager engine (plain in-tree files since Pattern B, vendored from `nubjs/aube`). Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process. NEVER a subprocess. From a build standpoint it's just part of the workspace — `cargo build` compiles it as a dependency. Changes to it are normal nub edits/PRs touching `vendor/aube/*` (no pin, no submodule). For pulling FROM / pushing TO upstream `jdx/aube`, see the `aube-bump` skill.
 
 ---
 

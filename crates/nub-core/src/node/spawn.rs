@@ -509,6 +509,11 @@ pub fn spawn_group_reaper(child_pid: u32) -> Option<GroupReaper> {
             libc::close(write_fd);
         }
     };
+    // `current_exe()` is whatever NAME nub is running under — for any workload
+    // spawned through nub's own PATH shim that is `node`, not `nub`. The verb
+    // below is therefore dispatched in `cli::run()` ABOVE argv0 detection; when
+    // it hung off the `nub`-only argv0 arm, a shim-named re-invocation ran
+    // `__pdeath-watch` as a SCRIPT and spawned another watcher per level (regression from #504).
     let Ok(exe) = std::env::current_exe() else {
         close_both();
         return None;
