@@ -1465,6 +1465,22 @@ fn resolve_identity_walk_up(
     strictness: IdentityStrictness,
 ) -> Result<Option<DetectedLockfile>> {
     use aube_lockfile::ResolvedLockfileKind;
+    // The walk never escapes nub's own PM cache root. Installs running inside
+    // it are nub-internal by construction (the node-gyp bootstrap's recursive
+    // install, dlx scratch dirs) and must not inherit identity from whatever
+    // sits above the cache — unbounded, a first-run bootstrap dir (manifest,
+    // no lockfile yet) walked into $HOME and hard-failed the outer install on
+    // unrelated-lockfile ambiguity (#489). The root is kept in whichever
+    // spelling is an ancestor of `cwd` (raw, or canonicalized for the
+    // symlinked-temp-dir case) so the containment test stays consistent as
+    // `dir` pops.
+    let clamp = aube_store::dirs::cache_dir().and_then(|root| {
+        if cwd.starts_with(&root) {
+            return Some(root);
+        }
+        let canon = std::fs::canonicalize(&root).ok()?;
+        cwd.starts_with(&canon).then_some(canon)
+    });
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
         match aube_lockfile::resolve_project_lockfile_kind(&dir) {
@@ -1493,6 +1509,11 @@ fn resolve_identity_walk_up(
             Err(err) => return Err(identity_error(err)),
         }
         if !dir.pop() {
+            break;
+        }
+        if let Some(root) = &clamp
+            && !dir.starts_with(root)
+        {
             break;
         }
     }
