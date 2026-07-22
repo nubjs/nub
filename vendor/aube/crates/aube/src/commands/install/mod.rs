@@ -2475,6 +2475,18 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // default `aube-lock.yaml`. Skipped entirely when
             // `lockfile=false`.
             let write_kind = source_kind_before.unwrap_or(aube_lockfile::LockfileKind::Aube);
+            // pnpm persists a top-level `time:` block only under
+            // `resolution-mode=time-based`; every other mode writes a
+            // `time:`-free lockfile even when the resolver kept publish
+            // times in memory (minimumReleaseAge / trustPolicy / the
+            // defaultTrust floor). Decided once here so EVERY lockfile
+            // write below — the main overlapped/inline write and the
+            // catch-up integrity rewrite alike — routes its graph through
+            // `lockfile_graph_for_write(_, persist_times)` and cannot
+            // diverge on the `time:` axis (the integrity rewrite once
+            // wrote its own un-stripped clone, re-introducing `time:`).
+            let persist_times = settings::resolve_resolution_mode(&settings_ctx)
+                == aube_resolver::ResolutionMode::TimeBased;
             if lockfile_enabled {
                 // When `lockfileIncludeTarballUrl=true`, record the
                 // registry tarball URL on every registry-sourced
@@ -2539,18 +2551,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 // snapshot metadata (`optional: true`, `transitivePeerDependencies`)
                 // before the write and before the host-only `filter_graph` below.
                 crate::commands::prepare_resolved_graph_for_lockfile_write(&mut graph);
-                // pnpm persists a top-level `time:` block only under
-                // `resolution-mode=time-based`; in every other mode the
-                // lockfile stays `time:`-free even when the resolver kept
-                // publish times in memory for `minimumReleaseAge` /
-                // `trustPolicy` / the `defaultTrust` floor. Strip them on
-                // the writer's view (a clone) WITHOUT mutating the shared
-                // `graph` — the floor clones `graph` further down and
-                // still needs `graph.times`. Both write paths below
-                // consume this same view, so the overlapped write and the
-                // killswitch write stay byte-identical to each other.
-                let persist_times = settings::resolve_resolution_mode(&settings_ctx)
-                    == aube_resolver::ResolutionMode::TimeBased;
+                // Strip `time:` on the writer's view (a clone) WITHOUT
+                // mutating the shared `graph` — the `defaultTrust` floor
+                // clones `graph` further down and still needs
+                // `graph.times`. Both write paths below consume this same
+                // view, so the overlapped write and the killswitch write
+                // stay byte-identical to each other.
                 let write_graph = lockfile_dir::lockfile_graph_for_write(&graph, persist_times);
                 // The serialize + reformat + atomic write is the slowest
                 // serial span before the linker (10-55 ms on large trees).
@@ -2716,11 +2722,17 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         if let Some(handle) = lockfile_write_handle.take() {
                             lockfile_write_overlap::join(handle).await?;
                         }
+                        // Same `time:`-strip the main write applied: this
+                        // rewrite overwrites that output, so it must honor
+                        // `persist_times` identically or it re-introduces a
+                        // `time:` block on non-time-based lockfiles.
+                        let lock_write_graph =
+                            lockfile_dir::lockfile_graph_for_write(lock_graph, persist_times);
                         if shared_workspace_lockfile || !has_workspace {
                             write_lockfile_dir_remapped(
                                 &lockfile_dir,
                                 &lockfile_importer_key,
-                                lock_graph,
+                                &lock_write_graph,
                                 &manifest,
                                 write_kind,
                             )
@@ -2729,7 +2741,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         } else {
                             write_per_project_lockfiles(
                                 &cwd,
-                                lock_graph,
+                                &lock_write_graph,
                                 &manifests,
                                 write_kind,
                                 per_project_write_selection.as_ref(),

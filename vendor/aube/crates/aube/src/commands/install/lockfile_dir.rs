@@ -116,3 +116,37 @@ pub(super) fn write_lockfile_dir_remapped(
     remapped.importers.insert(importer_key.to_string(), deps);
     aube_lockfile::write_lockfile_as(lockfile_dir, &remapped, manifest, kind)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::lockfile_graph_for_write;
+    use std::borrow::Cow;
+
+    /// The resolver keeps publish times in `graph.times` whenever
+    /// minimumReleaseAge / trustPolicy / the defaultTrust floor is active,
+    /// but pnpm serializes a `time:` block only under time-based
+    /// resolution. Every lockfile write — the main write and the catch-up
+    /// integrity rewrite — routes through this helper, so pinning its two
+    /// branches guards the #520 parity leak (the rewrite path once wrote
+    /// its own un-stripped clone, re-introducing `time:` on a
+    /// non-time-based lockfile).
+    #[test]
+    fn strips_times_only_when_not_persisting() {
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph
+            .times
+            .insert("foo@1.0.0".into(), "2020-01-01T00:00:00.000Z".into());
+
+        // Non-time-based: the writer's view is `time:`-free, and the strip
+        // is on a clone — the shared graph keeps its times for the floor.
+        let stripped = lockfile_graph_for_write(&graph, false);
+        assert!(stripped.times.is_empty());
+        assert!(matches!(stripped, Cow::Owned(_)));
+        assert!(!graph.times.is_empty());
+
+        // Time-based: times persist, no clone made.
+        let kept = lockfile_graph_for_write(&graph, true);
+        assert_eq!(kept.times.len(), 1);
+        assert!(matches!(kept, Cow::Borrowed(_)));
+    }
+}
