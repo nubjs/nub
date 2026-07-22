@@ -76,6 +76,7 @@ fn scaffolds_five_files_with_identity_pin_and_type_devdeps() {
     assert_eq!(pkg["devEngines"]["packageManager"]["name"], "nub");
     assert_eq!(pkg["devDependencies"]["@nubjs/types"], format!("^{ver}"));
     assert!(pkg["devDependencies"]["@types/node"].is_string());
+    assert!(pkg["devDependencies"]["typescript"].is_string());
     assert_eq!(pkg["type"], "module");
 
     let tsconfig = std::fs::read_to_string(dir.join("tsconfig.json")).unwrap();
