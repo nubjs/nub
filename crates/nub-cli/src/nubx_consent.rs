@@ -1,9 +1,9 @@
-//! Consent gate for `nubx`'s *implicit* registry tier — the moment `nubx <thing>`
-//! falls through a local file/script/bin miss into a download-and-run.
+//! Consent gate for `nubx`'s *implicit* registry tier — the moment `nubx <bin>`
+//! falls through a local `node_modules/.bin` miss into a download-and-run.
 //!
-//! The thesis: **`nubx` never executes remote code silently.** A local hit (file,
-//! script, or installed bin) never reaches this module — the gate guards only the
-//! registry fallthrough. There it splits three ways:
+//! The thesis: **`nubx` never executes remote code silently.** An installed bin
+//! never reaches this module — the gate guards only the registry fallthrough.
+//! There it splits three ways:
 //!
 //! - **CI** (a truthy `CI`) → fail closed. A CI job that needs a tool declares it;
 //!   nub does not fetch-and-run arbitrary remote code where no human can intervene.
@@ -43,10 +43,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A pinned spec ignores this (immutable identity → consent never expires).
 const FLOATING_TTL_SECS: u64 = 24 * 60 * 60;
 
-/// The abort message printed when `exec.implicitDlx = never` and the subject
-/// missed every local tier. LOCKED, maintainer-authored copy — reproduce verbatim,
-/// no rewording/capitalization/backtick changes. A test pins the exact bytes.
-const NEVER_ABORT_MESSAGE: &str = "No matching script or executable found.\nTo run a package from the remote registry, try `nub dlx`";
+/// The abort message printed when `exec.implicitDlx = never` and the bin missed
+/// the local `node_modules/.bin` chain. LOCKED, maintainer-authored copy —
+/// reproduce verbatim, no rewording/capitalization/backtick changes. A test pins
+/// the exact bytes. ("script or executable" became "executable" when nubx dropped
+/// the script tier; the second line is unchanged.)
+const NEVER_ABORT_MESSAGE: &str =
+    "No matching executable found.\nTo run a package from the remote registry, try `nub dlx`";
 
 /// What the gate decided for an implicit registry fetch.
 pub enum Decision {
@@ -91,9 +94,9 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
     // The global kill-switch (`exec.implicitDlx = never`) is read FIRST — before
     // CI/TTY probing, any prompt, prefetch, or network. Writing it via the `Never`
     // option (or `nub config set`) permanently disables the implicit registry tier;
-    // explicit `nub dlx <spec>` / `nubx -y <spec>` (above) stay open. The subject
-    // already missed every local tier (file/script/bin) to reach here, so we abort
-    // with the locked, maintainer-authored two-line message. Reproduce it verbatim.
+    // explicit `nub dlx <spec>` / `nubx -y <spec>` (above) stay open. The bin already
+    // missed the local `node_modules/.bin` chain to reach here, so we abort with the
+    // locked, maintainer-authored two-line message. Reproduce it verbatim.
     if matches!(
         crate::config::implicit_dlx(),
         crate::config::ImplicitDlx::Never
@@ -525,7 +528,7 @@ mod tests {
         // two lines so a reword can't slip through.
         assert_eq!(
             NEVER_ABORT_MESSAGE,
-            "No matching script or executable found.\nTo run a package from the remote registry, try `nub dlx`"
+            "No matching executable found.\nTo run a package from the remote registry, try `nub dlx`"
         );
     }
 
