@@ -445,6 +445,35 @@ impl LockfileGraph {
         DriftStatus::Fresh
     }
 
+    /// Compare the lockfile's recorded `packageExtensionsChecksum` against the
+    /// project's freshly-computed effective checksum. A mismatch means the
+    /// packageExtensions config changed since the lockfile was written — the
+    /// resolved graph is stale, since an extension adds/relaxes deps and can
+    /// alter resolution. Mirrors pnpm's `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`
+    /// `packageExtensionsChecksum` rule.
+    ///
+    /// `effective_checksum` is the caller-computed hash of the effective
+    /// packageExtensions (`None` when there are none). A stale
+    /// checksum carried over from a renamed pnpm-lock.yaml is validated here,
+    /// not trusted — a divergence re-resolves (or frozen-fails) and the write
+    /// path restamps the current value.
+    ///
+    /// Meaningful only for embedders that STAMP the checksum on every lockfile
+    /// kind they write (so the check reaches a fixpoint); the caller gates the
+    /// invocation on that embedder posture
+    /// (`EngineContext::enforce_package_extensions_checksum`), so standalone
+    /// aube — which stamps only pnpm-lock.yaml and never enforces — never
+    /// reaches it.
+    pub fn check_package_extensions_drift(&self, effective_checksum: Option<&str>) -> DriftStatus {
+        if self.package_extensions_checksum.as_deref() == effective_checksum {
+            DriftStatus::Fresh
+        } else {
+            DriftStatus::Stale {
+                reason: "packageExtensions changed since the lockfile was written".to_string(),
+            }
+        }
+    }
+
     /// Compare a single importer's `DirectDep` list against the corresponding
     /// `package.json`. Used by both [`check_drift`] and [`check_drift_workspace`].
     ///
@@ -1062,6 +1091,40 @@ mod drift_tests {
             graph.check_drift(&manifest, &BTreeMap::new(), &[], &BTreeMap::new()),
             DriftStatus::Fresh
         );
+    }
+
+    #[test]
+    fn package_extensions_drift_fires_on_checksum_mismatch() {
+        let mut graph = make_graph(&[("lodash", "^4.17.0", "lodash@4.17.21")]);
+        graph.package_extensions_checksum = Some("sha256-abc".to_string());
+
+        // Match → Fresh; both-absent → Fresh; any divergence → Stale.
+        assert_eq!(
+            graph.check_package_extensions_drift(Some("sha256-abc")),
+            DriftStatus::Fresh
+        );
+        assert!(matches!(
+            graph.check_package_extensions_drift(Some("sha256-xyz")),
+            DriftStatus::Stale { .. }
+        ));
+        // Extensions removed from the project (effective None) drifts a
+        // lockfile that still records a checksum.
+        assert!(matches!(
+            graph.check_package_extensions_drift(None),
+            DriftStatus::Stale { .. }
+        ));
+
+        // No checksum stored (a lockfile written before extensions existed):
+        // absent-vs-absent is Fresh, absent-vs-present drifts.
+        graph.package_extensions_checksum = None;
+        assert_eq!(
+            graph.check_package_extensions_drift(None),
+            DriftStatus::Fresh
+        );
+        assert!(matches!(
+            graph.check_package_extensions_drift(Some("sha256-abc")),
+            DriftStatus::Stale { .. }
+        ));
     }
 
     #[test]

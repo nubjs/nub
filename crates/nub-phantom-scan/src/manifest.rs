@@ -17,15 +17,15 @@ use serde_json::Value;
 pub struct Manifest {
     pub name: String,
     /// `dependencies` ∪ `optionalDependencies` — hard-declared, always resolvable.
-    pub deps: BTreeSet<String>,
+    pub(crate) deps: BTreeSet<String>,
     /// Required peers (`peerDependencies` without an `optional` meta flag).
-    pub required_peers: BTreeSet<String>,
+    pub(crate) required_peers: BTreeSet<String>,
     /// Optional peers (`peerDependenciesMeta.<x>.optional === true`). Declared —
     /// NOT phantoms — but reported as their own category (the pick-your-plugin
     /// pattern that a naive detector over-flags).
-    pub optional_peers: BTreeSet<String>,
+    pub(crate) optional_peers: BTreeSet<String>,
     /// `bundledDependencies` / `bundleDependencies` — shipped inside the tarball.
-    pub bundled: BTreeSet<String>,
+    pub(crate) bundled: BTreeSet<String>,
     /// Published entry files (relative paths from the package root) — the roots
     /// of the reachable-module walk, each tagged by whether it is the main entry
     /// or a non-`.` `exports` subpath (the adapter surface).
@@ -52,8 +52,8 @@ pub enum EntryKind {
 /// A published entry file + its surface kind.
 #[derive(Debug, Clone)]
 pub struct Entry {
-    pub path: String,
-    pub kind: EntryKind,
+    pub(crate) path: String,
+    pub(crate) kind: EntryKind,
 }
 
 impl Manifest {
@@ -294,13 +294,13 @@ fn is_entry_candidate(path: &str) -> bool {
 
 /// A TypeScript declaration file (`.d.ts`/`.d.mts`/`.d.cts`) — the type surface a
 /// `Types` entry seeds and the file class the graph walk resolves for that entry.
-pub fn is_dts_like(path: &str) -> bool {
+pub(crate) fn is_dts_like(path: &str) -> bool {
     path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
 }
 
 /// A JS-like runtime file (extension we can parse for imports). Excludes `.json`,
 /// `.node`, `.wasm`, `.css`, and `.d.ts` type stubs.
-pub fn is_js_like(path: &str) -> bool {
+pub(crate) fn is_js_like(path: &str) -> bool {
     if path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts") {
         return false;
     }
@@ -317,7 +317,7 @@ pub fn is_js_like(path: &str) -> bool {
 /// type-checker's upward `node_modules` walk can't reach the hoisted backend
 /// otherwise (nub#450). The graph walk resolves these and `extract` reads their
 /// script region.
-pub fn is_sfc_like(path: &str) -> bool {
+pub(crate) fn is_sfc_like(path: &str) -> bool {
     matches!(extension(path), Some("astro" | "vue" | "svelte"))
 }
 

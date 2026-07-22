@@ -248,10 +248,10 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         family: Family::Install,
         aube_args: "commands::create::CreateArgs",
     },
-    // `init` is deliberately NOT registered: the spelling is reserved for
-    // nub's own project init (the maintainer owns the verb), not the engine's
-    // npm-style manifest scaffold. cli.rs answers `nub init` with a
-    // "nub's own init is coming" note instead of a PM redirect.
+    // `init` is deliberately NOT registered: the spelling belongs to nub's
+    // own project scaffold (src/init.rs, a clap subcommand), not the engine's
+    // npm-style manifest write — the fourth deliberate pnpm-compat exception
+    // (AGENTS.md); design record in wiki/commands/init.md.
     // Workspace fanout meta-verb. Registered so it errors with the honest
     // "use -r on the verb" message rather than the generic not-a-command
     // fallback (install_family::run_verb).
@@ -967,14 +967,18 @@ fn apply_config_scope(
     // Scope the override sources to the role's dialect.
     let tagged = config_scope::gather_tagged_overrides(&manifest);
     let (effective, ignored) = config_scope::scope_overrides(role, major, minor, &tagged);
+    // Scope packageExtensions the same way: the top-level home is nub's neutral
+    // surface, honored only under nub identity and dropped under a compat role
+    // whose incumbent ignores it (see `scope_package_extensions`).
+    let (effective_pe, pe_ignored) = config_scope::scope_package_extensions(role, &manifest);
 
-    // Register the scoped source as the engine's sole override source, and
-    // the trusted-deps toggle (only bun honors `trustedDependencies`). Both
-    // are idempotent OnceLocks.
+    // Register the scoped sources as the engine's sole override / packageExtensions
+    // sources, and the trusted-deps toggle (only bun honors `trustedDependencies`).
     let trusted = config_scope::honors_trusted_dependencies(role);
     aube_util::update_engine_context(|c| {
         c.embedder_overrides = Some(effective);
         c.trusted_dependencies_honored = trusted;
+        c.embedder_package_extensions = Some(effective_pe);
     });
 
     if noise == ConfigScopeNoise::Warn {
@@ -986,6 +990,8 @@ fn apply_config_scope(
         {
             return Err(catalog_unsupported_error(role, &spec));
         }
+        let mut ignored = ignored;
+        ignored.extend(pe_ignored);
         emit_scope_warnings(role, &ignored);
 
         // Curated unsupported-config scan: FATAL-abort on the genuinely-hard
@@ -1465,6 +1471,22 @@ fn resolve_identity_walk_up(
     strictness: IdentityStrictness,
 ) -> Result<Option<DetectedLockfile>> {
     use aube_lockfile::ResolvedLockfileKind;
+    // The walk never escapes nub's own PM cache root. Installs running inside
+    // it are nub-internal by construction (the node-gyp bootstrap's recursive
+    // install, dlx scratch dirs) and must not inherit identity from whatever
+    // sits above the cache — unbounded, a first-run bootstrap dir (manifest,
+    // no lockfile yet) walked into $HOME and hard-failed the outer install on
+    // unrelated-lockfile ambiguity (#489). The root is kept in whichever
+    // spelling is an ancestor of `cwd` (raw, or canonicalized for the
+    // symlinked-temp-dir case) so the containment test stays consistent as
+    // `dir` pops.
+    let clamp = aube_store::dirs::cache_dir().and_then(|root| {
+        if cwd.starts_with(&root) {
+            return Some(root);
+        }
+        let canon = std::fs::canonicalize(&root).ok()?;
+        cwd.starts_with(&canon).then_some(canon)
+    });
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
         match aube_lockfile::resolve_project_lockfile_kind(&dir) {
@@ -1493,6 +1515,11 @@ fn resolve_identity_walk_up(
             Err(err) => return Err(identity_error(err)),
         }
         if !dir.pop() {
+            break;
+        }
+        if let Some(root) = &clamp
+            && !dir.starts_with(root)
+        {
             break;
         }
     }
@@ -1672,6 +1699,13 @@ pub(crate) fn engine_brand_preflight() {
         // bool because that posture defaults `true` in standalone aube, which
         // would activate the feature there and break default-preservation.
         c.named_registries_enabled = read_branded_pnpm_config;
+        // nub treats packageExtensions as a checksummed, drift-enforced config
+        // like pnpm: it stamps `packageExtensionsChecksum` on its own generic
+        // lockfile (nub.lock) and re-resolves / frozen-fails on a mismatch.
+        // Unconditional (not surface-gated) — harmless under lockfile kinds that
+        // carry no checksum (npm/yarn/bun locks), where stored and computed both
+        // resolve to `None`. Standalone aube leaves the default `false`.
+        c.enforce_package_extensions_checksum = true;
     });
     match surface {
         ConfigSurface::NubIdentity(dir) => {

@@ -9,6 +9,6 @@ pub mod shim;
 // the runtime blob (`embed-runtime`). The default dev build resolves `runtime/`
 // via the in-repo walk in `spawn::find_preload`, so this module is absent.
 #[cfg(feature = "embed-runtime")]
-pub mod runtime_cache;
+pub(crate) mod runtime_cache;
 pub mod spawn;
 pub mod version;

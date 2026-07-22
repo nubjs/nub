@@ -103,7 +103,7 @@ pub async fn run(args: DedupeArgs) -> miette::Result<()> {
         "Dedupe: {} removed, {} added (net {} packages)",
         removed.len(),
         added.len(),
-        graph.packages.len() as i64 - existing.as_ref().map_or(0, |g| g.packages.len()) as i64,
+        added.len() as i64 - removed.len() as i64,
     );
 
     if args.check {
@@ -125,14 +125,41 @@ pub async fn run(args: DedupeArgs) -> miette::Result<()> {
 /// Diff two lockfile graphs by dep_path. Returns `(removed, added)` — packages
 /// present in `old` but not `new`, and vice versa. Versions that are in both
 /// are omitted (they're untouched).
+///
+/// Only packages the lockfile writer actually serializes participate:
+/// `link:`/`exec:` entries are excluded, exactly mirroring the writer's
+/// skip set for the `packages:`/`snapshots:` sections (`pnpm/write.rs`),
+/// so a key that can never reach the lockfile can never be reported as a
+/// change. The case that made this bite is workspace-member links, where
+/// the two graphs are also asymmetric: the parser synthesizes a
+/// `<name>@link+<hash>` package for every workspace link it reads back,
+/// while a fresh resolve binds members by version and records no package
+/// entry at all — so dedupe reported them as "removed" on every run
+/// while the lockfile stayed byte-identical, and `--check` failed
+/// forever. (`exec:` and non-member `link:` deps resolve symmetrically;
+/// they are excluded on the writer-parity ground alone.)
 fn diff_graphs(
     existing: Option<&aube_lockfile::LockfileGraph>,
     new: &aube_lockfile::LockfileGraph,
 ) -> (Vec<String>, Vec<String>) {
+    fn serialized_keys(
+        pkgs: &BTreeMap<String, aube_lockfile::LockedPackage>,
+    ) -> BTreeSet<&String> {
+        use aube_lockfile::LocalSource;
+        pkgs.iter()
+            .filter(|(_, pkg)| {
+                !matches!(
+                    pkg.local_source,
+                    Some(LocalSource::Link(_) | LocalSource::Exec(_))
+                )
+            })
+            .map(|(key, _)| key)
+            .collect()
+    }
+
     let empty: BTreeMap<String, aube_lockfile::LockedPackage> = BTreeMap::new();
-    let old_pkgs = existing.map(|g| &g.packages).unwrap_or(&empty);
-    let old_keys: BTreeSet<&String> = old_pkgs.keys().collect();
-    let new_keys: BTreeSet<&String> = new.packages.keys().collect();
+    let old_keys = serialized_keys(existing.map(|g| &g.packages).unwrap_or(&empty));
+    let new_keys = serialized_keys(&new.packages);
 
     let removed: Vec<String> = old_keys
         .difference(&new_keys)

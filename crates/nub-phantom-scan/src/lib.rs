@@ -25,8 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use classify::Finding;
-pub use classify::Verdict;
+pub(crate) use classify::Verdict;
 use manifest::Manifest;
 
 /// One undeclared target a scanned version pulls in, with the provenance bits the
@@ -36,9 +35,9 @@ pub struct PhantomTarget {
     /// The undeclared package name (`zod`, `@apify/datastructures`).
     pub name: String,
     /// Reached from the package's main entry surface.
-    pub from_main: bool,
+    from_main: bool,
     /// Reached from a non-`.` `exports` subpath (the adapter surface).
-    pub from_subpath: bool,
+    from_subpath: bool,
 }
 
 /// The per-version scan verdict — the immutable, per-content-integrity payload
@@ -65,7 +64,7 @@ pub struct ScanResult {
     #[serde(default)]
     pub type_coupled_peers: Vec<String>,
     /// Reachable files parsed (diagnostic — lets the caller see scan breadth).
-    pub files_analyzed: usize,
+    files_analyzed: usize,
 }
 
 /// Scan an already-extracted package tree rooted at `root` (the dir holding
@@ -132,62 +131,9 @@ fn reduce(manifest: &Manifest, walk: &graph::Walk) -> ScanResult {
     }
 }
 
-/// The full per-package report (all verdict categories, not just hard phantoms) —
-/// used by the eval tool and the A/B corpus harness. `scan_extracted` is the lean
-/// production entry; this is the diagnostic one.
-#[derive(Debug, Serialize)]
-pub struct PackageReport {
-    pub name: String,
-    pub version: String,
-    pub findings: Vec<Finding>,
-    pub files_analyzed: usize,
-    pub unresolved_relative: usize,
-}
-
-impl PackageReport {
-    pub fn count(&self, v: Verdict) -> usize {
-        self.findings.iter().filter(|f| f.verdict == v).count()
-    }
-    pub fn hard_phantoms(&self) -> impl Iterator<Item = &Finding> {
-        self.findings
-            .iter()
-            .filter(|f| f.verdict == Verdict::HardPhantom)
-    }
-    pub fn subpath_adapter_phantoms(&self) -> impl Iterator<Item = &Finding> {
-        self.findings.iter().filter(|f| f.is_subpath_adapter())
-    }
-    pub fn naive_phantom_count(&self) -> usize {
-        self.findings
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.verdict,
-                    Verdict::HardPhantom | Verdict::SoftPhantom | Verdict::DeclaredOptionalPeer
-                )
-            })
-            .count()
-    }
-}
-
-/// Analyze an already-extracted package tree into a full [`PackageReport`].
-pub fn analyze_extracted(root: &Path, version: &str) -> Result<PackageReport, String> {
-    let raw =
-        std::fs::read(root.join("package.json")).map_err(|e| format!("read package.json: {e}"))?;
-    let manifest = Manifest::parse(&raw).ok_or("unparseable package.json / no name")?;
-    let walk = graph::walk(root, &manifest.entry_points);
-    let findings = classify::classify(&manifest, &walk.references);
-    Ok(PackageReport {
-        name: manifest.name,
-        version: version.to_string(),
-        findings,
-        files_analyzed: walk.files_analyzed,
-        unresolved_relative: walk.unresolved_relative,
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{PathBuf, Verdict, analyze_extracted, scan_extracted, scan_index};
+    use super::{PathBuf, scan_extracted, scan_index};
     use std::fs;
 
     /// `(relpath, blob-path)` pairs for an on-disk tree — the blob is the real
@@ -464,15 +410,6 @@ mod tests {
             "extract-time index scan diverged from post-link tree scan"
         );
         assert!(from_index.has_unguarded_phantom);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn full_report_still_available() {
-        let root = fixture();
-        let r = analyze_extracted(&root, "1.2.3").unwrap();
-        assert_eq!(r.count(Verdict::HardPhantom), 3);
-        assert_eq!(r.version, "1.2.3");
         let _ = fs::remove_dir_all(&root);
     }
 }

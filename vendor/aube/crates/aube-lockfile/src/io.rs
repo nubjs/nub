@@ -233,6 +233,20 @@ fn lockfile_write_is_noop(
     let Ok(existing) = parse_one(path, kind, manifest) else {
         return false;
     };
+    // Under an enforcing embedder (nub), a differing `packageExtensionsChecksum`
+    // is a real config change that must be persisted — fold it into the no-op
+    // decision, exactly like the patch fingerprints below. Without this the
+    // guard suppresses the very write that would record the checksum whenever
+    // the resolved graph is otherwise unchanged (the mainline case: an existing
+    // lockfile that already applied the same extensions, just never stamped the
+    // checksum), leaving `--frozen-lockfile` permanently mismatched with no
+    // install-based remedy. Standalone aube never stamps the generic lock
+    // (posture off), so this is inert for it.
+    if aube_util::engine_context().enforce_package_extensions_checksum
+        && graph.package_extensions_checksum != existing.package_extensions_checksum
+    {
+        return false;
+    }
     // `allow_build` doesn't affect the engine-agnostic identity hash
     // (the engine taint it would gate is computed with `engine: None`),
     // so a trivial policy is correct here.

@@ -336,6 +336,72 @@ fn global_scope_commands_ignore_multi_lockfile_ambiguity() {
     );
 }
 
+/// The internal-re-entry corner of the #197/#199 class (#489): the node-gyp
+/// bootstrap runs a recursive `nub install` inside the PM cache
+/// (`$XDG_CACHE_HOME/nub/pm/tools/node-gyp/<bucket>`), whose first run has a
+/// manifest but no lockfile yet. The identity walk-up must stop at nub's cache
+/// root instead of climbing into ancestor dirs ($HOME on a real machine) and
+/// hard-failing on lockfile ambiguity that has nothing to do with the install.
+#[test]
+fn cache_scratch_installs_never_inherit_ambient_identity() {
+    // Ambiguous ANCESTOR of the cache root — two lockfile families, as a
+    // $HOME with leftovers from unrelated experiments would have.
+    let dir = project("cache-clamp", r#"{"name":"app","version":"1.0.0"}"#);
+    std::fs::write(
+        dir.join("package-lock.json"),
+        r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+
+    // The tool dir exactly as `bootstrap_blocking` shapes it: manifest +
+    // empty workspace-yaml stub, no lockfile. The dead-port `.npmrc` proves
+    // the install gets past identity to the resolve phase.
+    let tool_dir = dir
+        .join("xdg-cache")
+        .join("nub")
+        .join("pm")
+        .join("tools")
+        .join("node-gyp")
+        .join("v12");
+    std::fs::create_dir_all(&tool_dir).unwrap();
+    std::fs::write(
+        tool_dir.join("package.json"),
+        r#"{"name":"aube-tool-node-gyp","private":true,"dependencies":{"node-gyp":"^12.0.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(tool_dir.join("pnpm-workspace.yaml"), "").unwrap();
+    std::fs::write(
+        tool_dir.join(".npmrc"),
+        "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
+    )
+    .unwrap();
+
+    // The exact recursive invocation the bootstrap spawns — cwd is the tool
+    // dir while XDG_CACHE_HOME points at the cache root above it (the layout
+    // the walk must not escape), so the shared `run` helper (which pins the
+    // XDG roots to its cwd) doesn't fit here.
+    let out = Command::new(nub_binary())
+        .args(["install", "--ignore-scripts", "--silent"])
+        .current_dir(&tool_dir)
+        .env("NUB_SELF_SHIM", "0")
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "an install inside nub's cache root must not inherit ambient lockfile ambiguity: {stderr}"
+    );
+    // Positive proof the walk was clamped (fresh identity, resolution reached)
+    // rather than the command dying on some unrelated early exit.
+    assert!(
+        stderr.contains("ERR_NUB_REGISTRY_ERROR"),
+        "the scratch install should get past identity to the registry fetch: {stderr}"
+    );
+}
+
 /// The declared-yarn corner of the fresh row: identity resolves to yarn with
 /// no yarn.lock on disk, and the first install would CREATE yarn.lock — the
 /// gated write. Refused with the gate message, nothing written.

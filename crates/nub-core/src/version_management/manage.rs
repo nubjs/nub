@@ -78,14 +78,6 @@ pub enum InstallOutcome {
     Installed(NodeVersion),
 }
 
-impl InstallOutcome {
-    pub fn version(&self) -> &NodeVersion {
-        match self {
-            Self::AlreadyCached(v) | Self::AlreadyOnPath(v) | Self::Installed(v) => v,
-        }
-    }
-}
-
 /// Resolve a spec (`22`, `lts`, `22.13.0`, `latest`, …) to a concrete published
 /// version against the dist index. An exact `X.Y.Z` is still routed through the
 /// index so a typo'd nonexistent version fails fast rather than 404ing mid-download.

@@ -884,6 +884,21 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     let existing_for_resolver: Option<&aube_lockfile::LockfileGraph> =
         lockfile_pre_parse.as_ref().map(|(g, _)| g);
 
+    // The project's effective packageExtensions checksum, for the lockfile
+    // drift check. Computed only under an enforcing embedder (nub); standalone
+    // aube leaves it `None` and the drift check (gated on the same posture) is
+    // a no-op. Uses the same `effective_package_extensions` the stamp path
+    // does, so a fresh install and the drift check agree.
+    let effective_package_extensions_checksum =
+        if aube_util::engine_context().enforce_package_extensions_checksum {
+            aube_lockfile::pnpm::package_extensions_checksum(&settings::effective_package_extensions(
+                &manifest,
+                &settings_ctx,
+            ))
+        } else {
+            None
+        };
+
     // `--lockfile-only` short-circuit. Resolves (or reuses a fresh
     // lockfile), writes the new lockfile, and exits before any tarball
     // fetch / link / lifecycle work. Runs *before* the FrozenMode match
@@ -909,6 +924,8 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 workspace_catalogs: &workspace_catalogs,
                 is_workspace_project,
                 lockfile_pre_parse: lockfile_pre_parse.as_ref(),
+                effective_package_extensions_checksum: effective_package_extensions_checksum
+                    .clone(),
             })? {
                 Ok(_) => {}
                 Err(aube_lockfile::Error::NotFound(_)) => {
@@ -1105,6 +1122,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
         workspace_catalogs: &workspace_catalogs,
         is_workspace_project,
         lockfile_pre_parse: lockfile_pre_parse.as_ref(),
+        effective_package_extensions_checksum,
     })?;
 
     // Deprecation messages from freshly-resolved packages. Only the

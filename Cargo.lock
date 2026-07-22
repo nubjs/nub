@@ -2677,6 +2677,7 @@ dependencies = [
  "clap",
  "clx",
  "console",
+ "demand",
  "dirs-next",
  "dotenvy",
  "jsonc-parser",

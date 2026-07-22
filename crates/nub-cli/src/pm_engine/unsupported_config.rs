@@ -304,8 +304,10 @@ fn scan_fatal(role: Role, root: &Path) -> Option<FatalField> {
                     field: "`legacy-peer-deps`",
                     detail: "nub always resolves peer dependencies; npm's legacy escape hatch \
                              would produce a different peer graph",
-                    remedy: "remove `legacy-peer-deps` from .npmrc and fix the peer conflict, \
-                             or pin the conflicting versions in `overrides`",
+                    remedy: "remove `legacy-peer-deps` from .npmrc and fix the peer conflict — \
+                             pin the conflicting versions in `overrides`, or correct a \
+                             package's peer metadata (e.g. mark a peer optional) in \
+                             `packageExtensions`",
                 });
             }
             if let Some(strategy) = npmrc_project_value(root, "install-strategy")

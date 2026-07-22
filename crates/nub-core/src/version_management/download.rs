@@ -15,7 +15,7 @@
 //! number of times ([`MAX_ATTEMPTS`]); 4xx and integrity failures fail fast.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -119,25 +119,59 @@ fn backoff(attempt: u32) {
 }
 
 /// GET a small text resource (e.g. `SHASUMS256.txt`), fail-closed on non-2xx.
-pub fn fetch_text(url: &str) -> Result<String> {
+pub(crate) fn fetch_text(url: &str) -> Result<String> {
     fetch_text_auth(url, None)
 }
 
 /// [`fetch_text`] with an optional private-registry `Authorization` header and the
 /// bounded transient-failure retry.
 pub fn fetch_text_auth(url: &str, auth: Option<&Auth>) -> Result<String> {
-    let client = client()?;
+    fetch_text_accept_auth(url, None, auth).map_err(|e| e.error)
+}
+
+/// A failed text fetch, split by WHERE it failed: `status` carries the HTTP
+/// status when the server ANSWERED with a non-2xx (after retries) — the signal a
+/// caller can use to fall back to a different endpoint on the same host — and is
+/// `None` for a transport-level failure (unreachable host, TLS, timeout), where
+/// any sibling-endpoint fallback would only re-run the same doomed connect.
+pub struct FetchTextError {
+    pub status: Option<u16>,
+    pub error: anyhow::Error,
+}
+
+/// [`fetch_text_auth`] with an optional `Accept` header (the npm registry varies
+/// its packument representation on it) and a status-carrying error so callers can
+/// distinguish "endpoint said no" from "host unreachable".
+pub fn fetch_text_accept_auth(
+    url: &str,
+    accept: Option<&str>,
+    auth: Option<&Auth>,
+) -> std::result::Result<String, FetchTextError> {
+    let client = match client() {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(FetchTextError {
+                status: None,
+                error: e,
+            });
+        }
+    };
     let mut attempt = 0;
     loop {
         attempt += 1;
         let last = attempt >= MAX_ATTEMPTS;
-        match try_fetch_text(&client, url, auth) {
+        match try_fetch_text(&client, url, accept, auth) {
             Ok(body) => return Ok(body),
             Err(e) if !last && e.transient => {
                 backoff(attempt);
                 continue;
             }
-            Err(e) => return Err(e.error).with_context(|| format!("GET {url}")),
+            Err(e) => {
+                return Err(FetchTextError {
+                    status: e.status,
+                    error: e.error.context(format!("GET {url}")),
+                });
+            }
         }
     }
 }
@@ -147,20 +181,26 @@ pub fn fetch_text_auth(url: &str, auth: Option<&Auth>) -> Result<String> {
 fn try_fetch_text(
     client: &reqwest::blocking::Client,
     url: &str,
+    accept: Option<&str>,
     auth: Option<&Auth>,
 ) -> std::result::Result<String, Attempt> {
-    let resp = with_auth(client.get(url), auth)
-        .send()
-        .map_err(Attempt::from_send)?;
+    let mut req = with_auth(client.get(url), auth);
+    if let Some(media_type) = accept {
+        req = req.header(reqwest::header::ACCEPT, media_type);
+    }
+    let resp = req.send().map_err(Attempt::from_send)?;
     let resp = resp.error_for_status().map_err(Attempt::from_status)?;
     resp.text()
         .map_err(|e| Attempt::transient(anyhow::Error::new(e)))
 }
 
-/// A failed attempt plus whether the retry loop should try again.
+/// A failed attempt plus whether the retry loop should try again. `status` is
+/// the HTTP status when the server answered non-2xx (`None` for transport
+/// failures) — surfaced through [`FetchTextError`] for endpoint fallback.
 struct Attempt {
     error: anyhow::Error,
     transient: bool,
+    status: Option<u16>,
 }
 
 impl Attempt {
@@ -168,12 +208,14 @@ impl Attempt {
         Self {
             error,
             transient: true,
+            status: None,
         }
     }
     fn fatal(error: anyhow::Error) -> Self {
         Self {
             error,
             transient: false,
+            status: None,
         }
     }
     /// A send/connect/timeout failure (no HTTP status yet).
@@ -182,14 +224,17 @@ impl Attempt {
         Self {
             error: anyhow::Error::new(err),
             transient,
+            status: None,
         }
     }
     /// A non-2xx status from `error_for_status`: only 5xx/429 retry.
     fn from_status(err: reqwest::Error) -> Self {
         let transient = err.status().map(status_is_transient).unwrap_or(false);
+        let status = err.status().map(|s| s.as_u16());
         Self {
             error: anyhow::Error::new(err),
             transient,
+            status,
         }
     }
 }
@@ -198,7 +243,7 @@ impl Attempt {
 /// returning the SHA-256 (lowercase hex) of the bytes written. `progress` is
 /// called as chunks arrive with `(bytes_so_far, total_len_if_known)` so callers
 /// can render a stderr progress line.
-pub fn download_to_file(
+pub(crate) fn download_to_file(
     url: &str,
     dest: &Path,
     progress: impl FnMut(u64, Option<u64>),
@@ -245,7 +290,14 @@ fn try_download(
     auth: Option<&Auth>,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> std::result::Result<String, Attempt> {
+    // Integrity is verified over the on-disk bytes, so the wire body must BE the
+    // published artifact. The client's `gzip` feature (wanted for packument
+    // fetches) would otherwise advertise `Accept-Encoding: gzip` here and
+    // transparently decompress a `Content-Encoding`d response — inviting a proxy
+    // to re-encode an already-compressed tarball and fail the checksum. Ask for
+    // identity: artifacts gain nothing from transfer compression.
     let resp = with_auth(client.get(url), auth)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .send()
         .map_err(Attempt::from_send)?;
     let mut resp = resp.error_for_status().map_err(Attempt::from_status)?;
@@ -280,8 +332,184 @@ fn try_download(
     Ok(hex_lower(&hasher.finalize()))
 }
 
-/// SHA-256 (lowercase hex) of a file already on disk.
-pub fn sha256_file(path: &Path) -> Result<String> {
+/// Download a `.tar.xz` and extract it WHILE it streams in (#496): the response
+/// bytes are hashed and fed through a bounded channel to an extractor thread, so
+/// the wall clock is max(download, decode+extract) instead of their sum. The
+/// extraction lands under `stage_parent` (the provisioner's quarantine `.tmp-`
+/// work dir) — the caller MUST verify the returned SHA-256 against
+/// `SHASUMS256.txt` before committing the tree anywhere, and must discard the
+/// work dir on mismatch (`provision_node`'s `WorkGuard` covers every exit path).
+/// Returns `(sha256_hex, extracted_top_dir)`.
+///
+/// Retry mirrors [`download_to_file_auth`]: a mid-stream transport fault or a
+/// short body (known `Content-Length`, connection closed early) retries from
+/// scratch with a fresh stage dir; an extraction failure (corrupt xz, bomb-cap
+/// trip, disk error) is fatal — TLS already guarantees stream integrity, so
+/// corrupt bytes won't improve on a retry.
+pub fn download_and_extract_tar_xz(
+    url: &str,
+    stage_parent: &Path,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<(String, PathBuf)> {
+    let client = client()?;
+    let source_name = url.rsplit('/').next().unwrap_or(url).to_string();
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let last = attempt >= MAX_ATTEMPTS;
+        match try_download_extract(&client, url, &source_name, stage_parent, &mut progress) {
+            Ok(ok) => return Ok(ok),
+            Err(e) if !last && e.transient => {
+                backoff(attempt);
+                continue;
+            }
+            Err(e) => return Err(e.error).with_context(|| format!("downloading {url}")),
+        }
+    }
+}
+
+/// One streamed download+extract attempt. The stage dir is wiped at the top so a
+/// retry never extracts on top of a partial tree.
+fn try_download_extract(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    source_name: &str,
+    stage_parent: &Path,
+    progress: &mut impl FnMut(u64, Option<u64>),
+) -> std::result::Result<(String, PathBuf), Attempt> {
+    let resp = with_auth(client.get(url), None)
+        .send()
+        .map_err(Attempt::from_send)?;
+    let mut resp = resp.error_for_status().map_err(Attempt::from_status)?;
+    let total = resp.content_length();
+
+    let stage = stage_parent.join("stream-extract");
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)
+        .with_context(|| format!("create {}", stage.display()))
+        .map_err(Attempt::fatal)?;
+
+    // Bounded channel = backpressure: at most 16 × 64 KiB in flight, so a slow
+    // disk can't balloon memory and a fast disk never starves the socket.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+    let extractor = {
+        let stage = stage.clone();
+        let name = source_name.to_string();
+        std::thread::spawn(move || {
+            crate::version_management::extract::extract_tar_xz_stream(
+                ChannelReader {
+                    rx,
+                    buf: Vec::new(),
+                    pos: 0,
+                },
+                &name,
+                &stage,
+            )
+        })
+    };
+
+    let join_extractor = |h: std::thread::JoinHandle<Result<PathBuf>>| -> Result<PathBuf> {
+        h.join()
+            .unwrap_or_else(|_| bail!("extractor thread panicked unpacking {source_name}"))
+    };
+
+    let mut extractor = Some(extractor);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut written = 0u64;
+    let mut transport: std::result::Result<(), Attempt> = Ok(());
+    // Set when the extractor exits before the body ends (a send fails). A tar
+    // reader legitimately stops at the end-of-archive marker, before trailing
+    // padding — then we keep DRAINING the body so the hash covers every byte;
+    // an extraction FAILURE stops the download (its error is the story, and the
+    // rest of the body is wasted bandwidth).
+    let mut early: Option<Result<PathBuf>> = None;
+    loop {
+        let n = match resp.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                // Mid-stream transport drop → retry (after collecting the thread).
+                transport = Err(Attempt::transient(
+                    anyhow::Error::new(e).context("reading response body"),
+                ));
+                break;
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        written += n as u64;
+        progress(written, total);
+        if early.is_none() && tx.send(buf[..n].to_vec()).is_err() {
+            // A failed send means the receiver is gone, i.e. the extractor
+            // thread already returned — join is immediate.
+            let result = join_extractor(extractor.take().expect("joined once"));
+            let failed = result.is_err();
+            early = Some(result);
+            if failed {
+                break;
+            }
+        }
+    }
+    drop(tx); // signals EOF to the extractor
+    let extracted = match early {
+        Some(r) => r,
+        None => join_extractor(extractor.take().expect("joined once")),
+    };
+
+    // Precedence: a transport fault outranks the extractor's (symptomatic,
+    // truncated-stream) error; a genuine extraction failure outranks the
+    // short-body check (the body IS short because we stopped downloading — a
+    // transient retry would just re-download and re-fail, masking the cause);
+    // a short-but-cleanly-closed body retries.
+    transport?;
+    if let Some(t) = total {
+        if written != t && extracted.is_ok() {
+            return Err(Attempt::transient(anyhow::anyhow!(
+                "short response body: got {written} of {t} bytes"
+            )));
+        }
+    }
+    match extracted {
+        Ok(top) => Ok((hex_lower(&hasher.finalize()), top)),
+        Err(e) => Err(Attempt::fatal(e)),
+    }
+}
+
+/// `Read` over the download→extractor channel: each `recv` hands the next chunk,
+/// a disconnected sender is EOF. (The download side never sends an empty chunk.)
+struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        // `while` (not `if`): an empty chunk must never read as EOF — the
+        // download side doesn't send them, but a clean EOF here is load-bearing
+        // enough not to rest on that invariant alone.
+        while self.pos >= self.buf.len() {
+            match self.rx.recv() {
+                Ok(chunk) => {
+                    self.buf = chunk;
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.buf.len() - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// SHA-256 (lowercase hex) of a file already on disk. The production path hashes
+/// the stream during download; tests use this to independently verify the result.
+#[cfg(test)]
+fn sha256_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
@@ -308,7 +536,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// Find the expected SHA-256 for `filename` in a `SHASUMS256.txt` body. Each line
 /// is `<64-hex>  <filename>` (sha256sum format — two spaces). Returns the
 /// lowercase hex, or `None` when the file isn't listed.
-pub fn checksum_for(shasums: &str, filename: &str) -> Option<String> {
+fn checksum_for(shasums: &str, filename: &str) -> Option<String> {
     shasums.lines().find_map(|line| {
         let (hash, rest) = line.split_once(char::is_whitespace)?;
         let name = rest.trim_start(); // collapse the leading space(s) before the name
@@ -319,7 +547,11 @@ pub fn checksum_for(shasums: &str, filename: &str) -> Option<String> {
 
 /// Verify a downloaded artifact's SHA-256 against `SHASUMS256.txt`. Fail-closed:
 /// errors when `filename` isn't listed or the hashes differ.
-pub fn verify_checksum(actual_sha256_hex: &str, shasums: &str, filename: &str) -> Result<()> {
+pub(crate) fn verify_checksum(
+    actual_sha256_hex: &str,
+    shasums: &str,
+    filename: &str,
+) -> Result<()> {
     let expected = checksum_for(shasums, filename)
         .with_context(|| format!("{filename} is not listed in SHASUMS256.txt — refusing"))?;
     if actual_sha256_hex.eq_ignore_ascii_case(&expected) {

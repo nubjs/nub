@@ -164,6 +164,18 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     // other drift — same rule as pnpm's lockfile-config mismatch.
     let (effective_patch_paths, effective_patch_hashes) =
         crate::patches::effective_patch_config(cwd)?;
+    // packageExtensions drift (nub-only): a packageExtensions edit re-generates
+    // the lockfile like patch/override drift. Computed only under the enforcing
+    // embedder (nub) so standalone aube's `--lockfile-only` path does no extra
+    // work; `package_extensions_drift` also gates on the same posture.
+    let effective_package_extensions_checksum =
+        if aube_util::engine_context().enforce_package_extensions_checksum {
+            aube_lockfile::pnpm::package_extensions_checksum(
+                &super::settings::effective_package_extensions(manifest, settings_ctx),
+            )
+        } else {
+            None
+        };
     let fresh = !force_resolve
         && matches!(
             parsed,
@@ -185,6 +197,13 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
                             k,
                             &effective_patch_paths,
                             &effective_patch_hashes
+                        ),
+                        DriftStatus::Fresh
+                    )
+                    && matches!(
+                        package_extensions_drift(
+                            g,
+                            effective_package_extensions_checksum.as_deref()
                         ),
                         DriftStatus::Fresh
                     )
@@ -395,6 +414,23 @@ pub(super) struct SelectLockfileInput<'a> {
     pub workspace_catalogs: &'a crate::commands::CatalogMap,
     pub is_workspace_project: bool,
     pub lockfile_pre_parse: Option<&'a (LockfileGraph, LockfileKind)>,
+    /// The project's freshly-computed effective `packageExtensions` checksum
+    /// (`None` when there are none, or when the embedder doesn't enforce it).
+    /// Compared against the lockfile's recorded value under an enforcing
+    /// embedder to catch a packageExtensions edit; see
+    /// [`package_extensions_drift`].
+    pub effective_package_extensions_checksum: Option<String>,
+}
+
+/// packageExtensions drift, gated on the embedder posture. Returns `Fresh`
+/// when the embedder doesn't enforce the checksum (standalone aube), so the
+/// check is a nub-only layer that never fires on aube's default path.
+fn package_extensions_drift(graph: &LockfileGraph, effective_checksum: Option<&str>) -> DriftStatus {
+    if aube_util::engine_context().enforce_package_extensions_checksum {
+        graph.check_package_extensions_drift(effective_checksum)
+    } else {
+        DriftStatus::Fresh
+    }
 }
 
 pub(super) fn select_lockfile_result(
@@ -412,6 +448,7 @@ pub(super) fn select_lockfile_result(
         workspace_catalogs,
         is_workspace_project,
         lockfile_pre_parse,
+        effective_package_extensions_checksum,
     } = input;
     if !lockfile_enabled {
         tracing::debug!("lockfile=false: skipping lockfile parse, re-resolving");
@@ -473,6 +510,19 @@ pub(super) fn select_lockfile_result(
                          help: run without --frozen-lockfile to update the lockfile"
                     ));
                 }
+                // Same hard-fail for packageExtensions drift (nub-only layer,
+                // gated on the enforcing embedder) — pnpm rejects this as
+                // ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
+                if let DriftStatus::Stale { reason } = package_extensions_drift(
+                    graph,
+                    effective_package_extensions_checksum.as_deref(),
+                ) {
+                    return Err(miette!(
+                        code = aube_codes::errors::ERR_AUBE_OUTDATED_LOCKFILE,
+                        "lockfile is out of date with the project's packageExtensions configuration: {reason}\n\
+                         help: run without --frozen-lockfile to update the lockfile"
+                    ));
+                }
             }
             Ok(parsed)
         }
@@ -503,11 +553,17 @@ pub(super) fn select_lockfile_result(
                             is_workspace_project,
                             *kind,
                         ) {
-                            DriftStatus::Fresh => graph.check_patched_dependencies_drift(
+                            DriftStatus::Fresh => match graph.check_patched_dependencies_drift(
                                 *kind,
                                 &effective_patch_paths,
                                 &effective_patch_hashes,
-                            ),
+                            ) {
+                                DriftStatus::Fresh => package_extensions_drift(
+                                    graph,
+                                    effective_package_extensions_checksum.as_deref(),
+                                ),
+                                stale => stale,
+                            },
                             stale => stale,
                         };
                         match drift {

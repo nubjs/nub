@@ -34,7 +34,7 @@ const ALWAYS_INJECT: &[&str] = &["--enable-source-maps"];
 /// AssertionError. Verified on real Node 26.2.0:
 /// `node --enable-source-maps -e 'try{require("assert").ok(false)}catch(e){console.log(e.constructor.name)}'`
 /// prints `TypeError`; without the flag it prints `AssertionError`.
-pub fn source_maps_safe(node_version: &NodeVersion) -> bool {
+fn source_maps_safe(node_version: &NodeVersion) -> bool {
     !(node_version.major() == 26 && node_version.minor() == 2)
 }
 
@@ -58,8 +58,10 @@ const MIN_DISABLE_WARNING: NodeVersion = NodeVersion::new(20, 11, 0);
 /// NOTE: this is version-detection logic the spawn path uses indirectly via
 /// `webstorage_flag_needed` (which derives from the same matrix). It is the
 /// canonical description of Node's Web Storage banding (the source of truth shared
-/// with the `webstorage` feature_matrix row).
-pub fn webstorage_supported(node_version: &NodeVersion) -> bool {
+/// with the `webstorage` feature_matrix row). Only the banding tests call it
+/// directly — production reaches the matrix via `webstorage_flag_needed`.
+#[cfg(test)]
+fn webstorage_supported(node_version: &NodeVersion) -> bool {
     feature_matrix::feature("webstorage")
         .mitigation_for(node_version)
         .is_some()
@@ -76,7 +78,7 @@ pub fn webstorage_supported(node_version: &NodeVersion) -> bool {
 /// `--experimental-webstorage` (the maintainer, 2026-06-15): on the flag-needed band the
 /// flag is unconditionally injected so `sessionStorage` works out of the box; below
 /// the band it's a "bad option" and on 25+ it's unnecessary (native).
-pub fn webstorage_flag_needed(node_version: &NodeVersion) -> bool {
+pub(crate) fn webstorage_flag_needed(node_version: &NodeVersion) -> bool {
     matches!(
         feature_matrix::feature("webstorage").mitigation_for(node_version),
         Some(Mitigation::Unflag(_))
@@ -92,10 +94,10 @@ pub fn webstorage_flag_needed(node_version: &NodeVersion) -> bool {
 /// On the compat tier below 22.5 the exclude is simply skipped: nub's runtime shows
 /// up in the (rare) coverage report — a cosmetic aggregate quirk, vastly better than
 /// refusing to start. Verified against real Node 18.19 / 20.11 / 22.15.
-pub const MIN_TEST_COVERAGE_EXCLUDE: NodeVersion = NodeVersion::new(22, 5, 0);
+const MIN_TEST_COVERAGE_EXCLUDE: NodeVersion = NodeVersion::new(22, 5, 0);
 
 /// Whether the target Node supports `--test-coverage-exclude` (argv or NODE_OPTIONS).
-pub fn test_coverage_exclude_supported(node_version: &NodeVersion) -> bool {
+pub(crate) fn test_coverage_exclude_supported(node_version: &NodeVersion) -> bool {
     *node_version >= MIN_TEST_COVERAGE_EXCLUDE
 }
 

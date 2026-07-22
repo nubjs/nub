@@ -20,12 +20,12 @@ use std::path::{Path, PathBuf};
 /// A parsed filter expression.
 #[derive(Debug, Clone)]
 pub struct Filter {
-    pub pattern: String,
-    pub include_dependencies: bool,
-    pub include_dependents: bool,
-    pub exclude_self: bool,
-    pub git_ref: Option<String>,
-    pub exclude: bool,
+    pattern: String,
+    include_dependencies: bool,
+    include_dependents: bool,
+    exclude_self: bool,
+    git_ref: Option<String>,
+    exclude: bool,
 }
 
 impl Filter {
@@ -112,7 +112,7 @@ impl Filter {
 ///   tree against the ref directly, so a branch that diverged from `<ref>` still
 ///   selects members touched on EITHER side. Three-dot (merge-base..HEAD) would
 ///   drop the diverged side and `fatal: no merge base` on unrelated histories.
-pub fn packages_changed_since(
+fn packages_changed_since(
     workspace_root: &Path,
     members: &[WorkspacePackage],
     git_ref: &str,
@@ -523,8 +523,10 @@ fn raw_matched_set(
 
 /// Apply a single filter to workspace members, returning the matched set in
 /// topological order (dependencies first). This is the single-`--filter` base
-/// case; [`apply_filters`] generalizes it to several filters at once.
-pub fn apply_filter(
+/// case; [`apply_filters`] generalizes it to several filters at once. Production
+/// always goes through `apply_filters`; the selector tests use this base case.
+#[cfg(test)]
+fn apply_filter(
     members: &[WorkspacePackage],
     filter: &Filter,
     workspace_root: Option<&Path>,

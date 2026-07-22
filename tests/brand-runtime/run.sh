@@ -247,9 +247,10 @@ EOF
 (cd "$PROJ" && check_clean "search npm-only error" "$NUB" search left-pad)
 
 # --------------------------------------------------------------------------
-# 19. init: reserved error
+# 19. init: positional rejection (always errors pre-write — never scaffolds
+#     or installs, regardless of $PROJ's manifest state)
 # --------------------------------------------------------------------------
-(cd "$PROJ" && check_clean "init reserved error" "$NUB" init)
+(cd "$PROJ" && check_clean "init arg-reject" "$NUB" init some-template)
 
 # --------------------------------------------------------------------------
 # 20. upgrade --dry-run (no network download; checks brand in upgrade output)

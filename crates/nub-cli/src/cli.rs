@@ -155,6 +155,24 @@ fn emit_ndjson_summary(passed: usize, failed: usize) {
 /// dependency spun up a thread during init (A19). Set once; never mutated after.
 static ENV_FILE_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
+/// Raw (unexpanded, un-stripped) merge of the explicit `--env-file` contents —
+/// the values Node's own `--env-file` parser delivers. The watch path forwards
+/// the explicit files to the watched Node (#479) and compares [`ENV_FILE_VARS`]
+/// against this map to inject only keys whose `${VAR}` expansion changed the
+/// raw value (see [`watch_inject_vars`]); every plain var is left to Node's
+/// re-read so it live-reloads across restarts.
+static ENV_FILE_VARS_RAW: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Explicit `--env-file` / `--env-file-if-exists` paths in command-line order
+/// (absolutized against the scan-time cwd — the directory `read_env_file`
+/// resolved them from), tagged with the if-exists flavor. Retained for the
+/// watch path, which forwards them to the watched Node as `--env-file*` args
+/// so Node watches each file and every restarted child re-reads it (#479);
+/// the parsed values in [`ENV_FILE_VARS`] alone would freeze at their startup
+/// snapshot because the long-lived watch supervisor never restarts. Non-watch
+/// paths never read this.
+static ENV_FILE_PATHS: OnceLock<Vec<(PathBuf, bool)>> = OnceLock::new();
+
 /// Whether at least one `--env-file` flag was present on the command line.
 /// Distinct from `ENV_FILE_VARS` being empty: a user may pass `--env-file` to an
 /// empty file (zero vars) yet still have signalled intent. When set, nub's eager
@@ -271,25 +289,58 @@ fn watch_inject_vars<'a>(
         .collect()
 }
 
-/// Render an auto-discovered watch env file for Node's platform-specific watcher.
-/// Node 20.11 on Linux rejects absolute `--env-file` paths even when the file
-/// exists. Node 24's Windows watcher also aborts when an argv path contains an
-/// 8.3 component (for example `RUNNER~1`) but the filesystem event arrives with
-/// the long spelling. Keep Windows absolute and expand only short components;
-/// make Unix cwd-relative without canonicalizing so symlink and watch identity
-/// stay unchanged.
-fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool) -> Result<String> {
+/// Whether the watch path forwards the explicit `--env-file` flags to the
+/// watched Node (#479): the pinned Node must accept every flag flavor present —
+/// `--env-file` landed in 20.6.0, `--env-file-if-exists` in 22.9.0. All-or-
+/// nothing per run: mixing forwarded and injected explicit files would corrupt
+/// last-writer-wins precedence. Below the floor the watch path falls back to
+/// whole-map injection (values freeze at startup — the pre-#479 behavior).
+fn should_forward_explicit_env_files(
+    version: &nub_core::node::version::NodeVersion,
+    explicit: &[(PathBuf, bool)],
+) -> bool {
+    use nub_core::node::version::NodeVersion;
+    if explicit.is_empty() {
+        return false;
+    }
+    let needs_if_exists = explicit.iter().any(|(_, if_exists)| *if_exists);
+    *version >= NodeVersion::new(20, 6, 0)
+        && (!needs_if_exists || *version >= NodeVersion::new(22, 9, 0))
+}
+
+/// Render a forwarded watch env file (auto-discovered or explicit) for Node's
+/// platform-specific watcher. Node 20.11 on Linux rejects absolute `--env-file`
+/// paths even when the file exists. Node 24's Windows watcher also aborts when
+/// an argv path contains an 8.3 component (for example `RUNNER~1`) but the
+/// filesystem event arrives with the long spelling. Keep Windows absolute and
+/// expand only short components; make Unix cwd-relative without canonicalizing
+/// so symlink and watch identity stay unchanged. `if_exists` picks the
+/// `--env-file-if-exists` spelling (and tolerates an absent file, which that
+/// flag's semantics allow).
+fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool, if_exists: bool) -> Result<String> {
+    let flag = if if_exists {
+        "--env-file-if-exists"
+    } else {
+        "--env-file"
+    };
     if !path.is_absolute() || !cwd.is_absolute() {
         bail!("watch env-file paths and cwd must be absolute");
     }
 
     if windows {
-        let path = windows_long_watch_path(path)?;
+        // GetLongPathNameW fails on a nonexistent path; an absent if-exists
+        // target is legal (Node silently no-ops), so forward it verbatim — an
+        // unwatchable file has no event for the 8.3-spelling mismatch to bite.
+        let path = if if_exists && !path.exists() {
+            path.to_path_buf()
+        } else {
+            windows_long_watch_path(path)?
+        };
         let path = path
             .to_str()
             .context("watch env-file path is not valid UTF-8")?;
         let path = strip_windows_verbatim_prefix(path);
-        return Ok(format!("--env-file={path}"));
+        return Ok(format!("{flag}={path}"));
     }
 
     for (parent_count, ancestor) in cwd.ancestors().enumerate() {
@@ -307,7 +358,7 @@ fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool) -> Result<String> 
         let relative = relative
             .to_str()
             .context("watch env-file relative path is not valid UTF-8")?;
-        return Ok(format!("--env-file={relative}"));
+        return Ok(format!("{flag}={relative}"));
     }
 
     bail!(
@@ -790,6 +841,42 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    // nub's own project init, not the engine's npm-style manifest write —
+    // deliberately excluded from ENGINE_VERBS; design record in
+    // wiki/commands/init.md. (The doc comment below is user-facing `--help`
+    // text: no internal references.)
+    /// Scaffold a new TypeScript-first project.
+    Init {
+        /// Non-interactive: skip all prompts and take the defaults.
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// JavaScript variant: `index.js`, no tsconfig.json, no type devDeps.
+        #[arg(long)]
+        js: bool,
+
+        /// Project name (default: the directory name, sanitized).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// Skip `git init`.
+        #[arg(long = "no-git")]
+        no_git: bool,
+
+        /// Skip the `nub install` step.
+        #[arg(long = "no-install")]
+        no_install: bool,
+
+        /// Overwrite existing files (default: refuse and list conflicts).
+        #[arg(long)]
+        force: bool,
+
+        /// Rejected with a `nubx create-<template>` hint — `init` takes no
+        /// positionals (pnpm parity).
+        #[arg(trailing_var_arg = true, hide = true)]
+        args: Vec<String>,
+    },
+
     /// Upgrade Nub to the latest version.
     Upgrade {
         /// Target version (default: latest).
@@ -992,6 +1079,26 @@ pub enum ColorWhen {
 
 /// Top-level entry point. Returns the process exit code.
 pub fn run() -> Result<i32> {
+    // The macOS parent-death watcher (#480) re-invokes `current_exe()` with this
+    // hidden verb — and `current_exe()` is whatever NAME nub is running under,
+    // which for any workload spawned through nub's own PATH shim is `node`, not
+    // `nub`. Dispatching it here, BEFORE `Argv0::detect()`, is what makes the
+    // verb argv0-independent. Routing it through the argv0 match instead let
+    // `Argv0::Node` treat `__pdeath-watch` as a SCRIPT to run, which spawned a
+    // workload — and therefore another watcher — per level, an unbounded
+    // self-replicating chain that exhausted the process table (regression from #504).
+    //
+    // Landing above the guards below is also deliberate: the watcher must not
+    // reclaim or reap PATH shim dirs, which belong to the nub that spawned it.
+    #[cfg(unix)]
+    {
+        let mut args = env::args().skip(1);
+        if args.next().as_deref() == Some("__pdeath-watch") {
+            let rest: Vec<String> = args.collect();
+            return Ok(nub_core::node::spawn::run_pdeath_watch(&rest));
+        }
+    }
+
     // Reclaim the active PATH shim temp dir exactly once, on return. The shim
     // is created lazily/idempotently by the spawn paths and is process-wide; it
     // must outlive every — possibly parallel — child, so
@@ -1085,7 +1192,7 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci",
+    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci", "init",
 ];
 
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
@@ -1340,6 +1447,11 @@ fn run_nub() -> Result<i32> {
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
+    // Parallel raw (pre-expansion) merge + the flag paths themselves, retained
+    // for the watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
+    // ENV_FILE_PATHS.
+    let mut env_file_raw_vars: std::collections::HashMap<String, String> = Default::default();
+    let mut env_file_paths: Vec<(PathBuf, bool)> = Vec::new();
     // Tracks whether any `--env-file` flag appeared, independent of whether it
     // yielded vars (an empty file still counts as intent). Drives suppression of
     // the eager `.env*` auto-discovery.
@@ -1452,17 +1564,35 @@ fn run_nub() -> Result<i32> {
                 };
                 if !file_path.is_empty() {
                     let path = std::path::Path::new(&file_path);
+                    // Absolutize against the CURRENT cwd — the directory
+                    // read_env_file resolves the relative path from right below
+                    // (this scan runs before any `--cwd` chdir) — so the watch
+                    // path's forwarding names the same file the parse read.
+                    let abs_path = if path.is_absolute() {
+                        Some(path.to_path_buf())
+                    } else {
+                        env::current_dir().ok().map(|d| d.join(path))
+                    };
                     // `--env-file-if-exists`: a non-existent file is a silent no-op
                     // (Node's whole reason for the flag). A file that DOES exist but
                     // can't be read still surfaces the error, matching Node — only
                     // the missing-file case is suppressed.
                     if if_exists && !path.exists() {
-                        // silent no-op
+                        // Silent no-op for values — but still retained for watch
+                        // forwarding: Node's own `--env-file-if-exists` no-ops on
+                        // an absent file too, and a restarted child picks the file
+                        // up if it appears later (parity).
+                        if let Some(abs) = abs_path {
+                            env_file_paths.push((abs, if_exists));
+                        }
                     } else if let Some(content) =
                         // read_env_file refuses non-regular files (e.g. /dev/zero) and
                         // oversized files, so a hostile --env-file can't hang or OOM.
                         nub_core::workspace::env::read_env_file(path)
                     {
+                        if let Some(abs) = abs_path {
+                            env_file_paths.push((abs, if_exists));
+                        }
                         // Route through parse_env (not dotenvy directly) so the
                         // explicit --env-file flag strips backtick-quoted values
                         // like Node's parser, matching the .env auto-load path.
@@ -1472,9 +1602,13 @@ fn run_nub() -> Result<i32> {
                             // variables defined in previous files" (doc/api/cli.md).
                             // Shell env still wins over all of them — enforced later
                             // in `overlay_env_file_vars` (skips keys already set).
+                            env_file_raw_vars.insert(k.clone(), v.clone());
                             env_file_vars.insert(k, v);
                         }
                     } else {
+                        // Warn-and-continue (softer than Node's hard error) — and do
+                        // NOT retain the path: forwarding an unreadable file would
+                        // turn the warning into a per-restart child error under watch.
                         eprintln!("nub: cannot read env file: {file_path}");
                     }
                 }
@@ -1516,7 +1650,9 @@ fn run_nub() -> Result<i32> {
                 // Check if this is the first positional and matches a subcommand
                 // (nub-native, a verb registered to the embedded PM engine, or
                 // the engine's hidden node-gyp re-entry verb — its lazy shims
-                // re-invoke current_exe() with it mid-lifecycle-script).
+                // re-invoke current_exe() with it mid-lifecycle-script). The
+                // parent-death watcher's verb is handled in `run()`, above
+                // argv0 dispatch, so it never reaches here.
                 if rest.is_empty()
                     && !arg.starts_with('-')
                     && (SUBCOMMANDS.contains(&arg.as_str())
@@ -1568,6 +1704,13 @@ fn run_nub() -> Result<i32> {
     // dep threads during init. Shell-wins / `.env`-override precedence is applied
     // at each spawn site via overlay_env_file_vars / apply_env_file_vars.
     let _ = ENV_FILE_VARS.set(env_file_vars);
+    // Raw values + flag paths for the watch path's --env-file forwarding (#479).
+    // The raw map deliberately keeps denied keys: watch_inject_vars iterates the
+    // stripped ENV_FILE_VARS side, so a denied key is never injected, and the
+    // forwarded file's copy is neutralized by the watch env guard's placeholder
+    // pinning (Node's --env-file never overrides an already-set var).
+    let _ = ENV_FILE_VARS_RAW.set(env_file_raw_vars);
+    let _ = ENV_FILE_PATHS.set(env_file_paths);
     // Record flag presence so the run/watch paths can suppress eager `.env*`
     // auto-discovery when the user named explicit env file(s).
     let _ = ENV_FILE_PRESENT.set(env_file_present);
@@ -1680,17 +1823,6 @@ fn run_nub() -> Result<i32> {
         if is_node_passthrough {
             run_file_with_compat(&rest, compat)
         } else {
-            // `init` is reserved for nub's own project init (not the PM
-            // engine's npm-style manifest scaffold) — deliberately absent
-            // from ENGINE_VERBS, answered with a "coming" note rather than
-            // a PM redirect so nobody scaffolds the wrong shape meanwhile.
-            if first == "init" {
-                bail!(
-                    "nub: \"init\" is reserved — nub's own project init is coming and \
-                     hasn't shipped yet\n\
-                     \x20\x20(to run a package.json script named init: nub run init)"
-                );
-            }
             // No magic auto-run (deliberate divergence from pnpm/bun, which run
             // `<pm> dev` as the dev script). But when the bareword is almost
             // certainly a script — it's defined in the local package.json#scripts,
@@ -2264,6 +2396,23 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 }
             }
         }
+        Some(Command::Init {
+            yes,
+            js,
+            name,
+            no_git,
+            no_install,
+            force,
+            args,
+        }) => crate::init::run_init(crate::init::InitOptions {
+            yes,
+            js,
+            name,
+            no_git,
+            no_install,
+            force,
+            args,
+        }),
         Some(Command::Upgrade {
             version,
             dry_run,
@@ -4456,6 +4605,10 @@ fn spawn_script_prefixed(
     // Relay docker stop / Ctrl-C to the streamed child's whole process group too
     // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
     nub_core::node::spawn::track_child_group(child.id());
+    // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; held across
+    // the wait below, dropped (disarmed) on return.
+    #[cfg(unix)]
+    let _reaper = nub_core::node::spawn::spawn_group_reaper(child.id());
     let mut output_buf = String::new();
 
     let stdout = child.stdout.take();
@@ -4604,12 +4757,20 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
             .unwrap_or_default()
     };
+    // Explicit `--env-file` flags forward to the watched Node too (#479), so
+    // each file is watched and re-read per restart exactly like the autos —
+    // these are the candidates; the per-version gate lives below.
+    let explicit_env_files: &[(PathBuf, bool)] = if env_file_present && !no_env_file {
+        ENV_FILE_PATHS.get().map(|v| v.as_slice()).unwrap_or(&[])
+    } else {
+        &[]
+    };
     // A raw env-file path arms the child guard for the watch lifetime. Validate
     // its serialized ambient state before Node discovery: an uncached
     // `node --version` probe inherits NODE_OPTIONS, so waiting until command
     // assembly would let invalid bytes fail with an unrelated Node error first.
     if !compat_mode
-        && !env_file_paths.is_empty()
+        && (!env_file_paths.is_empty() || !explicit_env_files.is_empty())
         && env::var_os("NODE_OPTIONS").is_some_and(|value| value.to_str().is_none())
     {
         bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
@@ -4680,12 +4841,27 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // single read (rather than `load_env_files` + a second `load_env_files_raw`)
     // avoids re-parsing every file twice and closes the TOCTOU window where a file
     // changing between two reads could spuriously inject a plain var.
+    // Forward the explicit `--env-file` files only when the pinned Node accepts
+    // every flag flavor present (#479). All-or-nothing: mixing forwarded and
+    // injected explicit files would corrupt last-writer-wins precedence (an
+    // injected earlier file, arriving via the inherited env, would beat a
+    // forwarded later one — Node's `--env-file` never overrides an already-set
+    // var). Below the gate, fall back to whole-map injection: values freeze at
+    // their startup snapshot (the pre-#479 behavior — degraded, never broken).
+    let forward_explicit = should_forward_explicit_env_files(&node.version, explicit_env_files);
     let raw_env = if env_file_present || no_env_file {
-        // `--env-file` suppresses auto-discovery: no auto `--env-file` args reach
-        // Node, so injection is the only delivery channel — leave `raw_env` empty
-        // so the inject loop injects every var (see `watch_inject_vars`). Under
-        // `--no-env-file` `merge_child_env` returns empty, so nothing is injected.
-        HashMap::new()
+        if forward_explicit {
+            // The explicit files reach Node as `--env-file` args below, so the
+            // inject loop must skip everything Node delivers identically — hand
+            // it the raw (unexpanded) explicit merge, same as the auto path.
+            ENV_FILE_VARS_RAW.get().cloned().unwrap_or_default()
+        } else {
+            // No `--env-file` args reach Node, so injection is the only delivery
+            // channel — leave `raw_env` empty so the inject loop injects every
+            // var (see `watch_inject_vars`). Under `--no-env-file`
+            // `merge_child_env` returns empty, so nothing is injected.
+            HashMap::new()
+        }
     } else {
         project
             .as_ref()
@@ -4734,7 +4910,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for path in env_file_paths.iter().rev() {
         // `cmd` inherits `cwd`; the helper chooses the path form required by the
         // platform watcher without changing cwd or file precedence.
-        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows))?);
+        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
+    }
+    // Explicit `--env-file` files forward in USER order — no reverse: Node is
+    // last-writer-wins and nub's parse across repeated flags is last-wins too,
+    // so the orders already agree (#479).
+    if forward_explicit {
+        for (path, if_exists) in explicit_env_files {
+            node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), *if_exists)?);
+        }
     }
 
     if let Some(preload) = &preload_path {
@@ -4764,8 +4948,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // older bundled versions abort on the mismatch. Align only this raw-env
     // watch path's supervisor cwd; GetLongPathNameW preserves symlink/junction
     // identity and non-Windows behavior stays byte-for-byte unchanged.
+    // Whether ANY env file (auto-discovered or explicit) reaches Node as a raw
+    // `--env-file` arg — the trigger for the per-child guard machinery below.
+    let any_env_forwarded = !env_file_paths.is_empty() || forward_explicit;
     #[cfg(windows)]
-    if !env_file_paths.is_empty() {
+    if any_env_forwarded {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
     }
     // Inject ONLY the .env* vars whose `${VAR}` expansion changed the raw value
@@ -4776,14 +4963,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for (k, v) in watch_inject_vars(&env_vars, &raw_env) {
         cmd.env(k, v);
     }
-    // Node receives the auto-discovered files as raw `--env-file` paths and
-    // re-reads them in each watched child. Keep canonical placeholders in the
-    // preload-free supervisor so startup consumers cannot act on file values;
-    // an early child-only `--require` then removes every non-ambient denied
-    // spelling and restores the sanitized ambient NODE_OPTIONS before user
-    // preloads run. Arming by path presence, rather than current contents, keeps
-    // edits made after startup behind the same boundary.
-    if !env_file_paths.is_empty() {
+    // Node receives the forwarded files (auto-discovered + explicit) as raw
+    // `--env-file` paths and re-reads them in each watched child. Keep canonical
+    // placeholders in the preload-free supervisor so startup consumers cannot
+    // act on file values; an early child-only `--require` then removes every
+    // non-ambient denied spelling and restores the sanitized ambient
+    // NODE_OPTIONS before user preloads run. Arming by path presence, rather
+    // than current contents, keeps edits made after startup behind the same
+    // boundary.
+    if any_env_forwarded {
         if node_options_os.is_some() && node_options.is_none() {
             bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
         }
@@ -5250,15 +5438,16 @@ fn suggest_package_manager(cwd: &Path) -> String {
 const RELEASE_REPO: &str = "nubjs/nub";
 
 /// Internal, test-only override for the GitHub *releases-download* base
-/// (`https://github.com/<repo>/releases/download`). When set, `tarball_url` /
+/// (`https://github.com/<repo>/releases/download`). When set, `archive_url` /
 /// `checksum_url` point at it instead of github.com, so the self-owned
 /// download+verify+swap path can be driven against a local `file://` fixture
 /// with no network. UNSET in all normal operation (default behavior is
 /// byte-identical); this is NOT a documented user knob — it exists purely so the
 /// upgrade flow is end-to-end testable without publishing a real release. The
 /// value is used verbatim as a URL prefix: the artifact for `v<version>` /
-/// `<target>` is `<base>/v<version>/nub-<target>.tar.gz` (mirroring GitHub's
-/// release-asset layout), so a fixture must reproduce that path shape.
+/// `<target>` is `<base>/v<version>/nub-<target>.<ext>` (`.zip` for win32
+/// targets, `.tar.gz` otherwise — mirroring GitHub's release-asset layout), so
+/// a fixture must reproduce that path shape.
 const RELEASE_DOWNLOAD_BASE_ENV: &str = "NUB_RELEASE_BASE_URL";
 
 /// Internal, test-only override for the "resolve `latest`" endpoint
@@ -5288,6 +5477,11 @@ fn release_latest_api() -> String {
 /// third-party package — emitting it would clobber a working install, so every
 /// npm-channel command must target the scoped `@nubjs/nub`.
 const NPM_PACKAGE: &str = "@nubjs/nub";
+
+/// On-disk file name of the nub executable inside a self-owned install's
+/// `bin/` — `nub.exe` on Windows, `nub` elsewhere (same fact install.ps1 /
+/// install.sh encode).
+const NUB_EXE: &str = if cfg!(windows) { "nub.exe" } else { "nub" };
 
 /// How the running `nub` binary got onto disk. Detection is a single rung: the
 /// canonicalized path of the binary matched against known install-layout shapes.
@@ -5344,16 +5538,17 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
 }
 
 /// The release-artifact platform token for the current build, mirroring
-/// install.sh's `uname -ms` → target mapping. `None` on a platform Nub doesn't
-/// publish a tarball for (the self-owned channel then falls back to a clear
-/// error rather than fetching a 404). musl vs glibc on Linux is a runtime
-/// distinction install.sh makes via `ldd`/`/etc/alpine-release`; we encode the
-/// glibc default here and document musl as the known gap (see note below).
+/// install.sh's `uname -ms` → target mapping (install.ps1's OSArchitecture
+/// switch on Windows). `None` on a platform Nub doesn't publish an archive for
+/// (the self-owned channel then falls back to a clear error rather than
+/// fetching a 404). musl vs glibc on Linux is a runtime distinction install.sh
+/// makes via `ldd`/`/etc/alpine-release`; we encode the glibc default here and
+/// document musl as the known gap (see note below).
 pub(crate) fn platform_target() -> Option<&'static str> {
     // NOTE: a glibc build and a musl build of the same arch are the same Rust
     // `target_env` only under `target_env = "musl"`, so this distinguishes them
     // correctly when Nub itself is built for musl. The detection matches the
-    // tarball names release.yml publishes.
+    // archive names release.yml publishes.
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Some("darwin-arm64"),
         ("macos", "x86_64") => Some("darwin-x64"),
@@ -5361,6 +5556,8 @@ pub(crate) fn platform_target() -> Option<&'static str> {
         ("linux", "x86_64") => Some("linux-x64"),
         ("linux", "aarch64") if cfg!(target_env = "musl") => Some("linux-arm64-musl"),
         ("linux", "aarch64") => Some("linux-arm64"),
+        ("windows", "x86_64") => Some("win32-x64"),
+        ("windows", "aarch64") => Some("win32-arm64"),
         _ => None,
     }
 }
@@ -5412,19 +5609,36 @@ fn npm_upgrade_command_invocation(target: &str) -> std::process::Command {
     }
 }
 
-/// GitHub release tarball URL for a resolved version + platform target. Mirrors
-/// install.sh's `url=` line so the self-owned channel pulls the same artifact
-/// the installer did. The base is [`release_download_base`] so the test seam can
-/// redirect it to a local fixture; unset → the canonical github.com URL.
-fn tarball_url(version: &str, target: &str) -> String {
-    format!("{}/v{version}/nub-{target}.tar.gz", release_download_base())
+/// Release-archive extension for a platform token: the win32 targets publish
+/// portable `.zip` (release.yml), every other target a `.tar.gz`. Keyed on the
+/// target STRING rather than `cfg!` so the URL builders stay pure and testable
+/// on any host.
+fn archive_ext(target: &str) -> &'static str {
+    if target.starts_with("win32-") {
+        "zip"
+    } else {
+        "tar.gz"
+    }
 }
 
-/// SHA-256 checksum sidecar URL for the tarball. release.yml publishes a
+/// GitHub release archive URL for a resolved version + platform target. Mirrors
+/// install.sh's `url=` line (install.ps1's on Windows) so the self-owned channel
+/// pulls the same artifact the installer did. The base is
+/// [`release_download_base`] so the test seam can redirect it to a local
+/// fixture; unset → the canonical github.com URL.
+fn archive_url(version: &str, target: &str) -> String {
+    format!(
+        "{}/v{version}/nub-{target}.{}",
+        release_download_base(),
+        archive_ext(target)
+    )
+}
+
+/// SHA-256 checksum sidecar URL for the archive. release.yml publishes a
 /// `<archive>.sha256` next to each archive; the self-owned channel fetches it
 /// and verifies the download before extracting.
 fn checksum_url(version: &str, target: &str) -> String {
-    format!("{}.sha256", tarball_url(version, target))
+    format!("{}.sha256", archive_url(version, target))
 }
 
 fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> {
@@ -5450,13 +5664,6 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                     "would upgrade to {target} via self-owned ({})",
                     install_dir.display()
                 );
-                if cfg!(windows) {
-                    println!(
-                        "  note: a real self-owned upgrade is unsupported on Windows; \
-                         reinstall via `{}` instead.",
-                        npm_upgrade_command("latest")
-                    );
-                }
                 match platform_target() {
                     Some(plat) => {
                         // Resolve `latest` to a concrete tag so the printed URL is
@@ -5473,12 +5680,12 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                             println!("  (could not resolve `latest`; showing literal)");
                         }
                         println!("  platform: {plat}");
-                        println!("  tarball:  {}", tarball_url(ver, plat));
+                        println!("  archive:  {}", archive_url(ver, plat));
                         println!("  sha256:   {}", checksum_url(ver, plat));
                         println!("  install:  {}", install_dir.display());
                     }
                     None => println!(
-                        "  (no published tarball for this platform: {}/{})",
+                        "  (no published archive for this platform: {}/{})",
                         std::env::consts::OS,
                         std::env::consts::ARCH
                     ),
@@ -5583,27 +5790,7 @@ fn resolve_version(spec: &str) -> Result<String> {
     Ok(tag.trim_start_matches('v').to_string())
 }
 
-/// The actionable message shown when a self-owned (`~/.nub`) upgrade is attempted
-/// on Windows, where renaming `bin/`+`runtime/` out from under the running
-/// `nub.exe` is unsafe (ERROR_SHARING_VIOLATION). Pure (takes `is_windows`
-/// explicitly) so the fail-fast contract is unit-testable on any host: returns
-/// `Some(msg)` to refuse, `None` to proceed. Self-owned only — npm/homebrew
-/// channels delegate to a package manager and are not affected.
-fn windows_selfowned_unsupported(is_windows: bool) -> Option<String> {
-    if !is_windows {
-        return None;
-    }
-    Some(format!(
-        "nub upgrade: self-upgrade isn't supported on Windows yet.\n\
-         A running nub.exe can't replace its own files in place, so swapping the \
-         install would risk leaving it half-updated.\n\
-         To update, reinstall instead:\n  \
-         npm install -g {NPM_PACKAGE}@latest\n\
-         or re-run the Windows installer."
-    ))
-}
-
-/// Download + SHA-256-verify + atomic-swap a release tarball into a self-owned
+/// Download + SHA-256-verify + atomic-swap a release archive into a self-owned
 /// `~/.nub` install. Mirrors install.sh's layout exactly: the archive contains
 /// `bin/` + `runtime/`, extracted into `<install_dir>` after replacing the prior
 /// `bin/`+`runtime/`.
@@ -5612,38 +5799,29 @@ fn windows_selfowned_unsupported(is_windows: bool) -> Option<String> {
 /// existing install is untouched. We stage the extraction in a sibling temp dir
 /// on the same filesystem, verify the SHA-256 before extracting, then swap the
 /// new `bin`/`runtime` into place via directory rename (atomic per-dir on POSIX);
-/// the prior dirs move aside to `.old` first and are GC'd on success.
+/// the prior dirs move aside to `.old` first and are GC'd on success. Windows
+/// cannot take the directory-rename path at all — see [`swap_bin_files_windows`]
+/// for the per-file rename dance and its own all-or-nothing contract.
 ///
 /// MANUAL-VERIFICATION NOTE: the download/verify/rename path is network- and
 /// release-artifact-hard to unit-test (it needs a live GitHub release + a real
 /// platform tarball). It is verified ad hoc via `nub upgrade --dry-run` (which
 /// prints channel, URL, sha source, and install dir) and by running a real
 /// `nub upgrade` against a published release once one exists. The pure pieces —
-/// `detect_channel`, `tarball_url`, `checksum_url`, `platform_target`,
+/// `detect_channel`, `archive_url`, `checksum_url`, `platform_target`,
 /// `sha256_hex`, and sidecar parsing — are individually exercised; the glue here
 /// is kept deliberately linear and small so its correctness is reviewable by eye.
 fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<()> {
-    // Windows fail-fast: the self-owned swap renames `bin/` out from under the
-    // running `nub.exe`. A running executable cannot be renamed or deleted while
-    // in use on Windows (ERROR_SHARING_VIOLATION), so the swap can fail mid-flight
-    // and leave a half-replaced — potentially unbootable — install. We do not yet
-    // implement the rename-self-to-`.old` dance that would
-    // make this safe, so refuse BEFORE touching the filesystem. See
-    // upgrade.md#windows. This guards the real swap only; the npm/homebrew
-    // channels (which shell out to a package manager) are unaffected.
-    if let Some(msg) = windows_selfowned_unsupported(cfg!(windows)) {
-        bail!("{msg}");
-    }
     let target = platform_target().ok_or_else(|| {
         anyhow::anyhow!(
-            "nub upgrade: no published tarball for this platform ({}/{}). \
+            "nub upgrade: no published archive for this platform ({}/{}). \
              Reinstall via the install script instead.",
             std::env::consts::OS,
             std::env::consts::ARCH
         )
     })?;
     let version = resolve_version(version_spec)?;
-    let url = tarball_url(&version, target);
+    let url = archive_url(&version, target);
     let sha_url = checksum_url(&version, target);
 
     println!("upgrading to v{version} ({target})");
@@ -5654,7 +5832,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         .prefix(".nub-upgrade-")
         .tempdir_in(install_dir)
         .context("nub upgrade: could not create staging directory")?;
-    let archive_path = staging.path().join("nub.tar.gz");
+    let archive_path = staging.path().join(format!("nub.{}", archive_ext(target)));
 
     curl_download(&url, &archive_path)
         .with_context(|| format!("nub upgrade: failed to download {url}"))?;
@@ -5674,19 +5852,14 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // matching install.sh's `tar -xzf … -C $install_dir`.
     let staged_root = staging.path().join("staged");
     std::fs::create_dir_all(&staged_root)?;
-    let tar_status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&archive_path)
-        .arg("-C")
-        .arg(&staged_root)
-        .status()
+    let extracted = extract_release_archive(&archive_path, target, &staged_root)
         .context("nub upgrade: failed to invoke tar")?;
-    if !tar_status.success() {
+    if !extracted {
         bail!("nub upgrade: failed to extract archive {url}");
     }
     let new_bin = staged_root.join("bin");
-    if !new_bin.join("nub").is_file() {
-        bail!("nub upgrade: downloaded archive did not contain bin/nub");
+    if !new_bin.join(NUB_EXE).is_file() {
+        bail!("nub upgrade: downloaded archive did not contain bin/{NUB_EXE}");
     }
 
     // RESILIENCE CONTRACT: `bin/nub` is the ONLY component an upgrade hard-requires.
@@ -5702,6 +5875,9 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // satisfy old upgraders — see release.yml); either way the embedded-runtime
     // binary ignores ~/.nub/runtime, so any prior runtime/ is dead weight removed
     // best-effort for hygiene (mirrors install.sh / install.ps1).
+    #[cfg(windows)]
+    swap_bin_files_windows(install_dir, &new_bin)?;
+    #[cfg(not(windows))]
     swap_dir(install_dir, "bin", &new_bin)?;
     let _ = std::fs::remove_dir_all(install_dir.join("runtime"));
 
@@ -5711,8 +5887,10 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // installs with its own `chmod +x`; the self-owned upgrade path must do the
     // same or every upgrade leaves `~/.nub/bin/nub` as `-rw-r--r--` and the next
     // invocation is "command not found" / a silent fall-back to a stale npm binary.
-    // Set +x on the freshly-swapped-in binary before it can be invoked.
-    ensure_bin_executable(&install_dir.join("bin").join("nub"))?;
+    // Set +x on the freshly-swapped-in binary before it can be invoked. (Not a
+    // Windows concern — executability there is by extension, not a mode bit.)
+    #[cfg(not(windows))]
+    ensure_bin_executable(&install_dir.join("bin").join(NUB_EXE))?;
 
     // Recreate the `nubx` alias install.sh creates (relative symlink → nub; the CLI
     // dispatches on argv[0], so only the alias NAME matters — see Argv0::detect).
@@ -5720,7 +5898,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // and executable, so `nub` works regardless. nubx is a derived convenience —
     // its recreation failing (an exotic FS, a permissions quirk) must NOT abort an
     // otherwise-successful upgrade; warn and continue rather than bail. POSIX-only:
-    // Windows self-owned upgrades already bailed at the top of this fn.
+    // on Windows the nubx COPY is refreshed inside `swap_bin_files_windows`.
     #[cfg(unix)]
     {
         let nubx = install_dir.join("bin").join("nubx");
@@ -5738,9 +5916,77 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     Ok(())
 }
 
+/// The Windows half of the swap: per-FILE renames instead of the POSIX
+/// directory rename. Two Windows filesystem facts shape it (upgrade.md#windows):
+/// a memory-mapped (running) executable cannot be deleted or overwritten, but
+/// its directory ENTRY can be renamed — and a directory containing a mapped
+/// executable cannot be renamed at all, which rules out [`swap_dir`] here
+/// entirely. So: move the live `nub.exe` aside to `nub.exe.old` (succeeds even
+/// mid-run; rustup and uv ride the same fact), rename the staged binary into
+/// place, then refresh the `nubx.exe` COPY from it (install.ps1 ships nubx as a
+/// copy — symlinks need admin/Developer Mode).
+///
+/// All-or-nothing (the upgrade.md#atomicity contract, per-file form): if the
+/// first rename fails the install is untouched; if the second fails the old
+/// binary is rolled back into place. The `.old` files cannot be deleted while
+/// the old binary is still executing (this very process), so they are left
+/// behind and GC'd best-effort at the START of the next upgrade — deliberately
+/// never on the hot run path, which stays free of upgrade bookkeeping. The
+/// pre-GC also clears the way for the rename: `std::fs::rename` on Windows
+/// replaces an existing destination only when it isn't locked, and a stale
+/// `.old` still held by a long-lived pre-upgrade process would otherwise block
+/// the dance (the error message says to close old nub processes and retry).
+#[cfg(windows)]
+fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
+    let bin_dir = install_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("could not create {}", bin_dir.display()))?;
+    let nub = bin_dir.join("nub.exe");
+    let nub_old = bin_dir.join("nub.exe.old");
+    let nubx = bin_dir.join("nubx.exe");
+    let nubx_old = bin_dir.join("nubx.exe.old");
+
+    let _ = std::fs::remove_file(&nub_old);
+    let _ = std::fs::remove_file(&nubx_old);
+
+    if nub.exists() {
+        std::fs::rename(&nub, &nub_old).with_context(|| {
+            format!(
+                "nub upgrade: could not move the running {} aside. If a stale \
+                 nub.exe.old is held open by another running nub process, close \
+                 it and retry; the install has not been modified.",
+                nub.display()
+            )
+        })?;
+    }
+    if let Err(e) = std::fs::rename(staged_bin.join("nub.exe"), &nub) {
+        // Roll the old binary back so the install keeps working.
+        let _ = std::fs::rename(&nub_old, &nub);
+        return Err(e).with_context(|| format!("nub upgrade: could not install {}", nub.display()));
+    }
+
+    // nubx refresh is BEST-EFFORT per the resilience contract: `nub` is already
+    // swapped and authoritative. A running nubx.exe blocks the delete but not
+    // the rename-aside; if even that fails, warn and leave the stale copy.
+    if nubx.exists() && std::fs::remove_file(&nubx).is_err() {
+        let _ = std::fs::rename(&nubx, &nubx_old);
+    }
+    if let Err(e) = std::fs::copy(&nub, &nubx) {
+        eprintln!(
+            "nub upgrade: warning: could not refresh the nubx alias at {} ({e}); \
+             `nub` is upgraded and usable. Re-run the installer to restore nubx.",
+            nubx.display()
+        );
+    }
+    Ok(())
+}
+
 /// Atomically replace `<install_dir>/<name>` with `new_src` via rename: move any
 /// existing dir to a `.old` sibling (which we then remove), rename the staged dir
-/// into place. Same-filesystem, so each rename is atomic on POSIX.
+/// into place. Same-filesystem, so each rename is atomic on POSIX. (Unix-only:
+/// on Windows renaming a directory that contains the running executable fails —
+/// see [`swap_bin_files_windows`].)
+#[cfg(not(windows))]
 fn swap_dir(install_dir: &Path, name: &str, new_src: &Path) -> Result<()> {
     let dest = install_dir.join(name);
     if dest.exists() {
@@ -5761,9 +6007,9 @@ fn swap_dir(install_dir: &Path, name: &str, new_src: &Path) -> Result<()> {
 /// Set the executable bit (0o755) on a freshly-installed binary. The release
 /// archive ships the binary at 0o644 — CI's upload/download-artifact round-trip
 /// strips the +x install.sh would otherwise rely on — so the self-owned upgrade
-/// path must re-apply it or the upgraded `nub` is non-executable. No-op on
-/// Windows (executability is by extension, not a mode bit).
-#[cfg_attr(windows, allow(unused_variables, clippy::unnecessary_wraps))]
+/// path must re-apply it or the upgraded `nub` is non-executable. Not compiled
+/// on Windows (executability is by extension, not a mode bit).
+#[cfg(not(windows))]
 fn ensure_bin_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -5777,6 +6023,28 @@ fn ensure_bin_executable(path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Extract a release archive into `dest` by shelling to `tar`, returning whether
+/// tar succeeded (spawn failure is the `Err`). Handles both artifact formats:
+/// `.tar.gz` under `-xzf`, and the win32 `.zip` under plain `-xf` — `tar` on
+/// Windows IS bsdtar (in System32 since Windows 10 1803, alongside the curl.exe
+/// this channel already requires), which auto-detects zip on read, so no unzip
+/// dependency is needed. `-z` stays on the tar.gz path only because GNU tar
+/// (Linux) does not auto-detect under an explicit `-z` mismatch.
+fn extract_release_archive(archive: &Path, target: &str, dest: &Path) -> Result<bool> {
+    let status = std::process::Command::new("tar")
+        .arg(if archive_ext(target) == "zip" {
+            "-xf"
+        } else {
+            "-xzf"
+        })
+        .arg(archive)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .context("failed to invoke tar")?;
+    Ok(status.success())
 }
 
 /// Download `url` to `dest` via curl (the same tool install.sh uses — keeps Nub
@@ -5830,15 +6098,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// The nub binary's filename inside a release archive's `bin/` dir.
-fn nub_release_bin_name() -> &'static str {
-    if cfg!(windows) { "nub.exe" } else { "nub" }
-}
-
 /// Provision an exact nub version into the version-addressed self store and return
 /// the path to its `bin/nub` — the delegated-artifact half of the self-shim
 /// (`self_shim.rs` owns the decision). Reuses the `nub upgrade` release channel:
-/// download `<base>/v<ver>/nub-<target>.tar.gz`, SHA-256-verify it against the
+/// download `<base>/v<ver>/nub-<target>.<ext>`, SHA-256-verify it against the
 /// published `.sha256` sidecar BEFORE extracting, then confirm the extracted
 /// binary reports the expected version before it is trusted for a default-on exec.
 ///
@@ -5851,7 +6114,7 @@ fn nub_release_bin_name() -> &'static str {
 fn provision_self(version: &str) -> Result<PathBuf> {
     let store = pm_store_root()?.join("self");
     let final_dir = store.join(version);
-    let bin = final_dir.join("bin").join(nub_release_bin_name());
+    let bin = final_dir.join("bin").join(NUB_EXE);
     if bin.is_file() {
         return Ok(bin); // verified store hit — silent, no network
     }
@@ -5867,7 +6130,7 @@ fn provision_self(version: &str) -> Result<PathBuf> {
             std::env::consts::ARCH
         )
     })?;
-    let url = tarball_url(version, target);
+    let url = archive_url(version, target);
     let sha_url = checksum_url(version, target);
 
     std::fs::create_dir_all(&store)
@@ -5886,7 +6149,7 @@ fn provision_self(version: &str) -> Result<PathBuf> {
         .prefix(&format!(".self-{version}-"))
         .tempdir_in(&store)
         .context("creating a staging dir for the pinned-nub provision")?;
-    let archive = staging.path().join("nub.tar.gz");
+    let archive = staging.path().join(format!("nub.{}", archive_ext(target)));
 
     eprintln!("nub: provisioning pinned nub@{version} ({target})...");
     curl_download(&url, &archive).map_err(|_| {
@@ -5917,28 +6180,24 @@ fn provision_self(version: &str) -> Result<PathBuf> {
 
     let staged = staging.path().join("staged");
     std::fs::create_dir_all(&staged)?;
-    let tar_status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&staged)
-        .status()
+    let extracted = extract_release_archive(&archive, target, &staged)
         .context("invoking tar to extract the pinned nub")?;
-    if !tar_status.success() {
+    if !extracted {
         bail!(
             "{ERR_NUB_SELF_SHIM}: failed to extract the pinned nub@{version} archive. \
              Set NUB_SELF_SHIM=0 to run with your installed nub."
         );
     }
-    let staged_bin = staged.join("bin").join(nub_release_bin_name());
+    let staged_bin = staged.join("bin").join(NUB_EXE);
     if !staged_bin.is_file() {
         bail!(
-            "{ERR_NUB_SELF_SHIM}: the pinned nub@{version} archive did not contain bin/nub. \
+            "{ERR_NUB_SELF_SHIM}: the pinned nub@{version} archive did not contain bin/{NUB_EXE}. \
              Set NUB_SELF_SHIM=0 to run with your installed nub."
         );
     }
     // CI's upload/download-artifact round-trip strips +x from the archived binary
     // (see perform_selfowned_upgrade) — re-apply it before the version probe.
+    #[cfg(not(windows))]
     ensure_bin_executable(&staged_bin)?;
 
     // Provision-then-verify: a version-mismatched or corrupt artifact hard-errors
@@ -5961,7 +6220,7 @@ fn provision_self(version: &str) -> Result<PathBuf> {
         }
     }
     eprintln!("nub: provisioned nub@{version}");
-    Ok(final_dir.join("bin").join(nub_release_bin_name()))
+    Ok(final_dir.join("bin").join(NUB_EXE))
 }
 
 /// Run the freshly-provisioned binary's `--version` and confirm it reports the
@@ -6048,7 +6307,7 @@ fn print_version() {
 
 /// Native clap subcommands whose `--help` is rendered by clap directly.
 const CLAP_HELP_COMMANDS: &[&str] = &[
-    "run", "watch", "exec", "nubx", "upgrade", "install", "i", "ci",
+    "run", "watch", "exec", "nubx", "upgrade", "install", "i", "ci", "init",
 ];
 
 /// True for any word `nub <word> -h` / `nub help <word>` can route to a real help
@@ -6154,6 +6413,7 @@ nub {v} — the all-in-one Node.js toolkit
   run <script>                run a package.json script
   watch <file>                run a file and restart on changes
   nubx <pkg>                  fetch and run a package binary
+  init                        scaffold a new project
 
 {runtime}
   -                           read script from stdin
@@ -6250,6 +6510,9 @@ nub {v} — the all-in-one Node.js toolkit
     exec <bin> / nubx <bin>  run a node_modules/.bin binary
     dlx <pkg> / x <pkg>      fetch-and-run a package's bin (also: nubx)
     watch <file>             run a file in watch mode
+
+  Start a project:
+    init                     scaffold a new project (TypeScript-first)
 
   Manage dependencies:
     install, i               install from package.json + lockfile
@@ -7868,11 +8131,11 @@ fn shim_plan(
             };
             // A name-only pin (devEngines.packageManager without a version)
             // constrains the NAME, not the version — prefer the user's own
-            // matching PM on PATH: zero network (a spec like "latest" or a
-            // lockfile family re-resolves against the registry on EVERY
-            // invocation) and no run-to-run drift as new versions publish.
-            // Provision the lockfile-implied family / registry latest only on
-            // a true PATH miss.
+            // matching PM on PATH: zero network (a lockfile-family range still
+            // re-resolves against the registry per invocation; "latest" is
+            // TTL-cached but pays a resolve on expiry) and no run-to-run drift
+            // as new versions publish. Provision the lockfile-implied family /
+            // registry latest only on a true PATH miss.
             if pin.version.is_none() {
                 let shim_dir = shim::shim_dir()?;
                 if let Some(system) = shim::find_system_pm(invoked.as_str(), &shim_dir) {
@@ -7917,12 +8180,15 @@ fn shim_plan(
                     env: Vec::new(),
                 });
             }
-            // True PATH miss: provision a dynamic default of the INVOKED PM —
+            // True PATH miss: run a dynamic default of the INVOKED PM —
             // announced, never a baked version, and the shim never writes a pin.
+            // "using", not "provisioning": with the dist-tag TTL cache a warm
+            // call resolves and execs with zero network, and the install path
+            // prints its own Installing…/Installed… lines when it does run.
             let root = shim_lockfile_root(cwd);
             let (spec, why) = dynamic_default_spec(invoked.pm(), &root)?;
             eprintln!(
-                "nub: no {} on PATH — provisioning {}@{spec} ({why}); one-time default, no pin written",
+                "nub: no {} on PATH — using {}@{spec} ({why}); one-time default, no pin written",
                 invoked.as_str(),
                 invoked.pm()
             );
@@ -8214,7 +8480,7 @@ fn shim_relink_reminder() -> Option<String> {
 /// shim family in place right after the swap (best-effort: a failure downgrades
 /// to the reminder). Covers both the PM shims and the persistent `node` shim.
 fn relink_shims_after_selfowned(install_dir: &Path) {
-    let new_bin = install_dir.join("bin").join("nub");
+    let new_bin = install_dir.join("bin").join(NUB_EXE);
     if let Ok(dir) = nub_core::pm::shim::shim_dir()
         && dir.is_dir()
     {
@@ -8368,8 +8634,9 @@ mod tests {
             "an expansion-changed var must be injected with its expanded value; got {injected:?}"
         );
 
-        // Explicit `--env-file` case: `raw_env` is empty (Node gets no `--env-file`
-        // args), so injection is the only delivery channel — inject everything.
+        // Below-floor fallback (explicit `--env-file` on a Node without the flag):
+        // `raw_env` is empty — no `--env-file` args reach Node, so injection is
+        // the only delivery channel and everything is injected (frozen).
         let all: HashMap<_, _> = watch_inject_vars(&env_vars, &HashMap::new())
             .into_iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -8385,21 +8652,86 @@ mod tests {
     fn watch_env_file_arg_is_relative_to_the_watcher_cwd() {
         let root = std::env::temp_dir().join("nub-watch-env-arg-root");
         assert_eq!(
-            watch_env_file_arg(&root.join(".env"), &root, false).unwrap(),
+            watch_env_file_arg(&root.join(".env"), &root, false, false).unwrap(),
             "--env-file=.env"
         );
 
         let member = root.join("packages").join("app");
         let one_level = Path::new("..").join(".env.local");
         assert_eq!(
-            watch_env_file_arg(&root.join("packages").join(".env.local"), &member, false,).unwrap(),
+            watch_env_file_arg(
+                &root.join("packages").join(".env.local"),
+                &member,
+                false,
+                false
+            )
+            .unwrap(),
             format!("--env-file={}", one_level.to_str().unwrap())
         );
         let two_levels = Path::new("..").join("..").join(".env");
         assert_eq!(
-            watch_env_file_arg(&root.join(".env"), &member, false).unwrap(),
+            watch_env_file_arg(&root.join(".env"), &member, false, false).unwrap(),
             format!("--env-file={}", two_levels.to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn watch_env_file_arg_spells_the_if_exists_flag() {
+        let root = std::env::temp_dir().join("nub-watch-env-arg-if-exists");
+        // Unix: same cwd-relative form, if-exists spelling (#479).
+        assert_eq!(
+            watch_env_file_arg(&root.join("custom.env"), &root, false, true).unwrap(),
+            "--env-file-if-exists=custom.env"
+        );
+        // Windows: an ABSENT if-exists target must not fail long-path expansion —
+        // Node itself silently no-ops on it, so the arg forwards verbatim.
+        let arg = watch_env_file_arg(&root.join("missing.env"), &root, true, true).unwrap();
+        assert!(arg.starts_with("--env-file-if-exists="), "{arg}");
+        assert!(arg.ends_with("missing.env"), "{arg}");
+    }
+
+    #[test]
+    fn explicit_env_file_forwarding_gates_on_node_version() {
+        use nub_core::node::version::NodeVersion;
+        let plain = vec![(PathBuf::from("/p/custom.env"), false)];
+        let if_exists = vec![(PathBuf::from("/p/custom.env"), true)];
+        let mixed = vec![
+            (PathBuf::from("/p/a.env"), false),
+            (PathBuf::from("/p/b.env"), true),
+        ];
+
+        // No explicit files → nothing to forward.
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(26, 0, 0),
+            &[]
+        ));
+        // `--env-file` needs Node 20.6.0.
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(20, 5, 0),
+            &plain
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(20, 6, 0),
+            &plain
+        ));
+        // `--env-file-if-exists` needs Node 22.9.0 — and one if-exists flag
+        // gates the whole set (all-or-nothing preserves precedence).
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(22, 8, 0),
+            &if_exists
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(22, 9, 0),
+            &if_exists
+        ));
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(21, 0, 0),
+            &mixed
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(26, 0, 0),
+            &mixed
+        ));
     }
 
     #[test]
@@ -8409,7 +8741,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&path, "A=1\n").unwrap();
-        let arg = watch_env_file_arg(&path, &root, true).unwrap();
+        let arg = watch_env_file_arg(&path, &root, true, false).unwrap();
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(arg.starts_with("--env-file="), "{arg}");
@@ -8462,8 +8794,10 @@ mod tests {
     #[test]
     fn watch_env_file_arg_rejects_relative_inputs() {
         let absolute = std::env::temp_dir().join("nub-watch-env-arg-absolute");
-        assert!(watch_env_file_arg(Path::new(".env"), &absolute, false).is_err());
-        assert!(watch_env_file_arg(&absolute.join(".env"), Path::new("project"), true).is_err());
+        assert!(watch_env_file_arg(Path::new(".env"), &absolute, false, false).is_err());
+        assert!(
+            watch_env_file_arg(&absolute.join(".env"), Path::new("project"), true, false).is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -8476,19 +8810,19 @@ mod tests {
         let ancestor = base.join(&non_utf8);
         let cwd = ancestor.join("member");
         assert_eq!(
-            watch_env_file_arg(&ancestor.join(".env"), &cwd, false).unwrap(),
+            watch_env_file_arg(&ancestor.join(".env"), &cwd, false, false).unwrap(),
             format!("--env-file={}", Path::new("..").join(".env").display())
         );
 
         let non_utf8_file = cwd.join(std::ffi::OsString::from_vec(vec![b'.', 0xff]));
         assert!(
-            watch_env_file_arg(&non_utf8_file, &cwd, false)
+            watch_env_file_arg(&non_utf8_file, &cwd, false, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not valid UTF-8")
         );
         assert!(
-            watch_env_file_arg(&non_utf8_file, &cwd, true)
+            watch_env_file_arg(&non_utf8_file, &cwd, true, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not valid UTF-8")
@@ -9162,7 +9496,10 @@ mod tests {
     // The critical repeat-upgrade invariant: a self-owned upgrade swaps only bin/,
     // so the `.nub-receipt` marker MUST survive it — otherwise the NEXT upgrade
     // would fail to re-detect a relocated install as self-owned. Exercises the real
-    // `swap_dir` the upgrade uses.
+    // `swap_dir` the upgrade uses (Unix-only, like the fn — the Windows per-file
+    // dance never touches anything outside bin/, and its e2e twin in
+    // tests/upgrade_windows.rs asserts against a receipt-marked install).
+    #[cfg(not(windows))]
     #[test]
     fn install_receipt_survives_a_selfowned_bin_swap() {
         let tmp = tempfile::tempdir().unwrap();
@@ -9207,34 +9544,22 @@ mod tests {
         );
     }
 
-    // Fail-fast contract: on Windows the self-owned swap must refuse before any
-    // filesystem op (a running nub.exe can't replace its own files), and the
-    // message must hand the user a concrete recovery path. On non-Windows the
-    // guard is a no-op so the real swap proceeds. Tested via the pure helper so
-    // both branches run regardless of the host OS.
-    #[test]
-    fn windows_selfowned_upgrade_is_refused_with_recovery_steps() {
-        assert!(windows_selfowned_unsupported(false).is_none());
-        let msg = windows_selfowned_unsupported(true).expect("must refuse on Windows");
-        assert!(msg.contains("isn't supported on Windows"));
-        assert!(msg.contains("npm install -g @nubjs/nub@latest"));
-        assert!(msg.contains("re-run the Windows installer"));
-    }
-
     /// Serializes the tests that read or mutate the release-URL env seams
     /// (`NUB_RELEASE_BASE_URL` / `NUB_RELEASE_LATEST_URL`). Those vars are
     /// process-global, so a test that sets them mustn't run concurrently with one
     /// that asserts the unset-default URL shape.
     static RELEASE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    // Verification correctness: the checksum sidecar URL is the tarball URL plus
-    // `.sha256`, and the digest helper matches the well-known empty-input vector.
-    // Asserts the DEFAULT (env-seam unset) URLs, so it holds the release-env lock
-    // to never observe the seam mid-override from the e2e test below.
+    // Verification correctness: the checksum sidecar URL is the archive URL plus
+    // `.sha256`, the win32 targets resolve to the `.zip` artifacts release.yml
+    // actually publishes (everything else `.tar.gz`), and the digest helper
+    // matches the well-known empty-input vector. Asserts the DEFAULT (env-seam
+    // unset) URLs, so it holds the release-env lock to never observe the seam
+    // mid-override from the e2e test below.
     #[test]
-    fn tarball_and_checksum_urls_pair_up() {
+    fn archive_and_checksum_urls_pair_up_per_platform() {
         let _g = RELEASE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let url = tarball_url("0.0.6", "darwin-arm64");
+        let url = archive_url("0.0.6", "darwin-arm64");
         assert_eq!(
             url,
             "https://github.com/nubjs/nub/releases/download/v0.0.6/nub-darwin-arm64.tar.gz"
@@ -9242,6 +9567,14 @@ mod tests {
         assert_eq!(
             checksum_url("0.0.6", "darwin-arm64"),
             format!("{url}.sha256")
+        );
+        assert_eq!(
+            archive_url("0.0.6", "win32-x64"),
+            "https://github.com/nubjs/nub/releases/download/v0.0.6/nub-win32-x64.zip"
+        );
+        assert_eq!(
+            checksum_url("0.0.6", "win32-arm64"),
+            "https://github.com/nubjs/nub/releases/download/v0.0.6/nub-win32-arm64.zip.sha256"
         );
         // SHA-256 of the empty string — pins the digest formatting (lowercase hex).
         assert_eq!(
@@ -9261,9 +9594,10 @@ mod tests {
     // invocation is OS-correct for the resolved version. A wrong-checksum sub-case
     // proves the verify step actually rejects a tampered artifact.
     //
-    // Unix-only: the self-owned swap path (symlink, mode bits, the Windows
-    // fail-fast bail) is POSIX; the Windows arm is covered by
-    // `windows_selfowned_upgrade_is_refused_with_recovery_steps`.
+    // Unix-only: the self-owned swap path here (symlink, mode bits, dir rename)
+    // is POSIX; the Windows per-file rename dance is exercised end-to-end —
+    // against the REAL running binary — by `tests/upgrade_windows.rs` on the
+    // windows-latest CI leg.
     #[cfg(unix)]
     #[test]
     fn self_owned_upgrade_runs_end_to_end_against_a_local_fake_release() {
@@ -9756,7 +10090,7 @@ mod tests {
         // to native verbs (the embedded aube engine, src/pm_engine/) — they
         // must stay native and out of the registry.
         for verb in [
-            "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci",
+            "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci", "init",
         ] {
             assert!(
                 SUBCOMMANDS.contains(&verb),
@@ -9823,11 +10157,11 @@ mod tests {
         assert!(msg.contains("-r"), "{msg}");
     }
 
-    // `init` reservation: the registry exclusion is asserted in
-    // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs
-    // and the bareword arm's "nub's own init is coming" answer is covered
-    // through the spawned binary in tests/pm_verbs.rs (the arm lives inside
-    // run_nub's argv pre-parse, which has no injectable entry point here).
+    // `init`: the engine-registry exclusion is asserted in
+    // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs;
+    // the command itself (src/init.rs, a clap subcommand since it shipped) is
+    // covered through the spawned binary in tests/init_cmd.rs and
+    // tests/pm_verbs.rs.
 
     /// A project dir whose `.npmrc` points the registry at an unroutable port, so
     /// any code path that should NOT reach the network fails fast (connection

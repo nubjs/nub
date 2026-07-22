@@ -92,6 +92,10 @@ clap.workspace = true
 # text mode via clx::progress::set_output, the same knob aube's own startup
 # flips for --silent (vendor/aube/crates/aube/src/startup.rs).
 clx = "2"
+# Same major as vendor/aube: `nub init`'s prompts (src/init.rs) use the same
+# clack-style prompt crate the engine already ships, so the dep graph carries
+# one copy and the prompt aesthetic matches the engine's own pickers.
+demand = "2"
 dirs-next.workspace = true
 dotenvy = "0.15"
 # `preserve_order` keeps serde_json::Map in INSERTION order (IndexMap-backed) so

@@ -1,0 +1,552 @@
+{
+  "metadata": {
+    "date": "2026-07-21T22:32:21.400Z",
+    "node": "v26.5.0",
+    "platform": "darwin-arm64",
+    "cpu": "Apple M1 Max",
+    "iterations": 10000,
+    "repetitions": 5,
+    "measurement": "Process CPU time per operation; Web-object lower bound excludes uWebSockets.js request iteration, URL assembly, response writes, and transport work.",
+    "loadAverageBefore": [
+      233.2431640625,
+      190.865234375,
+      150.0771484375
+    ],
+    "loadAverageAfter": [
+      238.474609375,
+      200.1044921875,
+      156.5107421875
+    ],
+    "revision": "c8516138d79aa1863d3b71a9222d48f5cc992ab0",
+    "sourceTree": "6ca1e750dccbb9c45b3f4768b6663bb1949bafda",
+    "sourceDirty": false,
+    "sourceDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sourceUntrackedFiles": [],
+    "remixNodeServe": "0.2.0",
+    "uWebSocketsJs": "20.69.0"
+  },
+  "measurements": [
+    {
+      "name": "request-constructor-with-headers",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 6655,
+      "wallNanosecondsPerOperation": 16221.533399999997,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "request-constructor",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 11143.8,
+      "wallNanosecondsPerOperation": 48299.44169999999,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "response-constructor",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 7770,
+      "wallNanosecondsPerOperation": 37539.80410000004,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "response-construction-plus-two-read-drain",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 8670.6,
+      "wallNanosecondsPerOperation": 59839.17919999999,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-plus-sync-handler-plus-drain",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 29692.5,
+      "wallNanosecondsPerOperation": 288390.94580000004,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-plus-sync-response-construction",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 24204.7,
+      "wallNanosecondsPerOperation": 134914.81250000006,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "sync-loop-baseline",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 101.6,
+      "wallNanosecondsPerOperation": 41.32079999999405,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "request-constructor-with-disconnect-signal",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 6334,
+      "wallNanosecondsPerOperation": 26475.0082999999,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "async-loop-baseline",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 71.7,
+      "wallNanosecondsPerOperation": 69.04579999991256,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "request-constructor-url-only",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 1896.4,
+      "wallNanosecondsPerOperation": 13038.433299999997,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "lazy-headers-wrapper",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 984.6,
+      "wallNanosecondsPerOperation": 1770.5250000000888,
+      "escapeChecksum": 40960
+    },
+    {
+      "name": "abort-controller",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 62.6,
+      "wallNanosecondsPerOperation": 42.18330000003334,
+      "escapeChecksum": 61440
+    },
+    {
+      "name": "request-plus-async-handler-plus-drain",
+      "repetition": 1,
+      "cpuNanosecondsPerOperation": 25684.7,
+      "wallNanosecondsPerOperation": 188963.58330000003,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "async-loop-baseline",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 125.6,
+      "wallNanosecondsPerOperation": 67.19999999986612,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "request-plus-sync-response-construction",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 21019.3,
+      "wallNanosecondsPerOperation": 147786.91660000006,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "abort-controller",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 1259.4,
+      "wallNanosecondsPerOperation": 3692.004100000122,
+      "escapeChecksum": 61440
+    },
+    {
+      "name": "request-constructor-url-only",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 3960.8,
+      "wallNanosecondsPerOperation": 32958.15000000002,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "request-plus-sync-handler-plus-drain",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 25763.9,
+      "wallNanosecondsPerOperation": 176807.37500000015,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-constructor-with-disconnect-signal",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 7121.9,
+      "wallNanosecondsPerOperation": 19633.629099999962,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "response-constructor",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 7793.9,
+      "wallNanosecondsPerOperation": 45384.39580000013,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "sync-loop-baseline",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 127.1,
+      "wallNanosecondsPerOperation": 267.7832999997918,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "request-constructor",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 11021,
+      "wallNanosecondsPerOperation": 56149.46670000026,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "response-construction-plus-two-read-drain",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 10065.7,
+      "wallNanosecondsPerOperation": 70928.99170000019,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-constructor-with-headers",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 7882,
+      "wallNanosecondsPerOperation": 32404.9541999997,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "request-plus-async-handler-plus-drain",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 26515.1,
+      "wallNanosecondsPerOperation": 205349.70829999982,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "lazy-headers-wrapper",
+      "repetition": 2,
+      "cpuNanosecondsPerOperation": 1913.1,
+      "wallNanosecondsPerOperation": 3187.750000000233,
+      "escapeChecksum": 40960
+    },
+    {
+      "name": "request-constructor",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 11213.2,
+      "wallNanosecondsPerOperation": 78169.91249999992,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "abort-controller",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 1345.6,
+      "wallNanosecondsPerOperation": 1851.0624999998984,
+      "escapeChecksum": 61440
+    },
+    {
+      "name": "sync-loop-baseline",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 20.3,
+      "wallNanosecondsPerOperation": 18.20419999967271,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "request-plus-sync-handler-plus-drain",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 27528.2,
+      "wallNanosecondsPerOperation": 214226.76250000004,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "lazy-headers-wrapper",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 2150.5,
+      "wallNanosecondsPerOperation": 5315.391699999964,
+      "escapeChecksum": 40960
+    },
+    {
+      "name": "request-constructor-with-headers",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 7012.2,
+      "wallNanosecondsPerOperation": 42462.92079999985,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "request-plus-async-handler-plus-drain",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 26971.1,
+      "wallNanosecondsPerOperation": 203610.78749999977,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "response-construction-plus-two-read-drain",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 11533.2,
+      "wallNanosecondsPerOperation": 75747.57919999975,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "response-constructor",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 9221.2,
+      "wallNanosecondsPerOperation": 60027.26659999971,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-constructor-with-disconnect-signal",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 8654.2,
+      "wallNanosecondsPerOperation": 58232.97919999968,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "async-loop-baseline",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 70.3,
+      "wallNanosecondsPerOperation": 67.57500000021537,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "request-constructor-url-only",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 4504.3,
+      "wallNanosecondsPerOperation": 34949.4541,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "request-plus-sync-response-construction",
+      "repetition": 3,
+      "cpuNanosecondsPerOperation": 24929.8,
+      "wallNanosecondsPerOperation": 169995.55000000037,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-plus-sync-handler-plus-drain",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 27290.6,
+      "wallNanosecondsPerOperation": 234508.1459000001,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "lazy-headers-wrapper",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 2551.4,
+      "wallNanosecondsPerOperation": 1069.4833000001381,
+      "escapeChecksum": 40960
+    },
+    {
+      "name": "request-plus-async-handler-plus-drain",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 28571.9,
+      "wallNanosecondsPerOperation": 154078.6791999999,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-plus-sync-response-construction",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 24632.3,
+      "wallNanosecondsPerOperation": 125942.3999999999,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "sync-loop-baseline",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 31.3,
+      "wallNanosecondsPerOperation": 19.166599999880418,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "request-constructor-with-disconnect-signal",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 8133.7,
+      "wallNanosecondsPerOperation": 25257.774999999674,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "response-construction-plus-two-read-drain",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 9363.4,
+      "wallNanosecondsPerOperation": 66049.46249999994,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "response-constructor",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 9654.4,
+      "wallNanosecondsPerOperation": 67325.41659999988,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-constructor-url-only",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 5309.3,
+      "wallNanosecondsPerOperation": 50321.90840000039,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "request-constructor",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 12068.8,
+      "wallNanosecondsPerOperation": 137659.1207999998,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "abort-controller",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 41.7,
+      "wallNanosecondsPerOperation": 19.750000000203727,
+      "escapeChecksum": 61440
+    },
+    {
+      "name": "request-constructor-with-headers",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 6403.3,
+      "wallNanosecondsPerOperation": 28332.020799999736,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "async-loop-baseline",
+      "repetition": 4,
+      "cpuNanosecondsPerOperation": 104.3,
+      "wallNanosecondsPerOperation": 104.31669999961741,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "lazy-headers-wrapper",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 2971.7,
+      "wallNanosecondsPerOperation": 2283.7290999996185,
+      "escapeChecksum": 40960
+    },
+    {
+      "name": "request-plus-async-handler-plus-drain",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 26646.1,
+      "wallNanosecondsPerOperation": 121189.02079999971,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "async-loop-baseline",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 2765,
+      "wallNanosecondsPerOperation": 1118.0749999999534,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "response-construction-plus-two-read-drain",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 10448.8,
+      "wallNanosecondsPerOperation": 67079.4667000002,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "sync-loop-baseline",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 20.7,
+      "wallNanosecondsPerOperation": 19.249999999738066,
+      "escapeChecksum": 0
+    },
+    {
+      "name": "request-plus-sync-handler-plus-drain",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 24993.2,
+      "wallNanosecondsPerOperation": 159801.47499999948,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "response-constructor",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 8662.8,
+      "wallNanosecondsPerOperation": 56985.60410000063,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-constructor",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 12723.1,
+      "wallNanosecondsPerOperation": 77508.0667000002,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "abort-controller",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 2915.3,
+      "wallNanosecondsPerOperation": 1754.9582999999984,
+      "escapeChecksum": 61440
+    },
+    {
+      "name": "request-plus-sync-response-construction",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 26217.4,
+      "wallNanosecondsPerOperation": 168697.72499999963,
+      "escapeChecksum": 32768
+    },
+    {
+      "name": "request-constructor-url-only",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 4639.7,
+      "wallNanosecondsPerOperation": 11469.120800000383,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "request-constructor-with-disconnect-signal",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 10137.9,
+      "wallNanosecondsPerOperation": 45050.62920000055,
+      "escapeChecksum": 28672
+    },
+    {
+      "name": "request-constructor-with-headers",
+      "repetition": 5,
+      "cpuNanosecondsPerOperation": 8790.1,
+      "wallNanosecondsPerOperation": 30003.837499998914,
+      "escapeChecksum": 28672
+    }
+  ],
+  "summaries": [
+    {
+      "name": "sync-loop-baseline",
+      "medianCpuNanosecondsPerOperation": 31.3,
+      "medianWallNanosecondsPerOperation": 19.249999999738066
+    },
+    {
+      "name": "async-loop-baseline",
+      "medianCpuNanosecondsPerOperation": 104.3,
+      "medianWallNanosecondsPerOperation": 69.04579999991256
+    },
+    {
+      "name": "response-constructor",
+      "medianCpuNanosecondsPerOperation": 8662.8,
+      "medianWallNanosecondsPerOperation": 56985.60410000063
+    },
+    {
+      "name": "abort-controller",
+      "medianCpuNanosecondsPerOperation": 1259.4,
+      "medianWallNanosecondsPerOperation": 1754.9582999999984
+    },
+    {
+      "name": "lazy-headers-wrapper",
+      "medianCpuNanosecondsPerOperation": 2150.5,
+      "medianWallNanosecondsPerOperation": 2283.7290999996185
+    },
+    {
+      "name": "request-constructor-url-only",
+      "medianCpuNanosecondsPerOperation": 4504.3,
+      "medianWallNanosecondsPerOperation": 32958.15000000002
+    },
+    {
+      "name": "request-constructor-with-headers",
+      "medianCpuNanosecondsPerOperation": 7012.2,
+      "medianWallNanosecondsPerOperation": 30003.837499998914
+    },
+    {
+      "name": "request-constructor-with-disconnect-signal",
+      "medianCpuNanosecondsPerOperation": 8133.7,
+      "medianWallNanosecondsPerOperation": 26475.0082999999
+    },
+    {
+      "name": "request-constructor",
+      "medianCpuNanosecondsPerOperation": 11213.2,
+      "medianWallNanosecondsPerOperation": 77508.0667000002
+    },
+    {
+      "name": "request-plus-sync-response-construction",
+      "medianCpuNanosecondsPerOperation": 24632.3,
+      "medianWallNanosecondsPerOperation": 147786.91660000006
+    },
+    {
+      "name": "response-construction-plus-two-read-drain",
+      "medianCpuNanosecondsPerOperation": 10065.7,
+      "medianWallNanosecondsPerOperation": 67079.4667000002
+    },
+    {
+      "name": "request-plus-sync-handler-plus-drain",
+      "medianCpuNanosecondsPerOperation": 27290.6,
+      "medianWallNanosecondsPerOperation": 214226.76250000004
+    },
+    {
+      "name": "request-plus-async-handler-plus-drain",
+      "medianCpuNanosecondsPerOperation": 26646.1,
+      "medianWallNanosecondsPerOperation": 188963.58330000003
+    }
+  ]
+}

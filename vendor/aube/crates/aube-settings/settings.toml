@@ -729,10 +729,12 @@ Controls how far packages can be promoted when `nodeLinker=hoisted` is
 active, mirroring Yarn's `nmHoistingLimits` and pnpm's
 `hoistingLimits` setting:
 
-- `none`: hoist as far as possible (default).
-- `workspaces`: hoist only as far as each workspace package. Aube plans
-  hoisted installs per physical importer, so this currently matches
-  `none`.
+- `none`: hoist as far as possible (default). In a workspace this hoists
+  across every member into the single shared root `node_modules`, so a
+  dependency at one version is stored once and only conflicts nest.
+- `workspaces`: hoist only as far as each workspace package. Every
+  member's `node_modules` is planned independently and bordered at the
+  member root, so transitives never promote across the workspace.
 - `dependencies`: hoist only up to each workspace package's direct
   dependencies. Transitive packages stay under the direct dependency
   that introduced them instead of being promoted to the importer root.

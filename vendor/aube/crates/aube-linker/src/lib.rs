@@ -71,11 +71,15 @@ pub enum NodeLinker {
 /// Limit how far packages may be promoted in `NodeLinker::Hoisted`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum HoistingLimits {
-    /// Hoist as far as possible.
+    /// Hoist as far as possible. In a workspace this hoists across every
+    /// member into the single shared workspace-root `node_modules`, so a
+    /// dependency at one version lives once at the root and only conflicts
+    /// nest (real pnpm's `nodeLinker=hoisted` default).
     #[default]
     None,
-    /// Aube plans hoisted installs per physical importer, so this is
-    /// currently equivalent to `None`.
+    /// Hoist only as far as each workspace package: every member's
+    /// `node_modules` is planned independently, bordered at the member
+    /// root, so transitives never promote across the workspace.
     Workspaces,
     /// Do not hoist transitives above the direct dependency that
     /// introduced them.

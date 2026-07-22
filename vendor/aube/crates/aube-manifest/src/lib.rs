@@ -878,6 +878,13 @@ impl PackageJson {
     /// `pnpm.packageExtensions`, `aube.packageExtensions`, top-level
     /// `packageExtensions` — later writes win for duplicate selectors.
     pub fn package_extensions(&self) -> BTreeMap<String, serde_json::Value> {
+        // Embedder seam: a host that scopes which packageExtensions home
+        // applies per active PM (e.g. honoring the top-level home only under
+        // its own identity) supplies the pre-scoped map; use it verbatim and
+        // skip the per-source walk below. Default `None` ⇒ upstream behavior.
+        if let Some(scoped) = aube_util::engine_context().embedder_package_extensions {
+            return scoped;
+        }
         let mut out = BTreeMap::new();
         for ns in self.pnpm_aube_objects() {
             if let Some(obj) = ns.get("packageExtensions").and_then(|v| v.as_object()) {

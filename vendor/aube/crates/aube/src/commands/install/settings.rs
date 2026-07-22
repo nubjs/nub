@@ -527,9 +527,16 @@ pub(crate) fn effective_supported_architectures(
 /// Stamp pnpm's `packageExtensionsChecksum` / `pnpmfileChecksum` onto
 /// `graph` so a written pnpm-lock.yaml matches what pnpm itself records,
 /// keeping config-drift detection in sync (a wrong/absent value makes
-/// pnpm re-resolve, or abort a frozen install). No-op for non-pnpm
-/// lockfiles: aube-lock.yaml shares the writer and must not grow
-/// pnpm-only fields.
+/// pnpm re-resolve, or abort a frozen install).
+///
+/// `packageExtensionsChecksum` is stamped on `pnpm-lock.yaml` always
+/// (registry byte-parity with pnpm) and on the embedder's own generic
+/// lockfile (the `Aube` kind, pnpm-v9 bytes) when the embedder enforces the
+/// checksum (`enforce_package_extensions_checksum` — nub) — so its own
+/// packageExtensions drift check reaches a fixpoint. Standalone aube leaves
+/// that posture off, so its aube-lock.yaml never grows the field (unchanged).
+/// `pnpmfileChecksum` stays pnpm-lock-only: the generic lockfile never
+/// carried it, and nub identity disables the default pnpmfile anyway.
 ///
 /// `local_pnpmfile` is the project-local pnpmfile that participates in
 /// the checksum — the caller resolves it via `crate::pnpmfile::detect`
@@ -543,12 +550,19 @@ pub(crate) async fn stamp_pnpm_config_checksums(
     ctx: &aube_settings::ResolveCtx<'_>,
     local_pnpmfile: Option<&std::path::Path>,
 ) {
-    if !matches!(write_kind, aube_lockfile::LockfileKind::Pnpm) {
+    let is_pnpm = matches!(write_kind, aube_lockfile::LockfileKind::Pnpm);
+    let stamp_package_extensions = is_pnpm
+        || (matches!(write_kind, aube_lockfile::LockfileKind::Aube)
+            && aube_util::engine_context().enforce_package_extensions_checksum);
+    if !stamp_package_extensions {
         return;
     }
     let package_extensions = effective_package_extensions(manifest, ctx);
     graph.package_extensions_checksum =
         aube_lockfile::pnpm::package_extensions_checksum(&package_extensions);
+    if !is_pnpm {
+        return;
+    }
 
     // Always reflect the *current* pnpmfile state: a missing, hook-less,
     // or unreadable pnpmfile must clear any checksum the graph carried
@@ -1454,10 +1468,15 @@ mod finalize_lockfile_graph_tests {
         );
     }
 
-    /// aube-lock.yaml must never grow pnpm-only checksum fields — the
-    /// stamp is a no-op when no pnpm lockfile is present.
+    /// The generic (`Aube`) lockfile grows `packageExtensionsChecksum` ONLY
+    /// when the embedder enforces the checksum (nub). Standalone aube leaves
+    /// the posture off, so its aube-lock.yaml never grows the pnpm-only field
+    /// — the byte-for-byte default. `pnpmfileChecksum` stays pnpm-lock-only
+    /// under either posture. Both branches run in one test fn (with a
+    /// save/restore of the process-global posture) so the enforce window can't
+    /// race the sibling pnpm-lock stamp tests.
     #[tokio::test]
-    async fn finalize_skips_checksums_on_aube_lock() {
+    async fn finalize_stamps_generic_lock_checksum_only_when_embedder_enforces() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         std::fs::write(
@@ -1471,15 +1490,33 @@ mod finalize_lockfile_graph_tests {
         )
         .unwrap();
 
+        // Default posture (standalone aube): no checksum on aube-lock.yaml.
         let mut graph = aube_lockfile::LockfileGraph::default();
         finalize_lockfile_graph(cwd, &mut graph, &manifest(), false, None)
             .await
             .unwrap();
         assert!(
             graph.package_extensions_checksum.is_none(),
-            "aube-lock.yaml must not grow pnpm-only checksum fields"
+            "standalone aube must not stamp packageExtensionsChecksum on aube-lock.yaml"
         );
         assert!(graph.pnpmfile_checksum.is_none());
+
+        // Enforcing embedder (nub): the generic lockfile grows the checksum,
+        // but never the pnpmfile checksum.
+        aube_util::update_engine_context(|c| c.enforce_package_extensions_checksum = true);
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        finalize_lockfile_graph(cwd, &mut graph, &manifest(), false, None)
+            .await
+            .unwrap();
+        aube_util::update_engine_context(|c| c.enforce_package_extensions_checksum = false);
+        assert!(
+            graph.package_extensions_checksum.is_some(),
+            "an enforcing embedder must stamp packageExtensionsChecksum on its generic lockfile"
+        );
+        assert!(
+            graph.pnpmfile_checksum.is_none(),
+            "pnpmfileChecksum stays pnpm-lock-only even under an enforcing embedder"
+        );
     }
 
     /// The pnpmfile half of the same regression: a local pnpmfile that

@@ -89,7 +89,7 @@ impl ShimName {
 
     /// `npx` / `pnpx` are runner binaries — transparent ALWAYS, whatever the
     /// first verb (corepack's allowlist shape; ratified 2026-06-09).
-    pub fn always_transparent(self) -> bool {
+    fn always_transparent(self) -> bool {
         matches!(self, Self::Npx | Self::Pnpx)
     }
 }
@@ -98,7 +98,7 @@ impl ShimName {
 /// `npm create vite` in a pnpm repo must work (corepack's allowlist shape).
 /// Matched against the FIRST argv token verbatim; a flag before the verb
 /// (`npm --yes create x`) is not recognized — strictness errs toward refusing.
-pub const TRANSPARENT_VERBS: [&str; 4] = ["init", "create", "dlx", "exec"];
+const TRANSPARENT_VERBS: [&str; 4] = ["init", "create", "dlx", "exec"];
 
 /// Whether this shim invocation was spawned by an already-running package
 /// manager (a nested call), versus typed by the user at a shell (a top-level
@@ -375,7 +375,7 @@ pub fn safe_redirect(pinned: Pm, args: &[String]) -> Option<String> {
 /// `install.sh` already puts `~/.nub/bin/nub` on PATH, and a `nub` argv0 is
 /// dispatched by [`Argv0`](../../../nub_cli/cli/enum.Argv0.html) regardless of
 /// the shim dir, so a `~/.nub/shims/nub` hardlink intercepts nothing.
-pub const PM_SHIM_NAMES: [&str; 6] = ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"];
+const PM_SHIM_NAMES: [&str; 6] = ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"];
 
 /// Everything [`install_shims`] links — the six PM names. Kept as a named alias
 /// of [`PM_SHIM_NAMES`] so the install/report path reads as "the full shim set"
@@ -525,7 +525,7 @@ pub fn install_shims_into(dir: &Path, nub_binary: &Path) -> Result<Vec<Installed
 /// of [`install_shims_into`]. The PM shim installs all six [`SHIM_NAMES`]; the
 /// persistent `node` shim (`crate::node::shim`) installs the single `["node"]`
 /// through the SAME lock + hardlink-then-copy + same-inode-idempotency path.
-pub fn install_named_shims(
+pub(crate) fn install_named_shims(
     dir: &Path,
     names: &[&'static str],
     nub_binary: &Path,
@@ -594,7 +594,7 @@ pub fn remove_shims() -> Result<bool> {
 }
 
 /// [`remove_shims`] with an explicit dir (the testable body).
-pub fn remove_shims_from(dir: &Path) -> Result<bool> {
+pub(crate) fn remove_shims_from(dir: &Path) -> Result<bool> {
     // Same writer-serializing lock as [`install_shims_into`]: an `unshim`
     // racing a re-link must not remove the dir mid-link. Held until return.
     let _lock = ShimLock::acquire(dir);
@@ -697,8 +697,8 @@ pub fn dir_is_noexec(_dir: &Path) -> bool {
 
 /// The PATH lines, exactly install.sh's shape (`$HOME`-relative so the profile
 /// stays portable across machines), pointing at the SHIMS dir.
-pub const SHIMS_POSIX_PATH_LINE: &str = r#"export PATH="$HOME/.nub/shims:$PATH""#;
-pub const SHIMS_FISH_PATH_LINE: &str = "set -gx PATH $HOME/.nub/shims $PATH";
+const SHIMS_POSIX_PATH_LINE: &str = r#"export PATH="$HOME/.nub/shims:$PATH""#;
+const SHIMS_FISH_PATH_LINE: &str = "set -gx PATH $HOME/.nub/shims $PATH";
 
 /// The block's marker comment. install.sh writes `# nub` above its `~/.nub/bin`
 /// line; this is deliberately DISTINCT so `nub pm unshim` strips exactly the
@@ -711,20 +711,20 @@ const BLOCK_MARKER: &str = "# nub shims";
 /// persistent `node` shim (`crate::node::shim`) without duplicating it. Each
 /// family carries a DISTINCT marker so an unshim strips exactly its own block —
 /// never a sibling's, never install.sh's `# nub` block.
-pub struct ShimBlock {
+pub(crate) struct ShimBlock {
     /// The marker comment written on its own line above the PATH line.
-    pub marker: &'static str,
+    pub(crate) marker: &'static str,
     /// The POSIX (bash/zsh) `export PATH="…:$PATH"` line.
-    pub posix_line: &'static str,
+    pub(crate) posix_line: &'static str,
     /// The fish `set -gx PATH … $PATH` line.
-    pub fish_line: &'static str,
+    pub(crate) fish_line: &'static str,
     /// A substring the PATH line must contain for [`strip_block`]'s defensive
     /// "is this really our line" guard — the `$HOME`-relative dir (`.nub/shims`).
-    pub dir_marker: &'static str,
+    pub(crate) dir_marker: &'static str,
 }
 
 /// The PM shims' block (`~/.nub/shims`, `# nub shims`).
-pub const PM_SHIM_BLOCK: ShimBlock = ShimBlock {
+pub(crate) const PM_SHIM_BLOCK: ShimBlock = ShimBlock {
     marker: BLOCK_MARKER,
     posix_line: SHIMS_POSIX_PATH_LINE,
     fish_line: SHIMS_FISH_PATH_LINE,
@@ -787,7 +787,7 @@ pub fn add_path_block() -> Result<ProfileOutcome> {
 /// the line it's `AlreadyPresent` (naming the first); if nothing could be
 /// written it's `Manual`. Non-interactive files are wired silently as extra
 /// coverage — the per-file detail isn't surfaced to keep one headline outcome.
-pub fn add_path_block_for(
+pub(crate) fn add_path_block_for(
     shell: &str,
     home: &Path,
     xdg_config: Option<&Path>,
@@ -957,7 +957,7 @@ pub fn remove_path_block() -> Result<Vec<PathBuf>> {
 }
 
 /// [`remove_path_block`] with the environment made explicit (the testable body).
-pub fn remove_path_block_from_profiles(
+pub(crate) fn remove_path_block_from_profiles(
     home: &Path,
     xdg_config: Option<&Path>,
     block: &ShimBlock,
@@ -1102,7 +1102,7 @@ fn check_shims_reachable_in(shim_dir: &Path, path_var: &OsStr) -> Vec<ShimReacha
 /// first PATH hit for `name` the entry in `shim_dir`? The single-name check the
 /// persistent `node` shim's post-install warning uses (parity with the PM
 /// sweep's per-name diagnosis).
-pub fn check_shim_reachable(shim_dir: &Path, name: &'static str) -> ShimReachability {
+pub(crate) fn check_shim_reachable(shim_dir: &Path, name: &'static str) -> ShimReachability {
     shim_reachability_in(
         shim_dir,
         name,

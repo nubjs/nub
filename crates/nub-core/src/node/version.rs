@@ -17,14 +17,11 @@ impl NodeVersion {
         ))
     }
 
-    pub fn major(&self) -> u64 {
+    pub(crate) fn major(&self) -> u64 {
         self.0.major
     }
-    pub fn minor(&self) -> u64 {
+    pub(crate) fn minor(&self) -> u64 {
         self.0.minor
-    }
-    pub fn patch(&self) -> u64 {
-        self.0.patch
     }
 
     /// The minimum Node version Nub supports at all. Below this, Nub
@@ -33,21 +30,21 @@ impl NodeVersion {
     /// `wiki/research/supported-node-versions.md` for the rationale
     /// (no hook API exists below 18.19 that can carry Nub's feature
     /// surface).
-    pub const MIN_SUPPORTED: Self = Self::new(18, 19, 0);
+    const MIN_SUPPORTED: Self = Self::new(18, 19, 0);
 
     /// The minimum Node version for Nub's fast-path augmented mode
     /// (sync `module.registerHooks`). Versions in
     /// `MIN_SUPPORTED..MIN_AUGMENTED` run in compatibility mode
     /// (async `module.register()`); the JS preload picks the
     /// registration shape based on `process.versions.node`.
-    pub const MIN_AUGMENTED: Self = Self::new(22, 15, 0);
+    const MIN_AUGMENTED: Self = Self::new(22, 15, 0);
 
     /// True if this Node version is at or above the hard floor.
-    pub fn is_supported(&self) -> bool {
+    pub(crate) fn is_supported(&self) -> bool {
         *self >= Self::MIN_SUPPORTED
     }
 
-    pub fn supports_augmentation(&self) -> bool {
+    pub(crate) fn supports_augmentation(&self) -> bool {
         *self >= Self::MIN_AUGMENTED
     }
 
@@ -59,7 +56,10 @@ impl NodeVersion {
     ///   Nub feature surface; the spawn path refuses.
     ///
     /// Source of truth for the support model: `wiki/research/supported-node-versions.md`.
-    pub fn tier(&self) -> SupportTier {
+    /// Production gates on [`Self::is_supported`] / [`Self::supports_augmentation`]
+    /// directly; this classifier exists so the tier-boundary tests read as the model.
+    #[cfg(test)]
+    fn tier(&self) -> SupportTier {
         if *self >= Self::MIN_AUGMENTED {
             SupportTier::FastPath
         } else if *self >= Self::MIN_SUPPORTED {
@@ -69,7 +69,7 @@ impl NodeVersion {
         }
     }
 
-    pub fn satisfies(&self, pin: &VersionPin) -> bool {
+    pub(crate) fn satisfies(&self, pin: &VersionPin) -> bool {
         match pin {
             VersionPin::Exact(v) => {
                 self.0.major == v.0.major && self.0.minor == v.0.minor && self.0.patch == v.0.patch
@@ -156,7 +156,7 @@ impl VersionPin {
     /// comma form Cargo's `semver` crate wants. Every alternative must parse, or
     /// the whole spec errors (the caller warns and falls through to the next pin
     /// source — never silently half-honors a range).
-    pub fn parse_allowing_ranges(s: &str) -> Result<Self, VersionParseError> {
+    pub(crate) fn parse_allowing_ranges(s: &str) -> Result<Self, VersionParseError> {
         if let Ok(pin) = s.parse::<VersionPin>() {
             return Ok(pin);
         }
@@ -253,7 +253,7 @@ impl FromStr for VersionPin {
 }
 
 #[derive(Debug, Clone)]
-pub struct VersionParseError(pub String);
+pub struct VersionParseError(String);
 
 impl fmt::Display for VersionParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

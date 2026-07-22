@@ -9,7 +9,7 @@
 //! with nub's download/verify/cache machinery into a runnable, version-addressed
 //! install — reusing the same provisioning skeleton as Node.
 
-pub mod extract;
+pub(crate) mod extract;
 pub mod lockfile_version;
 pub mod provision;
 pub mod registry;

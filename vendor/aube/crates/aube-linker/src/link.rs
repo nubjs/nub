@@ -738,13 +738,21 @@ impl Linker {
         Ok(stats)
     }
 
-    /// Hoisted-mode workspace linker. Runs the per-importer
-    /// hoisted planner once per importer in the graph, accumulating
-    /// stats + placements into a single `LinkStats`. Each importer
-    /// gets its own independent flat tree (no shared root
-    /// virtual-store like the isolated layout), matching npm
-    /// workspaces and what hoisted-mode toolchains expect: a
-    /// self-contained `node_modules/` under every importer.
+    /// Hoisted-mode workspace linker.
+    ///
+    /// The default (`hoistingLimits=none`) plans ONE flat tree spanning the
+    /// whole workspace: every importer's deps compete for the shared
+    /// workspace-root `node_modules`, so a dependency at a single version
+    /// materializes ONCE at the root and only version conflicts nest under
+    /// the member that needs them — matching real pnpm's `nodeLinker=hoisted`
+    /// default (@yarnpkg/nm hoist over the whole project). `hoistingLimits`
+    /// of `workspaces` (border at each member) and `dependencies` (keep
+    /// transitives under their direct dep) instead plan each importer's
+    /// `node_modules` independently.
+    ///
+    /// Either way, sibling workspace packages resolve through symlinks (not
+    /// the placement tree), added in a post-pass gated on
+    /// `hoist_workspace_packages`.
     fn link_workspace_hoisted(
         &self,
         root_dir: &Path,
@@ -754,82 +762,104 @@ impl Linker {
     ) -> Result<LinkStats, Error> {
         let mut stats = LinkStats::default();
         let mut placements = HoistedPlacements::default();
-        for (importer_path, deps) in &graph.importers {
-            if !is_physical_importer(importer_path) {
-                continue;
-            }
-            let importer_dir = if importer_path == "." {
+
+        // `.` => root, else the member dir with `..` collapsed lexically —
+        // a parent-relative importer key (`../sibling`, from a `../**`
+        // workspace glob) must land at the real sibling dir.
+        let importer_dir = |importer_path: &str| -> PathBuf {
+            if importer_path == "." {
                 root_dir.to_path_buf()
             } else {
-                // Collapse `..` segments lexically — a parent-relative
-                // importer key (`../sibling`, possible when
-                // `pnpm-workspace.yaml#packages` uses `../**`) needs
-                // to land at the actual sibling dir before
-                // `pathdiff`/`strip_prefix` see it.
                 aube_util::path::normalize_lexical(&root_dir.join(importer_path))
-            };
-            // Workspace deps resolve through `workspace_dirs` rather
-            // than going through the placement tree, so the hoisted
-            // planner shouldn't try to copy their contents. Filter
-            // them out of the seed set — we'll symlink them in a
-            // post-pass below.
-            //
-            // Same gating as the isolated mode below: the resolver
-            // omits a `LockedPackage` for workspace-resolved siblings,
-            // so a name match plus a missing package entry is the
-            // signal that the resolver picked the sibling. When the
-            // resolved package IS in `graph.packages`, the resolver
-            // pinned a registry version and the dep should follow the
-            // normal hoisted-placement path (otherwise the post-pass
-            // would silently substitute the local copy).
-            let planner_deps: Vec<aube_lockfile::DirectDep> = deps
-                .iter()
-                .filter(|d| {
-                    !workspace_dirs.contains_key(&d.name)
-                        || graph.packages.contains_key(&d.dep_path)
-                })
-                .cloned()
-                .collect();
-            hoisted::link_hoisted_importer(
+            }
+        };
+        let physical: Vec<(&String, &Vec<aube_lockfile::DirectDep>)> = graph
+            .importers
+            .iter()
+            .filter(|(p, _)| is_physical_importer(p))
+            .collect();
+
+        if matches!(self.hoisting_limits, crate::HoistingLimits::None) && physical.len() > 1 {
+            // One shared tree for the whole workspace. `plan_workspace`
+            // skips workspace-sibling edges (absent from `graph.packages`)
+            // itself, so the raw seeds are safe; the symlink post-pass
+            // below wires those siblings in.
+            let seeds = hoisted::workspace_importer_seeds(root_dir, graph, &self.modules_dir_name);
+            let plan = hoisted::plan_workspace(&seeds, graph)?;
+            hoisted::materialize_plan(
                 self,
-                hoisted::HoistedImporterDirs {
-                    root: root_dir,
-                    importer: &importer_dir,
-                },
-                &planner_deps,
+                root_dir,
+                &plan,
                 graph,
                 package_indices,
                 &mut stats,
                 &mut placements,
             )?;
-
-            // Drop workspace deps in as symlinks, same as isolated mode.
-            let nm = importer_dir.join(&self.modules_dir_name);
-            if !self.hoist_workspace_packages {
-                continue;
-            }
-            for dep in deps {
-                crate::validate_package_link_name(&dep.name)?;
-                let Some(ws_dir) = workspace_dirs.get(&dep.name) else {
-                    continue;
-                };
-                // See planner_deps gating above: skip deps the
-                // resolver actually pinned to a registry version.
-                if graph.packages.contains_key(&dep.dep_path) {
-                    continue;
-                }
-                let link_path = nm.join(&dep.name);
-                if let Some(parent) = link_path.parent() {
-                    mkdirp(parent)?;
-                }
-                try_remove_entry(&link_path);
-                let link_parent = link_path.parent().unwrap_or(&nm);
-                let target = pathdiff::diff_paths(ws_dir, link_parent).unwrap_or(ws_dir.clone());
-                sys::create_dir_link(&target, &link_path)
-                    .map_err(|e| Error::Io(link_path.clone(), e))?;
-                stats.top_level_linked += 1;
+        } else {
+            // Per-importer independent trees (`workspaces` / `dependencies`
+            // limits, or a degenerate single-importer workspace).
+            for (importer_path, deps) in &physical {
+                let dir = importer_dir(importer_path);
+                // The resolver omits a `LockedPackage` for workspace-resolved
+                // siblings, so a name match plus a missing package entry means
+                // the sibling was picked — filter those out of the planner
+                // seed (the post-pass symlinks them). A dep whose resolved
+                // package IS in `graph.packages` was pinned to a registry
+                // version and stays on the placement path.
+                let planner_deps: Vec<aube_lockfile::DirectDep> = deps
+                    .iter()
+                    .filter(|d| {
+                        !workspace_dirs.contains_key(&d.name)
+                            || graph.packages.contains_key(&d.dep_path)
+                    })
+                    .cloned()
+                    .collect();
+                hoisted::link_hoisted_importer(
+                    self,
+                    hoisted::HoistedImporterDirs {
+                        root: root_dir,
+                        importer: &dir,
+                    },
+                    &planner_deps,
+                    graph,
+                    package_indices,
+                    &mut stats,
+                    &mut placements,
+                )?;
             }
         }
+
+        // Sibling workspace packages resolve through symlinks, independent
+        // of the placement tree. Runs for both dispatch branches. The
+        // materialize sweep above may have removed a prior install's
+        // symlink (it is not a plan child); re-adding it here converges.
+        if self.hoist_workspace_packages {
+            for (importer_path, deps) in &physical {
+                let nm = importer_dir(importer_path).join(&self.modules_dir_name);
+                for dep in *deps {
+                    crate::validate_package_link_name(&dep.name)?;
+                    let Some(ws_dir) = workspace_dirs.get(&dep.name) else {
+                        continue;
+                    };
+                    // Skip deps the resolver pinned to a registry version.
+                    if graph.packages.contains_key(&dep.dep_path) {
+                        continue;
+                    }
+                    let link_path = nm.join(&dep.name);
+                    if let Some(parent) = link_path.parent() {
+                        mkdirp(parent)?;
+                    }
+                    try_remove_entry(&link_path);
+                    let link_parent = link_path.parent().unwrap_or(&nm);
+                    let target =
+                        pathdiff::diff_paths(ws_dir, link_parent).unwrap_or(ws_dir.clone());
+                    sys::create_dir_link(&target, &link_path)
+                        .map_err(|e| Error::Io(link_path.clone(), e))?;
+                    stats.top_level_linked += 1;
+                }
+            }
+        }
+
         // Same rationale as the non-workspace hoisted path: sweep any
         // `.aube/node_modules/` left behind by a prior isolated
         // install so hoisted's dotfile-preserving cleanup doesn't

@@ -7,7 +7,7 @@
 //! this table (it iterates [`FEATURES`]); the webstorage gating predicates are
 //! derived from it too. There is no second copy of the bands to drift against.
 //!
-//! ## The three mitigation shapes
+//! ## The mitigation shapes
 //!
 //! A feature reaches the user through exactly one of these per Node version:
 //!
@@ -27,8 +27,10 @@
 //!   intent + the floor; it does **not** version-gate the polyfill in Rust (the
 //!   polyfill bows out on its own when the global is already present). A unit
 //!   test asserts each named file exists and contains the named feature-detect.
-//! - **`Absent`** — below the feature's floor nub does nothing and the feature is
-//!   simply unavailable (the honest compat-tier outcome).
+//!
+//! Below a feature's floor no band matches (`mitigation_for` returns `None`):
+//! nub does nothing and the feature is simply unavailable (the honest
+//! compat-tier outcome).
 //!
 //! ## Why this is THE place
 //!
@@ -64,17 +66,17 @@ use super::version::NodeVersion;
 /// iff `lo <= v && (hi.is_none() || v < hi)`.
 #[derive(Clone)]
 pub struct VersionBand {
-    pub lo: NodeVersion,
-    pub hi: Option<NodeVersion>,
+    lo: NodeVersion,
+    hi: Option<NodeVersion>,
 }
 
 impl VersionBand {
-    pub const fn new(lo: NodeVersion, hi: Option<NodeVersion>) -> Self {
+    const fn new(lo: NodeVersion, hi: Option<NodeVersion>) -> Self {
         Self { lo, hi }
     }
 
     /// Whether `v` falls in this `[lo, hi)` band.
-    pub fn contains(&self, v: &NodeVersion) -> bool {
+    fn contains(&self, v: &NodeVersion) -> bool {
         *v >= self.lo && self.hi.as_ref().is_none_or(|hi| v < hi)
     }
 }
@@ -97,24 +99,26 @@ pub enum Mitigation {
         runtime_file: &'static str,
         global: &'static str,
     },
-    /// Below the feature's floor: nub does nothing, the feature is unavailable.
-    Absent,
 }
 
 /// One user-facing runtime feature and its per-version mitigation.
-pub struct Feature {
+pub(crate) struct Feature {
     /// Stable, human-readable feature name (unique across the table).
-    pub name: &'static str,
+    name: &'static str,
     /// The per-version mitigation bands, sorted ascending and non-overlapping.
     /// A version's mitigation is the band it falls into (or "nothing" if none).
-    pub mitigations: &'static [(VersionBand, Mitigation)],
+    mitigations: &'static [(VersionBand, Mitigation)],
     /// Changelog / PR citation for the whole feature (the bands' evidence).
-    pub evidence: &'static str,
+    /// Documentation-as-data: nothing in the production path reads it (hence the
+    /// allow — the lib target can't see the cfg(test) reader); the
+    /// `every_row_carries_changelog_evidence` test enforces it stays populated.
+    #[allow(dead_code)]
+    evidence: &'static str,
 }
 
 impl Feature {
     /// The mitigation that applies to `v` — the band it falls into, if any.
-    pub fn mitigation_for(&self, v: &NodeVersion) -> Option<Mitigation> {
+    pub(crate) fn mitigation_for(&self, v: &NodeVersion) -> Option<Mitigation> {
         self.mitigations
             .iter()
             .find(|(band, _)| band.contains(v))
@@ -135,7 +139,7 @@ const fn band(lo: (u32, u32, u32), hi: Option<(u32, u32, u32)>) -> VersionBand {
 /// feature with its per-version mitigation and changelog evidence. Everything
 /// version-keyed in [`super::flags`] and the webstorage predicates is derived
 /// from this — do not add a parallel table elsewhere.
-pub static FEATURES: &[Feature] = &[
+static FEATURES: &[Feature] = &[
     // ── vm.Module / vm.SourceTextModule ────────────────────────────────────
     // Flag added in Node 9.6.0 (#14253) and NEVER unflagged through Node 26 —
     // `vm.Module` stays experimental and the flag is always required. So inject
@@ -176,7 +180,7 @@ pub static FEATURES: &[Feature] = &[
     // backported to the 20.x LTS line at 20.18.0. The 21.x line was already EOL
     // when it landed, so the flag NEVER existed there — injecting it on any 21.x
     // is a "bad option" startup crash. Never unflagged through 26. Injection set:
-    // [20.18.0, 21.0.0) ∪ [22.3.0, ∞). Below 20.18 it is Absent.
+    // [20.18.0, 21.0.0) ∪ [22.3.0, ∞). Below 20.18 the feature is absent (no band).
     Feature {
         name: "eventsource",
         mitigations: &[
@@ -382,7 +386,7 @@ pub static FEATURES: &[Feature] = &[
     // ── Web Storage (localStorage / sessionStorage) ─────────────────────────
     // `--experimental-webstorage` + `--localstorage-file` landed in Node 22.4.0;
     // below it both are "bad option" (compat tier 18.19–22.3 runs without
-    // webstorage → Absent). The experimental flag was unflagged (defaults on) in
+    // webstorage — no band). The experimental flag was unflagged (defaults on) in
     // Node 25.0.0 (PR #57666). So:
     //   • [22.4.0, 25.0.0) → Unflag("--experimental-webstorage") + a storage file.
     //   • [25.0.0, ∞)      → StorageFile only (global is native; the
@@ -659,13 +663,14 @@ pub static FEATURES: &[Feature] = &[
 /// V8 context snapshot (Electron) in `Context::FromSnapshot` → `CreateEnvironment`,
 /// before any preload JS can intervene (#246). The
 /// `no_v8_harmony_flag_in_unflag_set` test enforces this against the whole matrix.
-pub const V8_HARMONY_UNFLAG_DENYLIST: &[&str] = &["--experimental-shadow-realm"];
+#[cfg(test)]
+const V8_HARMONY_UNFLAG_DENYLIST: &[&str] = &["--experimental-shadow-realm"];
 
 /// Look up a feature row by name (used by the webstorage-predicate derivation in
 /// [`super::flags`]). Panics if the name is absent — it is only ever called with
 /// a literal that must exist in [`FEATURES`], so an absent name is a programming
 /// error worth failing loudly.
-pub fn feature(name: &str) -> &'static Feature {
+pub(crate) fn feature(name: &str) -> &'static Feature {
     FEATURES
         .iter()
         .find(|f| f.name == name)
@@ -679,7 +684,7 @@ pub fn feature(name: &str) -> &'static Feature {
 ///
 /// Order follows table order (vm-modules, eventsource, sqlite, websocket,
 /// webstorage…) so the produced flag list is deterministic.
-pub fn unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> {
+pub(crate) fn unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> {
     FEATURES
         .iter()
         .filter_map(|f| match f.mitigation_for(node_version) {
@@ -697,7 +702,7 @@ pub fn unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> {
 /// exactly `[0, floor)`. [`super::flags::strip_unsupported_node_options`] uses this
 /// to snip a below-floor gated flag out of an inherited NODE_OPTIONS. Derived from
 /// the same matrix the inject path reads — no parallel floor table.
-pub fn unflag_floor(flag: &str) -> Option<NodeVersion> {
+pub(crate) fn unflag_floor(flag: &str) -> Option<NodeVersion> {
     FEATURES
         .iter()
         .flat_map(|f| f.mitigations.iter())
@@ -731,6 +736,19 @@ mod tests {
             assert!(
                 seen.insert(f.name),
                 "duplicate feature name in matrix: {:?}",
+                f.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_row_carries_changelog_evidence() {
+        // The module doc requires each row to cite its changelog/PR evidence;
+        // an empty string would silently drop the audit trail.
+        for f in FEATURES {
+            assert!(
+                !f.evidence.trim().is_empty(),
+                "feature {:?} has no evidence citation",
                 f.name
             );
         }

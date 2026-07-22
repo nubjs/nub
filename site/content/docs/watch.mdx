@@ -42,7 +42,7 @@ Restarting 'src/server.ts'
 The watch set is loader-instrumented, not glob-based: `nub watch` only watches files that were actually loaded as part of the run, plus a small set of off-graph files that invalidate the process when they change. Concretely, a restart fires on a change to:
 
 - Any file in the **resolved dependency graph** of the entry — including `.ts` / `.tsx` files transpiled in-memory through `module.registerHooks()` that Node never sees on disk.
-- Your **`.env*` files** in their normal precedence (`.env`, `.env.local`, `.env.[mode]`, …) — these are read once at boot and aren't in any import graph, so Nub reports them to the watcher explicitly.
+- Your **`.env*` files** in their normal precedence (`.env`, `.env.local`, `.env.[mode]`, …) — these are read once at boot and aren't in any import graph, so Nub reports them to the watcher explicitly. Files named with `--env-file` or `--env-file-if-exists` are watched the same way, and every restart re-reads them, so an edited value is live on the next run.
 - The **`tsconfig.json` extends chain** — editing a tsconfig (for example, changing a `paths` mapping) restarts the process even though tsconfig isn't imported by anything.
 - **`package.json`**.
 
