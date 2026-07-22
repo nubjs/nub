@@ -1250,12 +1250,18 @@ async fn pick_update_rich(
         };
         // An explicit `<pkg>@<spec>` arg overrides the manifest range as the
         // basis for the in-range cell, same as it overrides the resolver.
+        // A dist-tag spec (`update -i typescript@beta`, or a manifest
+        // `"typescript": "beta"`) doesn't parse as a range, so it resolves
+        // through the packument's dist-tags — without this, a tag-spec key
+        // would render no in-range cell and the tag could never apply from
+        // the picker.
         let spec = explicit_specs
             .get(key.as_str())
             .or_else(|| specifiers.get(key.as_str()))
             .map(String::as_str)
             .unwrap_or("");
-        let wanted = super::max_satisfying_version(packument, spec);
+        let wanted = super::max_satisfying_version(packument, spec)
+            .or_else(|| packument.dist_tags.get(spec).cloned());
         let registry_latest = packument.dist_tags.get("latest").map(String::as_str);
         if let Some(row) = update_picker::build_row(
             key,
