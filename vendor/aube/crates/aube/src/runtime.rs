@@ -219,8 +219,17 @@ pub fn path_entries() -> Vec<PathBuf> {
     .collect()
 }
 
-/// Set the npm-compat env vars naming the node binary on a child
-/// command (`npm_node_execpath`, and `NODE` which npm also exports).
+/// Set the npm-compat env vars on a child command: `npm_node_execpath` (and
+/// `NODE`, which npm also exports) naming the node binary, and
+/// `npm_config_user_agent` naming the running PM.
+///
+/// The UA is pnpm parity for the dlx/exec bin paths (the four callers of this
+/// fn): pnpm exports `npm_config_user_agent` to `pnpm dlx` / `pnpm create` /
+/// `pnpm exec` children exactly as it does to lifecycle scripts, and create-*
+/// scaffolders sniff it to emit the invoking PM's commands — without it they
+/// fall back to npm-mode. Same product/format as the lifecycle export
+/// ([`aube_scripts::aube_user_agent`]), so a tool sees one UA whether it ran
+/// as a postinstall or under dlx.
 ///
 /// Prefers the switched runtime's node; then the embedder-provisioned node
 /// ([`EngineContext::runtime_node_bin`]) when an embedder owns provisioning —
@@ -231,6 +240,7 @@ pub fn path_entries() -> Vec<PathBuf> {
 ///
 /// [`EngineContext::runtime_node_bin`]: aube_util::EngineContext::runtime_node_bin
 pub fn apply_child_env(cmd: &mut tokio::process::Command) {
+    cmd.env("npm_config_user_agent", aube_scripts::aube_user_agent());
     let node_bin = resolve_node_bin(
         current().and_then(|ctx| ctx.node_bin.clone()),
         aube_util::engine_context().runtime_node_bin,
