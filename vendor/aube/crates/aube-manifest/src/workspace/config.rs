@@ -247,6 +247,18 @@ pub struct WorkspaceConfig {
     #[serde(default, rename = "patchedDependencies")]
     pub patched_dependencies: BTreeMap<String, String>,
 
+    /// Downgrade a `patchedDependencies` key that matched no installed
+    /// package from a hard error to a warning. Lives here as well as in
+    /// the manifest because pnpm 10 accepts it in both (verified against
+    /// 10.15.1, including the deprecated `allowNonAppliedPatches`
+    /// spelling), and it belongs wherever `patchedDependencies` does.
+    #[serde(
+        default,
+        rename = "allowUnusedPatches",
+        alias = "allowNonAppliedPatches"
+    )]
+    pub allow_unused_patches: Option<bool>,
+
     /// os/cpu/libc widening set. pnpm v10 moved this alongside
     /// `overrides` — users generating a cross-platform lockfile on
     /// Linux CI want to widen in the workspace yaml (where the rest

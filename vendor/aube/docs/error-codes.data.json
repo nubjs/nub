@@ -277,6 +277,12 @@
       "exit_code": null
     },
     {
+      "name": "ERR_AUBE_UNUSED_PATCH",
+      "category": "Linker",
+      "description": "A declared `patchedDependencies` key matched no installed package. Set `allowUnusedPatches` to downgrade it to a warning.",
+      "exit_code": null
+    },
+    {
       "name": "ERR_AUBE_LINK_FAILED",
       "category": "Linker",
       "description": "Symlink / junction / hardlink couldn't be created — usually permissions or filesystem support.",
@@ -669,9 +675,9 @@
       "exit_code": null
     },
     {
-      "name": "WARN_AUBE_PATCH_KEY_ALIAS_NAME",
+      "name": "WARN_AUBE_UNUSED_PATCH",
       "category": "Settings / config validation",
-      "description": "A `patchedDependencies` key named an npm alias. Patches resolve against a package's registry name, so the entry matched nothing.",
+      "description": "A declared `patchedDependencies` key matched no installed package, downgraded from an error by `allowUnusedPatches`.",
       "exit_code": null
     },
     {

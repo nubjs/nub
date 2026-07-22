@@ -250,8 +250,9 @@ impl<'a> PatchGroups<'a> {
     /// explicitly here instead of falling out of the graph shape.
     ///
     /// A key only an alias name would match is dead config under this
-    /// rule; [`alias_only_patch_keys`] finds those so a caller can say
-    /// so rather than leave the user with a silently unapplied patch.
+    /// rule; [`unused_patch_keys`] finds it — along with every other key
+    /// nothing matches — so a caller can refuse the install rather than
+    /// leave the user with a silently unapplied patch.
     pub fn resolve_package(
         &self,
         pkg: &crate::LockedPackage,
@@ -260,20 +261,33 @@ impl<'a> PatchGroups<'a> {
     }
 }
 
-/// Declared patch keys that match nothing under pnpm's registry-name
-/// rule but WOULD have matched an npm-aliased package under the name it
-/// is installed as. Each entry is `(source key, alias name, registry
-/// name)`.
+/// A declared `patchedDependencies` key that no installed package
+/// matches, so the patch it names would never be applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusedPatchKey<'a> {
+    /// The declared selector, verbatim.
+    pub source_key: &'a str,
+    /// The registry-name spelling that WOULD have matched, when the key
+    /// names an npm alias instead of the package behind it. `None` when
+    /// the key simply matches nothing installed.
+    pub registry_name_spelling: Option<String>,
+}
+
+/// Every declared patch key that matches no installed package, in
+/// declaration order — pnpm's `verifyPatches`, which fails the install
+/// unless `allowUnusedPatches` downgrades it.
 ///
-/// The one shape of dead patch config nub can explain precisely, and the
-/// only one [`PatchGroups::resolve_package`] can newly create — so it is
-/// reported rather than left silent. A per-package conflict is swallowed
-/// here; the install's own conflict gate raises it.
-pub fn alias_only_patch_keys<'a>(
+/// The alias sub-case gets a concrete replacement spelling: swapping
+/// only the name prefix preserves whatever version selector the user
+/// wrote (exact, range, `*`, or absent), so the suggestion is a drop-in.
+/// A per-package conflict is swallowed here; the install's own conflict
+/// gate raises it.
+pub fn unused_patch_keys<'a>(
     source_keys: impl Iterator<Item = &'a str>,
     packages: &BTreeMap<String, crate::LockedPackage>,
-) -> Result<Vec<(&'a str, String, String)>, InvalidPatchRange> {
-    let groups = PatchGroups::build(source_keys)?;
+) -> Result<Vec<UnusedPatchKey<'a>>, InvalidPatchRange> {
+    let declared: Vec<&'a str> = source_keys.collect();
+    let groups = PatchGroups::build(declared.iter().copied())?;
     if groups.is_empty() {
         return Ok(Vec::new());
     }
@@ -281,19 +295,21 @@ pub fn alias_only_patch_keys<'a>(
         .values()
         .filter_map(|pkg| groups.resolve_package(pkg).ok().flatten())
         .collect();
-    let mut out: Vec<(&'a str, String, String)> = Vec::new();
-    for pkg in packages.values() {
-        let Some(registry_name) = pkg.alias_of.as_deref() else {
-            continue;
-        };
-        if let Ok(Some(source_key)) = groups.resolve(&pkg.name, &pkg.version)
-            && !matched.contains(source_key)
-            && !out.iter().any(|(key, _, _)| *key == source_key)
-        {
-            out.push((source_key, pkg.name.clone(), registry_name.to_string()));
-        }
-    }
-    Ok(out)
+    let alias_spelling = |source_key: &str| -> Option<String> {
+        packages.values().find_map(|pkg| {
+            let registry_name = pkg.alias_of.as_deref()?;
+            let hit = groups.resolve(&pkg.name, &pkg.version).ok().flatten()?;
+            (hit == source_key).then(|| format!("{registry_name}{}", &source_key[pkg.name.len()..]))
+        })
+    };
+    Ok(declared
+        .into_iter()
+        .filter(|key| !matched.contains(key))
+        .map(|source_key| UnusedPatchKey {
+            source_key,
+            registry_name_spelling: alias_spelling(source_key),
+        })
+        .collect())
 }
 
 /// Either failure mode of resolving a whole graph's patches — an
@@ -576,36 +592,41 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            alias_only_patch_keys(source.keys().map(String::as_str), &packages).unwrap(),
-            vec![(
-                "odd-alias@3.0.1",
-                "odd-alias".to_string(),
-                "is-odd".to_string()
-            )],
-            "dead alias-name config must be reportable, not silent"
+            unused_patch_keys(source.keys().map(String::as_str), &packages).unwrap(),
+            vec![UnusedPatchKey {
+                source_key: "odd-alias@3.0.1",
+                registry_name_spelling: Some("is-odd@3.0.1".to_string()),
+            }],
+            "dead alias-name config must be reportable, with the spelling that works"
         );
     }
 
     #[test]
-    fn alias_only_patch_keys_stays_quiet_on_a_correctly_declared_alias_patch() {
+    fn unused_patch_keys_reports_only_the_dead_key_beside_an_applying_one() {
         let mut packages = BTreeMap::new();
         packages.insert(
             "odd-alias@3.0.1".to_string(),
             mk_alias("odd-alias", "is-odd", "3.0.1"),
         );
-        // The supported spelling — a registry-name key patching an
-        // aliased install — must never warn, or every project the alias
-        // fix exists to serve gets nagged.
-        let source: BTreeMap<String, String> = [(
-            "is-odd@3.0.1".to_string(),
-            "patches/is-odd@3.0.1.patch".to_string(),
-        )]
+        // `is-odd@3.0.1` patches the aliased install and must never be
+        // reported, or every project the alias fix serves gets flagged.
+        // `ghost@1.0.0` matches nothing — and an unused key sitting
+        // beside one that applies still counts (pnpm fails there too).
+        let source: BTreeMap<String, String> = [
+            (
+                "is-odd@3.0.1".to_string(),
+                "patches/is-odd@3.0.1.patch".to_string(),
+            ),
+            ("ghost@1.0.0".to_string(), "patches/ghost.patch".to_string()),
+        ]
         .into();
 
-        assert!(
-            alias_only_patch_keys(source.keys().map(String::as_str), &packages)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            unused_patch_keys(source.keys().map(String::as_str), &packages).unwrap(),
+            vec![UnusedPatchKey {
+                source_key: "ghost@1.0.0",
+                registry_name_spelling: None,
+            }]
         );
     }
 

@@ -688,6 +688,41 @@ impl PackageJson {
         out
     }
 
+    /// pnpm's `allowUnusedPatches` — downgrade a `patchedDependencies`
+    /// key that matched no installed package from a hard error to a
+    /// warning.
+    ///
+    /// Read from exactly the homes `patchedDependencies` itself uses, so
+    /// the setting always travels with the config it governs: the
+    /// branded `pnpm.*` object (only under a pnpm incumbent, per
+    /// `pnpm_aube_objects`), this tool's own namespace, and — for a
+    /// root-namespace embedder — the neutral top-level key, which is
+    /// what keeps a nub-identity project off another tool's brand.
+    /// Deliberately NOT an npmrc/env setting: pnpm 10 honors it only
+    /// here and in the workspace yaml (verified against 10.15.1), and
+    /// accepting it where pnpm doesn't would be its own divergence.
+    /// `allowNonAppliedPatches` is pnpm's deprecated spelling, still
+    /// accepted by pnpm 10; the current name wins when both appear.
+    pub fn allow_unused_patches(&self) -> Option<bool> {
+        const KEYS: [&str; 2] = ["allowNonAppliedPatches", "allowUnusedPatches"];
+        let mut out = None;
+        for ns in self.pnpm_aube_objects() {
+            for key in KEYS {
+                if let Some(v) = ns.get(key).and_then(|v| v.as_bool()) {
+                    out = Some(v);
+                }
+            }
+        }
+        if aube_util::embedder().manifest_namespace.is_empty() {
+            for key in KEYS {
+                if let Some(v) = self.extra.get(key).and_then(|v| v.as_bool()) {
+                    out = Some(v);
+                }
+            }
+        }
+        out
+    }
+
     /// Return the set of dependency names marked
     /// `dependenciesMeta.<name>.injected = true`. When present, pnpm
     /// installs a hard copy of the resolved package (typically a
@@ -2194,6 +2229,24 @@ mod tests {
     fn trusted_dependencies_wrong_shape_returns_empty() {
         let p = parse(r#"{"trustedDependencies": {"esbuild": true}}"#);
         assert!(p.trusted_dependencies().is_empty());
+    }
+
+    #[test]
+    fn allow_unused_patches_accepts_pnpm_10s_deprecated_spelling() {
+        // pnpm 10 still honors `allowNonAppliedPatches` (deprecated in
+        // favor of `allowUnusedPatches`, removed only in 11), so a
+        // project carrying the old name must keep working. The current
+        // name wins when both are present.
+        assert_eq!(
+            parse(r#"{"pnpm":{"allowNonAppliedPatches":true}}"#).allow_unused_patches(),
+            Some(true)
+        );
+        assert_eq!(
+            parse(r#"{"pnpm":{"allowNonAppliedPatches":true,"allowUnusedPatches":false}}"#)
+                .allow_unused_patches(),
+            Some(false)
+        );
+        assert_eq!(parse(r#"{}"#).allow_unused_patches(), None);
     }
 
     #[test]
