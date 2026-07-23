@@ -223,12 +223,25 @@ if (!requireEsmDisabled && !forceAsyncTier) {
 // worker_threads to exist, and test-bootstrap-modules measures the main thread.
 function installLazyEsmPolyfills() {
   // Cheap main-thread detection that does NOT pull node:worker_threads into the
-  // main-thread bootstrap (requiring it eagerly is exactly the regression we're
-  // fixing): in a worker, worker_threads is already in the module-load list by the
-  // time this preload runs; on the main thread it is not.
-  const inWorkerThread = process.moduleLoadList.some(
+  // main-thread bootstrap (requiring it eagerly is exactly the regression this lazy
+  // path exists to fix). `process.moduleLoadList` alone is NOT an oracle — it says
+  // only that the module is RESIDENT, which anything running earlier in the same
+  // process can make true on the main thread. That false positive shipped: touching
+  // the lazy `MessageEvent` global in installSyncPolyfills loaded worker_threads, so
+  // the main thread took the worker branch below and eagerly loaded the very ESM
+  // polyfills this code defers. So use residency only as a GATE, then ask the
+  // authoritative `isMainThread` — free precisely because we only ask once the
+  // module is already loaded, and unpoisonable because a worker's bootstrap always
+  // loads worker_threads before any preload runs.
+  const workerThreadsResident = process.moduleLoadList.some(
     (m) => m === "NativeModule worker_threads",
   );
+  const inWorkerThread =
+    workerThreadsResident &&
+    !(process.getBuiltinModule
+      ? process.getBuiltinModule("node:worker_threads")
+      : __require("node:worker_threads")
+    ).isMainThread;
 
   const loadEsmSideEffect = (specifier) => {
     try {
