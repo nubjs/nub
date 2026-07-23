@@ -430,7 +430,7 @@ fn check_needs_install_compute(
             aube_util::diag::Span::new(aube_util::diag::Category::Frozen, "settings_hash");
         let current_settings_hash = hash_settings(project_dir, cli_flags);
         if current_settings_hash != state.settings_hash {
-            return Some(".npmrc or workspace config has changed".into());
+            return Some("install settings or the active Node version have changed".into());
         }
     }
 
@@ -1447,6 +1447,21 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
         hasher.update(p.as_bytes());
         hasher.update(b"\x1f");
     }
+    hasher.update(b"\0");
+    // The Node engine builds run against. Without it a Node major switch leaves
+    // this hash unchanged, the install reports itself current, and a native
+    // addon compiled for the previous ABI is never revisited — the delta filter
+    // and the side-effects cache downstream never get the chance. Engine-name
+    // granularity (major, os, arch) rather than the raw version keeps a patch
+    // bump from invalidating a warm tree.
+    let engine = crate::engines::effective_node_version(
+        aube_settings::resolved::node_version(&ctx).as_deref(),
+    )
+    .map_or_else(aube_lockfile::graph_hash::platform_name, |v| {
+        aube_lockfile::graph_hash::engine_name_default(&v).0
+    });
+    hasher.update(b"engine=");
+    hasher.update(engine.as_bytes());
     hasher.update(b"\0");
     // Embedder-supplied extra fingerprint: an install-shape input the host
     // controls outside aube's resolved settings (nub's phantom-eject flag,
