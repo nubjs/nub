@@ -15,10 +15,14 @@ use serde_json::{Map, Value, json};
 
 /// `@types/node` range written into the scaffold. Tracks the docs' latest-major
 /// rule (AGENTS.md: examples always use the newest Node major) — bump on a new
-/// `@types/node` major at release time. `@nubjs/types` needs no constant: it is
-/// version-locked to nub itself (`make version` bumps npm/nub-types with the
-/// binary), so its range derives from CARGO_PKG_VERSION.
+/// `@types/node` major at release time.
 const TYPES_NODE_RANGE: &str = "^26";
+
+/// Oldest declarations that cover the scaffold's `Worker`-era ambient surface.
+/// The upper bound is filled from the running Nub version: init may install an
+/// older mature release under the 24-hour age gate, but never declarations for
+/// runtime behavior newer than the binary being used.
+const NUB_TYPES_FLOOR: &str = "0.4.13";
 
 /// `typescript` range written into the scaffold. Nub transpiles TS itself, so
 /// the compiler package exists for the editor's typechecking (`tsc --noEmit`,
@@ -158,10 +162,11 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
 
 /// The scaffolded manifest, in display order. Identity fields come from the
 /// same writer `nub pm pin` uses so the two surfaces can't drift; both the pin
-/// and the `@nubjs/types` range derive from the running version (nub-types is
-/// release-locked to the binary).
+/// and the `@nubjs/types` ceiling derive from the running version (nub-types is
+/// released in lockstep with the binary).
 fn manifest_json(name: &str, entry: &str, typescript: bool) -> String {
     let ver = env!("CARGO_PKG_VERSION");
+    let nub_types_range = format!(">={NUB_TYPES_FLOOR} <={ver}");
     let mut root = Map::new();
     root.insert("name".into(), Value::String(name.into()));
     root.insert("version".into(), Value::String("0.0.1".into()));
@@ -172,7 +177,7 @@ fn manifest_json(name: &str, entry: &str, typescript: bool) -> String {
         root.insert(
             "devDependencies".into(),
             json!({
-                "@nubjs/types": format!("^{ver}"),
+                "@nubjs/types": nub_types_range,
                 "@types/node": TYPES_NODE_RANGE,
                 "typescript": TYPESCRIPT_RANGE,
             }),
@@ -452,12 +457,36 @@ mod tests {
     }
 
     #[test]
-    fn manifest_carries_identity_pin_and_lockstep_types_range() {
+    fn manifest_carries_identity_pin_and_age_gate_compatible_types_range() {
         let v: Value = serde_json::from_str(&manifest_json("demo", "index.ts", true)).unwrap();
         let ver = env!("CARGO_PKG_VERSION");
         assert_eq!(v["packageManager"], format!("nub@{ver}"));
         assert_eq!(v["devEngines"]["packageManager"]["name"], "nub");
-        assert_eq!(v["devDependencies"]["@nubjs/types"], format!("^{ver}"));
+        assert_eq!(
+            v["devDependencies"]["@nubjs/types"],
+            format!(">={NUB_TYPES_FLOOR} <={ver}")
+        );
+        let types_range =
+            node_semver::Range::parse(v["devDependencies"]["@nubjs/types"].as_str().unwrap())
+                .unwrap();
+        assert!(
+            node_semver::Version::parse(NUB_TYPES_FLOOR)
+                .unwrap()
+                .satisfies(&types_range),
+            "the oldest mature declaration release must remain selectable"
+        );
+        assert!(
+            node_semver::Version::parse(ver)
+                .unwrap()
+                .satisfies(&types_range),
+            "the running Nub release must remain selectable after it matures"
+        );
+        assert!(
+            !node_semver::Version::parse("99.0.0")
+                .unwrap()
+                .satisfies(&types_range),
+            "declarations newer than the running Nub runtime must not be selected"
+        );
         assert_eq!(v["devDependencies"]["typescript"], TYPESCRIPT_RANGE);
         assert_eq!(v["scripts"]["start"], "nub index.ts");
     }

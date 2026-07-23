@@ -74,7 +74,11 @@ fn scaffolds_five_files_with_identity_pin_and_type_devdeps() {
     let ver = env!("CARGO_PKG_VERSION");
     assert_eq!(pkg["packageManager"], format!("nub@{ver}"));
     assert_eq!(pkg["devEngines"]["packageManager"]["name"], "nub");
-    assert_eq!(pkg["devDependencies"]["@nubjs/types"], format!("^{ver}"));
+    assert_eq!(
+        pkg["devDependencies"]["@nubjs/types"],
+        format!(">=0.4.13 <={ver}"),
+        "the type range must let the age gate choose an older mature release"
+    );
     assert!(pkg["devDependencies"]["@types/node"].is_string());
     assert!(pkg["devDependencies"]["typescript"].is_string());
     assert_eq!(pkg["type"], "module");

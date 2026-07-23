@@ -2249,6 +2249,12 @@ fn nub_setting_defaults(
             fresh_format.to_string(),
         ),
         ("defaultTrust".to_string(), "true".to_string()),
+        // Nub advertises a real 24-hour trust floor, not an advisory one. Pin
+        // both halves at Nub's embedder tier rather than inheriting the engine's
+        // current built-in values: 1440 minutes, and fail closed when no mature
+        // version satisfies the range. Explicit user config still wins.
+        ("minimumReleaseAge".to_string(), "1440".to_string()),
+        ("minimumReleaseAgeStrict".to_string(), "true".to_string()),
         ("virtualStoreDir".to_string(), store_dir.clone()),
         ("stateDir".to_string(), store_dir),
         (
@@ -3200,6 +3206,16 @@ mod tests {
                 VirtualStoreLocality::Default,
             );
             assert_eq!(get(&defaults, "defaultLockfileFormat"), Some("pnpm"));
+            assert_eq!(
+                get(&defaults, "minimumReleaseAge"),
+                Some("1440"),
+                "Nub's release-age floor must default to 24 hours"
+            );
+            assert_eq!(
+                get(&defaults, "minimumReleaseAgeStrict"),
+                Some("true"),
+                "Nub's 24-hour release-age floor must fail closed by default"
+            );
             assert_eq!(
                 get(&defaults, "virtualStoreDir"),
                 Some("node_modules/.store")
