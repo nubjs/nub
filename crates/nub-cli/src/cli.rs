@@ -847,7 +847,7 @@ pub enum Command {
     // deliberately excluded from ENGINE_VERBS; design record in
     // wiki/commands/init.md. (The doc comment below is user-facing `--help`
     // text: no internal references.)
-    /// Compile a file to a standalone executable (spike — host triple only).
+    /// Compile a file to a standalone executable.
     ///
     /// Bundles the entry (Rolldown, in-process), embeds a Node for the target
     /// (default shape), and emits one self-contained binary. `--smol` embeds no
@@ -861,7 +861,7 @@ pub enum Command {
         /// Entry file (TS/JS) to bundle and compile.
         entry: String,
 
-        /// Output path. Default: ./<entry-stem>.
+        /// Output path. Default: ./<entry-stem> (plus `.exe` for a Windows target).
         #[arg(long, value_name = "PATH")]
         out: Option<String>,
 
@@ -875,8 +875,11 @@ pub enum Command {
         #[arg(long, value_name = "VERSION")]
         target: Option<String>,
 
-        /// Target triple. Spike: host triple only; a foreign triple errors.
-        #[arg(long, value_name = "TRIPLE")]
+        /// Target platform. Default: the host. One of `darwin-arm64`,
+        /// `darwin-x64`, `linux-arm64`, `linux-arm64-musl`, `linux-x64`,
+        /// `linux-x64-musl`, `win32-arm64`, `win32-x64`. Cross-compiling needs
+        /// that platform's prebuilt launcher.
+        #[arg(long, value_name = "PLATFORM")]
         platform: Option<String>,
 
         /// Disable minification (default: minify on).
