@@ -190,9 +190,10 @@ jobs:
       - run: cd crates/nub-native && cargo clippy --all-features -- -D warnings
       # nub-launcher (the `nub compile` runtime half) is ALSO its own workspace
       # (excluded from the root one for a size-tuned release profile), so the root
-      # clippy doesn't cover it either. Lint + build it from inside the crate so it
-      # can't bit-rot against nub-core changes.
-      - run: cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build
+      # clippy doesn't cover it either. Lint + build + TEST it from inside the crate
+      # so it can't bit-rot against nub-core changes and so its own unit tests (the
+      # cache-directory probe chain) actually run somewhere.
+      - run: cd crates/nub-launcher && cargo clippy --all-targets -- -D warnings && cargo build && cargo test
       # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
       # source (the embedded engine's brand is never nub's config surface). Cheap
       # grep, no build — runs alongside clippy on the same run_rust gate.
