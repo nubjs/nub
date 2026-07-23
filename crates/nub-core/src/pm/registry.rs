@@ -2,7 +2,7 @@
 //! (exact / dist-tag / range), the tarball URL, and the dist integrity that gates
 //! extraction. Mirrors `version_management::node_index`'s split — a PURE resolver
 //! over already-fetched metadata ([`resolve_dist`]) plus a thin networked wrapper
-//! ([`resolve_version`]) — so the resolution logic is unit-tested offline.
+//! ([`resolve_version_authed`]) — so the resolution logic is unit-tested offline.
 //!
 //! Trust model: HTTPS authenticates that the packument came from the registry;
 //! the per-version `dist.integrity` (sha512) authenticates the tarball before it
@@ -29,7 +29,7 @@ pub struct VersionDist {
     pub integrity: Integrity,
     /// The bin entry's path relative to the package root (`bin/pnpm.cjs`). For a
     /// PM the resolver picks the entry whose name matches the package.
-    pub bin_subpath: PathBuf,
+    pub(crate) bin_subpath: PathBuf,
 }
 
 /// The dist checksum that gates extraction. sha512 (the modern `dist.integrity`
@@ -45,7 +45,7 @@ pub enum Integrity {
 
 /// The public npm registry — the floor of the precedence stack and the marker
 /// for "no mirror configured" (the tarball-origin rewrite is a no-op against it).
-pub const PUBLIC_REGISTRY: &str = "https://registry.npmjs.org";
+const PUBLIC_REGISTRY: &str = "https://registry.npmjs.org";
 
 /// The resolved registry for PM downloads: its base URL plus any auth that
 /// applies to the base's host. Carries enough to fetch the packument AND the
@@ -57,7 +57,7 @@ pub struct RegistryConfig {
     /// Trailing-slash-trimmed base URL — callers concatenate `/<pkg>`.
     pub base: String,
     /// The `Authorization` credential for `base`'s host, if any.
-    pub auth: Option<Auth>,
+    auth: Option<Auth>,
 }
 
 /// The registry base URL, in precedence order:
@@ -308,7 +308,7 @@ fn strip_scheme(url: &str) -> &str {
 /// the configured registry's. Only rewritten when a NON-public registry is
 /// configured; a public-registry config leaves the URL untouched (the common
 /// case, and the safe one — never redirect a public tarball).
-pub fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
+fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
     // No rewrite when the configured registry is the public one.
     if origin_of(registry_base) == Some(origin_of(PUBLIC_REGISTRY).unwrap()) {
         return tarball.to_string();
@@ -370,7 +370,7 @@ fn origin_of(url: &str) -> Option<&str> {
 /// write) separates them by space. [`normalize_range`] bridges the two so a
 /// `>=9 <11` pin resolves rather than erroring. The `||` OR operator is NOT
 /// supported (Cargo's `semver` has no OR) — vanishingly rare in a PM pin.
-pub fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
+fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
     let spec = spec.trim();
     let versions = packument
         .get("versions")
@@ -567,31 +567,58 @@ pub(crate) fn named_bin_subpath(meta: &Value, entry: &str) -> Option<PathBuf> {
     safe_bin_subpath(bin.as_object()?.get(entry)?.as_str()?)
 }
 
-/// Networked wrapper over a bare base URL (no auth): fetch the packument from
-/// `base` and resolve `spec` against it. `pkg` is the package name (`pnpm`, `npm`,
-/// `yarn`). Retained for the no-auth `nub pm use` caller; provisioning goes through
-/// [`resolve_version_authed`], which carries the host auth and rewrites the tarball
-/// origin onto a configured mirror.
-pub fn resolve_version(base: &str, pkg: &str, spec: &str) -> Result<VersionDist> {
-    resolve_version_authed(
-        &RegistryConfig {
-            base: base.trim_end_matches('/').to_string(),
-            auth: None,
-        },
-        pkg,
-        spec,
-    )
-}
+/// npm's abbreviated ("corgi") packument media type. Same `dist-tags` /
+/// `versions[]` / `dist` / `bin` shape [`resolve_dist`] consumes, at a fraction
+/// of the bytes — the full `npm` packument is ~25 MB identity-encoded, the corgi
+/// form ~2.4 MB. The public registry and the mainstream private ones (Verdaccio,
+/// Artifactory, GitHub Packages) honor it; a registry that ignores the `Accept`
+/// header serves the full document, which resolves identically.
+const CORGI_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 
-/// Networked wrapper: fetch the packument from `cfg.base` (presenting `cfg.auth`
-/// to an auth-required mirror) and resolve `spec` against it. `pkg` is the package
-/// name (`pnpm`, `npm`, `yarn`). The resolved `dist.tarball` is rewritten onto the
-/// configured registry's origin ([`rewrite_tarball_origin`]) so a mirrored install
-/// fetches the tarball from the same host the packument came from, not a hardcoded
+/// Networked wrapper: resolve `spec` against `cfg.base` (presenting `cfg.auth`
+/// to an auth-required mirror). `pkg` is the package name (`pnpm`, `npm`,
+/// `yarn`). The resolved `dist.tarball` is rewritten onto the configured
+/// registry's origin ([`rewrite_tarball_origin`]) so a mirrored install fetches
+/// the tarball from the same host the metadata came from, not a hardcoded
 /// public URL.
+///
+/// An exact version or dist-tag resolves via `GET /{pkg}/{spec}` — the
+/// registry's version-manifest endpoint, a few KB — because the shim's dynamic
+/// default re-resolves `latest` on real invocations and paying a whole packument
+/// per call was the dominant cost of #491 (25 MB, uncompressed, per `npx` run).
+/// Only a RANGE needs the version-enumerating packument, fetched with the corgi
+/// `Accept`. A registry that doesn't implement the version endpoint — an HTTP
+/// error, or a 200 whose body isn't a usable manifest (a path-prefix proxy
+/// serving the whole packument, an HTML error page) — falls back to the
+/// packument, so no registry the packument path handled regresses. A TRANSPORT
+/// failure (host unreachable) propagates instead, since the packument fetch
+/// would only re-run the same doomed connect (and take its own retries doing it).
 pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
-    let url = format!("{}/{pkg}", cfg.base.trim_end_matches('/'));
-    let body = download::fetch_text_auth(&url, cfg.auth.as_ref())
+    let spec = spec.trim();
+    let base = cfg.base.trim_end_matches('/');
+    let is_exact = semver::Version::parse(spec).is_ok();
+    let is_range = !is_exact && semver::VersionReq::parse(&normalize_range(spec)).is_ok();
+    if !is_range {
+        let url = format!("{base}/{pkg}/{spec}");
+        match download::fetch_text_accept_auth(&url, None, cfg.auth.as_ref()) {
+            Ok(body) => {
+                if let Ok(meta) = serde_json::from_str::<Value>(&body)
+                    && let Ok(mut dist) = resolve_dist_from_version_manifest(&meta)
+                {
+                    dist.tarball = rewrite_tarball_origin(&dist.tarball, &cfg.base);
+                    return Ok(dist);
+                }
+                // 200 but not a version manifest → packument fallback below.
+            }
+            Err(e) if e.status.is_none() => {
+                return Err(e.error).with_context(|| format!("fetching {url}"));
+            }
+            Err(_) => {} // endpoint unsupported/404 on this registry → packument
+        }
+    }
+    let url = format!("{base}/{pkg}");
+    let body = download::fetch_text_accept_auth(&url, Some(CORGI_ACCEPT), cfg.auth.as_ref())
+        .map_err(|e| e.error)
         .with_context(|| format!("fetching packument {url}"))?;
     let packument: Value =
         serde_json::from_str(&body).with_context(|| format!("parsing packument {url}"))?;
@@ -599,6 +626,21 @@ pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Re
         resolve_dist(&packument, spec).with_context(|| format!("resolving {pkg}@{spec}"))?;
     dist.tarball = rewrite_tarball_origin(&dist.tarball, &cfg.base);
     Ok(dist)
+}
+
+/// Build a [`VersionDist`] from a VERSION-MANIFEST document (`GET
+/// /{pkg}/{version-or-tag}`) — the same `name`/`bin`/`dist` shape as one
+/// packument `versions[]` entry, plus its own top-level `version`. PURE — no
+/// network — so the parsing is unit-tested offline. Routes through
+/// [`dist_from_meta`], the single `VersionDist` chokepoint, so the
+/// store-path guard ([`validate_version`]) and the bin-path guard apply to this
+/// server-controlled document exactly as to a packument.
+pub fn resolve_dist_from_version_manifest(meta: &Value) -> Result<VersionDist> {
+    let version = meta
+        .get("version")
+        .and_then(Value::as_str)
+        .context("version manifest has no \"version\" field")?;
+    dist_from_meta(version, meta)
 }
 
 /// Verify a downloaded tarball against its dist integrity. Fail-closed: a mismatch
@@ -756,6 +798,48 @@ mod tests {
         // node-semver space-separated comparators (`>=9 <10`) — npm/devEngines
         // write these; Cargo's semver needs commas, so the normalizer bridges it.
         assert_eq!(resolve_dist(&p, ">=9 <10").unwrap().version, "9.5.0");
+    }
+
+    #[test]
+    fn version_manifest_resolves_through_the_same_guards_as_a_packument() {
+        // The version-manifest endpoint (`GET /{pkg}/{version-or-tag}`) returns
+        // one versions[] entry with its own top-level "version" — the fast path
+        // for exact/tag specs (#491). It must flow through dist_from_meta, the
+        // VersionDist chokepoint, so the store-path guard holds.
+        let meta: Value = serde_json::from_str(
+            r#"{
+                "name": "npm", "version": "12.0.1",
+                "bin": { "npm": "bin/npm-cli.js", "npx": "bin/npx-cli.js" },
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/npm/-/npm-12.0.1.tgz",
+                    "integrity": "sha512-DDDD"
+                }
+            }"#,
+        )
+        .unwrap();
+        let dist = resolve_dist_from_version_manifest(&meta).unwrap();
+        assert_eq!(dist.version, "12.0.1");
+        assert_eq!(dist.integrity, Integrity::Sha512("DDDD".into()));
+        assert_eq!(dist.bin_subpath, PathBuf::from("bin/npm-cli.js"));
+
+        // No "version" field → error, never a guessed store path.
+        let no_version: Value = serde_json::from_str(r#"{ "name": "npm" }"#).unwrap();
+        assert!(resolve_dist_from_version_manifest(&no_version).is_err());
+
+        // A server-controlled version that would escape the store join is
+        // refused — same F0c posture as the packument dist-tag branch.
+        let escaping: Value = serde_json::from_str(
+            r#"{ "name": "npm", "version": "..", "bin": "bin/npm-cli.js",
+                 "dist": { "tarball": "https://x/t.tgz", "integrity": "sha512-EEEE" } }"#,
+        )
+        .unwrap();
+        let err = resolve_dist_from_version_manifest(&escaping)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unsafe version string"),
+            "escaping version must be refused: {err}"
+        );
     }
 
     #[test]

@@ -615,6 +615,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_pkg_spec_jsr_rejects_path_shapes() {
+        for spec in [
+            "jsr:@std/../collections",
+            "jsr:@std/collections/more",
+            "jsr:@std//collections",
+            "jsr:@std/co llections",
+        ] {
+            let err = parse_pkg_spec(spec).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid jsr: spec"),
+                "{spec} produced unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_pkg_spec_git_bare_github_shorthand() {
         let s = parse_pkg_spec("kevva/is-negative").unwrap();
         assert_eq!(s.git_spec.as_deref(), Some("kevva/is-negative"));

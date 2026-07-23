@@ -13,10 +13,10 @@ An **audit** is a distinct thread profile — alongside the implementation threa
 
 ## The 5 gates (checklist — AGENTS.md is canonical)
 
-1. **Pin the reference target surgically.** State the EXACT major (e.g. pnpm 10). VERIFY every reference checkout's version before reading it (`git -C .repos/<tool> describe --tags`, its `package.json` `version`, the installed tool's `--version`). Wrong-major reference = #1 garbage source.
+1. **Pin the reference target surgically.** State the EXACT major (e.g. pnpm 10). VERIFY every reference checkout's version before reading it (`git -C .repos/<tool> describe --tags`, its `package.json` `version`, the installed tool's `--version`). Wrong-major reference = #1 garbage source. **When the AUDIT TARGET is a branch/SHA of THIS repo** (not a reference tool), `git fetch origin` FIRST and pin `origin/<branch>@<sha>` — never a local worktree/branch checkout, which routinely lags origin. Verify the pinned SHA is reachable (`git merge-base --is-ancestor <sha> origin/<branch>`) before reading a byte; auditing a stale local pin = the same wrong-target garbage as a wrong-major reference.
 2. **Empirical over source.** A candidate is not a finding until a differential fixture reproduces it by RUNNING the real pinned tool + nub on identical input and diffing. Source/`--help` reading = leads only.
 3. **Cross-check the decision record.** Deprecated/removed flags, npm-isms nub rejects, the deliberate pnpm-compat divergences, and already-decided/already-built work are NOT findings. Filter against AGENTS.md "Core design positions", `wiki/` decision docs, and prior `.fray/` threads.
-4. **Mandatory adversarial self-refutation.** Fresh-context reviewer(s) whose job is to REFUTE each surfaced finding (re-pin, re-reproduce, re-check the record); default to refuted when uncertain. Surface ONLY survivors, each with reproduction evidence. Never forward the raw breadth-pass output.
+4. **Mandatory adversarial self-refutation.** Fresh-context reviewer(s) must try to REFUTE each surfaced finding by re-pinning, re-reproducing, and re-checking the decision record. They must also challenge any claim that a gap is irreducible by exhausting the relevant mechanism's documented alternatives and testing plausible closures. Default to refuted when uncertain. Surface only survivors, each with reproduction evidence; never forward the raw breadth-pass output.
 5. **Tier + deliverable.** Opus/Fable high+ for judgment AND refutation (Sonnet/Haiku may harvest breadth, but every item is Opus-verified). Thoroughness is two-dimensional: COVERAGE (enumerate the FULL surface from the pinned reference's own authoritative source) AND PRECISION (every item verified). Catalog → `wiki/research/<topic>.md` with all buckets explicit (real gaps / confirmed-OK / intentional-divergence); each finding records reproduction + decision-record cross-check + severity + confidence.
 
 ## Orchestration shape (in order)
@@ -38,6 +38,9 @@ GATE 1 — PIN: The target is <REFERENCE> <EXACT MAJOR>. BEFORE reading anything
   every reference you use: `git -C .repos/<tool> describe --tags` and its package.json version, and
   `<tool> --version` for any installed binary. If a checkout is the wrong major, check out the right
   tag / install the right version FIRST. State the verified versions at the top of your output.
+  If the AUDIT TARGET is a branch/SHA of THIS repo (not a reference tool): `git fetch origin` FIRST,
+  pin `origin/<branch>@<sha>` (NEVER a local worktree/branch — it routinely lags origin), and verify
+  `git merge-base --is-ancestor <sha> origin/<branch>` before reading. State the pinned SHA at the top.
 GATE 2 — EMPIRICAL: A gap is NOT a finding until you reproduce it by RUNNING <REFERENCE> <MAJOR> AND nub
   on identical input and diffing the actual output. Source-reading and --help parsing are LEADS only.
   Build a minimal differential fixture per candidate; capture both commands + both outputs.
@@ -46,7 +49,9 @@ GATE 3 — DECISION RECORD: Drop any candidate that is a deprecated/removed flag
   decided/built. Cross-check AGENTS.md "Core design positions", wiki/ decision docs, and .fray/ threads.
   Deeply evaluate what has ALREADY been discussed — surfacing a settled call is as bad as a false positive.
 GATE 4 — REFUTE: After harvesting, re-verify every surviving candidate adversarially (try to REFUTE it:
-  re-pin, re-reproduce, re-check the record). Keep only what survives, with its reproduction evidence.
+  re-pin, re-reproduce, re-check the record). Treat "irreducible" or "cannot close" as claims that also
+  require evidence: exhaust the documented mechanism surface and test plausible closures. Keep only
+  what survives, with its reproduction evidence.
 GATE 5 — COVERAGE + PRECISION: Enumerate the FULL surface from <REFERENCE> <MAJOR>'s own authoritative
   source (its --help / source), so nothing is missed; AND verify every surfaced item. Output ALL buckets:
   real gaps / confirmed-OK / intentional-divergence. Each real finding: reproduction command + both

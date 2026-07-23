@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.32.0](https://github.com/jdx/aube/compare/aube-scripts-v1.31.0...aube-scripts-v1.32.0) - 2026-07-22
+
+### Other
+
+- refresh benchmarks for v1.31.0 ([#1072](https://github.com/jdx/aube/pull/1072))
+
+## [1.30.0](https://github.com/jdx/aube/compare/aube-scripts-v1.29.1...aube-scripts-v1.30.0) - 2026-07-20
+
+### Other
+
+- refresh benchmarks for v1.29.1 ([#1060](https://github.com/jdx/aube/pull/1060))
+
+## [1.29.0](https://github.com/jdx/aube/compare/aube-scripts-v1.28.0...aube-scripts-v1.29.0) - 2026-07-16
+
+### Other
+
+- refresh benchmarks for v1.28.0 ([#1050](https://github.com/jdx/aube/pull/1050))
+
+## [1.28.0](https://github.com/jdx/aube/compare/aube-scripts-v1.27.0...aube-scripts-v1.28.0) - 2026-07-16
+
+### Other
+
+- refresh benchmarks for v1.27.0 ([#1041](https://github.com/jdx/aube/pull/1041))
+
+## [1.27.0](https://github.com/jdx/aube/compare/aube-scripts-v1.26.0...aube-scripts-v1.27.0) - 2026-07-13
+
+### Added
+
+- *(scripts)* allow git repository build approvals ([#1010](https://github.com/jdx/aube/pull/1010))
+
+### Other
+
+- *(install)* isolate runtime and script state ([#1027](https://github.com/jdx/aube/pull/1027))
+- refresh benchmarks for v1.26.0 ([#1002](https://github.com/jdx/aube/pull/1002))
+
+## [1.26.0](https://github.com/jdx/aube/compare/aube-scripts-v1.25.2...aube-scripts-v1.26.0) - 2026-07-06
+
+### Added
+
+- *(scripts)* pass resolved proxy to lifecycle scripts ([#996](https://github.com/jdx/aube/pull/996))
+
+### Other
+
+- Update sponsor references for jdx.dev ([#978](https://github.com/jdx/aube/pull/978))
+- refresh benchmarks for v1.25.2 ([#975](https://github.com/jdx/aube/pull/975))
+
+## [1.25.2](https://github.com/jdx/aube/compare/aube-scripts-v1.25.1...aube-scripts-v1.25.2) - 2026-07-01
+
+### Other
+
+- refresh benchmarks for v1.25.1 ([#962](https://github.com/jdx/aube/pull/962))
+
 ## [1.25.1](https://github.com/jdx/aube/compare/aube-scripts-v1.25.0...aube-scripts-v1.25.1) - 2026-06-25
 
 ### Other

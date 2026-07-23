@@ -354,3 +354,67 @@ pub fn integrity_to_hex(integrity: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     Some(hex::encode(bytes))
 }
+
+/// Convert a legacy `dist.shasum` (hex-encoded SHA-1) into an SRI
+/// `sha1-<base64>` integrity string — the inverse of the sha1 branch of
+/// [`integrity_to_hex`]. Registries that predate npm's 2017 SRI rollout,
+/// or proxies that strip the modern `dist.integrity` field, still ship
+/// `dist.shasum`, and npm's classic client has always treated it as the
+/// package's verification hash. Deriving `sha1-…` from it lets the
+/// resolver record a verifiable integrity instead of falling through to
+/// an unverifiable tarball-only resolution. Returns `None` unless the
+/// input is a well-formed 40-char hex digest, so a malformed/absent
+/// field cleanly degrades to the existing no-integrity path rather than
+/// minting a bogus SRI.
+pub fn shasum_to_sri(shasum: &str) -> Option<String> {
+    let shasum = shasum.trim();
+    if shasum.len() != 40 || !shasum.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = hex::decode(shasum).ok()?;
+    use base64::Engine;
+    Some(format!(
+        "sha1-{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shasum_to_sri_matches_npm_classic_encoding() {
+        // The exact value yarn's classic resolver computed for the
+        // package in discussion #979: hex sha1 -> `sha1-<base64>`.
+        assert_eq!(
+            shasum_to_sri("dc96d6d3268bbc55103ce55cd4608d43d3b7ff72").as_deref(),
+            Some("sha1-3JbW0yaLvFUQPOVc1GCNQ9O3/3I=")
+        );
+    }
+
+    #[test]
+    fn shasum_to_sri_round_trips_through_integrity_to_hex() {
+        let hex = "dc96d6d3268bbc55103ce55cd4608d43d3b7ff72";
+        let sri = shasum_to_sri(hex).unwrap();
+        assert_eq!(integrity_to_hex(&sri).as_deref(), Some(hex));
+    }
+
+    #[test]
+    fn shasum_to_sri_is_lenient_about_surrounding_whitespace() {
+        assert!(shasum_to_sri("  dc96d6d3268bbc55103ce55cd4608d43d3b7ff72\n").is_some());
+    }
+
+    #[test]
+    fn shasum_to_sri_rejects_malformed_input() {
+        // Wrong length (sha256-sized), non-hex, and empty all degrade to
+        // None so callers fall back to the no-integrity path instead of
+        // recording a bogus SRI.
+        assert_eq!(shasum_to_sri(&"a".repeat(64)), None);
+        assert_eq!(
+            shasum_to_sri("dc96d6d3268bbc55103ce55cd4608d43d3b7ffzz"),
+            None
+        );
+        assert_eq!(shasum_to_sri(""), None);
+    }
+}

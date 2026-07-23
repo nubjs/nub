@@ -12,11 +12,16 @@ When a markdown file is large (>200 lines), don't Read the whole thing. Run the 
 
 ## Invocation
 
+The executable is a repository tool, not a resource nested under this skill directory. Resolve the checkout root explicitly before invoking it so the command works even when the skill itself was discovered under `.claude/skills/`:
+
 ```bash
-node scripts/md-toc/index.mjs <file.md>
+repo_root="$(git rev-parse --show-toplevel)"
+node "$repo_root/scripts/md-toc/index.mjs" <file.md>
 # or equivalently:
-nub scripts/md-toc/index.mjs <file.md>
+nub "$repo_root/scripts/md-toc/index.mjs" <file.md>
 ```
+
+Resolve `<file.md>` from the task's working directory. Do not look for `.claude/skills/md-toc/scripts/md-toc/index.mjs`; that nested path does not exist.
 
 ## Output format
 

@@ -22,10 +22,22 @@ pub const JSR_NPM_SCOPE: &str = "@jsr";
 pub fn jsr_to_npm_name(jsr_name: &str) -> Option<String> {
     let rest = jsr_name.strip_prefix('@')?;
     let (scope, name) = rest.split_once('/')?;
-    if scope.is_empty() || name.is_empty() {
+    if !valid_jsr_name_part(scope) || !valid_jsr_name_part(name) {
         return None;
     }
     Some(format!("@jsr/{scope}__{name}"))
+}
+
+fn valid_jsr_name_part(part: &str) -> bool {
+    if part.is_empty() || matches!(part, "." | "..") {
+        return false;
+    }
+    part.bytes().all(|b| {
+        matches!(
+            b,
+            b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.'
+        )
+    })
 }
 
 /// Inverse of [`jsr_to_npm_name`]. `@jsr/std__collections` → `@std/collections`.
@@ -65,6 +77,12 @@ mod tests {
         assert_eq!(jsr_to_npm_name("@std"), None);
         assert_eq!(jsr_to_npm_name("@/collections"), None);
         assert_eq!(jsr_to_npm_name("@std/"), None);
+        assert_eq!(jsr_to_npm_name("@std/../collections"), None);
+        assert_eq!(jsr_to_npm_name("@std/collections/more"), None);
+        assert_eq!(jsr_to_npm_name("@std//collections"), None);
+        assert_eq!(jsr_to_npm_name("@std/co llections"), None);
+        assert_eq!(jsr_to_npm_name("@std/%2fcollections"), None);
+        assert_eq!(jsr_to_npm_name("@Std/collections"), None);
     }
 
     #[test]

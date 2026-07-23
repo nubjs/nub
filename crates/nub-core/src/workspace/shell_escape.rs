@@ -18,7 +18,7 @@
 /// otherwise it is wrapped in single quotes with embedded `'` rendered as
 /// `'\''`, then npm's two cosmetic cleanups are applied (they shorten the string
 /// without changing how `sh` tokenizes it).
-pub fn sh(input: &str) -> String {
+fn sh(input: &str) -> String {
     if input.is_empty() {
         return "''".to_string();
     }
@@ -87,7 +87,7 @@ fn strip_leading_empty_quote_pairs(s: &str) -> String {
 /// whitespace/`"` per the MS command-line rules, then prefixes cmd metacharacters
 /// with `^`. `double_escape` repeats the `^` pass — npm does this when the script
 /// target is a `.cmd`/`.bat` file, which re-parses its arguments once more.
-pub fn cmd(input: &str, double_escape: bool) -> String {
+fn cmd(input: &str, double_escape: bool) -> String {
     if input.is_empty() {
         return "\"\"".to_string();
     }
@@ -175,7 +175,7 @@ pub fn splice_args(body: &str, args: &[String], shell: &str) -> String {
 /// Does `shell` invoke `cmd.exe`? Mirrors npm's `/(?:^|\\)cmd(?:\.exe)?$/i`, so a
 /// custom `script-shell` of `bash`/`zsh` selects POSIX escaping while the Windows
 /// default (`cmd`) selects cmd escaping.
-pub fn is_cmd(shell: &str) -> bool {
+fn is_cmd(shell: &str) -> bool {
     let lower = shell.to_ascii_lowercase();
     let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
     stem == "cmd" || stem.ends_with("\\cmd")
@@ -190,7 +190,7 @@ pub fn is_cmd(shell: &str) -> bool {
 /// whose `eslint` resolves to `eslint.cmd` is treated as non-batch and
 /// single-escaped. Closing that needs Windows PATHEXT resolution and Windows
 /// validation; tracked as the residual Windows gap on A42.
-pub fn body_targets_batch_file(script_body: &str) -> bool {
+fn body_targets_batch_file(script_body: &str) -> bool {
     let first = script_body.split_whitespace().next().unwrap_or("");
     let lower = first.to_ascii_lowercase();
     lower.ends_with(".cmd") || lower.ends_with(".bat")

@@ -42,7 +42,7 @@ tempfile = "3"
 bench = []
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false }
+criterion = { version = "0.8", default-features = false }
 
 [[bench]]
 name = "locked_lookup"

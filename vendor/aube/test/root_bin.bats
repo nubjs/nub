@@ -25,6 +25,12 @@ teardown() {
 	assert_output "$PHYS_PWD/node_modules/.bin"
 }
 
+@test "aube prefix prints <cwd>" {
+	run aube prefix
+	assert_success
+	assert_output "$PHYS_PWD"
+}
+
 @test "aube root works without a package.json" {
 	run aube root
 	assert_success
@@ -49,4 +55,11 @@ teardown() {
 	run aube -C sub bin
 	assert_success
 	assert_output "$PHYS_PWD/sub/node_modules/.bin"
+}
+
+@test "aube prefix honors global -C flag" {
+	mkdir sub
+	run aube -C sub prefix
+	assert_success
+	assert_output "$PHYS_PWD/sub"
 }

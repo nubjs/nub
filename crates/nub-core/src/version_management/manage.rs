@@ -78,14 +78,6 @@ pub enum InstallOutcome {
     Installed(NodeVersion),
 }
 
-impl InstallOutcome {
-    pub fn version(&self) -> &NodeVersion {
-        match self {
-            Self::AlreadyCached(v) | Self::AlreadyOnPath(v) | Self::Installed(v) => v,
-        }
-    }
-}
-
 /// Resolve a spec (`22`, `lts`, `22.13.0`, `latest`, …) to a concrete published
 /// version against the dist index. An exact `X.Y.Z` is still routed through the
 /// index so a typo'd nonexistent version fails fast rather than 404ing mid-download.
@@ -184,7 +176,7 @@ pub fn install_from_pin(store: &Path, cwd: &Path) -> Result<InstallOutcome> {
     let Some((raw, pin, source)) = chain.pin else {
         bail!(
             "nub node install: no version given and no Node pin (devEngines.runtime, \
-             .node-version, .nvmrc, or engines.node) found in this project"
+             .node-version, .nvmrc, .tool-versions, or engines.node) found in this project"
         );
     };
     match &pin {

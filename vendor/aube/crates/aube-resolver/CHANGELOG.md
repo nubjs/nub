@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.32.0](https://github.com/jdx/aube/compare/aube-resolver-v1.31.0...aube-resolver-v1.32.0) - 2026-07-22
+
+### Other
+
+- refresh benchmarks for v1.31.0 ([#1072](https://github.com/jdx/aube/pull/1072))
+
+## [1.30.0](https://github.com/jdx/aube/compare/aube-resolver-v1.29.1...aube-resolver-v1.30.0) - 2026-07-20
+
+### Other
+
+- refresh benchmarks for v1.29.1 ([#1060](https://github.com/jdx/aube/pull/1060))
+
+## [1.29.1](https://github.com/jdx/aube/compare/aube-resolver-v1.29.0...aube-resolver-v1.29.1) - 2026-07-16
+
+### Fixed
+
+- *(add)* honor minimumReleaseAge when pinning manifest versions ([#1056](https://github.com/jdx/aube/pull/1056))
+
+## [1.29.0](https://github.com/jdx/aube/compare/aube-resolver-v1.28.0...aube-resolver-v1.29.0) - 2026-07-16
+
+### Other
+
+- refresh benchmarks for v1.28.0 ([#1050](https://github.com/jdx/aube/pull/1050))
+
+## [1.28.0](https://github.com/jdx/aube/compare/aube-resolver-v1.27.0...aube-resolver-v1.28.0) - 2026-07-16
+
+### Fixed
+
+- *(resolver)* handle versionless scoped npm aliases ([#1044](https://github.com/jdx/aube/pull/1044))
+
+### Other
+
+- refresh benchmarks for v1.27.0 ([#1041](https://github.com/jdx/aube/pull/1041))
+- undo 7-day soak toolchain changes ([#1039](https://github.com/jdx/aube/pull/1039))
+
+## [1.27.0](https://github.com/jdx/aube/compare/aube-resolver-v1.26.0...aube-resolver-v1.27.0) - 2026-07-13
+
+### Other
+
+- 7-day soak across toolchain and deps, cold-path hints, pinned tooling ([#1020](https://github.com/jdx/aube/pull/1020))
+- refresh benchmarks for v1.26.0 ([#1002](https://github.com/jdx/aube/pull/1002))
+
+## [1.26.0](https://github.com/jdx/aube/compare/aube-resolver-v1.25.2...aube-resolver-v1.26.0) - 2026-07-06
+
+### Added
+
+- *(resolver)* allow trust exclude version ranges ([#989](https://github.com/jdx/aube/pull/989))
+
+### Fixed
+
+- *(resolver)* derive integrity from dist.shasum when dist.integrity is absent ([#994](https://github.com/jdx/aube/pull/994))
+
+### Other
+
+- Update sponsor references for jdx.dev ([#978](https://github.com/jdx/aube/pull/978))
+- refresh benchmarks for v1.25.2 ([#975](https://github.com/jdx/aube/pull/975))
+
+## [1.25.2](https://github.com/jdx/aube/compare/aube-resolver-v1.25.1...aube-resolver-v1.25.2) - 2026-07-01
+
+### Fixed
+
+- *(resolver)* allow git deps without package manifests ([#970](https://github.com/jdx/aube/pull/970))
+
+### Other
+
+- refresh benchmarks for v1.25.1 ([#962](https://github.com/jdx/aube/pull/962))
+- *(deps)* update rust crate criterion to 0.8 ([#955](https://github.com/jdx/aube/pull/955))
+
 ## [1.25.1](https://github.com/jdx/aube/compare/aube-resolver-v1.25.0...aube-resolver-v1.25.1) - 2026-06-25
 
 ### Other

@@ -1,0 +1,25 @@
+[package]
+name = "aube-node"
+description = "Node-API bindings for embedding aube"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aube = { workspace = true }
+aube-codes = { workspace = true }
+aube-registry = { workspace = true }
+aube-settings = { workspace = true }
+miette = { workspace = true }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+tokio = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }

@@ -141,6 +141,28 @@ fn rewrite_peer_reference(inner: &str, translate: &impl Fn(&str) -> Option<Strin
     out
 }
 
+pub(super) const PATCH_HASH_MARKER: &str = "(patch_hash=";
+
+/// Remove every `(patch_hash=…)` segment from a dep-path tail or a
+/// snapshots key.
+///
+/// The marker is pnpm's WRITE-TIME spelling of a patched package's
+/// identity. Aube carries the patch out of band (on
+/// `patched_dependency_hashes`, folded into the graph hash) and never
+/// puts it in a dep_path, so the reader strips it on the way in and the
+/// writer re-derives it on the way out — one owner per direction.
+pub(super) fn strip_patch_hash_suffix(value: &str) -> String {
+    let mut out = value.to_string();
+    while let Some(start) = out.find(PATCH_HASH_MARKER) {
+        let Some(rel_end) = out[start..].find(')') else {
+            break;
+        };
+        let end = start + rel_end + 1;
+        out.replace_range(start..end, "");
+    }
+    out
+}
+
 pub(super) fn peerless_alias_target<'a>(
     packages: &'a BTreeMap<String, LockedPackage>,
     real_dep_path: &str,

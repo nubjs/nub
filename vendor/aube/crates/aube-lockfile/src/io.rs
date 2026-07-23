@@ -26,6 +26,21 @@ pub enum LockfileKind {
     Bun,
 }
 
+/// Options that affect lockfile parsing without changing the graph
+/// shape. Defaults preserve the historic strict parser behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOptions {
+    pub strict_store_integrity: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            strict_store_integrity: true,
+        }
+    }
+}
+
 impl LockfileKind {
     pub fn filename(self) -> &'static str {
         match self {
@@ -230,9 +245,26 @@ fn lockfile_write_is_noop(
     if !path.exists() {
         return false;
     }
-    let Ok(existing) = parse_one(path, kind, manifest) else {
+    // Strict integrity is what this guard had unconditionally before
+    // jdx/aube#995 made it an option: a lockfile we cannot strictly parse falls
+    // through to `return false`, i.e. gets rewritten rather than suppressed.
+    let Ok(existing) = parse_one(path, kind, manifest, ParseOptions::default()) else {
         return false;
     };
+    // Under an enforcing embedder (nub), a differing `packageExtensionsChecksum`
+    // is a real config change that must be persisted — fold it into the no-op
+    // decision, exactly like the patch fingerprints below. Without this the
+    // guard suppresses the very write that would record the checksum whenever
+    // the resolved graph is otherwise unchanged (the mainline case: an existing
+    // lockfile that already applied the same extensions, just never stamped the
+    // checksum), leaving `--frozen-lockfile` permanently mismatched with no
+    // install-based remedy. Standalone aube never stamps the generic lock
+    // (posture off), so this is inert for it.
+    if aube_util::engine_context().enforce_package_extensions_checksum
+        && graph.package_extensions_checksum != existing.package_extensions_checksum
+    {
+        return false;
+    }
     // `allow_build` doesn't affect the engine-agnostic identity hash
     // (the engine taint it would gate is computed with `engine: None`),
     // so a trivial policy is correct here.
@@ -247,41 +279,33 @@ fn lockfile_write_is_noop(
     // (selector `name@version` → sha256 hex), matching how the link /
     // materialize paths derive their patch fingerprints.
     // The declared keys carried into `patched_dependency_hashes` may be
-    // ranges / `*` / bare names, so a package's fold hash is found by
-    // resolving its concrete `name@version` through the patch groups,
-    // not by a direct `name@version` lookup. An invalid range here means
-    // the graph is unwritable as-is — return `false` (treat as NOT
+    // ranges / `*` / bare names (and an npm-aliased package matches under
+    // the registry name it shadows), so each graph is folded through
+    // `resolve_patched_by_version` — the one rule the linker, writer, and
+    // drift check share — rather than a direct `name@version` lookup or a
+    // second copy of the matching logic here. The result is keyed by
+    // `spec_key()`, which is exactly what the hasher hands the closure.
+    // An unresolvable set (invalid range, or a per-package conflict)
+    // means the graph is unwritable as-is — return `false` (treat as NOT
     // equivalent) so the caller proceeds to the real write, which
     // surfaces the branded error rather than silently suppressing it.
-    // A per-package conflict resolves to `None` (swallowed): the two
-    // graphs then fold differently and the write proceeds, again
-    // deferring the error to the writer.
-    let Ok(graph_groups) = crate::patch_groups::PatchGroups::build(
-        graph.patched_dependency_hashes.keys().map(String::as_str),
+    let Ok(graph_patches) = crate::patch_groups::resolve_patched_by_version(
+        &graph.patched_dependency_hashes,
+        &graph.packages,
     ) else {
         return false;
     };
-    let Ok(existing_groups) = crate::patch_groups::PatchGroups::build(
-        existing
-            .patched_dependency_hashes
-            .keys()
-            .map(String::as_str),
+    let Ok(existing_patches) = crate::patch_groups::resolve_patched_by_version(
+        &existing.patched_dependency_hashes,
+        &existing.packages,
     ) else {
         return false;
     };
     let graph_patch = |name: &str, version: &str| -> Option<String> {
-        graph_groups
-            .resolve(name, version)
-            .ok()
-            .flatten()
-            .and_then(|source_key| graph.patched_dependency_hashes.get(source_key).cloned())
+        graph_patches.get(&format!("{name}@{version}")).cloned()
     };
     let existing_patch = |name: &str, version: &str| -> Option<String> {
-        existing_groups
-            .resolve(name, version)
-            .ok()
-            .flatten()
-            .and_then(|source_key| existing.patched_dependency_hashes.get(source_key).cloned())
+        existing_patches.get(&format!("{name}@{version}")).cloned()
     };
     crate::graph_hash::graph_identity_hash_with_patches(graph, &no_build, &graph_patch)
         == crate::graph_hash::graph_identity_hash_with_patches(
@@ -463,13 +487,23 @@ pub fn parse_lockfile_with_kind(
     project_dir: &Path,
     manifest: &aube_manifest::PackageJson,
 ) -> Result<(LockfileGraph, LockfileKind), Error> {
+    parse_lockfile_with_kind_and_options(project_dir, manifest, ParseOptions::default())
+}
+
+/// Like [`parse_lockfile_with_kind`] but lets callers opt into parser
+/// behavior driven by resolved install settings.
+pub fn parse_lockfile_with_kind_and_options(
+    project_dir: &Path,
+    manifest: &aube_manifest::PackageJson,
+    options: ParseOptions,
+) -> Result<(LockfileGraph, LockfileKind), Error> {
     reject_bun_binary(project_dir)?;
     for (path, kind) in lockfile_candidates(project_dir, /*include_aube=*/ true) {
         if !path.exists() {
             continue;
         }
         let kind = refine_yarn_kind(&path, kind);
-        let graph = parse_one(&path, kind, manifest)?;
+        let graph = parse_one(&path, kind, manifest, options)?;
         return Ok((graph, kind));
     }
     Err(Error::NotFound(project_dir.to_path_buf()))
@@ -491,7 +525,7 @@ pub fn parse_for_import(
             continue;
         }
         let kind = refine_yarn_kind(&path, kind);
-        let graph = parse_one(&path, kind, manifest)?;
+        let graph = parse_one(&path, kind, manifest, ParseOptions::default())?;
         return Ok((graph, kind));
     }
     Err(Error::NotFound(project_dir.to_path_buf()))
@@ -573,6 +607,7 @@ fn parse_one(
     path: &Path,
     kind: LockfileKind,
     manifest: &aube_manifest::PackageJson,
+    options: ParseOptions,
 ) -> Result<LockfileGraph, Error> {
     let _diag = aube_util::diag::Span::new(aube_util::diag::Category::Lockfile, "parse_one")
         .with_meta_fn(|| {
@@ -593,7 +628,7 @@ fn parse_one(
         // now — same parser, same writer — so we piggyback on the pnpm
         // module. Keeping the variant distinct lets detection/import
         // treat the two differently even though the bytes are the same.
-        LockfileKind::Aube | LockfileKind::Pnpm => pnpm::parse(path),
+        LockfileKind::Aube | LockfileKind::Pnpm => pnpm::parse_with_options(path, options),
         // yarn.rs::parse peeks the file for `__metadata:` and
         // dispatches between classic (v1) and berry (v2+) internally,
         // so we can hand both kinds to the same entry point. The

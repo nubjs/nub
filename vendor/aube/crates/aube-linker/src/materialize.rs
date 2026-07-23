@@ -750,17 +750,20 @@ impl Linker {
             // `pkg_nm_parent` is `<base_dir>/<subdir>/node_modules/`, so
             // two parents deep brings us to `<base_dir>/` where all
             // sibling subdirs live side-by-side.
-            let virtual_root = pkg_nm_parent
-                .parent()
-                .and_then(Path::parent)
-                .unwrap_or(&pkg_nm_parent);
-            let sibling_abs = virtual_root
-                .join(&sibling_subdir)
-                .join("node_modules")
-                .join(dep_name);
-            let link_parent = symlink_path.parent().unwrap_or(&pkg_nm_parent);
-            let target = pathdiff::diff_paths(&sibling_abs, link_parent)
-                .unwrap_or_else(|| sibling_abs.clone());
+            #[cfg(not(windows))]
+            let target = {
+                let virtual_root = pkg_nm_parent
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap_or(&pkg_nm_parent);
+                let sibling_abs = virtual_root
+                    .join(&sibling_subdir)
+                    .join("node_modules")
+                    .join(dep_name);
+                let link_parent = symlink_path.parent().unwrap_or(&pkg_nm_parent);
+                pathdiff::diff_paths(&sibling_abs, link_parent)
+                    .unwrap_or_else(|| sibling_abs.clone())
+            };
 
             // Staged materialization writes into `.tmp-<pid>-<id>/`,
             // then atomic-renames into `final_base_dir/<subdir>/`.

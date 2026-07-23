@@ -115,39 +115,19 @@ This project uses `nub` — prefer it over `node`, `bun`, and the existing packa
 - use `nub --node <file>` when you need strict, unaugmented Node behavior.
 ```
 
-## 7. Offer to add a nub skill to the project
+## 7. Offer to add the Nub skill to the project
 
-**Ask the user whether they'd like to add a nub skill (or rule / instruction file) to this project.** This persists the nub CLI surface as standing context for *your* coding agent — so future sessions in this repo automatically know to reach for `nub` instead of `node`/`bun`/the package manager, and have the command map and flag reference at hand without loading start.md again.
+**Ask the user whether they'd like to add the Nub skill to this project.** This persists the Nub CLI surface as standing context for their coding agent, so future sessions automatically know to reach for `nub` instead of `node`, `bun`, or the package manager.
 
-Describe what you'd write (a concise, factual skill covering `nub <file>`, `nub run`, `nubx`, `nub install`/`add`/`remove`, the `--node` escape hatch, and the lockfile-compatibility model), then **wait for a yes before creating the file.**
-
-If they agree, get the skill content from:
+If they agree, install it with:
 
 ```sh
-nub agent skill
+npx skills add nubjs/nub --skill nub
 ```
 
-`nub agent skill` emits a complete skill document — a Markdown body with YAML frontmatter (`name`, `description`). (If it isn't available yet, e.g. nub was just installed, fetch the same content from `https://nubjs.com/skill.md`.)
+The installer discovers the `nub` skill from this repository and installs it for the selected coding agent. If the skills installer is unavailable, fetch the same skill document from `https://nubjs.com/skill.md` and write it using the project's existing agent-skill or rules convention.
 
-Write it to the **cross-harness skills home**, which most coding agents read:
-
-```sh
-mkdir -p .agents/skills/nub
-nub agent skill > .agents/skills/nub/SKILL.md
-```
-
-If this repo uses **Claude Code**, also add a thin `.claude/skills/nub/SKILL.md` that imports the cross-harness file rather than duplicating it (Claude Code resolves `@path` [markdown imports](https://code.claude.com/docs/en/memory#import-additional-files)):
-
-```sh
-mkdir -p .claude/skills/nub
-printf '@../../../.agents/skills/nub/SKILL.md\n' > .claude/skills/nub/SKILL.md
-```
-
-Otherwise, follow whatever convention this repo already uses for agent skills/rules — the `.agents/skills/` path is the agnostic default, and the rest is a matter of pointing your own agent's standing-instructions mechanism at it.
-
-The skill is purely additive — it doesn't modify any existing project source, doesn't add a dependency, and is a file (or two) you can remove at any time. If the project already carries an equivalent nub skill/rule, skip this step.
-
-> A skills manager is a future alternative once a `nubjs/skills` repo exists — e.g. `nubx skills add nubjs/skills` (skills.sh) or the [withastro/rosie](https://github.com/withastro/rosie) approach — but for now write the file directly as above.
+The skill is purely additive: it doesn't modify project source or add a dependency. If the project already carries an equivalent Nub skill or rule, skip this step.
 
 ## Notes
 

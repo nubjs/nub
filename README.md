@@ -195,7 +195,7 @@ It's fast compared to existing JavaScript-based script runners.
 - 🗃️ The full pnpm workspace surface — `-r`, `--filter`, `--parallel`, `--workspace-concurrency`, `--resume-from`, `--stream`
 - 🎯 pnpm's `--filter` grammar verbatim — graph (`...@org/web`) and changed-since (`[main]`) selectors
 
-View the [full script runner docs 👉](https://nubjs.com/docs/run).
+View the [full script runner docs 👉](https://nubjs.com/docs/runner/run).
 
 <br/>
 
@@ -222,7 +222,7 @@ nubx -y cowsay@1.5.0 "hi"   # fetched from the registry (auto-approved via -y)
 - 🧩 Full `pnpm exec` / `pnpm dlx` flag parity, shell mode included
 - 🪜 Walks the resolution chain — member `.bin`, then workspace root, then ancestors
 
-View the [full package runner docs 👉](https://nubjs.com/docs/nubx).
+View the [full package runner docs 👉](https://nubjs.com/docs/runner).
 
 <br/>
 

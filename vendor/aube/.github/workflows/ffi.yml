@@ -1,0 +1,268 @@
+name: ffi
+
+on:
+  pull_request:
+    paths:
+      - "crates/aube-ffi/**"
+      - "crates/aube-codes/**"
+      - "crates/aube/src/lib.rs"
+      - "crates/aube/src/embed.rs"
+      - "crates/aube/src/commands/add/mod.rs"
+      - "crates/aube/src/commands/install/control.rs"
+      - "crates/aube/src/commands/install/dep_selection.rs"
+      - "crates/aube/src/commands/install/frozen.rs"
+      - "crates/aube-util/src/identity.rs"
+      - "crates/aube-util/src/lib.rs"
+      - ".github/workflows/ffi.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/aube-ffi/**"
+      - "crates/aube-codes/**"
+      - "crates/aube/src/lib.rs"
+      - "crates/aube/src/embed.rs"
+      - "crates/aube/src/commands/add/mod.rs"
+      - "crates/aube/src/commands/install/control.rs"
+      - "crates/aube/src/commands/install/dep_selection.rs"
+      - "crates/aube/src/commands/install/frozen.rs"
+      - "crates/aube-util/src/identity.rs"
+      - "crates/aube-util/src/lib.rs"
+      - ".github/workflows/ffi.yml"
+  release:
+    types: [published]
+  # Called from release-plz.yml between the CLI asset upload and the
+  # draft→published flip. With immutable GitHub releases enabled, a
+  # release's asset list freezes the moment it publishes — so the C ABI
+  # libraries must be attached while the release is still a draft. npm
+  # publishing intentionally stays on the `release: published` event
+  # above: npm doesn't care about release immutability, and gating it
+  # on the published release means packages only go out for releases
+  # that actually shipped.
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      # Constant marker distinguishing the draft-phase call from a
+      # direct workflow_dispatch: inside a called workflow,
+      # github.event_name reflects the *caller's* event, which is
+      # itself workflow_dispatch when release-plz.yml is manually
+      # re-run — so the event name alone can't gate the npm publish.
+      draft_phase:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      AUBE_GH_TOKEN:
+        required: true
+      CERTIFICATES_P12:
+        required: true
+      CERTIFICATES_P12_PASS:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag (e.g. v1.28.0) to publish packages for. Empty runs a smoke build."
+        required: false
+        default: ""
+
+concurrency:
+  group: ffi-${{ inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' && inputs.tag == '' }}
+
+permissions: {}
+
+jobs:
+  build:
+    name: ${{ matrix.package }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, target: aarch64-apple-darwin, os: darwin, cpu: arm64, package: darwin-arm64, binary: libaube_ffi.dylib, ext: dylib }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, os: darwin, cpu: x64, package: darwin-x64, binary: libaube_ffi.dylib, ext: dylib }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, os: linux, cpu: arm64, package: linux-arm64, binary: libaube_ffi.so, ext: so }
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, os: linux, cpu: x64, package: linux-x64, binary: libaube_ffi.so, ext: so }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, os: linux, cpu: arm64, libc: musl, package: linux-arm64-musl, binary: libaube_ffi.so, ext: so }
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, os: linux, cpu: x64, libc: musl, package: linux-x64-musl, binary: libaube_ffi.so, ext: so }
+          - { runner: windows-latest, target: aarch64-pc-windows-msvc, os: win32, cpu: arm64, package: win32-arm64, binary: aube_ffi.dll, ext: dll }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, os: win32, cpu: x64, package: win32-x64, binary: aube_ffi.dll, ext: dll }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: { persist-credentials: false, ref: "${{ inputs.tag || github.ref }}" }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "24", package-manager-cache: false }
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 # zizmor: ignore[cache-poisoning] PRs are read-only
+        with:
+          shared-key: ffi-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Rust target
+        shell: bash
+        run: rustup target add '${{ matrix.target }}'
+      - name: Install musl compiler
+        if: matrix.libc == 'musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build C ABI library
+        shell: bash
+        run: |
+          if [[ '${{ matrix.libc }}' == musl ]]; then
+            export RUSTFLAGS='-C target-feature=-crt-static'
+          fi
+          cargo build --locked --profile ffi -p aube-ffi --target '${{ matrix.target }}'
+      - name: Import macOS signing certificate
+        if: (github.event_name == 'release' || inputs.tag != '') && matrix.os == 'darwin'
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASS }}
+      - name: Sign macOS library
+        if: (github.event_name == 'release' || inputs.tag != '') && matrix.os == 'darwin'
+        shell: bash
+        run: |
+          codesign --force --sign 'Developer ID Application: Jeffrey Dickey (4993Y37DX6)' \
+            --options runtime --timestamp \
+            'target/${{ matrix.target }}/ffi/${{ matrix.binary }}'
+      - name: Set package version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then version=${RELEASE_TAG#v}; else version="0.0.0-smoke.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Stage library and platform package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OUT_DIR: ${{ runner.temp }}/ffi
+          AUBE_FFI_BINARY: target/${{ matrix.target }}/ffi/${{ matrix.binary }}
+          AUBE_FFI_OS: ${{ matrix.os }}
+          AUBE_FFI_CPU: ${{ matrix.cpu }}
+          AUBE_FFI_LIBC: ${{ matrix.libc }}
+          AUBE_FFI_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "$OUT_DIR"
+          cp "$AUBE_FFI_BINARY" "$OUT_DIR/libaube-${AUBE_FFI_TARGET}.${{ matrix.ext }}"
+          node crates/aube-ffi/npm/package.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aube-ffi-${{ matrix.package }}
+          path: ${{ runner.temp }}/ffi/*
+          if-no-files-found: error
+
+  packages:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { contents: read, id-token: write, attestations: write }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: { persist-credentials: false, ref: "${{ inputs.tag || github.ref }}" }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "24", package-manager-cache: false }
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          tool_versions: |
+            bun 1.3.11
+            deno 2.9.2
+          install_args: bun deno
+          cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with: { pattern: aube-ffi-*, path: packages, merge-multiple: true }
+      - name: Pack root npm package
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then VERSION=${RELEASE_TAG#v}; else VERSION="0.0.0-smoke.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"; fi
+          VERSION="$VERSION" OUT_DIR="$PWD/packages" node crates/aube-ffi/npm/package.mjs
+          cp crates/aube-ffi/include/aube.h packages/aube.h
+          test "$(find packages -maxdepth 1 -name '*.tgz' -print | wc -l)" -eq 9
+      - name: Smoke-test raw library with Bun and Deno
+        shell: bash
+        env:
+          AUBE_FFI_LIBRARY: ${{ github.workspace }}/packages/libaube-x86_64-unknown-linux-gnu.so
+        run: |
+          bun run crates/aube-ffi/poc/bun.ts
+          deno run --allow-env=AUBE_FFI_LIBRARY --allow-ffi --allow-read --allow-write crates/aube-ffi/poc/deno.ts
+      - name: Smoke-test npm packages and declarations
+        shell: bash
+        run: | # zizmor: ignore[adhoc-packages] installs only tarballs built by required matrix jobs
+          mkdir npm-smoke
+          cd npm-smoke
+          npm init --yes >/dev/null
+          npm install --force --ignore-scripts --no-package-lock ../packages/*.tgz
+          node -e "const ffi=require('@jdxcode/aube-ffi'); require('fs').accessSync(ffi.libraryPath); require('fs').accessSync(ffi.headerPath)"
+          cp "$GITHUB_WORKSPACE/crates/aube-ffi/npm/typecheck.ts" .
+          npx --yes --package=typescript@5.9.3 tsc --strict --noEmit \
+            --lib ES2022,DOM --module NodeNext --moduleResolution NodeNext typecheck.ts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aube-ffi-distribution
+          path: |
+            packages/*.tgz
+            packages/libaube-*
+            packages/aube.h
+          if-no-files-found: error
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        if: github.event_name == 'release' || inputs.tag != ''
+        with:
+          subject-path: |
+            packages/*.tgz
+            packages/libaube-*
+            packages/aube.h
+      - name: Publish platform and root packages
+        # `release: published` (or a manual dispatch backfill, where
+        # draft_phase is undeclared and thus falsy) only — never the
+        # workflow_call draft phase; see the trigger comment.
+        if: github.event_name == 'release' || (inputs.tag != '' && !inputs.draft_phase)
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          version=${RELEASE_TAG#v}; tag=latest; [[ "$version" == *-* ]] && tag=next
+          publish_package() {
+            local package=$1 name
+            name=$(tar -xOf "$package" package/package.json | jq -r .name)
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} is already published"
+              return
+            fi
+            npm publish "$package" --access public --provenance --tag "$tag"
+          }
+          # Relative paths need the ./ prefix or npm parses them as
+          # hosted-git owner/repo shorthands instead of local tarballs.
+          for package in ./packages/*-darwin-*.tgz ./packages/*-linux-*.tgz ./packages/*-win32-*.tgz; do publish_package "$package"; done
+          publish_package "./packages/jdxcode-aube-ffi-${version}.tgz"
+
+  # Attach the C ABI libraries + header to the (still-draft) GitHub
+  # release. Runs on the workflow_call from release-plz.yml during a
+  # real release, or on a workflow_dispatch with `tag` as the recovery
+  # path for a draft whose ffi assets are missing. Never on the
+  # `release: published` event: under immutable releases that is
+  # always too late to add assets.
+  release-assets:
+    if: inputs.tag != ''
+    needs: packages
+    runs-on: ubuntu-latest
+    # Uploads authenticate with AUBE_GH_TOKEN (the PAT release.yml
+    # already uses for draft asset uploads), not github.token.
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with: { name: aube-ffi-distribution, path: packages }
+      - name: Attach C ABI assets to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        # No checkout in this job, so gh needs the repo passed explicitly.
+        run: |
+          is_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+          if [[ "$is_draft" != "true" ]]; then
+            echo "::notice::release $RELEASE_TAG is already published; immutable releases cannot gain assets, skipping upload"
+            exit 0
+          fi
+          gh release upload --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" packages/libaube-* packages/aube.h --clobber

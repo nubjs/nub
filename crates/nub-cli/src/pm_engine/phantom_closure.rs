@@ -91,7 +91,86 @@ pub(super) fn set_native_config_seed(seed: Vec<String>) {
     }
 }
 
-/// Keep nub's internal seed plus native config entries, dropping every
+/// Curated "project-context" packages (nub#457): each one's build script READS or
+/// MUTATES the CONSUMING project rather than only its own dir — git-hook installers
+/// walk up from `cwd` to the project root and write `.git/hooks`; the rest generate
+/// project-local files or resolve peers/bridges against the host tree. Under GVS a
+/// build runs in the shared global store, DETACHED from any project, so a
+/// cwd/upward-walk lands on the per-package store wrapper (which has no
+/// package.json) and the script crashes — #457: `simple-git-hooks` postinstall →
+/// ENOENT — or silently emits shared-mutable wrong output. Ejecting them
+/// (disk-materialize project-local, via the SAME importer-closure + expand hook the
+/// phantom seeds use) restores a real project above `cwd`.
+///
+/// DELIBERATELY curated, NOT "all script-havers": self-contained builds (node-gyp
+/// native compiles, prebuilt-binary downloaders like esbuild) read only their own
+/// dir, produce identical output anywhere, and share it cross-project via the
+/// side-effects cache — ejecting them would erode the symlink-in-store sharing win
+/// for zero correctness gain, so they STAY in GVS (built once, shared). Every name
+/// here is verified category-C (build reads/mutates the host project); absent names
+/// cost nothing (the seed union is presence-gated against the resolved graph).
+///
+/// Gate: this rides the same [`enabled`] seam as phantom eject, so disabling the
+/// internal eject seam also disables curated eject (reintroducing #457) — an
+/// accepted property of that internal-only escape hatch.
+pub(super) const NUB_PROJECT_CONTEXT_EJECT: &[&str] = &[
+    // Git-hook installers — walk up from cwd to the project root, write `.git/hooks`.
+    "simple-git-hooks",
+    "lefthook",
+    "@evilmartians/lefthook",
+    "@arkweid/lefthook",
+    "pre-commit",
+    "pre-push",
+    "ghooks",
+    "git-validate",
+    "shared-git-hooks",
+    "yorkie",
+    "git-commit-msg-linter",
+    // Other host-project reader/mutators (generate project-local files, resolve
+    // peers/bridges against the consuming tree).
+    "install-peers",
+    "msw",
+    "@bahmutov/add-typescript-to-cypress",
+    "@cypress/snapshot",
+    "cordova.plugins.diagnostic",
+    "vue-demi",
+    "vue-inbrowser-compiler-demi",
+    "@intlify/vue-i18n-bridge",
+    "@intlify/vue-router-bridge",
+    "storage-engine",
+];
+
+/// Stable, order-independent fingerprint token for the curated eject list, folded
+/// into the install-state settings hash via [`crate::dynamic_phantom::settings_token`]
+/// (the `extra_settings_fingerprint` embedder hook). Load-bearing for warm/upgrade
+/// trees (nub#457): the curated seed is injected INSIDE the expand hook, after
+/// aube's `disk_materialize_packages` settings fold, so without this token an
+/// existing install — one from a nub predating the list, or after any FUTURE list
+/// edit — keeps an identical `settings_hash`, and aube's existence-gated fast path
+/// accepts the stale symlinked tree and skips the relink, leaving #457 unfixed.
+/// Folding this token forces the relink that converts the stale symlink to an
+/// ejected dir. Hashing the SORTED names makes the token move on any add/remove and
+/// hold steady on a pure reorder; FNV-1a keeps it dependency-free and stable across
+/// platforms/releases (std's `DefaultHasher` is not guaranteed stable across Rust
+/// versions).
+pub(crate) fn project_context_eject_token() -> String {
+    eject_list_token(NUB_PROJECT_CONTEXT_EJECT)
+}
+
+fn eject_list_token(names: &[&str]) -> String {
+    let mut sorted: Vec<&str> = names.to_vec();
+    sorted.sort_unstable();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for name in sorted {
+        for byte in name.bytes().chain(std::iter::once(0x1f)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// Keep nub's internal and native-config seed names, dropping every
 /// incumbent/user-source `diskMaterializePackages` entry.
 fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
     let configured = match NATIVE_CONFIG_SEED.read() {
@@ -119,15 +198,25 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
     )
 }
 
+/// One dynamically-flagged importer the planner may seed. Two INDEPENDENT reasons
+/// to eject, either sufficient: an undeclared-phantom carrier (`targets`, the
+/// runtime + `.d.ts`-undeclared class) and/or a `.d.ts` peer-type carrier
+/// (`type_peers`, nub#450). `dep_path`/`name` locate it in the graph.
+pub(super) struct FlaggedImporter {
+    pub dep_path: String,
+    pub name: String,
+    pub targets: Vec<String>,
+    pub type_peers: Vec<String>,
+}
+
 /// Pure planner: resolved graph + flat seed + dynamic phantom flags → graph-aware
 /// materialization plan. See the module docs for the two rungs. `flags` is each
-/// surviving-candidate importer's `(dep_path, name, undeclared-target-names)`,
-/// supplied by [`dynamic_phantom_flags`] in production and injected directly in
-/// tests.
+/// surviving-candidate importer, supplied by [`dynamic_phantom_flags`] in
+/// production and injected directly in tests.
 fn plan_from_flags(
     graph: &LockfileGraph,
     seed_names: &[String],
-    flags: &[(String, String, Vec<String>)],
+    flags: &[FlaggedImporter],
 ) -> DiskMaterializePlan {
     // Drop the version-BLIND `vite` name-seed and decide vite version-aware here.
     // The embedder default (mod.rs) seeds the literal `vite` for ANY direct-dep
@@ -173,9 +262,46 @@ fn plan_from_flags(
     // linker builds over the ejected set (see `aube_linker::link_hidden_hoist`)
     // then resolves every undeclared phantom for those members via Node's walk-up,
     // so no per-importer target hoist is recorded.
-    for (dep_path, name, targets) in flags {
-        if should_seed(targets, &direct_dep_names(dep_path, graph), is_top_level) {
-            seed_names_set.insert(name.as_str());
+    for flag in flags {
+        // (a) Undeclared phantoms — the existing runtime + `.d.ts`-undeclared class.
+        // Guard on non-empty targets: `should_seed` returns SEED for an empty target
+        // set (its "can't prove safe" default), which is correct for a phantom flag
+        // that lost its targets but WRONG for a pure type-peer flag (no undeclared
+        // phantom at all) — that must seed only via path (b).
+        let seed_for_targets = !flag.targets.is_empty()
+            && should_seed(
+                &flag.targets,
+                &direct_dep_names(&flag.dep_path, graph),
+                is_top_level,
+            );
+        // (b) `.d.ts` peer-type coupling (nub#450): a declared peer imported from
+        // the type surface breaks the type-checker only when the peer's types come
+        // from a SEPARATE top-level `@types/<peer>` the store realpath can't reach.
+        // Ejecting the importer makes its realpath project-local so the collective
+        // hidden tree provides `@types/<peer>`. Gate on the `@types/<peer>` actually
+        // being a top-level package: this both makes the eject load-bearing and
+        // BOUNDS it to the peer-typed set (a peer that ships its own types, e.g.
+        // `vue`, has no top-level `@types/vue`, so it never seeds — GVS stays on).
+        let seed_for_type_peers = flag
+            .type_peers
+            .iter()
+            .any(|peer| is_top_level(&types_package_name(peer)));
+        if seed_for_targets || seed_for_type_peers {
+            seed_names_set.insert(flag.name.as_str());
+        }
+    }
+
+    // Curated project-context eject (nub#457): union every `NUB_PROJECT_CONTEXT_EJECT`
+    // name PRESENT in the resolved graph. Their builds read/mutate the consuming
+    // project, so a GVS store-detached materialization crashes or emits
+    // shared-mutable wrong output; seeding them here routes them through the SAME
+    // importer-closure + disk-materialize path as the phantom seeds (a git-hook leaf
+    // has ~0 importers, so its closure is just itself). The presence gate keeps an
+    // absent name free.
+    let graph_names: HashSet<&str> = graph.packages.values().map(|p| p.name.as_str()).collect();
+    for &name in NUB_PROJECT_CONTEXT_EJECT {
+        if graph_names.contains(name) {
+            seed_names_set.insert(name);
         }
     }
 
@@ -257,7 +383,7 @@ fn plan_from_flags(
 /// installs the hook only when armed, so this gate is belt-and-suspenders; the
 /// pure planning logic is tested through [`plan_from_flags`] with injected flags,
 /// so the unit tests never reach this store-IO path.
-fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<String>)> {
+fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<FlaggedImporter> {
     if !enabled() {
         return Vec::new();
     }
@@ -288,13 +414,33 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<Stri
             // `cached_or_scan_verdict` scans + caches here so the decision is
             // correct at the point the resolved graph + CAS index are both in hand.
             let result = crate::dynamic_phantom::cached_or_scan_verdict(&sidecar_dir, &index)?;
-            if !result.has_unguarded_phantom {
+            // A package flags for EITHER an undeclared phantom (`targets`) OR a
+            // `.d.ts` peer-type coupling (`type_coupled_peers`, nub#450). react-pdf
+            // has NO undeclared phantom — only the react peer typed in its `.d.ts` —
+            // so gating on `has_unguarded_phantom` alone would drop it.
+            if !result.has_unguarded_phantom && result.type_coupled_peers.is_empty() {
                 return None;
             }
             let targets: Vec<String> = result.targets.into_iter().map(|t| t.name).collect();
-            Some((dep_path.clone(), pkg.name.clone(), targets))
+            Some(FlaggedImporter {
+                dep_path: dep_path.clone(),
+                name: pkg.name.clone(),
+                targets,
+                type_peers: result.type_coupled_peers,
+            })
         })
         .collect()
+}
+
+/// The DefinitelyTyped package name for a runtime package: `react` → `@types/react`,
+/// and a scoped `@scope/name` → `@types/scope__name` (the `__` mangling). This is
+/// the package whose top-level presence makes a `.d.ts` peer-type eject
+/// load-bearing (nub#450).
+fn types_package_name(pkg: &str) -> String {
+    match pkg.strip_prefix('@').and_then(|r| r.split_once('/')) {
+        Some((scope, name)) => format!("@types/{scope}__{name}"),
+        None => format!("@types/{pkg}"),
+    }
 }
 
 /// Whether a dynamically-flagged package must SEED the closure — the precision
@@ -417,6 +563,43 @@ mod tests {
         xs.iter().map(|s| s.to_string()).collect()
     }
 
+    /// A flagged importer carrying undeclared phantom `targets` (no peer-types).
+    fn flag(dep_path: &str, name: &str, targets: &[&str]) -> FlaggedImporter {
+        FlaggedImporter {
+            dep_path: dep_path.to_string(),
+            name: name.to_string(),
+            targets: targets.iter().map(|s| s.to_string()).collect(),
+            type_peers: Vec::new(),
+        }
+    }
+
+    /// A flagged importer carrying only `.d.ts` type-coupled peers (nub#450).
+    fn type_flag(dep_path: &str, name: &str, type_peers: &[&str]) -> FlaggedImporter {
+        FlaggedImporter {
+            dep_path: dep_path.to_string(),
+            name: name.to_string(),
+            targets: Vec::new(),
+            type_peers: type_peers.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Register `names` as the root importer's direct deps — what `is_top_level`
+    /// reads (the `@types/<peer>` presence gate for the type-peer eject).
+    fn top_level(g: &mut LockfileGraph, names: &[&str]) {
+        g.importers.insert(
+            ".".to_string(),
+            names
+                .iter()
+                .map(|n| aube_lockfile::DirectDep {
+                    name: n.to_string(),
+                    dep_path: format!("{n}@0.0.0"),
+                    dep_type: aube_lockfile::DepType::Dev,
+                    specifier: None,
+                })
+                .collect(),
+        );
+    }
+
     // Rung-1 vite seeding is independent of the dynamic source, so these inject
     // an EMPTY flag set and exercise the pure planner (`plan_from_flags`) end to
     // end — no host-store IO.
@@ -507,6 +690,62 @@ mod tests {
         assert!(plan.names.is_empty());
     }
 
+    // Curated project-context eject (nub#457): a build that reads/mutates the
+    // consuming project ejects from GVS; a self-contained build stays symlinked.
+
+    #[test]
+    fn project_context_pkg_ejects_from_gvs() {
+        // `simple-git-hooks` postinstall walks up from cwd to the project root; under
+        // GVS the store-detached copy crashes (#457 ENOENT). As a curated
+        // project-context leaf it seeds its own closure (no importers, no phantom
+        // flag) purely by name.
+        let g = graph(&[("simple-git-hooks@2.13.1", "simple-git-hooks", &[])]);
+        let plan = plan_from_flags(&g, &[], &[]);
+        assert!(
+            plan.names.iter().any(|n| n == "simple-git-hooks"),
+            "a curated project-context package ejects: {:?}",
+            plan.names
+        );
+    }
+
+    #[test]
+    fn self_contained_build_stays_symlinked() {
+        // esbuild ships a prebuilt-binary downloader — self-contained, output shared
+        // cross-project via the side-effects cache — so it is deliberately NOT
+        // curated and stays in GVS (symlinked, built once). No phantom flag, so
+        // nothing seeds it: the eject is curated, not blanket-on-every-script-haver.
+        let g = graph(&[("esbuild@0.20.0", "esbuild", &[])]);
+        let plan = plan_from_flags(&g, &[], &[]);
+        assert!(
+            plan.names.is_empty(),
+            "a self-contained build is not ejected: {:?}",
+            plan.names
+        );
+    }
+
+    #[test]
+    fn eject_list_token_is_order_independent_and_edit_sensitive() {
+        // The token feeds the install-state fingerprint (#457 warm-tree fix): a pure
+        // reorder is a no-op (it's a set), while any add/remove MUST move it so an
+        // existing install relinks. And it is deterministic — a stable fingerprint,
+        // not a per-run value.
+        assert_eq!(
+            eject_list_token(&["a", "b", "c"]),
+            eject_list_token(&["c", "a", "b"]),
+            "a pure reorder does not change the token"
+        );
+        assert_ne!(
+            eject_list_token(&["a", "b"]),
+            eject_list_token(&["a", "b", "c"]),
+            "an added name changes the token"
+        );
+        assert_eq!(
+            project_context_eject_token(),
+            project_context_eject_token(),
+            "deterministic across calls"
+        );
+    }
+
     #[test]
     fn configured_seed_patterns_match_wildcards_and_literals() {
         let g = graph(&[
@@ -556,10 +795,10 @@ mod tests {
             ("@hookform/resolvers@1.0.0", "@hookform/resolvers", &[]),
             ("zod@3.0.0", "zod", &[]),
         ]);
-        let flags = vec![(
-            "@hookform/resolvers@1.0.0".to_string(),
-            "@hookform/resolvers".to_string(),
-            vec!["zod".to_string()],
+        let flags = vec![flag(
+            "@hookform/resolvers@1.0.0",
+            "@hookform/resolvers",
+            &["zod"],
         )];
         let plan = plan_from_flags(&g, &[], &flags);
         let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
@@ -705,11 +944,7 @@ mod tests {
             ("core@1.0.0", "core", &[("datastructures", "2.0.0")]),
             ("datastructures@2.0.0", "datastructures", &[]),
         ]);
-        let flags = vec![(
-            "basic@1.0.0".to_string(),
-            "basic".to_string(),
-            vec!["datastructures".to_string()],
-        )];
+        let flags = vec![flag("basic@1.0.0", "basic", &["datastructures"])];
         let plan = plan_from_flags(&g, &[], &flags);
         let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
         assert!(
@@ -728,16 +963,80 @@ mod tests {
             ("adapter@1.0.0", "adapter", &[("helper", "1.0.0")]),
             ("helper@1.0.0", "helper", &[]),
         ]);
-        let flags = vec![(
-            "adapter@1.0.0".to_string(),
-            "adapter".to_string(),
-            vec!["helper".to_string()],
-        )];
+        let flags = vec![flag("adapter@1.0.0", "adapter", &["helper"])];
         let plan = plan_from_flags(&g, &[], &flags);
         assert!(
             plan.names.is_empty(),
             "a depth-1-satisfied phantom target stays skipped: {:?}",
             plan.names
         );
+    }
+
+    // Type-coupled peers (nub#450): the `.d.ts` peer-type eject path.
+
+    #[test]
+    fn type_peer_ejects_only_when_types_pkg_is_top_level() {
+        // react-pdf shape: it declares `react` a peer and imports it from its
+        // `.d.ts`. The eject is load-bearing ONLY because the project has a
+        // top-level `@types/react` the store realpath can't otherwise reach.
+        let mut g = graph(&[
+            ("@react-pdf/renderer@4.5.1", "@react-pdf/renderer", &[]),
+            ("@types/react@18.3.0", "@types/react", &[]),
+        ]);
+        top_level(&mut g, &["@react-pdf/renderer", "react", "@types/react"]);
+        let flags = vec![type_flag(
+            "@react-pdf/renderer@4.5.1",
+            "@react-pdf/renderer",
+            &["react"],
+        )];
+        let plan = plan_from_flags(&g, &[], &flags);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("@react-pdf/renderer"),
+            "peer-type importer seeds when @types/react is top-level: {names:?}"
+        );
+    }
+
+    #[test]
+    fn type_peer_does_not_eject_without_top_level_types_pkg() {
+        // A self-typed peer (vue ships its own types → no `@types/vue` in the tree)
+        // must NOT eject — this is the bound that keeps GVS on for the common case.
+        let mut g = graph(&[
+            ("some-vue-lib@1.0.0", "some-vue-lib", &[]),
+            ("vue@3.5.0", "vue", &[]),
+        ]);
+        // vue is top-level but ships its own types → NO `@types/vue` in the tree.
+        top_level(&mut g, &["some-vue-lib", "vue"]);
+        let flags = vec![type_flag("some-vue-lib@1.0.0", "some-vue-lib", &["vue"])];
+        let plan = plan_from_flags(&g, &[], &flags);
+        assert!(
+            plan.names.is_empty(),
+            "no top-level @types/vue → no eject (GVS stays on): {:?}",
+            plan.names
+        );
+    }
+
+    #[test]
+    fn type_peer_handles_scoped_types_mangling() {
+        // A scoped peer's DefinitelyTyped name mangles the slash: `@scope/pkg` →
+        // `@types/scope__pkg`. The top-level check must use the mangled name.
+        let mut g = graph(&[
+            ("uses-babel@1.0.0", "uses-babel", &[]),
+            ("@types/babel__core@7.0.0", "@types/babel__core", &[]),
+        ]);
+        top_level(&mut g, &["uses-babel", "@types/babel__core"]);
+        let flags = vec![type_flag(
+            "uses-babel@1.0.0",
+            "uses-babel",
+            &["@babel/core"],
+        )];
+        let plan = plan_from_flags(&g, &[], &flags);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("uses-babel"),
+            "scoped @types/scope__name mangling drives the seed: {names:?}"
+        );
+        assert_eq!(types_package_name("@babel/core"), "@types/babel__core");
+        assert_eq!(types_package_name("react"), "@types/react");
     }
 }

@@ -18,7 +18,11 @@
 //                   defaults to $GITHUB_REPOSITORY or `jdx/aube`)
 //   NPM_TAG       — npm dist-tag (optional; defaults to `next` for
 //                   pre-releases, `latest` otherwise)
-//   DRY_RUN=1     — stage + `npm pack` but don't publish
+//   NPM_REGISTRY  — npm-compatible registry URL (optional; defaults to
+//                   https://registry.npmjs.org)
+//   AUBE_PUBLISH_BIN — path to an existing aube binary (optional; otherwise
+//                   bootstraps from the release's linux x64 archive)
+//   DRY_RUN=1     — stage + `aube publish --dry-run` but don't publish
 //   SKIP_ROOT=1   — publish only the platform packages
 //   SKIP_PLATFORMS=1 — publish only the root package
 
@@ -49,6 +53,7 @@ const TARGETS = [
 ];
 
 const BINS = ['aube', 'aubr', 'aubx'];
+const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 
 function run(cmd, args, opts = {}) {
     const result = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
@@ -64,22 +69,26 @@ function platformPkgName(target) {
     return `@endevco/aube-${target.os}-${target.cpu}${suffix}`;
 }
 
+function encodePackageName(name) {
+    if (name.startsWith('@') && name.includes('/')) {
+        const [scope, pkg] = name.slice(1).split('/');
+        return `@${scope}%2F${pkg}`;
+    }
+    return name;
+}
+
 // Returns true when <pkg>@<version> is already on the registry, so a
 // re-run after a partial publish (or a re-tag) skips instead of erroring
 // with "cannot publish over the previously published versions".
-function isVersionPublished(pkgName, version) {
-    const result = spawnSync('npm', ['view', `${pkgName}@${version}`, 'version'], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        encoding: 'utf8',
+async function isVersionPublished(registryUrl, pkgName, version) {
+    const url = `${registryUrl.replace(/\/+$/, '')}/${encodePackageName(pkgName)}`;
+    const res = await fetch(url, {
+        headers: { accept: 'application/vnd.npm.install-v1+json, application/json' },
     });
-    // spawn itself failed (e.g. `npm` not on PATH) — surface ENOENT/EACCES
-    // instead of letting it dissolve into "failed: null" downstream.
-    if (result.error) throw result.error;
-    if (result.status === 0) return result.stdout.trim() === version;
-    // Match only the canonical npm 404 code; broader patterns like
-    // "not found" would also swallow ENOTFOUND DNS failures.
-    if (/E404/.test(result.stderr || '')) return false;
-    throw new Error(`npm view ${pkgName}@${version} failed: ${(result.stderr || '').trim() || result.status}`);
+    if (res.status === 404) return false;
+    if (!res.ok) throw new Error(`registry lookup ${url} failed: ${res.status} ${res.statusText}`);
+    const packument = await res.json();
+    return Boolean(packument.versions?.[version]);
 }
 
 function assertEnv(name) {
@@ -128,6 +137,18 @@ function extractArchive(archivePath, target, destDir) {
         }
         if (target.os !== 'win32') chmodSync(binPath, 0o755);
     }
+}
+
+async function resolveAubeBin(repo, tag) {
+    if (process.env.AUBE_PUBLISH_BIN) return resolve(process.env.AUBE_PUBLISH_BIN);
+
+    const target = TARGETS.find((t) => t.triple === 'x86_64-unknown-linux-gnu');
+    if (!target) throw new Error('internal error: missing linux x64 release target');
+    const archivePath = await downloadArchive(repo, tag, target, resolve(stageRoot, '_aube-cli-download'));
+    const extractDir = resolve(stageRoot, '_aube-cli');
+    rmSync(extractDir, { recursive: true, force: true });
+    extractArchive(archivePath, target, extractDir);
+    return resolve(extractDir, 'aube');
 }
 
 async function buildPlatformPackage(repo, tag, version, target) {
@@ -179,13 +200,23 @@ async function buildPlatformPackage(repo, tag, version, target) {
     return { pkgName, stageDir };
 }
 
-function npmPublish(stageDir, npmTag, dryRun) {
-    // `--provenance` is separate from Trusted Publishing: OIDC covers
-    // the auth handshake, but the provenance attestation is only
-    // attached when this flag is set explicitly.
-    const args = ['publish', '--access', 'public', '--tag', npmTag, '--provenance'];
+function aubePublish(aubeBin, stageDir, registryUrl, npmTag, dryRun) {
+    const args = [
+        'publish',
+        '--access',
+        'public',
+        '--tag',
+        npmTag,
+        '--registry',
+        registryUrl,
+        '--no-git-checks',
+    ];
+    // `--provenance` requires ambient OIDC even in aube's dry-run mode.
+    // Real release publishes must attach provenance; local dry runs should
+    // stay useful without CI credentials.
+    if (!dryRun) args.push('--provenance');
     if (dryRun) args.push('--dry-run');
-    run('npm', args, { cwd: stageDir });
+    run(aubeBin, args, { cwd: stageDir });
 }
 
 async function main() {
@@ -193,23 +224,26 @@ async function main() {
     const version = versionFromTag(tag);
     const repo = process.env.REPO || process.env.GITHUB_REPOSITORY || 'jdx/aube';
     const npmTag = process.env.NPM_TAG || defaultNpmTag(version);
+    const registryUrl = (process.env.NPM_REGISTRY || DEFAULT_REGISTRY).replace(/\/?$/, '/');
     const dryRun = process.env.DRY_RUN === '1';
     const skipPlatforms = process.env.SKIP_PLATFORMS === '1';
     const skipRoot = process.env.SKIP_ROOT === '1';
+    const aubeBin = await resolveAubeBin(repo, tag);
 
-    console.log(`[publish] repo=${repo} tag=${tag} version=${version} npmTag=${npmTag} dryRun=${dryRun}`);
+    console.log(`[publish] repo=${repo} tag=${tag} version=${version} npmTag=${npmTag} registry=${registryUrl} dryRun=${dryRun}`);
+    console.log(`[publish] using ${aubeBin}`);
 
     if (!skipPlatforms) {
         for (const target of TARGETS) {
             console.log(`\n[publish] --- ${target.os}-${target.cpu} (${target.triple}) ---`);
             const pkgName = platformPkgName(target);
-            if (!dryRun && isVersionPublished(pkgName, version)) {
+            if (!dryRun && await isVersionPublished(registryUrl, pkgName, version)) {
                 console.log(`[publish] ${pkgName}@${version} already published, skipping`);
                 continue;
             }
             const built = await buildPlatformPackage(repo, tag, version, target);
             console.log(`[publish] staged ${built.pkgName} at ${built.stageDir}`);
-            npmPublish(built.stageDir, npmTag, dryRun);
+            aubePublish(aubeBin, built.stageDir, registryUrl, npmTag, dryRun);
         }
     }
 
@@ -218,15 +252,15 @@ async function main() {
         const rootPkgPath = resolve(npmDir, 'package.json');
         const rootPkg = JSON.parse(readFileSync(rootPkgPath, 'utf8'));
         rootPkg.version = version;
-        if (!dryRun && isVersionPublished(rootPkg.name, version)) {
+        if (!dryRun && await isVersionPublished(registryUrl, rootPkg.name, version)) {
             console.log(`[publish] ${rootPkg.name}@${version} already published, skipping`);
             return;
         }
         writeFileSync(rootPkgPath, JSON.stringify(rootPkg, null, 2) + '\n');
-        // `npm pack` doesn't follow symlinks, so stage a real README
-        // copy next to package.json rather than linking ../README.md.
+        // Stage a real README copy next to package.json so the publish
+        // selection does not depend on symlink traversal.
         cpSync(resolve(npmDir, '..', 'README.md'), resolve(npmDir, 'README.md'));
-        npmPublish(npmDir, npmTag, dryRun);
+        aubePublish(aubeBin, npmDir, registryUrl, npmTag, dryRun);
     }
 }
 

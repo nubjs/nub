@@ -1,13 +1,18 @@
 //! `aube ignored-builds` — print packages whose lifecycle scripts were
 //! skipped by the `pnpm.allowBuilds` allowlist.
 //!
-//! Walks the lockfile, reads each dep's stored `package.json` from the
-//! global store, and reports any package that declares a
+//! Walks the lockfile and reports any package that declares a
 //! `preinstall` / `install` / `postinstall` script but isn't explicitly
-//! allowed by the current `BuildPolicy`. Shared with `approve-builds`,
-//! which re-uses [`collect_ignored`] to drive its interactive picker.
+//! allowed by the current `BuildPolicy`. Registry packages are classified
+//! from their stored `package.json` in the global store; source-backed
+//! (`file:`/tarball/git/…) packages, which have no store index, are taken
+//! from the install-recorded unreviewed set instead (see [`collect_ignored`]).
+//! Shared with `approve-builds`, which re-uses `collect_ignored` to drive
+//! its interactive picker.
 //!
-//! Pure read — no network, no writes, no project lock.
+//! A pure read of project state — no network, no project-file writes, no
+//! project lock (the install-state read may lazily migrate its own
+//! on-disk format, an internal, idempotent housekeeping write).
 
 use clap::Args;
 use miette::{Context, IntoDiagnostic};
@@ -60,7 +65,7 @@ pub async fn run(args: IgnoredBuildsArgs) -> miette::Result<()> {
 /// followed by `<indent>  ⚠ <hook>: <description>` lines for each
 /// content-sniff match against the package's lifecycle scripts.
 fn print_entry_line(indent: &str, entry: &IgnoredEntry) {
-    println!("{indent}{}@{}", entry.name, entry.version);
+    println!("{indent}{}", entry.display_spec());
     for sus in &entry.suspicions {
         println!("{indent}  ⚠ {} — {}", sus.hook, sus.kind.description());
     }
@@ -103,17 +108,21 @@ fn run_global() -> miette::Result<()> {
 
 /// One package whose lifecycle scripts were skipped because it was not
 /// allowed by the current `BuildPolicy`. `name` is the pnpm package name,
-/// `version` is the resolved version from the lockfile. `suspicions`
-/// is the result of running the content-sniff against the stored
-/// manifest's lifecycle script bodies — empty when the scripts look
-/// clean, populated when one or more dangerous-shape heuristics
-/// fired. Used by the `approve-builds` picker to flag suspicious
-/// entries so the user has more than `name@version` to judge by.
+/// `version` is the resolved version from the lockfile. `approval_key` is
+/// the `allowBuilds` entry that authorizes the build: the bare package
+/// name for registry packages, but the source key (`name@file:…`,
+/// `name@<git-url>#<sha>`, …) for source-backed packages, which a bare
+/// name must never approve. `suspicions` is the result of running the
+/// content-sniff against the stored manifest's lifecycle script bodies —
+/// empty when the scripts look clean, populated when one or more
+/// dangerous-shape heuristics fired. Used by the `approve-builds` picker
+/// to flag suspicious entries so the user has more than `name@version` to
+/// judge by.
 ///
 /// Field order matters: derived `Ord` compares by declaration
 /// order, so `(name, version)` orders identically to the prior
 /// manual impl. `collect_ignored` already deduplicates on
-/// `(name, version)`, so the `suspicions` tiebreak is unreachable
+/// `(name, version)`, so the tiebreak fields are unreachable
 /// in practice — keeping the derived shape avoids the
 /// `Eq`/`Ord` inconsistency that an explicit Ord-on-prefix impl
 /// would introduce.
@@ -121,7 +130,30 @@ fn run_global() -> miette::Result<()> {
 pub(super) struct IgnoredEntry {
     pub name: String,
     pub version: String,
+    pub approval_key: String,
     pub suspicions: Vec<aube_scripts::Suspicion>,
+}
+
+impl IgnoredEntry {
+    /// Whether this entry must be approved by its source key rather than
+    /// its bare name — true for `file:`/tarball/git/… packages, where
+    /// `approval_key` carries the source identity instead of the name.
+    pub(super) fn is_source_backed(&self) -> bool {
+        self.approval_key != self.name
+    }
+
+    /// The `name@…` spec to show the user. Registry packages read as
+    /// `name@version`; source-backed packages read as their source key
+    /// (`name@file:./dep`), matching the install-time warning and pnpm's
+    /// `ignored-builds` output so the displayed identity is exactly what
+    /// gets written to `allowBuilds`.
+    pub(super) fn display_spec(&self) -> String {
+        if self.is_source_backed() {
+            self.approval_key.clone()
+        } else {
+            format!("{}@{}", self.name, self.version)
+        }
+    }
 }
 
 /// Load the lockfile and build policy for `project_dir`, then return the
@@ -154,36 +186,63 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
     let no_integrity_index =
         crate::state::read_no_integrity_index_for(project_dir, graph.packages.values());
 
+    // Source-backed (`file:`/tarball/git/…) packages have no
+    // `(name, version)`-keyed store index — their content is imported by
+    // dep_path, not a registry integrity — so the store read below always
+    // misses for them and they'd be silently dropped (the `approve-builds`
+    // dead-end this closes). The install already decided which have
+    // unreviewed builds and recorded their source approval keys in install
+    // state; this is the same set the `WARN_..._IGNORED_BUILD_SCRIPTS`
+    // warning enumerates via `unreviewed_dep_builds`, so keying off it here
+    // makes the warning and this command agree by construction.
+    let recorded_source_builds: BTreeSet<String> =
+        crate::state::read_state_unreviewed_builds(project_dir)
+            .into_iter()
+            .collect();
+
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     let mut out: Vec<IgnoredEntry> = Vec::new();
 
     for pkg in graph.packages.values() {
-        if !seen.insert((pkg.name.clone(), pkg.version.clone())) {
-            continue;
-        }
         // Match on registry_name, not pkg.name. Allowlist pins the
         // real pkg name. npm: alias would sneak past otherwise. Same
         // fix as every other policy.decide callsite.
-        let source_key = pkg.source_approval_key();
-        if matches!(
-            policy.decide_package(pkg.registry_name(), &pkg.version, source_key.as_deref()),
-            aube_scripts::AllowDecision::Allow
-        ) {
+        if super::install::package_build_is_allowed(&policy, pkg) {
             continue;
         }
-        let read_key = pkg.integrity.as_deref().or_else(|| {
-            no_integrity_index
-                .get(&format!("{}@{}", pkg.registry_name(), pkg.version))
-                .map(String::as_str)
-        });
-        let Some(suspicions) =
-            lifecycle_scripts_with_suspicions(&store, &pkg.name, &pkg.version, read_key)
-        else {
+        if !seen.insert((pkg.name.clone(), pkg.version.clone())) {
             continue;
+        }
+        // A source-backed dep is authorized by its source key, not its bare
+        // name, so surface it under that key. Suspicions stay empty: the
+        // content-sniff ran at install time and the warning already
+        // surfaced any findings; re-deriving them would mean re-reading each
+        // dep's materialized manifest, which this pure lockfile read avoids.
+        // A stale recorded set is self-correcting — the policy check above
+        // drops an already-approved dep before it reaches here.
+        let (approval_key, suspicions) = match pkg.source_approval_key() {
+            Some(source_key) if recorded_source_builds.contains(&source_key) => {
+                (source_key, Vec::new())
+            }
+            Some(_) => continue,
+            None => {
+                let read_key = pkg.integrity.as_deref().or_else(|| {
+                    no_integrity_index
+                        .get(&format!("{}@{}", pkg.registry_name(), pkg.version))
+                        .map(String::as_str)
+                });
+                let Some(suspicions) =
+                    lifecycle_scripts_with_suspicions(&store, &pkg.name, &pkg.version, read_key)
+                else {
+                    continue;
+                };
+                (pkg.name.clone(), suspicions)
+            }
         };
         out.push(IgnoredEntry {
             name: pkg.name.clone(),
             version: pkg.version.clone(),
+            approval_key,
             suspicions,
         });
     }

@@ -17,10 +17,26 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
+# Node-API addons execute inside the host process, so panics must unwind to
+# the napi-rs boundary instead of aborting the entire JavaScript runtime.
+[profile.napi]
+inherits = "release"
+panic = "unwind"
+
+# C ABI calls execute inside the host process and catch every panic at the
+# extern boundary. The workspace release profile's panic=abort would bypass
+# those guards and terminate the host.
+[profile.ffi]
+inherits = "release"
+panic = "unwind"
+
 [workspace.package]
-version = "1.25.1"
+version = "1.32.0"
 edition = "2024"
-rust-version = "1.93"
+# Kept at the floor mise can build with (its distro packaging pins the
+# toolchain) so mise can embed the library crates. CI enforces this via
+# `cargo msrv verify` — bump deliberately, not as a side effect.
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/jdx/aube"
 homepage = "https://github.com/jdx/aube"
@@ -28,6 +44,12 @@ readme = "README.md"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Node-API bindings
+napi = { version = "3.10.5", default-features = false, features = ["napi8", "tokio_rt", "dyn-symbols"] }
+napi-derive = "3.5.10"
+napi-build = "2.3.2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -53,7 +75,13 @@ clap = { version = "4", features = ["derive"] }
 strum = { version = "0.28", features = ["derive"] }
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2", "charset", "system-proxy", "gzip", "brotli", "zstd", "hickory-dns"] }
+# TLS backend and DNS resolver are deliberately NOT chosen here. Library
+# crates must stay backend-agnostic so embedders (mise) don't get rustls or
+# hickory-dns forced into their build via feature unification — reqwest's
+# hickory-dns cargo feature flips the default resolver for every client in
+# the final binary. The aube binary gets rustls + hickory-dns through
+# aube-registry's default features.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "http2", "charset", "system-proxy", "gzip", "brotli", "zstd"] }
 webpki-root-certs = "1"
 
 # Hashing
@@ -65,6 +93,11 @@ hex = "0.4"
 # Filesystem
 xx = { version = "2", features = ["fslock"] }
 reflink-copy = "0.1"
+# OS-level transparent per-file compression (APFS decmpfs / btrfs / NTFS)
+# applied to native addons as they land in the CAS. The `addon` feature
+# unwraps a napi `--compress` hybrid back to the raw `.node` before the
+# kernel re-compresses it transparently.
+decmpfs = { version = "0.1", features = ["addon"] }
 glob = "0.3"
 # BurntSushi's gitignore matcher (from ripgrep). Used by `aube pack` /
 # `aube publish` to honor `.npmignore` / `.gitignore` with full
@@ -99,9 +132,9 @@ smallvec = { version = "1", features = ["serde"] }
 base64 = "0.22"
 
 # Sigstore (provenance attestation on `publish`)
-sigstore-sign = "0.8"
-sigstore-oidc = "0.8"
-sigstore-types = "0.8"
+sigstore-sign = "0.11"
+sigstore-oidc = "0.11"
+sigstore-types = "0.11"
 # Pinned to an exact `0.0.x` because the crate is pre-1.0 and the `0.0`
 # series carries no SemVer compat guarantees — a silent break in OIDC
 # detection would disable provenance on every supported CI.
@@ -129,7 +162,11 @@ log = "0.4"
 regex = "1"
 
 # Archive extraction
-flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
+# Pure-Rust backend here so library crates don't force libz-ng-sys (cmake +
+# C toolchain) onto embedders' builds. The aube binary re-enables zlib-ng —
+# feature unification makes it win over rust_backend for the whole workspace
+# build, so standalone aube keeps the fast C backend.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 zstd = { version = "0.13", default-features = false }
 # Zip reader for the OSV advisory mirror — the bulk dump at
@@ -148,19 +185,19 @@ diffy = "0.5"
 # Internal crates — `version` is required so `cargo publish` can resolve
 # transitive crate dependencies via crates.io. release-plz keeps these
 # versions in sync with [workspace.package].version during release PRs.
-aube = { path = "crates/aube", version = "1.25.1" }
-aube-codes = { path = "crates/aube-codes", version = "1.25.1" }
-aube-settings = { path = "crates/aube-settings", version = "1.25.1" }
-aube-resolver = { path = "crates/aube-resolver", version = "1.25.1" }
-aube-registry = { path = "crates/aube-registry", version = "1.25.1" }
-aube-store = { path = "crates/aube-store", version = "1.25.1" }
-aube-linker = { path = "crates/aube-linker", version = "1.25.1" }
-aube-lockfile = { path = "crates/aube-lockfile", version = "1.25.1" }
-aube-manifest = { path = "crates/aube-manifest", version = "1.25.1" }
-aube-runtime = { path = "crates/aube-runtime", version = "1.25.1" }
-aube-scripts = { path = "crates/aube-scripts", version = "1.25.1" }
-aube-workspace = { path = "crates/aube-workspace", version = "1.25.1" }
-aube-util = { path = "crates/aube-util", version = "1.25.1" }
+aube = { path = "crates/aube", version = "1.32.0", default-features = false }
+aube-codes = { path = "crates/aube-codes", version = "1.32.0" }
+aube-settings = { path = "crates/aube-settings", version = "1.32.0" }
+aube-resolver = { path = "crates/aube-resolver", version = "1.32.0" }
+aube-registry = { path = "crates/aube-registry", version = "1.32.0" }
+aube-store = { path = "crates/aube-store", version = "1.32.0" }
+aube-linker = { path = "crates/aube-linker", version = "1.32.0" }
+aube-lockfile = { path = "crates/aube-lockfile", version = "1.32.0" }
+aube-manifest = { path = "crates/aube-manifest", version = "1.32.0" }
+aube-runtime = { path = "crates/aube-runtime", version = "1.32.0" }
+aube-scripts = { path = "crates/aube-scripts", version = "1.32.0" }
+aube-workspace = { path = "crates/aube-workspace", version = "1.32.0" }
+aube-util = { path = "crates/aube-util", version = "1.32.0" }
 
 [profile.dev]
 debug = 1

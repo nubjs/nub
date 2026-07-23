@@ -29,6 +29,452 @@
         "hidden_aliases": [],
         "examples": []
       },
+      "access": {
+        "full_cmd": [
+          "access"
+        ],
+        "usage": "access [FLAGS] <SUBCOMMAND>",
+        "subcommands": {
+          "get": {
+            "full_cmd": [
+              "access",
+              "get"
+            ],
+            "usage": "access get <SUBCOMMAND>",
+            "subcommands": {
+              "status": {
+                "full_cmd": [
+                  "access",
+                  "get",
+                  "status"
+                ],
+                "usage": "access get status <PACKAGE>",
+                "subcommands": {},
+                "args": [
+                  {
+                    "name": "PACKAGE",
+                    "usage": "<PACKAGE>",
+                    "help": "Package name",
+                    "help_first_line": "Package name",
+                    "required": true,
+                    "double_dash": "Optional",
+                    "hide": false
+                  }
+                ],
+                "flags": [],
+                "mounts": [],
+                "hide": false,
+                "help": "Get a package's public or restricted status",
+                "name": "status",
+                "aliases": [],
+                "hidden_aliases": [],
+                "examples": []
+              }
+            },
+            "args": [],
+            "flags": [],
+            "mounts": [],
+            "hide": false,
+            "subcommand_required": true,
+            "help": "Get package visibility status",
+            "name": "get",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          },
+          "grant": {
+            "full_cmd": [
+              "access",
+              "grant"
+            ],
+            "usage": "access grant <ARGS>…",
+            "subcommands": {},
+            "args": [
+              {
+                "name": "PERMISSIONS",
+                "usage": "<PERMISSIONS>",
+                "help": "`read-only` or `read-write`",
+                "help_first_line": "`read-only` or `read-write`",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              },
+              {
+                "name": "TEAM",
+                "usage": "<TEAM>",
+                "help": "Team in `@scope:team` form",
+                "help_first_line": "Team in `@scope:team` form",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              },
+              {
+                "name": "PACKAGE",
+                "usage": "<PACKAGE>",
+                "help": "Package name",
+                "help_first_line": "Package name",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              }
+            ],
+            "flags": [],
+            "mounts": [],
+            "hide": false,
+            "help": "Grant a team read-only or read-write access to a package",
+            "name": "grant",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          },
+          "list": {
+            "full_cmd": [
+              "access",
+              "list"
+            ],
+            "usage": "access list <SUBCOMMAND>",
+            "subcommands": {
+              "collaborators": {
+                "full_cmd": [
+                  "access",
+                  "list",
+                  "collaborators"
+                ],
+                "usage": "access list collaborators <PACKAGE> [USER]",
+                "subcommands": {},
+                "args": [
+                  {
+                    "name": "PACKAGE",
+                    "usage": "<PACKAGE>",
+                    "help": "Package name",
+                    "help_first_line": "Package name",
+                    "required": true,
+                    "double_dash": "Optional",
+                    "hide": false
+                  },
+                  {
+                    "name": "USER",
+                    "usage": "[USER]",
+                    "help": "Optional user name",
+                    "help_first_line": "Optional user name",
+                    "required": false,
+                    "double_dash": "Optional",
+                    "hide": false
+                  }
+                ],
+                "flags": [],
+                "mounts": [],
+                "hide": false,
+                "help": "List collaborators for a package, optionally filtering to one user",
+                "name": "collaborators",
+                "aliases": [],
+                "hidden_aliases": [],
+                "examples": []
+              },
+              "packages": {
+                "full_cmd": [
+                  "access",
+                  "list",
+                  "packages"
+                ],
+                "usage": "access list packages [ENTITY]",
+                "subcommands": {},
+                "args": [
+                  {
+                    "name": "ENTITY",
+                    "usage": "[ENTITY]",
+                    "help": "User, `@organization`, or `@scope:team`",
+                    "help_first_line": "User, `@organization`, or `@scope:team`",
+                    "required": false,
+                    "double_dash": "Optional",
+                    "hide": false
+                  }
+                ],
+                "flags": [],
+                "mounts": [],
+                "hide": false,
+                "help": "List packages visible to the current user or an optional entity",
+                "name": "packages",
+                "aliases": [],
+                "hidden_aliases": [],
+                "examples": []
+              }
+            },
+            "args": [],
+            "flags": [],
+            "mounts": [],
+            "hide": false,
+            "subcommand_required": true,
+            "help": "List packages visible to a user, organization, or team",
+            "name": "list",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          },
+          "ls": {
+            "full_cmd": [
+              "access",
+              "ls"
+            ],
+            "usage": "access ls [ENTITIES]…",
+            "subcommands": {},
+            "args": [
+              {
+                "name": "ENTITIES",
+                "usage": "[ENTITIES]…",
+                "help": "User, `@organization`, or `@scope:team`. Also accepts pnpm's `packages [ENTITY]` compatibility form. Accepted forms are `aube access ls [ENTITY]` and `aube access ls packages [ENTITY]`",
+                "help_first_line": "User, `@organization`, or `@scope:team`. Also accepts pnpm's `packages [ENTITY]` compatibility form. Accepted forms are `aube access ls [ENTITY]` and `aube access ls packages [ENTITY]`",
+                "required": false,
+                "double_dash": "Optional",
+                "var": true,
+                "hide": false
+              }
+            ],
+            "flags": [],
+            "mounts": [],
+            "hide": false,
+            "help": "Alias for `list packages`",
+            "name": "ls",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          },
+          "revoke": {
+            "full_cmd": [
+              "access",
+              "revoke"
+            ],
+            "usage": "access revoke <TEAM> <PACKAGE>",
+            "subcommands": {},
+            "args": [
+              {
+                "name": "TEAM",
+                "usage": "<TEAM>",
+                "help": "Team in `@scope:team` form",
+                "help_first_line": "Team in `@scope:team` form",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              },
+              {
+                "name": "PACKAGE",
+                "usage": "<PACKAGE>",
+                "help": "Package name",
+                "help_first_line": "Package name",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              }
+            ],
+            "flags": [],
+            "mounts": [],
+            "hide": false,
+            "help": "Revoke a team's access to a package",
+            "name": "revoke",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          },
+          "set": {
+            "full_cmd": [
+              "access",
+              "set"
+            ],
+            "usage": "access set <SETTING> <PACKAGE>",
+            "subcommands": {},
+            "args": [
+              {
+                "name": "SETTING",
+                "usage": "<SETTING>",
+                "help": "`status=public|private|restricted` or `mfa=none|publish|automation`",
+                "help_first_line": "`status=public|private|restricted` or `mfa=none|publish|automation`",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              },
+              {
+                "name": "PACKAGE",
+                "usage": "<PACKAGE>",
+                "help": "Package name",
+                "help_first_line": "Package name",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              }
+            ],
+            "flags": [],
+            "mounts": [],
+            "hide": false,
+            "help": "Set package visibility or a publish MFA requirement",
+            "name": "set",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          }
+        },
+        "args": [],
+        "flags": [
+          {
+            "name": "json",
+            "usage": "--json",
+            "help": "Emit registry responses as JSON when the subcommand has a result",
+            "help_first_line": "Emit registry responses as JSON when the subcommand has a result",
+            "short": [],
+            "long": [
+              "json"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "otp",
+            "usage": "--otp <OTP>",
+            "help": "One-time password from a 2FA authenticator; sent as `npm-otp`",
+            "help_first_line": "One-time password from a 2FA authenticator; sent as `npm-otp`",
+            "short": [],
+            "long": [
+              "otp"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "OTP",
+              "usage": "<OTP>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-retries",
+            "usage": "--fetch-retries <N>",
+            "help": "Number of retry attempts for failed registry fetches",
+            "help_long": "Number of retry attempts for failed registry fetches.\n\nOverrides `fetchRetries` / `fetch-retries` from `.npmrc` / `aube-workspace.yaml` when set. Pair with `--fetch-timeout` to fail fast in scripted test runs.",
+            "help_first_line": "Number of retry attempts for failed registry fetches",
+            "short": [],
+            "long": [
+              "fetch-retries"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "N",
+              "usage": "<N>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-retry-factor",
+            "usage": "--fetch-retry-factor <N>",
+            "help": "Exponential backoff factor between retry attempts",
+            "help_long": "Exponential backoff factor between retry attempts.\n\nOverrides `fetchRetryFactor` / `fetch-retry-factor` from `.npmrc` / `aube-workspace.yaml` when set. Integer-only — the underlying `FetchPolicy.retry_factor` is `u32`. Fractional values like `1.5` are rejected by clap.",
+            "help_first_line": "Exponential backoff factor between retry attempts",
+            "short": [],
+            "long": [
+              "fetch-retry-factor"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "N",
+              "usage": "<N>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-retry-maxtimeout",
+            "usage": "--fetch-retry-maxtimeout <MS>",
+            "help": "Upper bound (ms) on the computed retry backoff",
+            "help_long": "Upper bound (ms) on the computed retry backoff.\n\nOverrides `fetchRetryMaxtimeout` / `fetch-retry-maxtimeout` from `.npmrc` / `aube-workspace.yaml` when set.",
+            "help_first_line": "Upper bound (ms) on the computed retry backoff",
+            "short": [],
+            "long": [
+              "fetch-retry-maxtimeout"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "MS",
+              "usage": "<MS>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-retry-mintimeout",
+            "usage": "--fetch-retry-mintimeout <MS>",
+            "help": "Lower bound (ms) on the computed retry backoff",
+            "help_long": "Lower bound (ms) on the computed retry backoff.\n\nOverrides `fetchRetryMintimeout` / `fetch-retry-mintimeout` from `.npmrc` / `aube-workspace.yaml` when set.",
+            "help_first_line": "Lower bound (ms) on the computed retry backoff",
+            "short": [],
+            "long": [
+              "fetch-retry-mintimeout"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "MS",
+              "usage": "<MS>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-timeout",
+            "usage": "--fetch-timeout <MS>",
+            "help": "Per-request HTTP timeout in milliseconds",
+            "help_long": "Per-request HTTP timeout in milliseconds.\n\nOverrides `fetchTimeout` / `fetch-timeout` from `.npmrc` / `aube-workspace.yaml` when set. Applied via `reqwest`'s `.timeout()` so it covers headers + body together.",
+            "help_first_line": "Per-request HTTP timeout in milliseconds",
+            "short": [],
+            "long": [
+              "fetch-timeout"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "MS",
+              "usage": "<MS>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "registry",
+            "usage": "--registry <URL>",
+            "help": "Override the default registry URL for this invocation",
+            "help_long": "Override the default registry URL for this invocation.\n\nUse this npm registry URL for package metadata, tarballs, audit requests, dist-tags, and registry writes.",
+            "help_first_line": "Override the default registry URL for this invocation",
+            "short": [],
+            "long": [
+              "registry"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "URL",
+              "usage": "<URL>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          }
+        ],
+        "mounts": [],
+        "hide": false,
+        "subcommand_required": true,
+        "help": "Manage package access and visibility on the registry",
+        "name": "access",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": []
+      },
       "activate": {
         "full_cmd": [
           "activate"
@@ -173,10 +619,23 @@
             "global": false
           },
           {
+            "name": "dangerously-allow-all-builds",
+            "usage": "--dangerously-allow-all-builds",
+            "help": "Allow every dependency's lifecycle scripts to run",
+            "help_long": "Allow every dependency's lifecycle scripts to run.\n\nBypasses the `allowBuilds` allowlist for this invocation. Do not use in CI. Mirrors pnpm's `--dangerously-allow-all-builds`.",
+            "help_first_line": "Allow every dependency's lifecycle scripts to run",
+            "short": [],
+            "long": [
+              "dangerously-allow-all-builds"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "deny-build",
             "usage": "--deny-build… <PKG>",
             "help": "Mark a dependency's lifecycle scripts as reviewed and denied",
-            "help_long": "Mark a dependency's lifecycle scripts as reviewed and denied.\n\nWrites `allowBuilds: { <pkg>: false }` into the workspace yaml (or `package.json#aube.allowBuilds`) before the install runs, so the named package's lifecycle scripts stay skipped without tripping `strictDepBuilds=true`. Repeatable — pass the flag once per package.\n\nConflicts with `--no-save`, which only snapshots `package.json` and the lockfile and would leave an orphaned denial in the workspace yaml on restore. Also conflicts with `--allow-build` for the same package name.",
+            "help_long": "Mark a dependency's lifecycle scripts as reviewed and denied.\n\nWrites `allowBuilds: { <pkg>: false }` into the workspace yaml (or `package.json#aube.allowBuilds`) before the install runs, so the named package's lifecycle scripts stay skipped without tripping `strictDepBuilds=true`. Repeatable — pass the flag once per package.\n\nConflicts with `--no-save`, which only snapshots `package.json` and the lockfile and would leave an orphaned denial in the workspace yaml on restore. Also conflicts with `--allow-build` for the same package name and with `--dangerously-allow-all-builds`.",
             "help_first_line": "Mark a dependency's lifecycle scripts as reviewed and denied",
             "short": [],
             "long": [
@@ -885,7 +1344,7 @@
         "full_cmd": [
           "bin"
         ],
-        "usage": "bin [-g --global]",
+        "usage": "bin [-g --global] [-w --workspace-root]",
         "subcommands": {},
         "args": [],
         "flags": [
@@ -902,6 +1361,22 @@
             ],
             "hide": false,
             "global": false
+          },
+          {
+            "name": "workspace-root",
+            "usage": "-w --workspace-root",
+            "help": "Print the workspace-root bin directory instead of the current package's",
+            "help_long": "Print the workspace-root bin directory instead of the current package's.\n\nMirrors `pnpm bin -w`: from a sub-package, resolves the enclosing workspace root and prints its `node_modules/.bin`. No-op when no workspace root exists above cwd (single-project install), so the flag is safe to leave in shell aliases.",
+            "help_first_line": "Print the workspace-root bin directory instead of the current package's",
+            "short": [
+              "w"
+            ],
+            "long": [
+              "workspace-root",
+              "workspace"
+            ],
+            "hide": false,
+            "global": false
           }
         ],
         "mounts": [],
@@ -910,7 +1385,158 @@
         "name": "bin",
         "aliases": [],
         "hidden_aliases": [],
-        "after_help_long": "Examples:\n\n  $ aube bin\n  /home/user/project/node_modules/.bin\n\n  $ aube bin -g\n  /home/user/.local/share/aube/global/node_modules/.bin\n\n  # Extend PATH with the project bin directory\n  $ export PATH=\"$(aube bin):$PATH\"\n",
+        "after_help_long": "Examples:\n\n  $ aube bin\n  /home/user/project/node_modules/.bin\n\n  $ aube bin -g\n  /home/user/.local/share/aube/global/node_modules/.bin\n\n  # From a workspace package, -w prints the workspace-root bin directory\n  $ cd packages/app\n  $ aube bin\n  /home/user/project/packages/app/node_modules/.bin\n  $ aube bin -w\n  /home/user/project/node_modules/.bin\n\n  # Extend PATH with the project bin directory\n  $ export PATH=\"$(aube bin):$PATH\"\n",
+        "examples": []
+      },
+      "bugs": {
+        "full_cmd": [
+          "bugs"
+        ],
+        "usage": "bugs [FLAGS] [PACKAGES]…",
+        "subcommands": {},
+        "args": [
+          {
+            "name": "PACKAGES",
+            "usage": "[PACKAGES]…",
+            "help": "Packages to open bug trackers for. Defaults to the current project",
+            "help_first_line": "Packages to open bug trackers for. Defaults to the current project",
+            "required": false,
+            "double_dash": "Optional",
+            "var": true,
+            "hide": false
+          }
+        ],
+        "flags": [
+          {
+            "name": "fetch-retries",
+            "usage": "--fetch-retries <N>",
+            "help": "Number of retry attempts for failed registry fetches",
+            "help_long": "Number of retry attempts for failed registry fetches.\n\nOverrides `fetchRetries` / `fetch-retries` from `.npmrc` / `aube-workspace.yaml` when set. Pair with `--fetch-timeout` to fail fast in scripted test runs.",
+            "help_first_line": "Number of retry attempts for failed registry fetches",
+            "short": [],
+            "long": [
+              "fetch-retries"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "N",
+              "usage": "<N>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-retry-factor",
+            "usage": "--fetch-retry-factor <N>",
+            "help": "Exponential backoff factor between retry attempts",
+            "help_long": "Exponential backoff factor between retry attempts.\n\nOverrides `fetchRetryFactor` / `fetch-retry-factor` from `.npmrc` / `aube-workspace.yaml` when set. Integer-only — the underlying `FetchPolicy.retry_factor` is `u32`. Fractional values like `1.5` are rejected by clap.",
+            "help_first_line": "Exponential backoff factor between retry attempts",
+            "short": [],
+            "long": [
+              "fetch-retry-factor"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "N",
+              "usage": "<N>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-retry-maxtimeout",
+            "usage": "--fetch-retry-maxtimeout <MS>",
+            "help": "Upper bound (ms) on the computed retry backoff",
+            "help_long": "Upper bound (ms) on the computed retry backoff.\n\nOverrides `fetchRetryMaxtimeout` / `fetch-retry-maxtimeout` from `.npmrc` / `aube-workspace.yaml` when set.",
+            "help_first_line": "Upper bound (ms) on the computed retry backoff",
+            "short": [],
+            "long": [
+              "fetch-retry-maxtimeout"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "MS",
+              "usage": "<MS>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-retry-mintimeout",
+            "usage": "--fetch-retry-mintimeout <MS>",
+            "help": "Lower bound (ms) on the computed retry backoff",
+            "help_long": "Lower bound (ms) on the computed retry backoff.\n\nOverrides `fetchRetryMintimeout` / `fetch-retry-mintimeout` from `.npmrc` / `aube-workspace.yaml` when set.",
+            "help_first_line": "Lower bound (ms) on the computed retry backoff",
+            "short": [],
+            "long": [
+              "fetch-retry-mintimeout"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "MS",
+              "usage": "<MS>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "fetch-timeout",
+            "usage": "--fetch-timeout <MS>",
+            "help": "Per-request HTTP timeout in milliseconds",
+            "help_long": "Per-request HTTP timeout in milliseconds.\n\nOverrides `fetchTimeout` / `fetch-timeout` from `.npmrc` / `aube-workspace.yaml` when set. Applied via `reqwest`'s `.timeout()` so it covers headers + body together.",
+            "help_first_line": "Per-request HTTP timeout in milliseconds",
+            "short": [],
+            "long": [
+              "fetch-timeout"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "MS",
+              "usage": "<MS>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "registry",
+            "usage": "--registry <URL>",
+            "help": "Override the default registry URL for this invocation",
+            "help_long": "Override the default registry URL for this invocation.\n\nUse this npm registry URL for package metadata, tarballs, audit requests, dist-tags, and registry writes.",
+            "help_first_line": "Override the default registry URL for this invocation",
+            "short": [],
+            "long": [
+              "registry"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "URL",
+              "usage": "<URL>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          }
+        ],
+        "mounts": [],
+        "hide": false,
+        "help": "Open package bug tracker URLs",
+        "name": "bugs",
+        "aliases": [
+          "issues"
+        ],
+        "hidden_aliases": [],
+        "after_help_long": "Examples:\n\n  $ aube bugs\n\n  $ aube bugs react\n\n  $ aube issues react react-dom\n",
         "examples": []
       },
       "cache": {
@@ -7669,6 +8295,38 @@
         "hidden_aliases": [],
         "examples": []
       },
+      "prefix": {
+        "full_cmd": [
+          "prefix"
+        ],
+        "usage": "prefix [-g --global]",
+        "subcommands": {},
+        "args": [],
+        "flags": [
+          {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Print the global prefix directory instead of the project's root",
+            "help_first_line": "Print the global prefix directory instead of the project's root",
+            "short": [
+              "g"
+            ],
+            "long": [
+              "global"
+            ],
+            "hide": false,
+            "global": false
+          }
+        ],
+        "mounts": [],
+        "hide": false,
+        "help": "Print the current package prefix directory",
+        "name": "prefix",
+        "aliases": [],
+        "hidden_aliases": [],
+        "after_help_long": "Examples:\n\n  $ aube prefix\n  /home/user/project\n\n  $ aube prefix -g\n  /home/user/.local/share/pnpm\n",
+        "examples": []
+      },
       "prune": {
         "full_cmd": [
           "prune"
@@ -9715,7 +10373,7 @@
         "flags": [],
         "mounts": [],
         "hide": false,
-        "help": "Show the companies sponsoring aube and the jdx.dev project family",
+        "help": "Show the companies sponsoring aube and the jdx.dev open source tools",
         "name": "sponsors",
         "aliases": [],
         "hidden_aliases": [],
@@ -12608,7 +13266,7 @@
   "config": {
     "props": {}
   },
-  "version": "1.25.1",
+  "version": "1.32.0",
   "usage": "Usage: aube [OPTIONS] [COMMAND]",
   "complete": {},
   "about": "A fast Node.js package manager"

@@ -360,7 +360,7 @@ pub fn find_bin(name: &str, cwd: &Path) -> Option<PathBuf> {
 /// user-level `~/.npmrc`), returning the first match's value with surrounding
 /// quotes stripped. The one `.npmrc` reader in the crate — `script_shell` and
 /// (P1) the PM registry lookup both go through it.
-pub fn npmrc_value(project_root: &Path, key: &str) -> Option<String> {
+pub(crate) fn npmrc_value(project_root: &Path, key: &str) -> Option<String> {
     // Check project .npmrc first, then ~/.npmrc
     let candidates = [
         project_root.join(".npmrc"),

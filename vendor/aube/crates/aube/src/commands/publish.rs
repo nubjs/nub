@@ -472,9 +472,10 @@ async fn publish_one(
             });
         }
         return Err(miette!(
-            "{}: {name}@{version} is already on {registry_url}\n\
+            "{}: {name}@{version} is already on {}\n\
              help: pass --force to republish (the registry must allow it; npm's public registry does not)",
-            aube_util::cmd("publish")
+            aube_util::cmd("publish"),
+            aube_util::url::redact_url(&registry_url),
         ));
     }
 
@@ -740,7 +741,12 @@ async fn exchange_npm_oidc_token(
         .send()
         .await
         .into_diagnostic()
-        .wrap_err_with(|| format!("failed to exchange npm OIDC token at {endpoint}"))?;
+        .wrap_err_with(|| {
+            format!(
+                "failed to exchange npm OIDC token at {}",
+                aube_util::url::redact_url(&endpoint)
+            )
+        })?;
     if !resp.status().is_success() {
         tracing::debug!(
             status = %resp.status(),
@@ -928,12 +934,7 @@ fn emit_outcome(outcome: &PublishOutcome, as_json: bool) -> miette::Result<()> {
 fn emit_outcome_line(outcome: &PublishOutcome) {
     match outcome.status {
         PublishStatus::DryRun => {
-            println!(
-                "+ {}@{} (dry run, would PUT to {})",
-                outcome.name,
-                outcome.version,
-                put_url(&outcome.registry_url, &outcome.name)
-            );
+            println!("{}", dry_run_outcome_line(outcome));
             if let Some(archive) = &outcome.archive {
                 for f in &archive.files {
                     println!("  {f}");
@@ -950,6 +951,15 @@ fn emit_outcome_line(outcome: &PublishOutcome) {
             );
         }
     }
+}
+
+fn dry_run_outcome_line(outcome: &PublishOutcome) -> String {
+    format!(
+        "+ {}@{} (dry run, would PUT to {})",
+        outcome.name,
+        outcome.version,
+        aube_util::url::redact_url(&put_url(&outcome.registry_url, &outcome.name))
+    )
 }
 
 fn emit_json_outcomes(outcomes: &[PublishOutcome]) -> miette::Result<()> {
@@ -1034,11 +1044,17 @@ fn build_publish_body(
     let (shasum, integrity) = archive_hashes(archive);
     let b64_tarball = base64::engine::general_purpose::STANDARD.encode(&archive.tarball);
 
+    // The registry keys the attachment and the tarball URI by the
+    // scope-preserving `<name>-<version>.tgz` form — `@scope/pkg`
+    // stays `@scope/pkg-1.2.3.tgz`, not the flattened `scope-pkg`
+    // used for the on-disk pack filename. GitHub Packages rejects the
+    // flattened key with `no attachments present in packument`.
+    let attachment_name = publish_attachment_name(&archive.name, &archive.version);
     let tarball_url = format!(
         "{}/{}/-/{}",
         registry_url.trim_end_matches('/'),
         archive.name,
-        archive.filename
+        attachment_name
     );
 
     // Start from the manifest JSON so every field the user set (scripts,
@@ -1069,7 +1085,7 @@ fn build_publish_body(
         "dist-tags": { tag: archive.version },
         "versions": { archive.version.clone(): version_doc },
         "_attachments": {
-            archive.filename.clone(): {
+            attachment_name.clone(): {
                 "content_type": "application/octet-stream",
                 "data": b64_tarball,
                 "length": archive.tarball.len(),
@@ -1170,6 +1186,16 @@ fn hosted_repository_url(host: &str, path: &str) -> Option<String> {
         format!("{path}.git")
     };
     Some(format!("https://{host}/{git_path}{fragment}"))
+}
+
+/// Registry-compatible tarball name for the publish packument, keeping
+/// the scope intact: `@scope/pkg` -> `@scope/pkg-1.2.3.tgz`. This is
+/// what npm's `libnpmpublish` uses for the `_attachments` key and the
+/// `dist.tarball` URI, and what GitHub Packages requires. Deliberately
+/// distinct from `pack::tarball_filename`, which flattens the scope for
+/// the on-disk `.tgz` name (`scope-pkg-1.2.3.tgz`).
+fn publish_attachment_name(name: &str, version: &str) -> String {
+    format!("{name}-{version}.tgz")
 }
 
 fn archive_hashes(archive: &BuiltArchive) -> (String, String) {
@@ -1439,6 +1465,46 @@ mod tests {
     }
 
     #[test]
+    fn publish_body_uses_scoped_attachment_key_and_tarball_uri() {
+        // GitHub Packages rejects the flattened `scope-pkg` attachment
+        // key with `no attachments present in packument`. The publish
+        // body must key `_attachments` and the tarball URI by the
+        // scope-preserving `@scope/pkg-<version>.tgz` form, even though
+        // the on-disk pack filename flattens the scope.
+        let archive = BuiltArchive {
+            name: "@oisin-ee/momokaya-brand".to_string(),
+            version: "0.1.2".to_string(),
+            filename: "oisin-ee-momokaya-brand-0.1.2.tgz".to_string(),
+            files: vec!["package.json".to_string()],
+            unpacked_size: 42,
+            tarball: b"archive bytes".to_vec(),
+        };
+        let manifest: PackageJson = serde_json::from_value(serde_json::json!({
+            "name": "@oisin-ee/momokaya-brand",
+            "version": "0.1.2"
+        }))
+        .unwrap();
+
+        let body = build_publish_body(
+            &archive,
+            &manifest,
+            "https://npm.pkg.github.com/",
+            "latest",
+            Some("restricted"),
+            None,
+        )
+        .unwrap();
+
+        let attachments = body["_attachments"].as_object().unwrap();
+        assert!(attachments.contains_key("@oisin-ee/momokaya-brand-0.1.2.tgz"));
+        assert!(!attachments.contains_key("oisin-ee-momokaya-brand-0.1.2.tgz"));
+        assert_eq!(
+            body["versions"]["0.1.2"]["dist"]["tarball"],
+            "https://npm.pkg.github.com/@oisin-ee/momokaya-brand/-/@oisin-ee/momokaya-brand-0.1.2.tgz"
+        );
+    }
+
+    #[test]
     fn publish_body_normalizes_string_repository() {
         let archive = BuiltArchive {
             name: "pkg".to_string(),
@@ -1608,6 +1674,22 @@ mod tests {
         assert_eq!(
             registry_uri_key_pub("https://registry.npmjs.org/"),
             "//registry.npmjs.org/"
+        );
+    }
+
+    #[test]
+    fn publish_target_display_redacts_inline_registry_credentials() {
+        let outcome = PublishOutcome {
+            name: "@scope/pkg".to_string(),
+            version: "1.0.0".to_string(),
+            registry_url: "https://user:secret@registry.example/".to_string(),
+            archive: None,
+            status: PublishStatus::DryRun,
+        };
+
+        assert_eq!(
+            dry_run_outcome_line(&outcome),
+            "+ @scope/pkg@1.0.0 (dry run, would PUT to https://***@registry.example/@scope%2Fpkg)"
         );
     }
 }

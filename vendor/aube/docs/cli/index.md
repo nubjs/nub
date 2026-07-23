@@ -3,7 +3,7 @@
 
 **Usage**: `aube [FLAGS] <SUBCOMMAND>`
 
-**Version**: 1.25.1
+**Version**: 1.32.0
 
 - **Usage**: `aube [FLAGS] <SUBCOMMAND>`
 
@@ -111,11 +111,22 @@ Run from the workspace root regardless of the current package
 
 ## Subcommands
 
+- [`aube access [FLAGS] <SUBCOMMAND>`](/cli/access.md)
+- [`aube access get <SUBCOMMAND>`](/cli/access/get.md)
+- [`aube access get status <PACKAGE>`](/cli/access/get/status.md)
+- [`aube access grant <ARGS>…`](/cli/access/grant.md)
+- [`aube access list <SUBCOMMAND>`](/cli/access/list.md)
+- [`aube access list collaborators <PACKAGE> [USER]`](/cli/access/list/collaborators.md)
+- [`aube access list packages [ENTITY]`](/cli/access/list/packages.md)
+- [`aube access ls [ENTITIES]…`](/cli/access/ls.md)
+- [`aube access revoke <TEAM> <PACKAGE>`](/cli/access/revoke.md)
+- [`aube access set <SETTING> <PACKAGE>`](/cli/access/set.md)
 - [`aube activate <SHELL>`](/cli/activate.md)
 - [`aube add [FLAGS] [PACKAGES]…`](/cli/add.md)
 - [`aube approve-builds [--all] [-g --global] [PKG]…`](/cli/approve-builds.md)
 - [`aube audit [FLAGS]`](/cli/audit.md)
-- [`aube bin [-g --global]`](/cli/bin.md)
+- [`aube bin [-g --global] [-w --workspace-root]`](/cli/bin.md)
+- [`aube bugs [FLAGS] [PACKAGES]…`](/cli/bugs.md)
 - [`aube cache <SUBCOMMAND>`](/cli/cache.md)
 - [`aube cache delete <PATTERNS>…`](/cli/cache/delete.md)
 - [`aube cache list [PATTERNS]…`](/cli/cache/list.md)
@@ -170,6 +181,7 @@ Run from the workspace root regardless of the current package
 - [`aube patch-remove [PACKAGES]…`](/cli/patch-remove.md)
 - [`aube peers <SUBCOMMAND>`](/cli/peers.md)
 - [`aube peers check [--json]`](/cli/peers/check.md)
+- [`aube prefix [-g --global]`](/cli/prefix.md)
 - [`aube prune [-P --prod] [--no-optional]`](/cli/prune.md)
 - [`aube publish [FLAGS]`](/cli/publish.md)
 - [`aube purge [-l --lockfile]`](/cli/purge.md)

@@ -40,6 +40,7 @@ static ROOT_TOOL: Embedder = Embedder {
     primer_ttl: None,
     cpu_budget: None,
     tty_progress: false,
+    rich_update_picker: false,
     strict_unsupported_source: false,
     warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,

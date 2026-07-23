@@ -1,9 +1,10 @@
 use super::{
     dep_path::{parse_dep_path, version_to_dep_path},
-    parse, write,
+    parse, parse_with_options, write,
 };
 use crate::{
     CatalogEntry, DepType, DirectDep, GitSource, LocalSource, LockedPackage, LockfileGraph,
+    ParseOptions,
 };
 use aube_manifest::PackageJson;
 use std::collections::BTreeMap;
@@ -1785,6 +1786,12 @@ fn overrides_round_trip_through_pnpm_lock_yaml() {
 fn catalogs_overrides_patched_dependencies_match_pnpm_order() {
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::create_dir(dir.path().join("patches")).unwrap();
+    std::fs::write(
+        dir.path().join("patches/lodash@4.17.21.patch"),
+        "patch contents\n",
+    )
+    .unwrap();
 
     let mut overrides = BTreeMap::new();
     overrides.insert("lodash".to_string(), "4.17.21".to_string());
@@ -3131,7 +3138,7 @@ overrides:
 patchedDependencies:
   is-odd@3.0.1:
     path: patches/is-odd@3.0.1.patch
-    hash: sha256-deadbeef
+    hash: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 
 catalogs:
   default:
@@ -3232,7 +3239,7 @@ snapshots:
             .patched_dependency_hashes
             .get("is-odd@3.0.1")
             .unwrap(),
-        "sha256-deadbeef"
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     );
     assert_eq!(
         graph.catalogs["evens"]["is-even"].specifier, "^1.0.0",
@@ -3349,7 +3356,7 @@ snapshots:
             .patched_dependency_hashes
             .get("is-odd@3.0.1")
             .unwrap_or_else(|| panic!("patched dep hash lost after reparse:\n{written}")),
-        "sha256-deadbeef"
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     );
     assert_eq!(reparsed.catalogs["default"]["react"].version, "18.2.0");
     assert_eq!(
@@ -3365,6 +3372,106 @@ snapshots:
     assert_eq!(
         reparsed.skipped_optional_dependencies["."]["optional-native"],
         "^1.0.0"
+    );
+}
+
+/// Every dep-path-shaped reference to a patched package carries the
+/// `(patch_hash=…)` marker — the importer's resolved version, the
+/// `snapshots:` key, and a dependent's snapshot dependency tail — with
+/// the marker seated before the peer-context suffix. The re-emit half
+/// is the load-bearing one: a graph parsed straight back from a pnpm
+/// lockfile carries hashes and *no* paths (the reader drops them), and
+/// the writer must still decorate from the stored hash alone, or every
+/// patched package silently changes identity on the next write.
+#[test]
+fn pnpm_patch_hash_decorates_direct_transitive_and_peer_context_refs() {
+    let yaml = r#"lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      consumer:
+        specifier: 1.0.0
+        version: 1.0.0
+      is-odd:
+        specifier: 3.0.1
+        version: 3.0.1(react@19.0.0)
+
+packages:
+
+  consumer@1.0.0: {}
+
+  is-odd@3.0.1:
+    peerDependencies:
+      react: '*'
+
+  react@19.0.0: {}
+
+snapshots:
+
+  consumer@1.0.0:
+    dependencies:
+      is-odd: 3.0.1(react@19.0.0)
+
+  is-odd@3.0.1(react@19.0.0):
+    dependencies:
+      react: 19.0.0
+
+  react@19.0.0: {}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&lockfile_path, yaml).unwrap();
+    // sha256 of the patch file's CRLF-normalized contents, as
+    // `record_patches_on_graph` records it before any install writes.
+    let hash = "2751a3a2f303ad21752038085e2b8c5f98ecff61a2e4ebbd43506a941725be80";
+
+    let mut graph = parse(&lockfile_path).unwrap();
+    graph.patched_dependencies.insert(
+        "is-odd@3.0.1".to_string(),
+        "patches/is-odd@3.0.1.patch".to_string(),
+    );
+    graph
+        .patched_dependency_hashes
+        .insert("is-odd@3.0.1".to_string(), hash.to_string());
+    write(&lockfile_path, &graph, &PackageJson::default()).unwrap();
+    let written = std::fs::read_to_string(&lockfile_path).unwrap();
+
+    assert!(
+        written.contains(&format!(
+            "patchedDependencies:\n  is-odd@3.0.1:\n    hash: {hash}\n    path: patches/is-odd@3.0.1.patch"
+        )),
+        "top-level {{ hash, path }} patch entry missing:\n{written}"
+    );
+    let decorated = format!("3.0.1(patch_hash={hash})(react@19.0.0)");
+    assert_eq!(
+        written.matches(&decorated).count(),
+        3,
+        "direct, transitive, and snapshot refs must all be decorated:\n{written}"
+    );
+
+    // Re-emit from the parsed graph: the reader keeps the hash and drops
+    // the path, so this is the path-less case the writer must still
+    // decorate from.
+    let reparsed = parse(&lockfile_path).unwrap();
+    assert!(reparsed.patched_dependencies.is_empty());
+    write(&lockfile_path, &reparsed, &PackageJson::default()).unwrap();
+    let rewritten = std::fs::read_to_string(&lockfile_path).unwrap();
+    assert!(
+        rewritten.contains(&format!(
+            "patchedDependencies:\n  is-odd@3.0.1:\n    hash: {hash}"
+        )),
+        "stored top-level patch hash was not preserved:\n{rewritten}"
+    );
+    assert_eq!(
+        rewritten.matches(&decorated).count(),
+        3,
+        "a stored patch hash must decorate every reference with no path on the graph:\n{rewritten}"
     );
 }
 
@@ -4108,6 +4215,44 @@ snapshots:
 }
 
 #[test]
+fn parser_allows_remote_tarball_resolution_without_integrity_when_not_strict() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        r#"
+lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      demo:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  demo@1.0.0:
+    resolution: {tarball: https://registry.npmjs.org/demo/-/demo-1.0.0.tgz}
+snapshots:
+  demo@1.0.0: {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse_with_options(
+        &path,
+        ParseOptions {
+            strict_store_integrity: false,
+        },
+    )
+    .unwrap();
+    let pkg = graph.packages.get("demo@1.0.0").expect("demo package");
+    assert!(pkg.integrity.is_none());
+    assert_eq!(
+        pkg.tarball_url.as_deref(),
+        Some("https://registry.npmjs.org/demo/-/demo-1.0.0.tgz")
+    );
+}
+
+#[test]
 fn remote_tarball_integrity_survives_lockfile_reuse_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pnpm-lock.yaml");
@@ -4409,7 +4554,7 @@ fn writer_omits_derivable_registry_tarball_url_with_query() {
                 integrity: Some("sha512-private".to_string()),
                 dep_path: "@scope/pkg@1.0.0".to_string(),
                 tarball_url: Some(
-                    "https://registry.example.test/@scope/pkg/-/pkg-1.0.0.tgz?signature=abc#sha"
+                    "https://registry.npmjs.org/@scope/pkg/-/pkg-1.0.0.tgz?signature=abc#sha"
                         .to_string(),
                 ),
                 ..Default::default()
@@ -4900,5 +5045,118 @@ fn npm_to_pnpm_conversion_omits_phantom_member_links_on_empty_root() {
     assert!(
         written.contains("packages/pkg-a:") && written.contains("packages/pkg-b:"),
         "member importers must still be emitted:\n{written}"
+    );
+}
+
+/// pnpm resolves an npm-aliased dep to the REAL package's node
+/// (`odd-alias: npm:is-odd@3.0.1` → the `is-odd@3.0.1` snapshot), so a
+/// patch declared on the registry name applies to the aliased install.
+/// Aube keeps the alias as its own `LockedPackage` — the linker needs it
+/// to place `node_modules/odd-alias` — so parity has to be carried by the
+/// patch-group resolution rule that the linker, the graph hash, the drift
+/// check, and this writer all key off. Without it the alias node is
+/// materialized unpatched AND the native-pnpm write emits a second,
+/// undecorated `is-odd@3.0.1` snapshot alongside the patched one.
+///
+/// Also pins the reader half: pnpm's `(patch_hash=…)` is a write-time
+/// spelling, so it must not survive into aube's dep_path model or the
+/// alias key on reparse becomes `odd-alias@3.0.1(patch_hash=…)`, which no
+/// `<alias>@<version>` lookup reproduces.
+#[test]
+fn pnpm_patch_on_registry_name_applies_to_npm_alias_and_round_trips() {
+    const HASH: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    let yaml = format!(
+        r#"lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+patchedDependencies:
+  is-odd@3.0.1:
+    path: patches/is-odd@3.0.1.patch
+    hash: {HASH}
+
+importers:
+
+  .:
+    dependencies:
+      odd-alias:
+        specifier: npm:is-odd@3.0.1
+        version: is-odd@3.0.1(patch_hash={HASH})
+
+packages:
+
+  is-odd@3.0.1:
+    resolution: {{integrity: sha512-odd}}
+
+snapshots:
+
+  is-odd@3.0.1(patch_hash={HASH}): {{}}
+"#
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, &yaml).unwrap();
+
+    let graph = parse(&path).unwrap();
+
+    assert_eq!(
+        graph.packages.keys().collect::<Vec<_>>(),
+        vec!["is-odd@3.0.1", "odd-alias@3.0.1"],
+        "the write-time patch marker must not leak into aube dep_paths"
+    );
+    let alias = graph
+        .packages
+        .get("odd-alias@3.0.1")
+        .expect("alias package");
+    assert_eq!(alias.alias_of.as_deref(), Some("is-odd"));
+    assert_eq!(graph.importers["."][0].dep_path, "odd-alias@3.0.1");
+
+    // The single rule every consumer keys off: both nodes resolve to the
+    // one declared patch, each under its own `spec_key()`.
+    let applied = crate::patch_groups::resolve_patched_by_version(
+        &graph.patched_dependency_hashes,
+        &graph.packages,
+    )
+    .unwrap();
+    assert_eq!(
+        applied.get("odd-alias@3.0.1").map(String::as_str),
+        Some(HASH)
+    );
+    assert_eq!(applied.get("is-odd@3.0.1").map(String::as_str), Some(HASH));
+
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("pnpm-lock.yaml");
+    let manifest = PackageJson {
+        name: Some("alias-patch".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("odd-alias".to_string(), "npm:is-odd@3.0.1".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    write(&out, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out).unwrap();
+
+    let snapshots = &written[written.find("\nsnapshots:").expect("snapshots")..];
+    assert!(
+        snapshots.contains(&format!("is-odd@3.0.1(patch_hash={HASH}):")),
+        "the aliased node must serialize as patched:\n{written}"
+    );
+    assert!(
+        !snapshots.contains("\n  is-odd@3.0.1:"),
+        "an unpatched duplicate snapshot means the alias resolved no patch:\n{written}"
+    );
+
+    let reparsed = parse(&out).unwrap();
+    assert_eq!(
+        reparsed
+            .packages
+            .get("odd-alias@3.0.1")
+            .unwrap_or_else(|| panic!("alias package lost after reparse:\n{written}"))
+            .alias_of
+            .as_deref(),
+        Some("is-odd")
     );
 }

@@ -511,16 +511,16 @@ fn run_approve_builds(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::approve_builds::ApproveBuildsArgs) =
         parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
-    // The success summary ends with a raw `` Run `aube install` (or `aube
-    // rebuild`) … `` println on stdout. Capture + rewrite; the interactive
-    // picker is unaffected (it prompts on stderr and reads stdin).
-    let (result, captured) = super::with_fd_captured(1, || {
-        session
-            .runtime
-            .block_on(aube::commands::approve_builds::run(verb))
-    });
-    print!("{}", present::rewrite(&captured));
-    finish(result)
+    // No fd capture: the engine's remaining prints brand through
+    // `prog()`/`cmd()` (already profile-aware), and the verb now runs the
+    // approved packages' build scripts in-process — buffering fd 1 for the
+    // whole call would hold back live script output until the end, reading
+    // as a hang during long native builds. Same shape as `run_rebuild`.
+    finish_quieted(
+        &globals.output,
+        &session,
+        aube::commands::approve_builds::run(verb),
+    )
 }
 
 fn run_ignored_builds(typed: &str, args: &[String]) -> Result<i32> {

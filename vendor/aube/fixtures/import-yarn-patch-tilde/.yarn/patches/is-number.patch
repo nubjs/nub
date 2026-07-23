@@ -1,0 +1,13 @@
+diff --git a/index.js b/index.js
+index 5847425f1bb0af3b05522f41d741e5a63cd171e9..57fb5a2bef3ba007140f499d22da2ea16a949663 100644
+--- a/index.js
++++ b/index.js
+@@ -9,7 +9,7 @@
+ 
+ module.exports = function(num) {
+   if (typeof num === 'number') {
+-    return num - num === 0;
++    return num === 42;
+   }
+   if (typeof num === 'string' && num.trim() !== '') {
+     return Number.isFinite ? Number.isFinite(+num) : isFinite(+num);

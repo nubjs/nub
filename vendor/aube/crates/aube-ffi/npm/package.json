@@ -1,0 +1,16 @@
+{
+  "name": "@jdxcode/aube-ffi",
+  "version": "0.0.0-placeholder",
+  "description": "C ABI bindings for embedding the aube package manager",
+  "license": "MIT",
+  "repository": "https://github.com/jdx/aube",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "default": "./index.js" },
+    "./aube.h": "./aube.h"
+  },
+  "files": ["index.js", "index.d.ts", "aube.h", "README.md"],
+  "preferUnplugged": true,
+  "engines": { "node": ">=18" }
+}

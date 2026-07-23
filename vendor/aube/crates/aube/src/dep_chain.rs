@@ -9,10 +9,9 @@
 //! `(name, version)` pairs and doesn't know which importer is
 //! responsible for each entry.
 //!
-//! This module bridges the gap. After the resolver finishes — when a
-//! `LockfileGraph` is available — call [`set_active`] to seed a
-//! process-global chain index. Subsequent error wrappers consult it
-//! via [`format_chain_for`] and embed a chain string in the message.
+//! This module bridges the gap. Each install runs inside [`scope`]. After the
+//! resolver finishes, [`set_active`] seeds that install's chain index;
+//! subsequent error wrappers consult it through [`format_chain_for`].
 //!
 //! The index is computed once via BFS from importer roots, recording
 //! the *shortest* path back to an importer for each `(name, version)`
@@ -21,15 +20,34 @@
 //! transitive pulls. Multi-parent disambiguation isn't tracked; the
 //! goal is "tell the user where this came from", not full ancestry.
 //!
-//! Storage is a `OnceLock<Mutex<Option<Arc<ChainIndex>>>>`. A single
-//! install run sets it once; recursive installs (workspace fan-out)
-//! reset it per-package. Outside an install, `format_chain_for` is a
-//! no-op and returns an empty string, so error messages remain
-//! stable when no install is active (e.g. during `aube view`).
+//! Storage is Tokio task-local and shared with child tasks through
+//! [`scope_current`]. Parallel installs therefore cannot replace one another's
+//! diagnostic graph. Outside an install, `format_chain_for` remains a no-op.
 
 use aube_lockfile::LockfileGraph;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::future::Future;
+use std::sync::{Arc, RwLock};
+
+type ActiveIndex = Arc<RwLock<Option<Arc<ChainIndex>>>>;
+
+tokio::task_local! {
+    static ACTIVE: ActiveIndex;
+}
+
+/// Run an install with an isolated dependency-chain slot.
+pub async fn scope<F: Future>(future: F) -> F::Output {
+    ACTIVE.scope(Arc::new(RwLock::new(None)), future).await
+}
+
+/// Propagate the current install's dependency-chain slot into a spawned task.
+/// Out-of-band callers get an empty slot, preserving the no-context behavior.
+pub fn scope_current<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    let active = ACTIVE
+        .try_with(Arc::clone)
+        .unwrap_or_else(|_| Arc::new(RwLock::new(None)));
+    ACTIVE.scope(active, future)
+}
 
 /// Maps `(name, version)` → shortest ancestor chain back to an
 /// importer. Empty chain = direct importer dep (no ancestors above
@@ -139,19 +157,13 @@ pub fn format_chain(ancestors: &[(String, String)], leaf_name: &str, leaf_versio
     s
 }
 
-/// Process-global active index. Set after the resolver finishes;
-/// consulted by error wrappers in the install pipeline.
-fn slot() -> &'static Mutex<Option<Arc<ChainIndex>>> {
-    static SLOT: OnceLock<Mutex<Option<Arc<ChainIndex>>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
-}
-
-/// Set the active chain index. Call once per install run, after
-/// resolution settles. Idempotent — replacing an existing index is
-/// fine (recursive installs reset between workspace packages).
+/// Set the current install's chain index after resolution settles.
 pub fn set_active(graph: &LockfileGraph) {
     let idx = Arc::new(ChainIndex::from_graph(graph));
-    *slot().lock().expect("chain index slot poisoned") = Some(idx);
+    let _ = ACTIVE.try_with(|active| match active.write() {
+        Ok(mut slot) => *slot = Some(idx),
+        Err(poisoned) => *poisoned.into_inner() = Some(idx),
+    });
 }
 
 /// Lookup the chain for `(name, version)` against the active index
@@ -159,22 +171,20 @@ pub fn set_active(graph: &LockfileGraph) {
 /// the package isn't present — callers concatenate the result, so
 /// the empty case must not insert separator characters.
 pub fn format_chain_for(name: &str, version: &str) -> String {
-    let guard = match slot().lock() {
-        Ok(g) => g,
-        Err(_) => return String::new(),
-    };
-    let Some(idx) = guard.as_ref() else {
-        return String::new();
-    };
-    match idx.lookup(name, version) {
-        Some(chain) if !chain.is_empty() => {
-            // Prefix newline so the chain appears on its own line in
-            // miette's rendered output. Empty-chain case (direct
-            // importer dep) returns "" so nothing is appended.
-            format!("\n{}", format_chain(chain, name, version))
-        }
-        _ => String::new(),
-    }
+    ACTIVE
+        .try_with(|active| {
+            let guard = match active.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            match guard.as_ref().and_then(|idx| idx.lookup(name, version)) {
+                Some(chain) if !chain.is_empty() => {
+                    format!("\n{}", format_chain(chain, name, version))
+                }
+                _ => String::new(),
+            }
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -289,5 +299,51 @@ mod tests {
         let idx = ChainIndex::from_graph(&graph);
         assert_eq!(idx.lookup("h3-v2", "2.0.0"), Some(&[][..]));
         assert_eq!(idx.lookup("h3", "2.0.0"), Some(&[][..]));
+    }
+
+    fn graph_with_ancestor(ancestor: &str) -> LockfileGraph {
+        let mut graph = LockfileGraph::default();
+        graph
+            .importers
+            .insert(".".to_string(), vec![direct(ancestor, "1")]);
+        graph
+            .packages
+            .extend([pkg(ancestor, "1", &[("leaf", "1")]), pkg("leaf", "1", &[])]);
+        graph
+    }
+
+    #[tokio::test]
+    async fn parallel_scopes_keep_their_own_chain_index() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+
+        let first = scope(async move {
+            set_active(&graph_with_ancestor("first"));
+            first_barrier.wait().await;
+            format_chain_for("leaf", "1")
+        });
+        let second = scope(async move {
+            set_active(&graph_with_ancestor("second"));
+            second_barrier.wait().await;
+            format_chain_for("leaf", "1")
+        });
+
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first, "\nchain: first@1 > leaf@1");
+        assert_eq!(second, "\nchain: second@1 > leaf@1");
+    }
+
+    #[tokio::test]
+    async fn scope_current_propagates_chain_index_to_spawned_tasks() {
+        let chain = scope(async {
+            set_active(&graph_with_ancestor("parent"));
+            tokio::spawn(scope_current(async { format_chain_for("leaf", "1") }))
+                .await
+                .unwrap()
+        })
+        .await;
+
+        assert_eq!(chain, "\nchain: parent@1 > leaf@1");
     }
 }

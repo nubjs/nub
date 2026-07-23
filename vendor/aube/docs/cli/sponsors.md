@@ -3,4 +3,4 @@
 
 - **Usage**: `aube sponsors`
 
-Show the companies sponsoring aube and the jdx.dev project family
+Show the companies sponsoring aube and the jdx.dev open source tools

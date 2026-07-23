@@ -22,7 +22,7 @@
 #   BENCH_BANDWIDTH       — optional throttle, e.g. `50mbit`, `6mbit`,
 #                           `6250000` (bytes/s as a bare integer).
 #                           When set, traffic goes through
-#                           throttle-proxy.mjs instead of direct.
+#                           throttle-proxy.mts instead of direct.
 #   BENCH_LATENCY         — optional fixed response latency for the
 #                           throttle proxy, e.g. `50ms`.
 #   BENCH_PROXY_PORT      — localhost port for the throttle proxy
@@ -241,14 +241,14 @@ _hermetic_warm() {
 }
 
 # Optional throttling proxy lifecycle. The proxy is a ~100-line Node
-# script with zero deps (benchmarks/throttle-proxy.mjs). We invoke it
+# script with zero deps (benchmarks/throttle-proxy.mts). We invoke it
 # with the upstream URL + rate; it prints "ready" to stdout once
 # listening so we know when to return.
 _hermetic_start_proxy() {
 	local rate=$1
 	local upstream="http://127.0.0.1:$BENCH_VERDACCIO_PORT"
 
-	node "$HERMETIC_DIR/throttle-proxy.mjs" \
+	node "$HERMETIC_DIR/throttle-proxy.mts" \
 		--port "$BENCH_PROXY_PORT" \
 		--upstream "$upstream" \
 		--rate "$rate" \

@@ -268,6 +268,22 @@ pub struct EngineContext {
     /// (default) keeps the ambient-`node` fallback — upstream behavior.
     pub runtime_node_bin: Option<PathBuf>,
 
+    /// The version of that node, bare (`22.15.0`, no `v`). Same provenance as
+    /// [`runtime_node_bin`](Self::runtime_node_bin) — an embedder that owns Node
+    /// provisioning already holds it, so aube neither probes nor re-derives it.
+    /// `engines::effective_node_version` consults this at the resolver's tier:
+    /// below an explicit `node-version` `.npmrc` override (pnpm's
+    /// validation-only knob), above the ambient `node --version` PATH probe.
+    ///
+    /// Load-bearing beyond the `engines.node` check: this version's major is the
+    /// GVS engine fingerprint (`<os>-<arch>-node<major>`) folded into the
+    /// virtual-store path of every subtree containing a build-allowed package.
+    /// Under `runtime_switching = false` the resolver is inert, so without this
+    /// the fingerprint would record the ambient shell node while lifecycle
+    /// scripts compiled against the embedder's — two majors sharing one store
+    /// entry. `None` (default) keeps the PATH probe — upstream behavior.
+    pub runtime_node_version: Option<String>,
+
     /// Replacement lifecycle `npm_config_user_agent` product token. `None`
     /// (default) falls back to the compile-time [`Embedder::user_agent`] —
     /// standalone aube reports `aube/<version>`. An embedder sets `Some` when
@@ -317,6 +333,38 @@ pub struct EngineContext {
     /// sets this to the same value it computes for `read_branded_pnpm_config`
     /// (pnpm incumbent or fresh nub-as-pnpm-drop-in).
     pub named_registries_enabled: bool,
+
+    /// Replacement `packageExtensions` source. `Some(map)` makes the supplied
+    /// map the manifest's *sole* packageExtensions contribution —
+    /// `PackageJson::package_extensions` returns it verbatim instead of
+    /// walking the manifest's `pnpm.packageExtensions` / `aube.packageExtensions`
+    /// / top-level `packageExtensions` sources. `None` (default) leaves upstream
+    /// behavior untouched (walk every source).
+    ///
+    /// The embedder seam for tools that scope which packageExtensions home
+    /// applies per active PM — top-level `packageExtensions` is a nub-identity
+    /// neutral field (no PM reads it except through a branded home), so nub
+    /// honors it only under its own identity and drops it under an npm/pnpm/
+    /// yarn/bun compat role. Same shape and contract as [`embedder_overrides`].
+    ///
+    /// [`embedder_overrides`]: Self::embedder_overrides
+    pub embedder_package_extensions: Option<BTreeMap<String, serde_json::Value>>,
+
+    /// Whether the embedder treats `packageExtensions` as a checksummed,
+    /// drift-enforced config like pnpm does. `false` (default) preserves
+    /// upstream behavior: aube stamps `packageExtensionsChecksum` only onto
+    /// `pnpm-lock.yaml` (registry byte-parity with pnpm) and never validates
+    /// it, so a packageExtensions edit never re-resolves or frozen-fails.
+    ///
+    /// When `true` (nub), the embedder additionally (1) stamps the checksum
+    /// onto its own generic lockfile (the `Aube` kind = `nub.lock`, pnpm-v9
+    /// bytes) so the drift check reaches a fixpoint, and (2) treats a
+    /// stored-vs-computed checksum mismatch as lockfile drift — a normal
+    /// install re-resolves, a `--frozen-lockfile` install aborts — mirroring
+    /// pnpm's `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`. Harmless under lockfile
+    /// kinds that carry no checksum (npm/yarn/bun): stored and computed both
+    /// resolve to `None`, so the check is a no-op.
+    pub enforce_package_extensions_checksum: bool,
 }
 
 impl Default for EngineContext {
@@ -342,9 +390,12 @@ impl Default for EngineContext {
             env_overlay: Vec::new(),
             runtime_node_dir: None,
             runtime_node_bin: None,
+            runtime_node_version: None,
             lifecycle_user_agent_product: None,
             npm_save_prefix_on_bare_exact: false,
             named_registries_enabled: false,
+            embedder_package_extensions: None,
+            enforce_package_extensions_checksum: false,
         }
     }
 }
@@ -411,8 +462,11 @@ mod tests {
         assert!(ctx.env_overlay.is_empty());
         assert_eq!(ctx.runtime_node_dir, None);
         assert_eq!(ctx.runtime_node_bin, None);
+        assert_eq!(ctx.runtime_node_version, None);
         assert_eq!(ctx.lifecycle_user_agent_product, None);
         assert!(!ctx.npm_save_prefix_on_bare_exact);
         assert!(!ctx.named_registries_enabled);
+        assert_eq!(ctx.embedder_package_extensions, None);
+        assert!(!ctx.enforce_package_extensions_checksum);
     }
 }

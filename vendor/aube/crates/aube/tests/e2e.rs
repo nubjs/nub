@@ -60,6 +60,36 @@ impl Sandbox {
     fn write_manifest(&self, contents: &str) {
         fs::write(self.project.join("package.json"), contents).unwrap();
     }
+
+    fn write_file(&self, rel: &str, contents: &str) {
+        let path = self.project.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+}
+
+/// Whether any file named `marker` exists anywhere under `dir`. Used to
+/// find a lifecycle script's output without hard-coding the hashed
+/// virtual-store path it lands in.
+fn marker_exists_under(dir: &std::path::Path, marker: &str) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            if marker_exists_under(&path, marker) {
+                return true;
+            }
+        } else if entry.file_name() == marker {
+            return true;
+        }
+    }
+    false
 }
 
 fn e2e_lock() -> MutexGuard<'static, ()> {
@@ -192,4 +222,80 @@ fn run_failing_pre_script_short_circuits_with_its_code() {
         .assert()
         .code(5)
         .stdout(predicates::str::contains("MAIN_RAN").not());
+}
+
+#[test]
+fn approve_builds_surfaces_and_runs_a_local_source_dep() {
+    // Regression for the `file:`-dep approve-builds dead-end: install
+    // warns about a local-source dependency's build script, but
+    // `ignored-builds` / `approve-builds` then reported nothing to
+    // approve — the warned dep was keyed only in the install-recorded
+    // set, never in the store the enumeration read. This pins the whole
+    // contract: the dep is listed, approving it writes the *source* key
+    // (a bare name never authorizes a source-backed build), and the
+    // build then runs on reinstall while the warning clears.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+
+    // A directory dependency is fully offline — no registry, no network.
+    // Its postinstall drops a marker so we can prove the script ran.
+    sbx.write_file(
+        "dep/package.json",
+        r#"{
+            "name": "dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('BUILT_527_MARKER','ok')\"" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-approve-local",
+            "version": "0.0.0",
+            "dependencies": { "dep": "file:./dep" }
+        }"#,
+    );
+
+    // Install gates the build: the marker must not exist yet, and the
+    // ignored-build warning must fire naming the source key.
+    sbx.cmd()
+        .arg("install")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("dep@file:./dep"));
+    let node_modules = sbx.project.join("node_modules");
+    assert!(
+        !marker_exists_under(&node_modules, "BUILT_527_MARKER"),
+        "postinstall must not run before approval"
+    );
+
+    // The dead-end: `ignored-builds` must now list the local dep by its
+    // source key (it previously printed "No ignored builds").
+    sbx.cmd()
+        .arg("ignored-builds")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("dep@file:./dep"));
+
+    // Approving records the source key in the build policy.
+    sbx.cmd().args(["approve-builds", "--all"]).assert().success();
+
+    // The now-approved build runs on the next install, and the warning
+    // is gone. (A source-backed dep's virtual-store path folds in build
+    // state, so — unlike a registry dep — the scoped rebuild inside
+    // `approve-builds` can't reach the freshly-approved tree; the full
+    // install re-materializes and builds it.)
+    sbx.cmd()
+        .arg("install")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("dep@file:./dep").not());
+    assert!(
+        marker_exists_under(&node_modules, "BUILT_527_MARKER"),
+        "approving a local-source dep must let its build script run on reinstall"
+    );
+    sbx.cmd()
+        .arg("ignored-builds")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No ignored builds"));
 }

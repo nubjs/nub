@@ -1,15 +1,23 @@
 //! `aube approve-builds` — flip packages to `true` in the workspace
-//! yaml's `allowBuilds` map so their install scripts run on the next
-//! `aube install`. Writes to `aube-workspace.yaml` by default, or
-//! mutates an existing `pnpm-workspace.yaml` in place.
+//! yaml's `allowBuilds` map and run their install scripts in the same
+//! invocation. Writes to `aube-workspace.yaml` by default, or mutates
+//! an existing `pnpm-workspace.yaml` in place.
 //!
 //! Walks the lockfile via `ignored_builds::collect_ignored`, presents an
 //! interactive multi-select picker (or approves everything under
-//! `--all`), then merges the selections into the workspace yaml's
-//! `allowBuilds` map. Matches pnpm v11, which collapsed the old
-//! allow/deny list keys into one review map. Entries are added as bare
-//! package names so a future resolution of the same dep under a
-//! different version keeps working without re-prompting.
+//! `--all`), merges the selections into the workspace yaml's
+//! `allowBuilds` map, then runs a rebuild scoped to the approved names
+//! (dep scripts only; root lifecycle hooks stay untouched). Matches
+//! pnpm v11, which collapsed the old allow/deny list keys into one
+//! review map and builds approved packages as part of `approve-builds`
+//! itself. Entries are added as bare package names so a future
+//! resolution of the same dep under a different version keeps working
+//! without re-prompting.
+//!
+//! The global path stays write-only: pnpm 11 removed `approve-builds
+//! --global` outright, so there is no reference behavior to mirror,
+//! and each global install dir would need its own retargeted rebuild —
+//! the printed hint keeps that flow explicit instead.
 
 use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
@@ -43,25 +51,78 @@ pub async fn run(args: ApproveBuildsArgs) -> miette::Result<()> {
     }
 
     let cwd = crate::dirs::project_root()?;
-    let _lock = super::take_project_lock(&cwd)?;
-    run_project(&cwd, args.all, args.packages)
+    // The lock covers only the config write. It is dropped before the
+    // build step: rebuild does not take the project lock, and holding a
+    // write lock across arbitrarily long lifecycle scripts would block
+    // every other engine command on the project for the whole build.
+    let approved = {
+        let _lock = super::take_project_lock(&cwd)?;
+        run_project(&cwd, args.all, args.packages)?
+    };
+    if approved.is_empty() {
+        return Ok(());
+    }
+    // pnpm parity: the same invocation runs the just-approved packages'
+    // scripts. The scoped form of rebuild is exactly the right shape —
+    // it runs only the named deps' scripts, skips the root lifecycle
+    // hooks, and treats the explicit names as the policy opt-in.
+    super::rebuild::run(
+        super::rebuild::RebuildArgs { packages: approved },
+        aube_workspace::selector::EffectiveFilter::default(),
+    )
+    .await
 }
 
-fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<()> {
+/// Approve builds for the current project and return the approved
+/// names (empty when nothing was ignored, nothing was selected, or the
+/// interactive confirmation was declined — the caller skips the build
+/// step in all three cases).
+fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<Vec<String>> {
     let ignored = super::ignored_builds::collect_ignored(cwd)?;
     if ignored.is_empty() {
         println!("No ignored builds to approve.");
-        return Ok(());
+        return Ok(Vec::new());
     }
 
+    let interactive = !all && packages.is_empty();
     let selected = select_project(&ignored, all, packages)?;
 
     if selected.is_empty() {
         println!("No packages selected.");
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    let written = aube_manifest::workspace::add_to_allow_builds(cwd, &selected)
+    // A source-backed package (`file:`/tarball/git/…) is authorized by its
+    // source key, never its bare name, so the `allowBuilds` write must use
+    // `approval_key`. The follow-up rebuild instead matches deps by graph
+    // `name` (pnpm's `rebuild <name>` contract), so the two lists diverge
+    // for source-backed deps and must be threaded separately.
+    let entries = selected_entries(&ignored, &selected);
+    let approval_keys = dedupe(entries.iter().map(|e| e.approval_key.clone()).collect());
+    let display = entries
+        .iter()
+        .map(|e| e.display_spec())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // The picker only toggles names; scripts running is a separate
+    // consent. pnpm gates the interactive path behind the same
+    // default-No confirmation (`--all` and positional approvals are
+    // themselves the explicit consent, so they build straight away).
+    if interactive {
+        let confirmed = demand::Confirm::new(format!(
+            "The next packages will now be built: {display}. Do you approve?"
+        ))
+        .selected(false)
+        .run()
+        .into_diagnostic()
+        .wrap_err("failed to read approve-builds confirmation")?;
+        if !confirmed {
+            return Ok(Vec::new());
+        }
+    }
+
+    let written = aube_manifest::workspace::add_to_allow_builds(cwd, &approval_keys)
         .into_diagnostic()
         .wrap_err("failed to update workspace yaml")?;
 
@@ -69,16 +130,27 @@ fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<(
         .strip_prefix(cwd)
         .unwrap_or(written.as_path())
         .display();
-    println!("Approved {} package(s) in {rel}:", selected.len());
-    for name in &selected {
-        println!("  {name}");
+    println!("Approved {} package(s) in {rel}:", approval_keys.len());
+    for entry in &entries {
+        println!("  {}", entry.display_spec());
     }
-    println!(
-        "Run `{}` (or `{}`) to execute their scripts.",
-        aube_util::cmd("install"),
-        aube_util::cmd("rebuild")
-    );
-    Ok(())
+    Ok(selected)
+}
+
+/// The `IgnoredEntry`s whose bare `name` the caller selected, preserving
+/// `ignored`'s sorted order. Bridges the name-keyed selection surface
+/// (picker values, positional args, `--all`) to the entries' richer
+/// identity — `approval_key` for the `allowBuilds` write and
+/// `display_spec` for user-facing output.
+fn selected_entries<'a>(
+    ignored: &'a [super::ignored_builds::IgnoredEntry],
+    selected: &[String],
+) -> Vec<&'a super::ignored_builds::IgnoredEntry> {
+    let want: HashSet<&str> = selected.iter().map(String::as_str).collect();
+    ignored
+        .iter()
+        .filter(|e| want.contains(e.name.as_str()))
+        .collect()
 }
 
 fn run_global(args: ApproveBuildsArgs) -> miette::Result<()> {
@@ -99,7 +171,11 @@ fn run_global(args: ApproveBuildsArgs) -> miette::Result<()> {
             .map(|entry| {
                 (
                     entry.install_dir.clone(),
-                    entry.ignored.iter().map(|i| i.name.clone()).collect(),
+                    entry
+                        .ignored
+                        .iter()
+                        .map(|i| i.approval_key.clone())
+                        .collect(),
                 )
             })
             .collect()
@@ -119,19 +195,19 @@ fn run_global(args: ApproveBuildsArgs) -> miette::Result<()> {
 
     let mut approved = 0usize;
     let mut written_dirs = 0usize;
-    for (install_dir, names) in selected {
-        let written = aube_manifest::workspace::add_to_allow_builds(&install_dir, &names)
+    for (install_dir, approval_keys) in selected {
+        let written = aube_manifest::workspace::add_to_allow_builds(&install_dir, &approval_keys)
             .into_diagnostic()
             .wrap_err("failed to update global install workspace yaml")?;
         written_dirs += 1;
-        approved += names.len();
+        approved += approval_keys.len();
         println!(
             "Approved {} package(s) in {}:",
-            names.len(),
+            approval_keys.len(),
             written.display()
         );
-        for name in &names {
-            println!("  {name}");
+        for key in &approval_keys {
+            println!("  {key}");
         }
     }
 
@@ -233,14 +309,17 @@ fn select_global_packages(
     let wanted: HashSet<&str> = wanted.iter().map(String::as_str).collect();
     let mut selected = BTreeMap::new();
     for entry in global_ignored {
-        let names: Vec<String> = entry
+        // Match on the user-typed bare `name`, but record the
+        // `approval_key` — the source key authorizes a source-backed
+        // build; the bare name would be silently ignored by the policy.
+        let keys: Vec<String> = entry
             .ignored
             .iter()
             .filter(|ignored| wanted.contains(ignored.name.as_str()))
-            .map(|ignored| ignored.name.clone())
+            .map(|ignored| ignored.approval_key.clone())
             .collect();
-        if !names.is_empty() {
-            selected.insert(entry.install_dir.clone(), names);
+        if !keys.is_empty() {
+            selected.insert(entry.install_dir.clone(), keys);
         }
     }
     Ok(selected)
@@ -273,7 +352,7 @@ fn pick_interactively(
         .description("Space to toggle, Enter to confirm")
         .min(1);
     for entry in ignored {
-        let label = format_picker_label(&entry.name, &entry.version, &entry.suspicions);
+        let label = format_picker_label(&entry.display_spec(), &entry.suspicions);
         picker = picker.option(demand::DemandOption::new(entry.name.clone()).label(&label));
     }
     picker
@@ -282,25 +361,21 @@ fn pick_interactively(
         .wrap_err("failed to read approve-builds selection")
 }
 
-/// `name@version` plus a compact suspicious-shape tag when the
+/// The entry's display spec plus a compact suspicious-shape tag when the
 /// content-sniff fired against any of the package's lifecycle
 /// scripts. One picker row is narrow, so only the first match's
 /// category gets a tag; `+N more` follows when more than one
 /// matched. The full breakdown lives in `print_suspicion_summary`.
-fn format_picker_label(
-    name: &str,
-    version: &str,
-    suspicions: &[aube_scripts::Suspicion],
-) -> String {
+fn format_picker_label(spec: &str, suspicions: &[aube_scripts::Suspicion]) -> String {
     if suspicions.is_empty() {
-        return format!("{name}@{version}");
+        return spec.to_string();
     }
     let first = suspicions[0].kind.category();
     let extra = suspicions.len() - 1;
     if extra == 0 {
-        format!("{name}@{version}  ⚠ suspicious: {first}")
+        format!("{spec}  ⚠ suspicious: {first}")
     } else {
-        format!("{name}@{version}  ⚠ suspicious: {first} +{extra} more")
+        format!("{spec}  ⚠ suspicious: {first} +{extra} more")
     }
 }
 
@@ -345,10 +420,14 @@ fn pick_global_interactively(
     for (idx, entry) in global_ignored.iter().enumerate() {
         let aliases = entry.aliases.join(", ");
         for ignored in &entry.ignored {
-            // split_once below keeps the full package name even if a
-            // private registry allows ':' inside it.
-            let value = format!("{idx}:{}", ignored.name);
-            let base = format_picker_label(&ignored.name, &ignored.version, &ignored.suspicions);
+            // `split_once(':')` below splits on the FIRST colon, so `idx`
+            // (digits only) is cleanly separated even when the payload
+            // `approval_key` itself carries colons (a `name@file:…`
+            // source key). Recording the approval_key — not the bare
+            // name — is what lets a source-backed global build be
+            // authorized rather than silently ignored by the policy.
+            let value = format!("{idx}:{}", ignored.approval_key);
+            let base = format_picker_label(&ignored.display_spec(), &ignored.suspicions);
             let label = format!("{aliases}: {base}");
             picker = picker.option(demand::DemandOption::new(value).label(&label));
         }
@@ -360,7 +439,7 @@ fn pick_global_interactively(
         .wrap_err("failed to read approve-builds selection")?;
     let mut selected: BTreeMap<std::path::PathBuf, Vec<String>> = BTreeMap::new();
     for item in picked {
-        let Some((idx, name)) = item.split_once(':') else {
+        let Some((idx, approval_key)) = item.split_once(':') else {
             continue;
         };
         let Ok(idx) = idx.parse::<usize>() else {
@@ -372,7 +451,7 @@ fn pick_global_interactively(
         selected
             .entry(entry.install_dir.clone())
             .or_default()
-            .push(name.to_string());
+            .push(approval_key.to_string());
     }
     Ok(selected)
 }
@@ -384,10 +463,7 @@ mod tests {
 
     #[test]
     fn label_for_clean_package_is_bare_spec() {
-        assert_eq!(
-            format_picker_label("esbuild", "0.20.2", &[]),
-            "esbuild@0.20.2"
-        );
+        assert_eq!(format_picker_label("esbuild@0.20.2", &[]), "esbuild@0.20.2");
     }
 
     #[test]
@@ -397,7 +473,7 @@ mod tests {
             hook: "postinstall",
         }];
         assert_eq!(
-            format_picker_label("lodash", "1.0.0", &s),
+            format_picker_label("lodash@1.0.0", &s),
             "lodash@1.0.0  ⚠ suspicious: curl|sh"
         );
     }
@@ -419,8 +495,13 @@ mod tests {
             },
         ];
         assert_eq!(
-            format_picker_label("evil-pkg", "9.9.9", &s),
+            format_picker_label("evil-pkg@9.9.9", &s),
             "evil-pkg@9.9.9  ⚠ suspicious: curl|sh +2 more"
         );
+    }
+
+    #[test]
+    fn label_for_source_backed_package_uses_source_key() {
+        assert_eq!(format_picker_label("dep@file:./dep", &[]), "dep@file:./dep");
     }
 }

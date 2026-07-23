@@ -32,7 +32,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           token: ${{ secrets.AUBE_GH_TOKEN }}
@@ -40,10 +40,14 @@ jobs:
           persist-credentials: false
       - name: Run release-plz
         id: release-plz
-        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release
         env:
+          # Workspace crates are published in dependency order during one
+          # release, so their freshly published internal dependencies must
+          # bypass the repository-wide 7-day dependency soak.
+          CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE: allow
           GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
       # The `releases` output is an array of every crate that was
       # published, in dependency order. Since aube depends on all
@@ -124,19 +128,45 @@ jobs:
       CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
       CERTIFICATES_P12_PASS: ${{ secrets.CERTIFICATES_P12_PASS }}
 
+  # Build + codesign the C ABI libraries and attach them (plus aube.h)
+  # to the draft release. Must complete before `publish-release`:
+  # immutable releases freeze the asset list the moment the draft
+  # flips live, so ffi.yml's old post-publish upload path could never
+  # attach anything. npm publishing of @jdxcode/aube-ffi is NOT part
+  # of this call — that stays on ffi.yml's `release: published`
+  # trigger so packages only go out for releases that actually
+  # shipped.
+  upload-ffi-assets:
+    name: Upload ffi assets
+    needs: release-plz-release
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/ffi.yml
+    with:
+      tag: ${{ needs.release-plz-release.outputs.tag }}
+      draft_phase: true
+    secrets:
+      AUBE_GH_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+      CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
+      CERTIFICATES_P12_PASS: ${{ secrets.CERTIFICATES_P12_PASS }}
+
   # Flip the draft release to non-draft once *every* asset uploaded
   # cleanly. With immutable GitHub releases enabled, a published
   # release can't have its assets replaced — so if any matrix target
   # failed, we leave the draft in place rather than ship a release
   # with missing platform binaries (downstream npm / COPR / PPA jobs
   # would also fail trying to fetch the holes). To recover: manually
-  # re-run `release.yml` via workflow_dispatch with the tag input,
-  # which fills in the missing assets, then either flip the draft by
-  # hand (`gh release edit $TAG --draft=false`) or workflow_dispatch
-  # the whole release-plz workflow again so this job runs.
+  # re-run `release.yml` (CLI binaries) or `ffi.yml` (C ABI libraries)
+  # via workflow_dispatch with the tag input, which fills in the
+  # missing assets, then either flip the draft by hand
+  # (`gh release edit $TAG --draft=false`) or workflow_dispatch the
+  # whole release-plz workflow again so this job runs.
   publish-release:
     name: Publish release
-    needs: [release-plz-release, upload-assets]
+    needs: [release-plz-release, upload-assets, upload-ffi-assets]
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
     runs-on: namespace-profile-endev-linux-amd64
     permissions:
@@ -160,12 +190,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: refs/tags/${{ needs.release-plz-release.outputs.tag }}
           submodules: recursive
           persist-credentials: false
-      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           install_args: communique
       - name: Enhance GitHub release with communique
@@ -197,9 +227,9 @@ jobs:
 
           ## 💚 Sponsor aube
 
-          aube is part of [**jdx.dev**](https://jdx.dev) — an independent developer-tooling studio run by [@jdx](https://github.com/jdx), also behind [mise](https://mise.jdx.dev/). Work on aube is funded entirely by sponsors.
+          aube is maintained by [@jdx](https://github.com/jdx), an open source developer for [**entire.io**](https://entire.io), the title sponsor of the [jdx.dev](https://jdx.dev) open source tools including [mise](https://mise.jdx.dev/). Work on aube is funded by sponsors.
 
-          If aube is saving your team install time or CI minutes, please consider [sponsoring at jdx.dev](https://jdx.dev). Individual and company sponsorships are what keep the project fast, free, and independent.
+          If aube is saving your team install time or CI minutes, please consider [sponsoring at jdx.dev](https://jdx.dev/sponsors.html). Individual and company sponsorships are what keep the project fast, free, and independent.
           EOF
           } > /tmp/release-notes.md
           gh release edit "$TAG" --notes-file /tmp/release-notes.md
@@ -227,7 +257,7 @@ jobs:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           token: ${{ secrets.AUBE_GH_TOKEN }}
@@ -238,10 +268,10 @@ jobs:
       # of silently re-resolving `"latest"` pins and rewriting mise.lock.
       # release-plz refuses to run against a dirty tree, and intentional
       # lockfile bumps should land via their own PR.
-      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         env:
           MISE_LOCKED: "1"
-      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: release-plz
       - name: Configure git identity
@@ -316,12 +346,13 @@ jobs:
             `$1${newVersion}$2`,
           );
           for (const name of packages) {
-            let found = false;
+            // Workspace members nobody depends on (aube-node, aube-ffi) have no
+            // [workspace.dependencies] entry; their versions come from
+            // workspace.package, bumped above. Only rewrite lines that exist.
             cargoToml = cargoToml
               .split('\n')
               .map((line) => {
                 if (!line.startsWith(`${name} = {`) || !line.includes('path = ')) return line;
-                found = true;
                 const updated = line.replace(`version = "${oldVersion}"`, `version = "${newVersion}"`);
                 if (updated === line) {
                   throw new Error(`path dependency ${name} did not contain version ${oldVersion}`);
@@ -329,7 +360,6 @@ jobs:
                 return updated;
               })
               .join('\n');
-            if (!found) throw new Error(`path dependency ${name} not found in Cargo.toml`);
           }
           fs.writeFileSync('Cargo.toml', cargoToml);
 

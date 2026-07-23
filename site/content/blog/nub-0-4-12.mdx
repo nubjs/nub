@@ -1,0 +1,26 @@
+---
+title: "Nub 0.4.12"
+description: Package-manager and runtime fixes centered on the global virtual store, plus Node version resolution from tool-versions files.
+author: The Nub Team
+date: 2026-07-15
+---
+
+A patch release with package-manager and runtime fixes, most of them around the global virtual store.
+
+## Package manager
+
+Trusted packages whose build script targets the project they're installed into — git-hook installers such as simple-git-hooks, and similar tools — are now ejected from the shared global store and built inside your project. Their `postinstall` runs against your project instead of failing in the store. Self-contained builds stay in the shared store, built once and reused across projects. ([#475](https://github.com/nubjs/nub/pull/475))
+
+Alongside that: type-only phantom dependencies in `.d.ts` and Vue SFC type surfaces are now detected under the global virtual store ([#452](https://github.com/nubjs/nub/pull/452)), importing a bun or npm lockfile to `pnpm-lock` runs the peer-context pass ([#471](https://github.com/nubjs/nub/pull/471)), incomplete version-cache entries are repaired rather than erroring ([#467](https://github.com/nubjs/nub/pull/467)), and Yarn Berry frozen-install drift validation is fixed for workspaces ([#462](https://github.com/nubjs/nub/pull/462)).
+
+## Node version management
+
+Nub now reads asdf/mise `.tool-versions` when resolving the project's Node version ([#474](https://github.com/nubjs/nub/pull/474)).
+
+## Runtime and process
+
+- The async hook tier is auto-selected when a foreign loader is detected in the preload ([#472](https://github.com/nubjs/nub/pull/472)).
+- The `nub run` script child arms `PR_SET_PDEATHSIG`, so killing the leader no longer orphans the workload ([#464](https://github.com/nubjs/nub/pull/464)).
+- Web Locks dictionary conversion is aligned to the spec ([#461](https://github.com/nubjs/nub/pull/461)), and runtime env keys are filtered across `nub watch` restarts ([#466](https://github.com/nubjs/nub/pull/466)).
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.12) list every change in this release.

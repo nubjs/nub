@@ -67,6 +67,9 @@ __pycache__/
 # /target/ above (via crates/nub-native/.cargo/config.toml), but guard against a
 # stray local target/ if it's ever built without that routing.
 /crates/nub-native/target/
+# nub-phantom is its own Cargo workspace too (eval tool, built on demand); its
+# default target/ lands in-tree.
+/crates/nub-phantom/target/
 /dist/
 /build/
 /coverage/

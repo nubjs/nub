@@ -83,7 +83,7 @@ pub(super) fn snapshot_lockfile(lockfile_path: &Path) -> miette::Result<Option<V
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e)
             .into_diagnostic()
-            .wrap_err("failed to snapshot lockfile for --no-save"),
+            .wrap_err("failed to snapshot lockfile"),
     }
 }
 
@@ -128,5 +128,5 @@ pub(super) fn restore_lockfile(
     };
     result
         .into_diagnostic()
-        .wrap_err("failed to restore original lockfile after --no-save")
+        .wrap_err("failed to restore original lockfile")
 }

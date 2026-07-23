@@ -31,14 +31,15 @@ function LabelWithChip({ label, command }: { label: ReactNode; command: string }
 
 function styleNode(node: TreeNode): TreeNode {
   if (node.type === 'folder') {
-    // The folder header renders a clickable link to its index page; give it the
-    // same command chip that index page would get. When the folder has no
-    // `index` (a meta whose `pages` lists "index" explicitly rather than "..."),
-    // the index instead appears as a regular child page — find it so the chip
-    // still attaches, and drop that duplicate child below so the header isn't
-    // stuttered by an identical row beneath it.
+    // The folder header renders a clickable link to its index page. When the
+    // folder has no `index` (a meta whose `pages` lists "index" explicitly
+    // rather than "..."), the index instead appears as a regular child page —
+    // find it by its source file, promote it to the header, and drop that
+    // duplicate child so the folder name isn't repeated beneath itself. A
+    // command chip is added below when the promoted page maps to a command.
     const indexChild = node.children.find(
-      (c): c is Extract<TreeNode, { type: 'page' }> => c.type === 'page' && c.url in COMMAND_BY_URL,
+      (c): c is Extract<TreeNode, { type: 'page' }> =>
+        c.type === 'page' && /(^|\/)index\.mdx?$/.test(c.$ref ?? ''),
     );
     const folderUrl = node.index?.url ?? indexChild?.url;
     const isDuplicateIndex = (c: TreeNode) =>

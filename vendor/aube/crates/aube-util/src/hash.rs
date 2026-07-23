@@ -240,6 +240,13 @@ where
 /// install. The active embedder's `manifest_namespace` is folded in at the
 /// digest site (it sorts ahead of these for standalone aube → `"aube"`).
 pub const INSTALL_SHAPE_FIELDS: &[&str] = &[
+    // Brand-neutral build-policy review map (the namespaced variants ride
+    // the `pnpm` / manifest-namespace entries below): a newly-allowed dep
+    // must re-run its previously-skipped build script, so an edit must
+    // invalidate the install — without this, an approval written to the
+    // neutral field left the warm fast path reporting "up to date" and
+    // the script never ran.
+    "allowBuilds",
     "bundleDependencies",
     "bundledDependencies",
     "catalog",
@@ -254,6 +261,11 @@ pub const INSTALL_SHAPE_FIELDS: &[&str] = &[
     "name",
     "optionalDependencies",
     "overrides",
+    // `packageExtensions` extends a package's declared deps/optionalDeps/
+    // peerDeps/peerDependenciesMeta at resolve time, so an edit reshapes the
+    // resolved graph — it must invalidate the install, else the fast path
+    // silently skips the re-resolve the new extension demands.
+    "packageExtensions",
     "peerDependencies",
     "peerDependenciesMeta",
     "pnpm",
@@ -440,6 +452,23 @@ mod tests {
     }
 
     #[test]
+    fn manifest_digest_reacts_to_allow_builds_change() {
+        // The neutral `allowBuilds` review map gates which dep build scripts
+        // run, so an approval must invalidate the install (a stale digest let
+        // the warm fast path skip newly-approved scripts).
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"dependencies":{"esbuild":"0.20.2"}}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(
+            r#"{"dependencies":{"esbuild":"0.20.2"},"allowBuilds":{"esbuild":true}}"#,
+        )
+        .unwrap();
+        assert_ne!(
+            manifest_install_shape_digest(&a),
+            manifest_install_shape_digest(&b)
+        );
+    }
+
+    #[test]
     fn manifest_digest_reacts_to_dependencies_meta_change() {
         // Toggling `dependenciesMeta.<dep>.injected` reshapes the on-disk tree,
         // so it must change the shape digest (was silently ignored).
@@ -463,6 +492,24 @@ mod tests {
             serde_json::from_str(r#"{"dependencies":{"esbuild":"0.24.0"}}"#).unwrap();
         let b: serde_json::Value = serde_json::from_str(
             r#"{"dependencies":{"esbuild":"0.24.0"},"trustedDependencies":["esbuild"]}"#,
+        )
+        .unwrap();
+        assert_ne!(
+            manifest_install_shape_digest(&a),
+            manifest_install_shape_digest(&b)
+        );
+    }
+
+    #[test]
+    fn manifest_digest_reacts_to_package_extensions_change() {
+        // A top-level `packageExtensions` edit reshapes the resolved graph
+        // (here marking a peer optional), so the shape digest must change —
+        // otherwise the install fast path treats the edit as cosmetic and
+        // skips the re-resolve.
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"dependencies":{"is-positive":"3.1.0"}}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(
+            r#"{"dependencies":{"is-positive":"3.1.0"},"packageExtensions":{"is-positive@3.1.0":{"peerDependenciesMeta":{"react":{"optional":true}}}}}"#,
         )
         .unwrap();
         assert_ne!(

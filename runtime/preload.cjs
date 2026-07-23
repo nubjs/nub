@@ -93,17 +93,21 @@ try {
 
 const { installSyncPolyfills } = __require("./polyfills.cjs");
 
-// Force the async loader-worker tier when nub's launcher detected this process
-// will host a FOREIGN async `module.register` loader (tsx/ts-node) on a Node
-// whose sync/async hook composition is broken (22.15.0–24.11.0, fixed in
-// Node 24.11.1; nodejs/node#59666). There, nub's sync `module.registerHooks`
-// forces resolution synchronous and reaches the foreign loader's unimplemented
-// `resolveSync` stub → ERR_METHOD_NOT_IMPLEMENTED. Registering nub's hooks via
-// the async path instead keeps BOTH loaders async, so Node's all-async resolve
-// composes cleanly. The signal (__NUB_FORCE_ASYNC_TIER) is set by the Rust
-// spawn path only for the specific loader-hosting process; every other run on
-// this Node keeps the sync fast tier. See crates/nub-core/src/node/spawn.rs.
-const forceAsyncTier = !!process.env.__NUB_FORCE_ASYNC_TIER;
+// Force the async loader-worker tier when this process will host a FOREIGN async
+// `module.register` loader (tsx/ts-node) on a Node whose sync/async hook composition
+// is broken (22.15.0–24.11.0, fixed in Node 24.11.1; nodejs/node#59666). There, nub's
+// sync `module.registerHooks` forces resolution synchronous and reaches the foreign
+// loader's unimplemented `resolveSync` stub → ERR_METHOD_NOT_IMPLEMENTED. Registering
+// nub's hooks via the async path instead keeps BOTH loaders async, so Node's all-async
+// resolve composes cleanly. TWO signals, either sufficient:
+//   • __NUB_FORCE_ASYNC_TIER — the launcher's PREDICTIVE argv scan (spawn.rs), set when
+//     nub itself spawns a tsx/ts-node child. Blind to nested `nub run`, a `child_process`
+//     spawn, or a shell wrapper (nub#460), where nub never sees the tsx argv.
+//   • shouldAutoAsyncTierAtPreload() — the INTRINSIC runtime signal: reads THIS process's
+//     own startup flags (execArgv AND NODE_OPTIONS) for a foreign `--import`/`--loader` on
+//     the broken band, so it fires for every spawn shape the scan misses. This is the
+//     load-bearing half of the nub#460 fix.
+const forceAsyncTier = !!process.env.__NUB_FORCE_ASYNC_TIER || common.shouldAutoAsyncTierAtPreload();
 
 if (!requireEsmDisabled && !forceAsyncTier) {
   // ── Fast tier (sync require(esm) available) ───────────────────────

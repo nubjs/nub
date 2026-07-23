@@ -215,6 +215,10 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // The animated single-line install bar is nub's first-class TTY UX; the
     // engine still falls back to append-only for CI / piped / non-TTY output.
     tty_progress: true,
+    // `nub update -i` uses the tri-state table picker (keep → range → latest
+    // radio cells per row, defaulting to "keep" so updates are opt-in),
+    // instead of standalone aube's flat everything-pre-selected multiselect.
+    rich_update_picker: true,
     // nub's guarantee is "the installed tree equals the incumbent PM's, or an
     // eager precise refusal" — so a lockfile source nub can't resolve (a
     // git/jsr/unknown protocol in a yarn.lock or bun.lock) aborts at plan time

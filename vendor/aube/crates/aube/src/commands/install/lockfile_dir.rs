@@ -28,37 +28,27 @@ pub(super) fn lockfile_graph_for_write(
     }
 }
 
-/// Read a lockfile from `lockfile_dir` and remap its importer key
-/// for the current project from the project's relative-path key to
-/// `"."`, so the rest of the install pipeline can keep treating the
-/// project as the root importer. No-op when `importer_key == "."`.
-pub(super) fn parse_lockfile_dir_remapped(
-    lockfile_dir: &std::path::Path,
-    importer_key: &str,
-    manifest: &aube_manifest::PackageJson,
-) -> Result<aube_lockfile::LockfileGraph, aube_lockfile::Error> {
-    let mut graph = aube_lockfile::parse_lockfile(lockfile_dir, manifest)?;
+fn remap_lockfile_importer(graph: &mut aube_lockfile::LockfileGraph, importer_key: &str) {
     if importer_key != "."
         && let Some(deps) = graph.importers.remove(importer_key)
     {
         graph.importers.insert(".".to_string(), deps);
     }
-    Ok(graph)
 }
 
-/// Same as [`parse_lockfile_dir_remapped`] but preserves the detected
-/// kind for callers that need format-aware behavior.
-pub(super) fn parse_lockfile_dir_remapped_with_kind(
+/// Read a lockfile from `lockfile_dir`, preserve the detected kind,
+/// and remap its importer key for the current project from the
+/// project's relative-path key to `"."`. No-op when
+/// `importer_key == "."`.
+pub(super) fn parse_lockfile_dir_remapped_with_kind_and_options(
     lockfile_dir: &std::path::Path,
     importer_key: &str,
     manifest: &aube_manifest::PackageJson,
+    options: aube_lockfile::ParseOptions,
 ) -> Result<(aube_lockfile::LockfileGraph, aube_lockfile::LockfileKind), aube_lockfile::Error> {
-    let (mut graph, kind) = aube_lockfile::parse_lockfile_with_kind(lockfile_dir, manifest)?;
-    if importer_key != "."
-        && let Some(deps) = graph.importers.remove(importer_key)
-    {
-        graph.importers.insert(".".to_string(), deps);
-    }
+    let (mut graph, kind) =
+        aube_lockfile::parse_lockfile_with_kind_and_options(lockfile_dir, manifest, options)?;
+    remap_lockfile_importer(&mut graph, importer_key);
     Ok((graph, kind))
 }
 
@@ -125,4 +115,38 @@ pub(super) fn write_lockfile_dir_remapped(
     })?;
     remapped.importers.insert(importer_key.to_string(), deps);
     aube_lockfile::write_lockfile_as(lockfile_dir, &remapped, manifest, kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lockfile_graph_for_write;
+    use std::borrow::Cow;
+
+    /// The resolver keeps publish times in `graph.times` whenever
+    /// minimumReleaseAge / trustPolicy / the defaultTrust floor is active,
+    /// but pnpm serializes a `time:` block only under time-based
+    /// resolution. Every lockfile write — the main write and the catch-up
+    /// integrity rewrite — routes through this helper, so pinning its two
+    /// branches guards the #520 parity leak (the rewrite path once wrote
+    /// its own un-stripped clone, re-introducing `time:` on a
+    /// non-time-based lockfile).
+    #[test]
+    fn strips_times_only_when_not_persisting() {
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph
+            .times
+            .insert("foo@1.0.0".into(), "2020-01-01T00:00:00.000Z".into());
+
+        // Non-time-based: the writer's view is `time:`-free, and the strip
+        // is on a clone — the shared graph keeps its times for the floor.
+        let stripped = lockfile_graph_for_write(&graph, false);
+        assert!(stripped.times.is_empty());
+        assert!(matches!(stripped, Cow::Owned(_)));
+        assert!(!graph.times.is_empty());
+
+        // Time-based: times persist, no clone made.
+        let kept = lockfile_graph_for_write(&graph, true);
+        assert_eq!(kept.times.len(), 1);
+        assert!(matches!(kept, Cow::Borrowed(_)));
+    }
 }

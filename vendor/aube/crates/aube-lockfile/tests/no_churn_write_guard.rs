@@ -53,6 +53,7 @@ static NO_CHURN_TOOL: Embedder = Embedder {
     primer_ttl: None,
     cpu_budget: None,
     tty_progress: false,
+    rich_update_picker: false,
     strict_unsupported_source: false,
     warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,
@@ -215,5 +216,47 @@ fn guard_rewrites_when_only_patch_config_is_added() {
         mtime(&path),
         after_patch,
         "an unchanged patched lockfile must stay a no-op (zero churn)"
+    );
+}
+
+/// Regression (nubjs/nub#492): under an enforcing embedder, stamping
+/// `packageExtensionsChecksum` over an otherwise-identical package set must
+/// NOT be treated as a no-op. Without folding the checksum into the guard,
+/// the write that records it is suppressed whenever the resolved graph is
+/// unchanged — the mainline upgrade case for a project that already applied
+/// top-level packageExtensions — so the checksum never lands and a frozen
+/// install stays permanently mismatched with no install-based remedy.
+#[test]
+fn guard_rewrites_when_only_package_extensions_checksum_is_added() {
+    aube_util::set_embedder(&NO_CHURN_TOOL);
+    // The checksum fold is gated on the engine-context posture, not the
+    // embedder; set it, and restore it so sibling tests see the default.
+    aube_util::update_engine_context(|c| c.enforce_package_extensions_checksum = true);
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"t"}"#).unwrap();
+    let manifest = PackageJson::default();
+
+    // An existing lockfile that already applied the extensions but predates
+    // checksum stamping (no `packageExtensionsChecksum`) hits disk first.
+    let graph = graph_with(vec![pkg("ms", "2.1.3", "sha512-AAA==")]);
+    let path = write_lockfile_as(dir.path(), &graph, &manifest, LockfileKind::Pnpm).unwrap();
+    let first = mtime(&path);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // Same package set, now carrying the stamped checksum: must rewrite.
+    let mut stamped = graph.clone();
+    stamped.package_extensions_checksum = Some("sha256-deadbeef".to_string());
+    write_lockfile_as(dir.path(), &stamped, &manifest, LockfileKind::Pnpm).unwrap();
+    aube_util::update_engine_context(|c| c.enforce_package_extensions_checksum = false);
+    assert!(
+        mtime(&path) > first,
+        "stamping packageExtensionsChecksum must rewrite the lockfile, not be skipped as a no-op"
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains("packageExtensionsChecksum:"),
+        "rewritten lockfile must record the checksum:\n{written}"
     );
 }

@@ -127,18 +127,28 @@ pub(super) fn parse_berry_str(
                 }
                 continue;
             }
-            "patch" => {
-                let Some(patch_path) = patch_protocol_path(res_body) else {
+            "patch" => match patch_protocol_path(res_body) {
+                PatchSelector::Single(patch_path) => {
+                    patched_dependencies.insert(format!("{res_name}@{version}"), patch_path);
+                    None
+                }
+                PatchSelector::Skip => {
                     tracing::warn!(
                         code = aube_codes::warnings::WARN_AUBE_YARN_BERRY_UNSUPPORTED,
                         "yarn berry patch protocol in block '{}' is not supported — entry skipped",
                         key_str,
                     );
                     continue;
-                };
-                patched_dependencies.insert(format!("{res_name}@{version}"), patch_path);
-                None
-            }
+                }
+                PatchSelector::Multiple => {
+                    return Err(Error::parse(
+                        path,
+                        format!(
+                            "yarn berry patch block '{key_str}' lists multiple patch files in one selector; aube applies one patch per package"
+                        ),
+                    ));
+                }
+            },
             "portal" => Some(LocalSource::Portal(PathBuf::from(strip_hash_fragment(
                 res_body,
             )))),
@@ -669,41 +679,75 @@ pub(super) fn file_protocol_source(body: &str) -> LocalSource {
     }
 }
 
-/// Extract the local patch file from Yarn's `patch:` protocol body.
+/// Classification of a Yarn `patch:` selector's real-file list.
+pub(super) enum PatchSelector {
+    /// Exactly one real project patch file to apply.
+    Single(String),
+    /// No real patch — all `builtin<…>` compat shims, or empty. Skip the entry.
+    Skip,
+    /// Two or more real patch files in one selector. aube stores one patch
+    /// path per package and can't represent this, so it's a hard error rather
+    /// than a partial apply (which would materialize a package that doesn't
+    /// match the lockfile).
+    Multiple,
+}
+
+/// Classify Yarn's `patch:` protocol body into a [`PatchSelector`].
 ///
 /// Berry encodes patched npm packages as
-/// `name@patch:name@npm%3Aversion#./.yarn/patches/name.patch::version=...`.
-/// Aube applies the patch through its existing git-diff materializer, so
-/// the only part needed here is the project-relative path after `#`.
+/// `name@patch:name@npm%3Aversion#<selector>::version=...&hash=...`.
+/// Aube applies a single patch through its existing git-diff materializer.
 ///
-/// Returns `None` for builtin-compat patches — yarn's internal shims for
-/// packages like `resolve`/`typescript`, which carry no real patch file
-/// and resolve from the companion `npm:` block. These appear bare
-/// (`builtin<compat/resolve>`, `~builtin<...>`) or with a `<qualifier>!`
-/// prefix (`optional!builtin<compat/resolve>` — the common berry form via
-/// eslint-plugin-import/webpack/rollup). The qualifier is stripped before
-/// the builtin check so the `!`-qualified target isn't mistaken for a
-/// filesystem path.
-fn patch_protocol_path(body: &str) -> Option<String> {
-    let (_, after_hash) = body.split_once('#')?;
-    let path = after_hash
+/// The selector is a `&`-joined list of patch paths (Yarn's
+/// `patchUtils.ts` grammar). `builtin<…>` segments are Yarn's internal
+/// compat shims with no project file to apply — aube ignores them (the
+/// package still resolves via its plain `npm:` block). `::`-params are split
+/// off first because they contain their own `&`. One real patch →
+/// [`PatchSelector::Single`]; all-builtin/empty → [`PatchSelector::Skip`];
+/// multiple real patches → [`PatchSelector::Multiple`] (Yarn permits this but
+/// its CLI never emits it).
+pub(super) fn patch_protocol_path(body: &str) -> PatchSelector {
+    let Some((_, after_hash)) = body.split_once('#') else {
+        return PatchSelector::Skip;
+    };
+    let selector = after_hash
         .split_once("::")
         .map(|(p, _)| p)
         .unwrap_or(after_hash);
-    // A `<qualifier>!builtin<...>` target carries one or more `!`-joined
-    // qualifiers (e.g. `optional!`) ahead of the selector. Strip up to and
-    // including the last `!` so the builtin check sees the bare selector.
-    let selector = path.rsplit_once('!').map(|(_, s)| s).unwrap_or(path);
-    if selector.is_empty() || selector.starts_with("builtin<") || selector.starts_with("~builtin<")
-    {
-        return None;
+    let mut reals = selector.split('&').filter_map(|path| {
+        // Strip `!`-delimited flags up to the last `!` (Yarn 4.0+).
+        let path = path.rsplit_once('!').map_or(path, |(_, p)| p);
+        // Strip the `~/` project-root prefix (Yarn 4.0+ `onProject`), or the
+        // legacy bare-`~` optional flag (Yarn 3.x, `~builtin<…>`). They never
+        // collide: a project path is `~/…` (slash), the flag is `~`+non-slash.
+        let path = if let Some(rest) = path.strip_prefix("~/") {
+            rest
+        } else if let Some(rest) = path.strip_prefix('~') {
+            rest
+        } else {
+            path
+        };
+        let is_builtin = path.starts_with("builtin<") && path.ends_with('>');
+        (!path.is_empty() && !is_builtin).then_some(path)
+    });
+    let Some(first) = reals.next() else {
+        return PatchSelector::Skip;
+    };
+    if reals.next().is_some() {
+        return PatchSelector::Multiple;
     }
-    Some(path.to_string())
+    PatchSelector::Single(first.to_string())
 }
 
 fn patch_spec_path(spec: &str) -> Option<String> {
     let (_, protocol, body) = parse_berry_spec(spec)?;
-    (protocol == "patch").then(|| patch_protocol_path(body))?
+    if protocol != "patch" {
+        return None;
+    }
+    match patch_protocol_path(body) {
+        PatchSelector::Single(p) => Some(p),
+        PatchSelector::Skip | PatchSelector::Multiple => None,
+    }
 }
 
 fn patch_spec_matches(

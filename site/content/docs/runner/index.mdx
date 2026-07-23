@@ -1,108 +1,36 @@
 ---
 title: Runner
-description: One command to run whatever a name points to — a file, a script, a local CLI, or a package off the registry. Local resolution first, and a registry fetch only with your consent, never silently in CI.
+description: Run a CLI by name — the project's own copy when it is installed, fetched from the registry when it is not, and never fetched silently in CI.
 ---
 
-Run whatever a name points to with one command — a file, a `package.json` script, a local bin, or a package off the registry.
+Run a CLI by name, whether or not the project has it installed:
 
 ```bash
-nubx index.ts          # run a file
-nubx test --snapshot   # run a package.json script
-nubx rolldown -b       # run a local CLI
-nubx cowsay "hi"       # run a remote CLI (dlx)
+nubx eslint . --fix        # installed — runs the local copy
+nubx vitest run --coverage
+nubx cowsay "hi"           # not installed — offers to fetch it
 ```
 
-Reach for `nubx` first. It resolves the name through every tier and runs the first match, so one command covers the file you wrote, the script in your `package.json`, the CLI already in `node_modules`, and the tool you haven't installed yet. The single-purpose commands it unifies — [`nub run`](/docs/runner/run), [`nub exec`](/docs/runner/exec), and [`nub dlx`](/docs/runner/dlx) — stay available when you want exactly one tier.
+Resolution is local first. Nub walks the `node_modules/.bin` chain — the nearest `node_modules/.bin`, then up through parent directories to the workspace root — and execs the match directly, with no network and no Node process in the wrapper. Yarn Plug'n'Play projects work too: PnP-registered bins resolve through `pnpapi`, the way `yarn exec` does. See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
 
-## Resolution order
-
-A bare token resolves by the first tier that matches:
-
-- **File** — a path (`./x`, `/abs/x`) or a file by that name in the current directory
-- **Script** — a `package.json` script of that name
-- **Local bin** — an executable on the `node_modules/.bin` chain
-- **Registry** — a package fetched and run, when nothing local matched
-
-Scripts beat bins, and a file beats both — the same precedence as [`nub run`](/docs/runner/run). A leading `-p`/`--package` spec skips local resolution and fetches.
-
-Each tier mirrors a standalone command — `nubx` picks the right one for you:
-
-```text
-nubx <file>        # equivalent to `nub <file>`
-nubx <script>      # equivalent to `nub run <script>`
-nubx <local-bin>   # equivalent to `nub exec <local-bin>`
-nubx <remote-bin>  # equivalent to `nub dlx <remote-bin>`
-```
-
-Other runners cover only a slice — `node` runs files, `npx` runs or fetches a bin, and pnpm splits the job across `run`, `exec`, and `dlx`:
-
-<ColGlow>
-<table>
-  <thead>
-    <tr>
-      <th>Target</th>
-      <th><code>node</code></th>
-      <th><code>pnpm</code></th>
-      <th><code className="whitespace-nowrap">pnpm run</code></th>
-      <th><code className="whitespace-nowrap">pnpm exec</code></th>
-      <th><code className="whitespace-nowrap">pnpm dlx</code></th>
-      <th><code>npx</code></th>
-      <th><code>pnpx</code></th>
-      <th><code>nubx</code></th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>JS/TS file</td>
-      <td><Yes /></td><td><No /></td><td><No /></td><td><No /></td><td><No /></td><td><No /></td><td><No /></td><td><Yes /></td>
-    </tr>
-    <tr>
-      <td><code>package.json</code> script</td>
-      <td><No /></td><td><Yes /></td><td><Yes /></td><td><No /></td><td><No /></td><td><No /></td><td><No /></td><td><Yes /></td>
-    </tr>
-    <tr>
-      <td>Local bin</td>
-      <td><No /></td><td><Yes /></td><td><No /></td><td><Yes /></td><td><No /></td><td><Yes /></td><td><No /></td><td><Yes /></td>
-    </tr>
-    <tr>
-      <td>Registry package</td>
-      <td><No /></td><td><No /></td><td><No /></td><td><No /></td><td><Yes /></td><td><Yes /></td><td><Yes /></td><td><Yes /></td>
-    </tr>
-  </tbody>
-</table>
-</ColGlow>
-
-Only `npx` and `nubx` fall through from local to the registry in one command — `npx` for a bin, `nubx` for the full chain. Every pnpm command targets one tier and errors on a miss.
-
-<Callout title="Coming from npx">
-
-Two deliberate differences. A local script or file wins, not just a bin — if a project has both a `lint` script and a `lint` bin, `nubx lint` runs the script (use `nub exec lint` to force the bin). And a registry fetch needs consent: where `npx` downloads silently, `nubx` prompts on the first fetch and fails closed in CI, so add `-y` or declare the tool as a dependency.
-
-</Callout>
+Only a local miss reaches the registry. That is the shape `npx` has, with two differences: dispatch happens in Rust instead of a Node bootstrap, so a local CLI starts in milliseconds rather than a couple hundred (see [the local bin runner](/docs/runner/exec) for the numbers), and a fetch is never silent.
 
 ## Fetch from the registry
 
-When nothing local matches, `nubx` can fetch a package, run its bin, and remember your consent — but it never runs remote code silently. The first run of a given tool prompts:
+Where `npx` downloads without asking, `nubx` asks. The first fetch of a given tool prompts, runs it once you agree, and remembers the answer:
 
 ```console
 $ nubx cowsay "Hello"
-nubx: cowsay is not installed locally. Download and run it? [y/N] y
-dependencies:
-+ cowsay@1.6.0
-
- _______
-< Hello >
- -------
-        \   ^__^
-         \  (oo)\_______
-            (__)\       )\/\
-                ||----w |
-                ||     ||
+The cowsay bin is not installed locally.
+Install and run from the remote registry?
+  ● Yes
+  ○ No
+  ○ Never (don't ask me again)
 ```
 
-Answer `y` once and later runs skip the prompt. A pinned version (`nubx cowsay@1.5.0`) is remembered indefinitely; a floating one (`nubx cowsay`, which tracks `latest`) is re-confirmed after a day, so a tool that has moved to a new version asks again before running new code.
+Later runs skip the prompt. A pinned version (`nubx cowsay@1.5.0`) is remembered indefinitely; a floating one (`nubx cowsay`, which tracks `latest`) is re-confirmed after a day, so a tool that has moved to a new version asks again before running new code.
 
-Outside a terminal there's no way to ask, so `nubx` fails closed — in CI, and any time stdin isn't a terminal:
+Outside a terminal there is no way to ask, so the fetch fails closed — in CI, and any time stdin isn't a terminal:
 
 ```console
 $ nubx cowsay "hi"          # in CI
@@ -120,9 +48,19 @@ Pass `-y` (`--yes`) to consent up front: it lets a fetch through in CI or any no
 nubx -y cowsay "hi"
 ```
 
+### `exec.implicitDlx`
+
+Answering **Never** turns the implicit fetch off for good. Nub records `exec.implicitDlx` in its global settings file (`~/.config/nub/nub.jsonc`), and from then on a local miss stops instead of offering a download. Explicit fetches are unaffected: [`nub dlx`](/docs/runner/dlx) and `nubx -y` keep working, because asking for them is itself the consent.
+
+Restore the prompt at any time:
+
+```bash
+nub config set exec.implicitDlx prompt
+```
+
 ## Pass arguments
 
-Everything after the name goes to the underlying file, script, or tool untouched — there's no `--` separator to remember.
+Everything after the tool name is forwarded to it untouched — there's no `--` separator to remember.
 
 ```bash
 nubx eslint . --fix --max-warnings 0
@@ -139,9 +77,9 @@ nubx --node prisma generate
 
 ## Related
 
-- [Script runner](/docs/runner/run) — `nub run`, the workspace-aware `package.json` script runner.
 - [Local bin runner](/docs/runner/exec) — `nub exec`, a local CLI from `node_modules/.bin`, never the registry.
 - [Remote bin runner](/docs/runner/dlx) — `nub dlx`, fetch and run a package from the registry, explicitly.
+- [Script runner](/docs/runner/run) — `nub run`, the workspace-aware `package.json` script runner.
 - [Running files](/docs/runtime) — TypeScript-first file execution.
 - [Watch mode](/docs/watch) — restart on change.
 - [Module resolution](/docs/runtime/resolution) — the resolver, including Yarn Plug'n'Play.

@@ -36,6 +36,7 @@ and install first only when needed. Use `aubx <pkg>` for one-off tools.
 | `pnpm dlx cowsay hi` | `aubx cowsay hi` | Installs into a throwaway environment and runs the binary. |
 | `pnpm list` | `aube list` | Supports depth, JSON, parseable, long, prod/dev, and global modes. |
 | `pnpm why debug` | `aube why debug` | Shows reverse dependency paths. |
+| `pnpm bin` | `aube bin` | Prints `node_modules/.bin`. Accepts `-g/--global` and `-w/--workspace-root` (workspace-root bin from a sub-package), matching pnpm. |
 | `pnpm pack` | `aube pack` | Creates a publishable tarball with npm-style file selection. |
 | `pnpm publish` | `aube publish` | Publishes to the configured registry; workspace fanout is available via filters. |
 | `pnpm approve-builds` | `aube approve-builds` | Records packages allowed to run lifecycle build scripts. |

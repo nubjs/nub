@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.32.0](https://github.com/jdx/aube/compare/aube-lockfile-v1.31.0...aube-lockfile-v1.32.0) - 2026-07-22
+
+### Other
+
+- refresh benchmarks for v1.31.0 ([#1072](https://github.com/jdx/aube/pull/1072))
+
+## [1.30.0](https://github.com/jdx/aube/compare/aube-lockfile-v1.29.1...aube-lockfile-v1.30.0) - 2026-07-20
+
+### Other
+
+- satisfy nightly clippy (question_mark, fetch_update) ([#1066](https://github.com/jdx/aube/pull/1066))
+- refresh benchmarks for v1.29.1 ([#1060](https://github.com/jdx/aube/pull/1060))
+
+## [1.29.0](https://github.com/jdx/aube/compare/aube-lockfile-v1.28.0...aube-lockfile-v1.29.0) - 2026-07-16
+
+### Other
+
+- refresh benchmarks for v1.28.0 ([#1050](https://github.com/jdx/aube/pull/1050))
+
+## [1.28.0](https://github.com/jdx/aube/compare/aube-lockfile-v1.27.0...aube-lockfile-v1.28.0) - 2026-07-16
+
+### Fixed
+
+- *(deploy)* dedupe injected workspace dependencies ([#1038](https://github.com/jdx/aube/pull/1038))
+- *(lockfile)* preserve pnpm patch hashes on re-resolve ([#1035](https://github.com/jdx/aube/pull/1035))
+
+### Other
+
+- refresh benchmarks for v1.27.0 ([#1041](https://github.com/jdx/aube/pull/1041))
+- undo 7-day soak toolchain changes ([#1039](https://github.com/jdx/aube/pull/1039))
+
+## [1.27.0](https://github.com/jdx/aube/compare/aube-lockfile-v1.26.0...aube-lockfile-v1.27.0) - 2026-07-13
+
+### Added
+
+- *(scripts)* allow git repository build approvals ([#1010](https://github.com/jdx/aube/pull/1010))
+
+### Other
+
+- 7-day soak across toolchain and deps, cold-path hints, pinned tooling ([#1020](https://github.com/jdx/aube/pull/1020))
+- refresh benchmarks for v1.26.0 ([#1002](https://github.com/jdx/aube/pull/1002))
+
+## [1.26.0](https://github.com/jdx/aube/compare/aube-lockfile-v1.25.2...aube-lockfile-v1.26.0) - 2026-07-06
+
+### Fixed
+
+- *(import)* preserve custom registry tarball urls ([#997](https://github.com/jdx/aube/pull/997))
+- *(lockfile)* gate tarball integrity parse errors on strict mode ([#995](https://github.com/jdx/aube/pull/995))
+
+### Other
+
+- Update sponsor references for jdx.dev ([#978](https://github.com/jdx/aube/pull/978))
+- refresh benchmarks for v1.25.2 ([#975](https://github.com/jdx/aube/pull/975))
+
+## [1.25.2](https://github.com/jdx/aube/compare/aube-lockfile-v1.25.1...aube-lockfile-v1.25.2) - 2026-07-01
+
+### Fixed
+
+- *(lockfile)* handle yarn berry builtin compat flags & ~/ patch paths ([#963](https://github.com/jdx/aube/pull/963))
+- *(lockfile)* detect npm package-lock root drift ([#974](https://github.com/jdx/aube/pull/974))
+
+### Other
+
+- refresh benchmarks for v1.25.1 ([#962](https://github.com/jdx/aube/pull/962))
+- *(install)* overlap cold-install lockfile write with the link tail ([#961](https://github.com/jdx/aube/pull/961))
+- *(deps)* update rust crate criterion to 0.8 ([#955](https://github.com/jdx/aube/pull/955))
+
 ## [1.25.1](https://github.com/jdx/aube/compare/aube-lockfile-v1.25.0...aube-lockfile-v1.25.1) - 2026-06-25
 
 ### Other

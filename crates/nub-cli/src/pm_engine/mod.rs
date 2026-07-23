@@ -248,10 +248,10 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         family: Family::Install,
         aube_args: "commands::create::CreateArgs",
     },
-    // `init` is deliberately NOT registered: the spelling is reserved for
-    // nub's own project init (the maintainer owns the verb), not the engine's
-    // npm-style manifest scaffold. cli.rs answers `nub init` with a
-    // "nub's own init is coming" note instead of a PM redirect.
+    // `init` is deliberately NOT registered: the spelling belongs to nub's
+    // own project scaffold (src/init.rs, a clap subcommand), not the engine's
+    // npm-style manifest write — the fourth deliberate pnpm-compat exception
+    // (AGENTS.md); design record in wiki/commands/init.md.
     // Workspace fanout meta-verb. Registered so it errors with the honest
     // "use -r on the verb" message rather than the generic not-a-command
     // fallback (install_family::run_verb).
@@ -1156,14 +1156,18 @@ fn apply_config_scope(
     // Scope the override sources to the role's dialect.
     let tagged = config_scope::gather_tagged_overrides(&manifest);
     let (effective, ignored) = config_scope::scope_overrides(role, major, minor, &tagged);
+    // Scope packageExtensions the same way: the top-level home is nub's neutral
+    // surface, honored only under nub identity and dropped under a compat role
+    // whose incumbent ignores it (see `scope_package_extensions`).
+    let (effective_pe, pe_ignored) = config_scope::scope_package_extensions(role, &manifest);
 
-    // Register the scoped source as the engine's sole override source, and
-    // the trusted-deps toggle (only bun honors `trustedDependencies`). Both
-    // are idempotent OnceLocks.
+    // Register the scoped sources as the engine's sole override / packageExtensions
+    // sources, and the trusted-deps toggle (only bun honors `trustedDependencies`).
     let trusted = config_scope::honors_trusted_dependencies(role);
     aube_util::update_engine_context(|c| {
         c.embedder_overrides = Some(effective);
         c.trusted_dependencies_honored = trusted;
+        c.embedder_package_extensions = Some(effective_pe);
     });
 
     if noise == ConfigScopeNoise::Warn {
@@ -1175,6 +1179,8 @@ fn apply_config_scope(
         {
             return Err(catalog_unsupported_error(role, &spec));
         }
+        let mut ignored = ignored;
+        ignored.extend(pe_ignored);
         emit_scope_warnings(role, &ignored);
 
         // Curated unsupported-config scan: FATAL-abort on the genuinely-hard
@@ -1571,18 +1577,31 @@ fn augmentation_to_lifecycle_overlay(
 /// Install nub's runtime augmentation onto the engine's lifecycle-script spawn
 /// env (via aube's generic [`aube::set_script_settings`] overlay), so dependency
 /// build scripts run under the project's provisioned + augmented Node — the same
-/// env `nub run` / `nub exec` give scripts. No-op (overlay stays default-empty,
-/// behavior preserved) when augmentation can't be computed (compat / re-entrant
-/// / broken install). Called once per command from [`engine_session`].
+/// env `nub run` / `nub exec` give scripts. The overlay stays default-empty
+/// (behavior preserved) when augmentation can't be computed (compat /
+/// re-entrant / broken install); the resolved Node *version* is published to the
+/// engine either way. Called once per command from [`engine_session`].
 fn apply_lifecycle_augmentation(cwd: &Path, configured_node_options: Option<&str>) {
-    let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
-        return;
-    };
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
     // path pins npm_node_execpath. Mirrors build_script_command's discovery.
-    let node = nub_core::node::discovery::discover_node(cwd)
-        .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    let discovered = nub_core::node::discovery::discover_node(cwd);
+    // Published ABOVE the early returns: the engine keys its GVS virtual-store
+    // paths — and validates `engines.node` — off this version, so it has to name
+    // the Node dependency build scripts actually compile against. That stays the
+    // project's pin under `--node` / NODE_COMPAT, which disable augmentation but
+    // not version provisioning. Otherwise aube probes the ambient PATH node and
+    // two majors silently share one store entry. Deliberately left unset when
+    // discovery FAILS: build scripts then fall back to a bare `node`, so the
+    // PATH probe is the honest answer and a fabricated version would not be.
+    if let Ok(node) = &discovered {
+        let version = node.version.to_string();
+        aube_util::update_engine_context(|c| c.runtime_node_version = Some(version));
+    }
+    let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
+        return;
+    };
+    let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
@@ -1672,6 +1691,22 @@ fn resolve_identity_walk_up(
     strictness: IdentityStrictness,
 ) -> Result<Option<DetectedLockfile>> {
     use aube_lockfile::ResolvedLockfileKind;
+    // The walk never escapes nub's own PM cache root. Installs running inside
+    // it are nub-internal by construction (the node-gyp bootstrap's recursive
+    // install, dlx scratch dirs) and must not inherit identity from whatever
+    // sits above the cache — unbounded, a first-run bootstrap dir (manifest,
+    // no lockfile yet) walked into $HOME and hard-failed the outer install on
+    // unrelated-lockfile ambiguity (#489). The root is kept in whichever
+    // spelling is an ancestor of `cwd` (raw, or canonicalized for the
+    // symlinked-temp-dir case) so the containment test stays consistent as
+    // `dir` pops.
+    let clamp = aube_store::dirs::cache_dir().and_then(|root| {
+        if cwd.starts_with(&root) {
+            return Some(root);
+        }
+        let canon = std::fs::canonicalize(&root).ok()?;
+        cwd.starts_with(&canon).then_some(canon)
+    });
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
         match aube_lockfile::resolve_project_lockfile_kind(&dir) {
@@ -1700,6 +1735,11 @@ fn resolve_identity_walk_up(
             Err(err) => return Err(identity_error(err)),
         }
         if !dir.pop() {
+            break;
+        }
+        if let Some(root) = &clamp
+            && !dir.starts_with(root)
+        {
             break;
         }
     }
@@ -1879,6 +1919,13 @@ pub(crate) fn engine_brand_preflight() {
         // bool because that posture defaults `true` in standalone aube, which
         // would activate the feature there and break default-preservation.
         c.named_registries_enabled = read_branded_pnpm_config;
+        // nub treats packageExtensions as a checksummed, drift-enforced config
+        // like pnpm: it stamps `packageExtensionsChecksum` on its own generic
+        // lockfile (nub.lock) and re-resolves / frozen-fails on a mismatch.
+        // Unconditional (not surface-gated) — harmless under lockfile kinds that
+        // carry no checksum (npm/yarn/bun locks), where stored and computed both
+        // resolve to `None`. Standalone aube leaves the default `false`.
+        c.enforce_package_extensions_checksum = true;
     });
     match surface {
         ConfigSurface::NubIdentity(dir) => {
@@ -2517,15 +2564,48 @@ fn nub_lockfile_present(dir: &Path) -> bool {
         || dir.join(use_align::NUB_LEGACY_LOCKFILE).is_file()
 }
 
-/// Nub's XDG data root (`$XDG_DATA_HOME/nub` or `~/.local/share/nub`), the
-/// data-dir sibling of `nub_core::node::discovery::cache_dir`.
+/// Nub's XDG data root (`$XDG_DATA_HOME/nub`, `%LOCALAPPDATA%\nub` on Windows,
+/// else `~/.local/share/nub`), the data-dir sibling of
+/// `nub_core::node::discovery::cache_dir`.
+///
+/// The Windows `%LOCALAPPDATA%` branch mirrors the engine's own data-path
+/// resolvers (`aube_store::dirs::store_dir`, `aube_runtime` `data_dir`): without
+/// it the CAS `storeDir` default fell through to the Unix `.local/share` leaf on
+/// Windows (`%USERPROFILE%\.local\share\nub\store`), split from the cache tier at
+/// `%LOCALAPPDATA%\nub\pm` — #451. This feeds the `storeDir` embedder default and
+/// the phantom scanner's store path; both stay consistent because both call here.
 pub(crate) fn nub_data_dir() -> Option<PathBuf> {
-    let base = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs_next::home_dir().map(|h| h.join(".local/share")))?;
-    Some(base.join("nub"))
+    nub_data_dir_from(
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
+        dirs_next::home_dir(),
+        cfg!(windows),
+    )
+}
+
+/// Pure resolver for [`nub_data_dir`] — precedence: `$XDG_DATA_HOME/nub`; then,
+/// on Windows, `%LOCALAPPDATA%\nub`; then `<home>/.local/share/nub`.
+/// `local_app_data` is consulted only when `windows`, so the unix XDG
+/// `.local/share` convention is preserved everywhere else. Split out
+/// env-injected so the precedence is unit-testable off Windows (mirrors
+/// `nub_core::node::discovery::windows_cache_dir`).
+fn nub_data_dir_from(
+    xdg_data_home: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    home: Option<PathBuf>,
+    windows: bool,
+) -> Option<PathBuf> {
+    if let Some(xdg) = xdg_data_home {
+        return Some(xdg.join("nub"));
+    }
+    if windows && let Some(local) = local_app_data {
+        return Some(local.join("nub"));
+    }
+    home.map(|h| h.join(".local/share").join("nub"))
 }
 
 /// Process-env snapshot for `InstallOptions::env_snapshot` — same content as
@@ -2955,6 +3035,38 @@ mod tests {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    // #451: the Windows data root must be %LOCALAPPDATA%\nub, never the Unix
+    // `.local/share` leaf — otherwise the CAS store splits from the cache tier.
+    #[test]
+    fn nub_data_dir_precedence() {
+        let xdg = PathBuf::from("/xdg-data");
+        let lad = PathBuf::from(r"C:\Users\u\AppData\Local");
+        let home = PathBuf::from("/home/u");
+        let call = |x, l, windows| nub_data_dir_from(x, l, Some(home.clone()), windows);
+
+        // XDG_DATA_HOME wins on every platform.
+        assert_eq!(
+            call(Some(xdg.clone()), Some(lad.clone()), true),
+            Some(xdg.join("nub"))
+        );
+        assert_eq!(call(Some(xdg.clone()), None, false), Some(xdg.join("nub")));
+
+        // Windows, no XDG → %LOCALAPPDATA%\nub, never `.local/share`.
+        assert_eq!(call(None, Some(lad.clone()), true), Some(lad.join("nub")));
+
+        // Unix, no XDG → <home>/.local/share/nub; LOCALAPPDATA ignored.
+        assert_eq!(
+            call(None, Some(lad.clone()), false),
+            Some(home.join(".local/share").join("nub"))
+        );
+
+        // Windows with neither XDG nor LOCALAPPDATA → the home fallback.
+        assert_eq!(
+            call(None, None, true),
+            Some(home.join(".local/share").join("nub"))
+        );
     }
 
     #[test]

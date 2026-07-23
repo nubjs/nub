@@ -13,6 +13,8 @@
 //! - `"esbuild"` — bare name, matches every version of the package
 //! - `"esbuild@0.19.0"` — exact version match
 //! - `"esbuild@0.19.0 || 0.20.0"` — exact version union
+//! - `"esbuild@git+https://github.com/acme/esbuild.git"` — every commit
+//!   from one Git repository
 //!
 //! Semver ranges are intentionally *not* supported, matching pnpm's
 //! `expandPackageVersionSpecs` behavior: if you pin a version in the
@@ -56,6 +58,12 @@ pub struct BuildPolicy {
     /// entries so a typo like `pkg@latest` still warns.
     allowed_sources: HashSet<String>,
     denied_sources: HashSet<String>,
+    /// Git repository approval keys such as
+    /// `pkg@git+https://github.com/acme/pkg.git`. These intentionally omit
+    /// the resolved commit so an audited branch may advance without a new
+    /// approval, while never approving a different repository by name alone.
+    allowed_git_repositories: HashSet<String>,
+    denied_git_repositories: HashSet<String>,
     /// Bare-name patterns containing `*` wildcards. Checked with a
     /// linear scan after the exact-match sets; wildcard rules are rare
     /// enough that the linear pass is cheaper than building an
@@ -101,6 +109,8 @@ impl BuildPolicy {
         let mut denied = HashSet::new();
         let mut allowed_sources = HashSet::new();
         let mut denied_sources = HashSet::new();
+        let mut allowed_git_repositories = HashSet::new();
+        let mut denied_git_repositories = HashSet::new();
         let mut allowed_wildcards = Vec::new();
         let mut denied_wildcards = Vec::new();
         let mut warnings = Vec::new();
@@ -139,7 +149,12 @@ impl BuildPolicy {
                     } else {
                         &mut denied_sources
                     };
-                    sort_entries(expanded, exact, source, wild);
+                    let git_repositories = if bool_value {
+                        &mut allowed_git_repositories
+                    } else {
+                        &mut denied_git_repositories
+                    };
+                    sort_entries(expanded, exact, source, git_repositories, wild);
                 }
                 Err(e) => warnings.push(e),
             }
@@ -156,6 +171,7 @@ impl BuildPolicy {
                     expanded,
                     &mut allowed,
                     &mut allowed_sources,
+                    &mut allowed_git_repositories,
                     &mut allowed_wildcards,
                 ),
                 Err(e) => warnings.push(e),
@@ -167,6 +183,7 @@ impl BuildPolicy {
                     expanded,
                     &mut denied,
                     &mut denied_sources,
+                    &mut denied_git_repositories,
                     &mut denied_wildcards,
                 ),
                 Err(e) => warnings.push(e),
@@ -180,6 +197,8 @@ impl BuildPolicy {
                 denied,
                 allowed_sources,
                 denied_sources,
+                allowed_git_repositories,
+                denied_git_repositories,
                 allowed_wildcards,
                 denied_wildcards,
             },
@@ -208,6 +227,7 @@ impl BuildPolicy {
     pub fn denylist(denied_patterns: &[String]) -> (Self, Vec<BuildPolicyError>) {
         let mut denied = HashSet::new();
         let mut denied_sources = HashSet::new();
+        let mut denied_git_repositories = HashSet::new();
         let mut denied_wildcards = Vec::new();
         let mut warnings = Vec::new();
         for pattern in denied_patterns {
@@ -216,6 +236,7 @@ impl BuildPolicy {
                     expanded,
                     &mut denied,
                     &mut denied_sources,
+                    &mut denied_git_repositories,
                     &mut denied_wildcards,
                 ),
                 Err(e) => warnings.push(e),
@@ -228,6 +249,8 @@ impl BuildPolicy {
                 denied,
                 allowed_sources: HashSet::new(),
                 denied_sources,
+                allowed_git_repositories: HashSet::new(),
+                denied_git_repositories,
                 allowed_wildcards: Vec::new(),
                 denied_wildcards,
             },
@@ -254,6 +277,18 @@ impl BuildPolicy {
         version: &str,
         source_key: Option<&str>,
     ) -> AllowDecision {
+        self.decide_package_with_git_repository(name, version, source_key, None)
+    }
+
+    /// Decide whether a package may run lifecycle scripts, accepting an
+    /// optional repository identity for Git-backed packages.
+    pub fn decide_package_with_git_repository(
+        &self,
+        name: &str,
+        version: &str,
+        source_key: Option<&str>,
+        git_repository_key: Option<&str>,
+    ) -> AllowDecision {
         // Reusable thread-local buffer for the `name@version` probe key.
         // Avoids a `format!` allocation on every call — ~2k throwaway
         // Strings on a typical install otherwise.
@@ -271,6 +306,11 @@ impl BuildPolicy {
         {
             return AllowDecision::Deny;
         }
+        if let Some(git_repository_key) = git_repository_key
+            && self.denied_git_repositories.contains(git_repository_key)
+        {
+            return AllowDecision::Deny;
+        }
         // Build the `name@version` probe key once and answer both the
         // deny and the allow lookups from a single buffer borrow.
         let (denied_versioned, allowed_versioned) = KEY_BUF.with(|buf| {
@@ -285,6 +325,11 @@ impl BuildPolicy {
             return AllowDecision::Deny;
         }
         if self.allow_all {
+            return AllowDecision::Allow;
+        }
+        if let Some(git_repository_key) = git_repository_key
+            && self.allowed_git_repositories.contains(git_repository_key)
+        {
             return AllowDecision::Allow;
         }
         if let Some(source_key) = source_key {
@@ -310,6 +355,7 @@ impl BuildPolicy {
         self.allow_all
             || !self.allowed.is_empty()
             || !self.allowed_sources.is_empty()
+            || !self.allowed_git_repositories.is_empty()
             || !self.allowed_wildcards.is_empty()
     }
 
@@ -340,6 +386,10 @@ impl BuildPolicy {
             .extend(other.allowed_sources.iter().cloned());
         self.denied_sources
             .extend(other.denied_sources.iter().cloned());
+        self.allowed_git_repositories
+            .extend(other.allowed_git_repositories.iter().cloned());
+        self.denied_git_repositories
+            .extend(other.denied_git_repositories.iter().cloned());
         merge_unique(&mut self.allowed_wildcards, &other.allowed_wildcards);
         merge_unique(&mut self.denied_wildcards, &other.denied_wildcards);
     }
@@ -398,6 +448,7 @@ fn sort_entries(
     entries: Vec<String>,
     exact: &mut HashSet<String>,
     sources: &mut HashSet<String>,
+    git_repositories: &mut HashSet<String>,
     wildcards: &mut Vec<String>,
 ) {
     for entry in entries {
@@ -405,6 +456,8 @@ fn sort_entries(
             if !wildcards.iter().any(|p| p == &entry) {
                 wildcards.push(entry);
             }
+        } else if is_git_repository_key(&entry) {
+            git_repositories.insert(entry);
         } else if is_source_key(&entry) {
             sources.insert(entry);
         } else {
@@ -508,6 +561,20 @@ fn expand_spec(pattern: &str) -> Result<Vec<String>, BuildPolicyError> {
 fn is_source_key(key: &str) -> bool {
     let (_, version) = split_name_and_versions(key);
     is_source_version(version)
+}
+
+fn is_git_repository_key(key: &str) -> bool {
+    let (_, source) = split_name_and_versions(key);
+    !source.contains('#')
+        && [
+            "git+https://",
+            "git+http://",
+            "git+ssh://",
+            "git+file://",
+            "git+git://",
+        ]
+        .iter()
+        .any(|prefix| source.starts_with(prefix))
 }
 
 fn is_source_version(version: &str) -> bool {
@@ -636,6 +703,80 @@ mod tests {
         assert_eq!(
             p.decide_package("raw-git", "1.0.0", Some("raw-git@github:owner/repo")),
             AllowDecision::Allow
+        );
+    }
+
+    #[test]
+    fn git_repository_rule_allows_every_resolved_commit() {
+        let p = policy(&[("gitdep@git+https://github.com/acme/gitdep.git", true)]);
+
+        for source_key in [
+            "gitdep@https://github.com/acme/gitdep.git#0123456789012345678901234567890123456789",
+            "gitdep@https://github.com/acme/gitdep.git#abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        ] {
+            assert_eq!(
+                p.decide_package_with_git_repository(
+                    "gitdep",
+                    "1.0.0",
+                    Some(source_key),
+                    Some("gitdep@git+https://github.com/acme/gitdep.git"),
+                ),
+                AllowDecision::Allow
+            );
+        }
+
+        assert_eq!(
+            p.decide_package_with_git_repository(
+                "gitdep",
+                "1.0.0",
+                Some("gitdep@https://github.com/acme/other.git#0123456789012345678901234567890123456789"),
+                Some("gitdep@git+https://github.com/acme/other.git"),
+            ),
+            AllowDecision::Unspecified
+        );
+    }
+
+    #[test]
+    fn git_repository_rule_accepts_native_git_transport() {
+        let p = policy(&[("gitdep@git+git://github.com/acme/gitdep.git", true)]);
+
+        assert_eq!(
+            p.decide_package_with_git_repository(
+                "gitdep",
+                "1.0.0",
+                Some("gitdep@git://github.com/acme/gitdep.git#0123456789012345678901234567890123456789"),
+                Some("gitdep@git+git://github.com/acme/gitdep.git"),
+            ),
+            AllowDecision::Allow
+        );
+    }
+
+    #[test]
+    fn git_repository_deny_and_package_deny_override_repository_allow() {
+        let p = policy(&[
+            ("gitdep@git+https://github.com/acme/gitdep.git", true),
+            ("other@git+https://github.com/acme/other.git", false),
+            ("blocked", false),
+            ("blocked@git+https://github.com/acme/blocked.git", true),
+        ]);
+
+        assert_eq!(
+            p.decide_package_with_git_repository(
+                "other",
+                "1.0.0",
+                Some("other@https://github.com/acme/other.git#0123456789012345678901234567890123456789"),
+                Some("other@git+https://github.com/acme/other.git"),
+            ),
+            AllowDecision::Deny
+        );
+        assert_eq!(
+            p.decide_package_with_git_repository(
+                "blocked",
+                "1.0.0",
+                Some("blocked@https://github.com/acme/blocked.git#0123456789012345678901234567890123456789"),
+                Some("blocked@git+https://github.com/acme/blocked.git"),
+            ),
+            AllowDecision::Deny
         );
     }
 

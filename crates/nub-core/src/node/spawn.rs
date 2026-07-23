@@ -484,7 +484,7 @@ pub fn untrack_child() {
 /// own-group-without-tcsetpgrp path (correct for non-interactive children).
 #[cfg(unix)]
 #[must_use]
-pub fn foreground_child(child_pid: u32) -> Option<ForegroundGuard> {
+fn foreground_child(child_pid: u32) -> Option<ForegroundGuard> {
     // SAFETY: pure FFI reads; STDIN_FILENO is always valid in this process.
     let stdin_is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
     if !stdin_is_tty {
@@ -590,6 +590,235 @@ pub fn group_on_spawn(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// The disarm byte [`GroupReaper::drop`] writes on the NORMAL teardown path, so
+/// the watcher can tell "Nub reaped the workload and is shutting down cleanly"
+/// (leave any deliberate background survivors alone, matching what plain
+/// node/sh leave behind) from "Nub died" (bare EOF — tear the group down).
+#[cfg(unix)]
+const PDEATH_DISARM: u8 = b'D';
+
+/// macOS backstop for the one signal the forwarder structurally cannot relay
+/// and that Linux's pdeathsig (see [`group_on_spawn`]) covers kernel-side:
+/// SIGKILL of the Nub leader — or of Nub's whole process group — must not
+/// orphan the workload (#480). macOS has no `PR_SET_PDEATHSIG`, so Nub instead
+/// plants a tiny WATCHER process inside the CHILD's process group:
+///
+/// - The watcher holds the read end of a pipe whose only write end lives in
+///   Nub (both ends CLOEXEC; the read end is re-armed by `dup2` for the
+///   watcher alone, so the workload never sees either fd). It blocks in
+///   `read(2)`.
+/// - Nub dying by ANY means — including SIGKILL, where the kernel closes its
+///   fds — delivers EOF, and the watcher SIGTERMs the child's group (the same
+///   signal pdeathsig delivers on Linux) and exits. EOF is level-triggered, so
+///   unlike pdeathsig there is no died-before-registration TOCTOU window to
+///   re-check.
+/// - Living in the CHILD's group is what makes it SIGKILL-proof: a supervisor's
+///   group-kill aimed at Nub's group cannot touch it. Membership also PINS the
+///   pgid — a process group cannot be recycled while a member lives — so the
+///   group kill can never land on a reused pgid.
+///
+/// On the normal path the guard writes [`PDEATH_DISARM`] before closing, and
+/// the watcher exits without signaling anyone. The guard then reaps the
+/// watcher, so nub processes that spawn many sequential children (workspace
+/// `-r` runs) don't accumulate zombies. (`nub watch` is NOT covered: its
+/// spawn path predates `group_on_spawn` entirely, so it has neither pdeathsig
+/// nor this reaper — a pre-existing gap on both platforms.)
+///
+/// Returns `None` off macOS (Linux is already covered kernel-side; a second
+/// mechanism would be redundant) and on any setup failure — the backstop
+/// degrades to the status quo rather than failing the run. Known residual
+/// windows, both milliseconds wide and of the same class as pdeathsig's
+/// fork→prctl gap:
+/// - a group-kill landing between the workload spawn and the watcher's own
+///   `setpgid` still orphans (the watcher dies in Nub's group);
+/// - macOS has no `pipe2(O_CLOEXEC)`, so a CONCURRENT `Command::spawn` on
+///   another thread (workspace `--parallel`) forking between `pipe()` and the
+///   `fcntl` below can duplicate the write end into an unrelated workload,
+///   deferring the watcher's EOF until that workload also dies. The disarm
+///   path is unaffected (the byte travels regardless of extra writers).
+///
+/// Divergence note: on Nub death this TERMs the whole GROUP (matching what
+/// the forwarder does for catchable signals), while Linux's pdeathsig TERMs
+/// only the direct child — a deliberate background survivor outlives a
+/// force-killed nub on Linux but not on macOS. Group scope is what #480 asks
+/// for; the asymmetry is accepted.
+#[cfg(unix)]
+pub fn spawn_group_reaper(child_pid: u32) -> Option<GroupReaper> {
+    use std::os::unix::process::CommandExt;
+    // cfg!(test) guard: nub-core's own in-process unit tests call the spawn
+    // paths directly, where current_exe() is the libtest harness — re-invoking
+    // THAT with watcher argv would re-run any test whose name substring-matches
+    // the argv. The integration suite (pdeath_watch.rs) spawns the real `nub`
+    // binary and exercises the watcher fully.
+    if !cfg!(target_os = "macos") || cfg!(test) {
+        return None;
+    }
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: pipe(2) into a local array; F_SETFD on the two fresh fds.
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            return None;
+        }
+        for fd in fds {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    let close_both = || {
+        // SAFETY: closing the two fds this function just opened.
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+    };
+    // `current_exe()` is whatever NAME nub is running under — for any workload
+    // spawned through nub's own PATH shim that is `node`, not `nub`. The verb
+    // below is therefore dispatched in `cli::run()` ABOVE argv0 detection; when
+    // it hung off the `nub`-only argv0 arm, a shim-named re-invocation ran
+    // `__pdeath-watch` as a SCRIPT and spawned another watcher per level (regression from #504).
+    let Ok(exe) = std::env::current_exe() else {
+        close_both();
+        return None;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.arg("__pdeath-watch")
+        .arg(child_pid.to_string())
+        .arg("3")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let pgid = child_pid as libc::pid_t;
+    // SAFETY: setpgid / signal / dup2 / fcntl between fork and exec are
+    // async-signal-safe and touch no parent state.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Join the WORKLOAD's group. It exists while its leader lives; if
+            // the workload already exited there is nothing left to protect and
+            // the watcher's membership self-check exits it immediately.
+            libc::setpgid(0, pgid);
+            // Ignore, HERE rather than after exec, everything the watcher can
+            // be hit with as a group member: the forwarder's terminating set
+            // (a docker-stop relay landing before the watcher's main ran would
+            // otherwise kill it and silently drop the backstop — SIG_IGN
+            // dispositions survive execve, unlike handlers) and the job-control
+            // stops (a TTY Ctrl-Z would otherwise STOP it, and the guard's
+            // reaping wait() would then hang on a stopped, never-dead child).
+            for sig in [
+                libc::SIGINT,
+                libc::SIGTERM,
+                libc::SIGHUP,
+                libc::SIGUSR1,
+                libc::SIGUSR2,
+                libc::SIGQUIT,
+                libc::SIGTSTP,
+                libc::SIGTTIN,
+                libc::SIGTTOU,
+            ] {
+                libc::signal(sig, libc::SIG_IGN);
+            }
+            // Re-arm ONLY the read end across the exec, at a fixed fd. dup2
+            // clears CLOEXEC on the destination — except when src == dst, where
+            // it is a no-op and the flag must be cleared explicitly.
+            if read_fd == 3 {
+                if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(read_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    match spawn_with_eagain_retry(&mut cmd) {
+        Ok(watcher) => {
+            // SAFETY: Nub's copy of the read end; the watcher holds its own.
+            unsafe { libc::close(read_fd) };
+            Some(GroupReaper { write_fd, watcher })
+        }
+        Err(_) => {
+            close_both();
+            None
+        }
+    }
+}
+
+/// Keeps the parent-death watcher's pipe write end open for the workload's
+/// lifetime — hold it across `wait()`, drop it after. See [`spawn_group_reaper`].
+#[cfg(unix)]
+pub struct GroupReaper {
+    write_fd: libc::c_int,
+    watcher: std::process::Child,
+}
+
+#[cfg(unix)]
+impl Drop for GroupReaper {
+    fn drop(&mut self) {
+        // Normal teardown: disarm (so deliberate background survivors in the
+        // workload's group are left running, exactly as plain node/sh leave
+        // them), close Nub's sole write end, and reap the watcher — it exits
+        // within microseconds of the EOF, and reaping here keeps a long-lived
+        // `nub watch` loop from accumulating zombies.
+        // SAFETY: write/close on the fd this guard owns.
+        unsafe {
+            let byte = [PDEATH_DISARM];
+            // EINTR-retry: a lost disarm byte would read as bare EOF — Nub
+            // "died" — and TERM deliberate background survivors on a NORMAL
+            // exit, the exact additivity break the byte exists to prevent.
+            while libc::write(self.write_fd, byte.as_ptr().cast(), 1) < 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+            {}
+            libc::close(self.write_fd);
+        }
+        let _ = self.watcher.wait();
+    }
+}
+
+/// The `__pdeath-watch` hidden-verb entry: `<child-pgid> <read-fd>` — the
+/// watcher half of [`spawn_group_reaper`]. Returns the process exit code.
+#[cfg(unix)]
+pub fn run_pdeath_watch(args: &[String]) -> i32 {
+    let (Some(pgid), Some(fd)) = (
+        args.first().and_then(|s| s.parse::<libc::pid_t>().ok()),
+        args.get(1).and_then(|s| s.parse::<libc::c_int>().ok()),
+    ) else {
+        return 2;
+    };
+    // SAFETY: getpgrp/read/kill FFI on values this process owns.
+    unsafe {
+        // Signal dispositions were already set in the spawner's pre_exec (they
+        // survive execve): the forwarded terminating set and the job-control
+        // stops are all SIG_IGN, so the watcher acts on exactly one stimulus —
+        // the pipe — and exits on its own. (SIGKILL still takes it down with
+        // the group, as it should.)
+        //
+        // Membership self-check: pre_exec's setpgid can only have failed if the
+        // workload group was already gone — nothing to protect. Being a member
+        // is load-bearing (SIGKILL immunity + pgid pinning, see
+        // `spawn_group_reaper`), so never watch from outside the group.
+        if libc::getpgrp() != pgid {
+            return 0;
+        }
+        let mut buf = [0u8; 1];
+        loop {
+            let n = libc::read(fd, buf.as_mut_ptr().cast(), 1);
+            if n == 1 && buf[0] == PDEATH_DISARM {
+                // Nub reaped the workload and is exiting cleanly: stand down
+                // without signaling, leaving any deliberate background
+                // survivors exactly as plain node/sh would.
+                return 0;
+            }
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            // EOF (Nub died) — or an unreadable pipe, where killing beats
+            // orphaning.
+            break;
+        }
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    0
+}
+
 /// Spawn `cmd` in its own process group and wait, forwarding terminating signals
 /// to the whole group while it runs — the signal-faithful, subtree-reaching
 /// equivalent of `cmd.status()` for a `sh -c <script>` child. Use for the `nub
@@ -599,6 +828,10 @@ pub fn status_forwarding_signals(cmd: &mut Command) -> std::io::Result<ExitStatu
     group_on_spawn(cmd);
     let mut child = spawn_with_eagain_retry(cmd)?;
     track_child_group(child.id());
+    // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; see
+    // `spawn_group_reaper`. Held across the wait, dropped (disarmed) after.
+    #[cfg(unix)]
+    let _reaper = spawn_group_reaper(child.id());
     // Interactive path (stdin is a TTY + inherited stdio): hand the terminal
     // foreground to the child so a full-screen TUI can read it / receive Ctrl-C
     // (issue #27); the guard restores nub's foreground group on drop. No-op off a
@@ -639,7 +872,7 @@ pub struct SpawnConfig<'a> {
 
 /// The result of spawning a Node process.
 pub struct SpawnResult {
-    pub status: ExitStatus,
+    status: ExitStatus,
 }
 
 /// Spawn Node with Nub's augmentation pipeline.
@@ -1125,6 +1358,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // negative target signals the child and its descendants exactly once.
     // (No-op off Unix.)
     track_child_group(child.id());
+
+    // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; see
+    // `spawn_group_reaper`. Held across the wait, dropped (disarmed) after.
+    #[cfg(unix)]
+    let _reaper = spawn_group_reaper(child.id());
 
     // Interactive path: hand the terminal foreground to the child (issue #27) so a
     // `nub <file>` that draws a full-screen TUI can read the terminal and receive
@@ -2006,7 +2244,7 @@ fn should_neutralize_localstorage(
 /// internal `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the
 /// brand boundary. The preload deletes it after reading so it does not leak to
 /// grandchild processes.
-pub(crate) const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
+const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 
 /// Carries the running binary's version (`env!("CARGO_PKG_VERSION")`) to the
 /// preload, which publishes it as `process.versions.nub` — the universal
@@ -2018,7 +2256,7 @@ pub(crate) const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTOR
 /// permitted by the brand boundary. Unlike the localStorage signal it is NOT
 /// deleted by the preload, so it inherits into augmented descendants (which run
 /// the same preload via NODE_OPTIONS) and they advertise the marker too.
-pub(crate) const VERSION_ENV: &str = "__NUB_VERSION";
+const VERSION_ENV: &str = "__NUB_VERSION";
 
 pub const RUNTIME_CONFIG_ENV: &str = "__NUB_RUNTIME_CONFIG";
 
@@ -2031,7 +2269,7 @@ pub const RUNTIME_CONFIG_ENV: &str = "__NUB_RUNTIME_CONFIG";
 /// (like [`VERSION_ENV`]) so every child in a tsx run composes async. An internal
 /// `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the brand
 /// boundary.
-pub(crate) const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
+const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
 
 const COMPAT_NODE_OPTIONS_ENV: &str = "__NUB_COMPAT_NODE_OPTIONS";
 const COMPAT_NODE_PATH_ENV: &str = "__NUB_COMPAT_NODE_PATH";
@@ -2093,7 +2331,7 @@ fn restore_compat_environment(cmd: &mut Command) {
 /// inclusive; 24.11.1+/25.2+/26 are fine. Refs nodejs/node#59666. (A later 22.x
 /// that backported the fix would be over-covered here — harmless, since the
 /// async tier composes correctly on every version.)
-pub(crate) fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
+fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
     use super::version::NodeVersion;
     *v >= NodeVersion::new(22, 15, 0) && *v <= NodeVersion::new(24, 11, 0)
 }
@@ -2104,7 +2342,7 @@ pub(crate) fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool 
 /// argv[0]) so an env-prefixed/compound script (`NODE_ENV=prod tsx x`) is still
 /// caught; a rare false positive (a literal `echo tsx`) only makes that one
 /// process use nub's async tier, which is always correct — never a crash.
-pub(crate) fn child_hosts_async_loader<'a>(tokens: impl IntoIterator<Item = &'a str>) -> bool {
+fn child_hosts_async_loader<'a>(tokens: impl IntoIterator<Item = &'a str>) -> bool {
     tokens.into_iter().any(|tok| {
         let flag = tok.split_once('=').map_or(tok, |(f, _)| f);
         if matches!(flag, "--import" | "--loader" | "--experimental-loader") {
@@ -2248,12 +2486,6 @@ fn to_file_url(path: &str, windows: bool) -> String {
         // Drive: C:/a/b -> file:///C:/a/b
         format!("file:///{forward}")
     }
-}
-
-/// Public path -> `file://` URL conversion for the current platform. Used wherever
-/// nub injects `--import <url>` for the preload.
-pub fn path_to_file_url(path: &str) -> String {
-    to_file_url(path, cfg!(windows))
 }
 
 /// How nub injects its preload, chosen BY TIER. The fast tier (Node 22.15+) loads a
@@ -2410,23 +2642,51 @@ fn find_preload(nub_binary: &Path) -> Option<String> {
         })
     }
 
-    // Dev / feature-off: walk up from the binary's directory to find
-    // runtime/preload.mjs (the in-repo, live-editable sidecar).
+    // Dev / feature-off: locate runtime/preload.mjs (the in-repo, live-editable
+    // sidecar) by two independent routes, so a dev binary augments identically to
+    // CI no matter which target dir the build landed in.
+    //
+    // Route 1 — walk up from the binary's directory. Hits the sidecar when the
+    // target dir sits under the repo (a plain `cargo build` into `<repo>/target`,
+    // which is what CI does).
+    //
+    // Route 2 — the source tree that COMPILED this binary (`CARGO_MANIFEST_DIR` →
+    // `<repo>/runtime`). A build routed to a target dir with no `runtime/` ancestor
+    // — the shared cross-worktree dir (`~/.cache/nub/shared-target`) that
+    // `scripts/rust-build.sh` uses on the fast path — has no sidecar to walk to, so
+    // route 1 fails and the binary would otherwise run WHOLLY un-augmented. That
+    // silent local/CI behavior split is exactly the gap that let a
+    // lifecycle-augmentation hang survive the whole suite (#528); route 2 is
+    // layout-agnostic and closes it.
+    //
+    // Both routes compile ONLY here: the shipped binary is built with
+    // `embed-runtime` and resolves its preload from the embedded blob above, never
+    // reaching this branch — so the compile-time source path can never leak into a
+    // released nub.
     #[cfg(not(feature = "embed-runtime"))]
     {
-        let mut dir = nub_binary.parent()?.to_path_buf();
-        for _ in 0..5 {
-            let candidate = dir.join("runtime").join("preload.mjs");
-            if candidate.is_file() {
-                // Strip the `\\?\` verbatim prefix `fs::canonicalize` adds on Windows so
-                // the path is usable in NODE_PATH and convertible to a valid file:// URL.
-                return candidate.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
-            }
-            if !dir.pop() {
-                break;
+        if let Some(mut dir) = nub_binary.parent().map(Path::to_path_buf) {
+            for _ in 0..5 {
+                let candidate = dir.join("runtime").join("preload.mjs");
+                if candidate.is_file() {
+                    // Strip the `\\?\` verbatim prefix `fs::canonicalize` adds on Windows so
+                    // the path is usable in NODE_PATH and convertible to a valid file:// URL.
+                    return candidate.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
+                }
+                if !dir.pop() {
+                    break;
+                }
             }
         }
-        tracing::warn!("preload not found relative to nub binary");
+        // `canonicalize` doubles as the existence check and resolves the `../..`
+        // (and any symlink) so NODE_OPTIONS / the file:// URL carry a clean absolute
+        // path, matching route 1's output shape.
+        let source_preload =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/preload.mjs");
+        if let Ok(canon) = fs::canonicalize(&source_preload) {
+            return canon.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
+        }
+        tracing::warn!("preload not found relative to nub binary or source root");
         None
     }
 }
@@ -2483,7 +2743,7 @@ const REAP_LEGACY_ENTRY_CAP: usize = 256;
 /// a directory scan + per-entry `stat`, which is exactly the synchronous cost the
 /// latency-sensitive run path must not pay. Drive it ONLY off the thread via
 /// [`spawn_stale_shim_reaper`], which detaches it so the run never waits on it.
-pub fn reap_stale_shims() {
+fn reap_stale_shims() {
     reap_stale_shims_in(&env::temp_dir(), std::process::id(), pid_is_alive);
 }
 

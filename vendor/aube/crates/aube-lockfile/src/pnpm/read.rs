@@ -1,13 +1,14 @@
 use super::dep_path::{
-    dep_path_tail, parse_dep_path, peerless_alias_target, rewrite_peer_suffix,
-    rewrite_snapshot_alias_deps, version_to_dep_path,
+    PATCH_HASH_MARKER, dep_path_tail, parse_dep_path, peerless_alias_target, rewrite_peer_suffix,
+    rewrite_snapshot_alias_deps, strip_patch_hash_suffix, version_to_dep_path,
 };
 use super::raw::{
-    RawBinSpec, RawDepSpec, RawRuntimeVariant, local_source_from_resolution, parse_raw_lockfile,
+    RawBinSpec, RawDepSpec, RawPnpmLockfile, RawRuntimeVariant, local_source_from_resolution,
+    parse_raw_lockfile,
 };
 use crate::{
     CatalogEntry, DepType, DirectDep, Error, LocalSource, LockedPackage, LockfileGraph,
-    PeerDepMeta, RuntimePin, RuntimeTarget, RuntimeVariant, git_commits_match,
+    ParseOptions, PeerDepMeta, RuntimePin, RuntimeTarget, RuntimeVariant, git_commits_match,
 };
 use aube_util::path::normalize_lexical;
 use std::collections::BTreeMap;
@@ -34,9 +35,66 @@ fn rebase_importer_local(local: LocalSource, importer_path: &str) -> LocalSource
 
 /// Parse a pnpm-lock.yaml file into a LockfileGraph.
 pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
+    parse_with_options(path, ParseOptions::default())
+}
+
+/// Erase pnpm's `(patch_hash=…)` markers from every key and dep-path
+/// value the graph is built out of, before any of it is interpreted.
+///
+/// The marker is a write-time spelling of a patched package's identity,
+/// not part of aube's dep_path model: the resolver never emits one, and
+/// the writer re-derives every occurrence from
+/// `patched_dependency_hashes`. Carrying it into the graph would key a
+/// patched project's package table differently from the freshly
+/// resolved graph it is compared against — the identity hash could
+/// never match, so the no-churn write guard could never fire — and the
+/// npm-alias synthesis would derive a marked alias key that no later
+/// `<alias>@<version>` lookup reproduces.
+fn strip_patch_hash_markers(raw: &mut RawPnpmLockfile) {
+    // A key collision can only come from a hand-merged lockfile holding
+    // both spellings of one package; first-wins keeps it deterministic.
+    fn rekey<V>(map: &mut BTreeMap<String, V>) {
+        if !map.keys().any(|k| k.contains(PATCH_HASH_MARKER)) {
+            return;
+        }
+        for (key, value) in std::mem::take(map) {
+            map.entry(strip_patch_hash_suffix(&key)).or_insert(value);
+        }
+    }
+
+    for importer in raw.importers.values_mut() {
+        let specs = [
+            &mut importer.dependencies,
+            &mut importer.dev_dependencies,
+            &mut importer.optional_dependencies,
+            &mut importer.skipped_optional_dependencies,
+        ];
+        for spec in specs.into_iter().flatten().flat_map(BTreeMap::values_mut) {
+            if spec.version.contains(PATCH_HASH_MARKER) {
+                spec.version = strip_patch_hash_suffix(&spec.version);
+            }
+        }
+    }
+    rekey(&mut raw.packages);
+    rekey(&mut raw.snapshots);
+    for snapshot in raw.snapshots.values_mut() {
+        let deps = [
+            &mut snapshot.dependencies,
+            &mut snapshot.optional_dependencies,
+        ];
+        for value in deps.into_iter().flatten().flat_map(BTreeMap::values_mut) {
+            if value.contains(PATCH_HASH_MARKER) {
+                *value = strip_patch_hash_suffix(value);
+            }
+        }
+    }
+}
+
+pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<LockfileGraph, Error> {
     let content = crate::read_lockfile(path)?;
-    let raw = parse_raw_lockfile(&content)
+    let mut raw = parse_raw_lockfile(&content)
         .map_err(|e| Error::parse_yaml_err(path, content.clone(), &e))?;
+    strip_patch_hash_markers(&mut raw);
 
     // Parse importers (direct deps of each workspace package).
     // We track synthesized LockedPackages for local (`file:` / `link:`)
@@ -619,10 +677,19 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         // pnpm records a registry `deprecated:` reason on package
         // entries; stash it on the generic meta map so the writer can
         // re-emit it (matching how bun round-trips the same field).
-        let extra_meta = pkg_info
+        let mut extra_meta = pkg_info
             .and_then(|p| p.deprecated.clone())
             .map(|msg| BTreeMap::from([("deprecated".to_string(), serde_json::Value::String(msg))]))
             .unwrap_or_default();
+        if tarball_url
+            .as_deref()
+            .is_some_and(tarball_url_needs_preserve)
+        {
+            extra_meta.insert(
+                crate::EXTRA_PRESERVE_TARBALL_URL.to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
         // pnpm's lockfile only stores `hasBin: true/false` (no paths);
         // reconstruct an opaque single-entry map on parse so
         // `!bin.is_empty()` stays equivalent to `hasBin`, then let
@@ -666,7 +733,8 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             Some(LocalSource::RemoteTarball(_)) if !version_is_http_url => None,
             other => other,
         };
-        if integrity.is_none()
+        if options.strict_store_integrity
+            && integrity.is_none()
             && resolution_requires_integrity(
                 pkg_info.and_then(|p| p.resolution.as_ref()),
                 &local_source,
@@ -972,12 +1040,21 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
     // The path map stays empty for pnpm regardless of which on-disk
     // form we read — pnpm itself discards the legacy object's `path` on
     // migration (`migratePatchedDependencies` keeps only `.hash`), and
-    // the install path derives the patch path from the manifest.
-    let patched_dependencies: BTreeMap<String, String> = BTreeMap::new();
+    // the install path derives the patch path from the manifest. The
+    // one exception is a hash-less entry, where the path is all there
+    // is and dropping it would silently lose the declaration.
+    let mut patched_dependencies: BTreeMap<String, String> = BTreeMap::new();
     let mut patched_dependency_hashes: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in raw.patched_dependencies.unwrap_or_default() {
-        let (_path, hash) = v.into_path_and_hash();
-        patched_dependency_hashes.insert(k, hash);
+        match v.into_path_and_hash() {
+            (_, Some(hash)) => {
+                patched_dependency_hashes.insert(k, hash);
+            }
+            (Some(path), None) => {
+                patched_dependencies.insert(k, path);
+            }
+            (None, None) => {}
+        }
     }
 
     // Lift the synthetic runtime importer deps recorded above into
@@ -1034,6 +1111,13 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         extra_fields: BTreeMap::new(),
         workspace_extra_fields: BTreeMap::new(),
     })
+}
+
+fn tarball_url_needs_preserve(url: &str) -> bool {
+    let Some((host, _)) = super::http_url_host_and_path(url) else {
+        return false;
+    };
+    !matches!(host.as_str(), "registry.npmjs.org" | "registry.yarnpkg.com")
 }
 
 /// Convert a raw `variations` variant into the typed graph shape.

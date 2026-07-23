@@ -30,6 +30,7 @@ pub use peer_context::{
 };
 pub use platform::{SupportedArchitectures, is_supported};
 pub use primer::{PruneStats as PrimerPruneStats, prune_cache as prune_primer_cache};
+pub use semver_util::{PickResult, pick_version_for_add};
 pub use trust::{
     MissingTimeDetails as MissingTrustTimeDetails, TrustCheckError, TrustDowngradeDetails,
     check_no_downgrade,
@@ -78,7 +79,7 @@ use peer_context::{
     dedupe_peer_variants, effective_peer_suffix, is_hashed_peer_suffix,
 };
 #[cfg(test)]
-use semver_util::{PickResult, pick_version, strip_alias_prefix};
+use semver_util::{pick_version, strip_alias_prefix};
 #[cfg(test)]
 use types::format_iso8601_utc;
 

@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "nub-phantom-core"
-version = "0.2.10"
+version = "0.4.13"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "nub-phantom-scan"
-version = "0.2.10"
+version = "0.4.13"
 dependencies = [
  "nub-phantom-core",
  "serde",

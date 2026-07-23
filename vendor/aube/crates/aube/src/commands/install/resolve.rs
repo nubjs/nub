@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::frozen::FrozenMode;
-use super::lockfile_dir::{parse_lockfile_dir_remapped_with_kind, write_lockfile_dir_remapped};
+use super::lockfile_dir::{
+    parse_lockfile_dir_remapped_with_kind_and_options, write_lockfile_dir_remapped,
+};
 use super::settings::{
     ResolverConfigInputs, configure_resolver, maybe_cleanup_unused_catalogs,
     stamp_pnpm_config_checksums,
@@ -20,11 +22,17 @@ pub(super) fn pre_parse_lockfile(
     lockfile_dir: &Path,
     lockfile_importer_key: &str,
     manifest: &aube_manifest::PackageJson,
+    parse_options: aube_lockfile::ParseOptions,
 ) -> miette::Result<ParsedLockfile> {
     if !lockfile_enabled || !matches!(mode, FrozenMode::Fix | FrozenMode::Prefer) {
         return Ok(None);
     }
-    match parse_lockfile_dir_remapped_with_kind(lockfile_dir, lockfile_importer_key, manifest) {
+    match parse_lockfile_dir_remapped_with_kind_and_options(
+        lockfile_dir,
+        lockfile_importer_key,
+        manifest,
+        parse_options,
+    ) {
         Ok(parsed) => Ok(Some(parsed)),
         Err(aube_lockfile::Error::NotFound(_)) => Ok(None),
         Err(e) if active_lockfile_has_conflict_markers(lockfile_dir) => {
@@ -41,6 +49,7 @@ pub(super) struct LockfileOnlyInput<'a> {
     pub lockfile_dir: &'a Path,
     pub lockfile_importer_key: &'a str,
     pub manifest: &'a aube_manifest::PackageJson,
+    pub parse_options: aube_lockfile::ParseOptions,
     pub manifests: &'a [(String, aube_manifest::PackageJson)],
     pub per_project_write_selection: Option<&'a std::collections::BTreeSet<String>>,
     pub ws_config: &'a aube_manifest::workspace::WorkspaceConfig,
@@ -76,6 +85,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         lockfile_dir,
         lockfile_importer_key,
         manifest,
+        parse_options,
         manifests,
         per_project_write_selection,
         ws_config,
@@ -119,10 +129,11 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         if let Some((g, k)) = lockfile_pre_parse {
             Ok((g, *k))
         } else {
-            parsed_owned = parse_lockfile_dir_remapped_with_kind(
+            parsed_owned = parse_lockfile_dir_remapped_with_kind_and_options(
                 lockfile_dir,
                 lockfile_importer_key,
                 manifest,
+                parse_options,
             );
             match &parsed_owned {
                 Ok((g, k)) => Ok((g, *k)),
@@ -144,10 +155,11 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             // about to abort anyway so speed does not matter here.
             // What matters: keeping the source span and miette help
             // text instead of flattening to one line via `{e}`.
-            match parse_lockfile_dir_remapped_with_kind(
+            match parse_lockfile_dir_remapped_with_kind_and_options(
                 lockfile_dir,
                 lockfile_importer_key,
                 manifest,
+                parse_options,
             ) {
                 Ok(_) => {
                     // Race: second parse succeeded while first failed.
@@ -166,7 +178,20 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     // other drift — same rule as pnpm's lockfile-config mismatch.
     let (effective_patch_paths, effective_patch_hashes) =
         crate::patches::effective_patch_config(cwd)?;
-    let fresh = !(force_resolve || revalidate_release_policy && matches!(mode, FrozenMode::Prefer))
+    // packageExtensions drift (nub-only): a packageExtensions edit re-generates
+    // the lockfile like patch/override drift. Computed only under the enforcing
+    // embedder (nub) so standalone aube's `--lockfile-only` path does no extra
+    // work; `package_extensions_drift` also gates on the same posture.
+    let effective_package_extensions_checksum =
+        if aube_util::engine_context().enforce_package_extensions_checksum {
+            aube_lockfile::pnpm::package_extensions_checksum(
+                &super::settings::effective_package_extensions(manifest, settings_ctx),
+            )
+        } else {
+            None
+        };
+    let fresh = !(force_resolve
+        || revalidate_release_policy && matches!(mode, FrozenMode::Prefer))
         && matches!(
             parsed,
             Ok((g, k))
@@ -190,6 +215,13 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
                         ),
                         DriftStatus::Fresh
                     )
+                    && matches!(
+                        package_extensions_drift(
+                            g,
+                            effective_package_extensions_checksum.as_deref()
+                        ),
+                        DriftStatus::Fresh
+                    )
         );
     if fresh {
         tracing::debug!("--lockfile-only: lockfile already up to date");
@@ -197,17 +229,24 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             p.finish(true);
         }
         if !write_lockfile {
-            eprintln!(
-                "Dry run: lockfile is up to date; fetch/link steps were not run and node_modules were not modified"
+            super::control::output(
+                super::InstallOutputLevel::Info,
+                None,
+                "Dry run: lockfile is up to date; fetch/link steps were not run and node_modules were not modified",
             );
             return Ok(());
         }
-        eprintln!("Lockfile is up to date, resolution step is skipped");
+        super::control::output(
+            super::InstallOutputLevel::Info,
+            None,
+            "Lockfile is up to date, resolution step is skipped",
+        );
         return Ok(());
     }
     if let Some(p) = prog_ref {
         p.set_phase("resolving");
     }
+    super::control::check_cancelled()?;
     let client =
         std::sync::Arc::new(crate::commands::make_client(cwd).with_network_mode(network_mode));
     let pnpmfile_paths = if ignore_pnpmfile {
@@ -220,6 +259,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     };
     crate::commands::run_pnpmfile_pre_resolution(&pnpmfile_paths, cwd, existing_for_resolver)
         .await?;
+    super::control::check_cancelled()?;
     let (read_package_host, read_package_forwarders) =
         match crate::pnpmfile::ReadPackageHostChain::spawn(&pnpmfile_paths, cwd)
             .await
@@ -331,9 +371,13 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         if let Some(p) = prog_ref {
             p.finish(true);
         }
-        eprintln!(
-            "Dry run: resolved {} package(s); lockfile and node_modules were not modified",
-            graph.packages.len()
+        super::control::output(
+            super::InstallOutputLevel::Info,
+            None,
+            format!(
+                "Dry run: resolved {} package(s); lockfile and node_modules were not modified",
+                graph.packages.len()
+            ),
         );
         return Ok(());
     }
@@ -378,9 +422,13 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     if let Some(p) = prog_ref {
         p.finish(true);
     }
-    eprintln!(
-        "Lockfile written ({} packages); skipped node_modules linking",
-        graph.packages.len()
+    super::control::output(
+        super::InstallOutputLevel::Info,
+        None,
+        format!(
+            "Lockfile written ({} packages); skipped node_modules linking",
+            graph.packages.len()
+        ),
     );
     Ok(())
 }
@@ -392,12 +440,30 @@ pub(super) struct SelectLockfileInput<'a> {
     pub lockfile_dir: &'a Path,
     pub lockfile_importer_key: &'a str,
     pub manifest: &'a aube_manifest::PackageJson,
+    pub parse_options: aube_lockfile::ParseOptions,
     pub manifests: &'a [(String, aube_manifest::PackageJson)],
     pub ws_config: &'a aube_manifest::workspace::WorkspaceConfig,
     pub workspace_catalogs: &'a crate::commands::CatalogMap,
     pub is_workspace_project: bool,
     pub lockfile_pre_parse: Option<&'a (LockfileGraph, LockfileKind)>,
     pub revalidate_release_policy: bool,
+    /// The project's freshly-computed effective `packageExtensions` checksum
+    /// (`None` when there are none, or when the embedder doesn't enforce it).
+    /// Compared against the lockfile's recorded value under an enforcing
+    /// embedder to catch a packageExtensions edit; see
+    /// [`package_extensions_drift`].
+    pub effective_package_extensions_checksum: Option<String>,
+}
+
+/// packageExtensions drift, gated on the embedder posture. Returns `Fresh`
+/// when the embedder doesn't enforce the checksum (standalone aube), so the
+/// check is a nub-only layer that never fires on aube's default path.
+fn package_extensions_drift(graph: &LockfileGraph, effective_checksum: Option<&str>) -> DriftStatus {
+    if aube_util::engine_context().enforce_package_extensions_checksum {
+        graph.check_package_extensions_drift(effective_checksum)
+    } else {
+        DriftStatus::Fresh
+    }
 }
 
 pub(super) fn select_lockfile_result(
@@ -410,12 +476,14 @@ pub(super) fn select_lockfile_result(
         lockfile_dir,
         lockfile_importer_key,
         manifest,
+        parse_options,
         manifests,
         ws_config,
         workspace_catalogs,
         is_workspace_project,
         lockfile_pre_parse,
         revalidate_release_policy,
+        effective_package_extensions_checksum,
     } = input;
     if !lockfile_enabled {
         tracing::debug!("lockfile=false: skipping lockfile parse, re-resolving");
@@ -431,10 +499,11 @@ pub(super) fn select_lockfile_result(
         FrozenMode::Fix => Ok(Err(aube_lockfile::Error::NotFound(cwd.to_path_buf()))),
         FrozenMode::Frozen => {
             // Use the lockfile, but error out on any drift across all workspace importers.
-            let parsed = parse_lockfile_dir_remapped_with_kind(
+            let parsed = parse_lockfile_dir_remapped_with_kind_and_options(
                 lockfile_dir,
                 lockfile_importer_key,
                 manifest,
+                parse_options,
             );
             if let Ok((ref graph, kind)) = parsed {
                 if let DriftStatus::Stale { reason } =
@@ -477,6 +546,19 @@ pub(super) fn select_lockfile_result(
                          help: run without --frozen-lockfile to update the lockfile"
                     ));
                 }
+                // Same hard-fail for packageExtensions drift (nub-only layer,
+                // gated on the enforcing embedder) — pnpm rejects this as
+                // ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
+                if let DriftStatus::Stale { reason } = package_extensions_drift(
+                    graph,
+                    effective_package_extensions_checksum.as_deref(),
+                ) {
+                    return Err(miette!(
+                        code = aube_codes::errors::ERR_AUBE_OUTDATED_LOCKFILE,
+                        "lockfile is out of date with the project's packageExtensions configuration: {reason}\n\
+                         help: run without --frozen-lockfile to update the lockfile"
+                    ));
+                }
             }
             Ok(parsed)
         }
@@ -513,11 +595,17 @@ pub(super) fn select_lockfile_result(
                             is_workspace_project,
                             *kind,
                         ) {
-                            DriftStatus::Fresh => graph.check_patched_dependencies_drift(
+                            DriftStatus::Fresh => match graph.check_patched_dependencies_drift(
                                 *kind,
                                 &effective_patch_paths,
                                 &effective_patch_hashes,
-                            ),
+                            ) {
+                                DriftStatus::Fresh => package_extensions_drift(
+                                    graph,
+                                    effective_package_extensions_checksum.as_deref(),
+                                ),
+                                stale => stale,
+                            },
                             stale => stale,
                         };
                         match drift {

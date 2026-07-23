@@ -1,5 +1,13 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["local>jdx/renovate-config"],
-  "ignorePaths": ["fixtures/**"]
+  "ignorePaths": ["fixtures/**"],
+  "packageRules": [
+    {
+      "description": "Group Sigstore Rust crates so their shared pre-1.0 APIs stay aligned.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["/^sigstore-/"],
+      "groupName": "sigstore crates"
+    }
+  ]
 }

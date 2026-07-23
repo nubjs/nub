@@ -136,10 +136,12 @@ Topological ordering, parallelism, and `--workspace-root` are honored. The point
 
 ## Does it replace `npx`?
 
-Yes — `nubx` (also available as `nub exec`) is the equivalent, following the same local-first-then-DLX model as `npx` and `pnpm dlx`, with no interactive prompt:
+Yes — `nubx` is the equivalent, following the same local-first-then-registry model as `npx` and `pnpm dlx`:
 
 - **Local bin** — `nubx` walks up the directory tree checking `node_modules/.bin/` at each level (the standard resolution algorithm), in Rust, returning in single-digit milliseconds.
 - **Not installed** — `nubx` fetches the binary from the registry and runs it on the fly. Nub is a complete package manager, so it does the fetch itself rather than shelling out to a foreign PM.
+
+The one behavioral difference from `npx` is that the fetch is not silent: the first fetch of a tool prompts, and CI fails closed unless you pass `-y`. See [the runner docs](/docs/runner#fetch-from-the-registry) for the consent model.
 
 ## Does it replace `tsx` / `ts-node`?
 

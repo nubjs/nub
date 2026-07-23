@@ -24,10 +24,10 @@ const INDEX_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// One row of nodejs.org's `index.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
-    pub version: NodeVersion,
+    version: NodeVersion,
     /// The LTS codename (e.g. `Jod`, `Iron`) when this is an LTS release; `None`
     /// for a non-LTS / current-line release.
-    pub lts: Option<String>,
+    lts: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,7 +39,7 @@ struct RawEntry {
 
 /// Parse the `index.json` body into entries (pure — the unit-test seam). Bad rows
 /// (unparseable version) are skipped rather than failing the whole index.
-pub fn parse_index(body: &str) -> Result<Vec<IndexEntry>> {
+fn parse_index(body: &str) -> Result<Vec<IndexEntry>> {
     let raw: Vec<RawEntry> = serde_json::from_str(body).context("decoding Node index.json")?;
     Ok(raw
         .into_iter()
@@ -56,7 +56,10 @@ pub fn parse_index(body: &str) -> Result<Vec<IndexEntry>> {
 }
 
 /// Fetch + parse the index from `mirror_base` (e.g. `https://nodejs.org/dist`).
-pub fn fetch_index(mirror_base: &str) -> Result<Vec<IndexEntry>> {
+/// Production goes through [`load_index`] (which caches the raw body); this is
+/// the ignored real-network test's direct entry.
+#[cfg(test)]
+fn fetch_index(mirror_base: &str) -> Result<Vec<IndexEntry>> {
     let url = format!("{}/index.json", mirror_base.trim_end_matches('/'));
     let body = download::fetch_text(&url).with_context(|| format!("fetching {url}"))?;
     parse_index(&body)
@@ -65,7 +68,7 @@ pub fn fetch_index(mirror_base: &str) -> Result<Vec<IndexEntry>> {
 /// Load the index, preferring a fresh on-disk cache
 /// (`<cache_root>/node-index.json`, refetched after `INDEX_TTL`). On a fetch
 /// failure but a stale-cache hit, fall back to the stale cache (offline-tolerant).
-pub fn load_index(cache_root: &Path, mirror_base: &str) -> Result<Vec<IndexEntry>> {
+pub(crate) fn load_index(cache_root: &Path, mirror_base: &str) -> Result<Vec<IndexEntry>> {
     let cache = cache_root.join("node-index.json");
     if let Ok(meta) = std::fs::metadata(&cache)
         && let Ok(modified) = meta.modified()
@@ -104,7 +107,7 @@ pub fn load_index(cache_root: &Path, mirror_base: &str) -> Result<Vec<IndexEntry
 /// `<major>` and `<major.minor>`, and an exact `[v]X.Y.Z`. Returns `None` when
 /// nothing matches. (`rc/<major>` lives on a different mirror — handled by the
 /// caller passing the rc index; this picks the newest entry there too.)
-pub fn resolve_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersion> {
+pub(crate) fn resolve_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersion> {
     let spec = spec.trim();
     let lower = spec.to_ascii_lowercase();
 
@@ -173,7 +176,7 @@ fn all_digits(s: &str) -> bool {
 /// `wiki/runtime/node-version-management.md` §"Resolution order".
 /// `alternatives` carries node-semver `||` branches (OR semantics — the shape
 /// `VersionPin::Range` holds); a plain range is a one-element slice.
-pub fn resolve_range(
+pub(crate) fn resolve_range(
     alternatives: &[semver::VersionReq],
     index: &[IndexEntry],
 ) -> Option<NodeVersion> {

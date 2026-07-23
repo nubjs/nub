@@ -1,4 +1,5 @@
 use crate::{Error, Store, StoredFile};
+use decmpfs::Gate;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -60,6 +61,102 @@ pub(crate) fn cas_file_matches_len(path: &Path, expected_len: u64) -> bool {
     path.metadata()
         .map(|metadata| metadata.len() == expected_len)
         .unwrap_or(false)
+}
+
+fn wait_for_cas_file_len(path: &Path, expected_len: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    while !cas_file_matches_len(path, expected_len) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_micros(250));
+    }
+}
+
+/// The opt-in store-compression gate, resolved once from the
+/// environment. Returns `Some(gate)` only when `AUBE_COMPRESS_STORE` is
+/// set; otherwise `None` and the CAS write path is byte-for-byte the
+/// pre-existing one.
+///
+/// The toggle's value selects the gate:
+///   - `AUBE_COMPRESS_STORE=1` (or any non-`size:`/non-`glob:` value) →
+///     the fleet default `**/*.node`, no size floor.
+///   - `AUBE_COMPRESS_STORE="glob:<pat>"` → that glob, no size floor.
+///   - `AUBE_COMPRESS_STORE="size:<pred>"` → `**/*.node` AND a size
+///     predicate (e.g. `size:>= 1MB`).
+///   - `AUBE_COMPRESS_STORE="glob:<pat>;size:<pred>"` → both.
+///
+/// A malformed size predicate disables compression (returns `None`)
+/// rather than silently widening the gate; the addon still lands plain.
+fn store_compression_gate() -> Option<&'static Gate> {
+    static GATE: std::sync::OnceLock<Option<Gate>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| {
+        let raw = aube_util::env::embedder_env("COMPRESS_STORE")?;
+        parse_compress_store_gate(&raw.to_string_lossy())
+    })
+    .as_ref()
+}
+
+/// Pure parse of an `AUBE_COMPRESS_STORE` value into a `Gate`. Split out
+/// so the directive grammar is unit-testable without the process-global
+/// env `OnceLock`. `None` means "no gate" (compression off): the env var
+/// being *unset* short-circuits in the caller, but a set-but-empty value
+/// (`AUBE_COMPRESS_STORE=`) reaches here and is treated as affirmative
+/// (the default `**/*.node` gate). A malformed size predicate fails closed.
+pub(crate) fn parse_compress_store_gate(spec: &str) -> Option<Gate> {
+    let trimmed = spec.trim();
+    // A bare/affirmative value means "use the fleet default gate".
+    if trimmed.is_empty() || matches!(trimmed, "1" | "true" | "on" | "yes") {
+        return Some(Gate::default());
+    }
+    let mut glob: Option<&str> = None;
+    let mut size: Option<&str> = None;
+    for part in trimmed.split(';') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("glob:") {
+            glob = Some(rest.trim());
+        } else if let Some(rest) = part.strip_prefix("size:") {
+            size = Some(rest.trim());
+        }
+    }
+    // No recognized directive → treat the value as affirmative.
+    if glob.is_none() && size.is_none() {
+        return Some(Gate::default());
+    }
+    match Gate::new(glob.or(Some(decmpfs::DEFAULT_GLOB)), size) {
+        Ok(gate) => Some(gate),
+        Err(err) => {
+            warn!(
+                "AUBE_COMPRESS_STORE has an invalid size predicate ({err}); \
+                 store compression disabled"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod compress_gate_tests {
+    use super::parse_compress_store_gate;
+
+    #[test]
+    fn affirmative_and_directives_yield_a_gate() {
+        // Bare/affirmative or unrecognized values → the fleet default gate.
+        for spec in ["", "1", "true", "on", "yes", "whatever"] {
+            assert!(
+                parse_compress_store_gate(spec).is_some(),
+                "spec {spec:?} should produce a gate"
+            );
+        }
+        // Explicit glob / size directives parse into a gate.
+        assert!(parse_compress_store_gate("glob:**/*.so").is_some());
+        assert!(parse_compress_store_gate("size:>= 1MB").is_some());
+        assert!(parse_compress_store_gate("glob:**/*.node;size:>= 512KB").is_some());
+    }
+
+    #[test]
+    fn malformed_size_predicate_fails_closed() {
+        // A bad size predicate disables compression (None) rather than
+        // silently widening the gate — the addon still lands plain.
+        assert!(parse_compress_store_gate("size:banana").is_none());
+    }
 }
 
 /// Outcome of `create_cas_file`. `Created` means we wrote the bytes
@@ -419,12 +516,7 @@ impl Store {
             // the partial file to settle. If it stays mismatched past
             // the deadline, treat it as (a) and recover.
             if !cas_file_matches_len(&store_path, content.len() as u64) {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
-                while !cas_file_matches_len(&store_path, content.len() as u64)
-                    && std::time::Instant::now() < deadline
-                {
-                    std::thread::sleep(std::time::Duration::from_micros(250));
-                }
+                wait_for_cas_file_len(&store_path, content.len() as u64);
             }
             if !cas_file_matches_len(&store_path, content.len() as u64) {
                 let _ = xx::file::remove_file(&store_path);
@@ -465,8 +557,7 @@ impl Store {
             // that's carried in `StoredFile.executable`, threaded
             // through the `PackageIndex` and the linker. So flipping
             // a marker-absent-to-present for a shared hash is safe.
-            let exec_marker = PathBuf::from(format!("{}-exec", store_path.display()));
-            self.create_cas_file(&exec_marker, None)?;
+            self.write_exec_marker(&store_path)?;
         }
 
         Ok(StoredFile {
@@ -474,6 +565,165 @@ impl Store {
             store_path,
             executable,
             size: Some(content.len() as u64),
+        })
+    }
+
+    /// Import a tar entry's content, applying OS-level transparent
+    /// compression to the entries the store-compression gate selects.
+    ///
+    /// When `AUBE_COMPRESS_STORE` is unset this is exactly
+    /// [`Store::import_bytes`] — same CAS key, same write path. When it
+    /// is set and `rel_path` + size match the gate, the entry is first
+    /// unwrapped if it is a napi `--compress` hybrid (so the CAS stores
+    /// the raw `.node`, not the wrapper) and then written into the CAS
+    /// as a transparently-compressed file in ONE pass via
+    /// [`decmpfs::compress_bytes`] — never a write-then-read-back. The
+    /// kernel decompresses on read, so the stored file keeps its logical
+    /// size and exact bytes; `cas_file_matches_len` and the BLAKE3 CAS
+    /// key are computed against that logical content, unchanged.
+    ///
+    /// Fail-soft: `compress_bytes` itself falls back to a plain atomic
+    /// write on an unsupported FS or any backend error, so a matched
+    /// entry always lands. The gate firing only changes how the bytes
+    /// are stored, never whether they are.
+    pub fn import_bytes_gated(
+        &self,
+        rel_path: &str,
+        content: &[u8],
+        executable: bool,
+    ) -> Result<StoredFile, Error> {
+        self.import_bytes_with_gate(rel_path, content, executable, store_compression_gate())
+    }
+
+    /// Gate-injectable core of [`Store::import_bytes_gated`]. `gate` of
+    /// `None` is the byte-identical pre-existing CAS path. Separated from
+    /// the public method so tests can drive the compressed path with an
+    /// explicit gate rather than racing the process-global env toggle.
+    pub(crate) fn import_bytes_with_gate(
+        &self,
+        rel_path: &str,
+        content: &[u8],
+        executable: bool,
+        gate: Option<&Gate>,
+    ) -> Result<StoredFile, Error> {
+        let Some(gate) = gate else {
+            return self.import_bytes(content, executable);
+        };
+
+        // Unwrap a napi `--compress` hybrid to the raw addon before the
+        // gate's size check and the CAS hash — a non-hybrid `.node`
+        // returns `None`, so this is a no-op for ordinary addons and the
+        // bytes (and CAS key) are identical to the ungated path.
+        let unwrapped = decmpfs::addon::unwrap_if_hybrid(content);
+        let stored_bytes: &[u8] = unwrapped.as_deref().unwrap_or(content);
+
+        if !gate.matches(rel_path, stored_bytes.len() as u64) {
+            // Not a gated entry. Store the (possibly unwrapped) bytes
+            // through the normal CAS path so a hybrid still lands as its
+            // raw addon even when too small to compress.
+            return self.import_bytes(stored_bytes, executable);
+        }
+
+        let hash_t0 = std::time::Instant::now();
+        let hex_hash = blake3_hex(stored_bytes);
+        if aube_util::diag::enabled() {
+            aube_util::diag::event_lazy(
+                aube_util::diag::Category::Store,
+                "blake3_hash",
+                hash_t0.elapsed(),
+                || format!(r#"{{"size":{}}}"#, stored_bytes.len()),
+            );
+        }
+        let store_path = self.file_path_from_hex(&hex_hash);
+
+        // If a prior import already committed this content, reuse it —
+        // the file is already stored (compressed or not) and the kernel
+        // reads it back identically. Matches `import_bytes`'s CAS-dedupe.
+        if cas_file_matches_len(&store_path, stored_bytes.len() as u64) {
+            if aube_util::diag::enabled() {
+                aube_util::diag::instant_lazy(aube_util::diag::Category::Store, "cas_hit", || {
+                    format!(r#"{{"size":{}}}"#, stored_bytes.len())
+                });
+            }
+            return self.finish_gated(hex_hash, store_path, executable, stored_bytes.len());
+        }
+
+        // Ensure the shard exists; `compress_bytes` writes the final
+        // path directly (its own sibling-temp + rename), so it relies on
+        // the parent dir being present just like the slow CAS path.
+        if let Some(parent) = store_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+        }
+
+        // One-pass compressed write. The gate is honored inside
+        // `compress_bytes` too, but we pass `Gate::any()` because we have
+        // already matched against `rel_path` (a CAS path no longer
+        // carries the package-relative name the glob expects).
+        match decmpfs::compress_bytes(&store_path, stored_bytes, &Gate::any()) {
+            Ok(_) => {}
+            Err(err) => {
+                // A genuine I/O failure from the one-pass writer. Fall
+                // back to the fully-guarded CAS path so the install is
+                // never left without the file.
+                warn!(
+                    "decmpfs one-pass write failed for {} ({err}); \
+                     falling back to the plain CAS path",
+                    store_path.display()
+                );
+                return self.import_bytes(stored_bytes, executable);
+            }
+        }
+
+        // Guard against a torn/short write the same way `import_bytes`
+        // does. decmpfs verifies the kernel read-back equals the bytes
+        // for a compressed Outcome, but a fail-soft plain fallback inside
+        // `compress_bytes` could still race a concurrent writer.
+        if !cas_file_matches_len(&store_path, stored_bytes.len() as u64) {
+            wait_for_cas_file_len(&store_path, stored_bytes.len() as u64);
+        }
+        if !cas_file_matches_len(&store_path, stored_bytes.len() as u64) {
+            let _ = xx::file::remove_file(&store_path);
+            return self.import_bytes(stored_bytes, executable);
+        }
+
+        // New content just landed (compressed, or fail-soft plain) — mirror
+        // `import_bytes`'s `cas_miss` so gated installs classify identically.
+        if aube_util::diag::enabled() {
+            aube_util::diag::instant_lazy(aube_util::diag::Category::Store, "cas_miss", || {
+                format!(r#"{{"size":{}}}"#, stored_bytes.len())
+            });
+        }
+        self.finish_gated(hex_hash, store_path, executable, stored_bytes.len())
+    }
+
+    /// Write the sidecar `<store_path>-exec` marker that records a CAS entry
+    /// as executable. Shared by `import_bytes` and `finish_gated`.
+    fn write_exec_marker(&self, store_path: &Path) -> Result<(), Error> {
+        let exec_marker = PathBuf::from(format!("{}-exec", store_path.display()));
+        self.create_cas_file(&exec_marker, None)?;
+        Ok(())
+    }
+
+    /// Shared tail of `import_bytes_gated`: write the executable marker
+    /// (if any) and build the `StoredFile`. Mirrors the marker handling
+    /// in `import_bytes`.
+    fn finish_gated(
+        &self,
+        hex_hash: String,
+        store_path: PathBuf,
+        executable: bool,
+        len: usize,
+    ) -> Result<StoredFile, Error> {
+        if executable {
+            self.write_exec_marker(&store_path)?;
+        }
+        Ok(StoredFile {
+            hex_hash,
+            store_path,
+            executable,
+            size: Some(len as u64),
         })
     }
 }

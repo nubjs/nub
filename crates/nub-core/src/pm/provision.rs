@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
@@ -138,15 +138,46 @@ pub fn provision_pm_announced(
     // (It was read from the cache-store root before — a dir no project commits
     // anything into — so project mirrors/auth were silently ignored.)
     let cfg = registry::registry_config(project_root);
+
+    // 2b. Dist-tag TTL cache: a tag spec (`latest`) is not exact, so it skipped
+    // the cache check above and used to pay a registry round-trip on EVERY
+    // invocation — the shim's dynamic default made that a per-`npx`-call cost
+    // (#491). A tag resolution recorded within [`TAG_TTL`] whose version is
+    // still installed short-circuits to the zero-network path; freshness lags
+    // the registry by at most the TTL, the same trade corepack makes.
+    let is_tag = is_dist_tag(spec);
+    if is_tag
+        && let Some((version, age)) = read_tag_resolution(&pm_store, &cfg.base, spec)
+        && age <= TAG_TTL
+        && let Some(bin) = cached_bin(&pm_store, &version)
+    {
+        if let Some(cb) = on_resolved {
+            cb(&version);
+        }
+        return Ok(ProvisionedPm { bin, version }); // cache hit — silent
+    }
+
     let dist = match registry::resolve_version_authed(&cfg, &pm.to_string(), spec) {
-        Ok(dist) => dist,
-        // 3. Registry unreachable: a range can still resolve against the cache.
-        // Exact pins were handled above (and an exact spec parses as a *caret*
-        // VersionReq, so it must not reach the range match); dist-tags have no
-        // offline meaning. Announced — a stale-vs-fresh divergence from the
-        // online behavior should never be silent.
+        Ok(dist) => {
+            if is_tag {
+                record_tag_resolution(&pm_store, &cfg.base, spec, &dist.version);
+            }
+            dist
+        }
+        // 3. Registry unreachable: a range can still resolve against the cache,
+        // and a dist-tag against its last RECORDED resolution (any age — stale
+        // beats down). Exact pins were handled above (and an exact spec parses
+        // as a *caret* VersionReq, so it must not reach the range match).
+        // Announced — a stale-vs-fresh divergence from the online behavior
+        // should never be silent.
         Err(err) if semver::Version::parse(spec).is_err() => {
-            match best_cached_match(&pm_store, spec) {
+            let fallback = if is_tag {
+                read_tag_resolution(&pm_store, &cfg.base, spec)
+                    .and_then(|(version, _)| cached_bin(&pm_store, &version).map(|b| (version, b)))
+            } else {
+                best_cached_match(&pm_store, spec)
+            };
+            match fallback {
                 Some((version, bin)) => {
                     if let Some(cb) = on_resolved {
                         cb(&version);
@@ -248,6 +279,90 @@ pub fn provision_pm_from_tarball(
         bin,
         version: dist.version.clone(),
     })
+}
+
+/// How long a recorded dist-tag resolution (`latest` → `12.0.1`) is trusted
+/// without re-consulting the registry. The trade is freshness-lag vs. a network
+/// round-trip on every unpinned shim invocation; 24h matches the cadence other
+/// tools accept for the same default (corepack's known-good pin, npm's own
+/// update-notifier). Deliberately NOT configurable until real demand exists —
+/// every knob is a doc + support surface (AGENTS.md knob discipline).
+const TAG_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether `spec` is a dist-tag (`latest`, `next`) — i.e. neither an exact
+/// version nor a semver range. Mirrors [`resolve_dist`]'s precedence safely:
+/// npm rejects publishing a tag that parses as a version or range, so the three
+/// classes are disjoint.
+fn is_dist_tag(spec: &str) -> bool {
+    semver::Version::parse(spec).is_err()
+        && semver::VersionReq::parse(&registry::normalize_range(spec)).is_err()
+}
+
+/// The tag-resolution record: `<pm_store>/.resolved-tags.json`, a flat
+/// `{"<registry-base>#<tag>": {"version": "...", "at": <unix-secs>}}` map. Lives
+/// INSIDE the per-PM store dir so [`best_cached_match`]'s version-dir scan
+/// parse-fails it out, and a registry switch (mirror vs public) misses the other
+/// registry's entries by key.
+fn tag_cache_file(pm_store: &Path) -> PathBuf {
+    pm_store.join(".resolved-tags.json")
+}
+
+fn tag_cache_key(registry_base: &str, tag: &str) -> String {
+    format!("{}#{tag}", registry_base.trim_end_matches('/'))
+}
+
+/// The recorded resolution of `tag` on `registry_base`, as `(version, age)`.
+/// Returns `None` for a missing/corrupt record file (never an error — the cache
+/// is advisory), and rejects a non-semver `version` value: the string becomes a
+/// store path component via [`cached_bin`], and while nub only ever records
+/// validated versions, a hand-edited file must not become a path-escape vector.
+fn read_tag_resolution(
+    pm_store: &Path,
+    registry_base: &str,
+    tag: &str,
+) -> Option<(String, Duration)> {
+    let raw = std::fs::read_to_string(tag_cache_file(pm_store)).ok()?;
+    let map: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let entry = map.get(tag_cache_key(registry_base, tag))?;
+    let version = entry.get("version")?.as_str()?;
+    semver::Version::parse(version).ok()?;
+    let at = entry.get("at")?.as_u64()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    // A future-dated record (clock skew at write, a hand-edited file) must not
+    // read as maximally fresh until wall-clock catches up — treat it as stale.
+    // The offline fallback still honors it; only freshness is denied.
+    let age = if at > now {
+        Duration::MAX
+    } else {
+        Duration::from_secs(now - at)
+    };
+    Some((version.to_string(), age))
+}
+
+/// Record `tag` → `version` (just resolved online) with the current time,
+/// preserving other registries'/tags' entries. Best-effort: a failure to record
+/// only costs the next invocation a re-resolve, so errors are swallowed. The
+/// write is temp-file + rename so a concurrent reader never sees a torn file
+/// (last writer wins, both wrote a fresh resolution).
+fn record_tag_resolution(pm_store: &Path, registry_base: &str, tag: &str, version: &str) {
+    let file = tag_cache_file(pm_store);
+    let mut map = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return;
+    };
+    map.insert(
+        tag_cache_key(registry_base, tag),
+        serde_json::json!({ "version": version, "at": now.as_secs() }),
+    );
+    let _ = std::fs::create_dir_all(pm_store);
+    let tmp = pm_store.join(format!(".resolved-tags-{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, serde_json::Value::Object(map).to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &file);
+    }
 }
 
 /// The runnable bin of an already-installed `<pm_store>/<version>/`, or `None`
@@ -858,6 +973,186 @@ mod tests {
             vec!["9.5.0".to_string()],
             "the hook fires exactly once with the concrete cached version"
         );
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    /// A loopback registry answering EVERY request with 200 + a pnpm@9.9.9
+    /// version manifest whose dist.tarball points back at the mock (where a GET
+    /// yields this same JSON — never a valid tarball, so any install attempt
+    /// against it fails on integrity). This makes the tag-cache tests
+    /// DISCRIMINATING: a run that consults the registry observably resolves
+    /// 9.9.9 (and then fails to install it), which a cache short-circuit never
+    /// does. The accept loop rides a detached thread for the remaining test
+    /// process — a few KB, no cleanup needed.
+    fn mock_registry_serving_pnpm_9_9_9() -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = format!(
+            r#"{{ "name": "pnpm", "version": "9.9.9", "bin": {{ "pnpm": "bin/pnpm.cjs" }},
+                 "dist": {{ "tarball": "http://127.0.0.1:{port}/pnpm-9.9.9.tgz", "integrity": "sha512-AAAA" }} }}"#
+        );
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let mut buf = [0u8; 4096];
+                let _ = conn.read(&mut buf); // drain the request head
+                let _ = conn.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[test]
+    fn fresh_tag_resolution_short_circuits_the_registry() {
+        if ambient_registry_override() {
+            return; // env registry outranks the test .npmrc — see helper
+        }
+        // A recorded, TTL-fresh `latest` → 9.5.0 with the version installed must
+        // return WITHOUT consulting the registry. The registry is a live mock
+        // that resolves `latest` to a DIFFERENT version (9.9.9, uninstallable),
+        // so a run that consults it cannot produce Ok(9.5.0) — the assertion
+        // distinguishes the short-circuit from the offline-fallback path, which
+        // a dead registry alone could not.
+        let store = offline_store_with("tag-fresh", "9.5.0");
+        let mock = mock_registry_serving_pnpm_9_9_9();
+        std::fs::write(store.join(".npmrc"), format!("registry={mock}\n")).unwrap();
+        let pm_store = store.join("pm").join("pnpm");
+        record_tag_resolution(&pm_store, &mock, "latest", "9.5.0");
+
+        let pin = PmPin {
+            pm: Pm::Pnpm,
+            version: Some("latest".to_string()),
+        };
+        let seen = std::cell::RefCell::new(Vec::<String>::new());
+        let prov = provision_pm_announced(
+            &pin,
+            &store,
+            &store,
+            None,
+            Some(&|v: &str| {
+                seen.borrow_mut().push(v.to_string());
+            }),
+        )
+        .expect("fresh tag record + cached install must not consult the registry");
+        assert_eq!(prov.version, "9.5.0");
+        assert_eq!(
+            *seen.borrow(),
+            vec!["9.5.0".to_string()],
+            "the shim-header hook still fires on the tag-cache hit"
+        );
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn stale_tag_resolution_is_not_trusted_for_freshness() {
+        if ambient_registry_override() {
+            return; // env registry outranks the test .npmrc — see helper
+        }
+        // The TTL boundary: an EXPIRED record must NOT short-circuit — the
+        // resolve must run. Against the live mock, `latest` resolves to 9.9.9
+        // whose "tarball" is JSON, so the run fails at install; a wrongly-firing
+        // short-circuit would instead return Ok(9.5.0). Future-dated records
+        // (at > now) are equally untrusted.
+        let store = offline_store_with("tag-expired", "9.5.0");
+        let mock = mock_registry_serving_pnpm_9_9_9();
+        std::fs::write(store.join(".npmrc"), format!("registry={mock}\n")).unwrap();
+        let pm_store = store.join("pm").join("pnpm");
+        for at in [1u64, u64::MAX] {
+            std::fs::write(
+                tag_cache_file(&pm_store),
+                format!(
+                    "{{\"{}\": {{\"version\": \"9.5.0\", \"at\": {at}}}}}",
+                    tag_cache_key(&mock, "latest")
+                ),
+            )
+            .unwrap();
+            let pin = PmPin {
+                pm: Pm::Pnpm,
+                version: Some("latest".to_string()),
+            };
+            let result = provision_pm(&pin, &store, &store, None);
+            assert!(
+                result.is_err(),
+                "an untrusted record (at={at}) must re-resolve, reaching the mock's \
+                 uninstallable 9.9.9 — got {result:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn stale_tag_resolution_survives_a_registry_outage() {
+        if ambient_registry_override() {
+            return; // env registry outranks the dead-registry .npmrc — see helper
+        }
+        // An EXPIRED record is not trusted for freshness (the resolve runs), but
+        // when the registry is unreachable it is the offline answer — stale
+        // beats down. Written by hand with at=1 (record_tag_resolution always
+        // stamps now).
+        let store = offline_store_with("tag-stale", "9.5.0");
+        let pm_store = store.join("pm").join("pnpm");
+        std::fs::write(
+            tag_cache_file(&pm_store),
+            format!(
+                "{{\"{}\": {{\"version\": \"9.5.0\", \"at\": 1}}}}",
+                tag_cache_key("http://127.0.0.1:1/", "latest")
+            ),
+        )
+        .unwrap();
+
+        let pin = PmPin {
+            pm: Pm::Pnpm,
+            version: Some("latest".to_string()),
+        };
+        let prov = provision_pm(&pin, &store, &store, None)
+            .expect("stale tag record is the offline fallback");
+        assert_eq!(prov.version, "9.5.0");
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn tag_record_round_trips_and_rejects_junk() {
+        let store = std::env::temp_dir().join(format!("nub-pm-tagrec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        let pm_store = store.join("pm").join("npm");
+
+        // Round-trip, preserving a sibling registry's entry.
+        record_tag_resolution(&pm_store, "https://registry.npmjs.org/", "latest", "12.0.1");
+        record_tag_resolution(&pm_store, "https://mirror.example.com", "latest", "11.9.9");
+        let (version, age) = read_tag_resolution(&pm_store, "https://registry.npmjs.org", "latest")
+            .expect("fresh record reads back");
+        assert_eq!(version, "12.0.1");
+        assert!(age <= TAG_TTL, "a just-written record is fresh");
+        assert_eq!(
+            read_tag_resolution(&pm_store, "https://mirror.example.com/", "latest")
+                .expect("sibling registry entry preserved")
+                .0,
+            "11.9.9"
+        );
+
+        // A non-semver version value is refused — the string becomes a store
+        // path component, so a hand-edited file must not smuggle one in.
+        std::fs::write(
+            tag_cache_file(&pm_store),
+            format!(
+                "{{\"{}\": {{\"version\": \"../evil\", \"at\": 999999999999}}}}",
+                tag_cache_key("https://registry.npmjs.org", "latest")
+            ),
+        )
+        .unwrap();
+        assert!(read_tag_resolution(&pm_store, "https://registry.npmjs.org", "latest").is_none());
+
+        // Corrupt JSON is advisory-cache tolerated: read yields None, no panic.
+        std::fs::write(tag_cache_file(&pm_store), "not json").unwrap();
+        assert!(read_tag_resolution(&pm_store, "https://registry.npmjs.org", "latest").is_none());
         let _ = std::fs::remove_dir_all(&store);
     }
 

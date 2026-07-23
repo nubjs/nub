@@ -417,6 +417,50 @@ EOF
 	assert_output "file:../@test_core"
 }
 
+@test "aube deploy: dedupes a workspace sibling reached directly and transitively" {
+	mkdir -p packages/app packages/lib-a packages/lib-b
+	cat >package.json <<'EOF'
+{ "name": "deploy-dedupe-root", "private": true }
+EOF
+	cat >aube-workspace.yaml <<'EOF'
+packages:
+  - packages/*
+EOF
+	cat >packages/lib-b/package.json <<'EOF'
+{ "name": "lib-b", "version": "1.0.0", "type": "module", "main": "index.js" }
+EOF
+	cat >packages/lib-b/index.js <<'EOF'
+globalThis.__libBLoads = (globalThis.__libBLoads ?? 0) + 1;
+export const loads = () => globalThis.__libBLoads;
+export const registry = new Map();
+EOF
+	cat >packages/lib-a/package.json <<'EOF'
+{ "name": "lib-a", "version": "1.0.0", "type": "module", "main": "index.js", "dependencies": { "lib-b": "workspace:" } }
+EOF
+	cat >packages/lib-a/index.js <<'EOF'
+export * as libB from "lib-b";
+EOF
+	cat >packages/app/package.json <<'EOF'
+{ "name": "app", "version": "1.0.0", "type": "module", "main": "index.js", "dependencies": { "lib-a": "workspace:", "lib-b": "workspace:" } }
+EOF
+	cat >packages/app/index.js <<'EOF'
+import { registry, loads } from "lib-b";
+import { libB } from "lib-a";
+registry.set("from-app", true);
+console.log(registry === libB.registry, loads());
+EOF
+
+	run aube deploy --filter app --prod ./out
+	assert_success
+
+	run bash -c "find out/node_modules/.aube -maxdepth 1 -type d -name 'lib-b@file+*' | wc -l | tr -d ' '"
+	assert_success
+	assert_output "1"
+	run node out/index.js
+	assert_success
+	assert_output "true 1"
+}
+
 @test "aube deploy: deploy-all-files=true copies symlinked files via their target" {
 	# Regression: `DirEntry::file_type()` uses lstat, so without
 	# following file symlinks the walk would silently drop them —

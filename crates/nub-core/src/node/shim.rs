@@ -36,7 +36,7 @@ use crate::pm::shim::{
 /// The persistent node shim's PATH block — a DEDICATED dir + marker, distinct
 /// from the PM shims' (`~/.nub/shims`, `# nub shims`) so the two install and
 /// uninstall independently.
-pub const NODE_SHIM_BLOCK: ShimBlock = ShimBlock {
+const NODE_SHIM_BLOCK: ShimBlock = ShimBlock {
     marker: "# nub node shim",
     posix_line: r#"export PATH="$HOME/.nub/node-shim:$PATH""#,
     fish_line: "set -gx PATH $HOME/.nub/node-shim $PATH",

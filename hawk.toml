@@ -1,0 +1,147 @@
+# hawk (astral-sh/hawk) visibility-lint config.
+# vendor/aube is NOT a workspace member (own workspace, path deps) so hawk
+# treats it as external and never lints it — aube stays byte-for-byte untouched.
+#
+# BLIND SPOT hawk cannot see: two crates OUTSIDE this workspace consume
+# workspace members — crates/nub-native (own workspace) uses nub-cache-key, and
+# crates/nub-phantom (own workspace, the eval tool) uses nub-phantom-scan +
+# nub-phantom-core. Items they need look dead/over-public to hawk; the
+# [[override]] entries below pin them. Before applying any future `--fix`,
+# verify both consumers still build:
+#   cargo check --manifest-path crates/nub-phantom/Cargo.toml
+#   cargo check --manifest-path crates/nub-native/Cargo.toml
+
+[[production]]
+package = "nub-cli"
+bin = "nub"
+reason = "the shipped nub CLI binary"
+
+[[feature-profile]]
+name = "all"
+all-features = true
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_cache_key"
+item = "cache_key"
+level = "allow"
+reason = "called by crates/nub-native (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_core"
+item = "pm::shim::SHIM_NAMES"
+level = "allow"
+reason = "used by the Windows-only test pm_shim_windows.rs (not compiled on a non-Windows analysis host)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_core"
+item = "pm::shim::install_shims_into"
+level = "allow"
+reason = "used by the Windows-only test pm_shim_windows.rs (not compiled on a non-Windows analysis host)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_core"
+item = "pm::shim::InstalledShim::name"
+level = "allow"
+reason = "used by the Windows-only test pm_shim_windows.rs (not compiled on a non-Windows analysis host)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_core"
+item = "pm::shim::InstalledShim::path"
+level = "allow"
+reason = "used by the Windows-only test pm_shim_windows.rs (not compiled on a non-Windows analysis host)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_core"
+item = "extract::Occurrence::kind"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "classify::classify"
+level = "allow"
+reason = "called by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "classify::Finding::verdict"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "classify::Finding::package"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "classify::Finding::specifiers"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "classify::Finding::is_subpath_adapter"
+level = "allow"
+reason = "called by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "graph::walk"
+level = "allow"
+reason = "called by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "graph::Walk::references"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "graph::Walk::files_analyzed"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "graph::Walk::unresolved_relative"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "manifest::Manifest::name"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "manifest::Manifest::entry_points"
+level = "allow"
+reason = "read by crates/nub-phantom (separate workspace; invisible to hawk)"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "nub_phantom_scan"
+item = "manifest::Manifest::parse"
+level = "allow"
+reason = "called by crates/nub-phantom (separate workspace; invisible to hawk)"

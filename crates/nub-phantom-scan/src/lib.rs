@@ -25,8 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use classify::Finding;
-pub use classify::Verdict;
+pub(crate) use classify::Verdict;
 use manifest::Manifest;
 
 /// One undeclared target a scanned version pulls in, with the provenance bits the
@@ -36,9 +35,9 @@ pub struct PhantomTarget {
     /// The undeclared package name (`zod`, `@apify/datastructures`).
     pub name: String,
     /// Reached from the package's main entry surface.
-    pub from_main: bool,
+    from_main: bool,
     /// Reached from a non-`.` `exports` subpath (the adapter surface).
-    pub from_subpath: bool,
+    from_subpath: bool,
 }
 
 /// The per-version scan verdict — the immutable, per-content-integrity payload
@@ -53,8 +52,19 @@ pub struct ScanResult {
     /// false). Provenance-tagged for the later transitive/subtree reachability
     /// query; the per-package eject decision itself needs only the boolean.
     pub targets: Vec<PhantomTarget>,
+    /// DECLARED PEERS this package imports from its `.d.ts` TYPE surface — the
+    /// nub#450 peer-type class. Distinct from `targets` (undeclared phantoms): a
+    /// peer is DECLARED, so it is not a phantom, but under the global virtual store
+    /// its `@types/<peer>` (a separate top-level package) is unreachable from the
+    /// package's store realpath, so the type-checker loses the peer's types. The
+    /// CONSUMER ejects this package only when the project actually has a top-level
+    /// `@types/<peer>` (see `phantom_closure`), which both fixes it and bounds the
+    /// eject to the peer-typed set. `#[serde(default)]` so a pre-field sidecar
+    /// deserializes (the scanner-version bump re-scans it anyway).
+    #[serde(default)]
+    pub type_coupled_peers: Vec<String>,
     /// Reachable files parsed (diagnostic — lets the caller see scan breadth).
-    pub files_analyzed: usize,
+    files_analyzed: usize,
 }
 
 /// Scan an already-extracted package tree rooted at `root` (the dir holding
@@ -98,69 +108,32 @@ fn reduce(manifest: &Manifest, walk: &graph::Walk) -> ScanResult {
             from_subpath: f.from_subpath,
         })
         .collect();
+    // Declared peers imported from the `.d.ts` type surface (nub#450). A peer is
+    // DECLARED (not a phantom → not in `targets`), but its `@types/<peer>` is a
+    // separate top-level package the store realpath can't reach; the consumer
+    // decides the eject against the real project graph.
+    let type_coupled_peers: Vec<String> = findings
+        .iter()
+        .filter(|f| {
+            f.from_types
+                && matches!(
+                    f.verdict,
+                    Verdict::DeclaredPeer | Verdict::DeclaredOptionalPeer
+                )
+        })
+        .map(|f| f.package.clone())
+        .collect();
     ScanResult {
         has_unguarded_phantom: !targets.is_empty(),
         targets,
+        type_coupled_peers,
         files_analyzed: walk.files_analyzed,
     }
-}
-
-/// The full per-package report (all verdict categories, not just hard phantoms) —
-/// used by the eval tool and the A/B corpus harness. `scan_extracted` is the lean
-/// production entry; this is the diagnostic one.
-#[derive(Debug, Serialize)]
-pub struct PackageReport {
-    pub name: String,
-    pub version: String,
-    pub findings: Vec<Finding>,
-    pub files_analyzed: usize,
-    pub unresolved_relative: usize,
-}
-
-impl PackageReport {
-    pub fn count(&self, v: Verdict) -> usize {
-        self.findings.iter().filter(|f| f.verdict == v).count()
-    }
-    pub fn hard_phantoms(&self) -> impl Iterator<Item = &Finding> {
-        self.findings
-            .iter()
-            .filter(|f| f.verdict == Verdict::HardPhantom)
-    }
-    pub fn subpath_adapter_phantoms(&self) -> impl Iterator<Item = &Finding> {
-        self.findings.iter().filter(|f| f.is_subpath_adapter())
-    }
-    pub fn naive_phantom_count(&self) -> usize {
-        self.findings
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.verdict,
-                    Verdict::HardPhantom | Verdict::SoftPhantom | Verdict::DeclaredOptionalPeer
-                )
-            })
-            .count()
-    }
-}
-
-/// Analyze an already-extracted package tree into a full [`PackageReport`].
-pub fn analyze_extracted(root: &Path, version: &str) -> Result<PackageReport, String> {
-    let raw =
-        std::fs::read(root.join("package.json")).map_err(|e| format!("read package.json: {e}"))?;
-    let manifest = Manifest::parse(&raw).ok_or("unparseable package.json / no name")?;
-    let walk = graph::walk(root, &manifest.entry_points);
-    let findings = classify::classify(&manifest, &walk.references);
-    Ok(PackageReport {
-        name: manifest.name,
-        version: version.to_string(),
-        findings,
-        files_analyzed: walk.files_analyzed,
-        unresolved_relative: walk.unresolved_relative,
-    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PathBuf, Verdict, analyze_extracted, scan_extracted, scan_index};
+    use super::{PathBuf, scan_extracted, scan_index};
     use std::fs;
 
     /// `(relpath, blob-path)` pairs for an on-disk tree — the blob is the real
@@ -240,6 +213,114 @@ mod tests {
         // Provenance: backend-lib is subpath-only (the adapter class).
         let backend = r.targets.iter().find(|t| t.name == "backend-lib").unwrap();
         assert!(backend.from_subpath && !backend.from_main);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dts_peer_type_surface_reports_type_coupled_peer() {
+        // react-pdf shape (nub#450): declares `react` a PEER, ships no `types`
+        // field, and its default `index.d.ts` imports react. The peer is DECLARED
+        // (not an undeclared phantom → no target, has_unguarded_phantom false), but
+        // it surfaces as a type-coupled peer so the consumer can eject on a
+        // top-level `@types/react`. A relative `.d.ts` re-export is followed.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "nub-phantom-dts-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"@react-pdf/renderer","main":"./index.js","peerDependencies":{"react":"*"}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("index.js"), "module.exports = {};").unwrap();
+        fs::write(
+            root.join("index.d.ts"),
+            "import * as React from 'react';\nexport type { Doc } from './types';\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("types.d.ts"),
+            "import type { ReactNode } from 'react';\nexport type Doc = ReactNode;\n",
+        )
+        .unwrap();
+
+        let r = scan_extracted(&root).unwrap();
+        assert!(
+            r.type_coupled_peers.contains(&"react".to_string()),
+            "declared peer imported from the .d.ts surface is a type-coupled peer: {:?}",
+            r.type_coupled_peers
+        );
+        assert!(
+            !r.has_unguarded_phantom,
+            "a declared peer is NOT an undeclared phantom"
+        );
+        assert!(
+            r.targets.is_empty(),
+            "no undeclared targets: {:?}",
+            r.targets
+        );
+        // Output-identical between the two scan entries (the hard invariant).
+        assert_eq!(scan_index(&index_of(&root)).unwrap(), r);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn type_walk_does_not_leak_runtime_imports_from_a_js_sibling() {
+        // Finding-1 regression: a `.d.ts` re-exports `./widgets`, and the standard
+        // compiled layout ships BOTH `widgets.js` and `widgets.d.ts`. The type walk
+        // must resolve `./widgets` to `widgets.d.ts` (NOT `widgets.js`), so
+        // `widgets.js`'s runtime `require('react')` is NOT captured as a type-peer
+        // (no spurious eject) and the real `widgets.d.ts` IS walked.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "nub-phantom-dtsleak-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"ui-lib","main":"./index.js","peerDependencies":{"react":"*"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("index.js"),
+            "module.exports = require('./widgets');",
+        )
+        .unwrap();
+        fs::write(root.join("index.d.ts"), "export * from './widgets';\n").unwrap();
+        // widgets.js runtime-requires react; widgets.d.ts does NOT type-import it.
+        fs::write(
+            root.join("widgets.js"),
+            "const React = require('react');\nmodule.exports = {};",
+        )
+        .unwrap();
+        fs::write(
+            root.join("widgets.d.ts"),
+            "import type { Backend } from 'the-backend';\nexport declare const Widget: Backend;\n",
+        )
+        .unwrap();
+
+        let r = scan_extracted(&root).unwrap();
+        assert!(
+            !r.type_coupled_peers.contains(&"react".to_string()),
+            "react (runtime-only, in widgets.js) must NOT leak into type_coupled_peers: {:?}",
+            r.type_coupled_peers
+        );
+        // The real widgets.d.ts WAS walked: its undeclared type import surfaced.
+        assert!(
+            r.targets.iter().any(|t| t.name == "the-backend"),
+            "widgets.d.ts should be walked from the type surface: {:?}",
+            r.targets
+        );
+        assert_eq!(scan_index(&index_of(&root)).unwrap(), r);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -329,15 +410,6 @@ mod tests {
             "extract-time index scan diverged from post-link tree scan"
         );
         assert!(from_index.has_unguarded_phantom);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn full_report_still_available() {
-        let root = fixture();
-        let r = analyze_extracted(&root, "1.2.3").unwrap();
-        assert_eq!(r.count(Verdict::HardPhantom), 3);
-        assert_eq!(r.version, "1.2.3");
         let _ = fs::remove_dir_all(&root);
     }
 }

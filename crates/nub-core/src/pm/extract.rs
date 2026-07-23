@@ -32,7 +32,7 @@ use crate::version_management::extract::{
 /// is skipped, not written) and preserves the bin's executable mode;
 /// `single_top_dir` enforces the one-dir invariant. The entry COUNT is bounded
 /// too (N2 — the `tar` crate has no count guard), mirroring aube-store's caps.
-pub fn extract_tgz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
+pub(crate) fn extract_tgz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     extract_tgz_capped(
         archive,
         dest_parent,

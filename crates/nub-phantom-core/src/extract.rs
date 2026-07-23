@@ -58,8 +58,38 @@ pub struct Occurrence {
 /// static-imports-only fast-path ladder was built and benchmarked but regressed
 /// the parse-dominated scan, so it was removed.)
 pub fn extract(path: &str, source: &str) -> Vec<Occurrence> {
-    let allocator = Allocator::default();
+    // Framework single-file components (Astro/Vue/Svelte) keep their imports in a
+    // frontmatter / `<script>` block. A backend imported there for TYPES ONLY still
+    // breaks resolution under the global virtual store: the package's realpath
+    // escapes into the shared store, so a type-checker's upward `node_modules` walk
+    // can't reach the hoisted backend (nub#450). So for an SFC we parse only its
+    // script region, as TS, and DO keep type-only imports. Plain `.js`/`.ts` are
+    // unchanged — type-only imports stay dropped, so a devDep-typed package is
+    // never false-flagged as a runtime phantom.
+    if let Some(script) = sfc_script(path, source) {
+        let ts = SourceType::from_path("_.mts").unwrap_or_else(|_| SourceType::mjs());
+        return parse_and_visit(&script, ts, true);
+    }
+    // A `.d.ts` (`.d.mts`/`.d.cts`) is a package's TYPE surface. Its imports are
+    // type-position by nature (`import * as React from 'react'`, `import type …`),
+    // yet under the global virtual store they still drive TS's resolution: the
+    // package's realpath escapes into the shared store, so a type import of a
+    // top-level-only backend (`@types/react`, `astro/types`) fails to resolve
+    // (nub#450). So a declaration file is parsed with type imports KEPT, exactly
+    // like an SFC script region. Plain `.js`/`.ts` still drop type-only imports.
+    if is_dts(path) {
+        let ts = SourceType::from_path("_.mts").unwrap_or_else(|_| SourceType::mjs());
+        return parse_and_visit(source, ts, true);
+    }
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    parse_and_visit(source, source_type, false)
+}
+
+/// Parse `source` as `source_type` and collect specifier occurrences.
+/// `capture_types` retains type-only import/re-export specifiers — set only for
+/// SFC script blocks; false on the runtime path preserves the type-only drop.
+fn parse_and_visit(source: &str, source_type: SourceType, capture_types: bool) -> Vec<Occurrence> {
+    let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, source_type).parse();
     if ret.panicked {
         return Vec::new();
@@ -67,6 +97,7 @@ pub fn extract(path: &str, source: &str) -> Vec<Occurrence> {
     let mut v = SpecVisitor {
         guard_depth: 0,
         out: Vec::new(),
+        capture_types,
     };
     v.visit_program(&ret.program);
     v.out
@@ -78,6 +109,9 @@ struct SpecVisitor {
     /// guard → any load here is soft.
     guard_depth: u32,
     out: Vec<Occurrence>,
+    /// Retain type-only import/re-export specifiers. Set only for SFC script
+    /// blocks, where a type-position phantom still breaks GVS resolution (nub#450).
+    capture_types: bool,
 }
 
 impl SpecVisitor {
@@ -137,21 +171,25 @@ impl<'a> Visit<'a> for SpecVisitor {
             // an inline all-`type` named import is likewise erased. A bare
             // `import "x"` (side effect) and any value specifier are runtime.
             Statement::ImportDeclaration(decl)
-                if !decl.import_kind.is_type() && import_has_value(decl) =>
+                if self.capture_types
+                    || (!decl.import_kind.is_type() && import_has_value(decl)) =>
             {
                 self.record(&decl.source.value, RefKind::StaticImport);
             }
             // Runtime re-exports. `export { x } from 'y'` (value) and
-            // `export * from 'y'` load the module; `export type { … }` does not.
+            // `export * from 'y'` load the module; `export type { … }` does not
+            // (unless `capture_types`, for SFC script blocks).
             Statement::ExportNamedDeclaration(decl) => {
                 if let Some(src) = &decl.source
-                    && !decl.export_kind.is_type()
-                    && export_named_has_value(decl)
+                    && (self.capture_types
+                        || (!decl.export_kind.is_type() && export_named_has_value(decl)))
                 {
                     self.record(&src.value, RefKind::ReExport);
                 }
             }
-            Statement::ExportAllDeclaration(decl) if !decl.export_kind.is_type() => {
+            Statement::ExportAllDeclaration(decl)
+                if self.capture_types || !decl.export_kind.is_type() =>
+            {
                 self.record(&decl.source.value, RefKind::ReExport);
             }
             _ => {}
@@ -199,6 +237,104 @@ fn import_has_value(decl: &oxc_ast::ast::ImportDeclaration<'_>) -> bool {
 /// is inline-`type`.
 fn export_named_has_value(decl: &oxc_ast::ast::ExportNamedDeclaration<'_>) -> bool {
     decl.specifiers.is_empty() || decl.specifiers.iter().any(|s| !s.export_kind.is_type())
+}
+
+/// A TypeScript declaration file (`.d.ts`/`.d.mts`/`.d.cts`) — a package's type
+/// surface, parsed with type imports kept (see [`extract`]).
+fn is_dts(path: &str) -> bool {
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    file.ends_with(".d.ts") || file.ends_with(".d.mts") || file.ends_with(".d.cts")
+}
+
+/// The analyzable script region of a single-file component, or `None` for a
+/// non-SFC path. `.astro` → the frontmatter between the leading `---` fence and
+/// its close; `.vue`/`.svelte` → the concatenated `<script>…</script>` bodies.
+fn sfc_script(path: &str, source: &str) -> Option<String> {
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    match file.rsplit_once('.').map(|(_, e)| e) {
+        Some("astro") => Some(astro_frontmatter(source)),
+        Some("vue" | "svelte") => Some(script_blocks(source)),
+        _ => None,
+    }
+}
+
+/// Astro frontmatter: the region between a leading `---` fence (its own line) and
+/// the next line that begins `---`. Empty when the file has no frontmatter.
+fn astro_frontmatter(source: &str) -> String {
+    let s = source.trim_start_matches('\u{feff}');
+    let Some(after) = s.strip_prefix("---") else {
+        return String::new();
+    };
+    let Some(body) = after
+        .strip_prefix("\r\n")
+        .or_else(|| after.strip_prefix('\n'))
+    else {
+        return String::new();
+    };
+    match body.find("\n---") {
+        Some(end) => body[..end].to_string(),
+        None => body.to_string(),
+    }
+}
+
+/// Concatenate the bodies of every `<script …>…</script>` block (Vue/Svelte),
+/// ignoring blocks inside `<!-- … -->` comments so a commented-out `<script>` is
+/// never mistaken for real component code (a false phantom).
+fn script_blocks(source: &str) -> String {
+    let source = strip_html_comments(source);
+    let mut out = String::new();
+    let mut rest = source.as_str();
+    while let Some(open) = rest.find("<script") {
+        let after = &rest[open..];
+        let Some(gt) = open_tag_end(after) else { break };
+        let body_start = open + gt + 1;
+        let Some(close) = rest[body_start..].find("</script>") else {
+            break;
+        };
+        out.push_str(&rest[body_start..body_start + close]);
+        out.push('\n');
+        rest = &rest[body_start + close + "</script>".len()..];
+    }
+    out
+}
+
+/// Index of the `>` that closes an open tag, skipping any `>` inside a quoted
+/// attribute value — Vue 3.3 `<script setup generic="T extends Record<string, X>">`
+/// carries one, and a naive `find('>')` would slice the body mid-attribute.
+fn open_tag_end(s: &str) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    for (i, &b) in s.as_bytes().iter().enumerate() {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'>' => return Some(i),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+/// Remove `<!-- … -->` comment spans (best-effort textual strip; a phantom scan
+/// tolerates the rare `-->` inside a string literal). An unterminated comment
+/// drops the remainder — commented-out code never counts.
+fn strip_html_comments(source: &str) -> String {
+    let mut out = String::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start + 4..].find("-->") {
+            Some(end) => rest = &rest[start + 4 + end + 3..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// If `call` is `require("lit")`, `require.resolve("lit")`, or the immediately-
@@ -341,6 +477,99 @@ mod tests {
             "all-inline-type erased"
         );
         assert!(names.contains(&"mixed-pkg"), "mixed import is runtime");
+    }
+
+    #[test]
+    fn astro_frontmatter_keeps_type_only_backend() {
+        // astro-icon's Icon.astro imports `astro/types` for TYPES ONLY; under the
+        // global virtual store that still breaks resolution (nub#450), so the SFC
+        // path parses the frontmatter and keeps the type import. The HTML template
+        // after the fence is not parsed.
+        let src = "---\nimport type { HTMLAttributes } from \"astro/types\";\nimport { getIconData } from \"@iconify/utils\";\n---\n<svg {...rest} />\n";
+        let names: Vec<_> = extract("components/Icon.astro", src)
+            .into_iter()
+            .map(|o| o.spec)
+            .collect();
+        assert!(
+            names.iter().any(|s| s == "astro/types"),
+            "type-only SFC import kept"
+        );
+        assert!(names.iter().any(|s| s == "@iconify/utils"));
+    }
+
+    #[test]
+    fn vue_svelte_script_block_scanned() {
+        let vue = "<template><div/></template>\n<script lang=\"ts\">\nimport type { Foo } from \"backend\";\n</script>\n";
+        let names: Vec<_> = extract("Comp.vue", vue)
+            .into_iter()
+            .map(|o| o.spec)
+            .collect();
+        assert!(names.iter().any(|s| s == "backend"), "vue <script> scanned");
+    }
+
+    #[test]
+    fn commented_out_script_block_is_ignored() {
+        // A commented-out <script> must not be parsed as real component code, or
+        // its imports would false-flag a phantom and force a needless disk eject.
+        let vue = "<template><div/></template>\n<!-- <script>import 'ghost';</script> -->\n<script setup lang=\"ts\">\nimport type { Foo } from \"real-backend\";\n</script>\n";
+        let names: Vec<_> = extract("Comp.vue", vue)
+            .into_iter()
+            .map(|o| o.spec)
+            .collect();
+        assert!(
+            names.iter().any(|s| s == "real-backend"),
+            "real <script> scanned"
+        );
+        assert!(
+            !names.iter().any(|s| s == "ghost"),
+            "commented <script> ignored: {names:?}"
+        );
+    }
+
+    #[test]
+    fn generic_script_setup_attribute_with_gt_is_sliced_correctly() {
+        // Vue 3.3 generics: the open tag carries a `>` inside the attribute
+        // value; the body must start after the real tag end or the parse is
+        // garbled and the block's imports are silently missed.
+        let vue = "<script setup lang=\"ts\" generic=\"T extends Record<string, unknown>\">\nimport type { Foo } from \"generic-backend\";\n</script>\n";
+        let names: Vec<_> = extract("Comp.vue", vue)
+            .into_iter()
+            .map(|o| o.spec)
+            .collect();
+        assert!(
+            names.iter().any(|s| s == "generic-backend"),
+            "generic <script setup> body scanned: {names:?}"
+        );
+    }
+
+    #[test]
+    fn non_sfc_type_only_still_dropped() {
+        // The runtime path is unchanged: a type-only import in a .ts stays dropped.
+        let names: Vec<_> = extract("x.ts", "import type { T } from \"type-pkg\";\n")
+            .into_iter()
+            .map(|o| o.spec)
+            .collect();
+        assert!(names.is_empty(), "type-only import in .ts still dropped");
+    }
+
+    #[test]
+    fn dts_keeps_type_surface_imports() {
+        // A declaration file's imports are type-position but still drive TS
+        // resolution under GVS (nub#450): both the value-syntax `import * as React`
+        // and a `import type` are kept, and a relative type re-export.
+        let dts = "import * as React from 'react';\nimport type { FormApi } from '@tanstack/form-core';\nexport type { Foo } from './internal';\n";
+        for path in ["index.d.ts", "dist/index.d.mts", "types.d.cts"] {
+            let names: Vec<_> = extract(path, dts).into_iter().map(|o| o.spec).collect();
+            assert!(names.iter().any(|s| s == "react"), "{path}: react kept");
+            assert!(
+                names.iter().any(|s| s == "@tanstack/form-core"),
+                "{path}: type-only import kept"
+            );
+            assert!(
+                names.iter().any(|s| s == "./internal"),
+                "{path}: relative type re-export kept (walked for .d.ts graph)"
+            );
+        }
     }
 
     #[test]

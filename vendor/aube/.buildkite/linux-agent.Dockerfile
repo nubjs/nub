@@ -17,10 +17,17 @@ RUN apt-get update \
     xz-utils \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://mise.run | sh
+# Download the installer before running it so network failures cannot yield an
+# empty script and silently produce a mise-less image.
+RUN set -eux; \
+  curl --proto '=https' --tlsv1.2 -fsSL https://mise.run -o /tmp/mise-install.sh; \
+  sh /tmp/mise-install.sh; \
+  rm /tmp/mise-install.sh; \
+  /root/.local/bin/mise --version
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --profile default --default-toolchain stable \
-  && /root/.cargo/bin/rustup toolchain install 1.93.0 --profile default \
-  && /root/.cargo/bin/rustup component add rustfmt clippy --toolchain stable
+    | sh -s -- -y --profile minimal --default-toolchain stable \
+  && /root/.cargo/bin/rustup toolchain install 1.93.0 --profile minimal \
+  && /root/.cargo/bin/rustup component add rustfmt clippy --toolchain stable \
+  && rm -rf /root/.rustup/downloads /root/.rustup/tmp
 
 ENV PATH="/root/.cargo/bin:/root/.local/bin:/root/.local/share/mise/shims:${PATH}"

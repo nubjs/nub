@@ -84,7 +84,7 @@ The script prints a colour-coded console report and writes a `results.json` in t
 | `node-install` | provision Node 22 from nodejs.org | major | ARM64 tarball download + extract |
 | `node-pin` | `nub node pin` writes `.node-version` | minor | file write |
 | `node-uninstall` | remove from cache | minor | dir removal |
-| `upgrade-dry-run` | `nub upgrade --dry-run` | minor | channel detection; self-owned unsupported on Windows |
+| `upgrade-dry-run` | `nub upgrade --dry-run` | minor | channel detection; self-owned upgrades in place on Windows (#481) |
 | `watch-restart` | file watcher restarts on touch | major | NTFS change notification via Node `--watch` |
 | `workspace-install` | install in workspace root | blocker | workspace discovery |
 | `workspace-run-recursive` | `nub run -r build` | major | recursive dispatch |
@@ -96,7 +96,7 @@ The script prints a colour-coded console report and writes a `results.json` in t
 - **`.cmd`/`.bat` bin shims** — `launch_bin` in `cli.rs` dispatches via `cmd /C <path>` for `.cmd`/`.bat` extensions; any regression here silently breaks every npm bin on Windows (most bins land as `.cmd` shims). Check `run-cmd-bin`.
 - **`.ps1` bin shims** — dispatched via `powershell -NoProfile -ExecutionPolicy Bypass -File <path>`. Execution policy on the VM may block this even with `-Bypass`; if so that is a papercut worth reporting.
 - **`nub run` POSIX-ism scripts** — default shell on Windows is `cmd.exe`, which does not support `FOO=1 node …` inline env syntax. Passing `--script-shell <path-to-sh>` routes the script body through that shell (e.g. a Git-for-Windows / WSL `sh.exe`); the `run-script-shell` check locates an `sh.exe` and hands it over explicitly. Under the default `cmd.exe` the POSIX-ism script fails — the degraded-but-not-crashed posture is what `run-posix-ism` checks.
-- **`nub upgrade` self-owned channel** — explicitly documented as unsupported on Windows (the `~/.nub` tarball self-replace cannot overwrite a running `.exe`). `upgrade --dry-run` notes this in its output; actual `upgrade` falls back to printing the `npm install -g` command. Not a blocker but worth confirming the message is clear.
+- **`nub upgrade` self-owned channel** — upgrades in place on Windows (#481) via the per-file rename dance: the running `nub.exe` is renamed aside to `nub.exe.old` (NTFS allows renaming a mapped image), the new binary renamed into place, and the `nubx.exe` copy refreshed; `.old` leftovers are GC'd at the next upgrade. The artifact is the `nub-win32-*.zip`, extracted with the System32 bsdtar. A rename failure bails all-or-nothing with the install untouched.
 - **`nub upgrade` via npm** — `npm_upgrade_command_invocation` uses `cmd /C npm install -g …` on Windows (not `sh -c …`), because `npm.cmd` only resolves through `cmd.exe`. A regression here would surface as "program not found" on plain Windows boxes without Git-Bash.
 - **NTFS file watcher** — Node's `--watch` uses `ReadDirectoryChangesW`; on ARM64 VMs under Hyper-V this can be slow to coalesce events. `watch-restart` allows 4 seconds for the restart to appear; adjust `-Timeout` if the VM is slow.
 - **Path separators** — nub Rust code uses `std::path` throughout, which normalises to backslashes on Windows; if any path is constructed with hardcoded `/` and passed to an OS API (not a URL), it may silently fail. The file-runner and workspace checks exercise the most path-heavy code.

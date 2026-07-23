@@ -37,8 +37,8 @@ impl LockfileGraph {
     /// `"lodash": "catalog:"` override reads as stale against a
     /// lockfile that recorded the resolved `"lodash": "4.17.21"`.
     ///
-    /// Lockfile formats that don't record specifiers (npm, yarn, bun) always
-    /// return `Fresh` since we have no way to detect drift without re-resolving.
+    /// Importers that don't record specifiers return `Fresh` since we have no
+    /// way to detect manifest drift without re-resolving.
     ///
     /// [`check_drift_workspace`]: Self::check_drift_workspace
     pub fn check_drift(
@@ -443,6 +443,35 @@ impl LockfileGraph {
             }
         }
         DriftStatus::Fresh
+    }
+
+    /// Compare the lockfile's recorded `packageExtensionsChecksum` against the
+    /// project's freshly-computed effective checksum. A mismatch means the
+    /// packageExtensions config changed since the lockfile was written — the
+    /// resolved graph is stale, since an extension adds/relaxes deps and can
+    /// alter resolution. Mirrors pnpm's `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`
+    /// `packageExtensionsChecksum` rule.
+    ///
+    /// `effective_checksum` is the caller-computed hash of the effective
+    /// packageExtensions (`None` when there are none). A stale
+    /// checksum carried over from a renamed pnpm-lock.yaml is validated here,
+    /// not trusted — a divergence re-resolves (or frozen-fails) and the write
+    /// path restamps the current value.
+    ///
+    /// Meaningful only for embedders that STAMP the checksum on every lockfile
+    /// kind they write (so the check reaches a fixpoint); the caller gates the
+    /// invocation on that embedder posture
+    /// (`EngineContext::enforce_package_extensions_checksum`), so standalone
+    /// aube — which stamps only pnpm-lock.yaml and never enforces — never
+    /// reaches it.
+    pub fn check_package_extensions_drift(&self, effective_checksum: Option<&str>) -> DriftStatus {
+        if self.package_extensions_checksum.as_deref() == effective_checksum {
+            DriftStatus::Fresh
+        } else {
+            DriftStatus::Stale {
+                reason: "packageExtensions changed since the lockfile was written".to_string(),
+            }
+        }
     }
 
     /// Compare a single importer's `DirectDep` list against the corresponding
@@ -1065,6 +1094,40 @@ mod drift_tests {
     }
 
     #[test]
+    fn package_extensions_drift_fires_on_checksum_mismatch() {
+        let mut graph = make_graph(&[("lodash", "^4.17.0", "lodash@4.17.21")]);
+        graph.package_extensions_checksum = Some("sha256-abc".to_string());
+
+        // Match → Fresh; both-absent → Fresh; any divergence → Stale.
+        assert_eq!(
+            graph.check_package_extensions_drift(Some("sha256-abc")),
+            DriftStatus::Fresh
+        );
+        assert!(matches!(
+            graph.check_package_extensions_drift(Some("sha256-xyz")),
+            DriftStatus::Stale { .. }
+        ));
+        // Extensions removed from the project (effective None) drifts a
+        // lockfile that still records a checksum.
+        assert!(matches!(
+            graph.check_package_extensions_drift(None),
+            DriftStatus::Stale { .. }
+        ));
+
+        // No checksum stored (a lockfile written before extensions existed):
+        // absent-vs-absent is Fresh, absent-vs-present drifts.
+        graph.package_extensions_checksum = None;
+        assert_eq!(
+            graph.check_package_extensions_drift(None),
+            DriftStatus::Fresh
+        );
+        assert!(matches!(
+            graph.check_package_extensions_drift(Some("sha256-abc")),
+            DriftStatus::Stale { .. }
+        ));
+    }
+
+    #[test]
     fn stale_when_specifier_changes() {
         let manifest = make_manifest(&[("lodash", "^4.18.0")]);
         let graph = make_graph(&[("lodash", "^4.17.0", "lodash@4.17.21")]);
@@ -1398,8 +1461,8 @@ mod drift_tests {
 
     #[test]
     fn fresh_when_no_specifiers_recorded() {
-        // Non-pnpm formats (npm/yarn/bun) don't store specifiers, so we can't
-        // detect drift — we treat them as fresh and let the resolver decide.
+        // Some lockfile importers don't store specifiers, so we can't detect
+        // drift — we treat them as fresh and let the resolver decide.
         let manifest = make_manifest(&[("lodash", "^4.17.0")]);
         let graph = LockfileGraph {
             importers: {

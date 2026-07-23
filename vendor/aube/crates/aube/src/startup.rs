@@ -430,6 +430,7 @@ pub(crate) fn command_needs_package_manager_guard(command: Option<&Commands>) ->
         None | Some(Commands::Config(_))
             | Some(Commands::Get(_))
             | Some(Commands::Set(_))
+            | Some(Commands::Prefix(_))
             | Some(Commands::Completion(_))
     )
 }

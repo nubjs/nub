@@ -37,6 +37,7 @@ pub const WARN_AUBE_INVALID_MINIMUM_RELEASE_AGE_EXCLUDE: &str =
 pub const WARN_AUBE_OVERRIDE_MISSING_DEP: &str = "WARN_AUBE_OVERRIDE_MISSING_DEP";
 pub const WARN_AUBE_OVERRIDE_DOLLAR_REF_DEPRECATED: &str =
     "WARN_AUBE_OVERRIDE_DOLLAR_REF_DEPRECATED";
+pub const WARN_AUBE_UNUSED_PATCH: &str = "WARN_AUBE_UNUSED_PATCH";
 pub const WARN_AUBE_INVALID_PEER_PATTERN: &str = "WARN_AUBE_INVALID_PEER_PATTERN";
 pub const WARN_AUBE_INVALID_SAVE_PREFIX: &str = "WARN_AUBE_INVALID_SAVE_PREFIX";
 pub const WARN_AUBE_CONCURRENCY_ENV_INVALID: &str = "WARN_AUBE_CONCURRENCY_ENV_INVALID";
@@ -281,6 +282,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_OVERRIDE_DOLLAR_REF_DEPRECATED,
         category: category::SETTINGS_CONFIG,
         description: "An `overrides` entry used pnpm's deprecated `$` version reference syntax.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_UNUSED_PATCH,
+        category: category::SETTINGS_CONFIG,
+        description: "A declared `patchedDependencies` key matched no installed package, downgraded from an error by `allowUnusedPatches`.",
         exit_code: None,
     },
     CodeMeta {

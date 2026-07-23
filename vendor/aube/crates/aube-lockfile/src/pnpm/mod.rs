@@ -10,7 +10,7 @@ mod write;
 mod tests;
 
 pub use checksum::{package_extensions_checksum, pnpmfile_checksum};
-pub use read::parse;
+pub use read::{parse, parse_with_options};
 pub use write::write;
 
 /// Benchmark-only shims comparing the byte-cursor subset parser against
@@ -31,6 +31,21 @@ pub fn __bench_parse_serde(content: &str) -> Option<(usize, usize, usize)> {
     raw::parse_raw_lockfile_serde(content)
         .ok()
         .map(|r| raw::__bench_counts(&r))
+}
+
+/// Benchmark-only: the full serialize + reformat + atomic-write path —
+/// exactly the work the lockfile-write-overlap optimization moves onto a
+/// background thread. Measured against `LockfileGraph::clone()` (the
+/// offsetting cost the spawned task pays) to decide whether overlapping
+/// the write with the link tail is a net win.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub fn __bench_write_to(
+    path: &std::path::Path,
+    graph: &crate::LockfileGraph,
+    manifest: &aube_manifest::PackageJson,
+) {
+    write::write(path, graph, manifest).expect("bench write");
 }
 
 pub(super) fn tarball_url_is_hosted_git(url: &str) -> bool {

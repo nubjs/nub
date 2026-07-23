@@ -23,26 +23,35 @@ use nub_phantom_core::extract::{Occurrence, extract};
 use nub_phantom_core::specifier::{self, SpecKind};
 
 /// Provenance bit: reached from the main surface (`main`/`bin`/`exports."."`).
-const FROM_MAIN: u8 = 0b01;
+const FROM_MAIN: u8 = 0b001;
 /// Provenance bit: reached from a non-`.` `exports` subpath (the adapter surface).
-const FROM_SUBPATH: u8 = 0b10;
+const FROM_SUBPATH: u8 = 0b010;
+/// Provenance bit: reached from the `.d.ts` TYPE surface (`types`/`typings`/an
+/// `exports` `types` condition/`index.d.ts`). A type-position peer import carries
+/// this and NOT the runtime bits, so `@types/<peer>` reachability (nub#450) is
+/// separable from a runtime require of the same peer.
+const FROM_TYPES: u8 = 0b100;
 
 /// A bare-specifier reference collected from a reachable file.
 #[derive(Debug, Clone)]
 pub struct Reference {
     /// Package name the specifier resolves to (`@scope/name` or `name`).
-    pub package: String,
+    pub(crate) package: String,
     /// The raw specifier (kept for the report — shows the exact subpath).
-    pub raw: String,
+    pub(crate) raw: String,
     /// Guarded (try/catch or a conditional branch) at every occurrence collapses
     /// to soft; a single unguarded occurrence makes the package hard.
-    pub soft: bool,
+    pub(crate) soft: bool,
     /// Reachable from the main entry surface.
-    pub from_main: bool,
+    pub(crate) from_main: bool,
     /// Reachable from a non-`.` `exports` subpath — the "consumer opts into
     /// `<pkg>/<subpath>`" adapter surface. A hard phantom reachable ONLY from a
     /// subpath (not main) is the subpath-adapter class.
-    pub from_subpath: bool,
+    pub(crate) from_subpath: bool,
+    /// Reachable from the `.d.ts` TYPE surface. A DECLARED PEER reached only via
+    /// this surface is the nub#450 peer-type class: its `@types/<peer>` must be
+    /// project-local for the type-checker's realpath walk to reach it.
+    pub(crate) from_types: bool,
 }
 
 /// Result of the reachable-module walk.
@@ -67,8 +76,12 @@ trait FileSource {
     /// A resolved, canonical file identifier within the package.
     type Key: Ord + Clone;
     /// Resolve a published entry path (package-root-relative) to a file.
-    fn resolve_entry(&self, entry_path: &str) -> Option<Self::Key>;
-    /// Resolve a relative specifier as written inside `from`.
+    /// `prefer_dts` selects the type surface (a `Types` entry) so a `.d.ts` root
+    /// resolves to its declaration graph instead of a colocated `.js`.
+    fn resolve_entry(&self, entry_path: &str, prefer_dts: bool) -> Option<Self::Key>;
+    /// Resolve a relative specifier as written inside `from`. The surface is taken
+    /// from `from`'s own kind — a `.d.ts` resolves its edges to `.d.ts`, a runtime
+    /// file to JS — so a type re-export never diverts to a runtime sibling.
     fn resolve_rel(&self, from: &Self::Key, spec: &str) -> Option<Self::Key>;
     /// Read a file's UTF-8 content (None on read/decode failure).
     fn read(&self, key: &Self::Key) -> Option<String>;
@@ -92,10 +105,12 @@ fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry]) -> Walk {
     let mut queue: VecDeque<S::Key> = VecDeque::new();
 
     for ep in entry_points {
-        if let Some(resolved) = source.resolve_entry(&ep.path) {
+        let prefer_dts = ep.kind == EntryKind::Types;
+        if let Some(resolved) = source.resolve_entry(&ep.path, prefer_dts) {
             let bit = match ep.kind {
                 EntryKind::Main => FROM_MAIN,
                 EntryKind::Subpath => FROM_SUBPATH,
+                EntryKind::Types => FROM_TYPES,
             };
             if add_flags(&mut flags, &resolved, bit) {
                 queue.push_back(resolved);
@@ -147,6 +162,7 @@ fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry]) -> Walk {
                     soft: occ.soft,
                     from_main: fflags & FROM_MAIN != 0,
                     from_subpath: fflags & FROM_SUBPATH != 0,
+                    from_types: fflags & FROM_TYPES != 0,
                 });
             }
         }
@@ -166,7 +182,7 @@ pub fn walk(root: &Path, entry_points: &[Entry]) -> Walk {
 /// tree (both drive [`walk_generic`]) for all real package layouts; see
 /// [`normalize_rel_join`] for the one accepted divergence on malformed
 /// (escape-and-re-enter-by-root-name) specifiers that never appear in practice.
-pub fn walk_index(files: &[(String, PathBuf)], entry_points: &[Entry]) -> Walk {
+pub(crate) fn walk_index(files: &[(String, PathBuf)], entry_points: &[Entry]) -> Walk {
     let map: BTreeMap<String, PathBuf> = files.iter().cloned().collect();
     walk_generic(&IndexSource { files: map }, entry_points)
 }
@@ -188,8 +204,48 @@ fn add_flags<K: Ord + Clone>(flags: &mut BTreeMap<K, u8>, key: &K, bit: u8) -> b
 /// the cap is a hard robustness requirement, not a nicety.
 const MAX_RESOLVE_DEPTH: u32 = 16;
 
-/// Node-style resolution extensions, in priority order.
-const RESOLVE_EXTS: [&str; 8] = ["js", "cjs", "mjs", "jsx", "ts", "tsx", "mts", "cts"];
+/// Node-style RUNTIME resolution extensions, in priority order — used when
+/// resolving from a runtime (`.js`/`.ts`/SFC) source or a Main/Subpath entry.
+const JS_EXTS: [&str; 8] = ["js", "cjs", "mjs", "jsx", "ts", "tsx", "mts", "cts"];
+
+/// TypeScript DECLARATION extensions — used when resolving from a `.d.ts` source
+/// or a `Types` entry. A type-surface edge is resolved to `.d.ts` ONLY and never
+/// diverts to a `.js` sibling: the standard compiled layout ships `widgets.js`
+/// beside `widgets.d.ts`, and resolving a type re-export to the `.js` would both
+/// capture that `.js`'s RUNTIME imports as type references (over-eject, nub#450)
+/// and skip the real `widgets.d.ts` (missed type imports).
+const DTS_EXTS: [&str; 3] = ["d.ts", "d.mts", "d.cts"];
+
+/// Extension ladder + file-acceptance predicate keyed to the resolution surface.
+/// The runtime surface admits JS/SFC files (byte-identical to the pre-type-surface
+/// behavior); the type surface admits `.d.ts` only.
+fn surface_exts(prefer_dts: bool) -> &'static [&'static str] {
+    if prefer_dts { &DTS_EXTS } else { &JS_EXTS }
+}
+
+fn resolvable_name(name: &str, prefer_dts: bool) -> bool {
+    if prefer_dts {
+        crate::manifest::is_dts_like(name)
+    } else {
+        crate::manifest::is_js_like(name) || crate::manifest::is_sfc_like(name)
+    }
+}
+
+/// On the type surface, TS resolves a `./widgets.js` re-export's TYPES at
+/// `./widgets.d.ts` (the NodeNext convention: the specifier keeps the runtime
+/// extension, the declaration sits beside it). Strip any runtime/declaration
+/// extension so the `.d.ts` ladder re-appends the declaration form. `./widgets` →
+/// `./widgets`; `./widgets.js` → `./widgets`; `./widgets.d.ts` → `./widgets`.
+fn dts_stem(spec: &str) -> &str {
+    for ext in [
+        ".d.ts", ".d.mts", ".d.cts", ".js", ".cjs", ".mjs", ".jsx", ".ts", ".tsx", ".mts", ".cts",
+    ] {
+        if let Some(stem) = spec.strip_suffix(ext) {
+            return stem;
+        }
+    }
+    spec
+}
 
 // --- Filesystem-backed source (extracted tree) ---------------------------------
 
@@ -200,13 +256,18 @@ struct FsSource<'a> {
 impl FileSource for FsSource<'_> {
     type Key = PathBuf;
 
-    fn resolve_entry(&self, entry_path: &str) -> Option<PathBuf> {
-        fs_resolve(self.root, self.root, entry_path, 0)
+    fn resolve_entry(&self, entry_path: &str, prefer_dts: bool) -> Option<PathBuf> {
+        fs_resolve(self.root, self.root, entry_path, prefer_dts, 0)
     }
 
     fn resolve_rel(&self, from: &PathBuf, spec: &str) -> Option<PathBuf> {
         let from_dir = from.parent().unwrap_or(self.root);
-        fs_resolve(self.root, from_dir, spec, 0)
+        // Surface follows the SOURCE file: a `.d.ts` resolves its edges to `.d.ts`.
+        let prefer_dts = from
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(crate::manifest::is_dts_like);
+        fs_resolve(self.root, from_dir, spec, prefer_dts, 0)
     }
 
     fn read(&self, key: &PathBuf) -> Option<String> {
@@ -221,10 +282,19 @@ impl FileSource for FsSource<'_> {
     }
 }
 
-fn fs_resolve(root: &Path, from_dir: &Path, spec: &str, depth: u32) -> Option<PathBuf> {
+fn fs_resolve(
+    root: &Path,
+    from_dir: &Path,
+    spec: &str,
+    prefer_dts: bool,
+    depth: u32,
+) -> Option<PathBuf> {
     if depth > MAX_RESOLVE_DEPTH {
         return None;
     }
+    // On the type surface, `./widgets.js` re-exports resolve types at
+    // `./widgets.d.ts`; strip the extension so the `.d.ts` ladder re-appends it.
+    let spec = if prefer_dts { dts_stem(spec) } else { spec };
     let joined = from_dir.join(spec);
     // Keep the walk inside the package tree (a `../../` that climbs out is not
     // part of the published surface).
@@ -232,42 +302,68 @@ fn fs_resolve(root: &Path, from_dir: &Path, spec: &str, depth: u32) -> Option<Pa
     if !base.starts_with(root) {
         return None;
     }
+    let exts = surface_exts(prefer_dts);
 
-    // 1. Exact file.
-    if is_js_file(&base) {
+    // 1. Exact file (runtime surface only — the type surface always stems + appends).
+    if !prefer_dts && is_resolvable_file(&base, prefer_dts) {
         return Some(base);
     }
     // 2. `base.<ext>`.
-    for ext in RESOLVE_EXTS {
+    for ext in exts {
         let cand = with_appended_ext(&base, ext);
-        if is_js_file(&cand) {
+        if is_resolvable_file(&cand, prefer_dts) {
             return Some(cand);
         }
     }
     // 3. `base/index.<ext>`.
-    for ext in RESOLVE_EXTS {
+    for ext in exts {
         let cand = base.join(format!("index.{ext}"));
-        if is_js_file(&cand) {
+        if is_resolvable_file(&cand, prefer_dts) {
             return Some(cand);
         }
     }
-    // 4. `base/package.json` → its `main` (depth-bounded; see MAX_RESOLVE_DEPTH).
+    // 4. `base/package.json` → its `types`/`main` (depth-bounded). The type surface
+    // chases `types`/`typings`; the runtime surface chases `main`.
     let pkg = base.join("package.json");
     if let Ok(raw) = fs::read(&pkg) {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
-            && let Some(main) = v.get("main").and_then(|m| m.as_str())
+            && let Some(entry) = manifest_entry(&v, prefer_dts)
         {
-            return fs_resolve(root, &base, main, depth + 1);
+            return fs_resolve(root, &base, &entry, prefer_dts, depth + 1);
         }
-        // package.json with no main → default index.js in that dir.
-        for ext in RESOLVE_EXTS {
+        // package.json with no entry → default `index.<ext>` in that dir.
+        for ext in exts {
             let cand = base.join(format!("index.{ext}"));
-            if is_js_file(&cand) {
+            if is_resolvable_file(&cand, prefer_dts) {
                 return Some(cand);
             }
         }
     }
     None
+}
+
+/// The relevant entry field of a nested `package.json` for the current surface:
+/// `types`/`typings` for the type walk, `main` for runtime.
+fn manifest_entry(v: &serde_json::Value, prefer_dts: bool) -> Option<String> {
+    let fields: &[&str] = if prefer_dts {
+        &["types", "typings"]
+    } else {
+        &["main"]
+    };
+    fields
+        .iter()
+        .find_map(|f| v.get(*f).and_then(|m| m.as_str()))
+        .map(str::to_string)
+}
+
+/// Existence + surface-appropriate extension check (`.d.ts` on the type surface,
+/// JS/SFC on the runtime surface).
+fn is_resolvable_file(p: &Path, prefer_dts: bool) -> bool {
+    if !p.is_file() {
+        return false;
+    }
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    resolvable_name(name, prefer_dts)
 }
 
 /// Append an extension to a path's file name (`a/b` + `js` → `a/b.js`), rather
@@ -277,14 +373,6 @@ fn with_appended_ext(base: &Path, ext: &str) -> PathBuf {
     s.push(".");
     s.push(ext);
     PathBuf::from(s)
-}
-
-fn is_js_file(p: &Path) -> bool {
-    if !p.is_file() {
-        return false;
-    }
-    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    crate::manifest::is_js_like(name)
 }
 
 /// Lexically normalize `.`/`..` segments WITHOUT touching the filesystem (we do
@@ -315,12 +403,14 @@ struct IndexSource {
 impl FileSource for IndexSource {
     type Key = String;
 
-    fn resolve_entry(&self, entry_path: &str) -> Option<String> {
-        self.resolve("", entry_path, 0)
+    fn resolve_entry(&self, entry_path: &str, prefer_dts: bool) -> Option<String> {
+        self.resolve("", entry_path, prefer_dts, 0)
     }
 
     fn resolve_rel(&self, from: &String, spec: &str) -> Option<String> {
-        self.resolve(parent_rel(from), spec, 0)
+        // Surface follows the SOURCE file (its rel-path basename).
+        let prefer_dts = crate::manifest::is_dts_like(from);
+        self.resolve(parent_rel(from), spec, prefer_dts, 0)
     }
 
     fn read(&self, key: &String) -> Option<String> {
@@ -333,34 +423,37 @@ impl FileSource for IndexSource {
 }
 
 impl IndexSource {
-    /// True if `rel` is a JS-like file present in the index — the index analogue
-    /// of `is_js_file` (name check + existence), which the fs ladder relies on.
-    fn contains_js(&self, rel: &str) -> bool {
-        crate::manifest::is_js_like(rel) && self.files.contains_key(rel)
+    /// True if `rel` is present in the index AND matches the surface's extension
+    /// class (`.d.ts` on the type surface, JS/SFC on the runtime surface) — the
+    /// index analogue of [`is_resolvable_file`].
+    fn contains_surface(&self, rel: &str, prefer_dts: bool) -> bool {
+        resolvable_name(rel, prefer_dts) && self.files.contains_key(rel)
     }
 
-    /// Index analogue of [`fs_resolve`], step-for-step: exact → `base.<ext>` →
-    /// `base/index.<ext>` → `base/package.json` `main`. Resolution is over the
-    /// relpath key set; the `main` chase reads the package.json blob.
-    fn resolve(&self, from_dir: &str, spec: &str, depth: u32) -> Option<String> {
+    /// Index analogue of [`fs_resolve`], step-for-step, surface-aware: the type
+    /// walk stems + appends `.d.ts` and never diverts to a JS sibling; the runtime
+    /// walk is the pre-type-surface JS resolution.
+    fn resolve(&self, from_dir: &str, spec: &str, prefer_dts: bool, depth: u32) -> Option<String> {
         if depth > MAX_RESOLVE_DEPTH {
             return None;
         }
+        let spec = if prefer_dts { dts_stem(spec) } else { spec };
         // `None` == escaped the package root, mirroring fs `!starts_with(root)`.
         let base = normalize_rel_join(from_dir, spec)?;
+        let exts = surface_exts(prefer_dts);
 
-        if self.contains_js(&base) {
+        if !prefer_dts && self.contains_surface(&base, prefer_dts) {
             return Some(base);
         }
-        for ext in RESOLVE_EXTS {
+        for ext in exts {
             let cand = format!("{base}.{ext}");
-            if self.contains_js(&cand) {
+            if self.contains_surface(&cand, prefer_dts) {
                 return Some(cand);
             }
         }
-        for ext in RESOLVE_EXTS {
+        for ext in exts {
             let cand = join_rel(&base, &format!("index.{ext}"));
-            if self.contains_js(&cand) {
+            if self.contains_surface(&cand, prefer_dts) {
                 return Some(cand);
             }
         }
@@ -369,13 +462,13 @@ impl IndexSource {
             && let Ok(raw) = fs::read(blob)
         {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
-                && let Some(main) = v.get("main").and_then(|m| m.as_str())
+                && let Some(entry) = manifest_entry(&v, prefer_dts)
             {
-                return self.resolve(&base, main, depth + 1);
+                return self.resolve(&base, &entry, prefer_dts, depth + 1);
             }
-            for ext in RESOLVE_EXTS {
+            for ext in exts {
                 let cand = join_rel(&base, &format!("index.{ext}"));
-                if self.contains_js(&cand) {
+                if self.contains_surface(&cand, prefer_dts) {
                     return Some(cand);
                 }
             }
@@ -541,6 +634,44 @@ mod tests {
             .find(|r| r.package == "main-dep")
             .unwrap();
         assert!(main.from_main && !main.from_subpath, "main-graph dep");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn astro_sfc_subpath_reexport_reaches_type_only_backend() {
+        // Mirrors astro-icon: a `./components` subpath re-exports an `.astro` whose
+        // frontmatter type-imports an undeclared backend (`astro`). With SFC
+        // resolution + type capture the backend must surface as
+        // from_subpath && !from_main, so it classifies as a subpath adapter and
+        // gets project-local materialization under GVS (nub#450).
+        let root = scratch("astro-sfc");
+        fs::create_dir_all(root.join("components")).unwrap();
+        fs::write(
+            root.join("components/index.ts"),
+            r#"export { default as Icon } from "./Icon.astro";"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("components/Icon.astro"),
+            "---\nimport type { HTMLAttributes } from \"astro/types\";\n---\n<svg/>",
+        )
+        .unwrap();
+        let w = walk(
+            &root,
+            &[Entry {
+                path: "components/index.ts".to_string(),
+                kind: EntryKind::Subpath,
+            }],
+        );
+        let astro = w
+            .references
+            .iter()
+            .find(|r| r.package == "astro")
+            .expect("astro reached via .astro re-export");
+        assert!(
+            astro.from_subpath && !astro.from_main,
+            "subpath-only backend"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

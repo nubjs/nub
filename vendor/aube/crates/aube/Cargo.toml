@@ -65,6 +65,7 @@ console = "0.16"
 demand = "2"
 reqwest = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 miette = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -74,13 +75,20 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
-sigstore-sign = { workspace = true }
-sigstore-oidc = { workspace = true }
-sigstore-types = { workspace = true }
-ambient-id = { workspace = true }
+# Provenance/signing stack, only needed by `aube publish`. Optional so
+# embedders (mise) that depend on the aube library for install/resolve do not
+# pull the sigstore + x509 + OIDC supply chain. Gated by the `publish` feature.
+sigstore-sign = { workspace = true, optional = true }
+sigstore-oidc = { workspace = true, optional = true }
+sigstore-types = { workspace = true, optional = true }
+ambient-id = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-flate2 = { workspace = true }
+# zlib-ng re-enabled at the binary level only: feature unification makes the
+# C backend win for the whole aube build (same perf as before), while library
+# crates stay on the pure-Rust backend so embedders don't inherit a cmake
+# build dependency. See the workspace flate2 entry.
+flate2 = { workspace = true, features = ["zlib-ng"] }
 glob = { workspace = true }
 ignore = { workspace = true }
 node-semver = { workspace = true }
@@ -99,7 +107,7 @@ ratatui = { version = "0.30.0", default-features = false, features = ["crossterm
 crossterm = { version = "0.29.0", optional = true }
 
 [features]
-default = ["mimalloc", "config-tui"]
+default = ["mimalloc", "config-tui", "publish", "rustls", "hickory-dns"]
 # Include the interactive `aube config tui` browser. Builds that want the
 # smallest dependency graph can disable default features and omit this.
 config-tui = ["dep:crossterm", "dep:ratatui"]
@@ -108,6 +116,19 @@ config-tui = ["dep:crossterm", "dep:ratatui"]
 # falls back to the system allocator. Needed for Valgrind, ASAN,
 # Miri, and distros that require libc malloc.
 mimalloc = ["dep:mimalloc"]
+# `aube publish` provenance/signing. Off for embedders that only need the
+# install/resolve library surface, keeping the sigstore stack out of their build.
+publish = ["dep:sigstore-sign", "dep:sigstore-oidc", "dep:sigstore-types", "dep:ambient-id"]
+# TLS backend for the crate's own reqwest clients and the aube-registry /
+# aube-util it re-exports. rustls only (no OpenSSL / native-tls — see CLAUDE.md);
+# required. Embedders depend with `default-features = false, features = ["rustls"]`.
+rustls = ["reqwest/rustls", "aube-registry/rustls", "aube-util/rustls"]
+# In-process DNS caching. Default for the aube binary; opt-in for embedders,
+# because reqwest's hickory-dns feature flips the default resolver for every
+# client in the final binary (see aube-registry's feature docs). Lists
+# reqwest/hickory-dns directly — mirroring `rustls` — so the crate's own
+# reqwest clients keep it even if aube-registry's feature graph changes.
+hickory-dns = ["reqwest/hickory-dns", "aube-registry/hickory-dns"]
 
 [dev-dependencies]
 clap-sort = "1"

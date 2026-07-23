@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.32.0](https://github.com/jdx/aube/compare/aube-linker-v1.31.0...aube-linker-v1.32.0) - 2026-07-22
+
+### Other
+
+- refresh benchmarks for v1.31.0 ([#1072](https://github.com/jdx/aube/pull/1072))
+
+## [1.30.0](https://github.com/jdx/aube/compare/aube-linker-v1.29.1...aube-linker-v1.30.0) - 2026-07-20
+
+### Other
+
+- refresh benchmarks for v1.29.1 ([#1060](https://github.com/jdx/aube/pull/1060))
+
+## [1.29.0](https://github.com/jdx/aube/compare/aube-linker-v1.28.0...aube-linker-v1.29.0) - 2026-07-16
+
+### Other
+
+- refresh benchmarks for v1.28.0 ([#1050](https://github.com/jdx/aube/pull/1050))
+
+## [1.28.0](https://github.com/jdx/aube/compare/aube-linker-v1.27.0...aube-linker-v1.28.0) - 2026-07-16
+
+### Added
+
+- *(packaging)* add production Node-API embedding ([#1025](https://github.com/jdx/aube/pull/1025))
+
+### Fixed
+
+- *(install)* refresh changed file directory dependencies ([#1034](https://github.com/jdx/aube/pull/1034))
+
+### Other
+
+- refresh benchmarks for v1.27.0 ([#1041](https://github.com/jdx/aube/pull/1041))
+- undo 7-day soak toolchain changes ([#1039](https://github.com/jdx/aube/pull/1039))
+
+## [1.27.0](https://github.com/jdx/aube/compare/aube-linker-v1.26.0...aube-linker-v1.27.0) - 2026-07-13
+
+### Fixed
+
+- *(linker)* accept plain unified patches ([#1021](https://github.com/jdx/aube/pull/1021))
+
+### Other
+
+- 7-day soak across toolchain and deps, cold-path hints, pinned tooling ([#1020](https://github.com/jdx/aube/pull/1020))
+- refresh benchmarks for v1.26.0 ([#1002](https://github.com/jdx/aube/pull/1002))
+
+## [1.26.0](https://github.com/jdx/aube/compare/aube-linker-v1.25.2...aube-linker-v1.26.0) - 2026-07-06
+
+### Other
+
+- Update sponsor references for jdx.dev ([#978](https://github.com/jdx/aube/pull/978))
+- refresh benchmarks for v1.25.2 ([#975](https://github.com/jdx/aube/pull/975))
+
+## [1.25.2](https://github.com/jdx/aube/compare/aube-linker-v1.25.1...aube-linker-v1.25.2) - 2026-07-01
+
+### Other
+
+- refresh benchmarks for v1.25.1 ([#962](https://github.com/jdx/aube/pull/962))
+
 ## [1.25.1](https://github.com/jdx/aube/compare/aube-linker-v1.25.0...aube-linker-v1.25.1) - 2026-06-25
 
 ### Fixed

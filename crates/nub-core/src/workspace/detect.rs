@@ -78,7 +78,7 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
 /// keying on the cwd keeps the count immune to sibling tests walking other dirs
 /// concurrently (cargo runs tests in parallel). Test-only; zero cost in release.
 #[cfg(test)]
-pub(crate) static WALKED_CWDS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static WALKED_CWDS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// The walk itself — the pre-memo body of [`detect_project`]. A cache miss (and
 /// any path where canonicalization fails) runs exactly this, so the memoized and
@@ -274,44 +274,6 @@ impl ProjectCache {
 fn cache() -> &'static ProjectCache {
     static CACHE: ProjectCache = ProjectCache::new();
     &CACHE
-}
-
-/// List workspace member package.json paths matching a filter.
-pub fn find_workspace_members(workspace_root: &Path, _filter: Option<&str>) -> Vec<PathBuf> {
-    // Simplified: read the workspace root's package.json for the
-    // workspaces field and glob-match. Full glob support deferred.
-    let pkg_path = workspace_root.join("package.json");
-    let Ok(content) = fs::read_to_string(&pkg_path) else {
-        return vec![];
-    };
-    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(crate::strip_utf8_bom(&content))
-    else {
-        return vec![];
-    };
-
-    let patterns = match manifest.get("workspaces") {
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect::<Vec<_>>(),
-        _ => return vec![],
-    };
-
-    let mut members = Vec::new();
-    for pattern in &patterns {
-        let base = pattern.trim_end_matches("/*").trim_end_matches("/**");
-        let search_dir = workspace_root.join(base);
-        if let Ok(entries) = fs::read_dir(&search_dir) {
-            for entry in entries.flatten() {
-                let member_pkg = entry.path().join("package.json");
-                if member_pkg.is_file() {
-                    members.push(entry.path());
-                }
-            }
-        }
-    }
-
-    members
 }
 
 #[cfg(test)]

@@ -17,15 +17,15 @@ use serde_json::Value;
 pub struct Manifest {
     pub name: String,
     /// `dependencies` ∪ `optionalDependencies` — hard-declared, always resolvable.
-    pub deps: BTreeSet<String>,
+    pub(crate) deps: BTreeSet<String>,
     /// Required peers (`peerDependencies` without an `optional` meta flag).
-    pub required_peers: BTreeSet<String>,
+    pub(crate) required_peers: BTreeSet<String>,
     /// Optional peers (`peerDependenciesMeta.<x>.optional === true`). Declared —
     /// NOT phantoms — but reported as their own category (the pick-your-plugin
     /// pattern that a naive detector over-flags).
-    pub optional_peers: BTreeSet<String>,
+    pub(crate) optional_peers: BTreeSet<String>,
     /// `bundledDependencies` / `bundleDependencies` — shipped inside the tarball.
-    pub bundled: BTreeSet<String>,
+    pub(crate) bundled: BTreeSet<String>,
     /// Published entry files (relative paths from the package root) — the roots
     /// of the reachable-module walk, each tagged by whether it is the main entry
     /// or a non-`.` `exports` subpath (the adapter surface).
@@ -40,13 +40,20 @@ pub enum EntryKind {
     /// A non-`.` `exports` subpath (`./zod`, `./vitest`) — the adapter surface a
     /// consumer opts into by importing `<pkg>/<subpath>`.
     Subpath,
+    /// A `.d.ts` TYPE surface (`types`/`typings` field, an `exports` `types`
+    /// condition, or the `index.d.ts` default) — the root of the declaration-file
+    /// graph. Reached references carry `from_types` so a type-position peer import
+    /// (`import * as React from 'react'` in a `.d.ts`) is separable from a runtime
+    /// one; this is what drives the nub#450 `@types/<peer>` reachability eject
+    /// without touching runtime-phantom detection.
+    Types,
 }
 
 /// A published entry file + its surface kind.
 #[derive(Debug, Clone)]
 pub struct Entry {
-    pub path: String,
-    pub kind: EntryKind,
+    pub(crate) path: String,
+    pub(crate) kind: EntryKind,
 }
 
 impl Manifest {
@@ -108,10 +115,12 @@ fn collect_bundled(v: &Value, out: &mut BTreeSet<String>) {
 }
 
 /// Gather the published entry files from `main`, `module`, `bin`, and `exports`,
-/// each tagged Main or Subpath. A recognized JS file is kept directly; an
-/// extensionless / directory-style target (`"./dist/index"`, `"./dist"`) is kept
-/// as a candidate and resolved Node-style by the graph walk; `types`/`.d.ts` and
-/// asset conditions carry no runtime imports and are filtered.
+/// each tagged Main or Subpath, PLUS the `.d.ts` TYPE surface (`types`/`typings`,
+/// `exports` `types` conditions, or the TS default roots) tagged Types. A
+/// recognized JS file is kept directly; an extensionless / directory-style target
+/// (`"./dist/index"`, `"./dist"`) is kept as a candidate and resolved Node-style
+/// by the graph walk; non-JS asset conditions (`.json`/`.node`/`.wasm`/`.css`)
+/// carry no analyzable imports and are filtered.
 fn collect_entry_points(v: &Value) -> Vec<Entry> {
     // Dedup on (kind, path) so a file exported at both `.` and a subpath seeds
     // both surfaces into the walk.
@@ -172,7 +181,65 @@ fn collect_entry_points(v: &Value) -> Vec<Entry> {
             kind: EntryKind::Main,
         });
     }
+
+    // TYPE-surface roots (`.d.ts`) — the explicit `types`/`typings` field and every
+    // `exports` `types` condition, else the TS default roots. Seeded as
+    // `EntryKind::Types` so reached references carry `from_types` (nub#450). Runtime
+    // entry collection above is untouched.
+    let mut type_targets: Vec<String> = Vec::new();
+    for field in ["types", "typings"] {
+        if let Some(s) = v.get(field).and_then(Value::as_str) {
+            type_targets.push(s.to_string());
+        }
+    }
+    if let Some(exports) = v.get("exports") {
+        collect_export_types(exports, &mut type_targets);
+    }
+    if type_targets.is_empty() {
+        // No explicit type surface → TS's defaults: each Main entry's colocated
+        // declaration (`x.js` → `x.d.ts`, `./dist` → `./dist/index.d.ts`) plus the
+        // root `index.d.ts`. The Types-surface resolver stems the runtime extension
+        // and re-appends `.d.ts` (see `graph::dts_stem`), so the RAW main path is
+        // passed through and resolves to its declaration — no path rewrite here.
+        // Only synthesized when no explicit `types` exists; an authoritative field
+        // must not be shadowed by a default that may not exist.
+        let colocated: Vec<String> = out
+            .iter()
+            .filter(|e| e.kind == EntryKind::Main)
+            .map(|e| e.path.clone())
+            .collect();
+        type_targets.extend(colocated);
+        type_targets.push("index.d.ts".to_string());
+    }
+    for p in &type_targets {
+        push(p, EntryKind::Types, &mut out, &mut seen);
+    }
+
     out
+}
+
+/// Recursively gather every `types`/`typings` condition target inside an
+/// `exports` subtree (the type surface of `.` and every subpath).
+fn collect_export_types(node: &Value, out: &mut Vec<String>) {
+    match node {
+        Value::Object(map) => {
+            for (k, child) in map {
+                if (k == "types" || k == "typings")
+                    && let Some(s) = child.as_str()
+                {
+                    out.push(s.to_string());
+                } else {
+                    collect_export_types(child, out);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                collect_export_types(child, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Recursively collect every relative-path leaf of an `exports` subtree, carrying
@@ -222,12 +289,18 @@ fn normalize_rel(p: &str) -> String {
 /// costs a resolver probe. The `is_js_like`-only gate this replaced dropped
 /// extensionless mains outright → `files_analyzed: 0` → every phantom missed.
 fn is_entry_candidate(path: &str) -> bool {
-    is_js_like(path) || extension(path).is_none()
+    is_js_like(path) || is_sfc_like(path) || is_dts_like(path) || extension(path).is_none()
+}
+
+/// A TypeScript declaration file (`.d.ts`/`.d.mts`/`.d.cts`) — the type surface a
+/// `Types` entry seeds and the file class the graph walk resolves for that entry.
+pub(crate) fn is_dts_like(path: &str) -> bool {
+    path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
 }
 
 /// A JS-like runtime file (extension we can parse for imports). Excludes `.json`,
 /// `.node`, `.wasm`, `.css`, and `.d.ts` type stubs.
-pub fn is_js_like(path: &str) -> bool {
+pub(crate) fn is_js_like(path: &str) -> bool {
     if path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts") {
         return false;
     }
@@ -235,6 +308,17 @@ pub fn is_js_like(path: &str) -> bool {
         extension(path),
         Some("js" | "cjs" | "mjs" | "jsx" | "ts" | "tsx" | "mts" | "cts")
     )
+}
+
+/// A single-file component (Astro/Vue/Svelte) whose imports live in a
+/// frontmatter / `<script>` block. Under the global virtual store a backend it
+/// imports there — even for TYPES ONLY — still needs project-local
+/// materialization: the package's realpath escapes into the shared store, so a
+/// type-checker's upward `node_modules` walk can't reach the hoisted backend
+/// otherwise (nub#450). The graph walk resolves these and `extract` reads their
+/// script region.
+pub(crate) fn is_sfc_like(path: &str) -> bool {
+    matches!(extension(path), Some("astro" | "vue" | "svelte"))
 }
 
 fn extension(path: &str) -> Option<&str> {
@@ -265,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn collects_entry_points_from_exports_and_filters_types() {
+    fn collects_entry_points_from_exports_including_type_surface() {
         let raw = br#"{
             "name": "pkg",
             "exports": {
@@ -288,7 +372,53 @@ mod tests {
             entry("dist/sub.js").unwrap().kind,
             super::EntryKind::Subpath
         );
-        assert!(!m.entry_points.iter().any(|e| e.path.contains(".d.ts")));
+        // The `types` condition IS collected — as a Types entry, the `.d.ts` type
+        // surface the peer-type walk seeds (nub#450). An explicit `types` suppresses
+        // the `index.d.ts` fallback, so no synthesized default appears.
+        assert_eq!(
+            entry("dist/index.d.ts").unwrap().kind,
+            super::EntryKind::Types
+        );
+        assert!(!m.entry_points.iter().any(|e| e.path == "index.d.ts"));
+    }
+
+    #[test]
+    fn synthesizes_default_type_roots_only_without_explicit_types() {
+        // No `types` field / `exports` types condition → TS's defaults: each Main
+        // entry's colocated `.d.ts` plus the root `index.d.ts`, all as Types
+        // entries (nub#450). react-pdf's shape (no types field, real index.d.ts).
+        let m = Manifest::parse(br#"{"name":"p","main":"./index.js"}"#).unwrap();
+        let types: Vec<&str> = m
+            .entry_points
+            .iter()
+            .filter(|e| e.kind == super::EntryKind::Types)
+            .map(|e| e.path.as_str())
+            .collect();
+        assert!(
+            types.contains(&"index.d.ts"),
+            "root index.d.ts default: {types:?}"
+        );
+    }
+
+    #[test]
+    fn direct_sfc_export_is_collected_as_entry() {
+        // A package publishing an .astro/.vue/.svelte directly (not via a JS
+        // re-export) must still be scanned, or its type-only phantoms are missed
+        // under GVS (nub#450, codex review P1).
+        let raw = br#"{
+            "name": "pkg",
+            "exports": { "./Icon": "./components/Icon.astro", "./Widget": "./Widget.vue" }
+        }"#;
+        let m = Manifest::parse(raw).unwrap();
+        assert_eq!(
+            m.entry_points
+                .iter()
+                .find(|e| e.path == "components/Icon.astro")
+                .unwrap()
+                .kind,
+            super::EntryKind::Subpath
+        );
+        assert!(m.entry_points.iter().any(|e| e.path == "Widget.vue"));
     }
 
     #[test]
@@ -314,19 +444,34 @@ mod tests {
             !has(&json, "data.json"),
             ".json main dropped (not analyzable)"
         );
-        // No entry survived → the entry-less fallback (`index.js`) seeds instead.
-        assert_eq!(json.entry_points.len(), 1);
-        assert_eq!(json.entry_points[0].path, "index.js");
+        // No RUNTIME entry survived → the entry-less fallback (`index.js`) seeds it.
+        // (A synthesized `index.d.ts` Types entry also appears — the type-surface
+        // default — so filter to the Main surface here.)
+        let mains: Vec<&str> = json
+            .entry_points
+            .iter()
+            .filter(|e| e.kind == super::EntryKind::Main)
+            .map(|e| e.path.as_str())
+            .collect();
+        assert_eq!(mains, vec!["index.js"]);
 
         let native = Manifest::parse(br#"{"name":"p","main":"./addon.node"}"#).unwrap();
         assert!(!has(&native, "addon.node"), ".node main dropped");
 
-        // Extensionless conditional target inside an `exports` map is admitted too.
+        // Extensionless conditional target inside an `exports` map is admitted too,
+        // and its `types` condition is collected as the Types surface.
         let exp = Manifest::parse(
             br#"{"name":"p","exports":{".":{"import":"./dist/index","types":"./dist/index.d.ts"}}}"#,
         )
         .unwrap();
         assert!(has(&exp, "dist/index"), "extensionless exports target kept");
-        assert!(!exp.entry_points.iter().any(|e| e.path.contains(".d.ts")));
+        assert_eq!(
+            exp.entry_points
+                .iter()
+                .find(|e| e.path == "dist/index.d.ts")
+                .unwrap()
+                .kind,
+            super::EntryKind::Types
+        );
     }
 }

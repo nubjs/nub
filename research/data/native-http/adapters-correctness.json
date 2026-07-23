@@ -1,0 +1,668 @@
+{
+  "metadata": {
+    "date": "2026-07-21T21:44:02.216Z",
+    "duration": "1s",
+    "concurrency": 1,
+    "repetitions": 1,
+    "node": "v26.5.0",
+    "bun": "1.3.14",
+    "oha": "oha 0.5.5",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "revision": "97b76dac23d06ac450e082799555d1c397b3bad5",
+    "sourceTree": "171fd46779baf8b8e69fb0ea69813efb3715564a",
+    "sourceDirty": true,
+    "sourceDiffSha256": "a130aa67ef9e7ad58055352f7fe08b0d77de03427f6f965aa38365bdd095b830",
+    "nativeBinarySha256": "71046a123b0dbeea7c52ff51f00971e5ee5f7ba29794b1a54c4c57e2fc00f441",
+    "platform": "darwin-arm64",
+    "osRelease": "25.5.0",
+    "cpu": "Apple M1 Max",
+    "logicalCpus": 10,
+    "totalMemoryBytes": 68719476736,
+    "freeMemoryBytesBefore": 257228800,
+    "loadAverageBefore": [
+      23.638671875,
+      24.4931640625,
+      22.5068359375
+    ],
+    "swapBefore": "total = 13312.00M  used = 12248.19M  free = 1063.81M  (encrypted)",
+    "dependencies": {
+      "bun": "1.3.14",
+      "hono": "4.12.30",
+      "@hono/node-server": "2.0.9",
+      "srvx": "0.11.22",
+      "uWebSockets.js": "20.69.0",
+      "@remix-run/node-serve": "0.2.0",
+      "@whatwg-node/server": "0.11.0"
+    },
+    "order1": [
+      "uws-async",
+      "whatwg-node-uws-async",
+      "remix-node-serve-stream",
+      "whatwg-node-uws-stream",
+      "remix-node-serve-async",
+      "whatwg-node-uws-json"
+    ],
+    "freeMemoryBytesAfter": 1031553024,
+    "loadAverageAfter": [
+      22.1435546875,
+      24.14697265625,
+      22.40673828125
+    ]
+  },
+  "results": [
+    {
+      "name": "uws-async",
+      "repetition": 1,
+      "result": {
+        "summary": {
+          "successRate": 1,
+          "total": 1.000613166,
+          "slowest": 0.0059575,
+          "fastest": 0.000019375,
+          "average": 0.00006149236582687337,
+          "requestsPerSec": 15470.514006808502,
+          "totalData": 170280,
+          "sizePerRequest": 11,
+          "sizePerSec": 170175.65407489354
+        },
+        "responseTimeHistogram": {
+          "0.000019375": 1,
+          "0.0006131874999999999": 15370,
+          "0.001207": 71,
+          "0.0018008125": 20,
+          "0.0023946249999999996": 7,
+          "0.0029884374999999993": 5,
+          "0.0035822499999999995": 2,
+          "0.0041760625": 3,
+          "0.004769875": 0,
+          "0.0053636874999999995": 0,
+          "0.005957499999999999": 1
+        },
+        "latencyPercentiles": {
+          "p10": 0.000025291,
+          "p25": 0.000029583,
+          "p50": 0.000037333,
+          "p75": 0.000053583,
+          "p90": 0.0000925,
+          "p95": 0.000140791,
+          "p99": 0.000482875
+        },
+        "rps": {
+          "mean": 15387.66302671011,
+          "stddev": 7308.520337980239,
+          "max": 32409.65482613876,
+          "percentiles": {
+            "p10": 4515.750220858751,
+            "p25": 9799.54673560424,
+            "p50": 16306.046281961351,
+            "p75": 20777.30820838175,
+            "p90": 24779.604479389865,
+            "p95": 27012.384876088217,
+            "p99": 28633.28619520178
+          }
+        },
+        "details": {
+          "DNSDialup": {
+            "average": 0.000228583,
+            "fastest": 0.000228583,
+            "slowest": 0.000228583
+          },
+          "DNSLookup": {
+            "average": 0.00001075,
+            "fastest": 0.00001075,
+            "slowest": 0.00001075
+          }
+        },
+        "statusCodeDistribution": {
+          "200": 15480
+        },
+        "errorDistribution": {}
+      },
+      "process": {
+        "averageCpuCores": 0.28982229082522387,
+        "rssBytes": 63766528
+      },
+      "host": {
+        "before": {
+          "loadAverage": [
+            23.638671875,
+            24.4931640625,
+            22.5068359375
+          ],
+          "freeMemoryBytes": 269860864
+        },
+        "after": {
+          "loadAverage": [
+            23.638671875,
+            24.4931640625,
+            22.5068359375
+          ],
+          "freeMemoryBytes": 413630464
+        }
+      }
+    },
+    {
+      "name": "whatwg-node-uws-async",
+      "repetition": 1,
+      "result": {
+        "summary": {
+          "successRate": 1,
+          "total": 1.000830125,
+          "slowest": 0.009194375,
+          "fastest": 0.000042666,
+          "average": 0.00012925452396759992,
+          "requestsPerSec": 7524.7535139892,
+          "totalData": 82841,
+          "sizePerRequest": 11,
+          "sizePerSec": 82772.2886538812
+        },
+        "responseTimeHistogram": {
+          "0.000042666": 1,
+          "0.0009578369": 7457,
+          "0.0018730078": 39,
+          "0.0027881787": 15,
+          "0.0037033495999999996": 8,
+          "0.0046185205": 6,
+          "0.0055336914000000004": 1,
+          "0.0064488623": 1,
+          "0.0073640332": 1,
+          "0.0082792041": 1,
+          "0.009194375": 1
+        },
+        "latencyPercentiles": {
+          "p10": 0.000053375,
+          "p25": 0.000062375,
+          "p50": 0.000077375,
+          "p75": 0.000112708,
+          "p90": 0.000204458,
+          "p95": 0.00030225,
+          "p99": 0.000920291
+        },
+        "rps": {
+          "mean": 7477.624756971916,
+          "stddev": 3643.312087298764,
+          "max": 13856.81293302541,
+          "percentiles": {
+            "p10": 1948.6014323451266,
+            "p25": 4903.707870889361,
+            "p50": 8130.523611743155,
+            "p75": 10558.865676144518,
+            "p90": 11679.027306169944,
+            "p95": 12426.97772594529,
+            "p99": 13762.330973210761
+          }
+        },
+        "details": {
+          "DNSDialup": {
+            "average": 0.000245833,
+            "fastest": 0.000245833,
+            "slowest": 0.000245833
+          },
+          "DNSLookup": {
+            "average": 0.0000155,
+            "fastest": 0.0000155,
+            "slowest": 0.0000155
+          }
+        },
+        "statusCodeDistribution": {
+          "200": 7531
+        },
+        "errorDistribution": {}
+      },
+      "process": {
+        "averageCpuCores": 0.7194028057458801,
+        "rssBytes": 247529472
+      },
+      "host": {
+        "before": {
+          "loadAverage": [
+            23.638671875,
+            24.4931640625,
+            22.5068359375
+          ],
+          "freeMemoryBytes": 512311296
+        },
+        "after": {
+          "loadAverage": [
+            23.638671875,
+            24.4931640625,
+            22.5068359375
+          ],
+          "freeMemoryBytes": 392839168
+        }
+      }
+    },
+    {
+      "name": "remix-node-serve-stream",
+      "repetition": 1,
+      "result": {
+        "summary": {
+          "successRate": 1,
+          "total": 1.000592583,
+          "slowest": 0.00423275,
+          "fastest": 0.000045583,
+          "average": 0.00011708313911266077,
+          "requestsPerSec": 8312.074406012262,
+          "totalData": 136265728,
+          "sizePerRequest": 16384,
+          "sizePerSec": 136185027.0681049
+        },
+        "responseTimeHistogram": {
+          "0.000045583": 2,
+          "0.00046429970000000007": 8167,
+          "0.0008830164000000001": 83,
+          "0.0013017331000000003": 37,
+          "0.0017204498000000003": 12,
+          "0.0021391665000000002": 6,
+          "0.0025578832000000004": 7,
+          "0.0029765999000000002": 1,
+          "0.0033953166000000004": 1,
+          "0.0038140333000000006": 0,
+          "0.00423275": 1
+        },
+        "latencyPercentiles": {
+          "p10": 0.000065,
+          "p25": 0.000071541,
+          "p50": 0.000084083,
+          "p75": 0.00011225,
+          "p90": 0.000169416,
+          "p95": 0.000235333,
+          "p99": 0.000670625
+        },
+        "rps": {
+          "mean": 8256.88905228557,
+          "stddev": 2950.2440816459243,
+          "max": 13654.120889540694,
+          "percentiles": {
+            "p10": 3366.8886296498217,
+            "p25": 6759.625302871549,
+            "p50": 9401.325692555554,
+            "p75": 10525.920078192541,
+            "p90": 11058.888581697534,
+            "p95": 11418.173164408532,
+            "p99": 11741.437882575263
+          }
+        },
+        "details": {
+          "DNSDialup": {
+            "average": 0.000160041,
+            "fastest": 0.000160041,
+            "slowest": 0.000160041
+          },
+          "DNSLookup": {
+            "average": 0.000009916,
+            "fastest": 0.000009916,
+            "slowest": 0.000009916
+          }
+        },
+        "statusCodeDistribution": {
+          "200": 8317
+        },
+        "errorDistribution": {}
+      },
+      "process": {
+        "averageCpuCores": 0.5096979616527898,
+        "rssBytes": 161759232
+      },
+      "host": {
+        "before": {
+          "loadAverage": [
+            23.02685546875,
+            24.35205078125,
+            22.46826171875
+          ],
+          "freeMemoryBytes": 989872128
+        },
+        "after": {
+          "loadAverage": [
+            23.02685546875,
+            24.35205078125,
+            22.46826171875
+          ],
+          "freeMemoryBytes": 916242432
+        }
+      }
+    },
+    {
+      "name": "whatwg-node-uws-stream",
+      "repetition": 1,
+      "result": {
+        "summary": {
+          "successRate": 1,
+          "total": 1.000735,
+          "slowest": 0.004277291,
+          "fastest": 0.000057833,
+          "average": 0.00015644239718129425,
+          "requestsPerSec": 6239.414030687445,
+          "totalData": 102301696,
+          "sizePerRequest": 16384,
+          "sizePerSec": 102226559.4787831
+        },
+        "responseTimeHistogram": {
+          "0.000057833": 1,
+          "0.0004797788": 6016,
+          "0.0009017245999999999": 128,
+          "0.0013236703999999998": 38,
+          "0.0017456161999999998": 29,
+          "0.002167562": 11,
+          "0.0025895078": 9,
+          "0.0030114536": 4,
+          "0.0034333994": 2,
+          "0.0038553451999999997": 3,
+          "0.004277291": 3
+        },
+        "latencyPercentiles": {
+          "p10": 0.00007175,
+          "p25": 0.000081416,
+          "p50": 0.000098958,
+          "p75": 0.000142833,
+          "p90": 0.000233208,
+          "p95": 0.000385,
+          "p99": 0.001292916
+        },
+        "rps": {
+          "mean": 6194.384849429274,
+          "stddev": 2853.784394859452,
+          "max": 12161.211023444172,
+          "percentiles": {
+            "p10": 2111.817307288126,
+            "p25": 3888.9713397527375,
+            "p50": 6453.429231291703,
+            "p75": 8553.42296918094,
+            "p90": 9741.133978736418,
+            "p95": 10174.912795456505,
+            "p99": 10607.444931197104
+          }
+        },
+        "details": {
+          "DNSDialup": {
+            "average": 0.001502791,
+            "fastest": 0.001502791,
+            "slowest": 0.001502791
+          },
+          "DNSLookup": {
+            "average": 0.000021583,
+            "fastest": 0.000021583,
+            "slowest": 0.000021583
+          }
+        },
+        "statusCodeDistribution": {
+          "200": 6244
+        },
+        "errorDistribution": {}
+      },
+      "process": {
+        "averageCpuCores": 0.5995593238969358,
+        "rssBytes": 225165312
+      },
+      "host": {
+        "before": {
+          "loadAverage": [
+            23.02685546875,
+            24.35205078125,
+            22.46826171875
+          ],
+          "freeMemoryBytes": 880492544
+        },
+        "after": {
+          "loadAverage": [
+            23.02685546875,
+            24.35205078125,
+            22.46826171875
+          ],
+          "freeMemoryBytes": 969752576
+        }
+      }
+    },
+    {
+      "name": "remix-node-serve-async",
+      "repetition": 1,
+      "result": {
+        "summary": {
+          "successRate": 1,
+          "total": 1.000854166,
+          "slowest": 0.005275708,
+          "fastest": 0.000036541,
+          "average": 0.00011178326234995377,
+          "requestsPerSec": 8656.60582163176,
+          "totalData": 95304,
+          "sizePerRequest": 11,
+          "sizePerSec": 95222.66403794935
+        },
+        "responseTimeHistogram": {
+          "0.000036541": 1,
+          "0.0005604576999999999": 8531,
+          "0.0010843743999999998": 73,
+          "0.0016082910999999998": 22,
+          "0.0021322078": 12,
+          "0.0026561245": 6,
+          "0.0031800412": 8,
+          "0.0037039578999999998": 4,
+          "0.0042278746": 3,
+          "0.0047517913": 2,
+          "0.005275708": 2
+        },
+        "latencyPercentiles": {
+          "p10": 0.000048416,
+          "p25": 0.000055041,
+          "p50": 0.0000675,
+          "p75": 0.000100458,
+          "p90": 0.000176041,
+          "p95": 0.000267875,
+          "p99": 0.000761416
+        },
+        "rps": {
+          "mean": 8592.93723266141,
+          "stddev": 3913.395216205731,
+          "max": 16945.236077948033,
+          "percentiles": {
+            "p10": 2727.272536554367,
+            "p25": 5807.437595517088,
+            "p50": 9521.94121460663,
+            "p75": 11547.56752009597,
+            "p90": 12867.878056749356,
+            "p95": 13423.955883185914,
+            "p99": 15133.179300349246
+          }
+        },
+        "details": {
+          "DNSDialup": {
+            "average": 0.002302916,
+            "fastest": 0.002302916,
+            "slowest": 0.002302916
+          },
+          "DNSLookup": {
+            "average": 0.000017,
+            "fastest": 0.000017,
+            "slowest": 0.000017
+          }
+        },
+        "statusCodeDistribution": {
+          "200": 8664
+        },
+        "errorDistribution": {}
+      },
+      "process": {
+        "averageCpuCores": 0.4995732814884442,
+        "rssBytes": 165462016
+      },
+      "host": {
+        "before": {
+          "loadAverage": [
+            22.1435546875,
+            24.14697265625,
+            22.40673828125
+          ],
+          "freeMemoryBytes": 1092993024
+        },
+        "after": {
+          "loadAverage": [
+            22.1435546875,
+            24.14697265625,
+            22.40673828125
+          ],
+          "freeMemoryBytes": 901103616
+        }
+      }
+    },
+    {
+      "name": "whatwg-node-uws-json",
+      "repetition": 1,
+      "result": {
+        "summary": {
+          "successRate": 1,
+          "total": 1.002000875,
+          "slowest": 0.013360375,
+          "fastest": 0.000049458,
+          "average": 0.00016601304334523242,
+          "requestsPerSec": 5871.2523579383105,
+          "totalData": 70596,
+          "sizePerRequest": 12,
+          "sizePerSec": 70455.02829525972
+        },
+        "responseTimeHistogram": {
+          "0.000049458": 1,
+          "0.0013805497": 5835,
+          "0.0027116414": 26,
+          "0.004042733099999999": 10,
+          "0.0053738247999999995": 6,
+          "0.0067049165": 2,
+          "0.0080360082": 0,
+          "0.0093670999": 1,
+          "0.0106981916": 0,
+          "0.0120292833": 1,
+          "0.013360375": 1
+        },
+        "latencyPercentiles": {
+          "p10": 0.000068125,
+          "p25": 0.000076166,
+          "p50": 0.000096583,
+          "p75": 0.00014475,
+          "p90": 0.000271708,
+          "p95": 0.00041275,
+          "p99": 0.001106208
+        },
+        "rps": {
+          "mean": 5845.2206044314735,
+          "stddev": 3019.5033001123993,
+          "max": 10775.972309843313,
+          "percentiles": {
+            "p10": 1513.9472389387383,
+            "p25": 3352.0404276390923,
+            "p50": 6310.781338839268,
+            "p75": 8245.988631937555,
+            "p90": 9520.668419070935,
+            "p95": 10309.75199441155,
+            "p99": 10750.482113910535
+          }
+        },
+        "details": {
+          "DNSDialup": {
+            "average": 0.000307208,
+            "fastest": 0.000307208,
+            "slowest": 0.000307208
+          },
+          "DNSLookup": {
+            "average": 0.000010041,
+            "fastest": 0.000010041,
+            "slowest": 0.000010041
+          }
+        },
+        "statusCodeDistribution": {
+          "200": 5883
+        },
+        "errorDistribution": {}
+      },
+      "process": {
+        "averageCpuCores": 0.6087819035088169,
+        "rssBytes": 242335744
+      },
+      "host": {
+        "before": {
+          "loadAverage": [
+            22.1435546875,
+            24.14697265625,
+            22.40673828125
+          ],
+          "freeMemoryBytes": 836141056
+        },
+        "after": {
+          "loadAverage": [
+            22.1435546875,
+            24.14697265625,
+            22.40673828125
+          ],
+          "freeMemoryBytes": 836141056
+        }
+      }
+    }
+  ],
+  "summaries": [
+    {
+      "name": "whatwg-node-uws-json",
+      "medianRequestsPerSecond": 5871.2523579383105,
+      "minRequestsPerSecond": 5871.2523579383105,
+      "maxRequestsPerSecond": 5871.2523579383105,
+      "medianCpuCores": 0.6087819035088169,
+      "medianRssBytes": 242335744,
+      "medianP50Seconds": 0.000096583,
+      "medianP99Seconds": 0.001106208,
+      "medianRequestsPerCpuSecond": 9644.262295081966
+    },
+    {
+      "name": "remix-node-serve-stream",
+      "medianRequestsPerSecond": 8312.074406012262,
+      "minRequestsPerSecond": 8312.074406012262,
+      "maxRequestsPerSecond": 8312.074406012262,
+      "medianCpuCores": 0.5096979616527898,
+      "medianRssBytes": 161759232,
+      "medianP50Seconds": 0.000084083,
+      "medianP99Seconds": 0.000670625,
+      "medianRequestsPerCpuSecond": 16307.843137254904
+    },
+    {
+      "name": "whatwg-node-uws-stream",
+      "medianRequestsPerSecond": 6239.414030687445,
+      "minRequestsPerSecond": 6239.414030687445,
+      "maxRequestsPerSecond": 6239.414030687445,
+      "medianCpuCores": 0.5995593238969358,
+      "medianRssBytes": 225165312,
+      "medianP50Seconds": 0.000098958,
+      "medianP99Seconds": 0.001292916,
+      "medianRequestsPerCpuSecond": 10406.666666666666
+    },
+    {
+      "name": "uws-async",
+      "medianRequestsPerSecond": 15470.514006808502,
+      "minRequestsPerSecond": 15470.514006808502,
+      "maxRequestsPerSecond": 15470.514006808502,
+      "medianCpuCores": 0.28982229082522387,
+      "medianRssBytes": 63766528,
+      "medianP50Seconds": 0.000037333,
+      "medianP99Seconds": 0.000482875,
+      "medianRequestsPerCpuSecond": 53379.31034482759
+    },
+    {
+      "name": "remix-node-serve-async",
+      "medianRequestsPerSecond": 8656.60582163176,
+      "minRequestsPerSecond": 8656.60582163176,
+      "maxRequestsPerSecond": 8656.60582163176,
+      "medianCpuCores": 0.4995732814884442,
+      "medianRssBytes": 165462016,
+      "medianP50Seconds": 0.0000675,
+      "medianP99Seconds": 0.000761416,
+      "medianRequestsPerCpuSecond": 17327.999999999996
+    },
+    {
+      "name": "whatwg-node-uws-async",
+      "medianRequestsPerSecond": 7524.7535139892,
+      "minRequestsPerSecond": 7524.7535139892,
+      "maxRequestsPerSecond": 7524.7535139892,
+      "medianCpuCores": 0.7194028057458801,
+      "medianRssBytes": 247529472,
+      "medianP50Seconds": 0.000077375,
+      "medianP99Seconds": 0.000920291,
+      "medianRequestsPerCpuSecond": 10459.722222222223
+    }
+  ]
+}

@@ -382,9 +382,87 @@ pub fn record_patches_on_graph(cwd: &Path, graph: &mut aube_lockfile::LockfileGr
     // invalid range already errored inside `effective_patch_config`.
     aube_lockfile::patch_groups::resolve_patched_by_version(&paths, &graph.packages)
         .map_err(map_patch_resolve_err)?;
+    verify_patches_used(cwd, &paths, graph)?;
     graph.patched_dependencies = paths;
     graph.patched_dependency_hashes = hashes;
     Ok(())
+}
+
+/// pnpm's `verifyPatches`: a declared `patchedDependencies` key that
+/// matches no installed package fails the install, unless
+/// `allowUnusedPatches` downgrades it to a warning.
+///
+/// Runs here, at the resolve gate, because that is where pnpm runs it —
+/// inside the resolution step, which a warm "lockfile is up to date"
+/// install skips entirely (verified against pnpm 10.15.1). Reporting
+/// every unused key at once, rather than the first, also matches pnpm,
+/// and firing before the graph is handed on keeps the failure ahead of
+/// any linking or lockfile write.
+fn verify_patches_used(
+    cwd: &Path,
+    paths: &BTreeMap<String, String>,
+    graph: &aube_lockfile::LockfileGraph,
+) -> Result<()> {
+    let unused = aube_lockfile::patch_groups::unused_patch_keys(
+        paths.keys().map(String::as_str),
+        &graph.packages,
+    )
+    // An invalid range is `effective_patch_config`'s error to raise, and
+    // it already did; nothing here can add to it.
+    .unwrap_or_default();
+    if unused.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<&str> = unused.iter().map(|u| u.source_key).collect();
+    // Byte-identical to pnpm's ERR_PNPM_UNUSED_PATCH wording so a user
+    // moving between the two reads the same sentence.
+    let message = format!("The following patches were not used: {}", keys.join(", "));
+    // An alias-named key is the one unused shape with a mechanical fix,
+    // so it carries the exact replacement rather than the generic hint.
+    let hint = unused
+        .iter()
+        .find_map(|u| {
+            let spelling = u.registry_name_spelling.as_deref()?;
+            Some(format!(
+                "Patches resolve against a package's registry name, not the npm alias it is \
+                 installed as — declare {:?} as {spelling:?}.",
+                u.source_key
+            ))
+        })
+        .unwrap_or_else(|| {
+            "Either remove them from \"patchedDependencies\" or update them to match packages \
+             in your dependencies."
+                .to_string()
+        });
+    if allow_unused_patches(cwd) {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_UNUSED_PATCH,
+            "{message} {hint}"
+        );
+        return Ok(());
+    }
+    Err(miette!(
+        code = aube_codes::errors::ERR_AUBE_UNUSED_PATCH,
+        help = hint,
+        "{message}"
+    ))
+}
+
+/// Resolve `allowUnusedPatches` from the two homes pnpm 10 honors it in
+/// — the manifest and the workspace yaml — with the workspace yaml
+/// winning, matching how `patchedDependencies` itself merges. Each
+/// reader applies its own brand gating, so a nub-identity project sees
+/// only neutral, un-branded config.
+fn allow_unused_patches(cwd: &Path) -> bool {
+    if let Ok(ws) = aube_manifest::workspace::WorkspaceConfig::load(cwd)
+        && let Some(allow) = ws.allow_unused_patches
+    {
+        return allow;
+    }
+    aube_manifest::PackageJson::from_path(&cwd.join("package.json"))
+        .ok()
+        .and_then(|m| m.allow_unused_patches())
+        .unwrap_or(false)
 }
 
 /// Drop an entry from `patchedDependencies` in whichever file declares
@@ -620,6 +698,50 @@ mod tests {
             patch_with_content("hello\r\n").content_hash(),
             patch_with_content("hello\n").content_hash(),
         );
+    }
+
+    /// pnpm's `verifyPatches` contract: a declared key that matches no
+    /// installed package fails the install, and `allowUnusedPatches`
+    /// downgrades exactly that failure to a warning.
+    #[test]
+    fn unused_patch_key_fails_the_install_unless_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("patches")).unwrap();
+        std::fs::write(dir.path().join("patches/ghost.patch"), "").unwrap();
+        // `extra` lands inside the `pnpm` object, after the closing
+        // brace of `patchedDependencies`.
+        let manifest = |extra: &str| {
+            let json = String::from(
+                r#"{"pnpm":{"patchedDependencies":{"ghost@1.0.0":"patches/ghost.patch"}"#,
+            ) + extra
+                + "}}";
+            std::fs::write(dir.path().join("package.json"), json).unwrap();
+        };
+        let mut graph = aube_lockfile::LockfileGraph {
+            packages: [(
+                "is-number@6.0.0".to_string(),
+                aube_lockfile::LockedPackage {
+                    name: "is-number".into(),
+                    version: "6.0.0".into(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+
+        manifest("");
+        let err = record_patches_on_graph(dir.path(), &mut graph)
+            .expect_err("an unused patch key must fail the install");
+        assert_eq!(
+            err.code().map(|c| c.to_string()).as_deref(),
+            Some(aube_codes::errors::ERR_AUBE_UNUSED_PATCH),
+            "wrong error for an unused patch key: {err:?}"
+        );
+
+        manifest(r#","allowUnusedPatches":true"#);
+        record_patches_on_graph(dir.path(), &mut graph)
+            .expect("allowUnusedPatches must downgrade the failure to a warning");
     }
 
     #[test]

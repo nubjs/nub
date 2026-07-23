@@ -331,10 +331,10 @@ Packages exempt from the minimumReleaseAge requirement.
 
 Use for trusted internal packages that need to be rolled out immediately
 without waiting for the age gate. Each entry is a bare name (`react`), a
-`*` name glob (`@myorg/*`), or a name with an exact-version union
-(`nx@21.6.5`, `webpack@4.47.0 || 5.102.1`); ranges like `^1.0.0` are not
-allowed. Once `aube audit --fix` learns to record patched versions, it
-will append them to this list automatically.
+`*` name glob (`@myorg/*`), or a name with a semver range union
+(`nx@21.6.5`, `webpack@^4.47.0 || >=5.102.1 <6`). Once
+`aube audit --fix` learns to record patched versions, it will append
+them to this list automatically.
 
 ### `minimumReleaseAgeStrict` {#setting-minimumreleaseagestrict}
 
@@ -653,8 +653,8 @@ Packages exempt from `trustPolicy` checks.
 - Workspace YAML keys: `trustPolicyExclude`
 - Managed policy: `managedWins`
 
-Patterns: `name`, `name@1.0.0`, `name@1.0.0 || 1.0.1` (exact versions only —
-no `^`/`~`/`>=`), `is-*` (name glob, no version), `@scope/name@1.0.0`.
+Patterns: `name`, `name@1.0.0`, `name@^1.0.0 || >=2 <3`, `is-*`
+(name glob, no version), `@scope/name@1.0.0`.
 Empty list disables user-provided exclusions; aube still applies its built-in
 exclusions for known registry provenance metadata churn.
 
@@ -2149,7 +2149,10 @@ Cache the results of install hooks.
 
 When an allowlisted dependency runs lifecycle scripts, aube snapshots
 the post-build package directory under the cache dir keyed by
-`(name, version, input hash)`. Future installs with the same inputs
+`(name, version, engine, input hash)`, where the engine is the same
+`<os>-<arch>-node<major>` fingerprint the virtual store uses, so a
+native addon built for one Node ABI is never restored into another.
+Future installs with the same inputs
 hardlink that cached tree back into the materialized package and skip
 the build. Packages still have to pass the active `allowBuilds` /
 `onlyBuiltDependencies` policy before scripts can run or populate the

@@ -21,7 +21,7 @@ pub(super) async fn run(
     // walks up) mutate the real root lockfile and then silently skip
     // the restore under `--no-save`.
     let (root, matched) = crate::commands::select_workspace_packages(&cwd, filter, "add")?;
-    let _lock = crate::commands::take_project_lock(&root)?;
+    let lock = crate::commands::take_project_lock(&root)?;
 
     // CLI build review flags write against the workspace root (where
     // `allowBuilds` lives) — same as the non-filtered path. Run before
@@ -78,13 +78,17 @@ pub(super) async fn run(
         let mut install_opts = install::InstallOptions::with_mode(
             crate::commands::chained_frozen_mode(install::FrozenMode::Fix),
         );
+        super::apply_dangerously_allow_all_builds(
+            &mut install_opts,
+            args.dangerously_allow_all_builds,
+        );
         install_opts.workspace_filter = filter.clone();
         // See the sibling `aube add` codepath for why this flag is set:
         // live OSV API on the resolved transitives.
         install_opts.osv_transitive_check = true;
         // `--lockfile-only`: write the lockfile + manifests, skip linking.
         install_opts.lockfile_only = args.lockfile_only;
-        install::run(install_opts).await?;
+        install::run_with_project_lock(install_opts, &lock).await?;
         Ok(())
     }
     .await;

@@ -1,5 +1,6 @@
 use super::dep_path::{
-    dep_path_tail, parse_dep_path, peerless_dep_path, rewrite_peer_suffix, version_to_dep_path,
+    dep_path_tail, parse_dep_path, peerless_dep_path, rewrite_peer_suffix, strip_patch_hash_suffix,
+    version_to_dep_path,
 };
 use super::format::reformat_for_pnpm_parity;
 use crate::{DepType, Error, LocalSource, LockfileGraph};
@@ -29,21 +30,37 @@ enum WritablePatchedDependency {
 }
 
 /// Stamp pnpm's `(patch_hash=<hash>)` marker onto a dep-path tail or
-/// snapshots key, in the position pnpm uses: immediately after the
-/// version, before any peer-context suffix
-/// (`6.1.0(patch_hash=…)(react@18.2.0)`). Idempotent — a tail parsed
-/// from a lockfile that already carries the marker passes through
-/// unchanged.
-fn with_patch_hash(tail: &str, hash: &str) -> String {
-    if tail.contains("(patch_hash=") {
-        return tail.to_string();
-    }
-    let insert_at = tail.find('(').unwrap_or(tail.len());
+/// snapshots key. pnpm places the patch identity immediately after the
+/// version, before any peer-context suffix:
+/// `1.0.0(patch_hash=<sha256>)(react@19.0.0)`. Any marker already on
+/// the value is stripped first, so a re-emit replaces a stale hash
+/// rather than preserving it, and `None` clears the marker for a
+/// package that is no longer patched.
+fn with_patch_hash(value: &str, hash: Option<&str>) -> String {
+    let bare = strip_patch_hash_suffix(value);
+    let Some(hash) = hash else {
+        return bare;
+    };
+    let suffix_at = bare.find('(').unwrap_or(bare.len());
     format!(
         "{}(patch_hash={hash}){}",
-        &tail[..insert_at],
-        &tail[insert_at..]
+        &bare[..suffix_at],
+        &bare[suffix_at..]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_patch_hash;
+
+    #[test]
+    fn replaces_every_stale_patch_hash_suffix() {
+        let value = "1.0.0(patch_hash=old)(react@19)(patch_hash=duplicate)";
+        assert_eq!(
+            with_patch_hash(value, Some("current")),
+            "1.0.0(patch_hash=current)(react@19)"
+        );
+    }
 }
 
 /// Write a LockfileGraph as pnpm-lock.yaml v9 format.
@@ -97,10 +114,12 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
     // on the right resolved version. Groups build from the DEDUPED union
     // of both selector maps — a key present in both would otherwise
     // double-push into a range group and manufacture a false conflict.
-    // The suffix is stamped only when the winning source key carries
-    // both a hash and a path (the `{ hash, path }` block form). For
-    // all-exact keys the resolved source key equals `name@version`, so
-    // this is byte-identical to the pre-resolution lookup.
+    // A recorded hash alone is enough to stamp: a graph parsed from a
+    // pnpm lockfile carries hashes with no paths (the reader drops
+    // them), and withholding the suffix on that re-emit would rewrite
+    // every patched package's identity. For all-exact keys the resolved
+    // source key equals `name@version`, so this is byte-identical to the
+    // pre-resolution lookup.
     let patch_selectors: std::collections::BTreeSet<&str> = graph
         .patched_dependency_hashes
         .keys()
@@ -110,24 +129,39 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
     let patch_groups = crate::patch_groups::PatchGroups::build(patch_selectors.into_iter())
         .map_err(|e| Error::PatchNonSemverRange(e.message()))?;
     let mut patched_by_dep_path: BTreeMap<&str, &str> = BTreeMap::new();
-    for (dep_path, pkg) in &graph.packages {
+    for pkg in graph.packages.values() {
         if pkg.local_source.is_some() {
             continue;
         }
+        // Resolve exactly the way `patch_groups::resolve_patched_by_version`
+        // does — that is the single rule the linker, graph hash, and drift
+        // check key off, and a suffix the linker won't honor is a lockfile
+        // that lies about what landed in node_modules.
         let source_key =
             patch_groups
-                .resolve(&pkg.name, &pkg.version)
+                .resolve_package(pkg)
                 .map_err(|c| Error::PatchKeyConflict {
                     message: c.message(),
                     hint: c.hint(),
                 })?;
         if let Some(source_key) = source_key
             && let Some(hash) = graph.patched_dependency_hashes.get(source_key)
-            && graph.patched_dependencies.contains_key(source_key)
         {
-            patched_by_dep_path.insert(dep_path.as_str(), hash.as_str());
+            patched_by_dep_path.insert(pkg.dep_path.as_str(), hash.as_str());
         }
     }
+    // Every dep-path-shaped reference to a package flows through here, so
+    // a `(patch_hash=…)` parsed off the previous lockfile is replaced with
+    // the current hash — or dropped once the patch is gone.
+    let decorate_patch_hash = |value: &str, pkg: Option<&crate::LockedPackage>| -> String {
+        match pkg {
+            Some(pkg) => with_patch_hash(
+                value,
+                patched_by_dep_path.get(pkg.dep_path.as_str()).copied(),
+            ),
+            None => value.to_string(),
+        }
+    };
     // Translate a *flat* peer reference from aube's internal FS-safe
     // hashed dep_path (`request@url+<hash>` / `request@git+<hash>`) to the
     // resolved spec pnpm writes inside a peer suffix
@@ -237,7 +271,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             // Local deps render with the canonical `file:<path>` /
             // `link:<path>` specifier, not the FS-safe encoded form
             // that lives in `dep_path`.
-            let version = if let Some(local) = graph
+            let mut version = if let Some(local) = graph
                 .packages
                 .get(&dep.dep_path)
                 .and_then(|p| p.local_source.as_ref())
@@ -273,10 +307,11 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
                     &peer_suffix_to_spec,
                 )
             };
-            let version = match patched_by_dep_path.get(dep.dep_path.as_str()) {
-                Some(hash) => with_patch_hash(&version, hash),
-                None => version,
-            };
+            let target = graph
+                .packages
+                .get(&dep.dep_path)
+                .or_else(|| graph.packages.get(&peerless_dep_path(&dep.name, &version)));
+            version = decorate_patch_hash(&version, target);
 
             let spec = WritableDepSpec {
                 specifier: specifier.to_string(),
@@ -439,6 +474,11 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             // the derivable `/-/…tgz` shape would reconstruct against the wrong
             // (default) registry, so the URL must be persisted verbatim.
             || pkg.force_tarball_url
+            || pkg
+                .extra_meta
+                .get(crate::EXTRA_PRESERVE_TARBALL_URL)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
             || registry_tarball_url_is_not_derivable(
                 pkg.registry_name(),
                 &pkg.version,
@@ -703,26 +743,24 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
                     .packages
                     .get(&dp)
                     .or_else(|| graph.packages.get(&peerless_dep_path(&name, &value)));
-                if let Some(target) = target
+                let rewritten = if let Some(target) = target
                     && let Some(ref local) = target.local_source
                     && !matches!(local, LocalSource::Link(_))
                 {
-                    (name, local.specifier())
+                    local.specifier()
                 } else if native_pnpm_aliases
                     && let Some(target) = target
                     && let Some(real_name) = target.alias_of.as_deref()
                 {
-                    (name, format!("{real_name}@{value}"))
-                } else if let Some(hash) = patched_by_dep_path.get(dp.as_str()) {
-                    // A dependent of a patched package references the
-                    // suffixed dep path, same as the snapshots key.
-                    (name, with_patch_hash(&value, hash))
+                    format!("{real_name}@{value}")
                 } else {
                     // Registry dep whose value may carry a
                     // `(git/tarball@hash)` peer suffix — render the suffix
                     // as the resolved spec (`1.1.4(request@https://…)`).
-                    (name, rewrite_peer_suffix(&value, &peer_suffix_to_spec))
-                }
+                    rewrite_peer_suffix(&value, &peer_suffix_to_spec)
+                };
+                let rewritten = decorate_patch_hash(&rewritten, target);
+                (name, rewritten)
             })
             .collect()
     };
@@ -733,7 +771,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
         // pnpm has no resolution shape for generated packages.
         // Other local deps use the canonical specifier key so pnpm's
         // parser lines them up with the packages entry above.
-        let key = match pkg.local_source.as_ref() {
+        let mut key = match pkg.local_source.as_ref() {
             Some(LocalSource::Link(_)) | Some(LocalSource::Exec(_)) => continue,
             Some(local) => format!("{}@{}", pkg.name, local.specifier()),
             None => {
@@ -747,10 +785,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
                 }
             }
         };
-        let key = match patched_by_dep_path.get(dep_path.as_str()) {
-            Some(hash) => with_patch_hash(&key, hash),
-            None => key,
-        };
+        key = decorate_patch_hash(&key, Some(pkg));
         let pkg_deps = rewrite_local_deps(pkg.dependencies.clone());
         let pkg_opt_deps = rewrite_local_deps(pkg.optional_dependencies.clone());
         snapshots.insert(

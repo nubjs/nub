@@ -234,6 +234,82 @@ impl<'a> PatchGroups<'a> {
         }
         Ok(group.all)
     }
+
+    /// Resolve a graph package by the name pnpm would match it under:
+    /// its REGISTRY name, never the folder it is installed as.
+    ///
+    /// pnpm keeps no separate node for an npm-aliased install —
+    /// `odd-alias: npm:is-odd@3.0.1` resolves to the `is-odd@3.0.1`
+    /// node, and `getPatchInfo(patchedDependencies, pkg.name,
+    /// pkg.version)` matches it on the resolved manifest name. So a key
+    /// declared against the registry name patches the alias too, and a
+    /// key naming the ALIAS matches nothing at all — no manifest is
+    /// named `odd-alias`. Aube keeps the alias as its own
+    /// `LockedPackage` because the linker needs it to place
+    /// `node_modules/<alias>`, so pnpm's rule has to be applied
+    /// explicitly here instead of falling out of the graph shape.
+    ///
+    /// A key only an alias name would match is dead config under this
+    /// rule; [`unused_patch_keys`] finds it — along with every other key
+    /// nothing matches — so a caller can refuse the install rather than
+    /// leave the user with a silently unapplied patch.
+    pub fn resolve_package(
+        &self,
+        pkg: &crate::LockedPackage,
+    ) -> Result<Option<&'a str>, PatchKeyConflict> {
+        self.resolve(pkg.registry_name(), &pkg.version)
+    }
+}
+
+/// A declared `patchedDependencies` key that no installed package
+/// matches, so the patch it names would never be applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusedPatchKey<'a> {
+    /// The declared selector, verbatim.
+    pub source_key: &'a str,
+    /// The registry-name spelling that WOULD have matched, when the key
+    /// names an npm alias instead of the package behind it. `None` when
+    /// the key simply matches nothing installed.
+    pub registry_name_spelling: Option<String>,
+}
+
+/// Every declared patch key that matches no installed package, in
+/// declaration order — pnpm's `verifyPatches`, which fails the install
+/// unless `allowUnusedPatches` downgrades it.
+///
+/// The alias sub-case gets a concrete replacement spelling: swapping
+/// only the name prefix preserves whatever version selector the user
+/// wrote (exact, range, `*`, or absent), so the suggestion is a drop-in.
+/// A per-package conflict is swallowed here; the install's own conflict
+/// gate raises it.
+pub fn unused_patch_keys<'a>(
+    source_keys: impl Iterator<Item = &'a str>,
+    packages: &BTreeMap<String, crate::LockedPackage>,
+) -> Result<Vec<UnusedPatchKey<'a>>, InvalidPatchRange> {
+    let declared: Vec<&'a str> = source_keys.collect();
+    let groups = PatchGroups::build(declared.iter().copied())?;
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let matched: std::collections::BTreeSet<&str> = packages
+        .values()
+        .filter_map(|pkg| groups.resolve_package(pkg).ok().flatten())
+        .collect();
+    let alias_spelling = |source_key: &str| -> Option<String> {
+        packages.values().find_map(|pkg| {
+            let registry_name = pkg.alias_of.as_deref()?;
+            let hit = groups.resolve(&pkg.name, &pkg.version).ok().flatten()?;
+            (hit == source_key).then(|| format!("{registry_name}{}", &source_key[pkg.name.len()..]))
+        })
+    };
+    Ok(declared
+        .into_iter()
+        .filter(|key| !matched.contains(key))
+        .map(|source_key| UnusedPatchKey {
+            source_key,
+            registry_name_spelling: alias_spelling(source_key),
+        })
+        .collect())
 }
 
 /// Either failure mode of resolving a whole graph's patches — an
@@ -272,7 +348,7 @@ pub fn resolve_patched_by_version<V: Clone>(
             continue;
         }
         if let Some(source_key) = groups
-            .resolve(&pkg.name, &pkg.version)
+            .resolve_package(pkg)
             .map_err(PatchResolveError::Conflict)?
             && let Some(value) = source.get(source_key)
         {
@@ -457,6 +533,100 @@ mod tests {
             resolved.len(),
             3,
             "peer-context variant must collapse to one entry"
+        );
+    }
+
+    fn mk_alias(alias: &str, registry_name: &str, version: &str) -> crate::LockedPackage {
+        crate::LockedPackage {
+            name: alias.into(),
+            version: version.into(),
+            alias_of: Some(registry_name.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_by_version_aliased_package_inherits_registry_name_patch() {
+        let mut packages = BTreeMap::new();
+        packages.insert("is-odd@3.0.1".to_string(), mk_pkg("is-odd", "3.0.1"));
+        packages.insert(
+            "odd-alias@3.0.1".to_string(),
+            mk_alias("odd-alias", "is-odd", "3.0.1"),
+        );
+        let source: BTreeMap<String, String> = [(
+            "is-odd@3.0.1".to_string(),
+            "patches/is-odd@3.0.1.patch".to_string(),
+        )]
+        .into();
+
+        let resolved = resolve_patched_by_version(&source, &packages).unwrap();
+        // The alias entry is keyed by the ALIAS spec_key — what the
+        // linker's `Patches` map and the graph-hash fold look up — not by
+        // the registry name the selector was written against.
+        assert_eq!(
+            resolved.get("odd-alias@3.0.1").map(String::as_str),
+            Some("patches/is-odd@3.0.1.patch"),
+            "an aliased install must inherit its registry name's patch (pnpm has no separate alias node)"
+        );
+        assert_eq!(
+            resolved.get("is-odd@3.0.1").map(String::as_str),
+            Some("patches/is-odd@3.0.1.patch")
+        );
+    }
+
+    #[test]
+    fn resolve_by_version_ignores_a_key_naming_the_alias_and_reports_it() {
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            "odd-alias@3.0.1".to_string(),
+            mk_alias("odd-alias", "is-odd", "3.0.1"),
+        );
+        let source: BTreeMap<String, String> =
+            [("odd-alias@3.0.1".to_string(), "patches/x.patch".to_string())].into();
+
+        // pnpm resolves on the registry name, so nothing is named
+        // `odd-alias` and the key patches nothing.
+        assert!(
+            resolve_patched_by_version(&source, &packages)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            unused_patch_keys(source.keys().map(String::as_str), &packages).unwrap(),
+            vec![UnusedPatchKey {
+                source_key: "odd-alias@3.0.1",
+                registry_name_spelling: Some("is-odd@3.0.1".to_string()),
+            }],
+            "dead alias-name config must be reportable, with the spelling that works"
+        );
+    }
+
+    #[test]
+    fn unused_patch_keys_reports_only_the_dead_key_beside_an_applying_one() {
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            "odd-alias@3.0.1".to_string(),
+            mk_alias("odd-alias", "is-odd", "3.0.1"),
+        );
+        // `is-odd@3.0.1` patches the aliased install and must never be
+        // reported, or every project the alias fix serves gets flagged.
+        // `ghost@1.0.0` matches nothing — and an unused key sitting
+        // beside one that applies still counts (pnpm fails there too).
+        let source: BTreeMap<String, String> = [
+            (
+                "is-odd@3.0.1".to_string(),
+                "patches/is-odd@3.0.1.patch".to_string(),
+            ),
+            ("ghost@1.0.0".to_string(), "patches/ghost.patch".to_string()),
+        ]
+        .into();
+
+        assert_eq!(
+            unused_patch_keys(source.keys().map(String::as_str), &packages).unwrap(),
+            vec![UnusedPatchKey {
+                source_key: "ghost@1.0.0",
+                registry_name_spelling: None,
+            }]
         );
     }
 

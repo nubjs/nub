@@ -17,6 +17,148 @@ use manifest::{
 };
 use miette::{Context, IntoDiagnostic, miette};
 
+/// Options for embedders that need npm-style `install(dir, { add })`
+/// semantics without routing through clap or process-global cwd state.
+#[derive(Debug, Clone, Default)]
+pub struct AddToProjectOptions {
+    /// Save packages to `devDependencies`.
+    pub save_dev: bool,
+    /// Save concrete versions instead of applying the configured save prefix.
+    pub save_exact: bool,
+    /// Save packages to `optionalDependencies`.
+    pub save_optional: bool,
+    /// Save packages to `peerDependencies`. Combine with [`Self::save_dev`]
+    /// to install the peer locally for development as well.
+    pub save_peer: bool,
+    /// Skip root and dependency lifecycle scripts regardless of project policy.
+    pub ignore_scripts: bool,
+    /// Ignore install freshness state and re-resolve/relink the project.
+    pub force: bool,
+    /// Allow dependency lifecycle scripts without the normal allowlist.
+    pub dangerously_allow_all_builds: bool,
+    /// Refuse network access and resolve exclusively from local caches.
+    pub offline: bool,
+    /// Dependency sections to materialize for this invocation.
+    pub dep_selection: install::DepSelection,
+    /// Force a live transitive OSV check even when resolution reused every
+    /// version from the existing lockfile.
+    pub osv_transitive_check: bool,
+    /// Invocation-scoped output and cancellation controls for embedders.
+    pub control: install::InstallControl,
+    /// Directory containing the `node` executable an embedding host wants
+    /// lifecycle scripts to run on (see
+    /// [`crate::commands::install::InstallOptions::embedder_node_bin_dir`]).
+    /// `None` keeps aube's own runtime resolution. Matches the
+    /// `node_bin_dir` field on [`crate::embed::InstallOptions`].
+    pub node_bin_dir: Option<std::path::PathBuf>,
+}
+
+/// Resolve, save, and install packages in an explicitly selected project.
+///
+/// This is the in-process counterpart to [`run`] for embedders. It holds the
+/// project lock across both manifest mutation and installation, and never
+/// consults or changes the process-global logical cwd. Cancellation rolls the
+/// manifest and lockfile back to their pre-call bytes. Other install failures
+/// preserve the manifest change, matching CLI `add`, so the host can retry the
+/// install without repeating the add operation.
+pub async fn add_to_project(
+    project_dir: &std::path::Path,
+    packages: &[String],
+    options: AddToProjectOptions,
+) -> miette::Result<()> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    // Adding to a workspace member mutates that member's manifest, but the
+    // subsequent install owns the workspace-root lockfile and virtual store.
+    // Serialize on the same root lock as the CLI add path.
+    let lock = super::take_install_project_lock(project_dir)?;
+    options.control.check_cancelled()?;
+    let manifest_path = project_dir.join("package.json");
+    let original_manifest = std::fs::read(&manifest_path)
+        .into_diagnostic()
+        .wrap_err("failed to snapshot package.json before embedded add")?;
+    let lockfile_path = no_save::lockfile_path_for_project(lock.project_dir())?;
+    let original_lockfile = no_save::snapshot_lockfile(&lockfile_path)?;
+    let mutation_control = options.control.clone();
+    let mutation_result = install::control::scope(options.control.clone(), async {
+        tokio::select! {
+            biased;
+            _ = mutation_control.cancelled() => mutation_control.check_cancelled(),
+            result = async {
+                if !options.offline {
+                    supply_chain::run_cli_name_gates(project_dir, packages, false).await?;
+                }
+                update_manifest_for_add(
+                    project_dir,
+                    packages,
+                    AddManifestOptions {
+                        save_dev: options.save_dev,
+                        save_exact: options.save_exact,
+                        save_optional: options.save_optional,
+                        save_peer: options.save_peer,
+                        network_mode: if options.offline {
+                            aube_registry::NetworkMode::Offline
+                        } else {
+                            aube_registry::NetworkMode::Online
+                        },
+                        save_catalog: None,
+                        workspace_protocol_override: None,
+                    },
+                    false,
+                )
+                .await
+            } => result,
+        }
+    })
+    .await;
+    let operation_result = match mutation_result {
+        Err(error) => Err(error),
+        Ok(()) => {
+            let mut install_options = install::InstallOptions::with_mode(install::FrozenMode::Fix);
+            install_options.project_dir = Some(project_dir.to_path_buf());
+            install_options.ignore_scripts = options.ignore_scripts;
+            install_options.force = options.force;
+            install_options.dep_selection = options.dep_selection;
+            install_options.osv_transitive_check = options.osv_transitive_check && !options.offline;
+            apply_dangerously_allow_all_builds(
+                &mut install_options,
+                options.dangerously_allow_all_builds,
+            );
+            install_options.control = options.control;
+            install_options.embedder_node_bin_dir = options.node_bin_dir;
+            if options.offline {
+                install_options.network_mode = aube_registry::NetworkMode::Offline;
+            }
+            install::run_with_project_lock(install_options, &lock).await
+        }
+    };
+    if let Err(error) = operation_result {
+        let cancelled = error
+            .code()
+            .is_some_and(|code| code.to_string() == aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED);
+        if cancelled {
+            let manifest_restore =
+                aube_util::fs_atomic::atomic_write(&manifest_path, &original_manifest);
+            let lockfile_restore = no_save::restore_lockfile(&lockfile_path, &original_lockfile);
+            if let Err(restore_error) = manifest_restore {
+                return Err(miette!(
+                    code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
+                    "install cancelled and package.json rollback failed: {restore_error}"
+                ));
+            }
+            if let Err(restore_error) = lockfile_restore {
+                return Err(miette!(
+                    code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
+                    "install cancelled and lockfile rollback failed: {restore_error}"
+                ));
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct AddArgs {
     /// Package(s) to add
@@ -69,6 +211,12 @@ pub struct AddArgs {
     /// which remains a hard block.
     #[arg(long)]
     pub allow_low_downloads: bool,
+    /// Allow every dependency's lifecycle scripts to run.
+    ///
+    /// Bypasses the `allowBuilds` allowlist for this invocation. Do not
+    /// use in CI. Mirrors pnpm's `--dangerously-allow-all-builds`.
+    #[arg(long)]
+    pub dangerously_allow_all_builds: bool,
     /// Mark a dependency's lifecycle scripts as reviewed and denied.
     ///
     /// Writes `allowBuilds: { <pkg>: false }` into the workspace yaml
@@ -80,11 +228,11 @@ pub struct AddArgs {
     /// Conflicts with `--no-save`, which only snapshots `package.json`
     /// and the lockfile and would leave an orphaned denial in the
     /// workspace yaml on restore. Also conflicts with `--allow-build` for
-    /// the same package name.
+    /// the same package name and with `--dangerously-allow-all-builds`.
     #[arg(
         long = "deny-build",
         value_name = "PKG",
-        conflicts_with = "no_save",
+        conflicts_with_all = ["no_save", "dangerously_allow_all_builds"],
         require_equals = true,
         value_parser = parse_deny_build_value,
     )]
@@ -227,8 +375,9 @@ pub async fn run(
         save_catalog,
         save_catalog_name,
         allow_build,
-        deny_build,
         allow_low_downloads,
+        dangerously_allow_all_builds,
+        deny_build,
         lockfile,
         network,
         virtual_store,
@@ -249,9 +398,12 @@ pub async fn run(
     if global {
         return global::run_global(
             packages,
-            allow_build,
-            deny_build,
-            allow_low_downloads,
+            global::GlobalAddOptions {
+                allow_build,
+                allow_low_downloads,
+                dangerously_allow_all_builds,
+                deny_build,
+            },
             lockfile,
             network,
             virtual_store,
@@ -328,7 +480,7 @@ pub async fn run(
         }
     }
 
-    let _lock = super::take_project_lock(&cwd)?;
+    let lock = super::take_install_project_lock(&cwd)?;
     let manifest_path = cwd.join("package.json");
 
     // 1. Read existing package.json. Snapshot the raw bytes when
@@ -384,6 +536,7 @@ pub async fn run(
             save_exact,
             save_optional,
             save_peer,
+            network_mode: aube_registry::NetworkMode::Online,
             save_catalog: save_catalog_target,
             workspace_protocol_override: workspace_protocol_override_from_flags(
                 save_workspace_protocol,
@@ -412,11 +565,13 @@ pub async fn run(
     // `ERR_AUBE_MALICIOUS_PACKAGE` as the CLI-name gate above.
     let mut install_opts =
         install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Fix));
+    apply_dangerously_allow_all_builds(&mut install_opts, dangerously_allow_all_builds);
     install_opts.osv_transitive_check = true;
     // `--lockfile-only`: the resolver still runs and the lockfile +
     // manifest are written, but the linker never touches `node_modules`.
     install_opts.lockfile_only = lockfile_only;
-    let pipeline_result: miette::Result<()> = install::run(install_opts).await;
+    let pipeline_result: miette::Result<()> =
+        install::run_with_project_lock(install_opts, &lock).await;
 
     // 5. Under `--no-save`, restore the snapshotted `package.json` and
     // lockfile so neither shows up in `git status`. The user's
@@ -453,4 +608,17 @@ pub async fn run(
         return Err(first);
     }
     Ok(())
+}
+
+pub(super) fn apply_dangerously_allow_all_builds(
+    install_opts: &mut install::InstallOptions,
+    enabled: bool,
+) {
+    if enabled {
+        install_opts.dangerously_allow_all_builds = true;
+        install_opts.cli_flags.push((
+            "dangerously-allow-all-builds".to_string(),
+            "true".to_string(),
+        ));
+    }
 }

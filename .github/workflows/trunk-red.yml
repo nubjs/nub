@@ -1,0 +1,90 @@
+name: Trunk red
+
+# Trunk regressions are only caught POST-merge here by design: the CI matrix drops
+# macos-14 from `pull_request` (the macOS-5 concurrent-runner cap), so the leg that
+# runs the integration suite on macOS runs on push:main and nightly only. That is a
+# deliberate cost trade — but it means nothing is watching when trunk breaks. It once
+# stayed red for ~16h across 8 merges (a macOS-only fork bomb, #517) because a failed
+# main run notifies nobody.
+#
+# This workflow closes that loop: it files ONE tracking issue the first time a
+# main-branch run fails and comments on it for each subsequent failure, so the red is
+# visible and attributable to a commit. It auto-closes when main goes green again.
+#
+# Scope: report only. It never reruns, reverts, or gates anything.
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Node matrix
+      - Aube parity
+      - Docker install smoke
+      - Native-dep floor
+      - Daily-driver smoke
+      - WPT Worker
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+
+# Serialize so two failing workflows finishing together can't both create the
+# tracking issue (the find-or-create below is read-then-write, not atomic).
+concurrency:
+  group: trunk-red
+  cancel-in-progress: false
+
+jobs:
+  report:
+    # `skipped` and `cancelled` are not signal: main's CI concurrency group is
+    # cancel-in-progress, so a merge burst routinely cancels superseded runs.
+    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: File / update / resolve the trunk-red tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TITLE: "CI is failing on main"
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The single open tracking issue, matched on exact title so this can
+          # never collide with a human-filed issue that merely mentions CI.
+          existing=$(gh issue list --repo "$REPO" --state open --label trunk-red \
+            --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+
+          short="${SHA:0:9}"
+
+          if [[ "$CONCLUSION" == "success" ]]; then
+            # Only the workflow that carries the macOS integration leg can clear
+            # the flag; a green Docker smoke says nothing about CI being fixed.
+            if [[ -n "$existing" && "$WORKFLOW" == "CI" ]]; then
+              gh issue close "$existing" --repo "$REPO" \
+                --comment "Green again on \`$short\` — $RUN_URL"
+            fi
+            exit 0
+          fi
+
+          body="\`$WORKFLOW\` failed on main at \`$short\`.
+
+          $RUN_URL
+
+          Trunk-only legs (the macOS integration suite) do not run on pull requests, so a
+          regression can land green and only surface here. This issue tracks the red and
+          closes automatically when CI passes on main again."
+
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+          else
+            gh label create trunk-red --repo "$REPO" --color B60205 \
+              --description "CI is failing on the main branch" 2>/dev/null || true
+            gh issue create --repo "$REPO" --title "$TITLE" --label trunk-red --body "$body"
+          fi

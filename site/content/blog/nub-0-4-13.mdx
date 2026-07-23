@@ -1,0 +1,18 @@
+---
+title: "Nub 0.4.13"
+description: On Windows, the global content-addressable store now resolves under LOCALAPPDATA instead of a Unix-style .local\share path, matching the cache tier and Node's platform conventions.
+author: The Nub Team
+date: 2026-07-15
+---
+
+A Windows-only patch that fixes where nub places its global content-addressable store.
+
+## The store now lands under %LOCALAPPDATA%
+
+On Windows, `nub store path` reported the content-addressable store under a Unix-style `.local\share` path — `C:\Users\<user>\.local\share\nub\store\v1` — instead of `%LOCALAPPDATA%\nub\store`. The data-dir resolver only consulted `XDG_DATA_HOME` and then fell back to `~/.local/share`, with no `%LOCALAPPDATA%` branch, so the CAS store split off from the cache and virtual-store tiers that already sat under `%LOCALAPPDATA%`. This showed up on plain cmd and PowerShell, not just Git Bash.
+
+The resolver now has a `%LOCALAPPDATA%` branch, so the Windows data root resolves to `%LOCALAPPDATA%\nub`, matching the cache tier and Node's platform conventions. Unix and macOS behavior is unchanged. ([#476](https://github.com/nubjs/nub/pull/476), closes [#451](https://github.com/nubjs/nub/issues/451))
+
+A Windows machine that already ran nub has a stale store at `%USERPROFILE%\.local\share\nub\store`. After upgrading, the next install re-populates the store under `%LOCALAPPDATA%` — a one-time re-download, no breakage. The old `.local\share\nub` directory can be deleted.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.13) list every change in this release.

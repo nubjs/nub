@@ -175,6 +175,7 @@ _dev_engines_project() {
 	echo "runtime-installer=aube" >>.npmrc
 	run aube runtime set node 0.95
 	assert_success
+	assert_output --partial "node 0.95.2 ready (aube)"
 	run cat package.json
 	assert_output --partial '"name": "node"'
 	assert_output --partial '"version": "^0.95.2"'
