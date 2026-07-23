@@ -47,8 +47,15 @@ pub struct Manifest {
     pub shape: Shape,
     /// The entry file's name within the extracted app dir (e.g. `main.js`).
     pub entry: String,
-    /// The concrete Node version this binary targets (down-level + embed/provision).
+    /// The concrete Node version this binary targets. Embed: the EXACT embedded
+    /// version. Smol: the acceptance FLOOR the launcher enforces (`discovered >=
+    /// node_version`) and the version it provisions when nothing is found.
     pub node_version: String,
+    /// Smol only: the original Node requirement (`>=20`, `^22`, `24`, `lts`) the
+    /// artifact was compiled against, recorded for provenance. `None` when the
+    /// target was a bare exact version (embed always None).
+    #[serde(default)]
+    pub node_range: Option<String>,
     /// The target triple this binary was compiled for (e.g. `darwin-arm64`).
     pub triple: String,
     /// Content hash (hex) of the DECOMPRESSED embedded Node — the cache key for
@@ -190,6 +197,7 @@ mod tests {
             shape: Shape::Embed,
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
+            node_range: None,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             app_sha256: "def456".into(),
@@ -218,6 +226,7 @@ mod tests {
             shape: Shape::Smol,
             entry: "main.js".into(),
             node_version: "24.10.0".into(),
+            node_range: Some(">=20".into()),
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),
             app_sha256: "aa".into(),
@@ -228,6 +237,7 @@ mod tests {
         let view = decode(&blob).unwrap();
         assert_eq!(view.manifest.shape, Shape::Smol);
         assert!(view.node_blob.is_empty());
+        assert_eq!(view.manifest.node_range.as_deref(), Some(">=20"));
         assert_eq!(view.app_files[0].1, b"console.log(1)");
     }
 

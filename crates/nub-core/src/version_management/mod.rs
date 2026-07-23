@@ -307,6 +307,154 @@ pub fn resolve_host_node_version(spec: &str, cache_root: &Path) -> Result<NodeVe
         .with_context(|| format!("no published Node release matches --target '{spec}'"))
 }
 
+// ---- pin-based resolution for `nub compile` (reuses nub run's grammar) ---------
+//
+// `nub compile` infers its Node version from the SAME pin chain `nub run` uses
+// (`resolve_pin_chain`), so the two can't drift. A `VersionPin` is the parsed
+// pin from that chain (or from `--target`). Embed resolves it to one EXACT
+// version to bake; `--smol` keeps a floor the launcher satisfies at runtime.
+
+use crate::node::version::VersionPin;
+
+/// Parse a `--target` value into a pin using the SAME grammar the pin chain
+/// accepts (concrete / major / major.minor / range / alias). The single entry
+/// nub-cli uses so `--target` and a `.node-version`/`engines.node` pin resolve
+/// identically.
+pub fn parse_target_spec(spec: &str) -> Result<VersionPin> {
+    VersionPin::parse_allowing_ranges(spec)
+        .map_err(|_| anyhow::anyhow!("invalid --target {spec:?}: not a version, range, or alias"))
+}
+
+/// Resolve a pin to the NEWEST host Node version satisfying it, against the dist
+/// index (no download). The embed shape bakes exactly one version, so a range /
+/// major / alias must collapse to a concrete release at compile time.
+pub fn resolve_host_pin(pin: &VersionPin, cache_root: &Path) -> Result<NodeVersion> {
+    let host = HostTarget::detect()
+        .context("this host is not a platform nodejs.org publishes a Node build for")?;
+    let mirror = resolve_mirror_base(&host);
+    let index = node_index::load_index(cache_root, &mirror)
+        .context("loading the Node release index to resolve the compile target")?;
+    // Resolve through node_index's own resolvers (which read the private index
+    // rows) rather than touching IndexEntry directly.
+    let resolved = match pin {
+        VersionPin::Range(alts) => node_index::resolve_range(alts, &index),
+        VersionPin::Exact(v) => node_index::resolve_spec(&v.to_string(), &index),
+        VersionPin::MajorMinor(major, minor) => {
+            node_index::resolve_spec(&format!("{major}.{minor}"), &index)
+        }
+        VersionPin::Major(major) => node_index::resolve_spec(&format!("{major}"), &index),
+        VersionPin::Alias(alias) => node_index::resolve_spec(alias, &index),
+    };
+    resolved.context("no published Node release satisfies the requested Node version")
+}
+
+/// The minimum acceptable Node version for a pin — the floor the `--smol`
+/// launcher enforces with its existing `discovered >= target` acceptance. Pure
+/// for exact/major/major.minor/lower-bounded ranges; an alias or an
+/// upper-bound-only range resolves to a concrete release via the index.
+pub fn pin_floor(pin: &VersionPin, cache_root: &Path) -> Result<NodeVersion> {
+    match pin {
+        VersionPin::Exact(v) => Ok(v.clone()),
+        VersionPin::Major(major) => Ok(NodeVersion::new(*major, 0, 0)),
+        VersionPin::MajorMinor(major, minor) => Ok(NodeVersion::new(*major, *minor, 0)),
+        VersionPin::Range(alts) => match range_floor(alts) {
+            Some(floor) => Ok(floor),
+            // Only an upper bound (`<23`) — no natural floor; fall back to the
+            // newest satisfying release so provisioning has a real target.
+            None => resolve_host_pin(pin, cache_root),
+        },
+        VersionPin::Alias(_) => resolve_host_pin(pin, cache_root),
+    }
+}
+
+/// The lowest lower-bound across a range's comparators (min over `||`
+/// alternatives — the most permissive floor). `None` when no comparator imposes
+/// a lower bound.
+fn range_floor(alternatives: &[semver::VersionReq]) -> Option<NodeVersion> {
+    let mut floor: Option<NodeVersion> = None;
+    for req in alternatives {
+        for c in &req.comparators {
+            let lower = matches!(
+                c.op,
+                semver::Op::GreaterEq
+                    | semver::Op::Greater
+                    | semver::Op::Exact
+                    | semver::Op::Tilde
+                    | semver::Op::Caret
+            );
+            if !lower {
+                continue;
+            }
+            let v = NodeVersion::new(
+                c.major as u32,
+                c.minor.unwrap_or(0) as u32,
+                c.patch.unwrap_or(0) as u32,
+            );
+            floor = Some(match floor {
+                Some(f) if f <= v => f,
+                _ => v,
+            });
+        }
+    }
+    floor
+}
+
+#[cfg(test)]
+mod pin_resolution_tests {
+    use super::*;
+
+    fn pin(s: &str) -> VersionPin {
+        parse_target_spec(s).unwrap()
+    }
+
+    #[test]
+    fn range_floor_takes_the_lowest_lower_bound() {
+        // A single AND'd range: the lower bound is the floor.
+        assert_eq!(
+            range_floor(match &pin(">=20 <23") {
+                VersionPin::Range(a) => a,
+                _ => panic!("expected a range"),
+            }),
+            Some(NodeVersion::new(20, 0, 0))
+        );
+        // `||` alternatives: the most permissive (lowest) floor wins.
+        assert_eq!(
+            range_floor(match &pin("^18 || >=20") {
+                VersionPin::Range(a) => a,
+                _ => panic!("expected a range"),
+            }),
+            Some(NodeVersion::new(18, 0, 0))
+        );
+    }
+
+    #[test]
+    fn pin_floor_is_pure_for_simple_pins() {
+        // No network for exact/major/major.minor.
+        let tmp = std::env::temp_dir().join("nub-pinfloor-unused");
+        assert_eq!(
+            pin_floor(&pin("24.5.1"), &tmp).unwrap(),
+            NodeVersion::new(24, 5, 1)
+        );
+        assert_eq!(
+            pin_floor(&pin("22"), &tmp).unwrap(),
+            NodeVersion::new(22, 0, 0)
+        );
+        assert_eq!(
+            pin_floor(&pin("20.11"), &tmp).unwrap(),
+            NodeVersion::new(20, 11, 0)
+        );
+        assert_eq!(
+            pin_floor(&pin(">=18 <21"), &tmp).unwrap(),
+            NodeVersion::new(18, 0, 0)
+        );
+    }
+
+    #[test]
+    fn target_spec_rejects_garbage() {
+        assert!(parse_target_spec("not-a-version").is_err());
+    }
+}
+
 /// [`provision_node`] with the mirror base explicit — the seam the local-server
 /// provisioning tests drive (env mutation would race the parallel harness).
 pub fn provision_node_from(

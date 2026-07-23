@@ -869,10 +869,11 @@ pub enum Command {
         #[arg(long)]
         smol: bool,
 
-        /// Node version to target: down-level target + embedded/provisioned
-        /// version. Accepts a concrete version, a major, or an alias (`lts`).
-        #[arg(long, value_name = "VERSION", default_value = "24")]
-        target: String,
+        /// Node version to target (overrides the project's pin chain). Accepts a
+        /// concrete version, a major, a range, or an alias (`lts`/`latest`).
+        /// Omitted → inferred from `.node-version` / `engines.node` / etc.
+        #[arg(long, value_name = "VERSION")]
+        target: Option<String>,
 
         /// Target triple. Spike: host triple only; a foreign triple errors.
         #[arg(long, value_name = "TRIPLE")]

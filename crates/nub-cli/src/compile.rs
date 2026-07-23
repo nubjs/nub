@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use nub_core::compile::{Manifest, Shape, encode};
 use nub_core::node::discovery;
-use nub_core::node::version::NodeVersion;
+use nub_core::node::version::{NodeVersion, VersionPin};
 use nub_core::version_management;
 use sha2::{Digest, Sha256};
 
@@ -21,7 +21,8 @@ pub struct CompileOptions {
     pub entry: String,
     pub out: Option<String>,
     pub smol: bool,
-    pub target: String,
+    /// Explicit `--target`; `None` → infer from the project's pin chain.
+    pub target: Option<String>,
     pub platform: Option<String>,
     pub minify: bool,
 }
@@ -76,16 +77,36 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
     let (entry_name, app_files) = assemble_app(chunks)?;
     let app_sha = sha256_of_app(&app_files);
 
-    // 2. Node blob (default shape) or concrete-version resolution (--smol).
+    // 2. Resolve the Node version through nub run's SAME pin chain (so compile
+    //    can't drift from run); --target overrides it. The pin context is the
+    //    entry's project dir (walk up from there).
     let shape = if opts.smol { Shape::Smol } else { Shape::Embed };
     let cache_root = discovery::cache_dir()
         .context("no writable cache dir for compile-time Node provisioning")?;
-    let (node_version, node_blob, node_sha) = if opts.smol {
-        let v = version_management::resolve_host_node_version(&opts.target, &cache_root)?;
-        eprintln!("--smol: no embedded Node; target {v} resolved at runtime");
-        (v, Vec::new(), String::new())
+    let pin_cwd = entry_abs
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let (pin, raw, source) = determine_target(opts.target.as_deref(), &pin_cwd)?;
+
+    let (node_version, node_range, node_blob, node_sha) = if opts.smol {
+        // Smol keeps a range: bake the acceptance FLOOR the launcher enforces
+        // (`discovered >= floor`) and record the raw requirement for provenance.
+        let floor = version_management::pin_floor(&pin, &cache_root)?;
+        let range = non_exact_spec(&pin, &raw);
+        eprintln!(
+            "Using Node.js {} (resolved from {source}; satisfied at runtime)",
+            range.clone().unwrap_or_else(|| floor.to_string())
+        );
+        (floor, range, Vec::new(), String::new())
     } else {
-        build_node_blob(&opts.target, &cache_root)?
+        // Embed bakes ONE exact version — a range/major/alias collapses to the
+        // newest satisfying release at compile time. (`build_node_blob` →
+        // `provision_host_node` prints the `Using Node.js … (resolved from …)`
+        // line, the same surface nub run uses.)
+        let exact = version_management::resolve_host_pin(&pin, &cache_root)?;
+        let (v, blob, sha) = build_node_blob(&exact, &cache_root, &source)?;
+        (v, None, blob, sha)
     };
 
     // 3. Manifest + payload.
@@ -93,6 +114,7 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
         shape,
         entry: entry_name,
         node_version: node_version.to_string(),
+        node_range,
         triple: host.clone(),
         node_sha256: node_sha,
         app_sha256: app_sha,
@@ -116,6 +138,43 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
         size as f64 / 1_000_000.0
     );
     Ok(0)
+}
+
+// ---- version resolution -------------------------------------------------------
+
+/// Resolve the target into `(pin, raw_spec, source_label)`. `--target` overrides
+/// everything; otherwise the SAME pin chain `nub run` uses (`resolve_pin_chain`:
+/// devEngines.runtime → .node-version → .nvmrc → .tool-versions → engines.node).
+/// No silent "latest" fallback — a compiled binary's Node version must be
+/// intentional/reproducible, so nothing found + no `--target` is an error (this
+/// diverges from `nub run`, which falls back to latest).
+fn determine_target(target: Option<&str>, cwd: &Path) -> Result<(VersionPin, String, String)> {
+    if let Some(t) = target {
+        return Ok((
+            version_management::parse_target_spec(t)?,
+            t.to_string(),
+            "--target".to_string(),
+        ));
+    }
+    match discovery::resolve_pin_chain(cwd)?.pin {
+        Some((raw, pin, source)) => Ok((pin, raw, source)),
+        None => bail!(
+            "no Node version could be inferred for this project.\n\
+             \x20\x20Pass --target <version> (e.g. --target 24, --target lts), or add a pin —\n\
+             \x20\x20a .node-version file, or package.json \"engines\": {{ \"node\": \"…\" }}.\n\
+             \x20\x20(nub compile does not fall back to \"latest\": a compiled binary's Node\n\
+             \x20\x20version must be intentional and reproducible.)"
+        ),
+    }
+}
+
+/// The raw requirement to record for `--smol` — `None` for a bare exact version
+/// (the floor already captures it), else the original spec string.
+fn non_exact_spec(pin: &VersionPin, raw: &str) -> Option<String> {
+    match pin {
+        VersionPin::Exact(_) => None,
+        _ => Some(raw.to_string()),
+    }
 }
 
 // ---- bundling -----------------------------------------------------------------
@@ -198,10 +257,18 @@ fn assemble_app(chunks: Vec<ChunkOut>) -> Result<(String, AppFiles)> {
 /// Provision the official Node for the target, strip + ad-hoc re-sign it (when
 /// the host has the tools), and zstd-19 compress. Returns the concrete version,
 /// the compressed blob, and the hash of the DECOMPRESSED (runnable) bytes.
-fn build_node_blob(target: &str, cache_root: &Path) -> Result<(NodeVersion, Vec<u8>, String)> {
-    eprintln!("Obtaining Node {target} for the host …");
-    let (version, dir) =
-        version_management::provision_host_node(target, cache_root, Some("--target"))?;
+fn build_node_blob(
+    version: &NodeVersion,
+    cache_root: &Path,
+    resolved_from: &str,
+) -> Result<(NodeVersion, Vec<u8>, String)> {
+    // The exact version's own string round-trips the index; provision prints the
+    // `Using Node.js <v> (resolved from <source>)` line + downloads.
+    let (version, dir) = version_management::provision_host_node(
+        &version.to_string(),
+        cache_root,
+        Some(resolved_from),
+    )?;
     let node_bin = dir.join("bin").join("node");
     if !node_bin.is_file() {
         bail!(
@@ -310,7 +377,15 @@ fn inject_and_sign(template: &Path, payload: &[u8], out: &Path) -> Result<()> {
 /// section injection corrupts into a SIGILL trap. Catching that HERE turns a
 /// would-be runtime crash for the user into a compile-time error.
 fn smoke_probe(bin: &Path) -> Result<()> {
-    let out = std::process::Command::new(bin)
+    // `Command::new` PATH-searches a bare name, so the default `--out` (the entry
+    // stem, no directory component) would probe a stray PATH binary or fail to
+    // spawn. Anchor a relative path to the cwd the file was just written to.
+    let bin = if bin.is_absolute() || bin.components().count() > 1 {
+        bin.to_path_buf()
+    } else {
+        Path::new(".").join(bin)
+    };
+    let out = std::process::Command::new(&bin)
         .arg("__probe")
         .output()
         .with_context(|| format!("running the self-probe on {}", bin.display()))?;
@@ -397,4 +472,60 @@ fn set_executable(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nub-compile-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn no_pin_and_no_target_errors_without_falling_back_to_latest() {
+        let dir = fresh_dir("nopin");
+        let err = determine_target(None, &dir).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--target"), "should point at --target: {msg}");
+        assert!(
+            msg.contains("reproducible"),
+            "should state the reproducibility rationale: {msg}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn infers_from_node_version_file_and_reports_the_source() {
+        let dir = fresh_dir("nodever");
+        fs::write(dir.join(".node-version"), "22\n").unwrap();
+        let (_pin, raw, source) = determine_target(None, &dir).unwrap();
+        assert_eq!(raw, "22");
+        assert_eq!(source, ".node-version");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_target_overrides_the_chain() {
+        let dir = fresh_dir("override");
+        fs::write(dir.join(".node-version"), "18\n").unwrap();
+        let (pin, raw, source) = determine_target(Some("24.5.0"), &dir).unwrap();
+        assert_eq!(raw, "24.5.0");
+        assert_eq!(source, "--target");
+        assert!(matches!(pin, VersionPin::Exact(_)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_exact_spec_records_ranges_but_not_bare_exacts() {
+        let exact = version_management::parse_target_spec("24.5.0").unwrap();
+        assert_eq!(non_exact_spec(&exact, "24.5.0"), None);
+        let range = version_management::parse_target_spec(">=20").unwrap();
+        assert_eq!(non_exact_spec(&range, ">=20"), Some(">=20".to_string()));
+        let major = version_management::parse_target_spec("24").unwrap();
+        assert_eq!(non_exact_spec(&major, "24"), Some("24".to_string()));
+    }
 }
