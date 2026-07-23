@@ -330,6 +330,12 @@ function isNubInternalParent(parentURL) {
   return String(parentURL).startsWith(RUNTIME_DIR_URL);
 }
 
+// Set while resolveSpec is inside its own `require.resolve` for a nub-internal
+// importer; see the re-entrancy guard there. Module-scoped, so each realm (the
+// main thread, each worker, the async tier's loader worker) carries its own — and
+// resolve hooks are synchronous, so a single flag cannot interleave.
+let resolvingInternal = false;
+
 // Resolve a specifier the way both hook tiers do. Returns `{ url, shortCircuit }`
 // to short-circuit Node's resolver, or `null` to fall through to `nextResolve`.
 // `parentURL` is the importer (a file: URL string), or "" for the entry.
@@ -347,9 +353,21 @@ export function resolveSpec(specifier, parentURL) {
       return { url, shortCircuit: true };
     }
     if (specifier.startsWith("data:")) return { url: specifier, shortCircuit: true };
+    // Re-entrancy guard. The `require.resolve` below runs through Node's CJS
+    // resolver, which invokes the registered resolve hook — i.e. back into this
+    // function with the same specifier and parent. Unguarded, the two call each
+    // other until V8 exhausts the stack and the RangeError lands in the catch: every
+    // nub-internal relative require cost ~849 nested hook invocations (measured on
+    // the fast-tier preload's own `./navigator-shim.mjs` / `./worker-blob-url.cjs`),
+    // ~50 CPU-ms per process, and produced the right answer only by accident of that
+    // unwind. Delegating the RE-ENTRANT call is not a behavior change: the outer
+    // frame still short-circuits the user chain, and Node's default resolver is what
+    // `require.resolve` was going to consult anyway.
+    if (resolvingInternal) return null;
     // A relative/bare import from inside nub's graph: resolve it natively from the
     // parent's own require() resolver (NOT nub's tsconfig/clobber/probe logic) and
     // short-circuit. Bare specifiers resolve from the parent package's location.
+    resolvingInternal = true;
     try {
       const parentReq = createRequire(parentURL);
       const resolved = parentReq.resolve(specifier);
@@ -358,6 +376,8 @@ export function resolveSpec(specifier, parentURL) {
       // Couldn't resolve from the parent (e.g. a non-file: parent): still short-
       // circuit by handing the specifier back as-is, so the user chain is bypassed.
       return null;
+    } finally {
+      resolvingInternal = false;
     }
   }
 
