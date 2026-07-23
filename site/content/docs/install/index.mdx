@@ -332,11 +332,26 @@ nub update                 # up — refresh all deps within range
 nub update <pkg>           # update a single dependency
 nub update <pkg>@<version> # pin one dep to a version, keeping its ^/~ operator
 nub update <pkg>@<tag>     # move one dep to a dist-tag (beta, next) as an exact pin
+nub update -i              # --interactive: pick each package's target
 nub update -L              # --latest: move past the manifest range
 nub update -E -L           # pin the rewritten range to an exact version
 nub update -D              # devDependencies only
 nub update -P              # production only
 nub update --lockfile-only # refresh the lockfile, leave node_modules alone
+```
+
+The interactive picker shows one row per outdated dependency, grouped by dependency type. Space (or `←`/`→`) cycles a row between keeping the current version, the newest version inside the manifest range, and the registry's `latest` — so one invocation covers both in-range refreshes and range-crossing bumps, per package. Nothing is selected by default: press enter and only the rows you flipped are updated. Version targets are colored by semver impact, and a `latest` that would downgrade a prerelease pin is never offered.
+
+```text
+Choose dependency updates
+                                         keep             latest in range   latest
+  dependencies
+❯   @effect/opentelemetry@^4.0.0-beta.1  ■ 4.0.0-beta.90  □ 4.0.0-beta.100  □ 4.0.0-beta.100
+    chalk@^4.1.0                         ■ 4.1.0          □ 4.1.2           □ 5.6.2
+    react@^17.0.0                        ■ 17.0.1         □ 17.0.2          □ 19.2.8
+  devDependencies
+    typescript@~5.3.0                    ■ 5.3.2          □ 5.3.3           □ 7.0.2
+↑/↓ move · space/←/→ cycle · a cycle all · / filter · enter apply · esc cancel
 ```
 
 ### `nub dedupe`

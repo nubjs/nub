@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/nub-win32-x64",
-  "version": "0.4.13",
+  "version": "0.5.0",
   "description": "Nub binary for win32-x64",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",

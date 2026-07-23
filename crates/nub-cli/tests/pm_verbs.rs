@@ -450,6 +450,39 @@ fn dlx_installs_and_runs_a_bin_from_a_scratch_project() {
     );
 }
 
+/// dlx/create children carry the role-aware `npm_config_user_agent` (pnpm
+/// parity) — create-* scaffolders sniff it to emit the invoking PM's commands
+/// and fall back to npm-mode when it's absent.
+#[test]
+#[ignore = "network: installs uuid into a dlx scratch project"]
+fn dlx_child_sees_nub_user_agent() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("dlxua");
+    let out = run_nub(
+        &dir,
+        &[
+            "dlx",
+            "--shell-mode",
+            "-p",
+            "uuid",
+            "node -p process.env.npm_config_user_agent",
+        ],
+    );
+    assert_eq!(
+        out.code, 0,
+        "stdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        out.stdout.contains("nub/"),
+        "dlx child must see a nub-first user agent, got: {}",
+        out.stdout
+    );
+}
+
 /// The yarn write gate on the mutating daily drivers: a yarn project refuses
 /// add/remove/update/dedupe outright (no network — the gate is a pre-flight),
 /// yarn.lock stays byte-identical, and `dedupe --check` is still allowed

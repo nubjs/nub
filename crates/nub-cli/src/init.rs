@@ -18,6 +18,11 @@ use serde_json::{Map, Value, json};
 /// binary), so its range derives from CARGO_PKG_VERSION.
 const TYPES_NODE_RANGE: &str = "^26";
 
+/// `typescript` range written into the scaffold. Nub transpiles TS itself, so
+/// the compiler package exists for the editor's typechecking (`tsc --noEmit`,
+/// tsserver pinned per-project) — bump on a new TypeScript major.
+const TYPESCRIPT_RANGE: &str = "^7";
+
 pub(crate) struct InitOptions {
     pub yes: bool,
     pub js: bool,
@@ -184,6 +189,7 @@ fn manifest_json(name: &str, entry: &str, typescript: bool) -> String {
             json!({
                 "@nubjs/types": format!("^{ver}"),
                 "@types/node": TYPES_NODE_RANGE,
+                "typescript": TYPESCRIPT_RANGE,
             }),
         );
     }
@@ -283,6 +289,7 @@ mod tests {
         assert_eq!(v["packageManager"], format!("nub@{ver}"));
         assert_eq!(v["devEngines"]["packageManager"]["name"], "nub");
         assert_eq!(v["devDependencies"]["@nubjs/types"], format!("^{ver}"));
+        assert_eq!(v["devDependencies"]["typescript"], TYPESCRIPT_RANGE);
         assert_eq!(v["scripts"]["start"], "nub index.ts");
     }
 

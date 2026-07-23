@@ -245,7 +245,7 @@ applies. Reverting was correct. Let the tests arbitrate; don't defend a graft.
 Grep after every bump — if one vanished, a resolution was wrong:
 
 ```sh
-grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pnpm_config\|env_prefix\|cache_namespace" vendor/aube/crates
+grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pnpm_config\|env_prefix\|cache_namespace\|engine_context\|env_overlay\|path_prepends\|runtime_node" vendor/aube/crates
 ```
 
 - **Embedder profile plumbing** — `env_prefix`, `cache_namespace`, `lockfile_basename`,
@@ -260,6 +260,15 @@ grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pn
   range resolution, pnpm-11 `namedRegistries`, git classification in the yarn-classic reader.
 - **Registry** — `registry_url_for` returns an owned `String` (a `namedRegistries` route lookup borrows
   through a lock guard), mTLS/`npmAlwaysAuth`, the Android hickory carve-out.
+- **Runtime / lifecycle-script env** — the embedder runtime seam. `crates/aube-util/src/engine_context.rs`
+  is a whole nub-only module (`EngineContext` = process-global `OnceLock<RwLock<..>>`); its
+  `runtime_node_dir` / `runtime_node_bin` / `env_overlay` / `path_prepends` / `lifecycle_user_agent_product`
+  fields drive the augmentation. The `resolve_node_bin` / `resolve_path_entry` fallback ladders are grafted
+  into `runtime::node_program` / `path_entries` / `apply_child_env`, and `env_overlay` + `path_prepends`
+  ride on `ScriptSettings`, applied last / ahead of PATH via `compose_overlay_path`. Default-empty
+  everywhere ⇒ standalone aube is byte-identical, so this delta CONVERGES silently on a bump — the grep
+  above is the only thing that catches it going missing. (Upstream's own `seed_embedder_node` /
+  `embedder_node_bin_dir` seam is adjacent and semantically overlapping; expect re-collision here.)
 
 ---
 

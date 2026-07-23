@@ -1,4 +1,5 @@
 use super::install;
+use super::update_picker;
 use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -174,12 +175,15 @@ pub async fn run(
     let packages = &parsed_packages[..];
     let latest = args.latest;
     let no_save = args.no_save;
-    // `--latest` flag triggers manifest rewrites for every direct dep;
-    // an explicit `<pkg>@<spec>` triggers it only for that one entry.
-    // Combine them into a per-key predicate so the same rewrite path
-    // serves both.
-    let effective_latest = latest || !explicit_specs.is_empty();
-    let should_rewrite_key = |key: &str| -> bool { latest || explicit_specs.contains_key(key) };
+    // `--latest` flag triggers manifest rewrites for every direct dep; an
+    // explicit `<pkg>@<spec>` triggers it only for that one entry. The
+    // combined per-key predicate (`should_rewrite_key`) and the rewrite
+    // eligibility flags are derived AFTER the interactive picker below, so
+    // a rich-picker "latest" pick can join `explicit_specs` first.
+    // The rich tri-state picker (embedder-gated) replaces both the
+    // pre-selected multiselect and the `--latest` flag's global reach in
+    // interactive mode; see `pick_update_rich`.
+    let rich_picker = args.interactive && aube_util::embedder().rich_update_picker;
     let mut cwd = crate::dirs::project_root()?;
     // `-w/--workspace-root`: act on the workspace root manifest
     // regardless of which sub-package the user ran from. Mirrors
@@ -202,13 +206,6 @@ pub async fn run(
         ignored: ignored_updates,
         rewrites_specifier: rewrites_specifier_setting,
     } = resolve_update_settings(&cwd, &manifest)?;
-    // Cosmetic floor-bump: outside `--latest` and `--no-save`, with
-    // `updateRewritesSpecifier=true` (default), `aube update <pkg>` also
-    // tracks the resolved in-range version in `package.json`. Limited to
-    // `^X.Y.Z` / `~X.Y.Z` specs at the rewrite site below; other shapes
-    // (`>=`, `1.x`, exact, dist-tags, git, workspace:) are preserved.
-    let cosmetic_rewrite_eligible = !effective_latest && rewrites_specifier_setting && !no_save;
-
     // Read the lockfile from the project, or fall back to the shared
     // workspace-root one when the project doesn't have its own (the
     // common shape after a fresh `aube install` from the workspace
@@ -388,7 +385,13 @@ pub async fn run(
     // hidden from the picker — otherwise the picker would surface a
     // phantom downgrade row that the post-picker rewrite path then
     // ignores.
-    let preserve_pin: BTreeSet<String> = if latest && update_all {
+    //
+    // Skipped in rich-picker mode: the tri-state picker applies the same
+    // downgrade guard per-cell (`update_picker::build_row` drops a `latest`
+    // cell at-or-below `current`), so a "latest" pick can never name a
+    // preserve-pin key and the pre-fetch here would be a redundant network
+    // round.
+    let preserve_pin: BTreeSet<String> = if latest && update_all && !rich_picker {
         let client = std::sync::Arc::new(super::make_client(&cwd));
         let mut handles = Vec::new();
         for key in &manifest_keys_to_update {
@@ -455,28 +458,86 @@ pub async fn run(
     };
 
     if args.interactive && !manifest_keys_to_update.is_empty() {
-        let selected = match pick_update_interactively(
-            &manifest_keys_to_update,
-            &manifest,
-            &all_specifiers,
-            existing.as_ref(),
-            &existing_importers,
-            &preserve_pin,
-            &cwd,
-            latest,
-        )
-        .await?
-        {
-            Some(sel) => sel,
-            // Picker cancelled (Ctrl-C / Esc): exit 130 via the return path.
-            None => return Ok(Some(130)),
-        };
-        if selected.is_empty() && indirect_arg_names.is_empty() {
-            eprintln!("No packages selected.");
-            return Ok(None);
+        if rich_picker {
+            match pick_update_rich(
+                &manifest_keys_to_update,
+                &manifest,
+                &all_specifiers,
+                &explicit_specs,
+                existing.as_ref(),
+                &existing_importers,
+                &cwd,
+            )
+            .await?
+            {
+                // Picker cancelled (Ctrl-C / Esc): exit 130 via the return path.
+                RichPick::Cancelled => return Ok(Some(130)),
+                RichPick::NothingOutdated => {
+                    if indirect_arg_names.is_empty() {
+                        eprintln!("All dependencies up to date.");
+                        return Ok(None);
+                    }
+                    // Named indirect deps still update even when no direct dep
+                    // has an offerable row: fall through with an empty direct
+                    // selection, matching the demand path's empty-set return.
+                    manifest_keys_to_update.clear();
+                }
+                RichPick::Selected(sel) => {
+                    if sel.is_empty() && indirect_arg_names.is_empty() {
+                        eprintln!("No packages selected.");
+                        return Ok(None);
+                    }
+                    manifest_keys_to_update
+                        .retain(|key| sel.in_range.contains(key) || sel.to_latest.contains(key));
+                    // A "latest" pick is exactly `<pkg>@latest`: route it
+                    // through the same per-key explicit-spec machinery so the
+                    // resolver and both rewrite loops treat it identically.
+                    for key in &sel.to_latest {
+                        explicit_specs.insert(key.clone(), "latest".to_string());
+                    }
+                }
+            }
+        } else {
+            let selected = match pick_update_interactively(
+                &manifest_keys_to_update,
+                &manifest,
+                &all_specifiers,
+                existing.as_ref(),
+                &existing_importers,
+                &preserve_pin,
+                &cwd,
+                latest,
+            )
+            .await?
+            {
+                Some(sel) => sel,
+                // Picker cancelled (Ctrl-C / Esc): exit 130 via the return path.
+                None => return Ok(Some(130)),
+            };
+            if selected.is_empty() && indirect_arg_names.is_empty() {
+                eprintln!("No packages selected.");
+                return Ok(None);
+            }
+            manifest_keys_to_update.retain(|key| selected.contains(key));
         }
-        manifest_keys_to_update.retain(|key| selected.contains(key));
     }
+
+    // Per-key rewrite predicate, derived AFTER the picker so rich-picker
+    // "latest" picks (merged into `explicit_specs` above) participate. In
+    // rich mode the picker's per-row choices are authoritative: the global
+    // `--latest` flag is neutralized so it can't drag an in-range pick past
+    // its manifest range (`-i` and `-i --latest` are the same picker).
+    // Non-interactive and demand-picker paths see identical values to the
+    // pre-picker derivation, so their behavior is unchanged.
+    let latest = latest && !rich_picker;
+    let effective_latest = latest || !explicit_specs.is_empty();
+    let should_rewrite_key = |key: &str| -> bool { latest || explicit_specs.contains_key(key) };
+    // Cosmetic floor-bump: outside `--latest` and `--no-save`, with
+    // `updateRewritesSpecifier=true` (default), `aube update <pkg>` also
+    // tracks the resolved in-range version in `package.json`. Limited to
+    // `^X.Y.Z` / `~X.Y.Z` specs at the rewrite site below; other shapes
+    // (`>=`, `1.x`, exact, dist-tags, git, workspace:) are preserved.
+    let cosmetic_rewrite_eligible = !effective_latest && rewrites_specifier_setting && !no_save;
 
     let real_names_to_update: std::collections::HashSet<String> = manifest_keys_to_update
         .iter()
@@ -1027,34 +1088,7 @@ async fn pick_update_interactively(
         return Ok(Some(BTreeSet::new()));
     }
 
-    let client = std::sync::Arc::new(super::make_client(cwd));
-    let cache_dir = super::packument_cache_dir();
-    let mut set = tokio::task::JoinSet::new();
-    for key in &registry_keys {
-        let real_name = real_name_from_spec(key, specifiers.get(key.as_str()));
-        let key_owned = (*key).clone();
-        let client = client.clone();
-        let cache_dir = cache_dir.clone();
-        set.spawn(async move {
-            let result = client.fetch_packument_cached(&real_name, &cache_dir).await;
-            (key_owned, result)
-        });
-    }
-    let mut packuments: HashMap<String, aube_registry::Packument> =
-        HashMap::with_capacity(registry_keys.len());
-    while let Some(joined) = set.join_next().await {
-        let (key, result) = joined
-            .into_diagnostic()
-            .wrap_err("packument fetch panicked")?;
-        match result {
-            Ok(p) => {
-                packuments.insert(key, p);
-            }
-            Err(e) => {
-                tracing::warn!("failed to fetch packument for {key}: {e}");
-            }
-        }
-    }
+    let packuments = fetch_packuments(&registry_keys, specifiers, cwd).await?;
 
     let mut picker = demand::MultiSelect::new("Choose which dependencies to update")
         .description("Space to toggle, Enter to confirm")
@@ -1116,6 +1150,148 @@ async fn pick_update_interactively(
         }
     };
     Ok(Some(picked.into_iter().collect()))
+}
+
+/// Concurrently fetch (cache-aware) packuments for the picker rows. A
+/// per-package fetch failure drops that package from the picker with a
+/// warning rather than failing the whole command.
+async fn fetch_packuments(
+    registry_keys: &[&String],
+    specifiers: &BTreeMap<String, String>,
+    cwd: &std::path::Path,
+) -> miette::Result<HashMap<String, aube_registry::Packument>> {
+    let client = std::sync::Arc::new(super::make_client(cwd));
+    let cache_dir = super::packument_cache_dir();
+    let mut set = tokio::task::JoinSet::new();
+    for key in registry_keys {
+        let real_name = real_name_from_spec(key, specifiers.get(key.as_str()));
+        let key_owned = (*key).clone();
+        let client = client.clone();
+        let cache_dir = cache_dir.clone();
+        set.spawn(async move {
+            let result = client.fetch_packument_cached(&real_name, &cache_dir).await;
+            (key_owned, result)
+        });
+    }
+    let mut packuments: HashMap<String, aube_registry::Packument> =
+        HashMap::with_capacity(registry_keys.len());
+    while let Some(joined) = set.join_next().await {
+        let (key, result) = joined
+            .into_diagnostic()
+            .wrap_err("packument fetch panicked")?;
+        match result {
+            Ok(p) => {
+                packuments.insert(key, p);
+            }
+            Err(e) => {
+                tracing::warn!("failed to fetch packument for {key}: {e}");
+            }
+        }
+    }
+    Ok(packuments)
+}
+
+/// Outcome of the rich tri-state picker (`Embedder::rich_update_picker`).
+enum RichPick {
+    /// Ctrl-C / Esc — the caller maps this to exit code 130.
+    Cancelled,
+    /// Every eligible dep is already at both its in-range max and the
+    /// registry `latest` — there was nothing to render.
+    NothingOutdated,
+    Selected(update_picker::PickerSelection),
+}
+
+/// Rich-picker front half: same TTY gate and row eligibility as the demand
+/// picker, but every row carries BOTH targets (in-range max and dist-tag
+/// latest) so one invocation subsumes `-i` and `-i --latest`. Preserve-pin
+/// screening happens per-cell in `update_picker::build_row` (a `latest` at
+/// or below `current` is never offered), not by hiding whole rows.
+async fn pick_update_rich(
+    keys: &[String],
+    manifest: &aube_manifest::PackageJson,
+    specifiers: &BTreeMap<String, String>,
+    explicit_specs: &BTreeMap<String, String>,
+    existing: Option<&aube_lockfile::LockfileGraph>,
+    existing_importers: &[&str],
+    cwd: &std::path::Path,
+) -> miette::Result<RichPick> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(miette!(
+            "`{} --interactive` requires stdin and stderr to be TTYs; pass package names explicitly to update non-interactively",
+            aube_util::cmd("update")
+        ));
+    }
+
+    let registry_keys: Vec<&String> = keys
+        .iter()
+        .filter(|key| {
+            let spec = specifiers.get(*key).map(String::as_str).unwrap_or("");
+            !aube_util::pkg::is_workspace_spec(spec)
+                && !spec.starts_with("link:")
+                && !spec.starts_with("file:")
+        })
+        .collect();
+    if registry_keys.is_empty() {
+        return Ok(RichPick::NothingOutdated);
+    }
+
+    let packuments = fetch_packuments(&registry_keys, specifiers, cwd).await?;
+    let mut rows = Vec::new();
+    for key in &registry_keys {
+        let Some(packument) = packuments.get(key.as_str()) else {
+            continue;
+        };
+        let real_name = real_name_from_spec(key, specifiers.get(key.as_str()));
+        let Some(current) = existing
+            .and_then(|g| lookup_pkg(g, existing_importers, key, &real_name))
+            .map(|p| p.version.clone())
+        else {
+            continue;
+        };
+        // An explicit `<pkg>@<spec>` arg overrides the manifest range as the
+        // basis for the in-range cell, same as it overrides the resolver.
+        // A dist-tag spec (`update -i typescript@beta`, or a manifest
+        // `"typescript": "beta"`) doesn't parse as a range, so it resolves
+        // through the packument's dist-tags — without this, a tag-spec key
+        // would render no in-range cell and the tag could never apply from
+        // the picker.
+        let spec = explicit_specs
+            .get(key.as_str())
+            .or_else(|| specifiers.get(key.as_str()))
+            .map(String::as_str)
+            .unwrap_or("");
+        let wanted = super::max_satisfying_version(packument, spec)
+            .or_else(|| packument.dist_tags.get(spec).cloned());
+        let registry_latest = packument.dist_tags.get("latest").map(String::as_str);
+        // The displayed spec is always the MANIFEST's (the dim annotation
+        // answers "what does package.json say today"), even when an
+        // explicit CLI spec drives the targets.
+        let manifest_spec = specifiers
+            .get(key.as_str())
+            .map(String::as_str)
+            .unwrap_or("");
+        if let Some(row) = update_picker::build_row(
+            key,
+            dep_bucket(manifest, key),
+            manifest_spec,
+            &current,
+            wanted.as_deref(),
+            registry_latest,
+        ) {
+            rows.push(row);
+        }
+    }
+    if rows.is_empty() {
+        return Ok(RichPick::NothingOutdated);
+    }
+
+    match update_picker::run(rows) {
+        Ok(Some(selection)) => Ok(RichPick::Selected(selection)),
+        Ok(None) => Ok(RichPick::Cancelled),
+        Err(e) => Err(e)
+            .into_diagnostic()
+            .wrap_err("failed to read update selection"),
+    }
 }
 
 fn dep_bucket(manifest: &aube_manifest::PackageJson, key: &str) -> &'static str {

@@ -1385,18 +1385,31 @@ fn augmentation_to_lifecycle_overlay(
 /// Install nub's runtime augmentation onto the engine's lifecycle-script spawn
 /// env (via aube's generic [`aube::set_script_settings`] overlay), so dependency
 /// build scripts run under the project's provisioned + augmented Node — the same
-/// env `nub run` / `nub exec` give scripts. No-op (overlay stays default-empty,
-/// behavior preserved) when augmentation can't be computed (compat / re-entrant
-/// / broken install). Called once per command from [`engine_session`].
+/// env `nub run` / `nub exec` give scripts. The overlay stays default-empty
+/// (behavior preserved) when augmentation can't be computed (compat /
+/// re-entrant / broken install); the resolved Node *version* is published to the
+/// engine either way. Called once per command from [`engine_session`].
 fn apply_lifecycle_augmentation(cwd: &Path) {
-    let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
-        return;
-    };
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
     // path pins npm_node_execpath. Mirrors build_script_command's discovery.
-    let node = nub_core::node::discovery::discover_node(cwd)
-        .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    let discovered = nub_core::node::discovery::discover_node(cwd);
+    // Published ABOVE the early returns: the engine keys its GVS virtual-store
+    // paths — and validates `engines.node` — off this version, so it has to name
+    // the Node dependency build scripts actually compile against. That stays the
+    // project's pin under `--node` / NODE_COMPAT, which disable augmentation but
+    // not version provisioning. Otherwise aube probes the ambient PATH node and
+    // two majors silently share one store entry. Deliberately left unset when
+    // discovery FAILS: build scripts then fall back to a bare `node`, so the
+    // PATH probe is the honest answer and a fabricated version would not be.
+    if let Ok(node) = &discovered {
+        let version = node.version.to_string();
+        aube_util::update_engine_context(|c| c.runtime_node_version = Some(version));
+    }
+    let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
+        return;
+    };
+    let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,

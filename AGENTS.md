@@ -110,10 +110,10 @@ Two families of `nub`-named packages exist on npm. Neither is the prohibited bar
 
 2. **`@nubjs/nub` + `@nubjs/nub-<platform>`** — the CLI itself and its platform-specific binary distribution packages (`@nubjs/nub-darwin-arm64`, `@nubjs/nub-linux-x64`, … — 8 platforms total). `@nubjs/nub` is the package users `npm install -g`; the `@nubjs/nub-<platform>` packages are its `optionalDependencies`, each containing the compiled Rust binary + N-API addon for one platform, selected at install time by npm's `os`/`cpu` filters and copied into place by `postinstall.js`. They are install-time plumbing — never `import`ed, never referenced in application source, never a thing users type. Same distribution pattern as `@biomejs/biome` + `@biomejs/cli-*`, `@oxlint/cli-*`, `@rollup/rollup-*`, `@esbuild/*`. The org scope is `@nubjs` (the project's own npm org), deliberately distinct from the prohibited bare `@nub`.
 
-### Naming
+### Naming (HIGH PRIORITY — this is how Nub is stylized everywhere)
 
-- **"Nub"** — proper noun, capitalized, in prose.
-- **`nub`** — lowercase, only for the executable, CLI invocations, package name, and code identifiers.
+- **"Nub"** — proper noun, ALWAYS capitalized in prose, on every surface: docs, release notes, blog posts, README, GitHub comments, commit bodies, code comments, chat. There is no "it's informal here" exception.
+- **`nub`** — lowercase ONLY when it is an identifier or part of a shell command: the executable, CLI invocations (`nub install`), package/file names (`@nubjs/nub`, `nub.lock`, `nub.jsonc`), and code identifiers. These are always in backticks in prose; a lowercase bare "nub" in running text is a style error — write "Nub".
 
 ### v0 verb surface
 

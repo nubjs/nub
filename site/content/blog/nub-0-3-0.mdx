@@ -1,11 +1,18 @@
 ---
 title: "Nub 0.3.0"
-description: Undeclared (phantom) dependencies resolve out of the box, and more frameworks scaffold and run with no config change.
+description: Undeclared (phantom) dependencies resolve out of the box, a unified nubx runs a file, script, local CLI, or registry package behind a consent-gated fetch, and more frameworks scaffold and run with no config change.
 author: The Nub Team
 date: 2026-07-07
 ---
 
-Undeclared (phantom) dependencies now resolve out of the box.
+Undeclared (phantom) dependencies now resolve out of the box, and `nubx` becomes a single runner for whatever a name points to.
+
+```console
+$ nubx build.ts             # runs the file
+$ nubx test                 # runs the package.json script
+$ nubx vite                 # runs the local CLI in node_modules/.bin
+$ nubx create-vite my-app   # fetches and runs a package that isn't installed
+```
 
 > [!IMPORTANT]
 > Phantom-eject is on for every install — no opt-in and no config change. Existing warm installs re-link once on the next install to converge to the new layout; there is no manual migration step.
@@ -19,9 +26,18 @@ Nub's isolated install layout used to reject a package's undeclared `require`/`i
 
 The detector replaces the previous curated static list — it self-maintains across package versions, and a detection improvement re-scans already-cached content instead of going stale. To bypass the virtual store entirely, `install.materialization: disk` materializes every dependency to disk.
 
-## nubx fetches with your consent
+## Unified nubx
 
-A `nubx <tool>` that misses the local `node_modules/.bin` chain no longer downloads silently. In an interactive terminal it prompts before the first fetch of a spec and remembers the answer, so a consented tool doesn't re-prompt; in CI or any non-interactive context it fails closed. `-y`/`--yes` is the explicit opt-in for CI and scripts.
+One command now runs whatever a name points to. A bare `nubx <name>` resolves through four tiers and runs the first match:
+
+- **File** — `nubx build.ts` runs the file, the same as `nub build.ts`.
+- **Script** — `nubx test` runs the `package.json` script.
+- **Local bin** — `nubx vite` runs the CLI already in `node_modules/.bin`.
+- **Registry** — `nubx create-vite my-app` fetches and runs a package that isn't installed.
+
+Scripts beat bins and a file beats both — the same precedence as `nub run`. A local match never touches the network.
+
+The registry tier is consent-gated, so `nubx` never runs remote code silently. On a full local miss in an interactive terminal, `nubx` prompts before the first fetch of a spec and remembers the answer, so a consented tool doesn't re-prompt; in CI or any non-interactive context it fails closed. `-y`/`--yes` is the explicit opt-in for CI and scripts.
 
 `nub dlx` (short alias `nub x`) splits off as the explicit downloader — invoking it is the consent, so it fetches without a prompt and runs in CI. `nub exec` stays the local-bin-only runner. ([#224](https://github.com/nubjs/nub/pull/224), [#275](https://github.com/nubjs/nub/pull/275))
 

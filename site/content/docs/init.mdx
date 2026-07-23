@@ -1,9 +1,9 @@
 ---
 title: Creating a project
-description: Scaffold a new TypeScript-first project — manifest, tsconfig, entry file, git, and installed type packages — in one command.
+description: Scaffold a new TypeScript-first project — manifest, tsconfig, entry file, git, and installed dev dependencies — in one command.
 ---
 
-Running `nub init` scaffolds a minimal TypeScript project that runs and typechecks immediately. It writes five files, initializes git, and installs the two type packages the editor needs:
+Running `nub init` scaffolds a minimal TypeScript project that runs and typechecks immediately. It writes five files, initializes git, and installs TypeScript plus the type packages the editor needs:
 
 ```console
 $ nub init -y
@@ -18,6 +18,7 @@ created my-app
 devDependencies:
 + @nubjs/types@0.4.13
 + @types/node@26.1.1
++ typescript@7.0.2
 
 next: nub index.ts
 ```
@@ -31,7 +32,7 @@ Hello from Nub
 
 ## What it writes
 
-The manifest declares the project as a Nub project from birth — the same `packageManager` pin and `devEngines` range that [`nub pm pin`](/docs/pm#nub-pm-pin) writes — and carries the two type packages as devDependencies:
+The manifest makes this a Nub-native project — the same `packageManager` pin and `devEngines` range that [`nub pm pin`](/docs/pm#nub-pm-pin) writes — and carries the dev dependencies:
 
 ```json
 {
@@ -47,12 +48,15 @@ The manifest declares the project as a Nub project from birth — the same `pack
   },
   "devDependencies": {
     "@nubjs/types": "^0.4.13",
-    "@types/node": "^26"
+    "@types/node": "^26",
+    "typescript": "^7"
   }
 }
 ```
 
-The tsconfig targets Node's own TypeScript semantics — `nodenext` resolution, `verbatimModuleSyntax`, strict mode, `noEmit` (Nub handles transpilation) — and wires the installed type packages:
+The install step resolves those and writes Nub's neutral lockfile, `nub.lock`.
+
+The tsconfig targets Node's own TypeScript semantics — `nodenext` resolution, `verbatimModuleSyntax`, strict mode, `noEmit` (Nub transpiles; the installed `typescript` is for the editor and typechecking) — and wires the installed type packages:
 
 ```jsonc
 {
@@ -80,7 +84,7 @@ In a terminal, `nub init` asks three questions — project name, TypeScript or J
 | Flag | Effect |
 |---|---|
 | `-y`, `--yes` | Skip all prompts, take the defaults. |
-| `--js` | JavaScript variant: writes `index.js`, no tsconfig, no type devDependencies. |
+| `--js` | JavaScript variant: writes `index.js`, no tsconfig, no devDependencies. |
 | `--name <name>` | Project name (default: the directory name, sanitized). |
 | `--no-git` | Skip `git init`. |
 | `--no-install` | Skip the install step. |
@@ -98,9 +102,23 @@ Error: nub: refusing to overwrite existing files: package.json, tsconfig.json, i
 
 Passing `--force` overwrites the listed files. An existing `.git/` is never touched — init skips `git init` inside an existing repository.
 
-## Templates
+## Templates: nub create
 
-Framework templates are not init's job. The command takes no arguments and points template scaffolding at the ecosystem's `create-*` convention:
+Framework templates are not init's job — they belong to `nub create`. It resolves the ecosystem's `create-*` convention (`vue` → `create-vue`, `@scope/foo` → `@scope/create-foo`), fetches the scaffolder, and runs it. Scaffolders that detect the invoking package manager answer with Nub commands:
+
+```console
+$ nub create vue my-app --default
+
+└  Done. Now run:
+
+   cd my-app
+   nub install
+   nub run dev
+```
+
+Everything after the template name is passed through to the scaffolder, so each `create-*` tool's own flags work unchanged.
+
+Passing a template to `init` points you the same way:
 
 ```console
 $ nub init vite
