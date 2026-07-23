@@ -32,6 +32,10 @@ struct ChunkOut {
     is_entry: bool,
 }
 
+/// The bundled app files to embed: `(name, bytes)` per file (entry + chunks + the
+/// synthesized `package.json`).
+type AppFiles = Vec<(String, Vec<u8>)>;
+
 pub fn run(opts: CompileOptions) -> Result<i32> {
     let host = host_triple();
     if let Some(p) = &opts.platform {
@@ -168,7 +172,7 @@ fn bundle(entry_abs: &Path, minify: bool) -> Result<Vec<ChunkOut>> {
 /// Turn the bundler chunks into the app file set: every chunk verbatim, plus a
 /// `package.json {"type":"module"}` so Node runs the ESM `.js` entry as ESM.
 /// Returns the entry filename (the one entry chunk) and the file list.
-fn assemble_app(chunks: Vec<ChunkOut>) -> Result<(String, Vec<(String, Vec<u8>)>)> {
+fn assemble_app(chunks: Vec<ChunkOut>) -> Result<(String, AppFiles)> {
     let entry_name = chunks
         .iter()
         .find(|c| c.is_entry)
