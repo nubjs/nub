@@ -321,6 +321,12 @@ struct EventState {
     downloaded: AtomicUsize,
     downloaded_bytes: AtomicU64,
     estimated_bytes: AtomicU64,
+    /// The *same* `Arc` the linker bumps per file — handed over by
+    /// `InstallProgress::link_progress_counter` — so a snapshot reads the
+    /// live count instead of a private zero. Events mode runs no ticker of
+    /// its own (unlike the TTY and CI renderers), so the value reaches the
+    /// host on whatever snapshot the install emits next.
+    files_linked: Arc<AtomicUsize>,
 }
 
 impl EventState {
@@ -344,6 +350,7 @@ impl EventState {
                 downloaded: self.downloaded.load(Ordering::Relaxed),
                 downloaded_bytes: self.downloaded_bytes.load(Ordering::Relaxed),
                 estimated_bytes: self.estimated_bytes.load(Ordering::Relaxed),
+                files_linked: self.files_linked.load(Ordering::Relaxed),
             }));
     }
 }
@@ -383,6 +390,12 @@ impl InstallProgress {
         match control.output_mode() {
             InstallOutputMode::Events => {
                 let reporter = control.reporter()?;
+                // One counter, two holders — same handoff as `new_ci`: the
+                // linker gets this `Arc` through `link_progress_counter()` and
+                // `EventState` reads it when building a snapshot. Constructing
+                // a second atomic here would leave the reported count pinned
+                // at zero.
+                let files_linked = Arc::new(AtomicUsize::new(0));
                 return Some(Self {
                     mode: Mode::Events(Arc::new(EventState {
                         reporter,
@@ -393,14 +406,10 @@ impl InstallProgress {
                         downloaded: AtomicUsize::new(0),
                         downloaded_bytes: AtomicU64::new(0),
                         estimated_bytes: AtomicU64::new(0),
+                        files_linked: files_linked.clone(),
                     })),
                     unpacked_sizes: Arc::new(Mutex::new(HashMap::new())),
-                    // The linker still bumps this through
-                    // `link_progress_counter()`, but `InstallProgressSnapshot`
-                    // carries no file-linking field, so Events mode has nowhere
-                    // to report it. Kept live rather than special-cased so the
-                    // linker handoff stays mode-agnostic.
-                    files_linked: Arc::new(AtomicUsize::new(0)),
+                    files_linked,
                 });
             }
             InstallOutputMode::Silent => return None,
@@ -1806,6 +1815,37 @@ mod tests {
                     && snapshot.downloaded == 1
                     && snapshot.downloaded_bytes == 512
         )));
+    }
+
+    /// Events mode must observe the linker's own counter, not a private copy:
+    /// the linker only ever touches the `Arc` it received from
+    /// `link_progress_counter()`, so a duplicate atomic would report `0` for
+    /// every install no matter how many files were materialized.
+    #[tokio::test]
+    async fn event_mode_reports_the_linkers_own_file_counter() {
+        let reporter = Arc::new(RecordingReporter::default());
+        let control = crate::commands::install::InstallControl::events(reporter.clone());
+
+        crate::commands::install::control::scope(control, async {
+            let progress = InstallProgress::try_new().unwrap();
+            progress.set_phase("linking");
+            // Stands in for the linker's materialize pass, which holds this
+            // exact counter and bumps it once per file.
+            progress
+                .link_progress_counter()
+                .fetch_add(7, Ordering::Relaxed);
+            progress.finish(false);
+        })
+        .await;
+
+        let events = reporter.0.lock().unwrap();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                InstallEvent::Progress(snapshot) if snapshot.files_linked == 7
+            )),
+            "no snapshot carried the linker's file count: {events:?}"
+        );
     }
 
     /// Display width of a styled string: strip SGR escapes, then count chars

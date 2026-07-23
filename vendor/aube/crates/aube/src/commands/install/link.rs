@@ -208,10 +208,14 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     }
     // Feed the progress UI its live file-linking counter so the linking
     // phase surfaces a ticking file count. Gated on the embedder opting
-    // into the redesigned progress UX (nub); standalone aube leaves it
-    // off, so its link pass never touches the counter (byte-identical).
+    // into the redesigned progress UX (nub), OR on Events mode, whose
+    // `InstallProgressSnapshot.files_linked` is otherwise pinned at zero for
+    // a host that consumes events without the TTY UX. Standalone aube sets
+    // neither on its default path, so its link pass never touches the
+    // counter (byte-identical).
     if let Some(p) = prog_ref
-        && aube_util::embedder().tty_progress
+        && (aube_util::embedder().tty_progress
+            || super::control::current().output_mode() == super::control::InstallOutputMode::Events)
     {
         linker = linker.with_link_progress(p.link_progress_counter());
     }
