@@ -16,6 +16,10 @@
 //! Node itself is bit-exact official Node — never patched. `process.execPath` is
 //! therefore the real resolved Node (plain-Node semantics).
 
+// Match the workspace convention (nub-core/nub-cli): collapsing nested `if let {
+// if }` into let-chains is cosmetic churn, so allow it.
+#![allow(clippy::collapsible_if)]
+
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
