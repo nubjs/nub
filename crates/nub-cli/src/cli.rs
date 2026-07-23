@@ -847,12 +847,16 @@ pub enum Command {
     // deliberately excluded from ENGINE_VERBS; design record in
     // wiki/commands/init.md. (The doc comment below is user-facing `--help`
     // text: no internal references.)
-    /// Scaffold a new TypeScript-first project.
     /// Compile a file to a standalone executable (spike — host triple only).
     ///
     /// Bundles the entry (Rolldown, in-process), embeds a Node for the target
     /// (default shape), and emits one self-contained binary. `--smol` embeds no
     /// Node — it discovers or provisions one at first run.
+    ///
+    /// Gated behind the `compile` cargo feature: a shipped build (which does not
+    /// enable it) exposes no `compile` verb at all rather than one that only
+    /// errors.
+    #[cfg(feature = "compile")]
     Compile {
         /// Entry file (TS/JS) to bundle and compile.
         entry: String,
@@ -879,6 +883,7 @@ pub enum Command {
         no_minify: bool,
     },
 
+    /// Scaffold a new TypeScript-first project.
     Init {
         /// Non-interactive: skip all prompts and take the defaults.
         #[arg(short = 'y', long)]
@@ -1240,7 +1245,21 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci", "init",
+    "run",
+    "watch",
+    "exec",
+    "upgrade",
+    "help",
+    "node",
+    "pm",
+    "agent",
+    "install",
+    "i",
+    "ci",
+    "init",
+    // Only a real verb in a `--features compile` build (the variant + handler are
+    // gated the same way); a shipped build exposes no `compile` verb at all.
+    #[cfg(feature = "compile")]
     "compile",
 ];
 
@@ -2434,6 +2453,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 run_exec_with_dlx(&bin, node, &args, Some(&dlx_flags))
             }
         }
+        #[cfg(feature = "compile")]
         Some(Command::Compile {
             entry,
             out,
@@ -2441,27 +2461,14 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             target,
             platform,
             no_minify,
-        }) => {
-            #[cfg(feature = "compile")]
-            {
-                crate::compile::run(crate::compile::CompileOptions {
-                    entry,
-                    out,
-                    smol,
-                    target,
-                    platform,
-                    minify: !no_minify,
-                })
-            }
-            #[cfg(not(feature = "compile"))]
-            {
-                let _ = (entry, out, smol, target, platform, no_minify);
-                anyhow::bail!(
-                    "this build of nub was compiled without `nub compile` support \
-                     (rebuild with `--features compile`)"
-                )
-            }
-        }
+        }) => crate::compile::run(crate::compile::CompileOptions {
+            entry,
+            out,
+            smol,
+            target,
+            platform,
+            minify: !no_minify,
+        }),
         Some(Command::Init {
             yes,
             js,
@@ -6303,7 +6310,17 @@ fn print_version() {
 
 /// Native clap subcommands whose `--help` is rendered by clap directly.
 const CLAP_HELP_COMMANDS: &[&str] = &[
-    "run", "watch", "exec", "nubx", "upgrade", "install", "i", "ci", "init", "compile",
+    "run",
+    "watch",
+    "exec",
+    "nubx",
+    "upgrade",
+    "install",
+    "i",
+    "ci",
+    "init",
+    #[cfg(feature = "compile")]
+    "compile",
 ];
 
 /// True for any word `nub <word> -h` / `nub help <word>` can route to a real help

@@ -70,6 +70,9 @@ __pycache__/
 # nub-phantom is its own Cargo workspace too (eval tool, built on demand); its
 # default target/ lands in-tree.
 /crates/nub-phantom/target/
+# nub-launcher (the `nub compile` runtime half) is its own size-tuned workspace;
+# a local build lands its target/ in-tree.
+/crates/nub-launcher/target/
 /dist/
 /build/
 /coverage/

@@ -37,6 +37,13 @@ struct ChunkOut {
 type AppFiles = Vec<(String, Vec<u8>)>;
 
 pub fn run(opts: CompileOptions) -> Result<i32> {
+    // The section-injection path is Mach-O-only in this spike (libsui `Macho`).
+    // Fail fast with a clear message rather than deep inside libsui trying to
+    // parse a non-Mach-O template on a Linux/Windows host.
+    if !cfg!(target_os = "macos") {
+        bail!("nub compile is macOS-host-only in this spike (ELF/PE injection is not wired yet)");
+    }
+
     let host = host_triple();
     if let Some(p) = &opts.platform {
         if *p != host {
@@ -98,6 +105,7 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
     inject_and_sign(&template, &payload, &out_path)
         .with_context(|| format!("writing {}", out_path.display()))?;
     set_executable(&out_path)?;
+    smoke_probe(&out_path)?;
 
     let size = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
     eprintln!(
@@ -294,6 +302,28 @@ fn inject_and_sign(template: &Path, payload: &[u8], out: &Path) -> Result<()> {
     macho
         .build_and_sign(&mut file)
         .map_err(|e| anyhow!("building + ad-hoc signing the executable: {e:?}"))?;
+    Ok(())
+}
+
+/// Run the produced binary's `__probe` self-check: it reads + decodes the injected
+/// section and touches a `String` allocation — the exact path an under-padded
+/// section injection corrupts into a SIGILL trap. Catching that HERE turns a
+/// would-be runtime crash for the user into a compile-time error.
+fn smoke_probe(bin: &Path) -> Result<()> {
+    let out = std::process::Command::new(bin)
+        .arg("__probe")
+        .output()
+        .with_context(|| format!("running the self-probe on {}", bin.display()))?;
+    let ok =
+        out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("nub-probe ok");
+    if !ok {
+        bail!(
+            "the produced executable failed its self-probe (exit {:?}) — the launcher template \
+             likely has insufficient Mach-O header padding for section injection (see \
+             crates/nub-launcher/build.rs)",
+            out.status.code()
+        );
+    }
     Ok(())
 }
 
