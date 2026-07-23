@@ -247,6 +247,9 @@ fn inspect_existing(path: &Path, private: bool) -> Result<(), Reject> {
     Ok(())
 }
 
+/// Windows has no uid and no mode bits to check. The temp directory is already
+/// per-user there (`%LOCALAPPDATA%\Temp`), which is the property the unix branch
+/// has to construct, so the write probe alone carries this platform.
 #[cfg(not(unix))]
 fn inspect_existing(_path: &Path, _private: bool) -> Result<(), Reject> {
     Ok(())
