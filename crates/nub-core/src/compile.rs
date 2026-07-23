@@ -123,21 +123,27 @@ pub fn decode(bytes: &[u8]) -> Result<PayloadView<'_>> {
     let app_len = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
     let node_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
 
-    let mut off = HEADER_LEN;
-    let manifest_end = off + manifest_len;
-    let app_end = manifest_end + app_len;
-    let node_end = app_end + node_len;
+    // Cumulative offsets via checked_add: a corrupted section can carry garbage
+    // lengths that would wrap under the launcher's panic=abort/no-overflow-checks
+    // release profile, sneak past a `len < end` guard, and then panic-abort on the
+    // slice. Overflow → clean Err instead.
+    let corrupt = || anyhow::anyhow!("compiled payload corrupted (bad length)");
+    let manifest_end = HEADER_LEN.checked_add(manifest_len).ok_or_else(corrupt)?;
+    let app_end = manifest_end.checked_add(app_len).ok_or_else(corrupt)?;
+    let node_end = app_end.checked_add(node_len).ok_or_else(corrupt)?;
     if bytes.len() < node_end {
         bail!("compiled payload truncated (body)");
     }
 
-    let manifest: Manifest = serde_json::from_slice(&bytes[off..manifest_end])
-        .context("parsing the compiled payload manifest")?;
-    off = manifest_end;
+    // `.get(..)` rather than direct indexing: even with the checks above, never let
+    // a bad range panic — a corrupted payload must error, not abort the process.
+    let manifest: Manifest =
+        serde_json::from_slice(bytes.get(HEADER_LEN..manifest_end).ok_or_else(corrupt)?)
+            .context("parsing the compiled payload manifest")?;
 
-    let app_region = &bytes[off..app_end];
+    let app_region = bytes.get(manifest_end..app_end).ok_or_else(corrupt)?;
     let app_files = decode_app_region(app_region)?;
-    let node_blob = &bytes[app_end..node_end];
+    let node_blob = bytes.get(app_end..node_end).ok_or_else(corrupt)?;
 
     Ok(PayloadView {
         manifest,
@@ -147,54 +153,28 @@ pub fn decode(bytes: &[u8]) -> Result<PayloadView<'_>> {
 }
 
 fn decode_app_region(region: &[u8]) -> Result<Vec<(String, &[u8])>> {
+    // Every advance is checked_add + `.get(..)`: a corrupted region must Err, never
+    // panic (debug overflow-check) or wrap-then-mis-slice. `end = p.checked_add(n)`
+    // → None on overflow → clean error.
+    let corrupt = || anyhow::anyhow!("compiled payload corrupted (app region)");
     let mut p = 0usize;
-    let read_u32 = |region: &[u8], p: &mut usize| -> Result<u32> {
-        let end = *p + 4;
-        let v = region
-            .get(*p..end)
-            .context("app region truncated (u32)")?
-            .try_into()
-            .unwrap();
+    let take = |len: usize, p: &mut usize| -> Result<&[u8]> {
+        let end = p.checked_add(len).ok_or_else(corrupt)?;
+        let slice = region.get(*p..end).ok_or_else(corrupt)?;
         *p = end;
-        Ok(u32::from_le_bytes(v))
+        Ok(slice)
     };
-    let count = read_u32(region, &mut p)?;
-    let mut files = Vec::with_capacity(count as usize);
+    let count = u32::from_le_bytes(take(4, &mut p)?.try_into().unwrap());
+    // No `with_capacity(count)`: a corrupt count would pre-allocate hugely. Each
+    // iteration is bounded by the region, so a bad count errors out quickly.
+    let mut files = Vec::new();
     for _ in 0..count {
-        let name_len = {
-            let end = p + 2;
-            let v: [u8; 2] = region
-                .get(p..end)
-                .context("app region truncated (name_len)")?
-                .try_into()
-                .unwrap();
-            p = end;
-            u16::from_le_bytes(v) as usize
-        };
-        let name = {
-            let end = p + name_len;
-            let s = std::str::from_utf8(region.get(p..end).context("app region truncated (name)")?)
-                .context("app file name is not utf-8")?
-                .to_string();
-            p = end;
-            s
-        };
-        let data_len = {
-            let end = p + 8;
-            let v: [u8; 8] = region
-                .get(p..end)
-                .context("app region truncated (data_len)")?
-                .try_into()
-                .unwrap();
-            p = end;
-            u64::from_le_bytes(v) as usize
-        };
-        let data = {
-            let end = p + data_len;
-            let d = region.get(p..end).context("app region truncated (data)")?;
-            p = end;
-            d
-        };
+        let name_len = u16::from_le_bytes(take(2, &mut p)?.try_into().unwrap()) as usize;
+        let name = std::str::from_utf8(take(name_len, &mut p)?)
+            .context("app file name is not utf-8")?
+            .to_string();
+        let data_len = u64::from_le_bytes(take(8, &mut p)?.try_into().unwrap()) as usize;
+        let data = take(data_len, &mut p)?;
         files.push((name, data));
     }
     Ok(files)
@@ -255,5 +235,28 @@ mod tests {
     fn rejects_bad_magic() {
         let bad = vec![0u8; HEADER_LEN + 4];
         assert!(decode(&bad).is_err());
+    }
+
+    #[test]
+    fn rejects_overflowing_lengths_without_panicking() {
+        // A corrupted section with a garbage length must Err cleanly, never
+        // panic (the launcher's release profile is panic=abort with overflow
+        // checks off, so an unchecked `+` would abort the process).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(FORMAT_VERSION);
+        bytes.extend_from_slice(&[0u8; 3]);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // manifest_len = 0
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // app_len = 0
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // node_len = MAX → overflow
+        // (PayloadView isn't Debug — it holds the raw section slices — so match
+        // rather than unwrap_err.)
+        match decode(&bytes) {
+            Err(e) => assert!(
+                format!("{e:#}").contains("corrupted"),
+                "expected a clean corruption error, got: {e:#}"
+            ),
+            Ok(_) => panic!("an overflowing length must not decode successfully"),
+        }
     }
 }

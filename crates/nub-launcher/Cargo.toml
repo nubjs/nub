@@ -30,6 +30,10 @@ libsui = "0.16"
 ruzstd = "0.8"
 anyhow = "1"
 libc = "0.2"
+# SHA-256 verification of a `--smol` shell-out-provisioned Node against
+# SHASUMS256.txt before it is committed into the shared store (fat-LTO drops it
+# from the embed-shape path, which never provisions).
+sha2 = "0.10"
 
 # Own workspace root: excluded from the nub root workspace so this profile
 # (size-first) governs the shipped launcher independently.

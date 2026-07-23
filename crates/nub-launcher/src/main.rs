@@ -39,11 +39,18 @@ fn run() -> i32 {
     // binary, IS this launcher. Dispatch that hidden verb to the watcher entry
     // instead of decoding the payload and re-launching the app (matches how the nub
     // CLI intercepts it above argv0 detection).
-    #[cfg(unix)]
     {
         let args: Vec<String> = std::env::args().collect();
+        #[cfg(unix)]
         if args.get(1).map(String::as_str) == Some("__pdeath-watch") {
             return spawn::run_pdeath_watch(&args[2..]);
+        }
+        // Compile-time self-check: `nub compile` runs this on the produced binary
+        // to catch an under-padded / corrupt section injection (which traps with
+        // SIGILL) BEFORE shipping it to the user. Exercises the section-read +
+        // decode + String allocation path without extracting or spawning Node.
+        if args.get(1).map(String::as_str) == Some("__probe") {
+            return probe();
         }
     }
 
@@ -118,6 +125,28 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
     // foreground handoff + macOS SIGKILL backstop — the same faithful spawn
     // `nub run`'s file path uses. NODE_OPTIONS is inherited untouched (honored).
     spawn::status_forwarding_signals(&mut cmd).context("spawning Node")
+}
+
+/// The `__probe` self-check `nub compile` runs on the produced binary at compile
+/// time. Reads + decodes the injected section and touches a `String` allocation
+/// (the exact code an under-padded libsui injection corrupts into a SIGILL trap),
+/// then prints a stable marker — WITHOUT extracting or spawning Node.
+fn probe() -> i32 {
+    let Ok(Some(section)) = libsui::find_section(compile::SECTION_NAME) else {
+        eprintln!("nub-probe: no payload section");
+        return 70;
+    };
+    match compile::decode(section) {
+        Ok(view) => {
+            let key = short_key(&view.manifest.app_sha256);
+            println!("nub-probe ok {} {}", view.manifest.entry, key);
+            0
+        }
+        Err(e) => {
+            eprintln!("nub-probe: {e:#}");
+            70
+        }
+    }
 }
 
 // ---- Node acquisition ---------------------------------------------------------
@@ -298,6 +327,21 @@ fn provision_smol_node(version: &NodeVersion) -> Result<PathBuf> {
         let _ = fs::remove_dir_all(&work);
     })?;
 
+    // Verify the tarball's SHA-256 against SHASUMS256.txt BEFORE anything reaches
+    // the shared store — `nub run` and the embed-shape dedup path later TRUST that
+    // store without re-verifying, so an unverified write would poison them. Matches
+    // version_management::provision_node_from's fail-closed commit gate.
+    let shasums_path = work.join("SHASUMS256.txt");
+    let shasums_url = format!("{base}/v{version}/SHASUMS256.txt");
+    download_via_shell(&shasums_url, &shasums_path).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&work);
+    })?;
+    let shasums = fs::read_to_string(&shasums_path)
+        .with_context(|| format!("reading {}", shasums_path.display()))?;
+    verify_tarball_checksum(&tarball, &shasums, &filename).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&work);
+    })?;
+
     // Extract (xz-aware tar). `tar -xJf` works on macOS bsdtar + GNU tar.
     let status = Command::new("tar")
         .arg("-xJf")
@@ -368,6 +412,37 @@ fn command_exists(name: &str) -> bool {
     which_on_path(name).is_some()
 }
 
+/// Fail-closed SHA-256 gate: the tarball's digest must match its line in
+/// SHASUMS256.txt, or the install aborts before anything is committed. Mirrors
+/// `version_management::download::verify_checksum` exactly.
+fn verify_tarball_checksum(tarball: &Path, shasums: &str, filename: &str) -> Result<()> {
+    let expected = checksum_for(shasums, filename)
+        .with_context(|| format!("{filename} is not listed in SHASUMS256.txt — refusing"))?;
+    let actual = sha256_hex_of_file(tarball)?;
+    if actual.eq_ignore_ascii_case(&expected) {
+        Ok(())
+    } else {
+        bail!("checksum mismatch for {filename}: expected {expected}, got {actual}");
+    }
+}
+
+/// The SHASUMS256.txt hash for `filename` (`<64-hex>  <name>`), lowercased, or
+/// `None` if absent/malformed. Byte-identical to nub-core's `checksum_for`.
+fn checksum_for(shasums: &str, filename: &str) -> Option<String> {
+    shasums.lines().find_map(|line| {
+        let (hash, rest) = line.split_once(char::is_whitespace)?;
+        let name = rest.trim_start();
+        let valid = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+        (valid && name == filename).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+fn sha256_hex_of_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
 /// The `NODEJS_ORG_MIRROR` override (nvm/n convention), else the default dist
 /// base (unofficial-builds for musl).
 fn smol_mirror_base() -> String {
@@ -405,6 +480,13 @@ fn ensure_app(view: &PayloadView<'_>) -> Result<PathBuf> {
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     for (name, data) in &view.app_files {
+        // Refuse a payload file name that could escape the extraction dir — a
+        // corrupted/hostile section must not write outside `tmp` via `..`, an
+        // absolute path, or a leading separator (defense in depth; nub compile
+        // only ever emits flat bundle names).
+        if !is_safe_relative_name(name) {
+            bail!("compiled payload has an unsafe file name: {name:?}");
+        }
         let dest = tmp.join(name);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).ok();
@@ -428,6 +510,18 @@ fn ensure_app(view: &PayloadView<'_>) -> Result<PathBuf> {
 }
 
 // ---- helpers ------------------------------------------------------------------
+
+/// A payload file name is safe to join under the extraction dir iff every path
+/// component is a plain name — no absolute root/prefix, no `..`, no leading
+/// separator, no `.`. Nested `a/b.js` is allowed (all-Normal); an escaping name
+/// is rejected. Guards against a corrupted section writing outside the cache.
+fn is_safe_relative_name(name: &str) -> bool {
+    use std::path::{Component, Path};
+    !name.is_empty()
+        && Path::new(name)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+}
 
 /// The cache base for extracted payloads (`~/.cache/nub`, else a temp fallback).
 fn cache_base() -> Result<PathBuf> {
@@ -533,4 +627,54 @@ fn exit_code(status: ExitStatus) -> i32 {
 #[cfg(not(unix))]
 fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `--smol` checksum gate: a tarball whose SHA-256 does not match
+    /// SHASUMS256.txt must be REFUSED (so provisioning bails before the
+    /// rename-into-store), and a matching one accepted. This is what keeps a
+    /// shell-out-provisioned Node from poisoning the shared store.
+    #[test]
+    fn checksum_gate_refuses_mismatch_and_accepts_match() {
+        let dir = std::env::temp_dir().join(format!("nub-smol-sum-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let filename = "node-v99.99.99-test.tar.xz";
+        let tarball = dir.join(filename);
+        fs::write(&tarball, b"pretend tarball bytes").unwrap();
+        let real = sha256_hex_of_file(&tarball).unwrap();
+
+        // Wrong hash listed → refused (mismatch), nothing extracted.
+        let bad = format!("{}  {filename}\n", "0".repeat(64));
+        let err = verify_tarball_checksum(&tarball, &bad, filename).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("checksum mismatch"),
+            "got: {err:#}"
+        );
+
+        // Not listed at all → refused (fail-closed, never accept an absent entry).
+        let absent = format!("{real}  some-other-file.tar.xz\n");
+        assert!(verify_tarball_checksum(&tarball, &absent, filename).is_err());
+
+        // Correct hash → accepted.
+        let good = format!("{real}  {filename}\n");
+        assert!(verify_tarball_checksum(&tarball, &good, filename).is_ok());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_escaping_payload_file_names() {
+        assert!(is_safe_relative_name("main.js"));
+        assert!(is_safe_relative_name("chunk-abc.js"));
+        assert!(is_safe_relative_name("nested/chunk.js"));
+        assert!(!is_safe_relative_name(""));
+        assert!(!is_safe_relative_name("../evil"));
+        assert!(!is_safe_relative_name("a/../../evil"));
+        assert!(!is_safe_relative_name("/etc/passwd"));
+        assert!(!is_safe_relative_name("./main.js"));
+    }
 }
