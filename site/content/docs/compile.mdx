@@ -109,16 +109,56 @@ nub compile app.ts --compress xz   # smaller file, slower first run
 
 ## `--install-message` / `--no-install-message`
 
-For a `--smol` binary, set or silence the message shown while it provisions Node on first run. Provisioning already shows a progress bar on a TTY and stays silent when output is redirected.
+The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. Both shapes announce that with a line before the work begins, defaulting to the output name:
+
+```console
+$ ./app
+Setting up app
+hello from app
+```
+
+Set your own text, or start silently:
 
 ```bash
-nub compile app.ts --smol --install-message "Fetching Node, one moment…"
-nub compile app.ts --smol --no-install-message
+nub compile app.ts --install-message "Preparing the toolchain, one moment"
+nub compile app.ts --no-install-message
 ```
+
+The line goes to stderr, and only on an interactive terminal — piped output and log files never see it. Later runs hit the warm cache and print nothing.
 
 ## `--platform`
 
 Reserved for cross-compiling to another target triple. Not yet available — see the note at the top of the page.
+
+## Where the runtime is extracted
+
+The default shape extracts Node once into a shared cache, so every compiled binary and every `nub run` project on the machine reuses one runtime. The binary takes the first directory it can create, write to, and execute from:
+
+```bash
+NUB_COMPILE_CACHE_DIR   # explicit override, used exactly as given
+$XDG_CACHE_HOME/nub
+$HOME/.cache/nub
+$TMPDIR/nub-<uid>       # per-user, created mode 0700
+```
+
+Each candidate is tried for real, so a read-only home or a `noexec` mount is skipped rather than fatal — a binary on AWS Lambda or in a `readOnlyRootFilesystem` pod falls through to the temp directory and runs. When no candidate works, the error names every path it tried and what stopped it:
+
+```console
+$ ./app
+nub: no writable, executable cache directory was found.
+  Tried:
+    NUB_COMPILE_CACHE_DIR — not set
+    XDG_CACHE_HOME — not set
+    HOME (/root/.cache/nub) — read-only filesystem
+    TMPDIR (/tmp/nub-0) — mounted noexec
+```
+
+For a locked-down deploy, warm the cache at image-build time — run the binary once during the build with `NUB_COMPILE_CACHE_DIR` pointing inside the image. The extraction lands in an ordinary layer, and the runtime hit writes nothing at all.
+
+```dockerfile
+ENV NUB_COMPILE_CACHE_DIR=/opt/nub-cache
+RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
+```
 
 ## Runtime behavior
 
