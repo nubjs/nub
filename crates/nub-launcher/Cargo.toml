@@ -27,7 +27,7 @@ nub-core = { path = "../nub-core" }
 libsui = "0.16"
 # Pure-Rust zstd DECODER for the embedded Node (matches nub-core's runtime
 # extraction). Decode-only keeps the C zstd out of the launcher.
-ruzstd = "0.7"
+ruzstd = "0.8"
 anyhow = "1"
 libc = "0.2"
 

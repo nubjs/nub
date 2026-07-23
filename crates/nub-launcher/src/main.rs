@@ -30,6 +30,19 @@ fn main() {
 }
 
 fn run() -> i32 {
+    // nub-core's signal-forwarding spawn plants a macOS SIGKILL-backstop watcher by
+    // re-invoking `current_exe __pdeath-watch <pgid> <fd>` — which, for a compiled
+    // binary, IS this launcher. Dispatch that hidden verb to the watcher entry
+    // instead of decoding the payload and re-launching the app (matches how the nub
+    // CLI intercepts it above argv0 detection).
+    #[cfg(unix)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("__pdeath-watch") {
+            return spawn::run_pdeath_watch(&args[2..]);
+        }
+    }
+
     let section = match libsui::find_section(compile::SECTION_NAME) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {

@@ -1241,6 +1241,7 @@ struct ScriptExecOpts<'a> {
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
     "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci", "init",
+    "compile",
 ];
 
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
@@ -6302,7 +6303,7 @@ fn print_version() {
 
 /// Native clap subcommands whose `--help` is rendered by clap directly.
 const CLAP_HELP_COMMANDS: &[&str] = &[
-    "run", "watch", "exec", "nubx", "upgrade", "install", "i", "ci", "init",
+    "run", "watch", "exec", "nubx", "upgrade", "install", "i", "ci", "init", "compile",
 ];
 
 /// True for any word `nub <word> -h` / `nub help <word>` can route to a real help
