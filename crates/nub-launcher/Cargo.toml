@@ -25,9 +25,14 @@ nub-core = { path = "../nub-core" }
 # runtime (`find_section`). The Mach-O writer + signer libsui also provides is
 # used compile-time in nub-cli, not here — fat LTO drops it.
 libsui = "0.16"
-# Pure-Rust zstd DECODER for the embedded Node (matches nub-core's runtime
-# extraction). Decode-only keeps the C zstd out of the launcher.
-ruzstd = "0.8"
+# zstd DECODER for the embedded Node. This was ruzstd (pure Rust) to keep the C
+# zstd out of the launcher on size grounds; measured on darwin-arm64 that premise
+# does not hold — the fat-LTO'd binary is 522,912 bytes with libzstd against
+# 523,056 with ruzstd, while ruzstd decodes the payload 4-5x slower and owns
+# nearly the whole cold-start cost. The launcher already links C through
+# nub-core, so this adds no toolchain requirement. `default-features = false`
+# drops the compressor-side extras; only the streaming decoder is used.
+zstd = { version = "0.13", default-features = false }
 anyhow = "1"
 libc = "0.2"
 # SHA-256 verification of a `--smol` shell-out-provisioned Node against
