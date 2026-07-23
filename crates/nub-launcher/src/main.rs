@@ -22,8 +22,9 @@
 
 mod cache;
 
+use std::cell::Cell;
 use std::fs;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -92,8 +93,9 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
     // under the one directory that was proven writable + exec-capable, and the
     // probe (a mkdir plus a zero-byte file) is not repeated per payload.
     let base = cache::resolve()?;
+    let notice = FirstRun::new(view.manifest.install_message.as_deref());
 
-    let node_path = acquire_node(view, &base)?;
+    let node_path = acquire_node(view, &base, &notice)?;
     let app_dir = ensure_app(view, &base)?;
     let entry = app_dir.join(&view.manifest.entry);
 
@@ -145,6 +147,35 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
     })
 }
 
+/// The one-shot first-run line. The launcher owns the terminal before it does any
+/// work, so a cold run announces itself instead of going silent for seconds; a
+/// warm run never constructs a reason to print. Non-TTY stays silent so piped
+/// output and logs are unaffected.
+struct FirstRun {
+    text: Option<String>,
+    printed: Cell<bool>,
+}
+
+impl FirstRun {
+    fn new(text: Option<&str>) -> Self {
+        let tty = std::io::stderr().is_terminal();
+        Self {
+            text: text.filter(|t| !t.is_empty() && tty).map(str::to_string),
+            printed: Cell::new(false),
+        }
+    }
+
+    /// Announce the cold path. Idempotent: extraction and provisioning both call
+    /// it, and a run that does both prints one line.
+    fn announce(&self) {
+        if let Some(text) = &self.text {
+            if !self.printed.replace(true) {
+                eprintln!("{text}");
+            }
+        }
+    }
+}
+
 /// The `__probe` self-check `nub compile` runs on the produced binary at compile
 /// time. Reads + decodes the injected section and touches a `String` allocation
 /// (the exact code an under-padded libsui injection corrupts into a SIGILL trap),
@@ -169,10 +200,10 @@ fn probe() -> i32 {
 
 // ---- Node acquisition ---------------------------------------------------------
 
-fn acquire_node(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
+fn acquire_node(view: &PayloadView<'_>, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
     match view.manifest.shape {
-        Shape::Embed => acquire_embedded_node(view, base),
-        Shape::Smol => acquire_smol_node(&view.manifest, base),
+        Shape::Embed => acquire_embedded_node(view, base, notice),
+        Shape::Smol => acquire_smol_node(&view.manifest, base, notice),
     }
 }
 
@@ -181,7 +212,11 @@ fn acquire_node(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
 /// embedded Node is stripped and the official provisioned Node is not, but both
 /// run identically, so an already-present official Node of the same version is
 /// accepted and decompression is skipped.
-fn acquire_embedded_node(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
+fn acquire_embedded_node(
+    view: &PayloadView<'_>,
+    base: &Path,
+    notice: &FirstRun,
+) -> Result<PathBuf> {
     let m = &view.manifest;
     let key = short_key(&m.node_sha256);
     let node_cache = base
@@ -206,6 +241,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf>
     if view.node_blob.is_empty() {
         bail!("embed-shape payload is missing its Node blob");
     }
+    notice.announce();
     let tmp = base.join(format!(
         ".compile-node.{}.{}.tmp",
         std::process::id(),
@@ -239,7 +275,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf>
 /// shell-out provision. Acceptance rule (orchestrator default): any discovered
 /// Node `>= --target` (regardless of major) qualifies; provision the exact target
 /// only when nothing does.
-fn acquire_smol_node(m: &Manifest, base: &Path) -> Result<PathBuf> {
+fn acquire_smol_node(m: &Manifest, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
     let target: NodeVersion = m.node_version.parse().map_err(|_| {
         anyhow!(
             "compiled target version '{}' is unparseable",
@@ -262,7 +298,7 @@ fn acquire_smol_node(m: &Manifest, base: &Path) -> Result<PathBuf> {
     }
 
     // 3. Provision the exact target via shell-out.
-    provision_smol_node(&target, base)
+    provision_smol_node(&target, base, notice)
 }
 
 /// Node stores to READ, nearest first: the probed cache base, then the location
@@ -329,7 +365,7 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 /// Provision `version` for the host from nodejs.org via a lean shell-out
 /// (`curl`→`wget`, then `tar`). No in-binary TLS stack — the design's `--smol`
 /// rule. Installs into nub's store so `nub run` and future launches reuse it.
-fn provision_smol_node(version: &NodeVersion, base: &Path) -> Result<PathBuf> {
+fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
     let token = host_platform_token();
     if host_archive_ext() != "tar.xz" {
         bail!(
@@ -351,10 +387,7 @@ fn provision_smol_node(version: &NodeVersion, base: &Path) -> Result<PathBuf> {
     fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
     let tarball = work.join(&filename);
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    if tty {
-        eprintln!("Installing Node {version} from nodejs.org...");
-    }
+    notice.announce();
     download_via_shell(&url, &tarball).inspect_err(|_| {
         let _ = fs::remove_dir_all(&work);
     })?;
