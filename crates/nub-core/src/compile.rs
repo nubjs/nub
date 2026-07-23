@@ -90,9 +90,8 @@ pub fn encode(manifest: &Manifest, app_files: &[(String, Vec<u8>)], node_blob: &
         app_region.extend_from_slice(data);
     }
 
-    let mut out = Vec::with_capacity(
-        HEADER_LEN + manifest_bytes.len() + app_region.len() + node_blob.len(),
-    );
+    let mut out =
+        Vec::with_capacity(HEADER_LEN + manifest_bytes.len() + app_region.len() + node_blob.len());
     out.extend_from_slice(MAGIC);
     out.push(FORMAT_VERSION);
     out.extend_from_slice(&[0u8; 3]);
@@ -115,7 +114,10 @@ pub fn decode(bytes: &[u8]) -> Result<PayloadView<'_>> {
         bail!("compiled payload has a bad magic");
     }
     if bytes[4] != FORMAT_VERSION {
-        bail!("compiled payload format version {} is unsupported", bytes[4]);
+        bail!(
+            "compiled payload format version {} is unsupported",
+            bytes[4]
+        );
     }
     let manifest_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let app_len = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;

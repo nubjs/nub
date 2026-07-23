@@ -90,13 +90,8 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
     // Pure version-banded flags (source-maps, disable-warning, experimental
     // unflags). `None` accepted-flag set = version-band behavior without the
     // extra allowed-flags probe spawn; safe for a known embedded/provisioned Node.
-    let inject = flags::compute_inject_flags(
-        version,
-        &user_args,
-        node_options.as_deref(),
-        false,
-        None,
-    );
+    let inject =
+        flags::compute_inject_flags(version, &user_args, node_options.as_deref(), false, None);
 
     let mut cmd = Command::new(node_path.as_os_str());
     // argv0 fidelity: process.argv0 / process.title report "node" (execPath still
@@ -170,8 +165,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let tmp_bin = tmp.join("node");
-    decompress_to_file(view.node_blob, &tmp_bin)
-        .context("decompressing the embedded Node")?;
+    decompress_to_file(view.node_blob, &tmp_bin).context("decompressing the embedded Node")?;
     set_executable(&tmp_bin)?;
 
     fs::create_dir_all(node_cache.parent().unwrap()).ok();
@@ -182,7 +176,10 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
             // if the binary is there, else surface the error.
             let _ = fs::remove_dir_all(&tmp);
             if !node_bin.is_file() {
-                bail!("failed to publish the extracted Node to {}", node_cache.display());
+                bail!(
+                    "failed to publish the extracted Node to {}",
+                    node_cache.display()
+                );
             }
         }
     }
@@ -194,10 +191,12 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
 /// Node `>= --target` (regardless of major) qualifies; provision the exact target
 /// only when nothing does.
 fn acquire_smol_node(m: &Manifest) -> Result<PathBuf> {
-    let target: NodeVersion = m
-        .node_version
-        .parse()
-        .map_err(|_| anyhow!("compiled target version '{}' is unparseable", m.node_version))?;
+    let target: NodeVersion = m.node_version.parse().map_err(|_| {
+        anyhow!(
+            "compiled target version '{}' is unparseable",
+            m.node_version
+        )
+    })?;
 
     // 1. nub's Node store — a version dir named by its concrete version.
     if let Some(store) = discovery::node_store_dir() {
@@ -279,8 +278,8 @@ fn provision_smol_node(version: &NodeVersion) -> Result<PathBuf> {
     let filename = format!("node-v{version}-{token}.tar.xz");
     let url = format!("{base}/v{version}/{filename}");
 
-    let store = discovery::node_store_dir()
-        .context("no writable cache dir for provisioning Node")?;
+    let store =
+        discovery::node_store_dir().context("no writable cache dir for provisioning Node")?;
     fs::create_dir_all(&store).ok();
     let work = store.join(format!(".smol.{version}.{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
@@ -319,7 +318,10 @@ fn provision_smol_node(version: &NodeVersion) -> Result<PathBuf> {
 
     let node = final_dir.join("bin").join("node");
     if !node.is_file() {
-        bail!("provisioned Node {version} but its binary is missing at {}", node.display());
+        bail!(
+            "provisioned Node {version} but its binary is missing at {}",
+            node.display()
+        );
     }
     Ok(node)
 }
@@ -411,7 +413,10 @@ fn ensure_app(view: &PayloadView<'_>) -> Result<PathBuf> {
         Err(_) => {
             let _ = fs::remove_dir_all(&tmp);
             if !app_dir.join(&view.manifest.entry).is_file() {
-                bail!("failed to publish the extracted app to {}", app_dir.display());
+                bail!(
+                    "failed to publish the extracted app to {}",
+                    app_dir.display()
+                );
             }
         }
     }

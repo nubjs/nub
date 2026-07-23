@@ -47,8 +47,8 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
     if !entry_path.is_file() {
         bail!("entry file not found: {}", opts.entry);
     }
-    let entry_abs = fs::canonicalize(entry_path)
-        .with_context(|| format!("resolving entry {}", opts.entry))?;
+    let entry_abs =
+        fs::canonicalize(entry_path).with_context(|| format!("resolving entry {}", opts.entry))?;
     let stem = entry_abs
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -141,8 +141,7 @@ fn bundle(entry_abs: &Path, minify: bool) -> Result<Vec<ChunkOut>> {
         .build()
         .context("building the bundler runtime")?;
     let output = rt.block_on(async move {
-        let mut bundler =
-            Bundler::new(options).map_err(|e| anyhow!("rolldown init: {e:?}"))?;
+        let mut bundler = Bundler::new(options).map_err(|e| anyhow!("rolldown init: {e:?}"))?;
         bundler
             .generate()
             .await
@@ -178,10 +177,7 @@ fn assemble_app(chunks: Vec<ChunkOut>) -> Result<(String, Vec<(String, Vec<u8>)>
 
     let mut files: Vec<(String, Vec<u8>)> =
         chunks.into_iter().map(|c| (c.filename, c.code)).collect();
-    files.push((
-        "package.json".to_string(),
-        br#"{"type":"module"}"#.to_vec(),
-    ));
+    files.push(("package.json".to_string(), br#"{"type":"module"}"#.to_vec()));
     Ok((entry_name, files))
 }
 
@@ -196,7 +192,10 @@ fn build_node_blob(target: &str, cache_root: &Path) -> Result<(NodeVersion, Vec<
         version_management::provision_host_node(target, cache_root, Some("--target"))?;
     let node_bin = dir.join("bin").join("node");
     if !node_bin.is_file() {
-        bail!("provisioned Node {version} but its binary is missing at {}", node_bin.display());
+        bail!(
+            "provisioned Node {version} but its binary is missing at {}",
+            node_bin.display()
+        );
     }
 
     let bytes = strip_and_resign(&node_bin)?;
@@ -226,13 +225,21 @@ fn strip_and_resign(node_bin: &Path) -> Result<Vec<u8>> {
     let tmp = std::env::temp_dir().join(format!("nub-compile-node-{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
     fs::write(&tmp, &original).with_context(|| format!("staging Node at {}", tmp.display()))?;
+    // fs::write lands 0644; the post-resign `--version` verification must be able to
+    // EXEC the staged binary, so restore the executable bit before strip/verify.
+    set_executable(&tmp)?;
     let _guard = FileGuard(tmp.clone());
 
     let stripped_ok = run_ok(&strip, &[tmp.as_os_str()]);
     if stripped_ok && which_first(&["codesign"]).is_some() {
         let resigned = run_ok(
             "codesign",
-            &["--force".as_ref(), "-s".as_ref(), "-".as_ref(), tmp.as_os_str()],
+            &[
+                "--force".as_ref(),
+                "-s".as_ref(),
+                "-".as_ref(),
+                tmp.as_os_str(),
+            ],
         );
         if resigned && run_ok(tmp.to_str().unwrap_or_default(), &["--version".as_ref()]) {
             eprintln!("Stripped + ad-hoc re-signed the embedded Node");
@@ -252,7 +259,10 @@ fn locate_launcher_template() -> Result<PathBuf> {
         if p.is_file() {
             return Ok(p);
         }
-        bail!("NUB_LAUNCHER_TEMPLATE points at a missing file: {}", p.display());
+        bail!(
+            "NUB_LAUNCHER_TEMPLATE points at a missing file: {}",
+            p.display()
+        );
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -269,8 +279,8 @@ fn locate_launcher_template() -> Result<PathBuf> {
 }
 
 fn inject_and_sign(template: &Path, payload: &[u8], out: &Path) -> Result<()> {
-    let template_bytes =
-        fs::read(template).with_context(|| format!("reading launcher template {}", template.display()))?;
+    let template_bytes = fs::read(template)
+        .with_context(|| format!("reading launcher template {}", template.display()))?;
     let macho = libsui::Macho::from(template_bytes)
         .map_err(|e| anyhow!("parsing the launcher template as Mach-O: {e:?}"))?;
     let macho = macho
