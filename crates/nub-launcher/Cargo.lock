@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "nub-core"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "camino",
@@ -878,6 +878,7 @@ dependencies = [
  "libsui",
  "nub-core",
  "ruzstd",
+ "sha2",
 ]
 
 [[package]]
