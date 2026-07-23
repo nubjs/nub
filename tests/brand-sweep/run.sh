@@ -232,7 +232,6 @@ grep -q 'WARN_NUB_IGNORED_BUILD_SCRIPTS' "$out3" || fail_with_output "warning co
 # allow path: the one-line disclosure names esbuild, rewritten like every
 # other warning-channel line.
 grep -q 'WARN defaultTrust: running build scripts for esbuild@' "$out3" || fail_with_output "defaultTrust disclosure line missing (floor allowed builds silently)"
-grep -q 'WARN_NUB_DEFAULT_TRUST_BUILDS' "$out3" || fail_with_output "defaultTrust disclosure code not rewritten to WARN_NUB_*"
 grep -q 'core-js' "$out3" || fail_with_output "deny-side probe (core-js) missing from ignored-builds warning"
 # NB: plain backticks inside single quotes — '\`' would be a literal
 # backslash-backtick, which GNU grep parses as the buffer-start anchor

@@ -143,7 +143,7 @@ fn format_line(level: &str, fields: &LineVisitor) -> String {
 
     let mut line = format!("{level} {message}");
     for (name, value) in &fields.rest {
-        if is_default_trust_disclosure && matches!(*name, "count" | "packages") {
+        if is_default_trust_disclosure && matches!(*name, "code" | "count" | "packages") {
             continue;
         }
         line.push(' ');
@@ -198,7 +198,7 @@ mod tests {
 
         assert_eq!(
             format_line("WARN", &fields),
-            "WARN defaultTrust: running build scripts for msgpackr-extract@3.0.4 code=WARN_AUBE_DEFAULT_TRUST_BUILDS"
+            "WARN defaultTrust: running build scripts for msgpackr-extract@3.0.4"
         );
     }
 }

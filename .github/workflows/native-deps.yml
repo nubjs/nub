@@ -6,7 +6,7 @@ name: Native-dep floor
 # Two fixture legs:
 #   floor-allowed: esbuild + better-sqlite3 (both on the allowlist). Asserts:
 #     (a) install exits 0 and artifacts materialize,
-#     (b) WARN_NUB_DEFAULT_TRUST_BUILDS discloses both packages by name — the
+#     (b) the defaultTrust warning discloses both packages by name — the
 #         floor is NOT a silent allow path,
 #     (c) native modules are loadable after install.
 #   floor-denied:  core-js (not on the allowlist). Asserts:
