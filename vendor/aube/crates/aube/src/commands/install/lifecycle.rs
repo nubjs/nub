@@ -546,8 +546,8 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             continue;
         }
         let cache_entry = side_effects_cache
-            .root()
-            .map(|root| SideEffectsCacheEntry::new(root, &pkg.name, &pkg.version, &package_dir))
+            .location()
+            .map(|loc| SideEffectsCacheEntry::new(loc, &pkg.name, &pkg.version, &package_dir))
             .transpose()?;
         let dep_modules_dir = dep_modules_dir_for(&package_dir, &pkg.name);
         if via_floor {

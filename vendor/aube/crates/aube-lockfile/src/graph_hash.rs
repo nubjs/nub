@@ -63,14 +63,24 @@ pub struct EngineName(pub String);
 /// store directories look familiar next to `process.arch` output.
 /// Libc detection is a known gap (TODO: musl vs glibc).
 pub fn engine_name_default(node_version: &str) -> EngineName {
-    let os = std::env::consts::OS;
-    let arch = node_arch(std::env::consts::ARCH);
     let major = node_version
         .trim_start_matches('v')
         .split('.')
         .next()
         .unwrap_or("");
-    EngineName(format!("{os}-{arch}-node{major}"))
+    EngineName(format!("{}-node{major}", platform_name()))
+}
+
+/// The `<os>-<arch>` prefix of [`engine_name_default`] on its own, for
+/// callers that key build artifacts but could not resolve a Node
+/// version: they degrade to the platform axis instead of naming an
+/// engine nobody observed.
+pub fn platform_name() -> String {
+    format!(
+        "{}-{}",
+        std::env::consts::OS,
+        node_arch(std::env::consts::ARCH)
+    )
 }
 
 /// Map Rust `std::env::consts::ARCH` values to Node's `process.arch`

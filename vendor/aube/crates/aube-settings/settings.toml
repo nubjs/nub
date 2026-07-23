@@ -2195,7 +2195,10 @@ default = "true"
 docs = """
 When an allowlisted dependency runs lifecycle scripts, aube snapshots
 the post-build package directory under the cache dir keyed by
-`(name, version, input hash)`. Future installs with the same inputs
+`(name, version, engine, input hash)`, where the engine is the same
+`<os>-<arch>-node<major>` fingerprint the virtual store uses, so a
+native addon built for one Node ABI is never restored into another.
+Future installs with the same inputs
 hardlink that cached tree back into the materialized package and skip
 the build. Packages still have to pass the active `allowBuilds` /
 `onlyBuiltDependencies` policy before scripts can run or populate the

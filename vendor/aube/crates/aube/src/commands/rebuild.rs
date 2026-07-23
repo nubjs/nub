@@ -150,6 +150,9 @@ pub async fn run(
                 } else {
                     None
                 };
+            let node_version = crate::engines::effective_node_version(
+                aube_settings::resolved::node_version(&settings_ctx).as_deref(),
+            );
             // Re-emit per-dep `.bin/` shims so a rebuild on a tree
             // that pre-dates the transitive-bin fix still lands them
             // on PATH for the lifecycle scripts. `link_bins_for_dep`
@@ -199,7 +202,12 @@ pub async fn run(
                         if aube_settings::resolved::side_effects_cache_readonly(&settings_ctx) {
                             super::install::SideEffectsCacheConfig::Disabled
                         } else {
-                            super::install::SideEffectsCacheConfig::SaveOnlyOverwrite(root)
+                            super::install::SideEffectsCacheConfig::SaveOnlyOverwrite(
+                                super::install::SideEffectsCacheLocation {
+                                    root,
+                                    node_version: node_version.as_deref(),
+                                },
+                            )
                         }
                     })
                     .unwrap_or(super::install::SideEffectsCacheConfig::Disabled),

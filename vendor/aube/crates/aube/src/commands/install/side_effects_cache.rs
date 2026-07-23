@@ -6,21 +6,35 @@ const SIDE_EFFECTS_CACHE_TMP_PREFIX: &str = ".tmp-side-effects-";
 const SIDE_EFFECTS_CACHE_TMP_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 
+/// Where cache entries live, paired with the Node the lifecycle
+/// scripts run under. The two travel together so no call site can name
+/// a root without also naming the engine: an entry holds *post-build*
+/// artifacts — a native addon's `build/Release/*.node` among them — and
+/// those are only loadable by the ABI that compiled them.
+///
+/// `node_version` is `None` only when the version could not be
+/// resolved at all.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SideEffectsCacheLocation<'a> {
+    pub(crate) root: &'a std::path::Path,
+    pub(crate) node_version: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SideEffectsCacheConfig<'a> {
     Disabled,
-    RestoreOnly(&'a std::path::Path),
-    RestoreAndSave(&'a std::path::Path),
-    SaveOnlyOverwrite(&'a std::path::Path),
+    RestoreOnly(SideEffectsCacheLocation<'a>),
+    RestoreAndSave(SideEffectsCacheLocation<'a>),
+    SaveOnlyOverwrite(SideEffectsCacheLocation<'a>),
 }
 
 impl<'a> SideEffectsCacheConfig<'a> {
-    pub(super) fn root(self) -> Option<&'a std::path::Path> {
+    pub(super) fn location(self) -> Option<SideEffectsCacheLocation<'a>> {
         match self {
             Self::Disabled => None,
-            Self::RestoreOnly(root)
-            | Self::RestoreAndSave(root)
-            | Self::SaveOnlyOverwrite(root) => Some(root),
+            Self::RestoreOnly(loc) | Self::RestoreAndSave(loc) | Self::SaveOnlyOverwrite(loc) => {
+                Some(loc)
+            }
         }
     }
 
@@ -51,7 +65,7 @@ pub(super) enum SideEffectsCacheRestore {
 
 impl SideEffectsCacheEntry {
     pub(super) fn new(
-        root: &std::path::Path,
+        location: SideEffectsCacheLocation<'_>,
         name: &str,
         version: &str,
         package_dir: &std::path::Path,
@@ -61,11 +75,19 @@ impl SideEffectsCacheEntry {
             None => hash_dir_for_side_effects_cache(package_dir)?,
         };
         let safe_name = name.replace('/', "__");
-        let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        // `input_hash` fingerprints the package *before* its scripts run,
+        // so it can never stand in for the engine. Reuse the virtual
+        // store's own engine name rather than a second spelling of it, so
+        // the two caches segregate on identical axes.
+        let engine = match location.node_version {
+            Some(v) => aube_lockfile::graph_hash::engine_name_default(v).0,
+            None => aube_lockfile::graph_hash::platform_name(),
+        };
         Ok(Self {
-            path: root
+            path: location
+                .root
                 .join(format!("{safe_name}@{version}"))
-                .join(platform)
+                .join(engine)
                 .join(&input_hash),
             input_hash,
         })
@@ -425,18 +447,69 @@ fn create_symlink_like(
 mod tests {
     use super::*;
 
+    fn entry_path(
+        root: &std::path::Path,
+        package_dir: &std::path::Path,
+        node_version: Option<&str>,
+    ) -> std::path::PathBuf {
+        SideEffectsCacheEntry::new(
+            SideEffectsCacheLocation { root, node_version },
+            "p",
+            "1.0.0",
+            package_dir,
+        )
+        .unwrap()
+        .path
+    }
+
+    fn package_fixture(root: &std::path::Path) -> std::path::PathBuf {
+        let pkg = root.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), "{\"name\":\"p\"}\n").unwrap();
+        pkg
+    }
+
     #[test]
     fn cache_path_segregates_by_platform() {
         let dir = tempfile::tempdir().unwrap();
-        let pkg = dir.path().join("pkg");
-        std::fs::create_dir_all(&pkg).unwrap();
-        std::fs::write(pkg.join("package.json"), "{\"name\":\"p\"}\n").unwrap();
-        let entry = SideEffectsCacheEntry::new(dir.path(), "p", "1.0.0", &pkg).unwrap();
-        let s = entry.path.to_string_lossy().into_owned();
-        let segment = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let pkg = package_fixture(dir.path());
+        let s = entry_path(dir.path(), &pkg, Some("22.15.0"))
+            .to_string_lossy()
+            .into_owned();
+        let segment = aube_lockfile::graph_hash::platform_name();
         assert!(
             s.contains(&segment),
             "cache path lacks platform segment {segment}: {s}"
+        );
+    }
+
+    #[test]
+    fn cache_path_segregates_by_node_major() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        let node22 = entry_path(dir.path(), &pkg, Some("22.15.0"));
+        let node26 = entry_path(dir.path(), &pkg, Some("26.5.0"));
+        let unknown = entry_path(dir.path(), &pkg, None);
+        assert_ne!(
+            node22, node26,
+            "a native build under one Node major must not be restorable into another"
+        );
+        assert_eq!(
+            node22,
+            entry_path(dir.path(), &pkg, Some("22.16.0")),
+            "NODE_MODULE_VERSION tracks the major, so a minor bump must stay a cache hit"
+        );
+        assert_ne!(
+            unknown, node22,
+            "an unresolved Node version must not collide with a known engine"
+        );
+        assert_ne!(unknown, node26);
+        assert!(
+            unknown
+                .to_string_lossy()
+                .contains(&aube_lockfile::graph_hash::platform_name()),
+            "unresolved Node version should still key on the platform: {}",
+            unknown.display()
         );
     }
 

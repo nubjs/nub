@@ -2,7 +2,9 @@ use super::dep_selection::DepSelection;
 use super::lifecycle::{
     JailBuildPolicy, run_dep_lifecycle_scripts, run_root_lifecycle, unreviewed_dep_builds,
 };
-use super::side_effects_cache::{SideEffectsCacheConfig, side_effects_cache_root};
+use super::side_effects_cache::{
+    SideEffectsCacheConfig, SideEffectsCacheLocation, side_effects_cache_root,
+};
 use super::summary::{print_direct_dependency_summary, should_print_human_install_summary};
 use super::sweep::sweep_orphaned_aube_entries;
 use super::workspace::importer_project_dir;
@@ -38,6 +40,10 @@ pub(super) struct FinalizePhaseInput<'a> {
     pub(super) aube_dir: &'a std::path::Path,
     pub(super) virtual_store_dir_max_length: usize,
     pub(super) child_concurrency: usize,
+    /// Node the dep lifecycle scripts will run under, keying the
+    /// side-effects cache so post-build artifacts never cross an ABI.
+    /// `None` when discovery failed.
+    pub(super) node_version: Option<&'a str>,
     pub(super) side_effects_cache_setting: bool,
     pub(super) side_effects_cache_readonly_setting: bool,
     pub(super) strict_dep_builds_setting: bool,
@@ -169,6 +175,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         aube_dir,
         virtual_store_dir_max_length,
         child_concurrency,
+        node_version,
         side_effects_cache_setting,
         side_effects_cache_readonly_setting,
         strict_dep_builds_setting,
@@ -263,10 +270,11 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         let side_effects_cache = side_effects_cache_root
             .as_deref()
             .map(|root| {
+                let location = SideEffectsCacheLocation { root, node_version };
                 if side_effects_cache_readonly_setting {
-                    SideEffectsCacheConfig::RestoreOnly(root)
+                    SideEffectsCacheConfig::RestoreOnly(location)
                 } else {
-                    SideEffectsCacheConfig::RestoreAndSave(root)
+                    SideEffectsCacheConfig::RestoreAndSave(location)
                 }
             })
             .unwrap_or(SideEffectsCacheConfig::Disabled);

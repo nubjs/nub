@@ -68,7 +68,9 @@ use materialize::{
 pub(crate) use settings::PeerDependencyRules;
 pub(crate) use settings::resolve_minimum_release_age;
 pub(crate) use settings::{ResolverConfigInputs, configure_resolver, finalize_lockfile_graph};
-pub(crate) use side_effects_cache::{SideEffectsCacheConfig, side_effects_cache_root};
+pub(crate) use side_effects_cache::{
+    SideEffectsCacheConfig, SideEffectsCacheLocation, side_effects_cache_root,
+};
 
 use settings::{
     check_unmet_peers, default_lockfile_network_concurrency, default_streaming_network_concurrency,
@@ -2963,6 +2965,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         aube_dir: &aube_dir,
         virtual_store_dir_max_length,
         child_concurrency,
+        node_version: node_version.as_deref(),
         side_effects_cache_setting,
         side_effects_cache_readonly_setting,
         strict_dep_builds_setting,
