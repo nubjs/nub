@@ -294,6 +294,20 @@ function installLazyEsmPolyfills() {
     // blob: worker support is best-effort; never block startup on it.
   }
 
+  // Laziness below depends on being able to load an ES module SYNCHRONOUSLY on
+  // first access — a getter cannot await. Under `--no-experimental-require-module`
+  // loadEsmSideEffect can only fall back to a dynamic `import()`, which resolves a
+  // tick too late: the getter would hand user code `undefined` instead of the
+  // constructor. Load eagerly there and accept the startup cost; the user opted out
+  // of require(esm), which is the mechanism the lazy path is built on.
+  if (requireEsmDisabled) {
+    loadEsmSideEffect("./worker-polyfill.mjs");
+    if (typeof globalThis.navigator?.locks === "undefined") {
+      loadEsmSideEffect("./navigator-locks.mjs");
+    }
+    return;
+  }
+
   // Main thread: lazy Worker global. Defined NON-ENUMERABLE so it stays invisible
   // to `Object.keys(globalThis)` / for-in — the additive contract — matching how
   // worker-polyfill.mjs defines the real one.
