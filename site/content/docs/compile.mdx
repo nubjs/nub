@@ -1,0 +1,132 @@
+---
+title: Compiling executables
+description: Package a TypeScript or JavaScript entry into a standalone executable — one that embeds Node for a self-contained binary, or a tiny variant that finds or fetches Node on the target machine.
+---
+
+Running `nub compile` turns an entry file into a single standalone executable. Point it at a file and run the result:
+
+```bash
+nub compile app.ts       # → ./app, a standalone executable
+./app                    # runs it — no Node install, no node_modules
+```
+
+Everything the entry imports is transpiled and bundled at compile time on your machine. The output carries no `node_modules` and needs no toolchain on the target — TypeScript, JSX, and non-erasable syntax are already down-leveled and packaged.
+
+<Callout title="Cross-platform targets are in progress">
+Today `nub compile` produces a macOS binary on a macOS host. Linux and Windows outputs, and cross-compiling one platform's binary from another, are being built and are not yet available. The `--platform` flag below is reserved for that work.
+</Callout>
+
+## Two shapes
+
+The default embeds Node; `--smol` does not.
+
+| | Default | `--smol` |
+|---|---|---|
+| Size (macOS arm64) | ~26 MB | ~0.5 MB |
+| Node at runtime | Embedded, extracted once to a shared cache | Found on the machine, else fetched from nodejs.org |
+| Offline machine | Runs | Runs only if a usable Node is already present |
+
+```bash
+nub compile app.ts           # self-contained: embeds Node, runs anywhere
+nub compile app.ts --smol    # tiny: discovers or provisions Node at first run
+```
+
+`--smol` is possible because Nub treats Node as a shared, cacheable resource rather than a private engine — the same Node it downloads for `nub run` backs a compiled binary.
+
+## `--out`
+
+Set the output path. The default is the entry's basename in the current directory (with `.exe` on Windows).
+
+```bash
+nub compile app.ts               # → ./app
+nub compile app.ts --out bin/cli # → ./bin/cli
+```
+
+## `--smol`
+
+Ship an executable with no embedded Node. On first run it looks for a usable Node — Nub's own cache, a version-manager install, or one on `PATH` — and provisions one from nodejs.org only if none is found.
+
+```bash
+nub compile app.ts --smol                  # ~0.5 MB, finds or fetches Node
+nub compile app.ts --smol --target ">=22"  # accepts any host Node >= 22
+```
+
+On a machine with no Node and no way to download one, a `--smol` binary exits with an error pointing at the default build. The default shape has no such dependency.
+
+## `--target`
+
+Select the Node version — the down-level target, and the version embedded (default) or accepted at runtime (`--smol`). Without the flag, Nub reads the project's pin the same way `nub run` does, and logs the resolution:
+
+```console
+$ nub compile app.ts
+Using Node.js {{NODE_VERSION}} (resolved from .node-version)
+```
+
+The pin is resolved from `.node-version`, `.nvmrc`, `engines.node`, or `devEngines.runtime` up the directory tree. Pass `--target` to override it:
+
+```bash
+nub compile app.ts --target {{NODE_MAJOR}}       # newest {{NODE_MAJOR}}.x
+nub compile app.ts --target {{NODE_VERSION}}     # an exact version
+nub compile app.ts --target latest    # the latest major ({{NODE_MAJOR}} today), not LTS
+```
+
+The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. A `--smol` binary may carry a **range**, checked against the Node it finds at runtime:
+
+```bash
+nub compile app.ts --target ">=22"          # default: bakes the newest >=22 now
+nub compile app.ts --smol --target ">=22"   # smol: matches host Node at runtime
+```
+
+With nothing pinned up the tree and no `--target`, Nub refuses rather than guessing — a compiled binary's Node version has to be intentional and reproducible, so there is no silent "latest" fallback the way `nub run` has:
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Error: no Node version could be inferred for this project.
+  Pass --target <version> (e.g. --target 24, --target lts), or add a pin —
+  a .node-version file, or package.json "engines": { "node": "…" }.
+  (nub compile does not fall back to "latest": a compiled binary's Node
+  version must be intentional and reproducible.)
+```
+
+## `--minify` / `--no-minify`
+
+Minification is on by default. Turn it off to keep the bundle readable for debugging.
+
+```bash
+nub compile app.ts               # minified
+nub compile app.ts --no-minify   # readable bundle
+```
+
+## `--compress`
+
+The embedded Node is compressed with zstd. Opt into a stronger algorithm for size-critical distribution — it trades a smaller file for a slower first-run extraction.
+
+```bash
+nub compile app.ts                 # zstd, ~26 MB (default)
+nub compile app.ts --compress xz   # smaller file, slower first run
+```
+
+## `--install-message` / `--no-install-message`
+
+For a `--smol` binary, set or silence the message shown while it provisions Node on first run. Provisioning already shows a progress bar on a TTY and stays silent when output is redirected.
+
+```bash
+nub compile app.ts --smol --install-message "Fetching Node, one moment…"
+nub compile app.ts --smol --no-install-message
+```
+
+## `--platform`
+
+Reserved for cross-compiling to another target triple. Not yet available — see the note at the top of the page.
+
+## Runtime behavior
+
+- **Dependencies are always bundled.** There is no install step on the target machine and no `node_modules` at runtime.
+- **Node flags pass through.** The compiled binary honors `NODE_OPTIONS` like plain Node, so an operator can raise the heap size or pass other flags without recompiling.
+- **Node stays stock.** The embedded or provisioned Node is official, unpatched Node; the binary spawns it with the version-appropriate flags Nub uses everywhere.
+
+## Related
+
+- [Running files](/docs/runtime) — how `nub <file>` transpiles and runs TypeScript.
+- [Node manager](/docs/node) — the version resolution `--target` reuses, and the shared cache the default shape extracts into.
