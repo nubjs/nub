@@ -257,7 +257,15 @@ grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pn
 - **Install** — concurrent OSV gating and trust-policy validation via `JoinSet` overlapping the
   download tail, the `defaultTrust` floor, the nub TTY progress line (`files_linked`).
 - **Lockfile** — `nub.lock` naming via the profile, pnpm-10 `{ hash, path }` patch shape, patch-group
-  range resolution, pnpm-11 `namedRegistries`, git classification in the yarn-classic reader.
+  range resolution, pnpm-11 `namedRegistries`, git classification in the yarn-classic reader. Patches
+  declared against a package's registry name also apply to an npm-aliased install
+  (`PatchGroups::resolve_package`), and an unused patch key fails the install unless
+  `allowUnusedPatches` is set — both pnpm-parity fixes aube v1.32.0 does not have.
+- **Build approval** — `collect_ignored` surfaces source-backed (`file:`) deps from the
+  install-recorded unreviewed set, and `approve-builds` writes their **source** approval key rather
+  than a bare name. Stock aube v1.32.0 silently drops them, so a dep it warns about cannot be
+  approved. This one changes standalone-aube behavior (a latent-bug fix matching pnpm 11), so expect
+  it to show as fork delta rather than converge on the next bump.
 - **Registry** — `registry_url_for` returns an owned `String` (a `namedRegistries` route lookup borrows
   through a lock guard), mTLS/`npmAlwaysAuth`, the Android hickory carve-out.
 - **Runtime / lifecycle-script env** — the embedder runtime seam. `crates/aube-util/src/engine_context.rs`
