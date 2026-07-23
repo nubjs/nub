@@ -56,7 +56,7 @@ fn run_init(dir: &Path, args: &[&str]) -> Out {
 #[test]
 fn scaffolds_five_files_with_identity_pin_and_type_devdeps() {
     let dir = tmpdir("basic");
-    let out = run_init(&dir, &["-y", "--no-install"]);
+    let out = run_init(&dir, &["-y", "--no-install", "--name", "basic"]);
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     for f in [
         "package.json",
@@ -89,6 +89,19 @@ fn scaffolds_five_files_with_identity_pin_and_type_devdeps() {
         "summary names the next command: {}",
         out.stdout
     );
+    assert!(
+        out.stdout.contains(
+            "created basic\n\
+             ├── package.json\n\
+             ├── tsconfig.json\n\
+             ├── index.ts\n\
+             ├── .gitignore\n\
+             ├── README.md\n\
+             └── .git/"
+        ),
+        "summary renders the generated structure as a tree: {}",
+        out.stdout
+    );
 }
 
 #[test]
@@ -108,6 +121,17 @@ fn js_variant_skips_tsconfig_and_type_devdeps() {
     assert_eq!(pkg["name"], "my-app", "--name is sanitized");
     assert!(pkg.get("devDependencies").is_none());
     assert_eq!(pkg["scripts"]["start"], "nub index.js");
+    assert!(
+        out.stdout.contains(
+            "created my-app\n\
+             ├── package.json\n\
+             ├── index.js\n\
+             ├── .gitignore\n\
+             └── README.md"
+        ),
+        "no-git JS tree closes on README: {}",
+        out.stdout
+    );
 }
 
 /// `git check-ignore` is the only honest test of a `.gitignore`: the scaffold's
