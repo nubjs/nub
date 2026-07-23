@@ -108,9 +108,10 @@ pub fn set_engine_loglevel(level: &str) {
     }
 }
 
-/// Minimal event renderer: `LEVEL message [field=value …]`, no
-/// timestamp, no module-path target (a Rust module path is engine
-/// internals, not user output), the whole line brand-rewritten.
+/// Minimal event renderer: `LEVEL message [field=value …]`, no timestamp or
+/// module-path target (a Rust module path is engine internals, not user output).
+/// Redundant human-facing fields may be collapsed before the whole line is
+/// brand-rewritten.
 struct RewriteLayer;
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RewriteLayer {
@@ -121,15 +122,36 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RewriteLayer {
     ) {
         let mut fields = LineVisitor::default();
         event.record(&mut fields);
-        let mut line = format!("{} {}", event.metadata().level(), fields.message);
-        for (name, value) in &fields.rest {
-            line.push(' ');
-            line.push_str(name);
-            line.push('=');
-            line.push_str(value);
-        }
+        let line = format_line(event.metadata().level().as_str(), &fields);
         eprintln!("{}", present::rewrite(&line));
     }
+}
+
+fn format_line(level: &str, fields: &LineVisitor) -> String {
+    let is_default_trust_disclosure = fields.rest.iter().any(|(name, value)| {
+        *name == "code" && value == aube_codes::warnings::WARN_AUBE_DEFAULT_TRUST_BUILDS
+    });
+    let message = if is_default_trust_disclosure {
+        fields
+            .message
+            .split_once("package(s): ")
+            .map(|(_, packages)| format!("defaultTrust: running build scripts for {packages}"))
+            .unwrap_or_else(|| fields.message.clone())
+    } else {
+        fields.message.clone()
+    };
+
+    let mut line = format!("{level} {message}");
+    for (name, value) in &fields.rest {
+        if is_default_trust_disclosure && matches!(*name, "count" | "packages") {
+            continue;
+        }
+        line.push(' ');
+        line.push_str(name);
+        line.push('=');
+        line.push_str(value);
+    }
+    line
 }
 
 #[derive(Default)]
@@ -156,9 +178,27 @@ impl Visit for LineVisitor {
     }
 }
 
-// Untested at the unit level on purpose: the layer's contract (engine
-// warnings reach stderr, rewritten, by default) spans the global
-// subscriber + fd 2, which unit tests can't observe honestly. It is
-// verified at the binary level — `nub install` of a package with
-// unapproved build scripts must print the WARN_NUB_IGNORED_BUILD_SCRIPTS
-// line — which tests/brand-sweep/run.sh asserts.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_trust_disclosure_does_not_repeat_count_and_packages() {
+        let fields = LineVisitor {
+            message: "defaultTrust: running build scripts for 1 default-trusted package(s): msgpackr-extract@3.0.4".into(),
+            rest: vec![
+                (
+                    "code",
+                    aube_codes::warnings::WARN_AUBE_DEFAULT_TRUST_BUILDS.into(),
+                ),
+                ("count", "1".into()),
+                ("packages", "[\"msgpackr-extract@3.0.4\"]".into()),
+            ],
+        };
+
+        assert_eq!(
+            format_line("WARN", &fields),
+            "WARN defaultTrust: running build scripts for msgpackr-extract@3.0.4 code=WARN_AUBE_DEFAULT_TRUST_BUILDS"
+        );
+    }
+}
