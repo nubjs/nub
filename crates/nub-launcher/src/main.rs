@@ -24,7 +24,7 @@ mod cache;
 
 use std::cell::Cell;
 use std::fs;
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -592,14 +592,20 @@ fn short_key(hex: &str) -> String {
     if s.is_empty() { "0".into() } else { s }
 }
 
+/// Stream the decoder into the file rather than materializing the whole ~94 MB
+/// Node in a `Vec` first. Same wall time (the decode dominates; the write is
+/// ~60 ms of it) at roughly half the peak RSS — which is what decides the run on
+/// a memory-capped host whose writable filesystem is tmpfs charged against that
+/// same limit.
 fn decompress_to_file(compressed: &[u8], dest: &Path) -> Result<()> {
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(compressed)
         .map_err(|e| anyhow!("zstd init: {e}"))?;
-    let mut out = Vec::new();
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|e| anyhow!("zstd decode: {e}"))?;
-    fs::write(dest, &out).with_context(|| format!("writing {}", dest.display()))?;
+    let file = fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    std::io::copy(&mut decoder, &mut out)
+        .with_context(|| format!("decompressing Node into {}", dest.display()))?;
+    out.flush()
+        .with_context(|| format!("writing {}", dest.display()))?;
     Ok(())
 }
 
