@@ -6,7 +6,7 @@
       "name": "nub",
       "dependencies": {
         "@js-temporal/polyfill": "^0.5.1",
-        "@oxc-project/runtime": "0.132.0",
+        "@oxc-project/runtime": "0.140.0",
         "@petamoriken/float16": "^3.9.3",
         "lodash": "^4.18.1",
         "urlpattern-polyfill": "^10.1.0",
@@ -16,7 +16,7 @@
   "packages": {
     "@js-temporal/polyfill": ["@js-temporal/polyfill@0.5.1", "", { "dependencies": { "jsbi": "^4.3.0" } }, "sha512-hloP58zRVCRSpgDxmqCWJNlizAlUgJFqG2ypq79DCvyv9tHjRYMDOcPFjzfl/A1/YxDvRCZz8wvZvmapQnKwFQ=="],
 
-    "@oxc-project/runtime": ["@oxc-project/runtime@0.132.0", "", {}, "sha512-Y8if5Ci7/WP163yuVBxG98zxB0dK3QKiO9vKHXVP05MNHYFdoqMx5bhl8x69SNOaFM+hV0uadGHJmZ+zU3oILQ=="],
+    "@oxc-project/runtime": ["@oxc-project/runtime@0.140.0", "", {}, "sha512-ZYZwESARwc2fB/vLHj+991uu3iGIsor3gPTA7wgouM6xEJzJsz11dt+/Xl5tUinERqmq6auyRhSMWzChhfez6w=="],
 
     "@petamoriken/float16": ["@petamoriken/float16@3.9.3", "", {}, "sha512-8awtpHXCx/bNpFt4mt2xdkgtgVvKqty8VbjHI/WWWQuEw+KLzFot3f4+LkQY9YmOtq7A5GdOnqoIC8Pdygjk2g=="],
 
