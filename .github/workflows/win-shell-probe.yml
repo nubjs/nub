@@ -137,6 +137,16 @@ jobs:
             --bin "C:\Program Files\Git\bin\bash.exe" `
             --fixture "$env:RUNNER_TEMP\fixture" --work "$env:RUNNER_TEMP\work"
 
+      # `Git\bin\bash.exe` is the WRAPPER (sets up the MSYS env, prepends Git's
+      # own /mingw64/bin + /usr/bin); `Git\usr\bin\bash.exe` is the bare shell.
+      # If they differ on PATH order, the wrapper silently shadows `.bin` tools.
+      - name: "MATRIX: Git Bash usr/bin (bare shell, no MSYS PATH prefix)"
+        shell: pwsh
+        run: |
+          node tests/win-shell-probe/run-matrix.mjs --shell gitbash-usrbin `
+            --bin "C:\Program Files\Git\usr\bin\bash.exe" `
+            --fixture "$env:RUNNER_TEMP\fixture" --work "$env:RUNNER_TEMP\work"
+
       - name: "MATRIX: Git Bash with MSYS_NO_PATHCONV=1 (path-translation opt-out)"
         shell: pwsh
         env:
@@ -163,6 +173,19 @@ jobs:
           & "C:\Program Files\Git\bin\bash.exe" tests/win-shell-probe/posixprobe.sh 2>&1 | Out-Host
           Write-Host "### shell: cmd.exe — NOT APPLICABLE: cmd cannot execute a POSIX shell script at all (0/34 by construction)."
 
+      # busybox-w32 has no /tmp mapping — `/tmp` resolves to <current drive>:\tmp.
+      # The probe hard-codes /tmp, so 3 of its rows failed on a missing DIRECTORY,
+      # not on grammar. Create the dir and re-run to separate the two.
+      - name: "POSIXPROBE re-run with a real \\tmp (isolates /tmp mapping from grammar)"
+        if: steps.busybox.outputs.path != ''
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          foreach ($d in @("C:\tmp","D:\tmp")) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+          Write-Host "created C:\tmp and D:\tmp; cwd drive = $((Get-Location).Drive.Name)"
+          $env:LBL = "busybox-ash (windows, \tmp created)"
+          & "${{ steps.busybox.outputs.path }}" ash tests/win-shell-probe/posixprobe.sh 2>&1 | Out-Host
+
   # brush publishes NO Windows release binary and has NO Windows CI leg upstream,
   # so it must be built here. The build time is itself a finding.
   brush:
@@ -179,6 +202,14 @@ jobs:
           rustup default stable
           rustc --version; cargo --version
 
+      # The installed binary is what we need, and it is fully determined by the
+      # pinned version — cache it so a re-push does not re-pay the ~4-minute build.
+      - uses: actions/cache@640a1c2554105b57832a23eea0b4672fc7a790d5 # v4
+        id: brushcache
+        with:
+          path: ${{ runner.temp }}/brushroot
+          key: brush-shell-0.4.0-${{ runner.os }}-v1
+
       # brush's workspace denies all warnings, so a newer rustc than the authors
       # tested would fail the build on a lint rather than a real error. Cap lints
       # so this measures whether the CODE works on Windows.
@@ -192,12 +223,17 @@ jobs:
           CARGO_INCREMENTAL: "0"
           CARGO_TERM_COLOR: never
         run: |
+          $exe = "$env:RUNNER_TEMP\brushroot\bin\brush.exe"
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          cargo install brush-shell --locked --version 0.4.0 --root "$env:RUNNER_TEMP\brushroot"
-          $code = $LASTEXITCODE
+          $code = 0
+          if (Test-Path $exe) {
+            Write-Host "cache hit — reusing the previously built brush.exe (build time from the first run: 258s)"
+          } else {
+            cargo install brush-shell --locked --version 0.4.0 --root "$env:RUNNER_TEMP\brushroot"
+            $code = $LASTEXITCODE
+          }
           $sw.Stop()
           "seconds=$([int]$sw.Elapsed.TotalSeconds)" >> $env:GITHUB_OUTPUT
-          $exe = "$env:RUNNER_TEMP\brushroot\bin\brush.exe"
           if (Test-Path $exe) { "path=$exe" >> $env:GITHUB_OUTPUT } else { "path=" >> $env:GITHUB_OUTPUT }
           exit $code
 
@@ -231,3 +267,38 @@ jobs:
         run: |
           $env:LBL = "brush (windows)"
           & "${{ steps.brushbuild.outputs.path }}" tests/win-shell-probe/posixprobe.sh 2>&1 | Out-Host
+
+      # brush rejected the whole probe FILE with "syntax error at end of input"
+      # while passing every equivalent construct through `-c`. Bisect which
+      # construct only breaks when the script is read from a file, and prove the
+      # `-c`/file asymmetry rather than asserting it.
+      - name: "brush: bisect the script-FILE parse failure"
+        if: steps.brushbuild.outputs.path != ''
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $brush = "${{ steps.brushbuild.outputs.path }}"
+          $t = "$env:RUNNER_TEMP\bisect"; New-Item -ItemType Directory -Force -Path $t | Out-Null
+          $frags = @{
+            "01-func"        = "f() { echo one; }`nf`n"
+            "02-eval-subst"  = "run() {`n  out=`$( { eval `"`$2`"; } 2>&1 ); rc=`$?`n  printf '%s rc=%s %s\n' `"`$1`" `"`$rc`" `"`$out`"`n}`nrun a 'echo hi'`n"
+            "03-printf-fmt"  = "printf '%-26s rc=%-3s %s\n' aa 0 bb`n"
+            "04-heredoc-arg" = "f() { echo `"[`$1]`"; }`nf 'cat <<EOF`nhd-ok`nEOF'`n"
+            "05-trailing-nl" = "echo last-line-no-trailing-newline"
+            "06-backtick"    = "echo ``uname```n"
+          }
+          foreach ($k in ($frags.Keys | Sort-Object)) {
+            $p = "$t\$k.sh"
+            [IO.File]::WriteAllText($p, $frags[$k])
+            Write-Host "----- $k -----"
+            Get-Content $p | ForEach-Object { Write-Host "    | $_" }
+            Write-Host "  as FILE:"; & $brush $p 2>&1 | ForEach-Object { Write-Host "    $_" }; Write-Host "  file exit=$LASTEXITCODE"
+            $body = [IO.File]::ReadAllText($p)
+            Write-Host "  as -c  :"; & $brush -c $body 2>&1 | ForEach-Object { Write-Host "    $_" }; Write-Host "  -c   exit=$LASTEXITCODE"
+          }
+          Write-Host "----- the real probe, as FILE vs -c -----"
+          & $brush tests/win-shell-probe/posixprobe.sh 2>&1 | Select-Object -First 3 | Out-Host
+          Write-Host "  file exit=$LASTEXITCODE"
+          $probe = [IO.File]::ReadAllText("tests/win-shell-probe/posixprobe.sh")
+          & $brush -c $probe 2>&1 | Select-Object -First 6 | Out-Host
+          Write-Host "  -c   exit=$LASTEXITCODE"

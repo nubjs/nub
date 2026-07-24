@@ -148,6 +148,12 @@ export const CASES = [
   { id: "path_flag_win", group: "path", spec: "win", body: String.raw`node printargv.js --out=C:\path\to\thing` },
   { id: "path_prefix_unix", group: "path", spec: "win", body: "node printargv.js --prefix=/usr/local" },
   { id: "path_docker_volume", group: "path", spec: "win", body: "node printargv.js -v /c/Users/x:/app" },
+  // `C:\Program Files\Git\bin\bash.exe` is Git-for-Windows' WRAPPER bash: it
+  // sets up the MSYS environment, which includes prepending Git's own
+  // /mingw64/bin and /usr/bin. If it does, `node_modules/.bin` is no longer
+  // first on PATH and any `.bin` tool colliding with a Git-shipped binary is
+  // silently shadowed. `Git\usr\bin\bash.exe` is the bare shell that does not.
+  { id: "path_env_dump", group: "path", spec: "win", body: "echo PATH=$PATH" },
   { id: "path_pwd", group: "path", spec: "POSIX", body: "pwd" },
   { id: "path_cd_persist", group: "path", spec: "POSIX", body: "mkdir -p sub && cd sub && pwd" },
 
