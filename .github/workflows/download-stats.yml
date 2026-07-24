@@ -24,9 +24,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         # Writes /tmp/gh-releases.json: array of { tag, assets: [{ name, download_count }] }
+        # Prereleases are excluded: the rolling `canary` release is deleted and
+        # recreated on every main push, so its asset counts reset constantly and
+        # would corrupt the between-snapshot deltas.
         run: |
           gh api repos/nubjs/nub/releases --paginate \
-            --jq '[.[] | {tag: .tag_name, assets: [.assets[] | {name: .name, download_count: .download_count}]}]' \
+            --jq '[.[] | select(.prerelease | not) | {tag: .tag_name, assets: [.assets[] | {name: .name, download_count: .download_count}]}]' \
             > /tmp/gh-releases.json
 
       - name: Fetch npm download counts

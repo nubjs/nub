@@ -130,9 +130,25 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Event data flows in via env, not ${{ }}-interpolation into the
+          # script body — head_commit.message is attacker-shaped text.
+          BEFORE: ${{ github.event.before }}
+          HEAD_TS: ${{ github.event.head_commit.timestamp }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
         run: |
+          # The release flow (`git push origin main --tags`) delivers the
+          # version-bump commit as a main push AND the v* tag as a tag push.
+          # The tag run builds this exact tree, so a canary of it is a wasted
+          # 8-platform matrix — skip when the head commit is the release bump
+          # (subject exactly `v<semver>`, per the release runbook).
+          FIRST_LINE="$(printf '%s' "$HEAD_MSG" | head -1)"
+          if [[ "$FIRST_LINE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "canary=false" >> "$GITHUB_OUTPUT"
+            echo "canary_version=" >> "$GITHUB_OUTPUT"
+            echo "release-bump push ($FIRST_LINE) — the tag run builds this tree; skipping the canary build"
+            exit 0
+          fi
           BUILD=true
-          BEFORE="${{ github.event.before }}"
           if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
             COMPARE=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BEFORE}...${GITHUB_SHA}" 2>/dev/null) || COMPARE=""
             if [ -n "$COMPARE" ]; then
@@ -153,7 +169,13 @@ jobs:
             fi
           fi
           BASE=$(node -e "console.log(require('./npm/nub/package.json').version)")
-          CANARY_VERSION="${BASE}-canary.$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          # Date from the head commit's timestamp, not wall clock: a re-run of a
+          # failed canary run keeps its run_number, and a wall-clock date would
+          # mint a DIFFERENT version for the same run after UTC midnight —
+          # semver-sorting it past newer same-base canaries. The commit
+          # timestamp is stable across re-runs.
+          DATE=$(date -u -d "$HEAD_TS" +%Y%m%d 2>/dev/null) || DATE=$(date -u +%Y%m%d)
+          CANARY_VERSION="${BASE}-canary.${DATE}.${GITHUB_RUN_NUMBER}"
           echo "canary=$BUILD" >> "$GITHUB_OUTPUT"
           echo "canary_version=$CANARY_VERSION" >> "$GITHUB_OUTPUT"
           if [ "$BUILD" = "true" ]; then
