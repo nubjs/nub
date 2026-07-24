@@ -133,9 +133,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.93.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0
         with:
-          toolchain: 1.93.0
+          toolchain: 1.95.0
       # shared-key (stable across runs, NOT per-ref) so PRs restore the warm cache
       # main saves; save-if gates writes to main only, so PRs/tags are read-only and
       # don't churn the 10GB/repo budget (the default per-(job,ref) key let every PR
@@ -147,9 +147,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --all-targets
       - run: cargo check --manifest-path crates/nub-phantom/Cargo.toml --all-targets
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0
-        with:
-          toolchain: 1.95.0
+      # One toolchain for all three: unifying every workspace on oxc 0.140 (which
+      # requires rustc 1.95) raised the main workspace's MSRV to nub-native's.
       - run: cd crates/nub-native && cargo check --locked --all-targets --all-features
       # Real Windows compile + test coverage is the windows-latest leg of the
       # `test` job. The previous fast `x86_64-pc-windows-gnu` cross-check needed
@@ -868,6 +867,20 @@ jobs:
   # and collapses all the conditional jobs into one deterministic verdict:
   #   - every dependency is `success` or `skipped` → PASS
   #   - any dependency is `failure` or `cancelled` → FAIL
+  # oxc is pre-1.0, so `^` never unifies two minors: a consumer left behind
+  # compiles a SECOND full oxc stack into the same binary. The consumers span
+  # three Cargo workspaces plus the npm @oxc-project/runtime emit helpers, which
+  # no single cargo resolve can reconcile. Deliberately NOT path-gated — the drift
+  # this catches can arrive through package.json alone, which the Rust paths
+  # filter does not cover — and it is pure Node with no toolchain, so running it
+  # on every event costs seconds.
+  oxc-lockstep:
+    name: oxc lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - run: node scripts/check-oxc-lockstep.mjs
+
   # Make THIS job (`CI gate`) the sole required status check in branch protection.
   # A docs-only PR → Rust matrix skipped → this gate green → mergeable. A Rust PR
   # → matrix runs → this gate reflects it. The merge gate is never weakened: a
@@ -875,7 +888,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, test, pnp, fmt, types-fixtures, docs-links]
+    needs: [matrix-plan, check, clippy, embed-runtime, test, pnp, fmt, types-fixtures, docs-links, oxc-lockstep]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed or was cancelled

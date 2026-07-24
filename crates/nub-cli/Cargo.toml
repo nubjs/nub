@@ -19,9 +19,11 @@ path = "src/main.rs"
 embed-runtime = ["nub-core/embed-runtime"]
 # `nub compile` (spike): the in-process Rolldown bundler + Mach-O section
 # injection/signing (libsui) + zstd-19 Node compression. OFF by default — these
-# are large, compile-time-only deps (Rolldown pulls its own oxc ^0.140, a dual-oxc
-# build alongside nub-phantom's =0.132), so the everyday build and CI cheap gates
-# don't carry them. `tokio/full` gives the bundler a full async runtime.
+# are large, compile-time-only deps, so the everyday build and CI cheap gates
+# don't carry them. `tokio/full` gives the bundler a full async runtime. Rolldown's
+# oxc requirement is what sets the repo-wide oxc pin (see the root Cargo.toml
+# OXC_VERSION note): every oxc consumer tracks it so this feature adds Rolldown's
+# own crates, NOT a second oxc stack.
 compile = ["dep:rolldown", "dep:rolldown_common", "dep:libsui", "dep:zstd", "tokio/full"]
 
 [dependencies]

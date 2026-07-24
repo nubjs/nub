@@ -3,7 +3,7 @@
 //!
 //! The parser functions take a source string and return a parsed value as a JS
 //! object (via napi's serde-json bridge). The [`transform`](transform::transform)
-//! function transpiles TS/JSX, mirroring `oxc-transform@0.132.0`'s `transformSync`
+//! function transpiles TS/JSX, mirroring `oxc-transform@0.140.0`'s `transformSync`
 //! for byte-for-byte emit parity.
 
 // `collapsible_if` fires on intentional nested `if let { if let }` sites;

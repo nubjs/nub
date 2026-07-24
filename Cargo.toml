@@ -92,7 +92,7 @@ split-debuginfo = "unpacked"
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/nubjs/nub"
 
@@ -111,7 +111,7 @@ json5 = "0.4"
 # the transpiler's tsconfig parsing and nub's own global config file
 # (~/.config/nub/nub.jsonc).
 jsonc-parser = { version = "0.24", features = ["serde", "cst"] }
-# napi 3 (not 2): oxc_napi 0.132.0 and oxc_sourcemap[napi] are built against
+# napi 3 (not 2): oxc_napi 0.140.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the
 # version oxc itself ships on. The `napi8` feature pins the NAPI-version FLOOR to
@@ -120,16 +120,17 @@ jsonc-parser = { version = "0.24", features = ["serde", "cst"] }
 # than at load on 18.19. serde-json preserves the bridge the data parsers rely on.
 napi = { version = "3", features = ["serde-json", "napi8"] }
 napi-derive = "3"
-# oxc transpiler — pinned EXACT to the oxc-transform npm version nub ships today
-# (see package.json: oxc-transform/oxc-parser/@oxc-project/runtime are all 0.132.0).
-# The internal Rust crates carry the SAME version number as the napi release;
-# oxc_sourcemap is independently versioned (oxc_codegen 0.132.0 depends on
-# oxc_sourcemap ^6.0.1). Any oxc bump must move in lockstep with the npm pin AND a
-# NUB_VERSION bump (transpile-cache buster). DO NOT float without re-running the
-# transpile-parity gate. OXC_VERSION = 0.132.0
-oxc = { version = "=0.132.0", features = ["full"] }
-oxc_napi = "=0.132.0"
-oxc_sourcemap = { version = "=6.0.1", features = ["napi"] }
+# oxc transpiler — pinned EXACT and lockstepped ACROSS EVERY oxc consumer in the
+# repo: this pin, crates/nub-native's workspace pin, crates/nub-phantom-core's
+# parser subset, and the npm `@oxc-project/runtime` emit-helper package. The
+# version is chosen to match what `rolldown` (the `nub compile` bundler) resolves,
+# so a `--features compile` build links ONE oxc stack instead of two. Any bump
+# must move all four together AND bump NUB_VERSION (the transpile-cache buster);
+# `make oxc-lockstep-check` (part of `make verify`) fails the build if they drift.
+# DO NOT float without re-running the transpile-parity gate. OXC_VERSION = 0.140.0
+oxc = { version = "=0.140.0", features = ["full"] }
+oxc_napi = "=0.140.0"
+oxc_sourcemap = { version = "=8.1.0", features = ["napi"] }
 rustc-hash = "2"
 toml = "0.8"
 # Interactive terminal primitive (raw-mode key reads, cursor control) for the
