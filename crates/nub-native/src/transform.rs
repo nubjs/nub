@@ -1,13 +1,14 @@
-//! In-process TS/JSX transpiler, mirroring `oxc-transform@0.132.0`'s `transformSync`.
+//! In-process TS/JSX transpiler, mirroring `oxc-transform@0.140.0`'s `transformSync`.
 //!
 //! This module is a faithful, trimmed mirror of the oxc napi crate's
-//! `napi/transform/src/transformer.rs` at tag `crates_v0.132.0` — the exact
+//! `napi/transform/src/transformer.rs` at tag `crates_v0.140.0` — the exact
 //! source the `oxc-transform` npm package is built from. Mirroring it (rather
 //! than hand-wiring `Parser → Semantic → Transformer → Codegen`) is what
-//! guarantees the emit is **byte-identical** to the npm package nub shipped
-//! before this transpiler moved in-process, so existing transpile-cache entries
-//! stay valid (no `NUB_VERSION` bump needed). Verified by the transpile-parity
-//! corpus gate.
+//! guarantees the emit is **byte-identical** to the `oxc-transform` npm package
+//! at the SAME oxc version. Verified by the transpile-parity corpus gate. (Emit
+//! does move ACROSS oxc versions, so a bump invalidates cached entries; the cache
+//! key folds in the build-id and `NUB_VERSION`, both of which shift with any
+//! rebuild or release that carries a new oxc.)
 //!
 //! Trimmed relative to upstream — nub uses none of these, so they are omitted to
 //! shrink the surface and the addon:
@@ -565,7 +566,7 @@ impl CompilerInterface for Compiler {
 
 /// Transpile a JavaScript or TypeScript file into a target ECMAScript version.
 ///
-/// Byte-compatible mirror of `oxc-transform@0.132.0`'s `transformSync`. The JS
+/// Byte-compatible mirror of `oxc-transform@0.140.0`'s `transformSync`. The JS
 /// preload consumes `code`, `map`, and `errors`; `helpers_used` is carried for
 /// parity but unused.
 #[allow(clippy::needless_pass_by_value, clippy::allow_attributes)]

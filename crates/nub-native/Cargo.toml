@@ -10,7 +10,7 @@
 # `[workspace.package]` / `[workspace.dependencies]` / `[workspace.lints]`. Those
 # are duplicated below. The dependency pins MUST stay byte-identical to the main
 # workspace's `[workspace.dependencies]` — the oxc/napi pins are lockstep with the
-# npm pin (oxc-transform@0.132.0; see the main Cargo.toml comments and
+# npm pin (@oxc-project/runtime@0.140.0; see the main Cargo.toml comments and
 # package.json) and the blake3 transpile-cache-key contract. Any oxc/napi bump
 # must move in BOTH workspaces together.
 #
@@ -142,7 +142,7 @@ jsonc-parser.workspace = true
 toml.workspace = true
 yaml-rust2.workspace = true
 # Transpiler (TS/JSX/non-erasable syntax) — moved in-process from the oxc-transform
-# npm package. Mirrors oxc-transform@0.132.0's transformSync for byte parity.
+# npm package. Mirrors oxc-transform@0.140.0's transformSync for byte parity.
 oxc.workspace = true
 oxc_napi.workspace = true
 oxc_sourcemap.workspace = true

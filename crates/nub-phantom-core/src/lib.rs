@@ -6,7 +6,7 @@
 //!
 //! - [`extract`] — oxc-parsed specifier occurrences, with the guard modeling
 //!   (try/catch, conditional branches → `soft`) and type-only erasure that keep
-//!   the never-false-flag bar. Runs on the SAME oxc 0.132.0 parser nub
+//!   the never-false-flag bar. Runs on the SAME oxc 0.140.0 parser nub
 //!   transpiles with, so extraction matches what nub actually loads.
 //! - [`specifier`] — bare-vs-relative-vs-nonpackage classification + package-name
 //!   extraction (`lodash/fp` → `lodash`).
