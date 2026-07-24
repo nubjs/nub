@@ -115,6 +115,14 @@ impl HostTarget {
     }
 }
 
+/// Whether the host's libc is musl — the one host fact `nub compile` needs to
+/// name the host's own triple (`linux-x64-musl` vs `linux-x64`). Re-exported
+/// rather than re-implemented so the compile target vocabulary and the dist
+/// mirror routing can never disagree about the same host.
+pub fn host_is_musl() -> bool {
+    detect_musl()
+}
+
 /// Detect a musl libc host via the dynamic-loader presence under `/lib` (the
 /// spec's prescription — cheap + reliable), falling back to the compile-time
 /// `target_env`. A glibc-built nub on a musl host (uncommon) is still caught by
@@ -269,6 +277,54 @@ pub(crate) fn provision_node(
     )
 }
 
+/// Download + verify + extract the official Node build for an EXPLICIT target
+/// platform, returning its version dir. This is the cross-compile entry
+/// `nub compile --platform` reaches: it reuses the whole host pipeline (mirror
+/// routing incl. musl → unofficial-builds, streamed download, SHA-256 commit
+/// gate) with the target substituted for the detected host.
+///
+/// INVARIANT the caller must hold: `store_root` is scoped per target platform
+/// for a NON-host target. The store layout is keyed by version alone
+/// (`<store_root>/node/<version>/`), so a foreign Node written into the host's
+/// store root would be indistinguishable from a host one and `nub run` would
+/// happily try to execute it.
+pub fn provision_node_for_platform(
+    version: &NodeVersion,
+    os: NodeOs,
+    arch: NodeArch,
+    musl: bool,
+    store_root: &Path,
+    resolved_from: Option<&str>,
+) -> Result<PathBuf> {
+    let target = HostTarget { os, arch, musl };
+    provision_node_from(
+        version,
+        &target,
+        store_root,
+        resolved_from,
+        &resolve_mirror_base(&target),
+    )
+}
+
+/// Resolve a pin to the newest published version satisfying it, against the dist
+/// index for an EXPLICIT target platform. The cross-compile twin of
+/// [`resolve_host_pin`] — same resolution, but the index is fetched from the
+/// mirror that actually serves the target (musl targets resolve against
+/// unofficial-builds, whose release set differs from nodejs.org's).
+pub fn resolve_pin_for_platform(
+    pin: &VersionPin,
+    os: NodeOs,
+    arch: NodeArch,
+    musl: bool,
+    cache_root: &Path,
+) -> Result<NodeVersion> {
+    let target = HostTarget { os, arch, musl };
+    let mirror = resolve_mirror_base(&target);
+    let index = node_index::load_index(cache_root, &mirror)
+        .context("loading the Node release index to resolve the compile target")?;
+    resolve_pin_in_index(pin, &index)
+}
+
 /// Resolve `spec` (a concrete `X.Y.Z`, a bare major/`major.minor`, or an alias
 /// like `lts`/`latest`) to a concrete Node version for the HOST platform, then
 /// download + verify + extract it into `store_root`, returning the resolved
@@ -334,16 +390,22 @@ pub fn resolve_host_pin(pin: &VersionPin, cache_root: &Path) -> Result<NodeVersi
     let mirror = resolve_mirror_base(&host);
     let index = node_index::load_index(cache_root, &mirror)
         .context("loading the Node release index to resolve the compile target")?;
-    // Resolve through node_index's own resolvers (which read the private index
-    // rows) rather than touching IndexEntry directly.
+    resolve_pin_in_index(pin, &index)
+}
+
+/// Resolve a pin against an already-loaded index. Shared by the host and
+/// explicit-platform entries so the two can never resolve a pin differently.
+/// Goes through `node_index`'s own resolvers (which read the private index rows)
+/// rather than touching `IndexEntry` directly.
+fn resolve_pin_in_index(pin: &VersionPin, index: &[node_index::IndexEntry]) -> Result<NodeVersion> {
     let resolved = match pin {
-        VersionPin::Range(alts) => node_index::resolve_range(alts, &index),
-        VersionPin::Exact(v) => node_index::resolve_spec(&v.to_string(), &index),
+        VersionPin::Range(alts) => node_index::resolve_range(alts, index),
+        VersionPin::Exact(v) => node_index::resolve_spec(&v.to_string(), index),
         VersionPin::MajorMinor(major, minor) => {
-            node_index::resolve_spec(&format!("{major}.{minor}"), &index)
+            node_index::resolve_spec(&format!("{major}.{minor}"), index)
         }
-        VersionPin::Major(major) => node_index::resolve_spec(&format!("{major}"), &index),
-        VersionPin::Alias(alias) => node_index::resolve_spec(alias, &index),
+        VersionPin::Major(major) => node_index::resolve_spec(&format!("{major}"), index),
+        VersionPin::Alias(alias) => node_index::resolve_spec(alias, index),
     };
     resolved.context("no published Node release satisfies the requested Node version")
 }

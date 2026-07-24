@@ -2,12 +2,14 @@
 //! byte layout embedded in a compiled executable, shared by the compile-time
 //! writer (`nub-cli`) and the runtime reader (`nub-launcher`).
 //!
-//! The container is one opaque blob written into a Mach-O `__SUI,__nubc` section
-//! (libsui's segment) at compile time and read back from the launcher's own
-//! image at runtime. It carries: a small JSON manifest (shape, entry name, Node
-//! version/triple, the embedded Node's content hash), the bundled app files
-//! (entry + Rolldown chunks), and — for the default `embed` shape — the
-//! zstd-compressed Node binary. `smol` shape carries no Node blob.
+//! The container is one opaque blob written into the target executable at
+//! compile time and read back from the launcher's own image at runtime. Where it
+//! lands is per-format (Mach-O `__SUI,__nubc` section / ELF `.note.sui` note /
+//! PE `RT_RCDATA` resource — see [`ContainerFormat`]), but the blob itself is
+//! byte-identical across formats. It carries: a small JSON manifest (shape,
+//! entry name, Node version/triple, the embedded Node's content hash), the
+//! bundled app files (entry + Rolldown chunks), and — for the default `embed`
+//! shape — the zstd-compressed Node binary. `smol` shape carries no Node blob.
 //!
 //! Design points:
 //! - **Decode borrows, never copies the Node blob.** [`decode`] returns slices
@@ -22,8 +24,12 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-/// The Mach-O section name (≤16 bytes) libsui writes the payload into, under its
-/// fixed `__SUI` segment. Read back at runtime via `libsui::find_section`.
+/// The payload's name in every container format — a Mach-O section under
+/// libsui's fixed `__SUI` segment (names are capped at 16 bytes), the name field
+/// of an ELF `SUI` note, and a PE `RT_RCDATA` resource (libsui upper-cases it on
+/// both write and read, so the asymmetry is invisible here). Read back at runtime
+/// via `libsui::find_section`, whose implementation is selected by the launcher's
+/// own `target_os`.
 pub const SECTION_NAME: &str = "__nubc";
 
 const MAGIC: &[u8; 4] = b"NUBC";
@@ -187,6 +193,156 @@ fn decode_app_region(region: &[u8]) -> Result<Vec<(String, &[u8])>> {
     Ok(files)
 }
 
+// ---- compile targets ----------------------------------------------------------
+//
+// A compile target is chosen at compile time and decides three things the rest of
+// the pipeline branches on: which container format the payload is injected into,
+// which Node dist build is embedded, and which prebuilt launcher template is used.
+// The runtime half needs none of this — the launcher's `find_section` is picked by
+// its OWN `target_os` — so this model is compile-time-only and lives here purely
+// because the container format and the manifest's `triple` are the same concern.
+
+/// The executable container format of a compile target. One compile-time
+/// injection leg per variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerFormat {
+    /// macOS. Payload = a `__SUI,__nubc` section; the artifact is ad-hoc signed
+    /// (Gatekeeper rejects an invalid signature, and arm64 requires one at all).
+    MachO,
+    /// Linux. Payload = a `SUI` note in an appended `PT_NOTE`; never signed.
+    Elf,
+    /// Windows. Payload = an `RT_RCDATA` resource; no Authenticode by default.
+    Pe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetOs {
+    Darwin,
+    Linux,
+    Win32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetArch {
+    X64,
+    Arm64,
+}
+
+/// A `nub compile` target platform, in nub's own `<os>-<arch>[-musl]` vocabulary
+/// — the same tokens the per-platform npm packages use, so `--platform linux-x64`
+/// and `@nubjs/nub-linux-x64` (which will carry that triple's launcher template)
+/// name the same thing. Deliberately NOT a Rust target triple: the user-facing
+/// vocabulary is Node's/npm's, not rustc's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetPlatform {
+    pub os: TargetOs,
+    pub arch: TargetArch,
+    /// Linux-musl. The official Node dist publishes no musl build, so this routes
+    /// the embedded Node to unofficial-builds and selects the musl launcher.
+    pub musl: bool,
+}
+
+/// Every triple `nub compile` accepts, in help/error order.
+pub const SUPPORTED_TRIPLES: &[&str] = &[
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-arm64-musl",
+    "linux-x64",
+    "linux-x64-musl",
+    "win32-arm64",
+    "win32-x64",
+];
+
+impl TargetPlatform {
+    /// The host, or `None` when nub is running on a platform `nub compile` has no
+    /// target vocabulary for (nub ships per-platform binaries, so in practice this
+    /// is only reachable from a locally-built nub on an exotic host).
+    pub fn host() -> Option<Self> {
+        let os = match std::env::consts::OS {
+            "macos" => TargetOs::Darwin,
+            "linux" => TargetOs::Linux,
+            "windows" => TargetOs::Win32,
+            _ => return None,
+        };
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => TargetArch::X64,
+            "aarch64" => TargetArch::Arm64,
+            _ => return None,
+        };
+        let musl = os == TargetOs::Linux && crate::version_management::host_is_musl();
+        Some(Self { os, arch, musl })
+    }
+
+    /// Parse a `--platform` value. `None` for anything outside
+    /// [`SUPPORTED_TRIPLES`]; the caller renders the list in the error.
+    pub fn parse(token: &str) -> Option<Self> {
+        let (base, musl) = match token.strip_suffix("-musl") {
+            Some(base) => (base, true),
+            None => (token, false),
+        };
+        let (os, arch) = base.split_once('-')?;
+        let os = match os {
+            "darwin" => TargetOs::Darwin,
+            "linux" => TargetOs::Linux,
+            "win32" => TargetOs::Win32,
+            _ => return None,
+        };
+        let arch = match arch {
+            "x64" => TargetArch::X64,
+            "arm64" => TargetArch::Arm64,
+            _ => return None,
+        };
+        // musl is a Linux-only libc; `darwin-x64-musl` must not round-trip.
+        if musl && os != TargetOs::Linux {
+            return None;
+        }
+        Some(Self { os, arch, musl })
+    }
+
+    /// The canonical triple string — round-trips [`parse`](Self::parse) and is
+    /// what the manifest records.
+    pub fn triple(&self) -> String {
+        let os = match self.os {
+            TargetOs::Darwin => "darwin",
+            TargetOs::Linux => "linux",
+            TargetOs::Win32 => "win32",
+        };
+        let arch = match self.arch {
+            TargetArch::X64 => "x64",
+            TargetArch::Arm64 => "arm64",
+        };
+        if self.musl {
+            format!("{os}-{arch}-musl")
+        } else {
+            format!("{os}-{arch}")
+        }
+    }
+
+    pub fn format(&self) -> ContainerFormat {
+        match self.os {
+            TargetOs::Darwin => ContainerFormat::MachO,
+            TargetOs::Linux => ContainerFormat::Elf,
+            TargetOs::Win32 => ContainerFormat::Pe,
+        }
+    }
+
+    /// The executable suffix for this target (`.exe` on Windows).
+    pub fn exe_suffix(&self) -> &'static str {
+        match self.os {
+            TargetOs::Win32 => ".exe",
+            _ => "",
+        }
+    }
+
+    /// Whether this target is the host — the gate on everything that can only be
+    /// done natively: running the produced binary's self-probe, shelling out to
+    /// `codesign`, verifying a stripped Node by executing it.
+    pub fn is_host(&self) -> bool {
+        Self::host().is_some_and(|h| h == *self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +424,53 @@ mod tests {
             ),
             Ok(_) => panic!("an overflowing length must not decode successfully"),
         }
+    }
+
+    #[test]
+    fn every_supported_triple_parses_and_round_trips() {
+        for token in SUPPORTED_TRIPLES {
+            let p = TargetPlatform::parse(token)
+                .unwrap_or_else(|| panic!("{token} is listed as supported but does not parse"));
+            assert_eq!(&p.triple(), token);
+        }
+    }
+
+    #[test]
+    fn triples_map_to_their_container_format() {
+        let fmt = |t: &str| TargetPlatform::parse(t).unwrap().format();
+        assert_eq!(fmt("darwin-arm64"), ContainerFormat::MachO);
+        assert_eq!(fmt("linux-x64-musl"), ContainerFormat::Elf);
+        assert_eq!(fmt("win32-x64"), ContainerFormat::Pe);
+        assert_eq!(
+            TargetPlatform::parse("win32-x64").unwrap().exe_suffix(),
+            ".exe"
+        );
+        assert_eq!(TargetPlatform::parse("linux-x64").unwrap().exe_suffix(), "");
+    }
+
+    #[test]
+    fn rejects_triples_outside_the_supported_set() {
+        // musl is Linux-only; the rest are typos or platforms nub has no launcher for.
+        for bad in [
+            "darwin-x64-musl",
+            "win32-arm64-musl",
+            "linux-x86",
+            "freebsd-x64",
+            "darwin",
+            "",
+            "linux-x64-gnu",
+        ] {
+            assert!(
+                TargetPlatform::parse(bad).is_none(),
+                "{bad:?} must not parse as a compile target"
+            );
+        }
+    }
+
+    #[test]
+    fn the_host_is_a_supported_triple_and_is_its_own_target() {
+        let host = TargetPlatform::host().expect("a dev/CI host is always a supported platform");
+        assert!(SUPPORTED_TRIPLES.contains(&host.triple().as_str()));
+        assert!(host.is_host());
     }
 }

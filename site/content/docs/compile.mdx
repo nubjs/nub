@@ -12,8 +12,8 @@ nub compile app.ts       # → ./app, a standalone executable
 
 Everything the entry imports is transpiled and bundled at compile time on your machine. The output carries no `node_modules` and needs no toolchain on the target — TypeScript, JSX, and non-erasable syntax are already down-leveled and packaged.
 
-<Callout title="Cross-platform targets are in progress">
-Today `nub compile` produces a macOS binary on a macOS host. Linux and Windows outputs, and cross-compiling one platform's binary from another, are being built and are not yet available. The `--platform` flag below is reserved for that work.
+<Callout title="Cross-compiling is in progress">
+Building one platform's executable from another needs that platform's prebuilt launcher, and Nub does not distribute those yet. Passing `--platform` for a foreign target names the launcher it could not find.
 </Callout>
 
 ## Two shapes
@@ -118,7 +118,15 @@ nub compile app.ts --smol --no-install-message
 
 ## `--platform`
 
-Reserved for cross-compiling to another target triple. Not yet available — see the note at the top of the page.
+Choose the platform the executable is built for. The default is the host.
+
+```bash
+nub compile app.ts --platform linux-x64
+```
+
+Accepted values: `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-arm64-musl`, `linux-x64`, `linux-x64-musl`, `win32-arm64`, `win32-x64`. A Windows target gets an `.exe` output name and embeds the Windows build of Node.
+
+Cross-compiling needs the target platform's launcher — see the note at the top of the page.
 
 ## Runtime behavior
 
