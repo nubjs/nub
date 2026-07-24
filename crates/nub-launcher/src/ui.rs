@@ -14,6 +14,10 @@
 //!     line, the pre-box behavior.
 //!   - **Boxed** — the full treatment on the alternate screen buffer.
 //!
+//! The box is deliberately indeterminate: an animated spinner and the label, no
+//! progress bar. The underlying work has a known byte total, but a percentage
+//! read as noise, so the spinner just ticks while the work runs.
+//!
 //! The alternate screen is what makes viewport centering possible AND what makes
 //! teardown exact: leaving it restores the user's scrollback byte-for-byte, so
 //! the app's own first line lands on a terminal that looks untouched. The cost is
@@ -22,9 +26,7 @@
 //! dies from a panic (`panic = "abort"`).
 
 use std::cell::{Cell, RefCell};
-use std::io::{IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::{IsTerminal, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -37,10 +39,12 @@ const FIRST_PAINT: Duration = Duration::from_millis(120);
 
 /// Horizontal padding between the border and the content column.
 const PAD: usize = 3;
-/// Content column floor — narrower than this and the progress bar is a joke.
-const MIN_CONTENT: usize = 16;
-/// Border, blank, message, progress, blank, border.
-const BOX_H: usize = 6;
+/// Content column floor, so a short label still gets a box with presence.
+const MIN_CONTENT: usize = 12;
+/// The message column overhead: the spinner cell plus one space before the label.
+const LEAD: usize = 2;
+/// Border, blank, message, blank, border.
+const BOX_H: usize = 5;
 /// `MIN_CONTENT` + padding + borders + a 2-column margin each side.
 const MIN_COLS: u16 = (MIN_CONTENT + 2 * PAD + 2 + 4) as u16;
 /// The box plus a row of breathing room above and below.
@@ -102,14 +106,14 @@ impl Layout {
         let (cols, rows) = (cols as usize, rows as usize);
         // 4 = the margin, 2 = the borders. Guaranteed >= MIN_CONTENT by MIN_COLS.
         let max_content = cols - 4 - 2 - 2 * PAD;
-        // "<spinner><2 spaces><text>" — the spinner is fixed-width, so centering
-        // the group as a whole never jitters between frames.
-        let text = if 3 + display_width(&text) > max_content {
-            truncate(&text, max_content - 3, unicode)
+        // The spinner cell is fixed-width, so centering "<spinner> <text>" as one
+        // group never jitters between frames.
+        let text = if LEAD + display_width(&text) > max_content {
+            truncate(&text, max_content - LEAD, unicode)
         } else {
             text
         };
-        let content_w = (3 + display_width(&text)).clamp(MIN_CONTENT, max_content);
+        let content_w = (LEAD + display_width(&text)).clamp(MIN_CONTENT, max_content);
         let box_w = content_w + 2 * PAD + 2;
         Self {
             text,
@@ -153,11 +157,12 @@ struct Glyphs {
     br: char,
     h: char,
     v: char,
-    bar_on: char,
-    bar_off: char,
     spin: &'static [&'static str],
 }
 
+/// A half-filled disc whose filled side rotates. It fills the cell and sits on the
+/// label's baseline — unlike the sparse `⠋⠙…` braille cycle, which lights only the
+/// upper-left dots and reads as a small mark floating above the text.
 const UNICODE_GLYPHS: Glyphs = Glyphs {
     tl: '╭',
     tr: '╮',
@@ -165,9 +170,7 @@ const UNICODE_GLYPHS: Glyphs = Glyphs {
     br: '╯',
     h: '─',
     v: '│',
-    bar_on: '━',
-    bar_off: '─',
-    spin: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+    spin: &["◐", "◓", "◑", "◒"],
 };
 
 const ASCII_GLYPHS: Glyphs = Glyphs {
@@ -177,8 +180,6 @@ const ASCII_GLYPHS: Glyphs = Glyphs {
     br: '+',
     h: '-',
     v: '|',
-    bar_on: '#',
-    bar_off: '-',
     spin: &["|", "/", "-", "\\"],
 };
 
@@ -191,7 +192,7 @@ impl Layout {
         }
     }
 
-    fn rows(&self, frame: usize, done: u64, total: u64) -> Vec<Row> {
+    fn rows(&self, frame: usize) -> Vec<Row> {
         let g = self.glyphs();
         let rule: String = std::iter::repeat_n(g.h, self.box_w - 2).collect();
         let edge = |l: char, r: char| -> Row { vec![(Sty::Dim, format!("{l}{rule}{r}"))] };
@@ -208,65 +209,32 @@ impl Layout {
             edge(g.tl, g.tr),
             blank(),
             wrap(self.message_row(frame)),
-            wrap(self.progress_row(done, total)),
             blank(),
             edge(g.bl, g.br),
         ]
     }
 
-    /// `<spinner>  <text>`, centered in the content column.
+    /// `<spinner> <text>` — one space between the two — centered in the content
+    /// column.
     fn message_row(&self, frame: usize) -> Row {
         let g = self.glyphs();
         let spin = g.spin[frame % g.spin.len()];
-        let used = 3 + display_width(&self.text);
-        let lead = (self.content_w.saturating_sub(used)) / 2;
+        let used = LEAD + display_width(&self.text);
+        let lead = self.content_w.saturating_sub(used) / 2;
         let trail = self.content_w.saturating_sub(used + lead);
         vec![
             (Sty::Plain, " ".repeat(lead)),
             (Sty::Accent, spin.to_string()),
-            (Sty::Plain, format!("  {}{}", self.text, " ".repeat(trail))),
+            (Sty::Plain, format!(" {}{}", self.text, " ".repeat(trail))),
         ]
-    }
-
-    /// A determinate bar when the byte total is known, a byte counter when only
-    /// the progress is (a download with no content-length), blank otherwise.
-    /// Never a fabricated percentage.
-    fn progress_row(&self, done: u64, total: u64) -> Row {
-        let g = self.glyphs();
-        if total > 0 {
-            let bar_w = self.content_w - 6;
-            let pct = ((done.min(total) as u128 * 100) / total as u128) as usize;
-            let on = bar_w * pct / 100;
-            return vec![
-                (Sty::Plain, g.bar_on.to_string().repeat(on)),
-                (Sty::Dim, g.bar_off.to_string().repeat(bar_w - on)),
-                (Sty::Dim, format!("  {pct:>3}%")),
-            ];
-        }
-        if done > 0 {
-            let label = human_bytes(done);
-            let w = display_width(&label);
-            if w <= self.content_w {
-                let lead = (self.content_w - w) / 2;
-                return vec![(
-                    Sty::Dim,
-                    format!(
-                        "{}{label}{}",
-                        " ".repeat(lead),
-                        " ".repeat(self.content_w - w - lead)
-                    ),
-                )];
-            }
-        }
-        vec![(Sty::Plain, " ".repeat(self.content_w))]
     }
 
     /// One frame as a single escape-laden string: absolute cursor placement per
     /// row, no clearing. Rows are always exactly `box_w` cells, so overwriting
     /// in place leaves no residue.
-    fn frame(&self, n: usize, done: u64, total: u64) -> String {
+    fn frame(&self, n: usize) -> String {
         let mut out = String::with_capacity(self.box_w * BOX_H * 2);
-        for (i, row) in self.rows(n, done, total).iter().enumerate() {
+        for (i, row) in self.rows(n).iter().enumerate() {
             out.push_str(&format!("\x1b[{};{}H", self.top + 1 + i, self.left + 1));
             for (sty, s) in row {
                 if !self.color || *sty == Sty::Plain {
@@ -284,16 +252,10 @@ impl Layout {
 
 // ---- shared state -------------------------------------------------------------
 
-/// Progress the render thread reads and the work threads write. `total == 0`
-/// means indeterminate.
+/// The render thread sleeps on this and wakes the instant the work signals stop.
 struct State {
     stop: Mutex<bool>,
     wake: Condvar,
-    done: AtomicU64,
-    total: AtomicU64,
-    /// A file whose growth IS the progress (a shell-out download). Polled by the
-    /// render thread; cheaper and more honest than parsing curl's meter.
-    watch: Mutex<Option<PathBuf>>,
 }
 
 impl State {
@@ -301,9 +263,6 @@ impl State {
         Self {
             stop: Mutex::new(false),
             wake: Condvar::new(),
-            done: AtomicU64::new(0),
-            total: AtomicU64::new(0),
-            watch: Mutex::new(None),
         }
     }
 
@@ -329,59 +288,6 @@ impl State {
     fn halt(&self) {
         *self.stop.lock().unwrap_or_else(|e| e.into_inner()) = true;
         self.wake.notify_all();
-    }
-}
-
-/// The write half of the progress channel, handed to whatever is doing the work.
-/// A no-op when the presentation is Silent or Line — the calls stay unconditional
-/// at the call sites.
-#[derive(Clone)]
-pub struct Progress(Arc<State>);
-
-impl Progress {
-    pub fn set_total(&self, total: u64) {
-        self.0.done.store(0, Ordering::Relaxed);
-        self.0.total.store(total, Ordering::Relaxed);
-    }
-
-    pub fn add(&self, n: u64) {
-        self.0.done.fetch_add(n, Ordering::Relaxed);
-    }
-
-    /// Track `path`'s size instead of an explicit counter — for work done by a
-    /// child process that only reports through the file it is writing.
-    pub fn watch_file(&self, path: &Path) {
-        self.reset();
-        *self.0.watch.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.to_path_buf());
-    }
-
-    /// Back to indeterminate — the spinner alone.
-    pub fn reset(&self) {
-        self.0.done.store(0, Ordering::Relaxed);
-        self.0.total.store(0, Ordering::Relaxed);
-        *self.0.watch.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    }
-}
-
-/// A `Read` that reports what it consumed. Wrapping the COMPRESSED side of the
-/// zstd decoder is what makes embed-shape progress determinate: the payload's
-/// compressed length is known exactly, and the decoder consumes it linearly.
-pub struct Counting<R> {
-    inner: R,
-    progress: Progress,
-}
-
-impl<R> Counting<R> {
-    pub fn new(inner: R, progress: Progress) -> Self {
-        Self { inner, progress }
-    }
-}
-
-impl<R: Read> Read for Counting<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.progress.add(n as u64);
-        Ok(n)
     }
 }
 
@@ -434,12 +340,8 @@ impl FirstRun {
         }
     }
 
-    pub fn progress(&self) -> Progress {
-        Progress(Arc::clone(&self.state))
-    }
-
     /// Whether the box currently owns the terminal — the signal for a child
-    /// process to keep its own progress meter to itself.
+    /// process to keep its own output (a downloader's meter) off the screen.
     pub fn owns_terminal(&self) -> bool {
         self.started.get() && matches!(self.plan, Plan::Boxed(_))
     }
@@ -491,20 +393,7 @@ fn render(mut layout: Layout, state: Arc<State>) {
             }
         }
 
-        let total = state.total.load(Ordering::Relaxed);
-        // Cloned out rather than stat'd under the lock: the work thread must never
-        // block on this thread's filesystem call.
-        let watched = state
-            .watch
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let done = match watched {
-            Some(path) => std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
-            None => state.done.load(Ordering::Relaxed),
-        };
-        screen.write(&layout.frame(frame, done, total));
-
+        screen.write(&layout.frame(frame));
         frame += 1;
         if state.park(FRAME) {
             break;
@@ -702,20 +591,6 @@ fn truncate(s: &str, w: usize, unicode: bool) -> String {
     out
 }
 
-fn human_bytes(n: u64) -> String {
-    const KB: f64 = 1024.0;
-    let b = n as f64;
-    if b < KB {
-        format!("{n} B")
-    } else if b < KB * KB {
-        format!("{:.0} KB", b / KB)
-    } else if b < KB * KB * KB {
-        format!("{:.1} MB", b / (KB * KB))
-    } else {
-        format!("{:.2} GB", b / (KB * KB * KB))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,8 +659,8 @@ mod tests {
     }
 
     /// Geometry: the box is centered, stays inside the viewport with a margin,
-    /// and every rendered row is exactly as wide as the box — the invariant that
-    /// keeps in-place repainting from leaving residue.
+    /// and every rendered row is exactly as wide as the box across spinner frames
+    /// — the invariant that keeps in-place repainting from leaving residue.
     #[test]
     fn box_is_centered_and_rows_are_flush() {
         for (cols, rows) in [(MIN_COLS, MIN_ROWS), (80, 24), (200, 60), (43, 11)] {
@@ -808,18 +683,35 @@ mod tests {
                 (rows as usize - BOX_H) / 2,
                 "{cols}x{rows}: off-center"
             );
-            for (done, total) in [(0, 0), (3, 10), (10, 10), (4096, 0)] {
-                for row in l.rows(0, done, total) {
+            for frame in 0..UNICODE_GLYPHS.spin.len() {
+                for row in l.rows(frame) {
                     let text: String = row.iter().map(|(_, s)| s.as_str()).collect();
                     assert_eq!(
                         display_width(&text),
                         l.box_w,
-                        "{cols}x{rows} at {done}/{total}: row {text:?} is not {} cells",
+                        "{cols}x{rows} frame {frame}: row {text:?} is not {} cells",
                         l.box_w
                     );
                 }
             }
         }
+    }
+
+    /// The maintainer's spec for the message line: spinner, ONE space, label —
+    /// nothing between them, and the spinner glyph fills its own cell (width 1).
+    #[test]
+    fn message_is_spinner_one_space_then_label() {
+        let l = boxed(plan(Some("Setting up app"), &caps(true, Some((80, 24)))));
+        let row = l.message_row(0);
+        let (spin_sty, spin) = &row[1];
+        assert_eq!(*spin_sty, Sty::Accent);
+        assert_eq!(display_width(spin), 1, "spinner must occupy one cell");
+        assert!(UNICODE_GLYPHS.spin.contains(&spin.as_str()));
+        let (_, after) = &row[2];
+        assert!(
+            after.starts_with(" Setting up app"),
+            "want exactly one space before the label, got {after:?}"
+        );
     }
 
     /// A message longer than the viewport is truncated into the box, never
@@ -846,26 +738,6 @@ mod tests {
         assert!(!l.text.contains('\n') && !l.text.contains('\x1b'));
     }
 
-    /// Progress is shown only where it is genuinely known: a determinate bar when
-    /// a byte total exists, a byte counter when only the numerator does, and
-    /// nothing at all otherwise.
-    #[test]
-    fn progress_row_never_invents_a_percentage() {
-        let l = boxed(plan(Some("Setting up app"), &caps(true, Some((80, 24)))));
-        let text = |done, total| -> String {
-            l.progress_row(done, total)
-                .iter()
-                .map(|(_, s)| s.as_str())
-                .collect()
-        };
-        assert!(text(0, 0).trim().is_empty());
-        assert!(text(50, 200).contains("25%"));
-        assert!(text(200, 200).contains("100%"));
-        // Overshoot is clamped, not rendered as 137%.
-        assert!(text(274, 200).contains("100%"));
-        assert_eq!(text(1_572_864, 0).trim(), "1.5 MB");
-    }
-
     #[test]
     fn width_accounts_for_wide_and_zero_width_characters() {
         assert_eq!(display_width("abc"), 3);
@@ -885,7 +757,7 @@ mod tests {
             color: true,
         };
         let l = boxed(plan(Some("Setting up app"), &caps));
-        for row in l.rows(2, 3, 10) {
+        for row in l.rows(2) {
             let text: String = row.iter().map(|(_, s)| s.as_str()).collect();
             assert!(text.is_ascii(), "non-ASCII in fallback row: {text:?}");
             assert_eq!(display_width(&text), l.box_w);

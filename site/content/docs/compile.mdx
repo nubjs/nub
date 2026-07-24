@@ -109,15 +109,14 @@ nub compile app.ts --compress xz   # smaller file, slower first run
 
 ## `--install-message` / `--no-install-message`
 
-The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. On a terminal the launcher shows a centered box with a spinner while that runs, and a determinate bar where the byte total is known, defaulting the text to the output name:
+The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. On a terminal the launcher shows a centered box with a spinner while that runs, defaulting the text to the output name:
 
 ```
-        ╭──────────────────────────────╮
-        │                              │
-        │      ⠹  Setting up app       │
-        │   ━━━━━━━━━━━━━━━━━━━━   62%  │
-        │                              │
-        ╰──────────────────────────────╯
+        ╭──────────────────────────╮
+        │                          │
+        │   ◐ Setting up app       │
+        │                          │
+        ╰──────────────────────────╯
 ```
 
 The box lives on the alternate screen, so when setup finishes it disappears and the app's own output starts on a clean terminal. Set your own text, or start silently:

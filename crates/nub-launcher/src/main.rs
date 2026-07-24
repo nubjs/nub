@@ -31,7 +31,7 @@ use std::process::{Command, ExitStatus};
 use anyhow::{Context, Result, anyhow, bail};
 use nub_core::compile::{self, Manifest, PayloadView, Shape};
 use nub_core::node::{discovery, flags, spawn, version::NodeVersion};
-use ui::{FirstRun, Progress};
+use ui::FirstRun;
 
 fn main() {
     std::process::exit(run());
@@ -230,8 +230,7 @@ fn acquire_embedded_node(
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let tmp_bin = tmp.join(node_exe_name());
-    decompress_to_file(view.node_blob, &tmp_bin, &notice.progress())
-        .context("decompressing the embedded Node")?;
+    decompress_to_file(view.node_blob, &tmp_bin).context("decompressing the embedded Node")?;
     set_executable(&tmp_bin)?;
 
     fs::create_dir_all(node_cache.parent().unwrap()).ok();
@@ -423,15 +422,11 @@ fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) ->
 /// Download `url` to `dest` via `curl`, then `wget`. When neither exists, the
 /// no-downloader error names the fix (a binary built with the default shape).
 ///
-/// While the first-run box owns the terminal the downloader is muted — two
-/// writers on one screen is torn output — and its progress is read off `dest`'s
-/// growth instead. Without the box, the downloader's own meter is left alone.
+/// While the first-run box owns the terminal the downloader's own progress meter
+/// is silenced — two writers on one screen is torn output; the box's spinner is
+/// the only feedback. Without the box, the downloader's meter is left alone.
 fn download_via_shell(url: &str, dest: &Path, notice: &FirstRun) -> Result<()> {
     let muted = notice.owns_terminal();
-    if muted {
-        notice.progress().watch_file(dest);
-    }
-    let restore = || notice.progress().reset();
 
     if command_exists("curl") {
         let mut cmd = Command::new("curl");
@@ -445,7 +440,6 @@ fn download_via_shell(url: &str, dest: &Path, notice: &FirstRun) -> Result<()> {
             .arg(url)
             .status()
             .context("running curl")?;
-        restore();
         if status.success() {
             return Ok(());
         }
@@ -462,7 +456,6 @@ fn download_via_shell(url: &str, dest: &Path, notice: &FirstRun) -> Result<()> {
             .arg(url)
             .status()
             .context("running wget")?;
-        restore();
         if status.success() {
             return Ok(());
         }
@@ -599,14 +592,9 @@ fn short_key(hex: &str) -> String {
 /// ~60 ms of it) at roughly half the peak RSS — which is what decides the run on
 /// a memory-capped host whose writable filesystem is tmpfs charged against that
 /// same limit.
-///
-/// Progress counts the COMPRESSED side: its length is known exactly and the
-/// decoder consumes it linearly, so the percentage is real rather than inferred
-/// from an output size nobody recorded.
-fn decompress_to_file(compressed: &[u8], dest: &Path, progress: &Progress) -> Result<()> {
-    progress.set_total(compressed.len() as u64);
-    let source = ui::Counting::new(compressed, progress.clone());
-    let mut decoder = zstd::stream::Decoder::new(source).map_err(|e| anyhow!("zstd init: {e}"))?;
+fn decompress_to_file(compressed: &[u8], dest: &Path) -> Result<()> {
+    let mut decoder =
+        zstd::stream::Decoder::new(compressed).map_err(|e| anyhow!("zstd init: {e}"))?;
     let file = fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
     let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
     std::io::copy(&mut decoder, &mut out)
