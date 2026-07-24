@@ -428,6 +428,7 @@ mod tests {
             node_sha256: String::new(),
             app_sha256: "aa".into(),
             minify: true,
+            install_message: None,
         };
         nub_core::compile::encode(
             &manifest,
