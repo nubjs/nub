@@ -1382,6 +1382,23 @@ fn augmentation_to_lifecycle_overlay(
     (overlay, prepends)
 }
 
+/// The directory lifecycle Node discovery is anchored at: the workspace root
+/// when `cwd` sits in a member, else the project root, else `cwd` itself.
+///
+/// aube keys its install state and virtual store at the workspace root
+/// (`dirs::workspace_or_project_root`), and an install from a member
+/// materializes the ONE shared tree for the whole workspace — so the Node its
+/// build scripts compile against, which is also the engine that keys the ABI
+/// caches, must be the root's pin rather than whichever member the shell sits
+/// in. Anchoring at the raw cwd instead lets a member's own `.nvmrc` flip the
+/// engine key against a root-anchored state file, thrashing the warm path.
+/// `detect_project` walks up by the same rule aube's root does.
+fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
+    nub_core::workspace::detect::detect_project(cwd)
+        .map(|p| p.workspace_root.unwrap_or(p.root))
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
 /// Install nub's runtime augmentation onto the engine's lifecycle-script spawn
 /// env (via aube's generic [`aube::set_script_settings`] overlay), so dependency
 /// build scripts run under the project's provisioned + augmented Node — the same
@@ -1390,17 +1407,7 @@ fn augmentation_to_lifecycle_overlay(
 /// re-entrant / broken install); the resolved Node *version* is published to the
 /// engine either way. Called once per command from [`engine_session`].
 fn apply_lifecycle_augmentation(cwd: &Path) {
-    // Anchor Node discovery at the workspace root — the directory aube keys its
-    // install state and virtual store at (`dirs::workspace_or_project_root`). An
-    // install from a member materializes the ONE shared tree for the whole
-    // workspace, so the Node its build scripts compile against — and the engine
-    // that keys the ABI caches — must be the root's pin, not whichever member the
-    // shell sits in. Discovering from the raw cwd instead lets a member's own
-    // `.nvmrc` flip the engine key against a root-anchored state file, thrashing
-    // the warm path. `detect_project` walks up by the same rule aube's root does.
-    let anchor = nub_core::workspace::detect::detect_project(cwd)
-        .map(|p| p.workspace_root.unwrap_or(p.root))
-        .unwrap_or_else(|| cwd.to_path_buf());
+    let anchor = lifecycle_node_anchor(cwd);
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
     // path pins npm_node_execpath. Mirrors build_script_command's discovery.
@@ -4080,5 +4087,42 @@ mod tests {
         let m = root_manifest(d.path());
         assert!(first_catalog_specifier(&m, d.path()).is_some());
         assert!(role_honors_catalog(Role::Yarn, Some(4), Some(10)));
+    }
+
+    #[test]
+    fn a_member_install_resolves_the_workspace_roots_node_pin() {
+        // aube anchors install state and the virtual store at the workspace root,
+        // and a member install materializes that ONE shared tree. So the engine
+        // published for it has to name the root's Node: keyed off the member's own
+        // pin, the ABI caches describe a Node the root-anchored state file never
+        // saw, and alternating root/member installs each rebuild the other's tree.
+        let d = workspace(&[
+            (
+                "package.json",
+                r#"{"name":"ws","workspaces":["packages/*"]}"#,
+            ),
+            (".nvmrc", "22.15.0\n"),
+            ("packages/member/package.json", r#"{"name":"member"}"#),
+            ("packages/member/.nvmrc", "20.19.0\n"),
+        ]);
+        let member = d.path().join("packages/member");
+        let pin_at = |dir: &Path| {
+            nub_core::node::discovery::resolve_pin_chain(dir)
+                .expect("pin chain resolves")
+                .pin
+                .expect("a pin file is in scope")
+                .0
+        };
+
+        // Control: from the raw cwd the member's own pin wins — the key the engine
+        // carried before discovery was anchored.
+        assert_eq!(pin_at(&member), "20.19.0");
+        assert_eq!(
+            pin_at(&lifecycle_node_anchor(&member)),
+            "22.15.0",
+            "a member install builds the workspace's one shared tree, so anchoring \
+             Node discovery anywhere but the root keys the ABI caches to a Node the \
+             install state never saw"
+        );
     }
 }

@@ -3096,6 +3096,134 @@ mod build_may_key_engine_tests {
     }
 }
 
+/// The GVS prewarm ([`materialize`]) and the link phase ([`link`]) hash the same
+/// graph independently, and link REUSES the prewarm's hashes whenever the key
+/// sets match — its filter compares key presence and count, never hash VALUES.
+/// So a gate that folds the engine in one phase but not the other never surfaces
+/// as a mismatch: link silently serves the prewarm's hashes, and a native addon
+/// lands at a virtual-store path shared across Node majors. Nothing at runtime
+/// can catch that, which is why it is pinned here.
+#[cfg(test)]
+mod engine_fold_agreement_tests {
+    use super::*;
+
+    const LINK_SRC: &str = include_str!("link.rs");
+    const PREWARM_SRC: &str = include_str!("materialize.rs");
+
+    /// The engine-fold gate's arguments at a file's graph-hash site, minus the
+    /// leading policy binding (each phase holds the policy differently) and with
+    /// whitespace collapsed.
+    fn engine_fold_gate(src: &str, file: &str) -> String {
+        let mut calls = src.match_indices("build_may_key_engine(");
+        let (idx, marker) = calls.next().unwrap_or_else(|| {
+            panic!(
+                "{file} no longer gates its graph-hash `allow` closure on \
+                 `build_may_key_engine`; the two phases must agree or link serves \
+                 wrong-ABI hashes"
+            )
+        });
+        assert!(
+            calls.next().is_none(),
+            "{file} gained a second `build_may_key_engine` call — this check only \
+             knows how to compare one graph-hash site per phase"
+        );
+        let open = idx + marker.len();
+        let args = &src[open..open + src[open..].find(')').expect("unterminated call")];
+        let (_policy, rest) = args
+            .split_once(',')
+            .expect("engine-fold gate takes (policy, pkg, default_trust_enabled)");
+        rest.split_whitespace().collect()
+    }
+
+    #[test]
+    fn the_prewarm_and_the_link_phase_gate_the_engine_fold_identically() {
+        assert_eq!(
+            engine_fold_gate(PREWARM_SRC, "materialize.rs"),
+            engine_fold_gate(LINK_SRC, "link.rs"),
+            "the prewarm and the link phase disagree on which packages fold the \
+             engine into their virtual-store path; link reuses the prewarm's \
+             hashes on a key-set match without comparing values, so this ships as \
+             a wrong-ABI store path rather than a failure"
+        );
+    }
+
+    #[test]
+    fn a_floor_built_package_taints_its_dependents_under_both_phases_hashers() {
+        // `better-sqlite3` builds off the `defaultTrust` floor rather than an
+        // explicit allow — the case #548 fixed, and the one link's reuse path
+        // hits on a plain warm install.
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        let mut consumer = locked("app-db");
+        consumer
+            .dependencies
+            .insert("better-sqlite3".into(), "1.0.0".into());
+        graph.packages.insert("app-db@1.0.0".into(), consumer);
+        graph
+            .packages
+            .insert("better-sqlite3@1.0.0".into(), locked("better-sqlite3"));
+
+        let policy = aube_scripts::BuildPolicy::from_config(&BTreeMap::new(), &[], &[], false).0;
+        let engine = aube_lockfile::graph_hash::engine_name_default("22.15.0");
+        let no_patch = |_: &str, _: &str| -> Option<String> { None };
+        // Link only reuses the prewarm's hashes when it has no content
+        // fingerprints of its own, so this is the shape that matters.
+        let no_content = |_: &str| -> Option<String> { None };
+
+        let allow = |pkg: &aube_lockfile::LockedPackage| build_may_key_engine(&policy, pkg, true);
+        let prewarm = aube_lockfile::graph_hash::compute_graph_hashes_with_patches(
+            &graph,
+            &allow,
+            Some(&engine),
+            &no_patch,
+        );
+        let link = aube_lockfile::graph_hash::compute_graph_hashes_full(
+            &graph,
+            &allow,
+            Some(&engine),
+            &no_patch,
+            &no_content,
+        );
+        assert_eq!(
+            prewarm.node_hash, link.node_hash,
+            "the prewarm's hashes are reused verbatim by the link phase; they must \
+             be byte-identical to what link would have computed itself"
+        );
+
+        // Control: without the floor nothing in this graph may build, so the
+        // hashes stay engine-agnostic. That the two differ is what proves the
+        // assertion above compared engine-KEYED hashes rather than passing
+        // vacuously.
+        let floor_off =
+            |pkg: &aube_lockfile::LockedPackage| build_may_key_engine(&policy, pkg, false);
+        let unkeyed = aube_lockfile::graph_hash::compute_graph_hashes_with_patches(
+            &graph,
+            &floor_off,
+            Some(&engine),
+            &no_patch,
+        );
+        assert_ne!(
+            prewarm.node_hash["better-sqlite3@1.0.0"], unkeyed.node_hash["better-sqlite3@1.0.0"],
+            "a floor-built native package must not share one virtual-store path \
+             across Node majors"
+        );
+        assert_ne!(
+            prewarm.node_hash["app-db@1.0.0"], unkeyed.node_hash["app-db@1.0.0"],
+            "the engine taint must cascade to every dependent, or a consumer's \
+             path points at an ABI it did not key"
+        );
+    }
+
+    fn locked(name: &str) -> aube_lockfile::LockedPackage {
+        aube_lockfile::LockedPackage {
+            name: name.into(),
+            version: "1.0.0".into(),
+            integrity: Some(format!("sha512-{name}")),
+            dep_path: format!("{name}@1.0.0"),
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod trust_policy_validation_cache_tests {
     use super::*;
