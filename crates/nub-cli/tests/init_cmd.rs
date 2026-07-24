@@ -297,7 +297,8 @@ fn scaffolds_five_files_with_identity_pin_and_type_devdeps() {
         "tsconfig must wire the type packages: {tsconfig}"
     );
     assert!(
-        out.stdout.contains("next: nub index.ts"),
+        out.stdout
+            .contains("Your project is ready!\nTry running `nub index.ts`"),
         "summary names the next command: {}",
         out.stdout
     );

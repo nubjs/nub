@@ -96,7 +96,7 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
         false
     } else if interactive {
         match prompt_choice(
-            "Initialize a git repository?",
+            "Initialize a Git repository?",
             &[("Yes", true), ("No", false)],
         )? {
             None => return Ok(130),
@@ -156,7 +156,9 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
     } else {
         println!();
     }
-    println!("next: nub {entry}");
+    use clx::style;
+    println!("Your project is ready!");
+    println!("Try running `{}`", style::ecyan(format!("nub {entry}")));
     Ok(0)
 }
 
@@ -215,12 +217,18 @@ const TSCONFIG: &str = r#"{
 }
 "#;
 
-/// Keep demand's text editor, but replace its broken submitted frame. The
-/// library under-counts its two-line input by one, leaving the title behind;
-/// it also renders the raw empty input instead of the default Nub applies.
+/// Keep demand's text editor, but use its inline mode so editing and submitted
+/// states occupy the same row. Demand cannot use a different separator after
+/// submission, so replace its success row with Nub's dim-label `:` form.
 fn prompt_name(default_name: &str) -> Result<Option<String>> {
+    let mut theme = demand::Theme::new();
+    theme.title.set_dimmed(true);
+    theme.input_prompt.set_dimmed(true);
     let input = demand::Input::new("Project name")
+        .inline(true)
+        .prompt("> ")
         .placeholder(default_name)
+        .theme(&theme)
         .validation(|s| {
             if s.is_empty() || !sanitize_name(s).is_empty() {
                 Ok(())
@@ -237,16 +245,12 @@ fn prompt_name(default_name: &str) -> Result<Option<String>> {
             } else {
                 sanitize_name(&raw)
             };
-            // demand leaves both its original title and its empty/raw success
-            // line in the terminal. Replace them with the resolved value once.
-            term.clear_last_lines(2)
+            term.clear_last_lines(1)
                 .context("clearing project-name prompt")?;
             write_prompt_answer(&term, "Project name", &name)?;
             Ok(Some(name))
         }
         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-            // Its interrupted path clears only the editable row, leaving the
-            // title behind for the same off-by-one reason.
             term.clear_last_lines(1)
                 .context("clearing cancelled project-name prompt")?;
             Ok(None)
@@ -305,7 +309,7 @@ fn prompt_choice<T: Copy>(title: &str, options: &[(&str, T)]) -> Result<Option<T
 
 fn render_choice_frame<T>(title: &str, options: &[(&str, T)], selected: usize) -> String {
     use clx::style;
-    let mut out = format!("{}\n", style::estyle(title).bold());
+    let mut out = format!("{}\n", style::estyle(title).dim());
     for (index, (label, _)) in options.iter().enumerate() {
         if index == selected {
             out.push_str(&format!("{} ■ {label}\n", style::ecyan("❯")));
@@ -324,8 +328,17 @@ fn render_choice_frame<T>(title: &str, options: &[(&str, T)], selected: usize) -
 
 fn write_prompt_answer(term: &Term, title: &str, answer: &str) -> Result<()> {
     use clx::style;
-    term.write_line(&format!("{title} {}", style::egreen(answer)))
+    let label = prompt_answer_label(title);
+    term.write_line(&format!("{} {answer}", style::estyle(label).dim()))
         .with_context(|| format!("writing {title} answer"))
+}
+
+fn prompt_answer_label(title: &str) -> String {
+    if title.ends_with('?') {
+        title.to_string()
+    } else {
+        format!("{title}:")
+    }
 }
 
 fn print_created_tree(name: &str, files: &[(&str, String)], git_ran: bool) {
@@ -512,6 +525,16 @@ mod tests {
         assert!(
             !frame.contains("48;"),
             "choice prompt must never set an ANSI background: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn submitted_prompt_labels_use_colons_without_double_punctuating_questions() {
+        assert_eq!(prompt_answer_label("Project name"), "Project name:");
+        assert_eq!(prompt_answer_label("Language"), "Language:");
+        assert_eq!(
+            prompt_answer_label("Initialize a Git repository?"),
+            "Initialize a Git repository?"
         );
     }
 }
