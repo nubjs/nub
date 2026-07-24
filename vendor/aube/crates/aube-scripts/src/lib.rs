@@ -43,9 +43,16 @@ pub struct ScriptSettings {
     /// system one while project-local binaries still win. `None` when
     /// no runtime switching is active.
     pub node_bin_dir: Option<PathBuf>,
-    /// The resolved node executable, exported as `npm_node_execpath` /
-    /// `NODE` (npm parity) for every script.
+    /// The resolved node executable, exported as `NODE` (and, unless
+    /// `node_execpath` overrides it, `npm_node_execpath`) for every script.
     pub node_exe: Option<PathBuf>,
+    /// The *real* Node exported as `npm_node_execpath` when it differs from
+    /// the program driving `NODE` — a wrapping embedder points `NODE` at a
+    /// shim, but node-gyp reads `npm_node_execpath` for Node's install prefix
+    /// and must reach the real binary. `None` ⇒ falls back to `node_exe`,
+    /// where both name one binary. Mirrors `RuntimeContext::node_execpath`,
+    /// which feeds it.
+    pub node_execpath: Option<PathBuf>,
     /// Embedder-supplied environment overlay applied verbatim to every
     /// lifecycle spawn (`(key, value)` pairs, set last so they win over the
     /// other `ScriptSettings`-derived keys). Generic by design — aube assigns
@@ -656,8 +663,11 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
     // `npm_node_execpath` / `NODE`: the node binary scripts should use
     // — the switched runtime's node, or the ambient `node` on PATH.
     // Set here (not at spawn) so it survives the jail's `env_clear`.
+    // A wrapping embedder splits them: `NODE` a shim, `npm_node_execpath` the
+    // real Node node-gyp reads for the prefix. Unset ⇒ both name `node_exe`.
     if let Some(node_exe) = settings.node_exe.as_deref() {
-        cmd.env("npm_node_execpath", node_exe).env("NODE", node_exe);
+        let execpath = settings.node_execpath.as_deref().unwrap_or(node_exe);
+        cmd.env("npm_node_execpath", execpath).env("NODE", node_exe);
     }
     // `npm_command`: the top-level PM command (run-script / install / …).
     if let Some(command) = settings.command.as_deref() {
@@ -1583,6 +1593,79 @@ mod env_overlay_tests {
             env_value(&cmd, "npm_node_execpath").map(|v| v.to_string_lossy().into_owned()),
             Some("/pinned/node".to_string()),
             "env_overlay must pin npm_node_execpath to the provisioned Node (ABI fix)"
+        );
+    }
+
+    /// A wrapping embedder splits the two: `NODE` drives the shim it wants
+    /// scripts to re-enter, while `npm_node_execpath` names the real Node
+    /// node-gyp reads for the install prefix. This is the lifecycle half of
+    /// `RuntimeContext::node_execpath` — node-gyp runs as a dep postinstall,
+    /// so the split has to reach *this* path to serve its own motivation.
+    #[test]
+    fn node_execpath_overrides_only_npm_node_execpath() {
+        let mut cmd = tokio::process::Command::new("node");
+        let settings = ScriptSettings {
+            node_exe: Some(PathBuf::from("/wrapper/libexec/node-shim")),
+            node_execpath: Some(PathBuf::from("/real/node/bin/node")),
+            ..Default::default()
+        };
+        apply_script_settings_env(&mut cmd, &settings);
+
+        assert_eq!(
+            env_value(&cmd, "NODE").map(|v| v.to_string_lossy().into_owned()),
+            Some("/wrapper/libexec/node-shim".to_string()),
+            "NODE stays the program the embedder wants scripts to invoke"
+        );
+        assert_eq!(
+            env_value(&cmd, "npm_node_execpath").map(|v| v.to_string_lossy().into_owned()),
+            Some("/real/node/bin/node".to_string()),
+            "npm_node_execpath must reach the real Node so node-gyp finds its prefix"
+        );
+    }
+
+    /// The default: one binary named by both vars. `node_execpath: None` is
+    /// what every non-wrapping caller sends, so this is the behavior-preserving
+    /// path — unchanged from before the split existed.
+    #[test]
+    fn unset_node_execpath_falls_back_to_node_exe() {
+        let mut cmd = tokio::process::Command::new("node");
+        let settings = ScriptSettings {
+            node_exe: Some(PathBuf::from("/opt/node/bin/node")),
+            ..Default::default()
+        };
+        apply_script_settings_env(&mut cmd, &settings);
+
+        for key in ["NODE", "npm_node_execpath"] {
+            assert_eq!(
+                env_value(&cmd, key).map(|v| v.to_string_lossy().into_owned()),
+                Some("/opt/node/bin/node".to_string()),
+                "{key} must fall back to node_exe when no split is requested"
+            );
+        }
+    }
+
+    /// The embedder overlay is applied last, so it outranks the split above.
+    /// nub depends on this: it seeds a directory runtime but pins its own
+    /// `npm_node_execpath` through the overlay (the ABI fix), and that pin must
+    /// keep winning now that the settings themselves can name an execpath.
+    #[test]
+    fn env_overlay_outranks_the_node_execpath_split() {
+        let mut cmd = tokio::process::Command::new("node");
+        let settings = ScriptSettings {
+            node_exe: Some(PathBuf::from("/settings/node")),
+            node_execpath: Some(PathBuf::from("/settings/execpath")),
+            env_overlay: vec![(
+                OsString::from("npm_node_execpath"),
+                OsString::from("/pinned/node"),
+            )],
+            ..Default::default()
+        };
+        apply_script_settings_env(&mut cmd, &settings);
+
+        assert_eq!(
+            env_value(&cmd, "npm_node_execpath").map(|v| v.to_string_lossy().into_owned()),
+            Some("/pinned/node".to_string()),
+            "the embedder overlay must still win over a settings-derived execpath"
         );
     }
 
