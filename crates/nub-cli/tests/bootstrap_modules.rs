@@ -21,8 +21,10 @@ use std::process::Command;
 /// tier). `worker_threads` is deliberately NOT a marker: `module.register` on the
 /// compat tier loads it legitimately (the async loader runs on a worker thread),
 /// so it appears there independent of any undici regression and would false-positive.
-const UNDICI_TREE_MARKERS: [&str; 2] =
-    ["NativeModule http", "NativeModule internal/deps/undici/undici"];
+const UNDICI_TREE_MARKERS: [&str; 2] = [
+    "NativeModule http",
+    "NativeModule internal/deps/undici/undici",
+];
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
