@@ -75,6 +75,13 @@ pub struct Manifest {
     /// Whether the bundle was minified (informational; affects nothing at runtime).
     #[serde(default)]
     pub minify: bool,
+    /// The line the launcher prints before a FIRST RUN extracts the embedded Node
+    /// or provisions one — the only thing between the user and a multi-second
+    /// silent startup. Baked at compile time (default `Setting up <app-name>`)
+    /// because the launcher has no app name of its own. `None` is
+    /// `--no-install-message`: stay quiet. Printed on a TTY only, both shapes.
+    #[serde(default)]
+    pub install_message: Option<String>,
 }
 
 /// A borrowed view over a decoded payload — app files and the Node blob are
@@ -358,6 +365,7 @@ mod tests {
             node_sha256: "abc123".into(),
             app_sha256: "def456".into(),
             minify: true,
+            install_message: Some("Setting up app".into()),
         };
         let app = vec![
             ("main.js".to_string(), b"import './c.js'\n".to_vec()),
@@ -387,6 +395,7 @@ mod tests {
             node_sha256: String::new(),
             app_sha256: "aa".into(),
             minify: false,
+            install_message: None,
         };
         let app = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
         let blob = encode(&manifest, &app, &[]);

@@ -885,6 +885,15 @@ pub enum Command {
         /// Disable minification (default: minify on).
         #[arg(long = "no-minify")]
         no_minify: bool,
+
+        /// First-run message the compiled binary prints while it sets itself up.
+        /// Default: `Setting up <output-name>`. Shown on a terminal only.
+        #[arg(long, value_name = "TEXT", conflicts_with = "no_install_message")]
+        install_message: Option<String>,
+
+        /// Start silently on first run instead of printing a setup message.
+        #[arg(long = "no-install-message")]
+        no_install_message: bool,
     },
 
     /// Scaffold a new TypeScript-first project.
@@ -2465,6 +2474,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             target,
             platform,
             no_minify,
+            install_message,
+            no_install_message,
         }) => crate::compile::run(crate::compile::CompileOptions {
             entry,
             out,
@@ -2472,6 +2483,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             target,
             platform,
             minify: !no_minify,
+            install_message,
+            no_install_message,
         }),
         Some(Command::Init {
             yes,

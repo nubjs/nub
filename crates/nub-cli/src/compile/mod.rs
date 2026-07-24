@@ -38,6 +38,10 @@ pub struct CompileOptions {
     pub target: Option<String>,
     pub platform: Option<String>,
     pub minify: bool,
+    /// Custom first-run line; `None` takes the `Setting up <app-name>` default.
+    pub install_message: Option<String>,
+    /// Suppress the first-run line entirely.
+    pub no_install_message: bool,
 }
 
 struct ChunkOut {
@@ -123,6 +127,7 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
         node_sha256: node_sha,
         app_sha256: app_sha,
         minify: opts.minify,
+        install_message: install_message(&opts, &out_path),
     };
     let payload = encode(&manifest, &app_files, &node_blob);
 
@@ -206,6 +211,24 @@ fn determine_target(target: Option<&str>, cwd: &Path) -> Result<(VersionPin, Str
              \x20\x20version must be intentional and reproducible.)"
         ),
     }
+}
+
+/// The first-run line to bake into the artifact. One mechanism covers both
+/// shapes: the default shape prints it before decompressing the embedded Node,
+/// `--smol` before downloading one. The launcher has no app name of its own, so
+/// the default text is derived here from the output file name.
+fn install_message(opts: &CompileOptions, out: &Path) -> Option<String> {
+    if opts.no_install_message {
+        return None;
+    }
+    if let Some(text) = &opts.install_message {
+        return Some(text.clone());
+    }
+    let app = out
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "this app".into());
+    Some(format!("Setting up {app}"))
 }
 
 /// The raw requirement to record for `--smol` — `None` for a bare exact version
@@ -696,6 +719,40 @@ mod tests {
         assert_eq!(source, "--target");
         assert!(matches!(pin, VersionPin::Exact(_)));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn opts(install_message: Option<&str>, no_install_message: bool) -> CompileOptions {
+        CompileOptions {
+            entry: "main.ts".into(),
+            out: None,
+            smol: false,
+            target: None,
+            platform: None,
+            minify: true,
+            install_message: install_message.map(str::to_string),
+            no_install_message,
+        }
+    }
+
+    #[test]
+    fn install_message_defaults_to_the_output_name_and_is_overridable() {
+        let out = PathBuf::from("dist/mytool");
+        assert_eq!(
+            install_message(&opts(None, false), &out).as_deref(),
+            Some("Setting up mytool")
+        );
+        assert_eq!(
+            install_message(&opts(Some("Warming up"), false), &out).as_deref(),
+            Some("Warming up")
+        );
+        // Silent is the ONLY way to get None — the launcher treats None as
+        // "print nothing", so a missing message must never mean "use a default".
+        assert_eq!(install_message(&opts(None, true), &out), None);
+        // A Windows-style output name drops the extension, not just the directory.
+        assert_eq!(
+            install_message(&opts(None, false), Path::new("mytool.exe")).as_deref(),
+            Some("Setting up mytool")
+        );
     }
 
     #[test]

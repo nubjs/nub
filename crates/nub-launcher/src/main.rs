@@ -20,8 +20,11 @@
 // if }` into let-chains is cosmetic churn, so allow it.
 #![allow(clippy::collapsible_if)]
 
+mod cache;
+
+use std::cell::Cell;
 use std::fs;
-use std::io::Read;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -86,8 +89,14 @@ fn run() -> i32 {
 }
 
 fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
-    let node_path = acquire_node(view)?;
-    let app_dir = ensure_app(view)?;
+    // Resolved ONCE and threaded through: every write this process makes lands
+    // under the one directory that was proven writable + exec-capable, and the
+    // probe (a mkdir plus a zero-byte file) is not repeated per payload.
+    let base = cache::resolve()?;
+    let notice = FirstRun::new(view.manifest.install_message.as_deref());
+
+    let node_path = acquire_node(view, &base, &notice)?;
+    let app_dir = ensure_app(view, &base)?;
     let entry = app_dir.join(&view.manifest.entry);
 
     let version: NodeVersion = view
@@ -124,7 +133,47 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
     // Own process group + terminating/diagnostic-signal forwarding + TTY
     // foreground handoff + macOS SIGKILL backstop — the same faithful spawn
     // `nub run`'s file path uses. NODE_OPTIONS is inherited untouched (honored).
-    spawn::status_forwarding_signals(&mut cmd).context("spawning Node")
+    spawn::status_forwarding_signals(&mut cmd).map_err(|e| {
+        // A mount-flag query already rejects a `noexec` candidate on Linux and
+        // macOS, so reaching here means the denial came from somewhere the flag
+        // does not describe — an unsupported host's mount, SELinux, an LSM. The
+        // remedies are the same; the classification is what makes the message
+        // actionable instead of a bare "Permission denied".
+        if cache::exec_denied(&e) && node_path.starts_with(&base) {
+            anyhow!(cache::noexec_remedy(&base))
+        } else {
+            anyhow::Error::new(e).context("spawning Node")
+        }
+    })
+}
+
+/// The one-shot first-run line. The launcher owns the terminal before it does any
+/// work, so a cold run announces itself instead of going silent for seconds; a
+/// warm run never constructs a reason to print. Non-TTY stays silent so piped
+/// output and logs are unaffected.
+struct FirstRun {
+    text: Option<String>,
+    printed: Cell<bool>,
+}
+
+impl FirstRun {
+    fn new(text: Option<&str>) -> Self {
+        let tty = std::io::stderr().is_terminal();
+        Self {
+            text: text.filter(|t| !t.is_empty() && tty).map(str::to_string),
+            printed: Cell::new(false),
+        }
+    }
+
+    /// Announce the cold path. Idempotent: extraction and provisioning both call
+    /// it, and a run that does both prints one line.
+    fn announce(&self) {
+        if let Some(text) = &self.text {
+            if !self.printed.replace(true) {
+                eprintln!("{text}");
+            }
+        }
+    }
 }
 
 /// The `__probe` self-check `nub compile` runs on the produced binary at compile
@@ -151,10 +200,10 @@ fn probe() -> i32 {
 
 // ---- Node acquisition ---------------------------------------------------------
 
-fn acquire_node(view: &PayloadView<'_>) -> Result<PathBuf> {
+fn acquire_node(view: &PayloadView<'_>, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
     match view.manifest.shape {
-        Shape::Embed => acquire_embedded_node(view),
-        Shape::Smol => acquire_smol_node(&view.manifest),
+        Shape::Embed => acquire_embedded_node(view, base, notice),
+        Shape::Smol => acquire_smol_node(&view.manifest, base, notice),
     }
 }
 
@@ -163,9 +212,12 @@ fn acquire_node(view: &PayloadView<'_>) -> Result<PathBuf> {
 /// embedded Node is stripped and the official provisioned Node is not, but both
 /// run identically, so an already-present official Node of the same version is
 /// accepted and decompression is skipped.
-fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
+fn acquire_embedded_node(
+    view: &PayloadView<'_>,
+    base: &Path,
+    notice: &FirstRun,
+) -> Result<PathBuf> {
     let m = &view.manifest;
-    let base = cache_base()?;
     let key = short_key(&m.node_sha256);
     let node_cache = base
         .join("compile-node")
@@ -178,7 +230,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
     }
 
     // Dedup: an official Node of the same version already in nub's store.
-    if let Some(store) = discovery::node_store_dir() {
+    for store in node_stores(base) {
         let official = node_in_version_dir(&store.join(&m.node_version));
         if official.is_file() {
             return Ok(official);
@@ -189,7 +241,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
     if view.node_blob.is_empty() {
         bail!("embed-shape payload is missing its Node blob");
     }
-    fs::create_dir_all(&base).ok();
+    notice.announce();
     let tmp = base.join(format!(
         ".compile-node.{}.{}.tmp",
         std::process::id(),
@@ -223,7 +275,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
 /// shell-out provision. Acceptance rule (orchestrator default): any discovered
 /// Node `>= --target` (regardless of major) qualifies; provision the exact target
 /// only when nothing does.
-fn acquire_smol_node(m: &Manifest) -> Result<PathBuf> {
+fn acquire_smol_node(m: &Manifest, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
     let target: NodeVersion = m.node_version.parse().map_err(|_| {
         anyhow!(
             "compiled target version '{}' is unparseable",
@@ -232,7 +284,7 @@ fn acquire_smol_node(m: &Manifest) -> Result<PathBuf> {
     })?;
 
     // 1. nub's Node store — a version dir named by its concrete version.
-    if let Some(store) = discovery::node_store_dir() {
+    for store in node_stores(base) {
         if let Some(node) = best_store_node(&store, &target) {
             return Ok(node);
         }
@@ -246,7 +298,22 @@ fn acquire_smol_node(m: &Manifest) -> Result<PathBuf> {
     }
 
     // 3. Provision the exact target via shell-out.
-    provision_smol_node(&target)
+    provision_smol_node(&target, base, notice)
+}
+
+/// Node stores to READ, nearest first: the probed cache base, then the location
+/// nub-core would name. They differ whenever the probe fell past `~/.cache/nub`
+/// — an explicit `NUB_COMPILE_CACHE_DIR`, or a read-only home on Lambda — and a
+/// Node the CLI installed earlier still counts on a box where only one of the two
+/// is writable now.
+fn node_stores(base: &Path) -> Vec<PathBuf> {
+    let mut out = vec![base.join("node")];
+    if let Some(store) = discovery::node_store_dir() {
+        if store != out[0] {
+            out.push(store);
+        }
+    }
+    out
 }
 
 /// Scan nub's store (`<cache>/node/<version>/bin/node`) for the newest installed
@@ -298,7 +365,7 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 /// Provision `version` for the host from nodejs.org via a lean shell-out
 /// (`curl`→`wget`, then `tar`). No in-binary TLS stack — the design's `--smol`
 /// rule. Installs into nub's store so `nub run` and future launches reuse it.
-fn provision_smol_node(version: &NodeVersion) -> Result<PathBuf> {
+fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
     let token = host_platform_token();
     if host_archive_ext() != "tar.xz" {
         bail!(
@@ -307,22 +374,20 @@ fn provision_smol_node(version: &NodeVersion) -> Result<PathBuf> {
              built with the default (embed-Node) shape"
         );
     }
-    let base = smol_mirror_base();
+    let mirror = smol_mirror_base();
     let filename = format!("node-v{version}-{token}.tar.xz");
-    let url = format!("{base}/v{version}/{filename}");
+    let url = format!("{mirror}/v{version}/{filename}");
 
-    let store =
-        discovery::node_store_dir().context("no writable cache dir for provisioning Node")?;
+    // The probed base, not `discovery::node_store_dir()`: provisioning WRITES, so
+    // it must land where the write probe succeeded.
+    let store = base.join("node");
     fs::create_dir_all(&store).ok();
     let work = store.join(format!(".smol.{version}.{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
     let tarball = work.join(&filename);
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    if tty {
-        eprintln!("Installing Node {version} from nodejs.org...");
-    }
+    notice.announce();
     download_via_shell(&url, &tarball).inspect_err(|_| {
         let _ = fs::remove_dir_all(&work);
     })?;
@@ -332,7 +397,7 @@ fn provision_smol_node(version: &NodeVersion) -> Result<PathBuf> {
     // store without re-verifying, so an unverified write would poison them. Matches
     // version_management::provision_node_from's fail-closed commit gate.
     let shasums_path = work.join("SHASUMS256.txt");
-    let shasums_url = format!("{base}/v{version}/SHASUMS256.txt");
+    let shasums_url = format!("{mirror}/v{version}/SHASUMS256.txt");
     download_via_shell(&shasums_url, &shasums_path).inspect_err(|_| {
         let _ = fs::remove_dir_all(&work);
     })?;
@@ -463,15 +528,13 @@ fn smol_mirror_base() -> String {
 
 /// Extract the bundled app files into `<cache>/compile-app/<app-key>/` (atomic
 /// tmp + rename). A warm run finds the dir present and skips the write.
-fn ensure_app(view: &PayloadView<'_>) -> Result<PathBuf> {
-    let base = cache_base()?;
+fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
     let key = short_key(&view.manifest.app_sha256);
     let app_dir = base.join("compile-app").join(key);
     if app_dir.join(&view.manifest.entry).is_file() {
         return Ok(app_dir);
     }
 
-    fs::create_dir_all(&base).ok();
     let tmp = base.join(format!(
         ".compile-app.{}.{}.tmp",
         std::process::id(),
@@ -523,27 +586,26 @@ fn is_safe_relative_name(name: &str) -> bool {
             .all(|c| matches!(c, Component::Normal(_)))
 }
 
-/// The cache base for extracted payloads (`~/.cache/nub`, else a temp fallback).
-fn cache_base() -> Result<PathBuf> {
-    discovery::cache_dir()
-        .or_else(|| Some(std::env::temp_dir().join("nub")))
-        .context("no writable cache dir")
-}
-
 /// A short, filesystem-safe key from a hex content hash.
 fn short_key(hex: &str) -> String {
     let s: String = hex.chars().take(16).collect();
     if s.is_empty() { "0".into() } else { s }
 }
 
+/// Stream the decoder into the file rather than materializing the whole ~94 MB
+/// Node in a `Vec` first. Same wall time (the decode dominates; the write is
+/// ~60 ms of it) at roughly half the peak RSS — which is what decides the run on
+/// a memory-capped host whose writable filesystem is tmpfs charged against that
+/// same limit.
 fn decompress_to_file(compressed: &[u8], dest: &Path) -> Result<()> {
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(compressed)
-        .map_err(|e| anyhow!("zstd init: {e}"))?;
-    let mut out = Vec::new();
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|e| anyhow!("zstd decode: {e}"))?;
-    fs::write(dest, &out).with_context(|| format!("writing {}", dest.display()))?;
+    let mut decoder =
+        zstd::stream::Decoder::new(compressed).map_err(|e| anyhow!("zstd init: {e}"))?;
+    let file = fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    std::io::copy(&mut decoder, &mut out)
+        .with_context(|| format!("decompressing Node into {}", dest.display()))?;
+    out.flush()
+        .with_context(|| format!("writing {}", dest.display()))?;
     Ok(())
 }
 
