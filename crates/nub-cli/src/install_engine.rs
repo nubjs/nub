@@ -56,16 +56,28 @@ pub(crate) fn recorded(anchor: &Path) -> Option<String> {
 /// name a different Node and stamp a lie. Best-effort: an install that already
 /// succeeded must not fail on an unwritable stamp.
 pub(crate) fn record(cwd: &Path, code: i32) {
+    record_for(
+        cwd,
+        code,
+        aube_util::engine_context().runtime_node_version.as_deref(),
+    );
+}
+
+/// The gated write, split from its process-global engine-context read so the
+/// success gate is unit-testable without touching that global. A non-zero exit
+/// records nothing — a failed install must not stamp the tree as built for this
+/// engine — and an unresolved version has nothing to record.
+fn record_for(cwd: &Path, code: i32, version: Option<&str>) {
     if code != 0 {
         return;
     }
-    let Some(version) = aube_util::engine_context().runtime_node_version else {
+    let Some(version) = version else {
         return;
     };
     let Some(anchor) = anchor(cwd) else {
         return;
     };
-    write_stamp(&anchor, &engine_name(&version));
+    write_stamp(&anchor, &engine_name(version));
 }
 
 /// Write the stamp INTO an existing tree only. A verb that installed nothing
@@ -117,6 +129,24 @@ mod tests {
         assert_eq!(recorded(anchor), Some("darwin-arm64-node22".to_string()));
         std::fs::write(anchor.join("node_modules/.nub-engine"), "  \n").unwrap();
         assert_eq!(recorded(anchor), None, "a blank marker is not a record");
+    }
+
+    #[test]
+    fn only_a_successful_install_records_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = dir.path();
+        std::fs::write(anchor.join("package.json"), "{\"name\":\"app\"}").unwrap();
+        std::fs::create_dir(anchor.join("node_modules")).unwrap();
+
+        // A failed verb must not claim the tree is built for this engine…
+        record_for(anchor, 1, Some("22.15.0"));
+        assert_eq!(recorded(anchor), None);
+        // …nor may an install with no resolved Node version stamp a guess.
+        record_for(anchor, 0, None);
+        assert_eq!(recorded(anchor), None);
+        // A success with a known engine records it.
+        record_for(anchor, 0, Some("22.15.0"));
+        assert_eq!(recorded(anchor), Some(engine_name("22.15.0")));
     }
 
     #[test]

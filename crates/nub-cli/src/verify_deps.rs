@@ -282,9 +282,15 @@ fn parse_policy_value(value: &serde_json::Value) -> Option<Policy> {
 /// because the script at hand may not touch the native dependency at all, and
 /// aborting a run that works today would be a regression.
 fn repair_engine_mismatch(project: &Project, policy: Policy) {
-    let Some(anchor) = crate::install_engine::anchor(&project.root) else {
-        return;
-    };
+    // The install root, derived from the `project` the gate already walked —
+    // NOT a fresh `install_engine::anchor()` call, which would re-run
+    // `detect_project` (a whole manifest-tree walk, and a cache miss when the
+    // run is invoked from a subdir) on every run of a nub project. Same value
+    // `anchor()` computes (`workspace_root.unwrap_or(root)`), zero extra I/O.
+    let anchor = project
+        .workspace_root
+        .clone()
+        .unwrap_or_else(|| project.root.clone());
     // Anchored at the install root, matching how the installer resolved the
     // Node it built against (`pm_engine::apply_lifecycle_augmentation`). Only a
     // tree carrying nub's stamp reaches this closure (see `engine_repair_needed`),
