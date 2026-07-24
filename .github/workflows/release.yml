@@ -807,7 +807,10 @@ jobs:
           # it runs + prints a non-empty semver-ish string.
           EXPECTED=""
           if [ "${{ github.event_name }}" = "push" ]; then
-            case "${{ github.ref }}" in
+            # $GITHUB_REF (the ambient env var) not ${{ github.ref }}: same
+            # value, but the expression form is a zizmor error-level
+            # template-injection finding that reds the whole workflow audit.
+            case "$GITHUB_REF" in
               refs/tags/*) EXPECTED="${GITHUB_REF_NAME#v}" ;;
               *)           EXPECTED="${{ needs.verify.outputs.canary_version }}" ;;
             esac
