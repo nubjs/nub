@@ -107,40 +107,14 @@ clean:
 # Set version across all npm packages + Cargo.toml + preload.mjs. Usage: make version V=0.0.3
 # Portable (node-based, no macOS-only sed). preload.mjs NUB_VERSION must stay in
 # lockstep with the binary version — it is the transpile-cache key, so a stale
-# value would serve stale cached output after an upgrade.
+# value would serve stale cached output after an upgrade. The file-stamping body
+# lives in scripts/set-version.mjs so release.yml's canary stamp (which can't
+# rely on `make` on the Windows runners) shares it; this target adds the
+# Cargo.lock refresh a committed bump wants.
 version:
 	@test -n "$(V)" || (echo "Usage: make version V=0.0.3" && exit 1)
 	@echo "Setting version to $(V) across all packages, Cargo.toml, and preload.mjs..."
-	@node -e " \
-		const fs = require('fs'); \
-		const v = '$(V)'; \
-		const pkgs = ['npm/nub/package.json', 'npm/nub-types/package.json', \
-			'npm/nub-darwin-arm64/package.json', 'npm/nub-darwin-x64/package.json', \
-			'npm/nub-linux-x64/package.json', 'npm/nub-linux-x64-musl/package.json', \
-			'npm/nub-linux-arm64/package.json', 'npm/nub-linux-arm64-musl/package.json', \
-			'npm/nub-win32-x64/package.json', 'npm/nub-win32-arm64/package.json']; \
-		for (const f of pkgs) { \
-			const p = JSON.parse(fs.readFileSync(f, 'utf8')); \
-			p.version = v; \
-			if (p.optionalDependencies) { \
-				for (const k of Object.keys(p.optionalDependencies)) p.optionalDependencies[k] = v; \
-			} \
-			fs.writeFileSync(f, JSON.stringify(p, null, 2) + '\n'); \
-		} \
-		const q = String.fromCharCode(34); \
-		let cargo = fs.readFileSync('Cargo.toml', 'utf8'); \
-		const cargoNext = cargo.replace(/^version = .*/m, 'version = ' + q + v + q); \
-		if (cargoNext === cargo) { console.error('ERROR: workspace version line not found in Cargo.toml'); process.exit(1); } \
-		fs.writeFileSync('Cargo.toml', cargoNext); \
-		let nativeCargo = fs.readFileSync('crates/nub-native/Cargo.toml', 'utf8'); \
-		const nativeCargoNext = nativeCargo.replace(/^version = .*/m, 'version = ' + q + v + q); \
-		if (nativeCargoNext === nativeCargo) { console.error('ERROR: workspace version line not found in crates/nub-native/Cargo.toml'); process.exit(1); } \
-		fs.writeFileSync('crates/nub-native/Cargo.toml', nativeCargoNext); \
-		let version = fs.readFileSync('runtime/version.mjs', 'utf8'); \
-		const versionNext = version.replace(/export const NUB_VERSION = .*/, 'export const NUB_VERSION = ' + q + v + q + ';'); \
-		if (versionNext === version) { console.error('ERROR: NUB_VERSION not found in runtime/version.mjs'); process.exit(1); } \
-		fs.writeFileSync('runtime/version.mjs', versionNext); \
-		"
+	@node scripts/set-version.mjs "$(V)"
 	@cargo update -p nub-cli -p nub-cache-key -p nub-core --precise $(V)
 	@# nub-native is its own workspace (split for panic=abort vs unwind); its
 	@# version + Cargo.lock entry live under crates/nub-native, updated separately.
