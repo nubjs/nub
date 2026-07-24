@@ -14,10 +14,15 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Loading `internal/deps/undici/undici` (which realizing any of Node >= 22.3's
-/// undici-backed lazy globals does) drags these in behind it. Their presence in an
-/// augmented bootstrap means the preload touched one.
-const UNDICI_TREE_MARKERS: [&str; 2] = ["NativeModule http", "NativeModule worker_threads"];
+/// Realizing any of Node >= 22.3's undici-backed lazy globals loads
+/// `internal/deps/undici/undici`, which drags `http` in behind it. Their presence
+/// in an augmented bootstrap means the preload touched one — and both are
+/// tier-independent (neither is part of nub's own preload machinery on either
+/// tier). `worker_threads` is deliberately NOT a marker: `module.register` on the
+/// compat tier loads it legitimately (the async loader runs on a worker thread),
+/// so it appears there independent of any undici regression and would false-positive.
+const UNDICI_TREE_MARKERS: [&str; 2] =
+    ["NativeModule http", "NativeModule internal/deps/undici/undici"];
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -74,8 +79,8 @@ fn augmented_startup_leaves_the_undici_module_tree_unloaded() {
     for marker in UNDICI_TREE_MARKERS {
         assert!(
             !loaded.iter().any(|m| m == marker),
-            "augmented startup loaded `{marker}` — a preload step realized a lazy global \
-             (undici / worker_threads). Bootstrap set was {} modules: {loaded:?}",
+            "augmented startup loaded `{marker}` — a preload step realized an \
+             undici-backed lazy global. Bootstrap set was {} modules: {loaded:?}",
             loaded.len()
         );
     }
