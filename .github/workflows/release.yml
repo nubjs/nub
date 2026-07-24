@@ -1128,6 +1128,15 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [verify, build, glibc-floor-guard, pre-publish-gate]
     runs-on: ubuntu-latest
+    permissions:
+      # Same grant as publish-npm (the job this mirrors): checkout reads; npm
+      # publish authenticates via OIDC trusted publishing, which mints its
+      # token from the job's OIDC identity (id-token: write). The workflow
+      # baseline is `permissions: {}`, so omitting this block deny-alls the
+      # job — the maiden canary run failed exactly here (npm PUT E404 from the
+      # unauthenticated fallback).
+      contents: read
+      id-token: write
     env:
       VERSION: ${{ needs.verify.outputs.canary_version }}
     steps:
@@ -1213,6 +1222,11 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [verify, canary-publish-npm]
     runs-on: ubuntu-latest
+    permissions:
+      # Deletes + recreates the rolling release and the canary tag ref with
+      # GITHUB_TOKEN (same grant as github-release). The workflow baseline is
+      # `permissions: {}`, so without this block every gh/git write here 403s.
+      contents: write
     env:
       VERSION: ${{ needs.verify.outputs.canary_version }}
       GH_TOKEN: ${{ github.token }}
