@@ -39,6 +39,7 @@ fn policy_round_trips_through_serde() {
         &json!({
             "fs": ["...", "!~/.ssh", "./data"],
             "net": ["*.sentry.io", "10.0.0.0/8"],
+            "proxy": "auto",
             "env": { "PORT": "port", "NODE_ENV": true }
         }),
         &ctx,
@@ -54,6 +55,23 @@ fn policy_round_trips_through_serde() {
 }
 
 #[test]
+fn broker_ir_round_trips_without_serializing_the_parent_secret() {
+    let ctx = common::ctx(true, &[("STRIPE_TOKEN", "real-parent-secret")]);
+    let policy = compile(
+        &json!({
+            "net": { "api.stripe.com": { "env": ["STRIPE_TOKEN"] } },
+            "env": true
+        }),
+        &ctx,
+    )
+    .unwrap();
+    let text = serde_json::to_string(&policy).unwrap();
+    assert!(!text.contains("real-parent-secret"));
+    let back: SandboxPolicy = serde_json::from_str(&text).unwrap();
+    assert_eq!(policy, back);
+}
+
+#[test]
 fn conformance_fixture_passes_when_verdicts_match() {
     let ctx = common::ctx(true, &[("KEEP", "1"), ("DROP_TOKEN", "s")]);
     let proj = common::homes().project;
@@ -62,6 +80,7 @@ fn conformance_fixture_passes_when_verdicts_match() {
         "sandbox": {
             "fs": ["...", "./build"],
             "net": ["github.com"],
+            "proxy": "auto",
             "env": ["KEEP", "!*_TOKEN"]
         },
         "fs": [
@@ -112,6 +131,70 @@ fn apply_scrubs_env_when_enforced() {
     assert!(
         !policy.env.constructed.contains_key("SECRET_TOKEN"),
         "secret withheld from child env"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_replaces_a_brokered_parent_value_with_a_fresh_marker() {
+    let home = std::env::var("HOME").expect("test parent has HOME");
+    let ambient = [("HOME", home.as_str())];
+    let ctx = common::ctx(true, &ambient);
+    let policy = compile(
+        &json!({
+            "fs": true,
+            "net": { "api.example.com": { "env": ["HOME"] } },
+            "env": true
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(!policy.env.constructed.contains_key("HOME"));
+
+    let run = || {
+        let output = apply(&policy, CommandSpec::new("/usr/bin/env"))
+            .unwrap()
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(!stdout.contains(&format!("HOME={home}")));
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("HOME="))
+            .expect("broker marker is present in the child env")
+            .to_string()
+    };
+    let first = run();
+    let second = run();
+    assert!(first.starts_with("nub-credential-v1-"));
+    assert_ne!(first, second, "each apply must mint a fresh marker");
+}
+
+#[test]
+fn apply_fails_closed_when_a_brokered_parent_value_is_missing() {
+    const MISSING: &str = "NUB_TEST_DEFINITELY_MISSING_BROKER_CREDENTIAL_7B1D";
+    assert!(std::env::var_os(MISSING).is_none());
+    let ctx = common::ctx(true, &[]);
+    let policy = compile(
+        &json!({
+            "fs": true,
+            "net": { "api.example.com": { "env": [MISSING] } },
+            "env": true
+        }),
+        &ctx,
+    )
+    .unwrap();
+    let degradation = match apply(&policy, CommandSpec::new(TRUE_PROGRAM)) {
+        Ok(_) => panic!("missing broker credential unexpectedly produced a launchable child"),
+        Err(degradation) => degradation,
+    };
+    assert_eq!(degradation.lost, vec!["credential-broker"]);
+    assert!(
+        degradation
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains(MISSING) && !reason.contains("secret"))
     );
 }
 

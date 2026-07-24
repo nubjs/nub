@@ -18,10 +18,14 @@ fn global_cwd_flag_initializes_one_snapshot_from_the_requested_dir() {
     let target = temp.path().join("target");
     std::fs::create_dir_all(&ambient).unwrap();
     std::fs::create_dir_all(&target).unwrap();
-    // Malformed dormant project files in BOTH dirs: gate-off must read neither,
-    // while the log proves the snapshot anchored to the `--cwd` dir.
+    // The ambient file is malformed, while the requested directory has a valid
+    // config. Success proves discovery starts after `--cwd` is applied.
     std::fs::write(ambient.join("nub.jsonc"), "{ malformed").unwrap();
-    std::fs::write(target.join("nub.jsonc"), "{ malformed").unwrap();
+    std::fs::write(
+        target.join("nub.jsonc"),
+        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
+    )
+    .unwrap();
     std::fs::write(target.join("probe.js"), "console.log('probe-ok');\n").unwrap();
     let log = temp.path().join("snapshot.log");
 
@@ -37,7 +41,7 @@ fn global_cwd_flag_initializes_one_snapshot_from_the_requested_dir() {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "gate-off malformed project files must not block the --cwd run; stderr: {}",
+        "the ambient malformed config must not block the --cwd run; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "probe-ok");
@@ -50,9 +54,35 @@ fn global_cwd_flag_initializes_one_snapshot_from_the_requested_dir() {
     assert_eq!(
         lines,
         vec![format!(
-            "cwd={} project=none",
+            "cwd={} project=loaded",
             target.canonicalize().unwrap().display()
         )],
-        "exactly one snapshot, anchored to the --cwd dir (not the ambient parent)"
+        "exactly one loaded snapshot, anchored to the --cwd dir"
     );
+}
+
+#[test]
+fn malformed_project_config_stops_before_the_entry_file_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("nub.jsonc"), "{ malformed").unwrap();
+    std::fs::write(
+        temp.path().join("probe.js"),
+        "require('fs').writeFileSync('must-not-run', 'ran');\n",
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg("probe.js")
+        .current_dir(temp.path())
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .output()
+        .expect("run nub with malformed project config");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("parsing nub.jsonc"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!temp.path().join("must-not-run").exists());
 }

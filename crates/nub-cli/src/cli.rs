@@ -49,7 +49,6 @@ static HIDE_STREAM_PREFIX: AtomicBool = AtomicBool::new(false);
 /// tool, matching `npx`/`pnpm dlx` (local-first, DLX as the fallback).
 static NUBX_DLX_FALLBACK: AtomicBool = AtomicBool::new(false);
 static DLX_ENV_CONTEXT: AtomicBool = AtomicBool::new(false);
-static DLX_FORWARDED_ENV_FILE: AtomicBool = AtomicBool::new(false);
 const DLX_ENV_CONTEXT_MARKER: &str = "__NUB_DLX_ENV_CONTEXT";
 static DLX_ENV_VALUES: OnceLock<Option<std::collections::BTreeMap<String, String>>> =
     OnceLock::new();
@@ -485,7 +484,7 @@ fn dlx_env_context() -> bool {
 }
 
 fn configured_dlx_env() -> Option<std::collections::BTreeMap<String, String>> {
-    if env_file_flag_present() || DLX_FORWARDED_ENV_FILE.load(Ordering::Relaxed) {
+    if env_file_flag_present() {
         return None;
     }
     dlx_env_context()
@@ -738,7 +737,7 @@ pub enum Command {
         no_check: bool,
 
         /// INTERNAL, UNDOCUMENTED: run the target under the OS-enforced sandbox
-        /// engine using an explicit surface policy file. The frontend-less test
+        /// engine using an explicit external sandbox config file. The test
         /// entry for `nub-sandbox` (Stage 1: compile→apply). Does NOT read the
         /// project nub.jsonc; takes an explicit `<file.json>`. Not a user surface.
         #[arg(long = "sandbox", value_name = "FILE", hide = true)]
@@ -1200,7 +1199,7 @@ pub fn run(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
     // `run_nub` path (its bootstrap relies on the guards above).
     if !matches!(argv0, Argv0::Nub) && env::args().nth(1).as_deref() == Some("__node-gyp-bootstrap")
     {
-        return run_nub();
+        return run_nub(sandbox_runtime);
     }
 
     match argv0 {
@@ -2621,6 +2620,7 @@ fn run_nubx(sandbox_runtime: &nub_sandbox::RuntimeCapability) -> Result<i32> {
     //
     // Three-position rule: a flag BEFORE the bin (`nubx --node eslint`, `nubx -p
     // left-pad pad`) is nubx's; a flag AFTER it reaches the bin verbatim.
+    DLX_ENV_CONTEXT.store(true, Ordering::Relaxed);
     let mut args: Vec<String> = env::args().skip(1).collect();
 
     // `--help`/`--version` are nubx's own only BEFORE the bin positional — after it
@@ -3090,10 +3090,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         None
     };
     let mut env_vars = if let Some(values) = dlx_env.as_ref() {
-        let base = if no_env_file()
-            || env_file_flag_present()
-            || DLX_FORWARDED_ENV_FILE.load(Ordering::Relaxed)
-        {
+        let base = if no_env_file() || env_file_flag_present() {
             HashMap::new()
         } else {
             values.clone().into_iter().collect()
@@ -3104,8 +3101,6 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
             ENV_FILE_VARS.get().unwrap_or(&HashMap::new()),
             no_env_file(),
         )
-    } else if DLX_FORWARDED_ENV_FILE.load(Ordering::Relaxed) {
-        HashMap::new()
     } else {
         runtime_child_env(
             &runtime,
@@ -3185,7 +3180,8 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
 /// stderr, never silent.
 ///
 /// The file may be either a bare surface block (`{ "fs": … }`) or a document with
-/// a top-level `"sandbox"` key. Trusted (an explicit user-supplied policy file),
+/// a top-level `"sandbox"` key. Trusted (an explicit user-supplied external
+/// sandbox config file),
 /// so `$(…)` substitution is permitted.
 fn run_sandboxed(
     runtime: &nub_sandbox::RuntimeCapability,
@@ -3208,7 +3204,7 @@ fn run_sandboxed(
         },
     };
     let text = std::fs::read_to_string(policy_file)
-        .with_context(|| format!("reading sandbox policy file {policy_file}"))?;
+        .with_context(|| format!("reading external sandbox config file {policy_file}"))?;
     let value = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
         .map_err(|e| anyhow::anyhow!("parsing sandbox policy {policy_file}: {e}"))?
         .unwrap_or(serde_json::Value::Null);

@@ -1,4 +1,4 @@
-//! P6 — a RESTRICTIVE sandbox value in the active (global) config layer must be
+//! A restrictive sandbox value in the active project config layer must be
 //! parsed but INERT during a real offline install lifecycle: everything a
 //! lifecycle script can observe matches a no-sandbox baseline. The runtime/dlx
 //! consumers get the same treatment via their existing e2e fixtures
@@ -13,7 +13,7 @@ fn nub_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
-/// One hermetic project + config home. `global_config` plants a global
+/// One hermetic project + config home. `project_config` plants a project
 /// `nub.jsonc`; `None` is the no-config baseline. The root postinstall records
 /// what a lifecycle script can observe on the axes a sandbox would restrict —
 /// an inherited env var and a write OUTSIDE the project root — plus
@@ -22,6 +22,7 @@ fn nub_binary() -> PathBuf {
 /// best-effort, so without this the inertness comparison could be vacuous).
 fn run_offline_lifecycle_install(
     root: &Path,
+    project_config: Option<&str>,
     global_config: Option<&str>,
 ) -> (i32, serde_json::Value) {
     let project = root.join("project");
@@ -29,6 +30,9 @@ fn run_offline_lifecycle_install(
     let marker = root.join("marker.json");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(config_home.join("nub")).unwrap();
+    if let Some(body) = project_config {
+        std::fs::write(project.join("nub.jsonc"), body).unwrap();
+    }
     if let Some(body) = global_config {
         std::fs::write(config_home.join("nub/nub.jsonc"), body).unwrap();
     }
@@ -71,7 +75,7 @@ fn run_offline_lifecycle_install(
 fn restrictive_install_sandbox_config_is_inert_for_an_offline_lifecycle_install() {
     let temp = tempfile::tempdir().unwrap();
     let (baseline_code, baseline) =
-        run_offline_lifecycle_install(&temp.path().join("baseline"), None);
+        run_offline_lifecycle_install(&temp.path().join("baseline"), None, None);
     assert_eq!(
         baseline_code, 0,
         "the baseline offline install must succeed"
@@ -94,12 +98,12 @@ fn restrictive_install_sandbox_config_is_inert_for_an_offline_lifecycle_install(
       "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
     }"#;
     let (code, observed) =
-        run_offline_lifecycle_install(&temp.path().join("configured"), Some(restrictive));
+        run_offline_lifecycle_install(&temp.path().join("configured"), Some(restrictive), None);
     assert_eq!(code, baseline_code, "exit code must match the baseline");
     assert_eq!(
         observed["stack"], 19,
         "the install.nodeOptions probe must reach the lifecycle script — \
-         otherwise the global config never loaded and this test proves nothing"
+         otherwise the project config never loaded and this test proves nothing"
     );
     assert_eq!(
         observed["canary"], baseline["canary"],
@@ -109,4 +113,33 @@ fn restrictive_install_sandbox_config_is_inert_for_an_offline_lifecycle_install(
         observed["outsideWrite"], baseline["outsideWrite"],
         "a restrictive fs axis must not block writes outside the project root"
     );
+}
+
+#[test]
+fn restrictive_global_sandbox_config_is_inert_for_an_offline_lifecycle_install() {
+    let temp = tempfile::tempdir().unwrap();
+    let (baseline_code, baseline) =
+        run_offline_lifecycle_install(&temp.path().join("baseline"), None, None);
+    assert_eq!(
+        baseline_code, 0,
+        "the baseline offline install must succeed"
+    );
+
+    let restrictive = r#"{
+      "sandbox": { "fs": false, "net": false, "env": false },
+      "install": {
+        "nodeOptions": ["--stack-trace-limit=29"],
+        "sandbox": { "fs": false, "net": false, "env": false }
+      },
+      "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
+    }"#;
+    let (code, observed) =
+        run_offline_lifecycle_install(&temp.path().join("configured"), None, Some(restrictive));
+    assert_eq!(code, baseline_code, "exit code must match the baseline");
+    assert_eq!(
+        observed["stack"], 29,
+        "the global install.nodeOptions probe must reach the lifecycle script"
+    );
+    assert_eq!(observed["canary"], baseline["canary"]);
+    assert_eq!(observed["outsideWrite"], baseline["outsideWrite"]);
 }

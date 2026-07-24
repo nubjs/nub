@@ -41,7 +41,7 @@ base64 = "0.22"
 
 # TLS termination for the MITM credential-brokering tier (proxy/mitm.rs, proxy/ca.rs).
 # Engaged ONLY when a net rule uses a capability that cannot be enforced without
-# reading inside the TLS stream (a credential-inject rule); host-only policies never
+# reading inside the TLS stream (exact-host marker brokering); host-only policies never
 # instantiate any of this. rustls (server side, blocking over std::net) + rustls-native-
 # certs (the real platform roots, bundled with the ephemeral CA so blind-tunneled hosts
 # still verify) are ALREADY in the workspace lockfile via reqwest's rustls-tls-native-

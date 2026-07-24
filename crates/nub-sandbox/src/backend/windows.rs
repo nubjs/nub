@@ -55,6 +55,20 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+/// Normalize an environment entry sequence into Windows's case-insensitive key
+/// space. The last entry wins when a direct caller supplies aliases; compiler
+/// construction has already selected the literal value before this final guard.
+/// Kept outside the FFI module so this contract is unit-tested on non-Windows hosts.
+fn dedupe_windows_env_pairs<'a>(
+    pairs: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Vec<(&'a String, &'a String)> {
+    let mut folded = BTreeMap::new();
+    for (key, value) in pairs {
+        folded.insert(key.to_ascii_uppercase(), (key, value));
+    }
+    folded.into_values().collect()
+}
+
 /// A resolved AppContainer launch plan. All fields are OS-agnostic plain data so the
 /// IR→plan derivation is unit-tested on the dev host; [`WindowsLaunch::run`] (the FFI)
 /// is `#[cfg(windows)]`.
@@ -1278,8 +1292,7 @@ mod launch {
     /// `windir` would otherwise sort after all-uppercase keys and violate the
     /// convention).
     fn build_env_block(env: &std::collections::BTreeMap<String, String>) -> Vec<u16> {
-        let mut pairs: Vec<(&String, &String)> = env.iter().collect();
-        pairs.sort_by_key(|a| a.0.to_ascii_uppercase());
+        let pairs = dedupe_windows_env_pairs(env.iter());
         let mut block: Vec<u16> = Vec::new();
         for (k, v) in pairs {
             block.extend(k.encode_utf16());
@@ -1475,6 +1488,18 @@ mod tests {
             Effect::Allow,
             vec![rule("C:/x", Effect::Deny, FsAccess::Read)]
         )));
+    }
+
+    #[test]
+    fn windows_env_serialization_deduplicates_case_aliases() {
+        let path = "Path".to_string();
+        let ambient = "ambient".to_string();
+        let literal_key = "PATH".to_string();
+        let literal = "literal".to_string();
+        let pairs = dedupe_windows_env_pairs([(&path, &ambient), (&literal_key, &literal)]);
+        assert_eq!(pairs.len(), 1, "Windows has one logical PATH key");
+        assert_eq!(pairs[0].0, "PATH");
+        assert_eq!(pairs[0].1, "literal");
     }
 
     #[test]

@@ -11,20 +11,9 @@
 //! global file uses. camelCase keys. `$schema` is the one blessed non-field key
 //! (accepted + ignored). Every other unrecognized key fails loud.
 //!
-//! ## The discovery gate (the ONE flip point)
-//!
-//! Project-file discovery is DISABLED by default. [`discovery_enabled`] is the
-//! single flip point: it returns `false` today, so [`load_project_config`] — the
-//! sole production entry — never discovers or reads a project file, and nub's
-//! effective config is the global file only (today's behavior, byte-for-byte).
-//! The eventual nub.jsonc release flips that one function body to `true`.
-//!
-//! To keep the gated path from being dead code behind a `const false`, the reader
-//! is split in two layers: the pure [`discover_project_config`] /
-//! [`read_project_config_at`] functions are UNGATED and carry the bulk of the
-//! test coverage; only [`load_project_config`] consults the gate. Tests exercise
-//! the production gate through the `#[cfg(test)]` [`with_project_config_enabled`]
-//! seam.
+//! Project files are discovered from the invocation's final working directory.
+//! Sandbox values are parsed and retained for forward compatibility, but no
+//! runtime, install, or dlx consumer applies them yet.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -115,10 +104,9 @@ impl std::error::Error for ConfigError {}
 type Result<T> = std::result::Result<T, ConfigError>;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The typed config shape (Slice 1). Runtime top-levels are fully typed; the
-// `sandbox`/`install`/`dlx` blocks are shape-validated skeletons — the sandbox
-// engine's real compiler (Phase 1) owns their resolution, this layer only proves
-// the schema is right so the future unflag turns on a validated surface.
+// The typed config shape. Runtime, install, and dlx values are consumed by their
+// command paths. Sandbox values are shape-validated and retained, but remain
+// inert until the sandbox frontend is enabled.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The parsed, validated `nub.jsonc`. Absent fields are `None`; explicitly empty
@@ -138,10 +126,10 @@ pub struct ProjectConfig {
     pub tsconfig: Option<String>,
     pub verify_deps_before_run: Option<VerifyDepsBeforeRun>,
 
-    // ── the default sandbox (skeleton — not consumed in this epic) ──
+    // ── the default sandbox (parsed and retained, not consumed) ──
     pub sandbox: Option<SandboxSetting>,
 
-    // ── install phase (skeleton for engine-coupled fields) ──
+    // ── install phase ──
     pub install: InstallConfig,
 
     // ── nubx / dlx ──
@@ -377,7 +365,7 @@ pub enum SandboxSetting {
     Enabled,
     /// A bare-identifier preset name (e.g. `"build-jail"`).
     Preset(String),
-    /// A `"./file.json"` policy-file reference.
+    /// A `"./file.json"` external sandbox config reference.
     FileRef(String),
     /// The granular `{ fs, net, env }` object form.
     Granular(SandboxAxes),
@@ -405,46 +393,8 @@ pub enum SandboxAxis {
     Object(BTreeMap<String, Value>),
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// The discovery gate.
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-thread_local! {
-    /// Per-thread override for the production gate. Set only through
-    /// [`with_project_config_enabled`]; a thread-local keeps parallel tests
-    /// hermetic (no process-global mutation, no cross-test leak).
-    static FORCE_ENABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// THE ONE FLIP POINT. Project-file discovery is off until nub.jsonc ships; the
-/// unflag PR changes this body to `true`. Not a user knob and not an env read —
-/// a private compile-time gate consulted by exactly one caller
-/// ([`load_project_config`]).
-fn discovery_enabled() -> bool {
-    #[cfg(test)]
-    if FORCE_ENABLE.with(|c| c.get()) {
-        return true;
-    }
-    false
-}
-
-/// Run `f` with the production discovery gate forced on. Test-only; mirrors the
-/// hermetic-guard shape of [`crate::config`]'s `with_config_home`.
-#[cfg(test)]
-pub(crate) fn with_project_config_enabled<T>(f: impl FnOnce() -> T) -> T {
-    FORCE_ENABLE.with(|c| c.set(true));
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    FORCE_ENABLE.with(|c| c.set(false));
-    match out {
-        Ok(v) => v,
-        Err(p) => std::panic::resume_unwind(p),
-    }
-}
-
 /// Walk up from `start` (inclusive) to the filesystem root, returning the first
-/// directory that holds a `nub.jsonc`. Ungated + pure over the path — the
-/// discovery mechanism, exercised directly by tests.
+/// directory that holds a `nub.jsonc`.
 pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let candidate = dir.join(FILE_NAME);
@@ -455,8 +405,7 @@ pub fn discover_project_config(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Parse + validate the `nub.jsonc` at `path`. Ungated + pure (a filesystem read,
-/// never a discovery decision) — this is where the bulk of coverage lives.
+/// Parse + validate the `nub.jsonc` at `path`.
 /// FAIL-LOUD: an unknown key or malformed value is a [`ConfigError`], NOT a
 /// silent degrade (unlike the best-effort global reader).
 pub fn read_project_config_at(path: &Path) -> Result<LoadedConfig> {
@@ -513,14 +462,9 @@ fn parse_global_config(text: &str) -> Result<ProjectConfig> {
     Ok(config)
 }
 
-/// The PRODUCTION entry — the only caller that consults the gate. Off ⇒ `Ok(None)`
-/// (no file discovered or read; effective config = global only). On ⇒ discover
-/// up-tree from `start` and read; a malformed project file propagates as an error
-/// (fail-loud), a genuinely absent file is `Ok(None)`.
+/// Discover up-tree from `start` and read the nearest project config. A malformed
+/// project file propagates as an error; a genuinely absent file is `Ok(None)`.
 pub fn load_project_config(start: &Path) -> Result<Option<LoadedConfig>> {
-    if !discovery_enabled() {
-        return Ok(None);
-    }
     match discover_project_config(start) {
         Some(path) => read_project_config_at(&path).map(Some),
         None => Ok(None),
@@ -1856,7 +1800,45 @@ mod tests {
         let _ = parse_project_config("{ \"tsconfig\": \"a\\u0000b\" }");
     }
 
-    // ── the discovery gate ──
+    #[test]
+    fn published_schema_exposes_only_active_parser_keys() {
+        fn keys(value: &Value, pointer: &str) -> std::collections::BTreeSet<String> {
+            value
+                .pointer(pointer)
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("schema object missing at {pointer}"))
+                .keys()
+                .cloned()
+                .collect()
+        }
+        fn active(values: &[&str]) -> std::collections::BTreeSet<String> {
+            values
+                .iter()
+                .filter(|value| **value != "sandbox")
+                .map(|value| (*value).to_string())
+                .collect()
+        }
+
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../site/public/schema/nub.json"))
+                .expect("the published nub.json schema must be valid JSON");
+        assert_eq!(keys(&schema, "/properties"), active(ROOT_KEYS));
+        assert_eq!(
+            keys(&schema, "/properties/install/properties"),
+            active(INSTALL_KEYS)
+        );
+        assert_eq!(
+            keys(&schema, "/properties/dlx/properties"),
+            active(DLX_KEYS)
+        );
+        assert!(schema.pointer("/$defs/sandboxSetting").is_none());
+        assert_eq!(
+            schema.get("$id").and_then(Value::as_str),
+            Some("https://nubjs.com/schema/nub.json")
+        );
+    }
+
+    // ── discovery ──
 
     #[test]
     fn discover_walks_up_tree_to_first_nub_jsonc() {
@@ -1880,20 +1862,21 @@ mod tests {
     }
 
     #[test]
-    fn gate_off_never_reads_a_present_file() {
-        // Default (production) gate: a real, VALID file present up-tree is still
-        // not read — load returns None, preserving global-only behavior.
+    fn load_reads_a_present_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
-        assert_eq!(load_project_config(dir.path()).unwrap(), None);
+        let loaded = load_project_config(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.values.node_compat, Some(true));
     }
 
     #[test]
-    fn gate_off_never_surfaces_a_malformed_file() {
-        // Fail-loud is gated too: with discovery off, even a broken file is inert.
+    fn load_surfaces_a_malformed_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), "{ broken").unwrap();
-        assert_eq!(load_project_config(dir.path()).unwrap(), None);
+        assert!(matches!(
+            load_project_config(dir.path()),
+            Err(ConfigError::Parse(_))
+        ));
     }
 
     #[test]
@@ -1938,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_enabled_project_dlx_env_sources_anchor_to_the_winning_file() {
+    fn project_dlx_env_sources_anchor_to_the_winning_file() {
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("project");
         let cwd = project_root.join("packages/app");
@@ -1960,7 +1943,7 @@ mod tests {
         )
         .unwrap();
 
-        let project = with_project_config_enabled(|| load_project_config(&cwd).unwrap());
+        let project = load_project_config(&cwd).unwrap();
         let snapshot = resolve_effective_config(&cwd, None, project, ConfigOverlays::default());
         let values = dlx_env_for(&snapshot).expect("project dlx env is active");
         assert_eq!(values.get("DLX_VALUE").map(String::as_str), Some("second"));
@@ -2002,10 +1985,10 @@ mod tests {
     }
 
     #[test]
-    fn gate_on_reads_the_discovered_file() {
+    fn reads_the_discovered_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), r#"{ "nodeCompat": true }"#).unwrap();
-        let cfg = with_project_config_enabled(|| load_project_config(dir.path()).unwrap());
+        let cfg = load_project_config(dir.path()).unwrap();
         assert_eq!(cfg.unwrap().values.node_compat, Some(true));
     }
 
@@ -2018,7 +2001,7 @@ mod tests {
         let path = root.join(FILE_NAME);
         std::fs::write(&path, r#"{ "tsconfig": "./tsconfig.runtime.json" }"#).unwrap();
 
-        let loaded = with_project_config_enabled(|| load_project_config(&deep).unwrap().unwrap());
+        let loaded = load_project_config(&deep).unwrap().unwrap();
         assert_eq!(loaded.source.kind, ConfigSourceKind::Project);
         assert_eq!(loaded.source.path.as_deref(), Some(path.as_path()));
         assert_eq!(loaded.source.root, root);
@@ -2046,7 +2029,7 @@ mod tests {
         )
         .unwrap();
 
-        let project = with_project_config_enabled(|| load_project_config(&effective).unwrap());
+        let project = load_project_config(&effective).unwrap();
         let snapshot =
             resolve_effective_config(&effective, None, project, ConfigOverlays::default());
         assert_eq!(
@@ -2247,22 +2230,26 @@ mod tests {
     }
 
     #[test]
-    fn one_test_fixture_can_force_the_gate_on_then_observe_it_off_again() {
+    fn repeated_loads_keep_discovery_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         std::fs::write(&path, r#"{ "nodeCompat": true }"#).unwrap();
 
-        let enabled = with_project_config_enabled(|| load_project_config(dir.path()).unwrap());
-        assert_eq!(enabled.unwrap().values.node_compat, Some(true));
-        assert_eq!(load_project_config(dir.path()).unwrap(), None);
+        let first = load_project_config(dir.path()).unwrap();
+        assert_eq!(first.unwrap().values.node_compat, Some(true));
+        let second = load_project_config(dir.path()).unwrap();
+        assert_eq!(second.unwrap().values.node_compat, Some(true));
 
         std::fs::write(&path, "{ malformed").unwrap();
-        assert_eq!(load_project_config(dir.path()).unwrap(), None);
+        assert!(matches!(
+            load_project_config(dir.path()),
+            Err(ConfigError::Parse(_))
+        ));
     }
 
     #[cfg(unix)]
     #[test]
-    fn gate_off_ignores_an_unreadable_project_file() {
+    fn unreadable_project_file_fails_loud() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2273,23 +2260,26 @@ mod tests {
         unreadable.set_mode(0o000);
         std::fs::set_permissions(&path, unreadable).unwrap();
 
-        assert_eq!(load_project_config(dir.path()).unwrap(), None);
+        assert!(matches!(
+            load_project_config(dir.path()),
+            Err(ConfigError::Io(_))
+        ));
 
         std::fs::set_permissions(&path, original).unwrap();
     }
 
     #[test]
-    fn gate_on_propagates_a_malformed_file_as_an_error() {
+    fn malformed_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), "{ broken").unwrap();
-        let result = with_project_config_enabled(|| load_project_config(dir.path()));
+        let result = load_project_config(dir.path());
         assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[test]
-    fn gate_on_with_no_file_is_none_not_an_error() {
+    fn no_file_is_none_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = with_project_config_enabled(|| load_project_config(dir.path()).unwrap());
+        let cfg = load_project_config(dir.path()).unwrap();
         assert_eq!(cfg, None);
     }
 }

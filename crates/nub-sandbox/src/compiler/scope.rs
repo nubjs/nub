@@ -46,7 +46,7 @@ pub struct ChainScope<'a> {
     /// This scope's capabilities, decided by scope IDENTITY (approved `nub.jsonc` /
     /// `scriptsMeta` vs dependency-controlled `dependenciesMeta`) — never inferred.
     /// This is the point of the chain: each scope compiles against its OWN caps, so an
-    /// outer approved scope may use `$(…)` / `net.inject` while an inner dependency
+    /// outer approved scope may use `$(…)` / credential brokering while an inner dependency
     /// scope in the SAME compile is denied them.
     pub caps: ScopeCapabilities,
 }

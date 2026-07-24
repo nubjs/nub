@@ -32,8 +32,8 @@ use handshake::{read_request, reply_failure, reply_success};
 use sni::SniScan;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -109,6 +109,96 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(15);
 /// Cap on buffered client prelude bytes while scanning for the SNI (mirrors the SNI
 /// reassembly cap): past this a client is dribbling → fail closed.
 const MAX_PRELUDE: usize = 16 * 1024;
+/// Bound parent threads and socket state a sandboxed child can create at once.
+const MAX_ACTIVE_CONNECTIONS: usize = 128;
+
+type ActiveSockets = Arc<Mutex<std::collections::BTreeMap<u64, Vec<TcpStream>>>>;
+
+/// The sockets owned by one handler. Clones are kept in a shared registry so proxy
+/// teardown can `shutdown(Both)` every in-flight client/upstream before joining the
+/// handler threads. That makes the per-apply MITM engine (and its secrets) end with
+/// the proxy rather than surviving in detached threads.
+pub(super) struct ActiveConnection {
+    id: u64,
+    sockets: ActiveSockets,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl ActiveConnection {
+    fn new(
+        stream: &TcpStream,
+        sockets: ActiveSockets,
+        shutdown: Arc<AtomicBool>,
+        next_id: &AtomicU64,
+    ) -> io::Result<Self> {
+        let id = next_id.fetch_add(1, Ordering::Relaxed);
+        let tracked = stream.try_clone()?;
+        let mut active = sockets
+            .lock()
+            .map_err(|_| io::Error::other("egress proxy socket registry poisoned"))?;
+        if active.len() >= MAX_ACTIVE_CONNECTIONS {
+            return Err(io::Error::other(
+                "egress proxy active-connection cap reached",
+            ));
+        }
+        if shutdown.load(Ordering::SeqCst) {
+            let _ = tracked.shutdown(Shutdown::Both);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "egress proxy is shutting down",
+            ));
+        }
+        active.insert(id, vec![tracked]);
+        drop(active);
+        Ok(Self {
+            id,
+            sockets,
+            shutdown,
+        })
+    }
+
+    pub(super) fn track(&self, stream: &TcpStream) -> io::Result<()> {
+        let tracked = stream.try_clone()?;
+        if self.shutdown.load(Ordering::SeqCst) {
+            let _ = tracked.shutdown(Shutdown::Both);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "egress proxy is shutting down",
+            ));
+        }
+        let mut active = self
+            .sockets
+            .lock()
+            .map_err(|_| io::Error::other("egress proxy socket registry poisoned"))?;
+        // Re-check under the same mutex Drop uses for its shutdown sweep. Without
+        // this check, an upstream could be inserted after the sweep and keep a
+        // joined handler blocked forever.
+        if self.shutdown.load(Ordering::SeqCst) {
+            let _ = tracked.shutdown(Shutdown::Both);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "egress proxy is shutting down",
+            ));
+        }
+        let Some(sockets) = active.get_mut(&self.id) else {
+            let _ = tracked.shutdown(Shutdown::Both);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "egress proxy connection is no longer active",
+            ));
+        };
+        sockets.push(tracked);
+        Ok(())
+    }
+}
+
+impl Drop for ActiveConnection {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.sockets.lock() {
+            active.remove(&self.id);
+        }
+    }
+}
 
 /// A running egress proxy bound to `127.0.0.1:<port>`. Dropping it stops accepting new
 /// connections (the parent owns this; it drops after the sandboxed child exits).
@@ -120,6 +210,7 @@ pub struct EgressProxy {
     /// OS CSPRNG; delivered to the child as the `HTTP_PROXY` URL userinfo.
     token: Arc<str>,
     shutdown: Arc<AtomicBool>,
+    active_sockets: ActiveSockets,
     accept_thread: Option<JoinHandle<()>>,
     /// The MITM engine, when the policy engages TLS termination (credential brokering /
     /// `proxy: "terminate"`). `None` for a host-only (connection-tier) policy — in which
@@ -143,16 +234,19 @@ impl EgressProxy {
         let port = listener.local_addr()?.port();
         let token: Arc<str> = Arc::from(mint_token());
         let shutdown = Arc::new(AtomicBool::new(false));
+        let active_sockets = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         let sh = shutdown.clone();
+        let active = active_sockets.clone();
         let engine = mitm.clone();
         let tok = token.clone();
         let accept_thread = std::thread::Builder::new()
             .name("nub-egress-proxy".into())
-            .spawn(move || accept_loop(listener, sh, decider, engine, tok))?;
+            .spawn(move || accept_loop(listener, sh, active, decider, engine, tok))?;
         Ok(EgressProxy {
             port,
             token,
             shutdown,
+            active_sockets,
             accept_thread: Some(accept_thread),
             mitm,
         })
@@ -185,10 +279,15 @@ impl EgressProxy {
 
 impl Drop for EgressProxy {
     fn drop(&mut self) {
-        // Signal the accept loop, then wake its blocked `accept()` with a throwaway
-        // self-connection so it observes the flag and exits. In-flight tunnel threads
-        // are detached; they end when their sockets close (the child is already gone).
+        // Signal the accept loop, close every in-flight socket, then wake `accept()`.
+        // The accept thread owns and joins every handler before returning, so dropping
+        // the proxy also drops every clone of the per-apply MITM engine and its secrets.
         self.shutdown.store(true, Ordering::SeqCst);
+        if let Ok(active) = self.active_sockets.lock() {
+            for stream in active.values().flatten() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        }
         let _ = TcpStream::connect((IpAddr::from([127, 0, 0, 1]), self.port));
         if let Some(h) = self.accept_thread.take() {
             let _ = h.join();
@@ -196,30 +295,57 @@ impl Drop for EgressProxy {
     }
 }
 
-/// Accept loop: one detached handler thread per connection. Any handler error just
+/// Accept loop: one tracked handler thread per connection. Any handler error just
 /// closes that connection — a single malformed client never takes down the proxy.
 fn accept_loop(
     listener: TcpListener,
     shutdown: Arc<AtomicBool>,
+    active_sockets: ActiveSockets,
     decider: Arc<dyn GrantDecider>,
     mitm: Option<Arc<mitm::MitmEngine>>,
     token: Arc<str>,
 ) {
+    let next_id = AtomicU64::new(1);
+    let mut handlers: Vec<JoinHandle<()>> = Vec::new();
     for conn in listener.incoming() {
+        // A long-running child may churn many short connections. Reap completed
+        // handlers continuously instead of retaining one JoinHandle per historical
+        // connection until shutdown.
+        let mut index = 0;
+        while index < handlers.len() {
+            if handlers[index].is_finished() {
+                let handler = handlers.swap_remove(index);
+                let _ = handler.join();
+            } else {
+                index += 1;
+            }
+        }
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
         let Ok(stream) = conn else { continue };
+        let Ok(active) =
+            ActiveConnection::new(&stream, active_sockets.clone(), shutdown.clone(), &next_id)
+        else {
+            continue;
+        };
         let d = decider.clone();
         let m = mitm.clone();
         let tok = token.clone();
+        let sh = shutdown.clone();
         // Best-effort spawn; if the OS refuses a thread we simply drop the connection
         // (fail-closed — no unproxied path opens).
-        let _ = std::thread::Builder::new()
+        if let Ok(handler) = std::thread::Builder::new()
             .name("nub-egress-tunnel".into())
             .spawn(move || {
-                let _ = handle_conn(stream, d, m, &tok);
-            });
+                let _ = handle_conn(stream, d, m, &tok, sh, active);
+            })
+        {
+            handlers.push(handler);
+        }
+    }
+    for handler in handlers {
+        let _ = handler.join();
     }
 }
 
@@ -246,6 +372,8 @@ fn handle_conn(
     decider: Arc<dyn GrantDecider>,
     mitm: Option<Arc<mitm::MitmEngine>>,
     token: &str,
+    shutdown: Arc<AtomicBool>,
+    active: ActiveConnection,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(CLIENT_HELLO_TIMEOUT))?;
     // Whether the policy opted into private-range egress (governs the SSRF guard's
@@ -283,7 +411,15 @@ fn handle_conn(
     if let Some(engine) = mitm.as_ref() {
         match terminate_host.as_deref() {
             Some(host) if engine.should_terminate(host) => {
-                let _ = mitm::terminate(engine, stream, prelude, host, req.port, allow_private);
+                let _ = mitm::terminate(
+                    engine,
+                    stream,
+                    prelude,
+                    host,
+                    req.port,
+                    allow_private,
+                    &active,
+                );
                 return Ok(());
             }
             // `proxy: "terminate"` but this connection carries no host to terminate (no
@@ -296,7 +432,11 @@ fn handle_conn(
     }
 
     // Connection tier — connect upstream, replay the buffered prelude, blind-splice.
+    if shutdown.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let upstream = connect_upstream(&req.host, req.port, allow_private)?;
+    active.track(&upstream)?;
     stream.set_read_timeout(None)?;
     upstream.set_read_timeout(None)?;
     let mut up = upstream;
@@ -469,7 +609,7 @@ fn is_timeout(e: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{Effect, NetRule, NetTarget};
+    use crate::policy::{CredentialBroker, Effect, NetRule, NetTarget};
 
     fn net(rules: Vec<NetRule>, default_effect: Effect) -> NetPolicy {
         NetPolicy {
@@ -668,5 +808,112 @@ mod tests {
             d.decide(&Host::Name("x.evil.example".into())),
             Decision::Deny
         );
+    }
+
+    #[test]
+    fn live_tls_broker_releases_marker_only_to_the_exact_verified_upstream() {
+        use base64::Engine as _;
+        use rcgen::{CertifiedKey, generate_simple_self_signed};
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+        use std::collections::BTreeMap;
+
+        const SECRET: &str = "real-secret-never-given-to-client";
+        let configured = [CredentialBroker {
+            host: "localhost".to_string(),
+            env: vec!["API_TOKEN".to_string()],
+        }];
+        let session =
+            mitm::BrokerSession::from_policy(&configured, |_| Ok(Some(SECRET.to_string())))
+                .unwrap();
+        let mut child_env = BTreeMap::new();
+        session.install_markers(&mut child_env);
+        let marker = child_env["API_TOKEN"].clone();
+        assert_ne!(marker, SECRET);
+
+        // A real local TLS upstream with its own root. The proxy must verify this cert;
+        // the child separately trusts only the proxy's ephemeral CA.
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let upstream_root = cert.der().clone();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let upstream_config = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der())),
+            )
+            .unwrap();
+        let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0)).unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let marker_for_upstream = marker.clone();
+        let upstream = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut conn = rustls::ServerConnection::new(Arc::new(upstream_config)).unwrap();
+            let mut tls = rustls::Stream::new(&mut conn, &mut socket);
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                tls.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() <= 64 * 1024);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.contains(&format!("Authorization: Bearer {SECRET}\r\n")));
+            assert!(!request.contains(&marker_for_upstream));
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+            tls.conn.send_close_notify();
+            tls.flush().unwrap();
+        });
+
+        let engine = mitm::MitmEngine::new_for_test(session.into_brokers(), upstream_root)
+            .expect("test MITM engine");
+        let mut child_roots = rustls::RootCertStore::empty();
+        child_roots.add(engine.child_ca_der()).unwrap();
+        let mut child_config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(child_roots)
+            .with_no_client_auth();
+        child_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+        let policy = net(vec![host("localhost", Effect::Allow)], Effect::Deny);
+        let proxy = EgressProxy::start(
+            Arc::new(StaticDecider::new(policy)),
+            Some(Arc::clone(&engine)),
+        )
+        .unwrap();
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:", proxy.token()));
+        let mut socket = TcpStream::connect((IpAddr::from([127, 0, 0, 1]), proxy.port())).unwrap();
+        write!(
+            socket,
+            "CONNECT localhost:{upstream_port} HTTP/1.1\r\nHost: localhost:{upstream_port}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"
+        )
+        .unwrap();
+        let mut connect_reply = Vec::new();
+        let mut byte = [0u8; 1];
+        while !connect_reply.ends_with(b"\r\n\r\n") {
+            socket.read_exact(&mut byte).unwrap();
+            connect_reply.push(byte[0]);
+        }
+        assert!(connect_reply.starts_with(b"HTTP/1.1 200"));
+
+        let name = ServerName::try_from("localhost").unwrap();
+        let mut conn = rustls::ClientConnection::new(Arc::new(child_config), name).unwrap();
+        let mut tls = rustls::Stream::new(&mut conn, &mut socket);
+        write!(
+            tls,
+            "GET / HTTP/1.1\r\nHost: localhost:{upstream_port}\r\nAuthorization: Bearer {marker}\r\n\r\n"
+        )
+        .unwrap();
+        tls.flush().unwrap();
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).unwrap();
+        assert!(response.ends_with(b"\r\n\r\nok"));
+
+        drop(proxy);
+        upstream.join().unwrap();
     }
 }

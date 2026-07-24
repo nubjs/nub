@@ -2488,6 +2488,11 @@ fn to_file_url(path: &str, windows: bool) -> String {
     }
 }
 
+/// Convert an absolute native path to the file URL spelling Node expects.
+pub fn path_to_file_url(path: &str) -> String {
+    to_file_url(path, cfg!(windows))
+}
+
 /// How nub injects its preload, chosen BY TIER. The fast tier (Node 22.15+) loads a
 /// CommonJS preload via `--require`; the compat tier (18.19–22.14) loads the ESM
 /// preload via `--import`. The channel choice is load-bearing: an `--import` ESM

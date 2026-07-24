@@ -85,7 +85,7 @@ fn registry_reachable() -> bool {
 }
 
 #[test]
-fn install_dir_initializes_one_gate_off_snapshot_from_final_cwd() {
+fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
     let outer = pm_tmpdir("dir-snapshot-outer");
     let target = outer.join("target");
     std::fs::create_dir_all(&target).unwrap();
@@ -94,9 +94,11 @@ fn install_dir_initializes_one_gate_off_snapshot_from_final_cwd() {
         r#"{"name":"target","version":"1.0.0"}"#,
     )
     .unwrap();
-    // A malformed dormant project file proves the production gate does not read
-    // it while the snapshot log still records the final verb-local cwd.
-    std::fs::write(target.join("nub.jsonc"), "{ malformed").unwrap();
+    std::fs::write(
+        target.join("nub.jsonc"),
+        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
+    )
+    .unwrap();
 
     for (idx, args) in [
         vec!["install", "--dir", "target", "--lockfile-only", "--offline"],
@@ -128,7 +130,7 @@ fn install_dir_initializes_one_gate_off_snapshot_from_final_cwd() {
         assert_eq!(
             lines,
             vec![format!(
-                "cwd={} project=none",
+                "cwd={} project=loaded",
                 target.canonicalize().unwrap().display()
             )]
         );

@@ -58,9 +58,6 @@
 //!   - **macOS toolchain read-confine** — a non-system interpreter (Homebrew/nvm
 //!     Node) needs its toolchain dir in the read-allow set; the engine grants the
 //!     program file only and does not probe the host for it.
-//!   - **macOS parent-env scrub** — the engine scrubs the CHILD's env, not nub's
-//!     own; the launcher must not hold ambient secrets in nub's environ at spawn
-//!     (co-resident `KERN_PROCARGS2` ascendant-env read).
 //!   - **Windows loopback exemption + clean-DACL work root** — per-host egress (and
 //!     the MITM tier) need a registered loopback exemption so the child can reach
 //!     the proxy; confined work dirs must sit under a CLEAN-DACL root (no inherited
@@ -76,13 +73,12 @@
 //! # Net axis — the per-host egress proxy and the MITM tier
 //!
 //! When a policy enforces per-host net, [`apply`] starts a loopback [`EgressProxy`]
-//! (no MITM: it gates the CONNECT/SOCKS target + the cleartext TLS SNI, then
-//! blind-forwards) and stashes it on [`Prepared`] so it outlives the child. The
-//! per-host decision is a [`GrantDecider`] seam ([`StaticDecider`] here); a
-//! capability-derived **MITM tier** (credential brokering via an ephemeral CA passed
-//! to the child through an env bundle) is a landed-but-held extension that swaps in
-//! through the same seam — see PR #414. The core [`compile`]/[`apply`] seam is
-//! unchanged by it.
+//! and stashes it on [`Prepared`] so it outlives the child. The connection tier gates
+//! the CONNECT/SOCKS target + cleartext TLS SNI, then blind-forwards. The
+//! capability-derived MITM tier terminates only exact brokered hosts (or all allowed
+//! hosts in explicit terminate mode), verifies the real upstream, and replaces opaque
+//! markers only in HTTP/1.1 request-header values. The per-host decision remains the
+//! same [`GrantDecider`] seam ([`StaticDecider`] here).
 //!
 //! # Backend status
 //!

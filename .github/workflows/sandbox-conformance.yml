@@ -62,16 +62,24 @@ jobs:
           scripts/build-bwrap-resource.sh bwrap-resource
           echo "NUB_BWRAP_VERSION=0.11.2" >> "$GITHUB_ENV"
           echo "NUB_BWRAP_SHA256=$(awk '{print $1}' bwrap-resource/bwrap.sha256)" >> "$GITHUB_ENV"
-      - name: Linux Bubblewrap enforcement
+      - name: Linux Bubblewrap enforcement and proxy conformance
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"
         run: |
-          cargo test -p nub-sandbox --test linux_enforcement
+          cargo test -p nub-sandbox --test linux_enforcement --test linux_proxy
           cargo test -p nub-sandbox --test linux_monitor_states
-      - name: Linux CLI-seam conformance matrix
+      - name: Linux CLI-seam conformance matrix and inert project config
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"
-        run: cargo test -p nub-cli --test sandbox_conformance
+        run: cargo test -p nub-cli --test sandbox_conformance --test project_config_sandbox_inert
+      # Hosted Ubuntu has stock Bubblewrap but intentionally does not install the
+      # root-owned, AppArmor-profiled nesting helper. These tests print a skip in
+      # that state; a prepared VM sets NUB_SANDBOX_REQUIRE_NESTING=1 to make the
+      # same command a hard admission and three-level composition gate.
+      - name: Linux gated nesting and nested composition coverage
+        env:
+          NUB_SANDBOX_REQUIRE_BWRAP: "1"
+        run: cargo test -p nub-sandbox --test linux_nesting --test linux_nested_composition
       - name: Linux fallback-only and incompatible-system conformance
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"

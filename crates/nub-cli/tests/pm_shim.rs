@@ -197,11 +197,15 @@ fn argv0_pnpm_dispatches_to_the_shim_and_falls_through_when_unpinned() {
 }
 
 #[test]
-fn argv0_pm_shim_initializes_one_inert_project_config_snapshot() {
+fn argv0_pm_shim_initializes_one_project_config_snapshot() {
     let work = tmp("config-snapshot");
     let proj = work.join("proj");
     std::fs::create_dir_all(&proj).unwrap();
-    std::fs::write(proj.join("nub.jsonc"), "{ malformed").unwrap();
+    std::fs::write(
+        proj.join("nub.jsonc"),
+        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
+    )
+    .unwrap();
     let sys = work.join("sys");
     std::fs::create_dir_all(&sys).unwrap();
     let fake = fake_pm(&sys, "pnpm");
@@ -220,7 +224,7 @@ fn argv0_pm_shim_initializes_one_inert_project_config_snapshot() {
     );
     assert_eq!(
         code, 0,
-        "gate-off malformed project config must not block PM-shim exec; stderr:\n{stderr}"
+        "an inert sandbox config must not block PM-shim exec; stderr:\n{stderr}"
     );
     assert_eq!(stdout, format!("FAKE:{}:--version\n", fake.display()));
 
@@ -232,7 +236,7 @@ fn argv0_pm_shim_initializes_one_inert_project_config_snapshot() {
     assert_eq!(
         lines,
         vec![format!(
-            "cwd={} project=none",
+            "cwd={} project=loaded",
             proj.canonicalize().unwrap().display()
         )],
         "the successful argv0 PM route must initialize exactly one snapshot from its resolved cwd"

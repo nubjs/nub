@@ -123,7 +123,9 @@ impl FsAccess {
 
 /// Network confinement. `enforce = false` means "no net restriction" (the
 /// wrapper/axis `true` case). When enforcing, `rules` is an ordered last-match-
-/// wins list the egress proxy (S6) evaluates by SNI/IP; the base is deny-all.
+/// wins list the egress proxy evaluates by SNI/IP; the base is deny-all. A
+/// fine-grained allow must request that proxy explicitly, except a credential
+/// broker which necessarily starts a terminating proxy itself.
 ///
 /// Provenance: design.md §2.1 sketches `allow_hosts`/`allow_cidrs` allow-lists.
 /// The IR keeps a single ordered `rules` list instead so `!`-deny + last-match-
@@ -135,10 +137,11 @@ pub struct NetPolicy {
     pub enforce: bool,
     pub rules: Vec<NetRule>,
     pub default_effect: Effect,
-    /// The `proxy` wrapper knob (default [`ProxyMode::Auto`]). Governs whether the
-    /// egress proxy may TERMINATE TLS to enforce a capability that can't be checked
-    /// from outside the stream. Authored at the wrapper level (sibling of net); the
-    /// compiler folds it onto the net axis it governs.
+    /// The resolved proxy posture. [`ProxyMode::Disabled`] means the author omitted
+    /// `proxy`; that is valid only for coarse network policy and brokered rules. The
+    /// other modes are an explicit request to run the egress proxy. Authored at the
+    /// wrapper level (sibling of net); the compiler folds it onto the net axis it
+    /// governs.
     #[serde(default)]
     pub mode: ProxyMode,
     /// The tier the compiler DERIVED (default [`Inspection::Connection`]). A pure
@@ -146,10 +149,10 @@ pub struct NetPolicy {
     /// states the posture explicitly (proposal §4). Never a user input.
     #[serde(default)]
     pub inspection: Inspection,
-    /// Per-host credential brokers (proposal §5 — cut-1 marquee). Non-empty ⇒ the tier
-    /// is [`Inspection::TlsInspect`] and the proxy terminates each brokered host to
-    /// inject the credential. The resolved secret lives here IN-MEMORY ONLY (see
-    /// [`HeaderInject::value`]) — never the child env, never a serialized dump.
+    /// Per-host credential brokers. Non-empty ⇒ the tier is
+    /// [`Inspection::TlsInspect`]. The IR carries only environment-variable names;
+    /// each apply resolves their parent values into redacted proxy state and gives
+    /// the child fresh opaque markers instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub brokers: Vec<CredentialBroker>,
 }
@@ -162,22 +165,25 @@ impl Default for NetPolicy {
             enforce: false,
             rules: Vec::new(),
             default_effect: Effect::Deny,
-            mode: ProxyMode::Auto,
+            mode: ProxyMode::Disabled,
             inspection: Inspection::Connection,
             brokers: Vec::new(),
         }
     }
 }
 
-/// The `proxy` wrapper knob — whether the egress proxy may terminate TLS (the MITM
-/// tier). The default reading of the maintainer's ask: derive the tier from the rules,
-/// never a user-set boolean.
+/// The `proxy` wrapper knob. Omission leaves the proxy off, so an ordinary host/CIDR
+/// allow cannot accidentally start an in-path service. A credential broker is the
+/// intentional exception: it starts TLS termination because injection cannot work
+/// without it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyMode {
-    /// Derive the tier from the rules: terminate only hosts whose own rules require it
-    /// (a credential-inject rule); tunnel everything else blind. The default.
+    /// No proxy was requested. Valid for coarse `net: true` / `net: false` and for a
+    /// credential broker, which derives its own terminating proxy.
     #[default]
+    Disabled,
+    /// Start a blind pass-through proxy unless a broker requires termination.
     Auto,
     /// Forbid termination. A rule that REQUIRES it is a COMPILE ERROR (never a silent
     /// drop) — the explicit "block MITM" posture; net stays connection-level only.
@@ -208,63 +214,76 @@ pub struct NetRule {
     pub effect: Effect,
 }
 
-/// A per-host credential broker (proposal §5, cut-1 marquee): on egress to `host` the
-/// terminating proxy STRIPS then re-injects each header, so the sandboxed child
-/// authenticates to an allowlisted upstream WITHOUT ever holding the secret. A broker
-/// forces [`Inspection::TlsInspect`] for its host. HTTPS-only by construction — the
-/// proxy refuses to inject over an unterminated/plaintext channel (never expose a
-/// secret on an unverified wire).
+/// A per-host credential broker. At apply time each named parent variable is replaced
+/// in the child's environment by a fresh opaque marker. On HTTPS egress to this exact
+/// host, the terminating proxy replaces marker occurrences in HTTP/1.1 request header
+/// values with the real secret. No secret is serialized in this IR.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CredentialBroker {
-    /// The host pattern the broker governs — same glob grammar as a net [`NetTarget::Host`].
+    /// One exact literal hostname. Wildcards, IP literals, and CIDRs are rejected.
     pub host: String,
-    pub injects: Vec<HeaderInject>,
+    /// Exact parent environment-variable names whose values may cross this host.
+    pub env: Vec<String>,
 }
 
-/// One header the broker sets on egress. Strip-then-set: the child's own value for
-/// `header` (if any) is removed FIRST, so a child-supplied — possibly leaked-real —
-/// credential can never survive alongside the injected one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HeaderInject {
-    /// The HTTP header name to set (e.g. `Authorization`).
-    pub header: String,
-    /// The resolved header value. `#[serde(skip)]` keeps the secret out of EVERY
-    /// serialized IR (a `--sandbox` dump, a conformance fixture) and the redacting
-    /// [`Secret`] `Debug` keeps it out of logs/panics. The IR is compiler-built and
-    /// consumed directly by `apply()` — never deserialized-then-applied — so skipping
-    /// it loses nothing at runtime.
-    #[serde(skip)]
-    pub value: Secret,
+/// Environment names the backend owns after the policy env has been constructed.
+///
+/// A broker marker written under one of these keys would be overwritten before
+/// spawn by proxy, CA, or private-tmp plumbing while the real secret remained
+/// live in proxy state. Rejecting the collision keeps the marker→secret pair
+/// structurally usable rather than creating a broker grant the child cannot
+/// present. Windows environment keys are case-insensitive; POSIX keys are not.
+pub(crate) fn credential_env_name_is_reserved(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+        "NODE_USE_ENV_PROXY",
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "PIP_CERT",
+        "NPM_CONFIG_CAFILE",
+        "npm_config_cafile",
+        "CARGO_HTTP_CAINFO",
+        "AWS_CA_BUNDLE",
+        "DENO_CERT",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    ];
+
+    if cfg!(windows) {
+        RESERVED
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+    } else {
+        RESERVED.contains(&name)
+    }
 }
 
-/// A resolved secret held in nub's PARENT process only. Serialization drops it (the
-/// containing field is `#[serde(skip)]`) and `Debug` redacts it, so a policy dump, a
-/// trace line, or a panic can never spill the credential. The inner field is PRIVATE:
-/// [`Secret::expose`] is the sole read path (grep it to audit every reader), so no
-/// `.0` access can slip past the redaction.
-#[derive(Clone, Default, PartialEq, Eq)]
-pub struct Secret(String);
-
-impl Secret {
-    /// Wrap a resolved secret value.
-    pub fn new(value: String) -> Self {
-        Secret(value)
-    }
-    /// Borrow the raw value. The ONE call site that needs it is the proxy's egress
-    /// header injection; grep for `.expose()` to audit every reader.
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for Secret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0.is_empty() {
-            f.write_str("Secret(\"\")")
-        } else {
-            f.write_str("Secret(\"<redacted>\")")
-        }
-    }
+/// Legacy IPv4 textual forms accepted by libc resolvers but rejected by Rust's
+/// canonical `IpAddr` parser (for example `127.1`, `2130706433`, or
+/// `0x7f000001`). A broker host must be a DNS name, not a spelling that resolves
+/// numerically without DNS.
+pub(crate) fn broker_host_is_legacy_ipv4_literal(host: &str) -> bool {
+    let components = host.split('.').collect::<Vec<_>>();
+    !components.is_empty()
+        && components.len() <= 4
+        && components.iter().all(|component| {
+            !component.is_empty()
+                && (component.bytes().all(|byte| byte.is_ascii_digit())
+                    || component
+                        .strip_prefix("0x")
+                        .or_else(|| component.strip_prefix("0X"))
+                        .is_some_and(|hex| {
+                            !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        }))
+        })
 }
 
 /// A net rule targets a host pattern (glob or literal), a CIDR block, or the

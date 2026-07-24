@@ -1,0 +1,18 @@
+{
+  "name": "fs-last-match-reopen",
+  "note": "Filesystem entries are ordered: a later exact allow reopens only its subtree inside an earlier denied subtree.",
+  "policy": {
+    "fs": ["./", "!./private", "./private/reopened"],
+    "env": true,
+    "net": true
+  },
+  "relaxed": false,
+  "cases": [
+    { "probe": "read", "target": "proj:public.txt", "expect": true, "platforms": ["linux"] },
+    { "probe": "read", "target": "proj:private/hidden.txt", "expect": false, "platforms": ["linux"] },
+    { "probe": "read", "target": "proj:private/reopened/read.txt", "expect": true, "platforms": ["linux"] },
+    { "probe": "write", "target": "proj:public-write.txt", "expect": true, "platforms": ["linux"] },
+    { "probe": "write", "target": "proj:private/blocked.txt", "expect": false, "platforms": ["linux"] },
+    { "probe": "write", "target": "proj:private/reopened/write.txt", "expect": true, "platforms": ["linux"] }
+  ]
+}

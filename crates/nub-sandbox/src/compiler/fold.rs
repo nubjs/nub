@@ -11,7 +11,7 @@ use super::{CompileCtx, CompileError, ScopeCapabilities};
 use crate::matcher::path::expand_symbolic;
 use crate::policy::{
     CanonGlob, CredentialBroker, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsPolicy, FsRule,
-    FsRuleSet, HeaderInject, NetPolicy, NetRule, NetTarget, Secret, TmpMode,
+    FsRuleSet, NetPolicy, NetRule, NetTarget, TmpMode,
 };
 use globset::{GlobBuilder, GlobMatcher};
 use serde_json::Value;
@@ -438,7 +438,7 @@ pub fn fold_net(
             for (i, item) in items.iter().enumerate() {
                 let p = child(path, &i.to_string());
                 let s = as_str(item, &p)?;
-                fold_net_entry(s, parent, &p, &mut policy.rules)?;
+                fold_net_entry(s, parent, &p, &mut policy)?;
             }
         }
         Value::Object(map) => {
@@ -467,7 +467,7 @@ fn fold_net_entry(
     s: &str,
     parent: Option<&NetPolicy>,
     path: &str,
-    out: &mut Vec<NetRule>,
+    policy: &mut NetPolicy,
 ) -> Result<(), CompileError> {
     if s == "!..." {
         return Err(CompileError::shape(path, SENTINEL_NEGATE_MSG));
@@ -477,7 +477,8 @@ fn fold_net_entry(
         // the built-in net base is deny-all with no committed allowlist (the
         // build-jail baseline owns trusted-host allows), so splice nothing.
         if let Some(p) = parent {
-            out.extend(p.rules.iter().cloned());
+            policy.rules.extend(p.rules.iter().cloned());
+            policy.brokers.extend(p.brokers.iter().cloned());
         }
         return Ok(());
     }
@@ -485,13 +486,13 @@ fn fold_net_entry(
         Some(rest) => (rest, Effect::Deny),
         None => (s, Effect::Allow),
     };
-    push_net_rule(pattern, effect, path, out)
+    push_net_rule(pattern, effect, path, &mut policy.rules)
 }
 
 /// One entry of the net OBJECT form: `"<host>": true | false | { rule object }`. A
-/// bool is a plain allow/deny (host-only, connection-level). A rule OBJECT is the
-/// per-host capability grammar; cut-1's ONLY key is `inject` (credential brokering),
-/// which implicitly ALLOWS the host and forces it to the TlsInspect tier.
+/// bool is a plain allow/deny (host-only, connection-level). A rule object with
+/// `env` enables credential brokering for an exact hostname, implicitly allowing
+/// that host and forcing the TlsInspect tier.
 fn fold_net_object_value(
     host: &str,
     val: &Value,
@@ -506,183 +507,149 @@ fn fold_net_object_value(
         Value::Object(rule) => fold_net_rule_object(host, rule, ctx, caps, path, policy),
         _ => Err(CompileError::shape(
             path,
-            "net host value must be true, false, or a rule object (e.g. { \"inject\": { … } })",
+            "net host value must be true, false, or a credential rule object (e.g. { \"env\": [\"TOKEN\"] })",
         )),
     }
 }
 
-/// Parse a per-host net rule OBJECT. Cut-1 vocabulary is credential brokering ONLY;
-/// the request-filter fields the proposal reserves (`methods`/`paths`/`headers`) are
-/// DEFERRED to a future request filter, so naming one fails loud rather than silently
-/// under-enforcing. The brokered host is recorded both as an ordinary Allow rule (a
-/// later explicit `!deny` can still override it — last-match-wins is preserved) and as
-/// a [`CredentialBroker`] (→ TlsInspect tier for that host).
+/// Parse an exact-host credential rule. The brokered host is also an ordinary
+/// Allow rule; a later explicit deny can still override it under last-match-wins.
 fn fold_net_rule_object(
     host: &str,
     rule: &serde_json::Map<String, Value>,
-    ctx: &CompileCtx,
+    _ctx: &CompileCtx,
     caps: ScopeCapabilities,
     path: &str,
     policy: &mut NetPolicy,
 ) -> Result<(), CompileError> {
     for key in rule.keys() {
-        if key != "inject" {
+        if key == "inject" {
             return Err(CompileError::shape(
                 &child(path, key),
-                &format!(
-                    "`{key}` is not supported in this cut — the only per-host net capability is `inject` (credential brokering); verb/path/header filtering is deferred to a future request filter"
-                ),
+                "the old `inject` credential syntax is not supported; name parent environment variables with `{ \"env\": [\"TOKEN\"] }`",
+            ));
+        }
+        if key != "env" {
+            return Err(CompileError::shape(
+                &child(path, key),
+                &format!("unknown credential rule option `{key}` (allowed: env)"),
             ));
         }
     }
-    // Credential brokering is the `credential_broker` capability — approved user config
-    // only. A dependency-controlled scope must not be able to force TLS termination of an
-    // allowed host or inject ANY header (a literal value would otherwise slip past the
-    // per-scope `$(…)` gate below). Gated on THIS scope's caps, not a compile-wide flag.
+    // Gated on THIS scope's capability, not a compile-wide trust flag.
     if !caps.credential_broker {
         return Err(CompileError::shape(
             path,
-            "credential brokering (`inject`) is a trusted-only capability — it is not permitted in an untrusted (dependenciesMeta) grant",
+            "credential brokering (`env`) is a trusted-only capability — it is not permitted in an untrusted (dependenciesMeta) grant",
         ));
     }
-    let inject = rule.get("inject").ok_or_else(|| {
+    let env = rule.get("env").ok_or_else(|| {
         CompileError::shape(
             path,
-            "a net rule object must contain `inject` (credential brokering) — it is the only per-host capability in this cut",
+            "a credential rule object must contain `env` (for example `{ \"env\": [\"STRIPE_TOKEN\"] }`)",
         )
     })?;
-    // Reject a CIDR BEFORE it becomes an allow rule — it can't carry HTTP header
-    // injection. Wildcard/glob broker hosts ARE accepted and match via the same
-    // universal host-glob matcher as net allow/deny (maintainer decision): a
-    // `*.example.com` broker brokers exactly the hosts it would allow, at the user's
-    // own risk (see `validate_broker_host`).
     validate_broker_host(host, path)?;
-    let injects = parse_inject(inject, ctx, caps, &child(path, "inject"))?;
+    let env = parse_broker_env(env, &child(path, "env"))?;
     push_net_rule(host, Effect::Allow, path, &mut policy.rules)?;
     policy.brokers.push(CredentialBroker {
         host: crate::matcher::host::strip_trailing_dot(host).to_string(),
-        injects,
+        env,
     });
     Ok(())
 }
 
-/// A broker host is any valid net host pattern — a literal, or the SAME universal
-/// host-glob syntax used for net allow/deny (`*.example.com`, bare `*`). Only a CIDR is
-/// rejected: brokering is an HTTP-header capability with no CIDR form. Wildcards are
-/// intentionally permitted (maintainer decision): a `*.example.com` broker mints +
-/// injects to the CLIENT-SUPPLIED SNI, so it brokers exactly the hosts the same pattern
-/// would allow as a net rule — including, if the user points it at a too-broad wildcard,
-/// an attacker-owned subdomain. That laundering-to-a-misconfigured-wildcard is the user's
-/// own risk (identical to any wildcard net allow), out of the threat model — no warning.
+/// Credential release is intentionally narrower than ordinary net matching: one
+/// literal DNS hostname only. A wildcard, IP literal, CIDR, or symbolic class would
+/// let one marker authorize more than one exact upstream boundary.
 fn validate_broker_host(pattern: &str, path: &str) -> Result<(), CompileError> {
-    if pattern.contains('/') {
+    let host = crate::matcher::host::strip_trailing_dot(pattern);
+    if pattern.contains('/')
+        || pattern.contains('*')
+        || pattern.starts_with('<')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || crate::policy::broker_host_is_legacy_ipv4_literal(host)
+    {
         return Err(CompileError::shape(
             path,
-            "credential brokering targets a host, not a CIDR — name a hostname (a literal or a `*.` wildcard)",
+            "credential brokering requires one exact literal hostname; wildcards, IP literals, CIDRs, and symbolic host classes are not allowed",
         ));
     }
-    if !crate::matcher::host::host_pattern_is_valid(pattern) {
+    if host.is_empty()
+        || !crate::matcher::host::host_pattern_is_valid(pattern)
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+        || host.len() > 253
+    {
         return Err(CompileError::shape(
             path,
-            &format!("`{pattern}` is not a valid host for a credential broker"),
+            &format!("`{pattern}` is not a valid literal hostname for a credential broker"),
         ));
     }
     Ok(())
 }
 
-/// Parse the `inject` map (header-name → value string) into resolved [`HeaderInject`]s.
-/// A `$(…)` value resolves through the SAME trusted gate as env values — an untrusted
-/// (`dependenciesMeta`) `$(…)` is a hard error, never a silent exec. The resolved
-/// secret is wrapped in [`Secret`] (redacting Debug, serde-skipped) so it never reaches
-/// a dump, a log, or the child env.
-fn parse_inject(
-    value: &Value,
-    ctx: &CompileCtx,
-    caps: ScopeCapabilities,
-    path: &str,
-) -> Result<Vec<HeaderInject>, CompileError> {
-    let map = value.as_object().ok_or_else(|| {
+fn parse_broker_env(value: &Value, path: &str) -> Result<Vec<String>, CompileError> {
+    let items = value.as_array().ok_or_else(|| {
         CompileError::shape(
             path,
-            "`inject` must be a header-name → value object (e.g. { \"Authorization\": \"Bearer $(op read …)\" })",
+            "`env` must be a non-empty array of exact environment-variable names",
         )
     })?;
-    if map.is_empty() {
+    if items.is_empty() {
         return Err(CompileError::shape(
             path,
-            "`inject` must name at least one header to set",
+            "`env` must name at least one environment variable",
         ));
     }
-    let mut out = Vec::with_capacity(map.len());
-    for (header, raw) in map {
-        let p = child(path, header);
-        validate_header_name(header, &p)?;
-        let raw_str = as_str(raw, &p)?;
-        let resolved = resolve_credential_value(raw_str, ctx, caps, &p)?;
-        if resolved.is_empty() {
+    let mut out = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let p = child(path, &index.to_string());
+        let name = as_str(item, &p)?;
+        if name.is_empty()
+            || name.contains(['=', '\0', '*', '?', '[', ']', '{', '}'])
+            || name.ends_with('?')
+        {
             return Err(CompileError::shape(
                 &p,
-                "an inject header value must not be empty",
+                "a brokered environment variable must be one exact, non-empty name without glob or optional-key syntax",
             ));
         }
-        // CRLF / NUL guard: a resolved value carrying a line break would smuggle a header
-        // (request splitting) into the reconstructed request. Reject at compile time — the
-        // proxy's serializer trusts values to be single-line.
-        if resolved.bytes().any(|b| matches!(b, b'\r' | b'\n' | b'\0')) {
+        if crate::policy::credential_env_name_is_reserved(name) {
             return Err(CompileError::shape(
                 &p,
-                "an inject header value must not contain a newline or NUL (request-splitting guard)",
+                &format!("`{name}` is owned by sandbox runtime plumbing and cannot be brokered"),
             ));
         }
-        out.push(HeaderInject {
-            header: header.clone(),
-            value: Secret::new(resolved),
-        });
+        if out
+            .iter()
+            .any(|existing: &String| broker_env_key_eq(existing, name))
+        {
+            return Err(CompileError::shape(
+                &p,
+                &format!("duplicate brokered environment variable `{name}`"),
+            ));
+        }
+        out.push(name.to_string());
     }
     Ok(out)
 }
 
-/// Resolve a credential value's `$(…)` through the `env_substitution` gate, mirroring
-/// env values (an inject value's `$(…)` is command substitution like any other, and
-/// gated on the same per-scope capability; the enclosing `credential_broker` gate has
-/// already admitted the inject block itself).
-fn resolve_credential_value(
-    raw: &str,
-    ctx: &CompileCtx,
-    caps: ScopeCapabilities,
-    path: &str,
-) -> Result<String, CompileError> {
-    if resolve::has_substitution(raw) {
-        if !caps.env_substitution {
-            return Err(CompileError::untrusted_substitution(path));
-        }
-        resolve::resolve_with(raw, ctx.runner.as_ref())
-            .map_err(|e| CompileError::substitution(path, &e))
-    } else if resolve::has_open_substitution(raw) {
-        Err(CompileError::substitution(
-            path,
-            resolve::UNTERMINATED_SUBST_MSG,
-        ))
+fn broker_env_key_eq(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
     } else {
-        Ok(raw.to_string())
+        a == b
     }
-}
-
-/// Conservative HTTP header-name validation (RFC 7230 token subset): ASCII
-/// alphanumerics plus `-`/`_`. Fail-closed on anything exotic so a crafted name can't
-/// smuggle a CRLF or a `:` into the reconstructed request line.
-fn validate_header_name(name: &str, path: &str) -> Result<(), CompileError> {
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        return Err(CompileError::shape(
-            path,
-            &format!("`{name}` is not a valid HTTP header name (letters, digits, `-`, `_`)"),
-        ));
-    }
-    Ok(())
 }
 
 /// Classify a net target as a CIDR (contains `/` and parses as one) or a host
@@ -784,7 +751,6 @@ pub fn fold_env(
     match value {
         Value::Bool(true) => {
             policy.constructed = ctx.ambient_env.clone();
-            return Ok(policy);
         }
         Value::Bool(false) => {
             // Explicit strip-all — same floor as an unlisted axis: withhold all
@@ -807,6 +773,10 @@ pub fn fold_env(
             ));
         }
     }
+    // An array/object allowlist can legitimately omit every ambient key, but a
+    // Windows child still needs the small bootstrap set for process/AppContainer
+    // startup. POSIX receives no additions because its essential set is empty.
+    defaults::add_os_essential_env(&mut policy, &ctx.ambient_env);
     Ok(policy)
 }
 
@@ -1084,15 +1054,27 @@ fn parse_env_extras(
     }
     // Single `sensitive` mark (D17), default-on; `sensitive: false` opts out of
     // redaction. Collapses the old `secret`/`public` pair.
-    let sensitive = extras
-        .get("sensitive")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let sensitive = match extras.get("sensitive") {
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(CompileError::shape(
+                &child(path, "sensitive"),
+                "sensitive must be a boolean",
+            ));
+        }
+        None => true,
+    };
     let optional = optional_from_key
-        || extras
-            .get("optional")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        || match extras.get("optional") {
+            Some(Value::Bool(value)) => *value,
+            Some(_) => {
+                return Err(CompileError::shape(
+                    &child(path, "optional"),
+                    "optional must be a boolean",
+                ));
+            }
+            None => false,
+        };
     let ty = match extras.get("format") {
         Some(Value::String(f)) => {
             Some(parse_env_type(f).map_err(|e| CompileError::shape(&child(path, "format"), &e))?)
@@ -1244,7 +1226,7 @@ fn construct_env(
         Some(p) => {
             let mut m = ctx.ambient_env.clone();
             for (k, v) in &p.constructed {
-                m.insert(k.clone(), v.clone());
+                defaults::insert_env(&mut m, k.clone(), v.clone());
             }
             source_owned = m;
             &source_owned
@@ -1272,13 +1254,13 @@ fn construct_env(
                     "a literal env value cannot be bound to a glob key",
                 ));
             }
-            policy.constructed.insert(e.pattern.clone(), v.clone());
+            defaults::insert_env(&mut policy.constructed, e.pattern.clone(), v.clone());
         }
     }
 
     // 2. Source keys: last-match-wins over allow/deny entries.
     for (name, value) in source {
-        if policy.constructed.contains_key(name) {
+        if defaults::env_contains_key(&policy.constructed, name) {
             continue; // a literal already claimed this key
         }
         let mut verdict: Option<&EnvEntry> = None;
@@ -1293,7 +1275,7 @@ fn construct_env(
                     t.validate(value)
                         .map_err(|err| CompileError::validation(name, &err))?;
                 }
-                policy.constructed.insert(name.clone(), value.clone());
+                defaults::insert_env(&mut policy.constructed, name.clone(), value.clone());
             }
             _ => {
                 // Deny, no match, or a literal (handled above) → withhold.
@@ -1310,7 +1292,7 @@ fn construct_env(
         // Case-mirrored (D16): on Windows a `PATH` requirement is satisfied by an
         // ambient `Path` — `constructed` is keyed by the source casing, so an
         // exact-string lookup would false-miss. Match how the key matcher matched.
-        let satisfied = policy.constructed.keys().any(|k| env_key_eq(k, &e.pattern));
+        let satisfied = defaults::env_contains_key(&policy.constructed, &e.pattern);
         if matches!(e.action, EnvAction::Allow(_)) && !satisfied {
             return Err(CompileError::missing_required(&e.pattern));
         }
@@ -1335,7 +1317,7 @@ fn construct_env(
     }
     policy.withheld = source
         .keys()
-        .filter(|k| !policy.constructed.contains_key(*k))
+        .filter(|k| !defaults::env_contains_key(&policy.constructed, k))
         .cloned()
         .collect();
     Ok(())
@@ -1369,15 +1351,6 @@ fn reject_env_key_braces(key: &str, path: &str) -> Result<(), CompileError> {
 /// env is folded on the host it runs on, so host OS == target OS. (Env is
 /// Windows-only insensitive, unlike fs which is also macOS-insensitive.)
 const ENV_KEYS_CASE_INSENSITIVE: bool = cfg!(windows);
-
-/// Compare two env keys honoring the OS case rule ([`ENV_KEYS_CASE_INSENSITIVE`]).
-fn env_key_eq(a: &str, b: &str) -> bool {
-    if ENV_KEYS_CASE_INSENSITIVE {
-        a.eq_ignore_ascii_case(b)
-    } else {
-        a == b
-    }
-}
 
 /// A compiled env-key matcher — the runtime form of an entry's [`KeyMatch`].
 enum KeyMatcher {

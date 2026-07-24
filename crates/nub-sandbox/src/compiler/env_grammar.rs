@@ -22,7 +22,7 @@ pub enum EnvType {
     AnyString,
     /// One of the closed FORMAT keywords.
     Format(EnvFormat),
-    /// A `/regex/` pattern (compiled at validate time).
+    /// A `/regex/` pattern (syntax-checked while compiling the config).
     Regex(String),
     /// A literal union — the value must be one of these exact strings.
     Union(Vec<String>),
@@ -36,6 +36,7 @@ pub fn parse_env_type(spec: &str) -> Result<EnvType, String> {
         if inner.is_empty() {
             return Err("empty /regex/ in env type".to_string());
         }
+        regex::Regex::new(inner).map_err(|e| format!("invalid regex `{inner}`: {e}"))?;
         return Ok(EnvType::Regex(inner.to_string()));
     }
     // Literal union: `'a' | 'b' | …` (single-quoted members joined by `|`).

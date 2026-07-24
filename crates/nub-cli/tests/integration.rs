@@ -6485,14 +6485,18 @@ fn run_points_node_env_at_an_augmenting_shim() {
 /// (the hijack is reached via an argv0=`node` symlink).
 #[cfg(unix)]
 #[test]
-fn node_argv0_initializes_one_inert_project_config_snapshot() {
+fn node_argv0_initializes_one_project_config_snapshot() {
     let dir = std::env::temp_dir().join(format!("nub-node-config-snapshot-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let proj = dir.join("proj");
     let shim_dir = dir.join("nub-node-shim-test");
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::create_dir_all(&shim_dir).unwrap();
-    std::fs::write(proj.join("nub.jsonc"), "{ malformed").unwrap();
+    std::fs::write(
+        proj.join("nub.jsonc"),
+        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
+    )
+    .unwrap();
     let node_shim = shim_dir.join("node");
     std::os::unix::fs::symlink(nub_binary(), &node_shim).expect("symlink nub to node");
     let log = dir.join("snapshot.log");
@@ -6507,7 +6511,7 @@ fn node_argv0_initializes_one_inert_project_config_snapshot() {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "gate-off malformed project config must not block node argv0; stderr: {}",
+        "an inert sandbox config must not block node argv0; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -6519,7 +6523,7 @@ fn node_argv0_initializes_one_inert_project_config_snapshot() {
     assert_eq!(
         lines,
         vec![format!(
-            "cwd={} project=none",
+            "cwd={} project=loaded",
             proj.canonicalize().unwrap().display()
         )],
         "the successful node argv0 route must initialize exactly one snapshot from its final cwd"

@@ -1,0 +1,14 @@
+{
+  "name": "build-jail-preset",
+  "note": "The build-jail preset permits project work while retaining its secret floor, empty environment, and egress deny.",
+  "policy": "build-jail",
+  "relaxed": false,
+  "cases": [
+    { "probe": "read", "target": "proj:source.txt", "expect": true, "platforms": ["linux"] },
+    { "probe": "write", "target": "proj:build/out.txt", "expect": true, "platforms": ["linux"] },
+    { "probe": "read", "target": "proj:.env", "expect": false, "platforms": ["linux"] },
+    { "probe": "read", "target": "home:.ssh/id_rsa", "expect": false, "platforms": ["linux"] },
+    { "probe": "env", "target": "PATH", "expect": false, "platforms": ["linux"] },
+    { "probe": "connect", "target": "1.1.1.1:443", "expect": false, "platforms": ["linux"] }
+  ]
+}

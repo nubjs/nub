@@ -1,6 +1,5 @@
-//! End-to-end coverage for the P2 runtime consumers. Project discovery remains
-//! gated off, so these tests exercise the same typed schema through the active
-//! global layer and deliberately plant an inert project `nub.jsonc`.
+//! End-to-end coverage for project `nub.jsonc` runtime consumers. Every route
+//! also carries a restrictive sandbox value to prove sandbox config stays inert.
 
 #![cfg(unix)]
 
@@ -30,7 +29,7 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         let xdg_config = temp.path().join("config");
-        let config_root = xdg_config.join("nub");
+        let config_root = project.clone();
         let cache = temp.path().join("cache");
         let nubx = temp.path().join("nubx");
         std::os::unix::fs::symlink(nub_binary(), &nubx).unwrap();
@@ -38,9 +37,8 @@ impl Fixture {
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
         std::fs::create_dir_all(&config_root).unwrap();
 
-        // The restrictive sandbox value rides along in every route this fixture
-        // exercises: Phase 0 parses it losslessly but activates nothing, so all
-        // assertions below double as the runtime-consumer inertness proof (P6).
+        // The project file is live, while the restrictive sandbox value remains
+        // inert. The runtime assertions below make that distinction non-vacuous.
         std::fs::write(
             config_root.join("nub.jsonc"),
             r#"{
@@ -107,6 +105,7 @@ console.log(JSON.stringify({
   jsxMode: component.mode,
   stack: Error.stackTraceLimit,
   nodeOptions: process.env.NODE_OPTIONS,
+  runtimeSnapshot: process.env.__NUB_RUNTIME_CONFIG,
 }));
 "#,
         )
@@ -123,13 +122,6 @@ console.log(JSON.stringify({
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        // The gated project file must remain inert even though it is nearer.
-        std::fs::write(
-            project.join("nub.jsonc"),
-            r#"{ "define": { "CONFIG_WORD": "\"wrong-project-value\"" } }"#,
-        )
-        .unwrap();
 
         Self {
             _temp: temp,
@@ -173,6 +165,18 @@ console.log(JSON.stringify({
         assert_eq!(value["stack"], 23);
         let options = value["nodeOptions"].as_str().unwrap();
         assert!(options.contains("--max-old-space-size=256"), "{options}");
+        let snapshot: serde_json::Value = serde_json::from_str(
+            value["runtimeSnapshot"]
+                .as_str()
+                .expect("runtime snapshot reaches the augmented child"),
+        )
+        .expect("runtime snapshot is JSON");
+        for key in ["sandbox", "install", "dlx"] {
+            assert!(
+                snapshot.get(key).is_none(),
+                "runtime transport must exclude {key}: {snapshot}"
+            );
+        }
     }
 
     fn assert_nubx_probe(&self) {
@@ -201,6 +205,42 @@ fn runtime_snapshot_reaches_file_script_node_argv0_exec_and_nubx() {
     fixture.assert_probe(&["run", "probe"]);
     fixture.assert_probe(&["exec", "probe"]);
     fixture.assert_nubx_probe();
+}
+
+#[test]
+fn inherited_runtime_snapshot_ignores_all_sandbox_config_positions() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.project.join("inherited.js"),
+        "console.log('inherited')\n",
+    )
+    .unwrap();
+    let snapshot = r#"{
+      "nodeCompat": false,
+      "preload": [],
+      "nodeOptions": [],
+      "v8Flags": [],
+      "env": { "kind": "default" },
+      "define": {},
+      "loader": {},
+      "conditions": [],
+      "tsconfig": null,
+      "sandbox": { "fs": false, "net": false, "env": false },
+      "install": { "sandbox": { "fs": false, "net": false, "env": false } },
+      "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
+    }"#;
+    let output = fixture
+        .command()
+        .env("__NUB_RUNTIME_CONFIG", snapshot)
+        .arg("inherited.js")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "sandbox-only inherited fields must deserialize inertly: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "inherited");
 }
 
 #[test]
@@ -240,7 +280,7 @@ fn runtime_snapshot_reaches_watch_child() {
 #[test]
 fn node_compat_config_is_zero_augmentation_and_environment_false_overrides_it() {
     let fixture = Fixture::new();
-    let config = fixture.xdg_config.join("nub/nub.jsonc");
+    let config = fixture.project.join("nub.jsonc");
     std::fs::write(
         fixture.project.join("compat.js"),
         "console.log(globalThis.__runtimePreload ?? 'vanilla');\n",
@@ -340,7 +380,7 @@ fn watch_composes_explicit_config_env_sources_before_cli_env_file() {
     use std::io::BufRead;
 
     let fixture = Fixture::new();
-    let config_root = fixture.xdg_config.join("nub");
+    let config_root = fixture.project.clone();
     std::fs::write(
         config_root.join("first.env"),
         "CONFIG_ONLY=first\nSHARED=first\n",
@@ -391,7 +431,7 @@ fn watch_composes_explicit_config_env_sources_before_cli_env_file() {
 fn unsupported_runtime_option_fails_before_node_startup() {
     let fixture = Fixture::new();
     std::fs::write(
-        fixture.xdg_config.join("nub/nub.jsonc"),
+        fixture.project.join("nub.jsonc"),
         r#"{ "nodeOptions": ["--definitely-not-a-node-option"] }"#,
     )
     .unwrap();

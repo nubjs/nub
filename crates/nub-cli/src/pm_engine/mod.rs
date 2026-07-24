@@ -3264,7 +3264,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enabled_project_snapshot_reaches_install_lowering() {
+    fn project_snapshot_reaches_install_lowering() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("nub.jsonc"),
@@ -3279,13 +3279,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let snapshot = crate::project_config::with_project_config_enabled(|| {
-            crate::project_config::load_effective_config(
-                dir.path(),
-                crate::project_config::ConfigOverlays::default(),
-            )
-            .unwrap()
-        });
+        let snapshot = crate::project_config::load_effective_config(
+            dir.path(),
+            crate::project_config::ConfigOverlays::default(),
+        )
+        .unwrap();
         assert_eq!(
             snapshot
                 .project

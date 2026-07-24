@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "nub-sandbox"
-version = "0.4.11"
+version = "0.5.0"
 dependencies = [
  "base64",
  "getrandom 0.2.17",

@@ -97,9 +97,11 @@ the reach is **defined by cooperation, not confinement widening**:
   fails; resolution is meant to happen at the proxy (proxy-side DNS), reached over the proxy env.
 
 A per-host policy whose bridge cannot be established fails SAFE to coarse deny (reported as
-`net-per-host`), never silently to unrestricted egress. The known network-equivalent daemon
-sockets (`docker.sock`, container-runtime and D-Bus sockets) are force-masked at the fs layer
-under net-confinement, so a generous filesystem policy cannot become a way around the netns.
+`net-per-host`), never silently to unrestricted egress. Target-created AF_UNIX sockets are
+seccomp-denied under net confinement, so a generous filesystem policy cannot become a way
+around the netns through a host socket. The trusted bridge is outside that target filter, and
+`socketpair(2)` remains available for target-local IPC. Known network-equivalent daemon sockets
+(`docker.sock`, container-runtime and D-Bus sockets) are also force-masked at the fs layer.
 
 **FUTURE (not shipped) — transparent redirect.** A robustness upgrade would make a
 non-cooperating program's direct egress work rather than fail: nftables DNAT inside the
@@ -115,8 +117,8 @@ An AppContainer child is blocked from loopback destinations by default. The pack
 
 The capability-derived MITM tier (see
 [`EMBEDDER.md`](EMBEDDER.md#net-axis--proxy-and-the-mitm-tier)) injects a secret into
-an allowed upstream request server-side, so the sandboxed child never holds it. Two
-residuals:
+an allowed upstream request server-side, so the sandboxed child never holds it. Its
+bounded residuals and scope are:
 
 - **Reflection-endpoint residual.** If the brokered upstream reflects request headers
   back into its response body — a debug/echo endpoint, or a compromised/malicious
@@ -128,12 +130,10 @@ residuals:
   credentials back.
 - **Port-agnostic broker scoping.** A broker host matches regardless of port —
   brokering configured for `api.example.com` applies to that host on any port.
-- **Wildcard broker scoping is the user's own risk.** A broker host accepts the same
-  universal host-glob syntax as any net rule (`*.example.com`, bare `*`); it brokers to
-  the client-supplied SNI of every matching host. Pointing a broker at too broad a
-  wildcard can hand the credential to an attacker-owned subdomain that presents a valid
-  real cert — identical exposure to any over-broad wildcard net allow, out of the threat
-  model and un-warned (maintainer decision). Scope the wildcard to hosts you trust.
+- **Exact-host-only scoping.** Broker hosts reject wildcards, IP literals, CIDRs, and
+  symbolic host classes. The brokered TLS SNI/upstream and HTTP Host boundary must equal
+  that literal; the CONNECT/SOCKS authority is independently required to be admitted by
+  the net policy.
 
 ## Launcher-handoff items (engine correct; launcher must complete the guarantee)
 
@@ -321,9 +321,10 @@ shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp
 
 Stock Bubblewrap creates fresh user, PID, IPC, device, and process-filesystem views.
 Network-deny policy also creates a private network namespace and installs a small seccomp
-filter for socket families that cross that namespace plus `io_uring_setup`. Unrestricted
-network policy installs no network filter. Nested namespace inheritance and conditional
-keyring hardening are separate unfinished work and are not claimed here.
+filter that denies target-created AF_UNIX sockets and non-bridge IP families plus
+`io_uring_setup`. Unrestricted network policy installs no network filter. Nested namespace
+inheritance and conditional keyring hardening are separate unfinished work and are not claimed
+here.
 
 Before a Bubblewrap executable is used, a bounded probe verifies the required stock
 mount operations, read-only remounting, private `/proc` and `/dev`, network isolation,

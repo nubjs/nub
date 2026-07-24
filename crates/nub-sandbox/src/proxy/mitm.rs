@@ -1,19 +1,16 @@
-//! The TLS-termination (MITM) tier — credential brokering (proposal §5, cut-1 marquee).
+//! The TLS-termination tier for exact-host credential brokering.
 //!
 //! ENGAGED per-host, ONLY where a rule demands reading inside the stream (a
-//! credential-inject rule), or globally under `proxy: "terminate"`. Everything else
+//! credential-broker rule), or globally under `proxy: "terminate"`. Everything else
 //! stays a blind splice ([`super::splice`]) — the default is not "MITM off", it is "MITM
 //! never instantiated": with no broker + Auto mode, [`MitmEngine`] does not exist and no
 //! TLS/CA code runs.
 //!
-//! THE FLOW for a terminated host: mint a leaf for the SNI host → complete the TLS
-//! handshake WITH THE CHILD (which trusts the ephemeral CA via its env bundle) → read the
-//! one HTTP/1.1 request in cleartext → STRIP the child's copy of each brokered header and
-//! INJECT the real secret (strip-then-set, so a child-supplied value never survives) →
-//! open a REAL TLS connection to the upstream (verifying the real cert against the real
-//! roots — nub is never itself MITM'd) → forward the modified request → relay the
-//! response back. The child NEVER holds the secret: direct injection, not a sentinel —
-//! there is no dummy token for the child to log, echo, or persist.
+//! THE FLOW for a brokered host: mint a leaf for the exact SNI host → complete TLS
+//! with the child → parse one HTTP/1.1 request → replace exact opaque markers only
+//! inside header values → open a second, verified TLS connection to that same host →
+//! forward the request and response. Markers in a URL, body, response, or another
+//! host are never touched.
 //!
 //! FAIL-CLOSED everywhere: any handshake / parse / upstream / cert error drops the
 //! connection (the child sees a reset). There is no path that forwards a request WITHOUT
@@ -26,8 +23,9 @@
 //! (fail-closed) rather than mis-framed.
 
 use super::ca::MitmCa;
-use crate::matcher::host::host_glob_matches;
-use crate::policy::{CredentialBroker, HeaderInject};
+use crate::matcher::host::strip_trailing_dot;
+use crate::policy::CredentialBroker;
+use base64::Engine as _;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -51,18 +49,187 @@ pub struct MitmEngine {
     client_config: Arc<rustls::ClientConfig>,
     /// The crypto provider, reused when building each per-host server config.
     provider: Arc<rustls::crypto::CryptoProvider>,
-    brokers: Vec<CredentialBroker>,
+    brokers: Vec<RuntimeCredentialBroker>,
     /// `proxy: "terminate"` — terminate every allowed TLS host, not only brokered ones.
     terminate_all: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct CredentialReplacement {
+    marker: String,
+    secret: Arc<Secret>,
+}
+
+impl std::fmt::Debug for CredentialReplacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialReplacement")
+            .field("marker", &self.marker)
+            .field("secret", &self.secret)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeCredentialBroker {
+    host: String,
+    replacements: Vec<CredentialReplacement>,
+}
+
+#[derive(Clone)]
+struct Secret(String);
+
+impl Secret {
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(\"<redacted>\")")
+    }
+}
+
+/// Per-apply broker state: fresh markers for the child plus real secrets retained
+/// only in redacted proxy-owned values.
+pub(crate) struct BrokerSession {
+    markers: Vec<(String, String)>,
+    brokers: Vec<RuntimeCredentialBroker>,
+}
+
+impl BrokerSession {
+    pub(crate) fn from_policy(
+        configured: &[CredentialBroker],
+        mut lookup: impl FnMut(&str) -> Result<Option<String>, String>,
+    ) -> io::Result<Self> {
+        let mut credentials: Vec<(String, String, Arc<Secret>)> = Vec::new();
+        for name in configured.iter().flat_map(|broker| &broker.env) {
+            if credentials
+                .iter()
+                .any(|(existing, _, _)| env_key_eq(existing, name))
+            {
+                continue;
+            }
+            let value = lookup(name)
+                .map_err(|error| {
+                    io::Error::other(format!("reading brokered env `{name}`: {error}"))
+                })?
+                .ok_or_else(|| {
+                    io::Error::other(format!(
+                        "brokered environment variable `{name}` is not set in the parent"
+                    ))
+                })?;
+            if value.is_empty() {
+                return Err(io::Error::other(format!(
+                    "brokered environment variable `{name}` is empty"
+                )));
+            }
+            if value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == 0x7f)
+            {
+                return Err(io::Error::other(format!(
+                    "brokered environment variable `{name}` contains an HTTP-unsafe control byte"
+                )));
+            }
+            let marker = loop {
+                let candidate = fresh_marker()?;
+                if !credentials
+                    .iter()
+                    .any(|(_, existing, _)| existing == &candidate)
+                {
+                    break candidate;
+                }
+            };
+            credentials.push((name.clone(), marker, Arc::new(Secret(value))));
+        }
+
+        let brokers = configured
+            .iter()
+            .map(|broker| RuntimeCredentialBroker {
+                host: broker.host.clone(),
+                replacements: broker
+                    .env
+                    .iter()
+                    .map(|name| {
+                        let (_, marker, secret) = credentials
+                            .iter()
+                            .find(|(existing, _, _)| env_key_eq(existing, name))
+                            .expect("credential collected for every configured broker env");
+                        CredentialReplacement {
+                            marker: marker.clone(),
+                            secret: Arc::clone(secret),
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+        let markers = credentials
+            .into_iter()
+            .map(|(name, marker, _)| (name, marker))
+            .collect();
+        Ok(Self { markers, brokers })
+    }
+
+    pub(crate) fn install_markers(&self, env: &mut std::collections::BTreeMap<String, String>) {
+        for (name, marker) in &self.markers {
+            env.retain(|existing, _| !env_key_eq(existing, name));
+            env.insert(name.clone(), marker.clone());
+        }
+    }
+
+    pub(crate) fn into_brokers(self) -> Vec<RuntimeCredentialBroker> {
+        self.brokers
+    }
+}
+
+fn env_key_eq(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+fn fresh_marker() -> io::Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| io::Error::other(format!("generating credential marker: {error}")))?;
+    Ok(format!(
+        "nub-credential-v1-{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    ))
+}
+
 impl MitmEngine {
-    pub fn new(brokers: Vec<CredentialBroker>, terminate_all: bool) -> io::Result<Arc<MitmEngine>> {
+    pub(crate) fn new(
+        brokers: Vec<RuntimeCredentialBroker>,
+        terminate_all: bool,
+    ) -> io::Result<Arc<MitmEngine>> {
         let ca = MitmCa::generate()?;
+        let roots = ca.native_roots().to_vec();
+        Self::with_ca_and_roots(ca, brokers, terminate_all, roots)
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_for_test(
+        brokers: Vec<RuntimeCredentialBroker>,
+        upstream_root: rustls::pki_types::CertificateDer<'static>,
+    ) -> io::Result<Arc<MitmEngine>> {
+        let ca = MitmCa::generate()?;
+        Self::with_ca_and_roots(ca, brokers, false, vec![upstream_root])
+    }
+
+    fn with_ca_and_roots(
+        ca: MitmCa,
+        brokers: Vec<RuntimeCredentialBroker>,
+        terminate_all: bool,
+        upstream_roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    ) -> io::Result<Arc<MitmEngine>> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
         let mut roots = rustls::RootCertStore::empty();
-        let (added, _) = roots.add_parsable_certificates(ca.native_roots().iter().cloned());
+        let (added, _) = roots.add_parsable_certificates(upstream_roots);
         if added == 0 {
             return Err(io::Error::other(
                 "no usable upstream root certificates for the MITM proxy",
@@ -87,6 +254,11 @@ impl MitmEngine {
         }))
     }
 
+    #[cfg(test)]
+    pub(super) fn child_ca_der(&self) -> rustls::pki_types::CertificateDer<'static> {
+        self.ca.ca_der()
+    }
+
     /// The child-scoped CA-bundle path — wired into the child's CA-env vars.
     pub fn bundle_path(&self) -> &std::path::Path {
         self.ca.bundle_path()
@@ -109,12 +281,20 @@ impl MitmEngine {
         self.terminate_all
     }
 
-    fn broker_for(&self, host: &str) -> Option<&[HeaderInject]> {
-        self.brokers
-            .iter()
-            .find(|b| host_glob_matches(&b.host, host))
-            .map(|b| b.injects.as_slice())
+    fn broker_for(&self, host: &str) -> Option<&[CredentialReplacement]> {
+        broker_for_host(&self.brokers, host)
     }
+}
+
+fn broker_for_host<'a>(
+    brokers: &'a [RuntimeCredentialBroker],
+    host: &str,
+) -> Option<&'a [CredentialReplacement]> {
+    let host = strip_trailing_dot(host);
+    brokers
+        .iter()
+        .find(|broker| strip_trailing_dot(&broker.host).eq_ignore_ascii_case(host))
+        .map(|broker| broker.replacements.as_slice())
 }
 
 /// Terminate a client tunnel to `host:port`, inject the broker's credential, forward to
@@ -131,6 +311,7 @@ pub(super) fn terminate(
     host: &str,
     port: u16,
     allow_private: bool,
+    active: &super::ActiveConnection,
 ) -> io::Result<()> {
     // A brokered host reached over a NON-TLS or unmintable channel must fail closed —
     // never inject a credential onto an unverified wire (SRT's allowPlaintextInject
@@ -154,14 +335,16 @@ pub(super) fn terminate(
 
     // Read the one request in cleartext, broker it, normalize its framing.
     let mut req = http1::read_request(&mut client_tls)?;
-    if let Some(injects) = engine.broker_for(host) {
-        http1::apply_injects(&mut req, injects);
-    }
+    http1::validate_host_boundary(&req, host, port)?;
     http1::normalize_for_forward(&mut req);
+    if let Some(replacements) = engine.broker_for(host) {
+        http1::apply_replacements(&mut req, replacements)?;
+    }
 
     // The upstream leg: REAL TLS to the REAL server, verified against REAL roots.
     let upstream_tcp =
         super::connect_upstream(&super::Host::Name(host.to_string()), port, allow_private)?;
+    active.track(&upstream_tcp)?;
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|_| io::Error::other("invalid upstream server name for TLS termination"))?;
     let mut uconn = rustls::ClientConnection::new(engine.client_config.clone(), server_name)
@@ -174,7 +357,9 @@ pub(super) fn terminate(
     // Relay the response back to the child. We forced `Connection: close` upstream, so
     // the server closes after the response body — copy-until-EOF frames it correctly.
     io::copy(&mut upstream_tls, &mut client_tls)?;
-    // Clean TLS teardown both ways so a client doesn't report truncation.
+    // Send an explicit close_notify so strict clients do not classify a complete HTTP
+    // response as a truncated TLS session.
+    client_tls.conn.send_close_notify();
     let _ = client_tls.flush();
     Ok(())
 }
@@ -227,7 +412,7 @@ impl Write for ReplayIo {
 /// no more. Deliberately NOT a general HTTP stack: cut-1 forwards one request per
 /// connection with an explicit Content-Length, which keeps framing unambiguous.
 pub(super) mod http1 {
-    use super::{HeaderInject, MAX_BODY, MAX_HEAD, Read};
+    use super::{CredentialReplacement, MAX_BODY, MAX_HEAD, Read};
     use std::io;
 
     pub(super) struct Request {
@@ -275,19 +460,27 @@ pub(super) mod http1 {
         let request_line = lines
             .next()
             .ok_or_else(|| io::Error::other("empty request"))?;
-        let mut parts = request_line.splitn(3, ' ');
-        let method = parts
-            .next()
-            .ok_or_else(|| io::Error::other("no method"))?
-            .to_string();
-        let target = parts
-            .next()
-            .ok_or_else(|| io::Error::other("no request target"))?
-            .to_string();
-        let version = parts
-            .next()
-            .ok_or_else(|| io::Error::other("no HTTP version"))?
-            .to_string();
+        let parts = request_line.split(' ').collect::<Vec<_>>();
+        if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+            return Err(io::Error::other("malformed HTTP/1.1 request line"));
+        }
+        let method = parts[0].to_string();
+        if !method.bytes().all(is_token_byte) {
+            return Err(io::Error::other("invalid HTTP method token"));
+        }
+        let target = parts[1].to_string();
+        if target != "*" && !target.starts_with('/') {
+            return Err(io::Error::other("unsupported HTTP/1.1 request-target form"));
+        }
+        if target.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(io::Error::other("invalid HTTP request target"));
+        }
+        let version = parts[2].to_string();
+        if version != "HTTP/1.1" {
+            return Err(io::Error::other(
+                "only HTTP/1.1 is supported for credential brokering",
+            ));
+        }
 
         let mut headers = Vec::new();
         for line in lines {
@@ -297,19 +490,47 @@ pub(super) mod http1 {
             let (name, value) = line
                 .split_once(':')
                 .ok_or_else(|| io::Error::other("malformed header line"))?;
-            headers.push((name.trim().to_string(), value.trim().to_string()));
+            if name.is_empty() || !name.bytes().all(is_token_byte) {
+                return Err(io::Error::other("invalid HTTP header name"));
+            }
+            let value = value.trim();
+            if value
+                .bytes()
+                .any(|byte| (byte.is_ascii_control() && byte != b'\t') || byte == 0x7f)
+            {
+                return Err(io::Error::other("invalid HTTP header value"));
+            }
+            headers.push((name.to_string(), value.to_string()));
         }
 
         // Body framing.
         let mut body = buf[head_end + 4..].to_vec();
-        if header_get(&headers, "transfer-encoding")
-            .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
+        if headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
         {
             return Err(io::Error::other(
-                "chunked request bodies are not supported in the MITM cut-1 (fail-closed)",
+                "Transfer-Encoding is not supported for credential brokering",
             ));
         }
-        if let Some(cl) = header_get(&headers, "content-length") {
+        if headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("expect") || name.eq_ignore_ascii_case("upgrade")
+        }) {
+            return Err(io::Error::other(
+                "HTTP expectation and protocol upgrade are not supported for credential brokering",
+            ));
+        }
+        let lengths = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        if lengths.len() > 1 {
+            return Err(io::Error::other(
+                "multiple Content-Length headers are not supported",
+            ));
+        }
+        if let Some(cl) = lengths.first() {
             let len: usize = cl
                 .trim()
                 .parse()
@@ -324,7 +545,15 @@ pub(super) mod http1 {
                 }
                 body.extend_from_slice(&tmp[..n]);
             }
-            body.truncate(len);
+            if body.len() != len {
+                return Err(io::Error::other(
+                    "pipelined bytes after the framed request are not supported",
+                ));
+            }
+        } else if !body.is_empty() {
+            return Err(io::Error::other(
+                "unframed request body or pipelined bytes are not supported",
+            ));
         }
 
         Ok(Request {
@@ -336,16 +565,135 @@ pub(super) mod http1 {
         })
     }
 
-    /// Strip-then-set each brokered header: remove EVERY existing copy (case-insensitive),
-    /// then append the injected value. A child-supplied — possibly leaked-real — header
-    /// can never survive alongside the injected one.
-    pub(super) fn apply_injects(req: &mut Request, injects: &[HeaderInject]) {
-        for inj in injects {
-            req.headers
-                .retain(|(n, _)| !n.eq_ignore_ascii_case(&inj.header));
-            req.headers
-                .push((inj.header.clone(), inj.value.expose().to_string()));
+    pub(super) fn validate_host_boundary(req: &Request, host: &str, port: u16) -> io::Result<()> {
+        let hosts = req
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        if hosts.len() != 1 {
+            return Err(io::Error::other(
+                "a brokered HTTP/1.1 request must carry exactly one Host header",
+            ));
         }
+        let expected = super::strip_trailing_dot(host);
+        let value = hosts[0];
+        let (actual, actual_port) = match value.rsplit_once(':') {
+            Some((candidate, suffix))
+                if !candidate.contains(':') && suffix.parse::<u16>().is_ok() =>
+            {
+                (
+                    candidate,
+                    Some(suffix.parse::<u16>().expect("checked above")),
+                )
+            }
+            _ => (value, None),
+        };
+        if !super::strip_trailing_dot(actual).eq_ignore_ascii_case(expected)
+            || actual_port.is_some_and(|actual| actual != port)
+        {
+            return Err(io::Error::other(
+                "HTTP Host does not match the brokered TLS host boundary",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replace all exact marker occurrences in every header value. Header names,
+    /// field count, ordering, the request target, and the body are untouched.
+    pub(super) fn apply_replacements(
+        req: &mut Request,
+        replacements: &[CredentialReplacement],
+    ) -> io::Result<()> {
+        // Preflight the entire expanded head before allocating any replacement. The
+        // child controls marker repetition and a parent secret can be large, so the
+        // inbound 64-KiB cap alone does not bound the outbound allocation.
+        let mut projected = req
+            .method
+            .len()
+            .checked_add(req.target.len())
+            .and_then(|size| size.checked_add(req.version.len()))
+            .and_then(|size| size.checked_add(4))
+            .ok_or_else(|| io::Error::other("expanded request head size overflow"))?;
+        for (name, value) in &req.headers {
+            projected = projected
+                .checked_add(name.len())
+                .and_then(|size| size.checked_add(2))
+                .and_then(|size| {
+                    projected_replaced_len(value, replacements)
+                        .and_then(|value_len| size.checked_add(value_len))
+                })
+                .and_then(|size| size.checked_add(2))
+                .ok_or_else(|| io::Error::other("expanded request head size overflow"))?;
+            if projected > MAX_HEAD {
+                return Err(io::Error::other("expanded request head exceeds cap"));
+            }
+        }
+        projected = projected
+            .checked_add(2)
+            .ok_or_else(|| io::Error::other("expanded request head size overflow"))?;
+        if projected > MAX_HEAD {
+            return Err(io::Error::other("expanded request head exceeds cap"));
+        }
+
+        for (_, value) in &mut req.headers {
+            if let Some(replaced) = replace_markers_once(value, replacements) {
+                *value = replaced;
+            }
+        }
+        Ok(())
+    }
+
+    fn projected_replaced_len(
+        value: &str,
+        replacements: &[CredentialReplacement],
+    ) -> Option<usize> {
+        let mut cursor = 0;
+        let mut projected = 0usize;
+        loop {
+            let next = replacements
+                .iter()
+                .filter_map(|replacement| {
+                    value[cursor..]
+                        .find(&replacement.marker)
+                        .map(|offset| (cursor + offset, replacement))
+                })
+                .min_by_key(|(offset, _)| *offset);
+            let Some((offset, replacement)) = next else {
+                return projected.checked_add(value.len() - cursor);
+            };
+            projected = projected
+                .checked_add(offset - cursor)?
+                .checked_add(replacement.secret.expose().len())?;
+            cursor = offset + replacement.marker.len();
+        }
+    }
+
+    fn replace_markers_once(value: &str, replacements: &[CredentialReplacement]) -> Option<String> {
+        let mut cursor = 0;
+        let mut out: Option<String> = None;
+        loop {
+            let next = replacements
+                .iter()
+                .filter_map(|replacement| {
+                    value[cursor..]
+                        .find(&replacement.marker)
+                        .map(|offset| (cursor + offset, replacement))
+                })
+                .min_by_key(|(offset, _)| *offset);
+            let Some((offset, replacement)) = next else {
+                break;
+            };
+            let output = out.get_or_insert_with(|| String::with_capacity(value.len()));
+            output.push_str(&value[cursor..offset]);
+            output.push_str(replacement.secret.expose());
+            cursor = offset + replacement.marker.len();
+        }
+        out.map(|mut output| {
+            output.push_str(&value[cursor..]);
+            output
+        })
     }
 
     /// Normalize framing for a single-request forward: drop hop-by-hop headers, set an
@@ -397,11 +745,33 @@ pub(super) mod http1 {
         }
     }
 
+    #[cfg(test)]
     fn header_get<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         headers
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+
+    fn is_token_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
     }
 
     fn find_crlf_crlf(buf: &[u8]) -> Option<usize> {
@@ -431,24 +801,87 @@ pub(super) mod http1 {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::policy::Secret;
         use std::io::Cursor;
+        use std::sync::Arc;
 
-        fn inject(header: &str, value: &str) -> HeaderInject {
-            HeaderInject {
-                header: header.to_string(),
-                value: Secret::new(value.to_string()),
+        fn replacement(marker: &str, secret: &str) -> CredentialReplacement {
+            CredentialReplacement {
+                marker: marker.to_string(),
+                secret: Arc::new(super::super::Secret(secret.to_string())),
             }
         }
 
         #[test]
-        fn strips_child_auth_then_injects_the_real_one() {
-            let raw = "GET /repos HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer child-guess\r\n\r\n";
+        fn replaces_multiple_markers_in_multiple_header_values_without_restructuring() {
+            let raw = "GET /repos HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer marker-a.marker-b.marker-a\r\nX-Credential: marker-b\r\nX-Unchanged: child-value\r\n\r\n";
             let mut req = read_request(&mut Cursor::new(raw.as_bytes())).unwrap();
-            apply_injects(&mut req, &[inject("Authorization", "Bearer REAL-SECRET")]);
-            // The child's value is gone; exactly one Authorization remains, the real one.
+            apply_replacements(
+                &mut req,
+                &[
+                    replacement("marker-a", "SECRET-A"),
+                    replacement("marker-b", "SECRET-B"),
+                ],
+            )
+            .unwrap();
             assert_eq!(req.header_count("authorization"), 1);
-            assert_eq!(req.header("Authorization"), Some("Bearer REAL-SECRET"));
+            assert_eq!(
+                req.header("Authorization"),
+                Some("Bearer SECRET-A.SECRET-B.SECRET-A")
+            );
+            assert_eq!(req.header("X-Credential"), Some("SECRET-B"));
+            assert_eq!(req.header("X-Unchanged"), Some("child-value"));
+        }
+
+        #[test]
+        fn no_marker_means_no_replacement_and_url_body_are_never_scanned() {
+            let raw = "POST /marker HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer child-value\r\nContent-Length: 6\r\n\r\nmarker";
+            let mut req = read_request(&mut Cursor::new(raw.as_bytes())).unwrap();
+            apply_replacements(&mut req, &[replacement("marker", "REAL-SECRET")]).unwrap();
+            let wire = String::from_utf8(req.serialize()).unwrap();
+            assert!(wire.starts_with("POST /marker HTTP/1.1\r\n"));
+            assert!(wire.contains("Authorization: Bearer child-value\r\n"));
+            assert!(wire.ends_with("\r\n\r\nmarker"));
+            assert!(!wire.contains("REAL-SECRET"));
+        }
+
+        #[test]
+        fn replacement_does_not_rescan_inserted_secret_bytes() {
+            let raw = "GET / HTTP/1.1\r\nHost: api.example.com\r\nX-Credential: marker-a\r\n\r\n";
+            let mut req = read_request(&mut Cursor::new(raw.as_bytes())).unwrap();
+            apply_replacements(
+                &mut req,
+                &[
+                    replacement("marker-a", "secret-containing-marker-b"),
+                    replacement("marker-b", "SECRET-B"),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                req.header("X-Credential"),
+                Some("secret-containing-marker-b")
+            );
+        }
+
+        #[test]
+        fn replacement_rejects_expansion_beyond_the_head_cap_before_allocating() {
+            let marker = "marker";
+            let repeated = marker.repeat((MAX_HEAD / marker.len()) - 32);
+            let raw = format!(
+                "GET / HTTP/1.1\r\nHost: api.example.com\r\nX-Credential: {repeated}\r\n\r\n"
+            );
+            let mut req = read_request(&mut Cursor::new(raw.as_bytes())).unwrap();
+            let err =
+                apply_replacements(&mut req, &[replacement(marker, &"S".repeat(MAX_HEAD / 2))])
+                    .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("expanded request head exceeds cap")
+            );
+            assert_eq!(
+                req.header("X-Credential"),
+                Some(repeated.as_str()),
+                "preflight failure must not partially mutate the request"
+            );
         }
 
         #[test]
@@ -464,33 +897,53 @@ pub(super) mod http1 {
         }
 
         #[test]
-        fn wildcard_broker_terminates_and_injects_only_for_matching_hosts() {
-            // A `*.example.com` broker fires `broker_for`/`should_terminate` for the apex
-            // and any-depth subdomain, and NOT for a sibling — the runtime selection uses
-            // the same universal host-glob matcher as net allow/deny.
-            let broker = crate::policy::CredentialBroker {
-                host: "*.example.com".to_string(),
-                injects: vec![inject("Authorization", "Bearer REAL-SECRET")],
+        fn broker_selection_and_http_host_boundary_are_exact() {
+            let broker = super::super::RuntimeCredentialBroker {
+                host: "api.example.com".to_string(),
+                replacements: vec![replacement("marker", "REAL-SECRET")],
             };
-            let engine = super::super::MitmEngine::new(vec![broker], false)
-                .expect("MITM engine needs a populated native root store");
-            assert!(engine.should_terminate("example.com"));
-            assert!(engine.should_terminate("api.example.com"));
-            assert!(engine.should_terminate("a.b.example.com"));
-            assert_eq!(
-                engine
-                    .broker_for("api.example.com")
-                    .map(|i| i[0].value.expose()),
-                Some("Bearer REAL-SECRET")
-            );
-            assert!(!engine.should_terminate("evil.com"));
-            assert!(engine.broker_for("example.com.evil.com").is_none());
+            let brokers = [broker];
+            assert!(super::super::broker_for_host(&brokers, "api.example.com").is_some());
+            assert!(super::super::broker_for_host(&brokers, "API.EXAMPLE.COM.").is_some());
+            assert!(super::super::broker_for_host(&brokers, "sub.api.example.com").is_none());
+            assert!(super::super::broker_for_host(&brokers, "evil.com").is_none());
+
+            let ok = "GET / HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n";
+            let req = read_request(&mut Cursor::new(ok.as_bytes())).unwrap();
+            validate_host_boundary(&req, "api.example.com", 443).unwrap();
+
+            let wrong = "GET / HTTP/1.1\r\nHost: evil.example.com\r\n\r\n";
+            let req = read_request(&mut Cursor::new(wrong.as_bytes())).unwrap();
+            assert!(validate_host_boundary(&req, "api.example.com", 443).is_err());
+
+            let duplicate =
+                "GET / HTTP/1.1\r\nHost: api.example.com\r\nHost: evil.example.com\r\n\r\n";
+            let req = read_request(&mut Cursor::new(duplicate.as_bytes())).unwrap();
+            assert!(validate_host_boundary(&req, "api.example.com", 443).is_err());
         }
 
         #[test]
         fn chunked_request_body_is_refused() {
             let raw = "POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
             assert!(read_request(&mut Cursor::new(raw.as_bytes())).is_err());
+        }
+
+        #[test]
+        fn unsupported_http_shapes_fail_closed() {
+            for raw in [
+                "PRI * HTTP/2.0\r\nHost: api.example.com\r\n\r\n",
+                "GET https://api.example.com/x HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+                "GET / HTTP/1.0\r\nHost: api.example.com\r\n\r\n",
+                "GET / HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+                "GET / HTTP/1.1\r\nHost: api.example.com\r\nExpect: 100-continue\r\n\r\n",
+                "GET / HTTP/1.1\r\nHost: api.example.com\r\n\r\nGET /second HTTP/1.1\r\n\r\n",
+                "POST / HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 1\r\n\r\nxy",
+            ] {
+                assert!(
+                    read_request(&mut Cursor::new(raw.as_bytes())).is_err(),
+                    "unsupported request unexpectedly parsed: {raw:?}"
+                );
+            }
         }
 
         #[test]
@@ -507,5 +960,67 @@ pub(super) mod http1 {
             let ok = "GET / HTTP/1.1\r\nHost: h\r\nX-Foo: a\r\n\r\n";
             assert!(read_request(&mut Cursor::new(ok.as_bytes())).is_ok());
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn broker(names: &[&str]) -> CredentialBroker {
+        CredentialBroker {
+            host: "api.example.com".to_string(),
+            env: names.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn each_session_installs_fresh_markers_and_redacts_real_secrets() {
+        let configured = [broker(&["API_TOKEN", "SECOND_TOKEN"])];
+        let make = || {
+            BrokerSession::from_policy(&configured, |name| {
+                Ok(Some(format!("real-secret-for-{name}")))
+            })
+            .unwrap()
+        };
+        let first = make();
+        let second = make();
+        let mut first_env = BTreeMap::from([
+            ("KEEP".to_string(), "yes".to_string()),
+            ("API_TOKEN".to_string(), "must-be-overwritten".to_string()),
+        ]);
+        let mut second_env = BTreeMap::new();
+        first.install_markers(&mut first_env);
+        second.install_markers(&mut second_env);
+
+        let first_marker = first_env.get("API_TOKEN").unwrap();
+        let second_marker = second_env.get("API_TOKEN").unwrap();
+        assert!(first_marker.starts_with("nub-credential-v1-"));
+        assert_ne!(
+            first_marker, second_marker,
+            "each apply gets a fresh marker"
+        );
+        assert!(
+            !first_env
+                .values()
+                .any(|value| value.contains("real-secret"))
+        );
+        assert_eq!(first_env.get("KEEP").map(String::as_str), Some("yes"));
+
+        let debug = format!("{:?}", first.brokers);
+        assert!(!debug.contains("real-secret"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn missing_empty_and_multiline_parent_values_fail_closed() {
+        let configured = [broker(&["API_TOKEN"])];
+        assert!(BrokerSession::from_policy(&configured, |_| Ok(None)).is_err());
+        assert!(BrokerSession::from_policy(&configured, |_| Ok(Some(String::new()))).is_err());
+        assert!(
+            BrokerSession::from_policy(&configured, |_| Ok(Some("bad\r\nvalue".to_string())))
+                .is_err()
+        );
     }
 }

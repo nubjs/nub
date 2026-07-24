@@ -22,7 +22,7 @@
 //! and per-run ACL grants that are torn down after exit.
 
 use crate::policy::{Effect, Inspection, ProxyMode, SandboxPolicy};
-use crate::proxy::mitm::MitmEngine;
+use crate::proxy::mitm::{BrokerSession, MitmEngine, RuntimeCredentialBroker};
 use crate::proxy::{EgressProxy, StaticDecider};
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
@@ -548,30 +548,51 @@ impl Prepared {
     }
 }
 
-/// Whether the policy needs the per-host egress proxy: net enforced AND at least one
-/// Allow rule (a pure deny-all is coarse — no proxy, nothing is reachable). A proxy
-/// that fails to start degrades to coarse-deny (fail-SAFE: denies more, not less), so
-/// this returns `None` on a start failure and the backend reports `net-per-host`.
-fn start_proxy_if_needed(policy: &SandboxPolicy) -> Option<EgressProxy> {
-    if !(policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow)) {
-        return None;
+/// Whether the policy needs the egress proxy. Coarse `net: true` / `net: false`
+/// never start one. An ordinary per-host allow reaches this point only after the
+/// compiler saw an explicit proxy mode; a credential broker automatically requires a
+/// terminating proxy even when `proxy` was omitted. Startup failure is a hard
+/// fail-closed apply error: a required proxy is never represented as "not needed."
+fn proxy_needed(policy: &SandboxPolicy) -> bool {
+    policy.net.enforce
+        && (!policy.net.brokers.is_empty()
+            || (policy
+                .net
+                .rules
+                .iter()
+                .any(|rule| rule.effect == Effect::Allow)
+                && policy.net.mode != ProxyMode::Disabled))
+}
+
+fn start_proxy_if_needed(
+    policy: &SandboxPolicy,
+    runtime_brokers: Vec<RuntimeCredentialBroker>,
+) -> Result<Option<EgressProxy>, Degradation> {
+    if !proxy_needed(policy) {
+        return Ok(None);
     }
     let decider = Arc::new(StaticDecider::new(policy.net.clone()));
     let mitm = match policy.net.inspection {
         Inspection::TlsInspect => {
             let terminate_all = matches!(policy.net.mode, ProxyMode::Terminate);
-            match MitmEngine::new(policy.net.brokers.clone(), terminate_all) {
+            match MitmEngine::new(runtime_brokers, terminate_all) {
                 Ok(engine) => Some(engine),
-                // FAIL-CLOSED: the tier required TLS termination but the CA/TLS stack
-                // could not be built. Do NOT downgrade to a blind splice — that would
-                // forward brokered requests UN-injected. Return None so the whole net
-                // coarse-denies (fail-safe over-confine); the backend reports net lost.
-                Err(_) => return None,
+                Err(error) => {
+                    return Err(Degradation {
+                        lost: vec!["net-per-host".to_string()],
+                        reason: Some(format!("starting required TLS-inspection proxy: {error}")),
+                    });
+                }
             }
         }
         Inspection::Connection => None,
     };
-    EgressProxy::start(decider, mitm).ok()
+    EgressProxy::start(decider, mitm)
+        .map(Some)
+        .map_err(|error| Degradation {
+            lost: vec!["net-per-host".to_string()],
+            reason: Some(format!("starting required egress proxy: {error}")),
+        })
 }
 
 /// The CA-trust env keys pointed at the child CA bundle (ephemeral CA + real roots).
@@ -737,13 +758,34 @@ fn apply_inner(
         });
     }
     validate_apply_inputs(policy, &spec)?;
+    let mut runtime_policy = policy.clone();
+    let runtime_brokers = if policy.net.brokers.is_empty() {
+        Vec::new()
+    } else {
+        let session = BrokerSession::from_policy(&policy.net.brokers, |name| {
+            let Some(value) = std::env::var_os(name) else {
+                return Ok(None);
+            };
+            value
+                .into_string()
+                .map(Some)
+                .map_err(|_| "value is not valid Unicode".to_string())
+        })
+        .map_err(|error| Degradation {
+            lost: vec!["credential-broker".to_string()],
+            reason: Some(error.to_string()),
+        })?;
+        session.install_markers(&mut runtime_policy.env.constructed);
+        session.into_brokers()
+    };
+    let policy = &runtime_policy;
     #[cfg(target_os = "linux")]
     let linux_preflight = linux::preflight(policy, &spec, runtime)?;
     // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
     // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
     // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`
     // so it outlives the child (design.md §2.5).
-    let proxy = start_proxy_if_needed(policy);
+    let proxy = start_proxy_if_needed(policy, runtime_brokers)?;
     let proxy_port = proxy.as_ref().map(EgressProxy::port);
     // The per-session egress-proxy token, delivered to the child via the proxy URL. Same
     // presence as `proxy_port` (both derive from `proxy`), threaded into each backend so
@@ -828,6 +870,93 @@ fn apply_inner(
 }
 
 fn validate_apply_inputs(policy: &SandboxPolicy, spec: &CommandSpec) -> Result<(), Degradation> {
+    let has_allow = policy
+        .net
+        .rules
+        .iter()
+        .any(|rule| rule.effect == Effect::Allow);
+    if policy.net.enforce
+        && has_allow
+        && policy.net.brokers.is_empty()
+        && policy.net.mode == ProxyMode::Disabled
+    {
+        return Err(Degradation {
+            lost: vec!["net-per-host".to_string()],
+            reason: Some(
+                "fine-grained net allow has no explicit proxy; compile the policy with `proxy: \"auto\"`, `\"passthrough\"`, or `\"terminate\"`"
+                    .to_string(),
+            ),
+        });
+    }
+    if !policy.net.brokers.is_empty()
+        && (!policy.net.enforce
+            || policy.net.inspection != Inspection::TlsInspect
+            || policy.net.mode == ProxyMode::Passthrough)
+    {
+        return Err(Degradation {
+            lost: vec!["credential-broker".to_string()],
+            reason: Some(
+                "credential broker IR does not require an enforceable TLS-inspection tier"
+                    .to_string(),
+            ),
+        });
+    }
+    for (broker_index, broker) in policy.net.brokers.iter().enumerate() {
+        let host = crate::matcher::host::strip_trailing_dot(&broker.host);
+        let duplicate_host = policy.net.brokers[..broker_index].iter().any(|existing| {
+            crate::matcher::host::strip_trailing_dot(&existing.host).eq_ignore_ascii_case(host)
+        });
+        let valid_host = !broker.host.contains(['*', '/'])
+            && !broker.host.starts_with('<')
+            && host.parse::<std::net::IpAddr>().is_err()
+            && !crate::policy::broker_host_is_legacy_ipv4_literal(host)
+            && !host.is_empty()
+            && host.len() <= 253
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            });
+        if !valid_host
+            || duplicate_host
+            || broker.env.is_empty()
+            || !crate::matcher::HostMatcher::new(&policy.net).admits(host)
+        {
+            return Err(Degradation {
+                lost: vec!["credential-broker".to_string()],
+                reason: Some(format!(
+                    "invalid credential broker IR for exact host {:?}",
+                    broker.host
+                )),
+            });
+        }
+        for (index, name) in broker.env.iter().enumerate() {
+            let invalid_name = name.is_empty()
+                || name.contains(['=', '\0', '*', '?', '[', ']', '{', '}'])
+                || name.ends_with('?')
+                || crate::policy::credential_env_name_is_reserved(name);
+            let duplicate = broker.env[..index].iter().any(|existing| {
+                if cfg!(windows) {
+                    existing.eq_ignore_ascii_case(name)
+                } else {
+                    existing == name
+                }
+            });
+            if invalid_name || duplicate {
+                return Err(Degradation {
+                    lost: vec!["credential-broker".to_string()],
+                    reason: Some(format!(
+                        "invalid credential broker environment name at {}[{}]",
+                        broker.host, index
+                    )),
+                });
+            }
+        }
+    }
     let reject_nul = |label: &str, value: &std::ffi::OsStr| {
         if os_str_contains_nul(value) {
             Err(Degradation {
@@ -946,6 +1075,15 @@ fn generic_apply(
     ca_bundle: Option<&std::path::Path>,
     tmp_dir: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
+    if !policy.net.brokers.is_empty() {
+        return Err(Degradation {
+            lost: vec!["credential-broker".to_string()],
+            reason: Some(
+                "this OS backend cannot force brokered traffic through the credential proxy"
+                    .to_string(),
+            ),
+        });
+    }
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
@@ -1028,6 +1166,90 @@ fn fs_confines(policy: &SandboxPolicy) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_activation_needs_an_explicit_mode_or_a_broker() {
+        use crate::policy::{CredentialBroker, NetRule, NetTarget};
+
+        let allow = NetRule {
+            target: NetTarget::Host("api.example.com".to_string()),
+            effect: Effect::Allow,
+        };
+        let mut policy = SandboxPolicy::default();
+
+        // Coarse policy never starts a proxy, including unrestricted network.
+        policy.net.enforce = false;
+        policy.net.mode = ProxyMode::Auto;
+        assert!(!proxy_needed(&policy));
+
+        // An omitted proxy never turns a plain host allow into an in-path service.
+        policy.net.enforce = true;
+        policy.net.rules.push(allow.clone());
+        policy.net.mode = ProxyMode::Disabled;
+        assert!(!proxy_needed(&policy));
+
+        // The author can request blind forwarding explicitly.
+        policy.net.mode = ProxyMode::Auto;
+        assert!(proxy_needed(&policy));
+
+        // Credential injection is the narrow automatic exception: it needs a
+        // terminating proxy even when the wrapper omitted `proxy`.
+        policy.net.mode = ProxyMode::Disabled;
+        policy.net.brokers.push(CredentialBroker {
+            host: "api.example.com".to_string(),
+            env: vec!["API_TOKEN".to_string()],
+        });
+        assert!(proxy_needed(&policy));
+    }
+
+    #[test]
+    fn apply_validation_rejects_forged_broker_ir() {
+        use crate::policy::{CredentialBroker, NetRule, NetTarget};
+
+        let mut policy = SandboxPolicy::default();
+        policy.env = crate::policy::EnvPolicy::resolved(Default::default());
+        policy.net.enforce = true;
+        policy.net.inspection = Inspection::TlsInspect;
+        policy.net.rules.push(NetRule {
+            target: NetTarget::Host("*".to_string()),
+            effect: Effect::Allow,
+        });
+        policy.net.brokers.push(CredentialBroker {
+            host: "*".to_string(),
+            env: vec!["API_TOKEN".to_string()],
+        });
+        let err = validate_apply_inputs(&policy, &CommandSpec::new("/usr/bin/true")).unwrap_err();
+        assert_eq!(err.lost, vec!["credential-broker"]);
+
+        policy.net.brokers[0].host = "api.example.com".to_string();
+        policy.net.brokers[0].env = vec!["TOKEN".to_string(), "TOKEN".to_string()];
+        let err = validate_apply_inputs(&policy, &CommandSpec::new("/usr/bin/true")).unwrap_err();
+        assert_eq!(err.lost, vec!["credential-broker"]);
+
+        policy.net.brokers[0].env = vec!["TOKEN".to_string()];
+        policy.net.rules.push(NetRule {
+            target: NetTarget::Host("api.example.com".to_string()),
+            effect: Effect::Deny,
+        });
+        let err = validate_apply_inputs(&policy, &CommandSpec::new("/usr/bin/true")).unwrap_err();
+        assert_eq!(err.lost, vec!["credential-broker"]);
+
+        policy.net.brokers[0].host = "127.1".to_string();
+        policy.net.brokers[0].env = vec!["TOKEN".to_string()];
+        policy.net.rules.push(NetRule {
+            target: NetTarget::Host("127.1".to_string()),
+            effect: Effect::Allow,
+        });
+        let err = validate_apply_inputs(&policy, &CommandSpec::new("/usr/bin/true")).unwrap_err();
+        assert_eq!(err.lost, vec!["credential-broker"]);
+        policy.net.rules.pop();
+
+        policy.net.brokers[0].host = "api.example.com".to_string();
+        policy.net.rules.pop();
+        policy.net.brokers[0].env = vec!["HTTPS_PROXY".to_string()];
+        let err = validate_apply_inputs(&policy, &CommandSpec::new("/usr/bin/true")).unwrap_err();
+        assert_eq!(err.lost, vec!["credential-broker"]);
+    }
 
     /// The proxy env embeds the per-session token as the URL userinfo (so proxy-honoring
     /// clients authenticate automatically) and sets `NODE_USE_ENV_PROXY=1` so Node 24+

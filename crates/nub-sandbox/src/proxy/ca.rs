@@ -104,6 +104,11 @@ impl MitmCa {
         &self.native_roots
     }
 
+    #[cfg(test)]
+    pub(super) fn ca_der(&self) -> CertificateDer<'static> {
+        self.ca_cert.der().clone()
+    }
+
     /// Mint a leaf cert for `host`, signed by the ephemeral CA. Fresh per call (cut-1
     /// mints per terminated connection — a per-host cache is a perf follow-up, not a
     /// correctness one). The returned chain is leaf-only: the child trusts the CA

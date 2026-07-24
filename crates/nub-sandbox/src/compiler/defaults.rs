@@ -361,11 +361,16 @@ fn os_essential_env_from(
     ambient: &std::collections::BTreeMap<String, String>,
     names: &[&str],
 ) -> std::collections::BTreeMap<String, String> {
-    ambient
-        .iter()
-        .filter(|(k, _)| names.iter().any(|n| n.eq_ignore_ascii_case(k)))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
+    let mut selected = std::collections::BTreeMap::new();
+    for (key, value) in ambient {
+        if names.iter().any(|name| name.eq_ignore_ascii_case(key)) {
+            // This helper models Windows selection even on a POSIX test host.
+            // A malformed synthetic map can contain aliases that a real Windows
+            // environment cannot; keep one deterministic logical entry anyway.
+            insert_env_with_case(&mut selected, key.clone(), value.clone(), true);
+        }
+    }
+    selected
 }
 
 /// The OS-essential env for the spawning OS, read from the host ambient env at
@@ -376,6 +381,78 @@ pub fn os_essential_env(
     ambient: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, String> {
     os_essential_env_from(ambient, OS_ESSENTIAL_ENV)
+}
+
+/// Environment variable names follow the spawning OS's name contract: Windows
+/// folds ASCII case, while POSIX keeps it significant.
+pub(crate) fn env_key_eq(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// Whether `env` already contains `key`, honoring the spawning OS's env-name
+/// contract. This is deliberately not a plain `BTreeMap::contains_key`: Windows
+/// treats `PATH` and `Path` as one variable even though Rust's map does not.
+pub(crate) fn env_contains_key(
+    env: &std::collections::BTreeMap<String, String>,
+    key: &str,
+) -> bool {
+    env.keys().any(|existing| env_key_eq(existing, key))
+}
+
+/// Insert one environment value while preserving one logical Windows key. A
+/// literal entry is folded before ambient source values, so its spelling and value
+/// replace any same-folded ambient entry rather than serializing both aliases.
+pub(crate) fn insert_env(
+    env: &mut std::collections::BTreeMap<String, String>,
+    key: String,
+    value: String,
+) {
+    insert_env_with_case(env, key, value, cfg!(windows));
+}
+
+fn insert_env_with_case(
+    env: &mut std::collections::BTreeMap<String, String>,
+    key: String,
+    value: String,
+    case_insensitive: bool,
+) {
+    if case_insensitive {
+        env.retain(|existing, _| !existing.eq_ignore_ascii_case(&key));
+    }
+    env.insert(key, value);
+}
+
+/// Add the OS bootstrap variables after every constraining env fold. These are
+/// mechanism values, not user-provided capabilities: Windows must retain them for
+/// `CreateProcessW`/AppContainer startup even when an array or object allowlist
+/// otherwise excludes them. Existing policy entries win, including an explicit
+/// literal override.
+pub(crate) fn add_os_essential_env(
+    policy: &mut crate::policy::EnvPolicy,
+    ambient: &std::collections::BTreeMap<String, String>,
+) {
+    // `EnvPolicy` is public IR, so normalize even a direct caller's synthetic
+    // map. Normal compiler folds have already made literal-over-ambient choice
+    // explicit; this only gives an ambiguous externally-built alias pair one
+    // deterministic Windows representation.
+    let constructed = std::mem::take(&mut policy.constructed);
+    for (key, value) in constructed {
+        insert_env(&mut policy.constructed, key, value);
+    }
+    for (key, value) in os_essential_env(ambient) {
+        if !env_contains_key(&policy.constructed, &key) {
+            insert_env(&mut policy.constructed, key, value);
+        }
+    }
+    policy.withheld = ambient
+        .keys()
+        .filter(|key| !env_contains_key(&policy.constructed, key))
+        .cloned()
+        .collect();
 }
 
 /// The strip-all env FLOOR: an enforcing env that WITHHOLDS all user/ambient env
@@ -392,7 +469,7 @@ pub fn strip_all_env(
     let constructed = os_essential_env(ambient);
     let withheld = ambient
         .keys()
-        .filter(|k| !constructed.contains_key(*k))
+        .filter(|k| !env_contains_key(&constructed, k))
         .cloned()
         .collect();
     crate::policy::EnvPolicy {
@@ -532,6 +609,35 @@ mod tests {
             !out.contains_key("SECRET_TOKEN"),
             "a non-essential (secret) name is never injected"
         );
+    }
+
+    #[test]
+    fn windows_essential_selection_deduplicates_case_aliases() {
+        // This is intentionally host-runnable: the selector models Windows
+        // case-folding even when the test process itself is POSIX.
+        let env = ambient(&[
+            ("SYSTEMROOT", "C:/old"),
+            ("SystemRoot", "C:/Windows"),
+            ("TEMP", "C:/Temp"),
+        ]);
+        let out = os_essential_env_from(&env, &["SystemRoot", "TEMP"]);
+        assert_eq!(out.len(), 2, "Windows aliases are one logical env key");
+        assert_eq!(
+            out.get("SystemRoot").map(String::as_str),
+            Some("C:/Windows")
+        );
+        assert_eq!(out.get("TEMP").map(String::as_str), Some("C:/Temp"));
+    }
+
+    #[test]
+    fn windows_env_insert_replaces_same_folded_ambient_key() {
+        // The literal insertion seam is host-runnable with the Windows case rule
+        // passed explicitly. It protects both the compiler's constructed map and
+        // the Windows launch block from `Path`/`PATH` duplication.
+        let mut env = ambient(&[("Path", "ambient")]);
+        insert_env_with_case(&mut env, "PATH".to_string(), "literal".to_string(), true);
+        assert_eq!(env.len(), 1);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("literal"));
     }
 
     #[test]

@@ -1250,38 +1250,103 @@ fn net_equivalent_socket_masks() -> Result<Vec<Mask>, String> {
 
     let mut masks = Vec::new();
     for path in paths {
-        let link = match fs::symlink_metadata(&path) {
-            Ok(link) => link,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "statting network-equivalent socket {}: {error}",
-                    path.display()
-                ));
-            }
-        };
-        let resolved = match fs::canonicalize(&path) {
-            Ok(resolved) => resolved,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "resolving network-equivalent socket {}: {error}",
-                    path.display()
-                ));
-            }
-        };
-        let is_socket = link.file_type().is_socket()
-            || fs::metadata(&resolved).is_ok_and(|meta| meta.file_type().is_socket());
-        if !is_socket {
+        let Some(mask) = net_equivalent_socket_mask(&path)? else {
             continue;
-        }
-        masks.push(Mask {
-            path: resolved,
-            kind: MaskKind::Unreadable,
-            directory: false,
-        });
+        };
+        masks.push(mask);
     }
     Ok(masks)
+}
+
+fn net_equivalent_socket_mask(path: &Path) -> Result<Option<Mask>, String> {
+    let link = match fs::symlink_metadata(path) {
+        Ok(link) => link,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            // The socket is already unreachable through a locked parent, but
+            // those permissions can change after preflight. Mask the nearest
+            // directory we can name so the sandbox remains closed if they do.
+            return inaccessible_socket_parent_mask(path).map(Some);
+        }
+        Err(error) => {
+            return Err(format!(
+                "statting network-equivalent socket {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let resolved = match fs::canonicalize(path) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return inaccessible_socket_parent_mask(path).map(Some);
+        }
+        Err(error) => {
+            return Err(format!(
+                "resolving network-equivalent socket {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let is_socket = link.file_type().is_socket()
+        || fs::metadata(&resolved).is_ok_and(|meta| meta.file_type().is_socket());
+    if !is_socket {
+        return Ok(None);
+    }
+    Ok(Some(Mask {
+        path: resolved,
+        kind: MaskKind::Unreadable,
+        directory: false,
+    }))
+}
+
+fn inaccessible_socket_parent_mask(path: &Path) -> Result<Mask, String> {
+    for parent in path.ancestors().skip(1) {
+        // Hiding all of /run or /var would break the process view. A normal
+        // locked runtime socket always has a narrower visible parent.
+        if matches!(parent.to_str(), Some("/" | "/run" | "/var" | "/var/run")) {
+            break;
+        }
+        match fs::metadata(parent) {
+            Ok(metadata) if metadata.is_dir() => {
+                let resolved = fs::canonicalize(parent).map_err(|error| {
+                    format!(
+                        "resolving inaccessible network-equivalent socket parent {}: {error}",
+                        parent.display()
+                    )
+                })?;
+                return Ok(Mask {
+                    path: resolved,
+                    kind: MaskKind::Unreadable,
+                    directory: true,
+                });
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "network-equivalent socket parent is not a directory: {}",
+                    parent.display()
+                ));
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "statting network-equivalent socket parent {}: {error}",
+                    parent.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "network-equivalent socket {} is inaccessible and has no narrow parent that can be masked",
+        path.display()
+    ))
 }
 
 fn alternate_procfs_masks() -> Result<Vec<Mask>, String> {
@@ -2224,23 +2289,26 @@ fn build_seccomp_for(
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 
     if restrict_network {
-        // The private network namespace handles ordinary IP traffic. AF_UNIX is
-        // included because filesystem and abstract sockets cross that boundary.
-        // AF_NETLINK remains available so nested Bubblewrap can configure its own
+        // The private network namespace handles ordinary IP traffic. AF_UNIX sockets
+        // cross that boundary, so target-created AF_UNIX sockets remain blocked. The
+        // trusted bridge runs outside the target's seccomp filter; socketpair(2) is not
+        // restricted and remains available for in-process local IPC. AF_NETLINK remains
+        // available so nested Bubblewrap can configure its own
         // private network namespace without reaching the host network.
         //
         // PER-HOST carve-out (C3): the empty netns is the boundary, but it does NOT confine
         // every family — AF_VSOCK reaches the hypervisor (CID-addressed, not netns-scoped)
         // and AF_BLUETOOTH/AF_RDS/AF_CAN/AF_TIPC/AF_IB/AF_NFC are global buses/transports —
-        // so those MUST stay seccomp-denied even for per-host. Per-host only lifts the three
-        // families the child genuinely needs to reach the in-netns bridge + the relay UDS:
-        // AF_INET, AF_INET6 (loopback to the bridge, which the netns confines to `lo`) and
-        // AF_UNIX (the relay socket + legit local IPC). Everything else — including AF_PACKET
-        // (no raw-socket need to reach the proxy) — stays denied, minimizing the delta from
+        // so those MUST stay seccomp-denied even for per-host. Per-host only lifts the IP
+        // families the target needs to reach the in-netns bridge: AF_INET and AF_INET6
+        // (loopback, which the netns confines to `lo`). AF_UNIX stays denied because a
+        // target-created filesystem socket can reach host services across the netns; the
+        // relay is trusted infrastructure outside this filter. Everything else — including
+        // AF_PACKET (no raw-socket need to reach the proxy) — stays denied, minimizing the delta from
         // coarse-deny. `io_uring_setup` stays blocked below so a socket cannot be created off
         // the family filter. WITHOUT this carve-out, per-host would be a strict WEAKENING of
         // coarse-deny (which denies all these families) — the netns alone is not sufficient.
-        const PER_HOST_PERMITTED: [libc::c_int; 3] = [libc::AF_UNIX, libc::AF_INET, libc::AF_INET6];
+        const PER_HOST_PERMITTED: [libc::c_int; 2] = [libc::AF_INET, libc::AF_INET6];
         let all_denied = [
             libc::AF_UNIX,
             libc::AF_INET,
@@ -2951,10 +3019,12 @@ mod tests {
     }
 
     #[test]
-    fn per_host_seccomp_permits_ip_and_unix_but_still_denies_vsock() {
-        // C3 cross-layer regression: per-host lifts the socket ceiling ONLY for the families
-        // the child needs to reach the in-netns bridge + relay UDS (AF_INET/AF_INET6/AF_UNIX).
-        // The empty netns does NOT confine AF_VSOCK (hypervisor CID addressing) or the other
+    fn per_host_seccomp_permits_ip_but_denies_unix_and_vsock() {
+        // C3 cross-layer regression: per-host lifts the socket ceiling ONLY for the IP
+        // families needed to reach the in-netns bridge (AF_INET/AF_INET6). The trusted
+        // bridge itself is outside the target filter, while target-created AF_UNIX sockets
+        // remain denied because filesystem paths cross the empty netns. The empty netns does
+        // NOT confine AF_VSOCK (hypervisor CID addressing) or the other
         // global buses/transports, so those MUST stay denied — otherwise per-host would be a
         // strict weakening of coarse-deny.
         const SOCKET: i64 = 41; // x86-64 socket(2)
@@ -2978,8 +3048,8 @@ mod tests {
                 &seccomp_data(SOCKET as u32, AUDIT_ARCH_X86_64, family as u64),
             )
         };
-        // Per-host PERMITS the three families the bridge/relay need — which coarse-deny denies.
-        for family in [libc::AF_INET, libc::AF_INET6, libc::AF_UNIX] {
+        // Per-host permits only the IP families the bridge needs — which coarse-deny denies.
+        for family in [libc::AF_INET, libc::AF_INET6] {
             assert_eq!(
                 sock(&per_host, family),
                 allowed,
@@ -2987,8 +3057,9 @@ mod tests {
             );
             assert_eq!(sock(&coarse, family), denied, "coarse-deny denies {family}");
         }
-        // Per-host STILL denies every netns-unconfined family (the cross-layer fix).
+        // Per-host still denies AF_UNIX and every other netns-unconfined family.
         for family in [
+            libc::AF_UNIX,
             libc::AF_VSOCK,
             libc::AF_PACKET,
             libc::AF_XDP,
@@ -3098,6 +3169,29 @@ mod tests {
                 directory: false,
             }]
         );
+    }
+
+    #[test]
+    fn inaccessible_network_socket_masks_its_narrow_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let root = tempdir().unwrap();
+        let runtime = root.path().join("podman");
+        fs::create_dir(&runtime).unwrap();
+        let socket = runtime.join("podman.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let original = fs::metadata(&runtime).unwrap().permissions();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let mask = net_equivalent_socket_mask(&socket)
+            .expect("an inaccessible socket must remain maskable")
+            .expect("the locked socket needs a mask");
+
+        fs::set_permissions(&runtime, original).unwrap();
+        assert_eq!(mask.path, fs::canonicalize(&runtime).unwrap());
+        assert_eq!(mask.kind, MaskKind::Unreadable);
+        assert!(mask.directory);
     }
 
     #[test]

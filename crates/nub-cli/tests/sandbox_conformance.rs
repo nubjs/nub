@@ -522,3 +522,108 @@ fn env_scrub_including_npm_config_auth() {
 fn net_coarse_egress_deny() {
     drive("net-coarse-deny");
 }
+
+/// Linux's real Bubblewrap backend is the conformance target for the deny-all
+/// empty object, ordered fs re-open, and the named lifecycle baseline.
+#[test]
+#[cfg(target_os = "linux")]
+fn empty_object_default_deny() {
+    drive("empty-object-default-deny");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn fs_last_match_reopen() {
+    drive("fs-last-match-reopen");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn build_jail_preset() {
+    drive("build-jail-preset");
+}
+
+#[test]
+fn sandbox_activation_requires_the_exact_run_flag_position() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let policy = temp.path().join("policy.json");
+    let marker = temp.path().join("marker");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{ "scripts": { "probe": "./probe.sh" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("probe.sh"),
+        format!("#!/bin/sh\nprintf invoked > {}\n", marker.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            project.join("probe.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    std::fs::write(&policy, r#"{ "env": 42 }"#).unwrap();
+
+    let exact = Command::new(nub_bin())
+        .args(["run", "--sandbox", policy.to_str().unwrap(), "--", "true"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(!exact.status.success());
+    assert!(
+        String::from_utf8_lossy(&exact.stderr).contains("sandbox policy did not compile"),
+        "{}",
+        String::from_utf8_lossy(&exact.stderr)
+    );
+
+    for args in [
+        vec!["run", "probe", "--sandbox", policy.to_str().unwrap()],
+        vec!["run", "--", "probe", "--sandbox", policy.to_str().unwrap()],
+        vec!["--sandbox", policy.to_str().unwrap(), "run", "probe"],
+    ] {
+        let output = Command::new(nub_bin())
+            .args(&args)
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("sandbox policy did not compile"),
+            "misplaced {args:?} activated the hidden sandbox: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(
+        marker.exists(),
+        "post-positional and -- forms must run the script"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn ambient_sandbox_named_environment_cannot_select_a_linux_bootstrap_role() {
+    for key in [
+        "NUB_SANDBOX_MONITOR",
+        "NUB_SANDBOX_BOOTSTRAP",
+        "__NUB_SANDBOX_MONITOR",
+        "__NUB_SANDBOX_BOOTSTRAP",
+    ] {
+        let output = Command::new(nub_bin())
+            .arg("--help")
+            .env(key, "__nub-sandbox-monitor")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{key}: {:?}", output.status);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("sandbox monitor bootstrap"),
+            "{key} selected a bootstrap role: {stderr}"
+        );
+    }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "empty-object-default-deny",
+  "note": "An empty object is the deny-all posture: no filesystem, network, or ambient-environment axis is implicitly inherited.",
+  "policy": {},
+  "relaxed": false,
+  "cases": [
+    { "probe": "read", "target": "proj:existing.txt", "expect": false, "platforms": ["linux"] },
+    { "probe": "write", "target": "proj:created.txt", "expect": false, "platforms": ["linux"] },
+    { "probe": "env", "target": "PATH", "expect": false, "platforms": ["linux"] },
+    { "probe": "connect", "target": "1.1.1.1:443", "expect": false, "platforms": ["linux"] }
+  ]
+}

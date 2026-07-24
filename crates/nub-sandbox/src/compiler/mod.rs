@@ -48,7 +48,7 @@ impl std::fmt::Display for CompileWarning {
 /// approved user config (`nub.jsonc` / `scriptsMeta`) gets the full set; dependency-
 /// controlled config (`dependenciesMeta`) gets none. The two axes are modeled
 /// independently because the invariant is phrased per capability ("MAY use `$(…)`",
-/// "MAY use `net.inject`") — a future scope could hold one without the other — even
+/// "MAY use credential brokering") — a future scope could hold one without the other — even
 /// though today's two callers set them together.
 ///
 /// Filesystem `$(…)` substitution is deliberately ABSENT: an fs path is inert data
@@ -56,13 +56,12 @@ impl std::fmt::Display for CompileWarning {
 /// and never gated. Only these two dynamic capabilities discriminate by trust.
 #[derive(Debug, Clone, Copy)]
 pub struct ScopeCapabilities {
-    /// `$(…)` command substitution in env values and inject-header values. Denied to
-    /// dependency-controlled config: it must never spawn a command the user did not
-    /// author.
+    /// `$(…)` command substitution in env values. Denied to dependency-controlled
+    /// config: it must never spawn a command the user did not author.
     pub env_substitution: bool,
-    /// Credential-broker injection (`net.inject`) — forcing TLS termination of an
-    /// allowed host and injecting request headers. Denied to dependency-controlled
-    /// config: it must not broker the user's credentials.
+    /// Exact-host credential brokering (`net.<host>.env`) — forcing TLS termination
+    /// and releasing named parent credentials only where their opaque markers occur
+    /// in request headers. Denied to dependency-controlled config.
     pub credential_broker: bool,
 }
 
@@ -313,14 +312,25 @@ fn compile_object(
         None => floor_net(),
     };
     // The `proxy` knob is authored at the wrapper level (sibling of net) but governs the
-    // net axis — fold it on, then DERIVE the enforcement tier from the broker set + mode.
-    net.mode = parse_proxy_mode(obj.get("proxy"))?;
+    // net axis. A child that inherits a parent net array through `"..."` also inherits
+    // the parent's explicit proxy posture; otherwise omission remains Disabled. That
+    // means a parent author can grant a proxy once without a nested scope silently
+    // widening it, while a fresh fine-grained allow still needs its own opt-in.
+    if obj.contains_key("proxy") {
+        net.mode = parse_proxy_mode(obj.get("proxy"))?;
+    } else if net_array_inherits_parent_mode(obj.get("net")) {
+        net.mode = parent
+            .map(|policy| policy.net.mode)
+            .unwrap_or(ProxyMode::Disabled);
+    }
+    reconcile_brokers(&mut net);
     finalize_net_inspection(&mut net, "net")?;
-    let env = match obj.get("env") {
+    let mut env = match obj.get("env") {
         Some(v) => fold::fold_env(v, ctx, caps, "env", parent.map(|p| &p.env))?,
         None if inherit_base => inherit_env(parent, ctx),
         None => floor_env(ctx),
     };
+    withhold_brokered_env(&net, &mut env, ctx);
     Ok(SandboxPolicy {
         fs,
         net,
@@ -329,11 +339,87 @@ fn compile_object(
     })
 }
 
-/// Parse the wrapper-level `proxy` knob into a [`ProxyMode`]. Absent = `Auto` (the
-/// default — derive the tier from the rules; most policies never write `proxy`).
+fn reconcile_brokers(net: &mut NetPolicy) {
+    let removed_hosts = net
+        .brokers
+        .iter()
+        .filter(|broker| !crate::matcher::HostMatcher::new(net).admits(&broker.host))
+        .map(|broker| broker.host.clone())
+        .collect::<Vec<_>>();
+    if removed_hosts.is_empty() {
+        return;
+    }
+    net.brokers.retain(|broker| {
+        !removed_hosts
+            .iter()
+            .any(|host| host.eq_ignore_ascii_case(&broker.host))
+    });
+    // The object-form broker contributed an implicit exact-host Allow. Once a
+    // later rule denies that host, remove the now-shadowed grant with the broker;
+    // otherwise the syntactic Allow would spuriously require a proxy even though
+    // the final last-match verdict admits no brokered traffic.
+    net.rules.retain(|rule| {
+        !(rule.effect == Effect::Allow
+            && matches!(
+                &rule.target,
+                crate::policy::NetTarget::Host(host)
+                    if removed_hosts
+                        .iter()
+                        .any(|removed| removed.eq_ignore_ascii_case(host))
+            ))
+    });
+}
+
+/// Brokered values never survive in the serializable compile result, even when
+/// the ordinary env policy would otherwise pass them through. `apply()` resolves
+/// the current parent value afresh and overlays a fresh marker for each run.
+fn withhold_brokered_env(net: &NetPolicy, env: &mut EnvPolicy, ctx: &CompileCtx) {
+    for name in net.brokers.iter().flat_map(|broker| &broker.env) {
+        env.constructed.retain(|key, _| {
+            if cfg!(windows) {
+                !key.eq_ignore_ascii_case(name)
+            } else {
+                key != name
+            }
+        });
+        for ambient_name in ctx.ambient_env.keys().filter(|key| {
+            if cfg!(windows) {
+                key.eq_ignore_ascii_case(name)
+            } else {
+                *key == name
+            }
+        }) {
+            if !env.withheld.iter().any(|existing| {
+                if cfg!(windows) {
+                    existing.eq_ignore_ascii_case(ambient_name)
+                } else {
+                    existing == ambient_name
+                }
+            }) {
+                env.withheld.push(ambient_name.clone());
+            }
+        }
+    }
+    env.withheld.sort();
+}
+
+/// Whether a net array splices the enclosing policy at least once. The fold copies
+/// inherited rules but not wrapper metadata, so this preserves the parent proxy mode
+/// across an explicit `"..."` splice. Object-form net deliberately has no sentinel.
+fn net_array_inherits_parent_mode(value: Option<&Value>) -> bool {
+    matches!(
+        value,
+        Some(Value::Array(items))
+            if items.iter().any(|item| matches!(item, Value::String(entry) if entry == "..."))
+    )
+}
+
+/// Parse the wrapper-level `proxy` knob into a [`ProxyMode`]. Omission leaves the
+/// proxy disabled. A fine-grained allow must opt into one of the explicit modes;
+/// a credential broker is the sole automatic-proxy capability.
 fn parse_proxy_mode(v: Option<&Value>) -> Result<ProxyMode, CompileError> {
     match v {
-        None => Ok(ProxyMode::Auto),
+        None => Ok(ProxyMode::Disabled),
         Some(Value::String(s)) => match s.as_str() {
             "auto" => Ok(ProxyMode::Auto),
             "passthrough" => Ok(ProxyMode::Passthrough),
@@ -352,25 +438,58 @@ fn parse_proxy_mode(v: Option<&Value>) -> Result<ProxyMode, CompileError> {
     }
 }
 
-/// Derive the net enforcement tier from the broker set + the `proxy` mode, and enforce
-/// the mode↔rule contradiction. A broker (or an explicit `proxy: "terminate"`) engages
-/// [`Inspection::TlsInspect`]; `proxy: "passthrough"` FORBIDS termination, so a broker
-/// under it is a COMPILE ERROR — never a silent rule drop (proposal §4).
+/// Derive the net enforcement tier and reject a policy whose requested net allows
+/// could not be enforced. Coarse `net: true` / `net: false` never need a proxy. An
+/// ordinary hostname/CIDR allow needs an explicit proxy mode; a credential broker is
+/// the narrow exception because it necessarily needs a terminating proxy to inject its
+/// headers. `passthrough` still forbids that termination.
 fn finalize_net_inspection(net: &mut NetPolicy, path: &str) -> Result<(), CompileError> {
+    let has_allow = net.rules.iter().any(|rule| rule.effect == Effect::Allow);
     let needs_tls = !net.brokers.is_empty();
+
+    if !net.enforce {
+        if net.mode != ProxyMode::Disabled {
+            return Err(CompileError::shape(
+                "proxy",
+                "`proxy` requires a fine-grained net allow; `net: true` is unrestricted and does not start a proxy",
+            ));
+        }
+        net.inspection = Inspection::Connection;
+        return Ok(());
+    }
+
+    if !has_allow {
+        if net.mode != ProxyMode::Disabled {
+            return Err(CompileError::shape(
+                "proxy",
+                "`proxy` requires a fine-grained net allow; `net: false` denies all egress and does not start a proxy",
+            ));
+        }
+        net.inspection = Inspection::Connection;
+        return Ok(());
+    }
+
+    if !needs_tls && net.mode == ProxyMode::Disabled {
+        return Err(CompileError::shape(
+            path,
+            "a fine-grained net allow requires an explicit proxy — set `proxy` to \"auto\", \"passthrough\", or \"terminate\"",
+        ));
+    }
+
     net.inspection = match net.mode {
         ProxyMode::Passthrough => {
             if needs_tls {
                 return Err(CompileError::shape(
                     path,
-                    "a credential-inject rule requires TLS termination, but `proxy` is \"passthrough\" — remove the inject rule or set `proxy` to \"auto\"/\"terminate\"",
+                    "a credential-broker rule requires TLS termination, but `proxy` is \"passthrough\" — remove the broker rule or set `proxy` to \"auto\"/\"terminate\"",
                 ));
             }
             Inspection::Connection
         }
         ProxyMode::Terminate => Inspection::TlsInspect,
+        ProxyMode::Disabled if needs_tls => Inspection::TlsInspect,
         ProxyMode::Auto if needs_tls => Inspection::TlsInspect,
-        ProxyMode::Auto => Inspection::Connection,
+        ProxyMode::Disabled | ProxyMode::Auto => Inspection::Connection,
     };
     Ok(())
 }

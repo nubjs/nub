@@ -6,8 +6,8 @@
 //!   - a DENIED host is refused at the proxy (403 / SNI drop);
 //!   - a raw client that IGNORES the proxy fails CLOSED (the empty netns has no route);
 //!   - the per-session token still gates the tunnel (tokenless → 407);
-//!   - CROSS-LAYER: a filesystem AF_UNIX daemon socket is denied by the fs mask, while
-//!     abstract-namespace AF_UNIX and the in-netns relay UDS keep working;
+//!   - CROSS-LAYER: target-created AF_UNIX sockets are seccomp-denied, while socketpair(2)
+//!     remains available for local in-process IPC and the trusted bridge remains functional;
 //!   - LIFECYCLE: after the child exits (normally AND killed) no bridge survives and the
 //!     per-run socket dir is cleaned.
 //!
@@ -168,7 +168,7 @@ fn ip(a: SocketAddr) -> String {
 /// Per-host policy: admit the loopback CIDR (so the proxy admits the loopback echo target)
 /// + an SNI host glob. Relaxed fs so the NET axis is isolated.
 fn net_policy() -> Value {
-    json!({ "fs": true, "net": ["127.0.0.0/8", "*.allowed.example"] })
+    json!({ "fs": true, "net": ["127.0.0.0/8", "*.allowed.example"], "proxy": "auto" })
 }
 
 #[test]
@@ -278,7 +278,7 @@ fn per_host_requires_the_per_session_token() {
 }
 
 #[test]
-fn af_unix_cross_layer_daemon_socket_denied_local_ipc_preserved() {
+fn per_host_denies_target_unix_sockets_but_permits_socketpair() {
     if skip_without_bwrap() {
         return;
     }
@@ -287,96 +287,40 @@ fn af_unix_cross_layer_daemon_socket_denied_local_ipc_preserved() {
         return;
     };
 
-    // Abstract-namespace AF_UNIX is scoped to the (empty) net namespace, so in-sandbox
-    // abstract IPC keeps working — the child binds+connects its own abstract socket.
+    // The target may not create AF_UNIX sockets: both abstract and filesystem-path UDS can
+    // cross the netns boundary. The proxy's relay is trusted infrastructure outside this
+    // target seccomp filter.
     assert_eq!(
         f.run(net_policy(), &probe, &["abstract"]),
-        0,
-        "abstract-namespace AF_UNIX still works under per-host"
+        1,
+        "per-host denies target-created abstract AF_UNIX sockets"
     );
-
-    // A LEGIT filesystem AF_UNIX peer the fs policy EXPOSES (a local db/redis pattern) is
-    // reachable — per-host does not blanket-block filesystem sockets; only the known
-    // network-equivalent daemon sockets are masked. The listener lives in the parent; the
-    // path socket crosses the empty netns via the shared mount view.
     let ipc = f.proj.join("app.sock");
     let _ipc = UnixListener::bind(&ipc).unwrap();
     assert_eq!(
         f.run(net_policy(), &probe, &["udsconnect", ipc.to_str().unwrap()]),
-        0,
-        "an exposed non-daemon filesystem AF_UNIX peer is reachable (legit local IPC)"
+        1,
+        "per-host denies target-created filesystem AF_UNIX sockets"
     );
 
-    // The load-bearing cross-layer defense: a KNOWN network-equivalent daemon socket is
-    // FORCE-MASKED under net-confinement even with a fully generous fs (`fs: true`, which
-    // WOULD expose it). Use the REAL per-uid D-Bus session bus when present — a genuine
-    // net-equivalent socket. A connect+close is how every bus client behaves, so it does
-    // not disturb the bus. Skip (no assertion) when there is no bus to test against.
-    let uid = unsafe { libc::getuid() };
-    let bus = PathBuf::from(format!("/run/user/{uid}/bus"));
-    let bus_is_socket = std::fs::metadata(&bus)
-        .map(|m| std::os::unix::fs::FileTypeExt::is_socket(&m.file_type()))
-        .unwrap_or(false);
-    if bus_is_socket {
-        assert_eq!(
-            f.run(
-                json!({ "fs": true, "net": ["127.0.0.0/8"] }),
-                &probe,
-                &["udsconnect", bus.to_str().unwrap()]
-            ),
-            1,
-            "a network-equivalent daemon socket is force-masked even under a generous fs"
-        );
-        // Negative control: with net UNENFORCED there is no force-mask, so the same generous
-        // fs reaches the real bus — proving the block above is the mask, not a missing path.
-        assert_eq!(
-            f.run(
-                json!({ "fs": true, "net": true }),
-                &probe,
-                &["udsconnect", bus.to_str().unwrap()]
-            ),
-            0,
-            "neg-control: unenforced net leaves the daemon socket reachable"
-        );
-    }
+    // socketpair(2) creates a local connected pair without opening a host-addressable
+    // AF_UNIX endpoint, so it remains available for target-local IPC.
+    assert_eq!(
+        f.run(net_policy(), &probe, &["socketpair"]),
+        0,
+        "per-host retains socketpair for target-local IPC"
+    );
 
-    // The ROOTLESS container-runtime socket is the DEFAULT for rootless Docker/Podman and is
-    // just as much a host escape — stand a stand-in up at the real rootless path and prove it
-    // is masked too (regression guard for the rootless entries). Guarded: only when the
-    // runtime dir is writable and the path is free.
-    let rootless = PathBuf::from(format!("/run/user/{uid}/docker.sock"));
-    let runtime_dir_writable = std::fs::metadata(format!("/run/user/{uid}"))
-        .is_ok_and(|m| m.is_dir())
-        && !rootless.exists();
-    if runtime_dir_writable && let Ok(listener) = UnixListener::bind(&rootless) {
-        let _guard = RemoveOnDrop(rootless.clone());
-        assert_eq!(
-            f.run(
-                json!({ "fs": true, "net": ["127.0.0.0/8"] }),
-                &probe,
-                &["udsconnect", rootless.to_str().unwrap()]
-            ),
-            1,
-            "the rootless container-runtime socket is force-masked under net-confinement"
-        );
-        assert_eq!(
-            f.run(
-                json!({ "fs": true, "net": true }),
-                &probe,
-                &["udsconnect", rootless.to_str().unwrap()]
-            ),
-            0,
-            "neg-control: unenforced net reaches the rootless runtime socket"
-        );
-        drop(listener);
-    }
-}
-
-struct RemoveOnDrop(PathBuf);
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+    // Negative control: without net enforcement, the same filesystem UDS remains available.
+    assert_eq!(
+        f.run(
+            json!({ "fs": true, "net": true }),
+            &probe,
+            &["udsconnect", ipc.to_str().unwrap()]
+        ),
+        0,
+        "neg-control: unenforced net does not install the AF_UNIX seccomp deny"
+    );
 }
 
 #[test]
@@ -425,7 +369,7 @@ fn no_bridge_survives_and_socket_dir_is_cleaned() {
     // gone (host bridge torn down on Drop) — no orphaned path to the proxy remains. The
     // in-netns bridge process died with the collapsed sandbox PID namespace.
     let policy = compile(&net_policy(), &f.ctx()).expect("compiles");
-    let spec = CommandSpec::new(&probe).args(["abstract"]).cwd(&f.proj);
+    let spec = CommandSpec::new(&probe).args(["socketpair"]).cwd(&f.proj);
     let prepared = apply_with_runtime(&policy, spec, runtime()).expect("apply");
     let normal_dir = prepared
         .debug_net_bridge_dir()
@@ -595,6 +539,13 @@ static int uds_connect(const char* path) {
 }
 
 /* Bind + connect an ABSTRACT-namespace AF_UNIX socket within this process. 0 = works. */
+static int socketpair_ok(void) {
+    int fd[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fd) != 0) return 1;
+    close(fd[0]); close(fd[1]);
+    return 0;
+}
+
 static int abstract_ok(void) {
     int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (lfd < 0) return 1;
@@ -643,6 +594,7 @@ int main(int argc, char** argv) {
     }
     if (!strcmp(argv[1], "udsconnect")) return uds_connect(argv[2]);
     if (!strcmp(argv[1], "abstract")) return abstract_ok();
+    if (!strcmp(argv[1], "socketpair")) return socketpair_ok();
     /* Create an AF_VSOCK socket. 0 = created (reaches the hypervisor transport), 1 = the
        socket() was refused (seccomp EPERM, or the family is unsupported). */
     if (!strcmp(argv[1], "vsock")) {

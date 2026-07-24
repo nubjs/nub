@@ -37,11 +37,11 @@ fn total_shadow_warns() {
         "later ** covers everything"
     );
     assert!(
-        warns(json!({ "net": ["in.sentry.io", "*.sentry.io"] })),
+        warns(json!({ "net": ["in.sentry.io", "*.sentry.io"], "proxy": "auto" })),
         "host then covering wildcard"
     );
     assert!(
-        warns(json!({ "net": ["a.com", "*"] })),
+        warns(json!({ "net": ["a.com", "*"], "proxy": "auto" })),
         "later * covers all hosts"
     );
     assert!(
@@ -68,7 +68,7 @@ fn partial_override_and_sentinels_stay_silent() {
         "allow-all then strip a class"
     );
     assert!(
-        !warns(json!({ "net": ["*", "!*.evil.com"] })),
+        !warns(json!({ "net": ["*", "!*.evil.com"], "proxy": "auto" })),
         "best-effort denylist"
     );
     assert!(!warns(json!({ "fs": ["./a", "./b"] })), "disjoint paths");
@@ -173,16 +173,45 @@ fn fs_spread_inherits_the_resolved_parent() {
 
 #[test]
 fn net_spread_inherits_the_resolved_parent() {
-    let parent = json!({ "net": ["a.com"] });
-    let p = chain(&parent, &json!({ "net": ["...", "b.com"] }));
+    let parent = json!({ "net": ["a.com"], "proxy": "auto" });
+    let p = chain(
+        &parent,
+        &json!({ "net": ["...", "b.com"], "proxy": "auto" }),
+    );
     let m = HostMatcher::new(&p.net);
     assert!(m.admits("a.com") && m.admits("b.com"), "inherit + extend");
     // No `"..."` → floor: only b.com.
-    let f = chain(&parent, &json!({ "net": ["b.com"] }));
+    let f = chain(&parent, &json!({ "net": ["b.com"], "proxy": "auto" }));
     let mf = HostMatcher::new(&f.net);
     assert!(
         mf.admits("b.com") && !mf.admits("a.com"),
         "parent host NOT inherited"
+    );
+
+    let broker_parent = json!({
+        "net": { "api.example.com": { "env": ["API_TOKEN"] } }
+    });
+    let broker_child = chain(&broker_parent, &json!({ "net": ["..."] }));
+    assert_eq!(
+        broker_child.net.brokers,
+        chain(&broker_parent, &json!({ "...": true })).net.brokers
+    );
+    assert!(matches!(
+        broker_child.net.inspection,
+        nub_sandbox::policy::Inspection::TlsInspect
+    ));
+
+    let denied_broker = chain(
+        &broker_parent,
+        &json!({ "net": ["...", "!api.example.com"] }),
+    );
+    assert!(
+        denied_broker.net.brokers.is_empty(),
+        "a later inherited-host deny removes the broker capability"
+    );
+    assert!(
+        !denied_broker.env.constructed.contains_key("API_TOKEN"),
+        "the complete child statement floors env independently"
     );
 }
 
@@ -224,7 +253,8 @@ fn keyless_scope_cascades_the_parent_whole_policy() {
     // A scope with NO `sandbox` key inherits its parent's WHOLE policy (cascade —
     // it can't escape confinement by saying nothing).
     let ctx = common::ctx(true, &[("FOO", "1")]);
-    let parent = json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "env": { "FOO": true } });
+    let parent =
+        json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "proxy": "auto", "env": { "FOO": true } });
     let (p, _) = resolve_chain(
         &[
             ChainScope {
@@ -249,7 +279,8 @@ fn keyless_scope_cascades_the_parent_whole_policy() {
 fn object_spread_inner_inherits_parent_for_unlisted_axes() {
     // `{ "...": true, "fs": ["...", "./b"] }` at an inner scope: inherit parent
     // net+env, and inherit-then-extend parent fs.
-    let parent = json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "env": { "FOO": true } });
+    let parent =
+        json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "proxy": "auto", "env": { "FOO": true } });
     let p = chain(&parent, &json!({ "...": true, "fs": ["...", "./b"] }));
     let m = PathMatcher::new(&p.fs.rules);
     let proj = common::homes().project;
@@ -278,7 +309,7 @@ fn approved_scope(surface: &Value) -> ChainScope<'_> {
 }
 
 /// The mixed chain the old compile-wide `trusted` bool could NOT express: an OUTER
-/// approved scope (`nub.jsonc`/`scriptsMeta`) uses `$(…)` + `net.inject` while an
+/// approved scope (`nub.jsonc`/`scriptsMeta`) uses `$(…)` + credential brokering while an
 /// INNER dependency-controlled scope (`dependenciesMeta`) in the SAME compile is
 /// denied both — the fold gates read each scope's OWN caps, not a chain-wide flag.
 #[test]
@@ -288,7 +319,7 @@ fn per_scope_capabilities_gate_each_scope_independently() {
     let ctx = common::ctx(false, &[]);
     let approved = json!({
         "env": { "TOKEN": "$(echo hi)" },
-        "net": { "api.example.com": { "inject": { "Authorization": "Bearer $(echo hi)" } } },
+        "net": { "api.example.com": { "env": ["BROKER_TOKEN"] } },
     });
     let outer = approved_scope;
 
@@ -342,15 +373,14 @@ fn per_scope_capabilities_gate_each_scope_independently() {
         "inner dependency scope's `$(…)` is gated by its own caps: {err:?}"
     );
 
-    // (3) The inner dependency scope's OWN `net.inject` is denied (credential_broker).
-    let inner_inject =
-        json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer x" } } } });
+    // (3) The inner dependency scope's OWN broker is denied (credential_broker).
+    let inner_broker = json!({ "net": { "api.example.com": { "env": ["BROKER_TOKEN"] } } });
     let err = resolve_chain(
         &[
             outer(&approved),
             ChainScope {
                 label: "dependenciesMeta",
-                surface: Some(&inner_inject),
+                surface: Some(&inner_broker),
                 caps: common::caps(false),
             },
         ],
@@ -360,7 +390,7 @@ fn per_scope_capabilities_gate_each_scope_independently() {
     match err {
         CompileError::Shape { message, .. } => assert!(
             message.contains("credential brokering"),
-            "inner dependency scope's `inject` is denied by the broker gate: {message}"
+            "inner dependency scope's broker is denied by the broker gate: {message}"
         ),
         other => panic!("expected the credential-broker Shape error, got {other:?}"),
     }

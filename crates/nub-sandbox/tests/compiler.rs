@@ -344,7 +344,13 @@ fn net_bare_string_host_value_is_a_shape_error() {
             other => panic!("expected Shape for {surface}, got {other:?}"),
         }
     }
-    assert!(compile(&json!({ "net": { "example.com": true } }), &ctx).is_ok());
+    assert!(
+        compile(
+            &json!({ "net": { "example.com": true }, "proxy": "auto" }),
+            &ctx
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -370,7 +376,7 @@ fn net_malformed_cidr_and_slash_host_are_shape_errors() {
         }
     }
     // A well-formed CIDR still compiles.
-    assert!(compile(&json!({ "net": ["10.0.0.0/8"] }), &ctx).is_ok());
+    assert!(compile(&json!({ "net": ["10.0.0.0/8"], "proxy": "auto" }), &ctx).is_ok());
 }
 
 #[test]
@@ -793,6 +799,19 @@ fn env_regex_and_literal_union() {
 }
 
 #[test]
+fn env_regex_is_checked_even_when_optional_and_unmatched() {
+    let ctx = common::ctx(true, &[]);
+    let err = compile(&json!({ "env": { "SHA?": "/[a-/" } }), &ctx).unwrap_err();
+    match err {
+        CompileError::Shape { path, message } => {
+            assert_eq!(path, "env.SHA?");
+            assert!(message.contains("invalid regex"), "{message}");
+        }
+        other => panic!("expected invalid regex shape error, got {other:?}"),
+    }
+}
+
+#[test]
 fn env_unknown_type_names_the_supported_set() {
     let ctx = common::ctx(true, &[("X", "1")]);
     let err = compile(&json!({ "env": { "X": "email" } }), &ctx).unwrap_err();
@@ -833,6 +852,21 @@ fn env_sensitive_mark_defaults_on_and_opts_out() {
     );
     assert!(rule("PRIV").sensitive);
     assert!(rule("DEFLT").sensitive, "default-on when unmarked");
+}
+
+#[test]
+fn env_extras_require_boolean_sensitive_and_optional() {
+    let ctx = common::ctx(true, &[("X", "1")]);
+    for (key, value) in [("sensitive", json!("false")), ("optional", json!(1))] {
+        let err = compile(&json!({ "env": { "X": { key: value } } }), &ctx).unwrap_err();
+        match err {
+            CompileError::Shape { path, message } => {
+                assert_eq!(path, format!("env.X.{key}"));
+                assert_eq!(message, format!("{key} must be a boolean"));
+            }
+            other => panic!("expected {key} shape error, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -891,6 +925,48 @@ fn env_empty_array_is_strip_all_not_passthrough() {
         assert!(
             p.env.withheld.contains(&k.to_string()),
             "{k} must be recorded withheld"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn constrained_windows_env_forms_keep_startup_essentials() {
+    // Every constraining surface constructs the child environment. The Windows
+    // loader/AppContainer startup variables are mechanism requirements, so they
+    // survive an allowlist or deny-all just as they do `env: false`.
+    let ctx = common::ctx(
+        true,
+        &[
+            ("SystemRoot", "C:/Windows"),
+            ("SystemDrive", "C:"),
+            ("TEMP", "C:/Temp"),
+            ("TMP", "C:/Tmp"),
+            ("LOCALAPPDATA", "C:/Users/me/AppData/Local"),
+            ("ONLY", "allowed"),
+            ("SECRET_TOKEN", "withheld"),
+        ],
+    );
+    for surface in [
+        json!({ "env": false }),
+        json!({ "env": [] }),
+        json!({ "env": ["ONLY"] }),
+        json!({ "env": { "ONLY": true } }),
+    ] {
+        let policy = compile(&surface, &ctx).unwrap();
+        for key in ["SystemRoot", "SystemDrive", "TEMP", "TMP", "LOCALAPPDATA"] {
+            assert!(
+                policy
+                    .env
+                    .constructed
+                    .keys()
+                    .any(|actual| actual.eq_ignore_ascii_case(key)),
+                "{surface} must retain {key}"
+            );
+        }
+        assert!(
+            !policy.env.constructed.contains_key("SECRET_TOKEN"),
+            "{surface} must not re-admit unrelated ambient env"
         );
     }
 }
@@ -1057,7 +1133,7 @@ fn glob_key_substitution_is_rejected_before_running() {
 fn net_array_hosts_and_cidr_classify() {
     let ctx = common::ctx(true, &[]);
     let p = compile(
-        &json!({ "net": ["*.sentry.io", "10.0.0.0/8", "!evil.com"] }),
+        &json!({ "net": ["*.sentry.io", "10.0.0.0/8", "!evil.com"], "proxy": "auto" }),
         &ctx,
     )
     .unwrap();
@@ -1087,11 +1163,20 @@ fn net_per_host_object_option_is_rejected_for_now() {
 }
 
 #[test]
-fn net_true_disables_enforcement_false_denies_all() {
+fn coarse_net_never_enables_a_proxy() {
+    use nub_sandbox::policy::ProxyMode;
+
     let ctx = common::ctx(true, &[]);
-    assert!(!compile(&json!({ "net": true }), &ctx).unwrap().net.enforce);
+    let unrestricted = compile(&json!({ "net": true }), &ctx).unwrap();
+    assert!(!unrestricted.net.enforce);
+    assert_eq!(unrestricted.net.mode, ProxyMode::Disabled);
+
     let denied = compile(&json!({ "net": false }), &ctx).unwrap();
     assert!(denied.net.enforce && denied.net.rules.is_empty());
+    assert_eq!(denied.net.mode, ProxyMode::Disabled);
+
+    let err = compile(&json!({ "net": false, "proxy": "auto" }), &ctx).unwrap_err();
+    assert!(matches!(err, CompileError::Shape { path, .. } if path == "proxy"));
 }
 
 #[test]
@@ -1172,7 +1257,7 @@ fn net_private_symbolic_target_folds_and_gates_the_opt_in() {
 
     // `<private>` (and its `<local>` alias) fold to NetTarget::Private and set the opt-in.
     for tok in ["<private>", "<local>"] {
-        let p = compile(&json!({ "net": [tok] }), &ctx).unwrap();
+        let p = compile(&json!({ "net": [tok], "proxy": "auto" }), &ctx).unwrap();
         assert_eq!(p.net.rules.len(), 1);
         assert!(matches!(p.net.rules[0].target, NetTarget::Private), "{tok}");
         assert!(
@@ -1182,14 +1267,18 @@ fn net_private_symbolic_target_folds_and_gates_the_opt_in() {
     }
 
     // A bare `*` allow-all does NOT set the opt-in — the private ranges stay blocked.
-    let p = compile(&json!({ "net": ["*"] }), &ctx).unwrap();
+    let p = compile(&json!({ "net": ["*"], "proxy": "auto" }), &ctx).unwrap();
     assert!(
         !net_allows_private(&p.net),
         "`*` must NOT re-open the private ranges"
     );
 
     // `!<private>` after an opt-in reclose it (last-match-wins on the token).
-    let p = compile(&json!({ "net": ["<private>", "!<private>"] }), &ctx).unwrap();
+    let p = compile(
+        &json!({ "net": ["<private>", "!<private>"], "proxy": "auto" }),
+        &ctx,
+    )
+    .unwrap();
     assert!(
         !net_allows_private(&p.net),
         "a later `!<private>` must reclose the opt-in"
@@ -1209,7 +1298,11 @@ fn net_private_symbolic_target_folds_and_gates_the_opt_in() {
 fn net_leading_wildcard_and_bare_star_still_accepted() {
     // D11 must not over-reject: the two valid wildcard forms compile.
     let ctx = common::ctx(true, &[]);
-    let p = compile(&json!({ "net": ["*.example.com", "*"] }), &ctx).unwrap();
+    let p = compile(
+        &json!({ "net": ["*.example.com", "*"], "proxy": "auto" }),
+        &ctx,
+    )
+    .unwrap();
     let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
     assert!(m.admits("a.b.example.com"));
     assert!(m.admits("anything.at.all"));
@@ -1220,7 +1313,11 @@ fn net_trailing_dot_is_stripped_so_it_cannot_dodge_a_deny() {
     // D12: `evil.com.` in config normalizes to `evil.com`, and a connect to the
     // dotted form matches a dotless rule.
     let ctx = common::ctx(true, &[]);
-    let p = compile(&json!({ "net": ["ok.example.", "!evil.com."] }), &ctx).unwrap();
+    let p = compile(
+        &json!({ "net": ["ok.example.", "!evil.com."], "proxy": "auto" }),
+        &ctx,
+    )
+    .unwrap();
     match &p.net.rules[0].target {
         nub_sandbox::policy::NetTarget::Host(h) => {
             assert_eq!(h, "ok.example", "dot stripped in IR")
@@ -1238,36 +1335,57 @@ fn net_trailing_dot_is_stripped_so_it_cannot_dodge_a_deny() {
 
 #[test]
 fn broker_compiles_to_an_allow_rule_plus_a_broker_and_engages_tls_inspect() {
-    let ctx = common::ctx(true, &[]);
+    let ctx = common::ctx(true, &[("STRIPE_TOKEN", "real-parent-secret")]);
     let p = compile(
-        &json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer literal-secret" } } } }),
+        &json!({
+            "net": { "api.stripe.com": { "env": ["STRIPE_TOKEN"] } },
+            "env": true
+        }),
         &ctx,
     )
     .unwrap();
     // The brokered host is implicitly ALLOWED.
     assert!(
         p.net.rules.iter().any(
-            |r| matches!(&r.target, NetTarget::Host(h) if h == "api.example.com")
+            |r| matches!(&r.target, NetTarget::Host(h) if h == "api.stripe.com")
                 && matches!(r.effect, Effect::Allow)
         ),
         "brokered host must be allowed"
     );
-    // The broker carries the resolved secret, readable only via `.expose()`.
     assert_eq!(p.net.brokers.len(), 1);
-    assert_eq!(p.net.brokers[0].host, "api.example.com");
-    assert_eq!(p.net.brokers[0].injects[0].header, "Authorization");
-    assert_eq!(
-        p.net.brokers[0].injects[0].value.expose(),
-        "Bearer literal-secret"
+    assert_eq!(p.net.brokers[0].host, "api.stripe.com");
+    assert_eq!(p.net.brokers[0].env, vec!["STRIPE_TOKEN"]);
+    assert!(
+        !p.env.constructed.contains_key("STRIPE_TOKEN"),
+        "the serializable IR must withhold brokered real values even under env:true"
     );
-    // The tier auto-derives to TlsInspect (a request-level capability is present).
+    let serialized = serde_json::to_string(&p).unwrap();
+    assert!(serialized.contains("STRIPE_TOKEN"));
+    assert!(!serialized.contains("real-parent-secret"));
+    // The tier auto-derives to TlsInspect even though no wrapper proxy was requested:
+    // credential injection cannot work without a terminating proxy.
+    assert!(matches!(
+        p.net.mode,
+        nub_sandbox::policy::ProxyMode::Disabled
+    ));
     assert!(matches!(p.net.inspection, Inspection::TlsInspect));
 }
 
 #[test]
-fn host_only_policy_stays_connection_tier_no_mitm() {
+fn host_only_allow_without_proxy_is_a_compile_error() {
     let ctx = common::ctx(true, &[]);
-    let p = compile(&json!({ "net": { "api.example.com": true } }), &ctx).unwrap();
+    let err = compile(&json!({ "net": { "api.example.com": true } }), &ctx).unwrap_err();
+    assert!(matches!(err, CompileError::Shape { path, .. } if path == "net"));
+}
+
+#[test]
+fn host_only_policy_with_explicit_auto_stays_connection_tier_no_mitm() {
+    let ctx = common::ctx(true, &[]);
+    let p = compile(
+        &json!({ "net": { "api.example.com": true }, "proxy": "auto" }),
+        &ctx,
+    )
+    .unwrap();
     assert!(p.net.brokers.is_empty());
     assert!(
         matches!(p.net.inspection, Inspection::Connection),
@@ -1276,61 +1394,36 @@ fn host_only_policy_stays_connection_tier_no_mitm() {
 }
 
 #[test]
-fn wildcard_broker_is_accepted_and_scopes_via_the_universal_matcher() {
-    // A wildcard broker host is admitted (maintainer decision) and matches EXACTLY what
-    // the same pattern matches as a net rule — the runtime `broker_for` selects it via
-    // `host_glob_matches`, so proving the matcher's verdict here proves inject-selection.
-    use nub_sandbox::matcher::host::host_glob_matches;
+fn broker_requires_an_exact_literal_hostname() {
     let ctx = common::ctx(true, &[]);
-    let p = compile(
-        &json!({ "net": { "*.example.com": { "inject": { "Authorization": "Bearer secret" } } } }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(p.net.brokers.len(), 1);
-    assert_eq!(p.net.brokers[0].host, "*.example.com");
-    // The wildcard host is implicitly allowed and engages TLS inspection.
-    assert!(p.net.rules.iter().any(
-        |r| matches!(&r.target, NetTarget::Host(h) if h == "*.example.com")
-            && matches!(r.effect, Effect::Allow)
-    ));
-    assert!(matches!(p.net.inspection, Inspection::TlsInspect));
-    // Injects for the apex and any-depth subdomain; NOT for a sibling / suffix-confusable.
-    let broker_host = &p.net.brokers[0].host;
-    assert!(host_glob_matches(broker_host, "example.com"));
-    assert!(host_glob_matches(broker_host, "a.example.com"));
-    assert!(host_glob_matches(broker_host, "a.b.example.com"));
-    assert!(!host_glob_matches(broker_host, "evil.com"));
-    assert!(!host_glob_matches(broker_host, "notexample.com"));
-    assert!(!host_glob_matches(broker_host, "example.com.evil.com"));
-    // A bare `*` broker is likewise accepted (same universal syntax, the user's own risk).
-    assert!(
-        compile(
-            &json!({ "net": { "*": { "inject": { "Authorization": "Bearer x" } } } }),
+    for host in [
+        "*",
+        "*.example.com",
+        "10.0.0.1",
+        "10.0.0.0/8",
+        "<private>",
+        "127.1",
+        "2130706433",
+        "0x7f000001",
+        "0177.0.0.1",
+    ] {
+        let err = compile(
+            &json!({ "net": { (host): { "env": ["API_TOKEN"] } } }),
             &ctx,
         )
-        .is_ok()
-    );
+        .unwrap_err();
+        assert!(
+            matches!(err, CompileError::Shape { .. }),
+            "non-literal broker host unexpectedly compiled: {host}"
+        );
+    }
 }
 
 #[test]
-fn cidr_broker_is_rejected_no_http_layer() {
-    // Brokering is an HTTP-header capability; a CIDR has no host to terminate/inject on.
-    let ctx = common::ctx(true, &[]);
-    let err = compile(
-        &json!({ "net": { "10.0.0.0/8": { "inject": { "Authorization": "Bearer x" } } } }),
-        &ctx,
-    )
-    .unwrap_err();
-    assert!(matches!(err, CompileError::Shape { .. }));
-}
-
-#[test]
-fn inject_is_a_trusted_only_capability() {
-    // An untrusted (dependenciesMeta) grant must not be able to broker — even a literal.
+fn broker_env_is_a_trusted_only_capability() {
     let ctx = common::ctx(false, &[]);
     let err = compile(
-        &json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer x" } } } }),
+        &json!({ "net": { "api.example.com": { "env": ["API_TOKEN"] } } }),
         &ctx,
     )
     .unwrap_err();
@@ -1338,13 +1431,13 @@ fn inject_is_a_trusted_only_capability() {
 }
 
 #[test]
-fn passthrough_with_an_inject_rule_is_a_compile_error() {
+fn passthrough_with_a_broker_rule_is_a_compile_error() {
     // The `proxy: "passthrough"` block-MITM posture contradicts a rule that requires
     // termination — a hard error, never a silent drop.
     let ctx = common::ctx(true, &[]);
     let err = compile(
         &json!({
-            "net": { "api.example.com": { "inject": { "Authorization": "Bearer x" } } },
+            "net": { "api.example.com": { "env": ["API_TOKEN"] } },
             "proxy": "passthrough"
         }),
         &ctx,
@@ -1366,14 +1459,39 @@ fn terminate_mode_engages_tls_inspect_without_a_broker() {
 }
 
 #[test]
-fn crlf_in_an_inject_value_is_rejected() {
+fn old_inject_syntax_is_rejected() {
     let ctx = common::ctx(true, &[]);
     let err = compile(
-        &json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer x\r\nX-Evil: 1" } } } }),
+        &json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer x" } } } }),
         &ctx,
     )
     .unwrap_err();
-    assert!(matches!(err, CompileError::Shape { .. }));
+    match err {
+        CompileError::Shape { message, .. } => assert!(message.contains("old `inject`")),
+        other => panic!("expected old-inject shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn broker_env_list_rejects_empty_duplicates_and_patterns() {
+    let ctx = common::ctx(true, &[]);
+    for env in [
+        json!([]),
+        json!(["TOKEN", "TOKEN"]),
+        json!(["*_TOKEN"]),
+        json!(["TOKEN?"]),
+        json!(["HTTPS_PROXY"]),
+        json!(["NODE_EXTRA_CA_CERTS"]),
+        json!(["TMPDIR"]),
+    ] {
+        assert!(
+            compile(
+                &json!({ "net": { "api.example.com": { "env": env } } }),
+                &ctx
+            )
+            .is_err()
+        );
+    }
 }
 
 // ── fs $(…) command substitution ───────────────────────────────────────────────

@@ -135,9 +135,11 @@ Two rules the sketch encodes:
 
 **Through — the IR (`SandboxPolicy`):** flat, ordered, per-axis, fully resolved
 (no residual surface syntax). `fs` (a last-match-wins `FsRuleSet` + tmp posture),
-`net` (`enforce` + ordered `NetRule`s + deny-all base), `env` (the CONSTRUCTED child
-env map + the `withheld` names + validation schema), `pid` (Linux env-read isolation
-request). Every field is `serde`-round-trippable.
+`net` (`enforce` + ordered `NetRule`s + deny-all base + proxy mode + derived
+inspection tier + secret-free broker descriptors), `env` (the CONSTRUCTED child env
+map + the `withheld` names + validation schema), `pid` (Linux env-read isolation
+request). Every field is `serde`-round-trippable; broker secret values are resolved
+only at apply and never enter the IR.
 
 **Out — Boundary B (`apply`):**
 
@@ -163,33 +165,27 @@ engine defects — they define the seam. Full detail + bounds:
    load its own libraries; the engine does not probe the host for it. The launcher
    supplies that dir. A system interpreter is covered by the essential base.
 
-2. **macOS parent-env scrub.** A sandboxed child can read nub's OWN argv+environ via
-   `sysctl(KERN_PROCARGS2, getppid())` (not routed through Seatbelt). The engine
-   constructs the CHILD's env least-privilege; it cannot scrub nub's own environ. The
-   launcher must not hold ambient secrets in nub's environ at spawn (scrub pre-spawn
-   or clean-env re-exec).
+2. **Windows per-host egress and MITM.** An AppContainer child cannot reach a loopback egress proxy without a package-wide exemption. That exemption exposes every loopback listener, not just the proxy port, so the engine rejects per-host and per-request policies before launch. It reports `net-per-host` and, when applicable, `net-per-request`.
 
-3. **Windows per-host egress and MITM.** An AppContainer child cannot reach a loopback egress proxy without a package-wide exemption. That exemption exposes every loopback listener, not just the proxy port, so the engine rejects per-host and per-request policies before launch. It reports `net-per-host` and, when applicable, `net-per-request`.
-
-4. **Windows clean-DACL work root.** A confined work dir must sit under a CLEAN-DACL
+3. **Windows clean-DACL work root.** A confined work dir must sit under a CLEAN-DACL
    root — no inherited `ALL APPLICATION PACKAGES` allow-ACE (an AAP grant satisfies
    the LowBox check before default-deny, so an ungranted secret under an AAP-inheriting
    `%TEMP%`/profile tree stays readable). The launcher provides a clean root (e.g.
    strip inherited ACEs, or a nub-owned store). Ancestor traverse grants are NOT
    needed (traverse-bypass covers intermediate dirs).
 
-5. **Per-scope capability boundary.** The engine CANNOT detect trust — the CALLER
+4. **Per-scope capability boundary.** The engine CANNOT detect trust — the CALLER
    assigns each scope its `ScopeCapabilities` by scope IDENTITY (never inferred from a
    repository/checkout heuristic). Two independent, per-scope capabilities gate the
-   dynamic operations: `env_substitution` (`$(…)` command substitution in env and
-   inject-header values) and `credential_broker` (`net.inject`). Approved user config
+   dynamic operations: `env_substitution` (`$(…)` command substitution in env) and
+   `credential_broker` (secret release through an exact-host broker). Approved user config
    (`nub.jsonc` / `scriptsMeta`) → `ScopeCapabilities::approved()` (both); dependency-
    controlled config (`dependenciesMeta`) → `ScopeCapabilities::dependency()` (neither
    — an ungranted `$(…)` is a hard `CompileError::UntrustedSubstitution`, an ungranted
-   `inject` a hard `CompileError::Shape`, never exec'd/brokered). Filesystem `$(…)` is
+   broker a hard `CompileError::Shape`, never exec'd/brokered). Filesystem `$(…)` is
    UNCONDITIONAL in every scope (an fs path is inert data). A single-block `compile`
    uses `CompileCtx::caps`; a mixed chain assigns each `scope::ChainScope` its own caps,
-   so an outer approved scope may use `$(…)`/`inject` while an inner dependency scope in
+   so an outer approved scope may use `$(…)`/brokering while an inner dependency scope in
    the SAME compile is denied. The launcher is responsible for securing untrusted-config
    usage (e.g. PR-CI, where the config itself is attacker-influenced).
 
@@ -197,19 +193,20 @@ engine defects — they define the seam. Full detail + bounds:
 
 When a policy enforces per-host net (enforcing + at least one allow rule), `apply`
 starts a loopback `EgressProxy` and stashes it on `Prepared` so it outlives the
-child. The proxy does **no MITM**: it gates the CONNECT/SOCKS target host and the
-cleartext TLS SNI (both must pass), then blind-forwards the tunnel byte-for-byte; a
-pure deny-all policy needs no proxy (nothing is reachable). The per-host verdict is a
+child. At the connection tier it gates the CONNECT/SOCKS target host and the cleartext
+TLS SNI (both must pass), then blind-forwards the tunnel byte-for-byte; a pure deny-all
+policy needs no proxy (nothing is reachable). The per-host verdict is a
 `GrantDecider` seam — wired to `StaticDecider` (the resolved `NetPolicy`,
 last-match-wins) in this epic; the build-jail thread swaps in an interactive prompt
 through the same seam without touching the proxy.
 
-A capability-derived **MITM tier** (credential brokering — an ephemeral CA passed to
-the child via an env bundle so the proxy can inject auth into allowed upstreams) is a
-landed-but-held extension to the net/apply surface, PR #414. It rides the same
-`GrantDecider` seam and platform-specific proxy routing; the core
-compile/apply data seam is unchanged by it. Treat it as a forward reference until
-it merges.
+The capability-derived **MITM tier** terminates only exact brokered hosts (or every
+allowed host under an explicit terminate mode). It uses an ephemeral per-run CA
+trusted only by the child, verifies the real upstream against platform roots, and
+replaces opaque child markers only in HTTP/1.1 request-header values. Real secret
+values live only in redacted, non-serialized proxy state and never enter the child
+environment. Unsupported TLS/HTTP shapes fail closed rather than falling back to a
+blind splice.
 
 ## PM-purity invariant
 
