@@ -1,11 +1,19 @@
 //! `nub init` through the real binary — scaffold contents, refuse-don't-
 //! clobber, the JS variant, and the non-TTY prompt fallback. Everything here
-//! is offline by construction (`--no-install`); the install-by-default path
-//! rides the engine's own install coverage plus manual e2e. Design record:
+//! is offline by construction: scaffold-only cases use `--no-install`, while
+//! the install-by-default case uses an in-process registry. Design record:
 //! wiki/commands/init.md.
 
+use base64::Engine as _;
+use sha2::{Digest, Sha512};
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -39,18 +47,218 @@ struct Out {
 /// Piped stdio — every run here exercises the non-TTY path (prompts must
 /// fall back to defaults, never hang).
 fn run_init(dir: &Path, args: &[&str]) -> Out {
-    let out = Command::new(nub_binary())
+    run_init_with_home(dir, args, None)
+}
+
+fn run_init_with_home(dir: &Path, args: &[&str], home: Option<&Path>) -> Out {
+    let mut command = Command::new(nub_binary());
+    command
         .arg("init")
         .args(args)
         .current_dir(dir)
-        .stdin(std::process::Stdio::piped())
-        .output()
-        .expect("failed to spawn nub");
+        .stdin(std::process::Stdio::piped());
+    if let Some(home) = home {
+        command
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("XDG_CONFIG_HOME", home.join("xdg-config"))
+            .env("XDG_DATA_HOME", home.join("xdg-data"))
+            .env("XDG_CACHE_HOME", home.join("xdg-cache"))
+            .env("NUB_SELF_SHIM", "0");
+    }
+    let out = command.output().expect("failed to spawn nub");
     Out {
         stdout: String::from_utf8_lossy(&out.stdout).to_string(),
         stderr: String::from_utf8_lossy(&out.stderr).to_string(),
         code: out.status.code().unwrap_or(-1),
     }
+}
+
+fn package_tarball(name: &str, version: &str) -> Vec<u8> {
+    // Deterministic npm tarballs containing only package/package.json. Keeping
+    // these inline makes the registry fixture portable without test-only deps.
+    let encoded = match (name, version) {
+        ("@nubjs/types", "0.4.13") => {
+            "H4sIAAAAAAAC/+3JQQrCMBBG4RwlzFrS1KZduPIqUYJYMQ1NK4h4d6MuBNcigu/bvOGf5LcHvwtVetb0eYjqw2zROfdo8V5r2+Xrvu913XaN0lZ9wZwnP2qt/tRFoj8GWck6zps+V9M5hSwLOYUx74dYHtY4UzdyVQAAAAAAAAAAAAAAAACAH3IDKfXZJwAoAAA="
+        }
+        ("@nubjs/types", "0.5.0") => {
+            "H4sIAAAAAAAC/+3JQQrCMBBG4RwlZC3pRJouXHmVKEGsmIamFUS8u1EXgmsRwfdt3vBPDttD2MUmP2v7MiT1YVJ1bfto9V4R7173fXfOd0ulRX3BXKYwaq3+1MWkcIxmZdZp3vSlmc45FrMwpziW/ZDqQ6y3Yq4KAAAAAAAAAAAAAAAAAPBLbnGuIdkAKAAA"
+        }
+        ("@types/node", "26.1.1") => {
+            "H4sIAAAAAAAC/+3IsQrCMBhF4TxK+GdJk9JmcPJVggZRMQ1NFYr47kYdBGcRwfMt53JzWB/CNjb5WbMvQ1IfZivfdY9W77W2d699/53rfau0VV9wKlMYtVZ/6iIpHKMsZTXNOZYmDZsoCznHseyGVP/WG2ecXBUAAAAAAAAAAAAAAAAA4JfcAHOReCIAKAAA"
+        }
+        ("typescript", "7.0.2") => {
+            "H4sIAAAAAAAC/+3IwQoCIRhFYR9F/nWYEzZCbyODxBQ5olMQ0btntQhaRwSdb3MuN4dhH7ZxmZ81uzol9WG26Z17tHmvtc6/9v3vunXvlbbqC451DkVr9acuksIhykbmc451KGOeZSGnWOo4pXZ7Y81KrgoAAAAAAAAAAAAAAAAA8FturWWPWwAoAAA"
+        }
+        _ => panic!("missing registry fixture tarball for {name}@{version}"),
+    };
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(encoded.trim_end_matches('='))
+        .unwrap()
+}
+
+fn integrity(bytes: &[u8]) -> String {
+    format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(Sha512::digest(bytes))
+    )
+}
+
+struct RegistryFixture {
+    url: String,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl RegistryFixture {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+
+        let packages: [(&str, &[&str]); 3] = [
+            ("@nubjs/types", &["0.4.13", "0.5.0"]),
+            ("@types/node", &["26.1.1"]),
+            ("typescript", &["7.0.2"]),
+        ];
+        let mut responses = HashMap::<String, (String, Vec<u8>)>::new();
+        for (name, versions) in packages {
+            let mut version_entries = serde_json::Map::new();
+            let mut times = serde_json::Map::new();
+            for version in versions {
+                let tarball = package_tarball(name, version);
+                let tarball_path =
+                    format!("/tarballs/{}-{version}.tgz", name.replace(['@', '/'], "_"));
+                version_entries.insert(
+                    (*version).to_string(),
+                    serde_json::json!({
+                        "name": name,
+                        "version": version,
+                        "dist": {
+                            "tarball": format!("{url}{}", &tarball_path[1..]),
+                            "integrity": integrity(&tarball),
+                        }
+                    }),
+                );
+                times.insert(
+                    (*version).to_string(),
+                    serde_json::Value::String(
+                        if *version == "0.5.0" {
+                            "2999-01-01T00:00:00.000Z"
+                        } else {
+                            "2020-01-01T00:00:00.000Z"
+                        }
+                        .to_string(),
+                    ),
+                );
+                responses.insert(
+                    tarball_path,
+                    ("application/octet-stream".to_string(), tarball),
+                );
+            }
+            let latest = versions.last().unwrap();
+            let packument = serde_json::to_vec(&serde_json::json!({
+                "name": name,
+                "dist-tags": { "latest": latest },
+                "versions": version_entries,
+                "time": times,
+            }))
+            .unwrap();
+            let encoded_name = name.replace('/', "%2f");
+            responses.insert(
+                format!("/{encoded_name}"),
+                ("application/json".to_string(), packument),
+            );
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let responses = Arc::new(responses);
+        let server = thread::spawn(move || {
+            while !server_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let responses = responses.clone();
+                        thread::spawn(move || {
+                            let mut request = [0_u8; 4096];
+                            let size = stream.read(&mut request).unwrap_or(0);
+                            let first_line = String::from_utf8_lossy(&request[..size])
+                                .lines()
+                                .next()
+                                .unwrap_or_default()
+                                .to_ascii_lowercase();
+                            let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+                            let (status, content_type, body) =
+                                if let Some((content_type, body)) = responses.get(path) {
+                                    ("200 OK", content_type.as_str(), body.as_slice())
+                                } else {
+                                    ("404 Not Found", "text/plain", b"not found".as_slice())
+                                };
+                            let headers = format!(
+                                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            stream.write_all(headers.as_bytes()).unwrap();
+                            stream.write_all(body).unwrap();
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("registry fixture failed: {error}"),
+                }
+            }
+        });
+
+        Self {
+            url,
+            stop,
+            thread: Some(server),
+        }
+    }
+}
+
+impl Drop for RegistryFixture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn default_install_uses_a_mature_types_release_under_the_strict_age_floor() {
+    let registry = RegistryFixture::start();
+    let dir = tmpdir("strict-install");
+    let home = tmpdir("strict-install-home");
+    std::fs::write(
+        dir.join(".npmrc"),
+        format!("registry={}\nfetch-retries=0\n", registry.url),
+    )
+    .unwrap();
+
+    let out = run_init_with_home(
+        &dir,
+        &["-y", "--no-git", "--name", "strict-install"],
+        Some(&home),
+    );
+    assert_eq!(
+        out.code, 0,
+        "stdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    let installed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("node_modules/@nubjs/types/package.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(installed["version"], "0.4.13");
+    assert!(
+        !std::fs::read_to_string(dir.join(".npmrc"))
+            .unwrap()
+            .contains("minimumReleaseAgeExclude"),
+        "strict mode must not persist a release-age exclusion"
+    );
 }
 
 #[test]
