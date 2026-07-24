@@ -423,28 +423,6 @@ fn bin_not_found_error(bin: &str) -> miette::Report {
     )
 }
 
-/// Assemble the `tokio::process::Command` that runs `bin`, shared by the
-/// supervised (`spawn_and_wait`) and image-replacing (`exec_bin_terminal`)
-/// paths. Callers own the bin-exists check.
-fn build_bin_command(
-    cwd: &Path,
-    bin_path: &Path,
-    bin: &str,
-    args: &[String],
-    node_args: &[String],
-    shell_mode: bool,
-) -> tokio::process::Command {
-    build_bin_command_with_env(
-        cwd,
-        bin_path,
-        bin,
-        args,
-        node_args,
-        shell_mode,
-        &Default::default(),
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_bin_command_with_env(
     cwd: &Path,
