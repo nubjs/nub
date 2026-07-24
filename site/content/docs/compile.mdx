@@ -98,13 +98,65 @@ nub compile app.ts               # minified
 nub compile app.ts --no-minify   # readable bundle
 ```
 
-## `--compress`
+## `--keep-names` / `--no-keep-names`
 
-The embedded Node is compressed with zstd. Opt into a stronger algorithm for size-critical distribution — it trades a smaller file for a slower first-run extraction.
+Minification renames functions and classes, which breaks anything that reads `fn.name` or `Class.name` at runtime — dependency injection containers, ORM entity registration, class-keyed lookup tables. Nub preserves those names by default, so the failure never reaches a shipped binary:
+
+```js
+class UserService {}
+console.log(UserService.name);   // "UserService", minified or not
+```
+
+Turn it off when you want the smaller bundle and know nothing reads a name:
 
 ```bash
-nub compile app.ts                 # zstd, ~26 MB (default)
-nub compile app.ts --compress xz   # smaller file, slower first run
+nub compile app.ts --no-keep-names
+```
+
+## `--sourcemap`
+
+A compiled binary runs bundled, minified code, so an unmapped stack trace points at a column in one long line. Nub emits an inline source map by default and the embedded Node consumes it, so traces name your original TypeScript:
+
+```console
+$ ./app
+file:///app/src/order.ts:14
+  throw new Error("no such order");
+        ^
+Error: no such order
+    at loadOrder (file:///app/src/order.ts:14:9)
+```
+
+Pick a different mode when the default doesn't fit:
+
+```bash
+nub compile app.ts --sourcemap=linked     # a .map shipped inside the binary
+nub compile app.ts --sourcemap=external   # a .map written beside the binary, not shipped
+nub compile app.ts --sourcemap=none       # no map at all
+```
+
+Use `external` to keep your source out of what you distribute while still holding a map to upload to an error tracker. Pair it with `--no-sources-content` to drop the original text from the map itself.
+
+## `--define`
+
+Replace an expression at build time. Values are JavaScript expressions, so a string constant carries its own quotes:
+
+```bash
+nub compile app.ts --define 'API_URL="https://api.example.com"' --define BUILD=42
+```
+
+Three defines are always applied, and an explicit `--define` of the same key overrides them:
+
+```js
+process.platform          // the --platform target, not the build machine
+process.arch              // the --platform target's architecture
+process.env.NODE_ENV      // "production"
+```
+
+Baking the target's platform in means a cross-compiled branch is eliminated rather than shipped:
+
+```ts
+if (process.platform === "win32") { useNamedPipe(); }
+else { useUnixSocket(); }         // the only branch in a linux-x64 binary
 ```
 
 ## `--install-message` / `--no-install-message`
@@ -137,6 +189,82 @@ nub compile app.ts --platform linux-x64
 Accepted values: `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-arm64-musl`, `linux-x64`, `linux-x64-musl`, `win32-arm64`, `win32-x64`. A Windows target gets an `.exe` output name and embeds the Windows build of Node.
 
 Cross-compiling needs the target platform's launcher — see the note at the top of the page.
+
+## Advanced options
+
+The bundler knobs, grouped under their own heading in `nub compile --help`. Most builds never need one.
+
+### `--tree-shake`
+
+Unreachable code is dropped by default. Pass `false` when a dependency claims to be side-effect-free and is not, so its module-level work survives:
+
+```bash
+nub compile app.ts --tree-shake false
+```
+
+### `--ignore-annotations`
+
+Tree-shaking trusts `/*@__PURE__*/` comments, and a dependency that marks a side-effectful call pure gets that call removed. This keeps tree-shaking on but stops honoring the annotations — a narrower fix than turning tree-shaking off entirely:
+
+```bash
+nub compile app.ts --ignore-annotations
+```
+
+### `--alias`
+
+Resolve one specifier as another, repeatable:
+
+```bash
+nub compile app.ts --alias lodash=lodash-es --alias '@/=./src/'
+```
+
+### `--conditions`
+
+Add `exports` conditions to resolution. They join the defaults (`default`, `node`) rather than replacing them:
+
+```bash
+nub compile app.ts --conditions production --conditions custom
+```
+
+### `--tsconfig`
+
+Nub finds the tsconfig.json governing the entry on its own. Point at a different one to override that:
+
+```bash
+nub compile app.ts --tsconfig tsconfig.build.json
+```
+
+### `--reject-unresolved` / `--allow-unresolved`
+
+A compiled binary carries no `node_modules`, so an import the bundler cannot resolve is a crash on the machine you ship to — with no stack-trace clue and nothing to install. Nub fails the build instead, naming the file and line:
+
+```console
+$ nub compile app.ts
+Bundling app.ts …
+Error: 1 import could not be resolved at build time:
+  /src/plugins.ts:6:22
+    import(pluginName)
+
+  A compiled binary carries no node_modules, so an unresolved import fails at
+  runtime on the machine you ship to. Make the specifier a static string, or
+  pass --allow-unresolved <GLOB> to ship it anyway.
+```
+
+The usual fix is to make the specifier a literal so the bundler can follow it. When a dependency does this and you know the code path is dead, exempt it by glob — the glob matches the path of the file containing the import:
+
+```bash
+nub compile app.ts --allow-unresolved '**/node_modules/some-dep/**'
+```
+
+Rejecting is the default; `--reject-unresolved` states it explicitly.
+
+### `--no-sources-content`
+
+Source maps embed the original source text by default. This omits it, leaving a map that still resolves file names and line numbers:
+
+```bash
+nub compile app.ts --sourcemap=external --no-sources-content
+```
 
 ## Where the runtime is extracted
 

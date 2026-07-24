@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "compile")]
+use clap::ArgAction;
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// Stable, branded error codes for nub-cli's own (non-engine) failure paths.
@@ -886,6 +888,23 @@ pub enum Command {
         #[arg(long = "no-minify")]
         no_minify: bool,
 
+        /// Where the source map goes: `inline` (default), `linked`, `external`,
+        /// or `none`. Written `--sourcemap=<MODE>`; bare `--sourcemap` is inline.
+        #[arg(
+            long,
+            value_name = "MODE",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "inline"
+        )]
+        sourcemap: Option<SourcemapArg>,
+
+        /// Replace an expression at build time, repeatable. Values are JavaScript
+        /// expressions, so a string needs its own quotes:
+        /// `--define 'API="https://example.com"'`.
+        #[arg(long, value_name = "KEY=VALUE", action = ArgAction::Append)]
+        define: Vec<String>,
+
         /// First-run message the compiled binary prints while it sets itself up.
         /// Default: `Setting up <output-name>`. Shown on a terminal only.
         #[arg(long, value_name = "TEXT", conflicts_with = "no_install_message")]
@@ -894,6 +913,51 @@ pub enum Command {
         /// Start silently on first run instead of printing a setup message.
         #[arg(long = "no-install-message")]
         no_install_message: bool,
+
+        /// Preserve `fn.name` and `Class.name` through minification. On by
+        /// default: minified class names break frameworks that key on them
+        /// (dependency injection, ORM entities, class registries).
+        #[arg(long = "keep-names", help_heading = COMPILE_ADVANCED, conflicts_with = "no_keep_names")]
+        keep_names: bool,
+
+        /// Let minification rename functions and classes.
+        #[arg(long = "no-keep-names", help_heading = COMPILE_ADVANCED)]
+        no_keep_names: bool,
+
+        /// Drop unreachable code (default: true). `--tree-shake false` keeps every
+        /// module's side effects, for a dependency that declares itself pure and
+        /// is not.
+        #[arg(long = "tree-shake", value_name = "BOOL", default_value_t = true, action = ArgAction::Set, help_heading = COMPILE_ADVANCED)]
+        tree_shake: bool,
+
+        /// Ignore `/*@__PURE__*/` annotations while tree-shaking.
+        #[arg(long = "ignore-annotations", help_heading = COMPILE_ADVANCED)]
+        ignore_annotations: bool,
+
+        /// Resolve one specifier as another, repeatable: `--alias lodash=lodash-es`.
+        #[arg(long, value_name = "FROM=TO", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        alias: Vec<String>,
+
+        /// Extra `exports` condition to honor, repeatable. Added to the
+        /// defaults rather than replacing them.
+        #[arg(long, value_name = "NAME", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        conditions: Vec<String>,
+
+        /// Use this tsconfig.json instead of the one discovered from the entry.
+        #[arg(long, value_name = "PATH", help_heading = COMPILE_ADVANCED)]
+        tsconfig: Option<String>,
+
+        /// Fail the build on an import that cannot be resolved (the default).
+        #[arg(long = "reject-unresolved", help_heading = COMPILE_ADVANCED)]
+        reject_unresolved: bool,
+
+        /// Allow unresolved imports in files matching this glob, repeatable.
+        #[arg(long = "allow-unresolved", value_name = "GLOB", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        allow_unresolved: Vec<String>,
+
+        /// Leave the original source text out of the source map.
+        #[arg(long = "no-sources-content", help_heading = COMPILE_ADVANCED)]
+        no_sources_content: bool,
     },
 
     /// Scaffold a new TypeScript-first project.
@@ -1126,6 +1190,24 @@ pub enum ColorWhen {
     Auto,
     Always,
     Never,
+}
+
+/// `nub compile`'s power set. Grouping it under its own `--help` heading (the
+/// shape esbuild uses) is what keeps the common six flags readable while the
+/// bundler knobs stay discoverable.
+#[cfg(feature = "compile")]
+const COMPILE_ADVANCED: &str = "Advanced options";
+
+#[cfg(feature = "compile")]
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SourcemapArg {
+    /// A `.map` shipped inside the executable, referenced by the bundle.
+    Linked,
+    /// A base64 data URI in the bundle itself.
+    Inline,
+    /// A `.map` written beside the executable and not shipped.
+    External,
+    None,
 }
 
 /// Top-level entry point. Returns the process exit code.
@@ -2474,17 +2556,53 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             target,
             platform,
             no_minify,
+            sourcemap,
+            define,
             install_message,
             no_install_message,
+            keep_names: _,
+            no_keep_names,
+            tree_shake,
+            ignore_annotations,
+            alias,
+            conditions,
+            tsconfig,
+            reject_unresolved: _,
+            allow_unresolved,
+            no_sources_content,
         }) => crate::compile::run(crate::compile::CompileOptions {
             entry,
             out,
             smol,
             target,
             platform,
-            minify: !no_minify,
             install_message,
             no_install_message,
+            bundle: crate::compile::BundleOptions {
+                minify: !no_minify,
+                // `--keep-names` is the default; the flag only exists to state it
+                // explicitly, so only its negation carries information here.
+                keep_names: !no_keep_names,
+                sourcemap: match sourcemap.unwrap_or(SourcemapArg::Inline) {
+                    SourcemapArg::Linked => crate::compile::SourcemapMode::Linked,
+                    SourcemapArg::Inline => crate::compile::SourcemapMode::Inline,
+                    SourcemapArg::External => crate::compile::SourcemapMode::External,
+                    SourcemapArg::None => crate::compile::SourcemapMode::None,
+                },
+                sources_content: !no_sources_content,
+                define,
+                auto_define: Vec::new(),
+                tree_shake,
+                ignore_annotations,
+                alias,
+                conditions,
+                tsconfig: tsconfig.map(PathBuf::from),
+                // Rejecting is unconditional today: a compiled binary has no
+                // node_modules to fall back on. `--allow-unresolved` is the
+                // per-site escape hatch.
+                reject_unresolved: true,
+                allow_unresolved,
+            },
         }),
         Some(Command::Init {
             yes,

@@ -28,7 +28,10 @@ use nub_core::node::version::{NodeVersion, VersionPin};
 use nub_core::version_management::{self, NodeArch, NodeOs};
 use sha2::{Digest, Sha256};
 
+pub mod bundle;
 mod inject;
+
+pub use bundle::{BundleOptions, SourcemapMode};
 
 pub struct CompileOptions {
     pub entry: String,
@@ -37,24 +40,19 @@ pub struct CompileOptions {
     /// Explicit `--target`; `None` → infer from the project's pin chain.
     pub target: Option<String>,
     pub platform: Option<String>,
-    pub minify: bool,
     /// Custom first-run line; `None` takes the `Setting up <app-name>` default.
     pub install_message: Option<String>,
     /// Suppress the first-run line entirely.
     pub no_install_message: bool,
+    /// The bundler-flag surface, shared verbatim with `nub build`.
+    pub bundle: BundleOptions,
 }
 
-struct ChunkOut {
-    filename: String,
-    code: Vec<u8>,
-    is_entry: bool,
-}
-
-/// The bundled app files to embed: `(name, bytes)` per file (entry + chunks + the
-/// synthesized `package.json`).
+/// The bundled app files to embed: `(name, bytes)` per file (entry + chunks +
+/// any shipped source map + the synthesized `package.json`).
 type AppFiles = Vec<(String, Vec<u8>)>;
 
-pub fn run(opts: CompileOptions) -> Result<i32> {
+pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let target = resolve_platform(opts.platform.as_deref())?;
     // Resolved BEFORE any work: a cross-compile whose launcher template is missing
     // must fail in the first second, not after downloading and recompressing a
@@ -77,10 +75,15 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("{stem}{}", target.exe_suffix())));
 
-    // 1. Bundle (Rolldown, in-process).
+    // 1. Bundle (Rolldown, in-process). The target's platform/arch are baked in
+    //    as defines UNDER the user's, so a cross-compiled `process.platform`
+    //    branch dead-code-eliminates for the machine the artifact will run on,
+    //    not the one it was built on.
+    opts.bundle.auto_define = target_defines(&target);
     eprintln!("Bundling {} …", opts.entry);
-    let chunks = bundle(&entry_abs, opts.minify)?;
-    let (entry_name, app_files) = assemble_app(chunks)?;
+    let bundled = bundle::bundle(&entry_abs, &opts.bundle)?;
+    let entry_name = bundled.entry.clone();
+    let app_files = assemble_app(&bundled);
     let app_sha = sha256_of_app(&app_files);
 
     // 2. Resolve the Node version through nub run's SAME pin chain (so compile
@@ -126,7 +129,7 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
         triple: target.triple(),
         node_sha256: node_sha,
         app_sha256: app_sha,
-        minify: opts.minify,
+        minify: opts.bundle.minify,
         install_message: install_message(&opts, &out_path),
     };
     let payload = encode(&manifest, &app_files, &node_blob);
@@ -138,6 +141,7 @@ pub fn run(opts: CompileOptions) -> Result<i32> {
         .with_context(|| format!("writing {}", out_path.display()))?;
     set_executable(&out_path)?;
     verify_artifact(&out_path, &target)?;
+    write_detached_maps(&bundled, &out_path)?;
 
     let size = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
     eprintln!(
@@ -242,77 +246,53 @@ fn non_exact_spec(pin: &VersionPin, raw: &str) -> Option<String> {
 
 // ---- bundling -----------------------------------------------------------------
 
-fn bundle(entry_abs: &Path, minify: bool) -> Result<Vec<ChunkOut>> {
-    use rolldown::{Bundler, BundlerOptions, InputItem, OutputFormat, Platform, RawMinifyOptions};
-
-    let cwd = entry_abs
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let import = format!(
-        "./{}",
-        entry_abs.file_name().unwrap_or_default().to_string_lossy()
-    );
-    let stem = entry_abs
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "main".into());
-
-    let options = BundlerOptions {
-        input: Some(vec![InputItem {
-            name: Some(stem),
-            import,
-        }]),
-        cwd: Some(cwd),
-        format: Some(OutputFormat::Esm),
-        platform: Some(Platform::Node),
-        minify: Some(RawMinifyOptions::Bool(minify)),
-        ..Default::default()
+/// The constants baked in for the TARGET, not the build host. Written as JSON so
+/// they land in the bundle as string literals — Rolldown/esbuild `define` values
+/// are JS expressions, so a bare `darwin` would define an identifier.
+///
+/// `NODE_ENV` is a literal `"production"`, never the compiling machine's value:
+/// nothing about the build environment is allowed to leak into the artifact.
+fn target_defines(target: &TargetPlatform) -> Vec<(String, String)> {
+    let os = match target.os {
+        TargetOs::Darwin => "darwin",
+        TargetOs::Linux => "linux",
+        TargetOs::Win32 => "win32",
     };
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("building the bundler runtime")?;
-    let output = rt.block_on(async move {
-        let mut bundler = Bundler::new(options).map_err(|e| anyhow!("rolldown init: {e:?}"))?;
-        bundler
-            .generate()
-            .await
-            .map_err(|e| anyhow!("rolldown bundle failed: {e:?}"))
-    })?;
-
-    let mut chunks = Vec::new();
-    for asset in &output.assets {
-        if let rolldown_common::Output::Chunk(c) = asset {
-            chunks.push(ChunkOut {
-                filename: c.filename.to_string(),
-                code: c.code.as_bytes().to_vec(),
-                is_entry: c.is_entry,
-            });
-        }
-        // Static (`Output::Asset`) emit is out of scope for the spike.
-    }
-    if chunks.is_empty() {
-        bail!("the bundler produced no chunks");
-    }
-    Ok(chunks)
+    let arch = match target.arch {
+        TargetArch::X64 => "x64",
+        TargetArch::Arm64 => "arm64",
+    };
+    vec![
+        ("process.platform".into(), format!("\"{os}\"")),
+        ("process.arch".into(), format!("\"{arch}\"")),
+        ("process.env.NODE_ENV".into(), "\"production\"".into()),
+    ]
 }
 
-/// Turn the bundler chunks into the app file set: every chunk verbatim, plus a
-/// `package.json {"type":"module"}` so Node runs the ESM `.js` entry as ESM.
-/// Returns the entry filename (the one entry chunk) and the file list.
-fn assemble_app(chunks: Vec<ChunkOut>) -> Result<(String, AppFiles)> {
-    let entry_name = chunks
+/// The app file set: every emitted file verbatim, plus a `package.json
+/// {"type":"module"}` so Node runs the ESM `.js` entry as ESM.
+fn assemble_app(bundled: &bundle::BundleResult) -> AppFiles {
+    let mut files: AppFiles = bundled
+        .files
         .iter()
-        .find(|c| c.is_entry)
-        .map(|c| c.filename.clone())
-        .context("the bundler emitted no entry chunk")?;
-
-    let mut files: Vec<(String, Vec<u8>)> =
-        chunks.into_iter().map(|c| (c.filename, c.code)).collect();
+        .map(|f| (f.name.clone(), f.bytes.clone()))
+        .collect();
     files.push(("package.json".to_string(), br#"{"type":"module"}"#.to_vec()));
-    Ok((entry_name, files))
+    files
+}
+
+/// `--sourcemap=external` maps land BESIDE the executable, deliberately outside
+/// it: the point of the mode is to keep source text out of what you ship while
+/// still having a map to hand an error tracker.
+fn write_detached_maps(bundled: &bundle::BundleResult, out_path: &Path) -> Result<()> {
+    let dir = out_path.parent().unwrap_or_else(|| Path::new("."));
+    for map in &bundled.detached_maps {
+        let path = dir.join(&map.name);
+        fs::write(&path, &map.bytes)
+            .with_context(|| format!("writing source map {}", path.display()))?;
+        eprintln!("Wrote {}", path.display());
+    }
+    Ok(())
 }
 
 // ---- Node blob (default/embed shape) ------------------------------------------
@@ -728,10 +708,43 @@ mod tests {
             smol: false,
             target: None,
             platform: None,
-            minify: true,
             install_message: install_message.map(str::to_string),
             no_install_message,
+            bundle: BundleOptions {
+                minify: true,
+                keep_names: true,
+                sourcemap: SourcemapMode::Inline,
+                sources_content: true,
+                define: Vec::new(),
+                auto_define: Vec::new(),
+                tree_shake: true,
+                ignore_annotations: false,
+                alias: Vec::new(),
+                conditions: Vec::new(),
+                tsconfig: None,
+                reject_unresolved: true,
+                allow_unresolved: Vec::new(),
+            },
         }
+    }
+
+    #[test]
+    fn auto_defines_describe_the_target_not_the_build_host() {
+        let win = TargetPlatform::parse("win32-x64").expect("known triple");
+        let defs = target_defines(&win);
+        assert_eq!(
+            defs,
+            vec![
+                ("process.platform".to_string(), "\"win32\"".to_string()),
+                ("process.arch".to_string(), "\"x64\"".to_string()),
+                (
+                    "process.env.NODE_ENV".to_string(),
+                    "\"production\"".to_string()
+                ),
+            ],
+            "cross-compiled platform checks must fold against the TARGET, and the \
+             values must be quoted so they land as string literals, not identifiers"
+        );
     }
 
     #[test]
