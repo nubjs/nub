@@ -6,13 +6,13 @@ Tests nub's default-trust floor policy end-to-end against real packages that run
 
 | Package | Build type | Expected outcome |
 | --- | --- | --- |
-| `esbuild@0.28.0` | Downloads a platform binary in postinstall | Floor-allowed: build runs, `WARN_NUB_DEFAULT_TRUST_BUILDS` disclosure emitted, binary materialized |
+| `esbuild@0.28.0` | Downloads a platform binary in postinstall | Floor-allowed: build runs, `defaultTrust` disclosure emitted, binary materialized |
 | `better-sqlite3@11.10.0` | Compiles a C++ N-API addon via node-gyp | Floor-allowed: build runs, addon loadable, disclosed in same warning |
 | `core-js@3.40.0` | Runs build scripts not on the floor allowlist | Floor-denied: build blocked, `WARN_NUB_IGNORED_BUILD_SCRIPTS` emitted naming core-js |
 
 The three-part pass condition for floor-allowed builds is:
 1. **Allowed** — `nub install` exits 0 and the module materializes.
-2. **Disclosed** — `WARN_NUB_DEFAULT_TRUST_BUILDS` names the package. The floor is not a silent allow path.
+2. **Disclosed** — the `defaultTrust` warning names the package. The floor is not a silent allow path.
 3. **Loadable** — `node -e require(...)` succeeds — the native artifact actually runs.
 
 ## Prerequisites

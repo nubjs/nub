@@ -53,7 +53,9 @@ jobs:
     name: drift-guard (root ↔ site/public)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - name: Assert install.sh in sync
         run: |
           if ! diff --unified install.sh site/public/install.sh; then
@@ -77,7 +79,9 @@ jobs:
         os: [windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - name: Verify checksum handling against local fixtures
         shell: pwsh
         run: pwsh -NoProfile -File tests/installer/checksums.ps1
@@ -85,10 +89,12 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INSTALL_SOURCE: ${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}
+          INSTALL_VERSION: ${{ github.event.inputs.version || 'latest' }}
         run: |
           $ErrorActionPreference = "Stop"
-          $src = "${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}"
-          $ver = "${{ github.event.inputs.version || 'latest' }}"
+          $src = $env:INSTALL_SOURCE
+          $ver = $env:INSTALL_VERSION
           $headers = @{}
           # Pass a token when fetching from raw.githubusercontent.com to avoid
           # the unauthenticated rate-limit (403) that bites CI runners.
@@ -134,10 +140,12 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INSTALL_SOURCE: ${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}
+          INSTALL_VERSION: ${{ github.event.inputs.version || 'latest' }}
         run: |
           set -euo pipefail
-          src="${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}"
-          ver="${{ github.event.inputs.version || 'latest' }}"
+          src="$INSTALL_SOURCE"
+          ver="$INSTALL_VERSION"
           # Pass a token when fetching from raw.githubusercontent.com to avoid
           # the unauthenticated rate-limit (403) that bites macOS CI runners.
           auth_arg=()
@@ -192,10 +200,13 @@ jobs:
         # and the token is not injected by default. The musl leg exercises the exact
         # same curl path as a real user (unauthenticated) — rate-limit risk is low
         # because the container IP isn't shared with macOS runners that exhaust the limit.
+        env:
+          INSTALL_SOURCE: ${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}
+          INSTALL_VERSION: ${{ github.event.inputs.version || 'latest' }}
         run: |
           set -euo pipefail
-          src="${{ github.event.inputs.source || 'https://raw.githubusercontent.com/nubjs/nub/main' }}"
-          ver="${{ github.event.inputs.version || 'latest' }}"
+          src="$INSTALL_SOURCE"
+          ver="$INSTALL_VERSION"
           if [ "$ver" = "latest" ]; then curl -fsSL "$src/install.sh" | bash
           else curl -fsSL "$src/install.sh" | bash -s -- "$ver"; fi
       - name: Binary runs (direct path)
@@ -227,7 +238,9 @@ jobs:
         os: [ubuntu-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - name: Verify checksum handling against local fixtures
         shell: bash
         run: bash tests/installer/checksums.sh

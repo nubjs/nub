@@ -65,6 +65,12 @@ pub async fn run(args: ImportArgs) -> miette::Result<()> {
         }
     };
 
+    // install treats aube-lock.yaml as an already peer-resolved incumbent, so a
+    // suffix-less source (npm / bun) has to be contextualized here or the
+    // written lockfile is missing peer edges nothing downstream restores (#453).
+    let graph = aube_resolver::peer_pass_for_import(graph, kind)
+        .map_err(|e| miette!("peer-context pass failed: {e}"))?;
+
     let pkg_count = graph.packages.len();
     aube_lockfile::write_lockfile(&cwd, &graph, &manifest)
         .into_diagnostic()

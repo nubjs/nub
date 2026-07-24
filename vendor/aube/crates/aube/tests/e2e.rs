@@ -233,7 +233,8 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
     // set, never in the store the enumeration read. This pins the whole
     // contract: the dep is listed, approving it writes the *source* key
     // (a bare name never authorizes a source-backed build), and the
-    // build then runs on reinstall while the warning clears.
+    // build runs during that same `approve-builds` call, then survives
+    // the next install while the warning clears.
     let _guard = e2e_lock();
     let sbx = Sandbox::new();
 
@@ -276,14 +277,20 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .success()
         .stdout(predicates::str::contains("dep@file:./dep"));
 
-    // Approving records the source key in the build policy.
+    // Approving records the source key AND runs the build in the same
+    // invocation, exactly like a registry dep. The scoped rebuild reaches
+    // the tree because approval cannot move a local dep's cell: the
+    // build-state-sensitive graph hash is applied only by
+    // `virtual_store_subdir` (the shared global store, which `file:` deps
+    // never enter), never by the `aube_dir_entry_name` that
+    // `materialized_pkg_dir` reconstructs.
     sbx.cmd().args(["approve-builds", "--all"]).assert().success();
+    assert!(
+        marker_exists_under(&node_modules, "BUILT_527_MARKER"),
+        "approve-builds must run a local-source dep's build in the same invocation"
+    );
 
-    // The now-approved build runs on the next install, and the warning
-    // is gone. (A source-backed dep's virtual-store path folds in build
-    // state, so — unlike a registry dep — the scoped rebuild inside
-    // `approve-builds` can't reach the freshly-approved tree; the full
-    // install re-materializes and builds it.)
+    // Reinstalling keeps the build and clears the warning.
     sbx.cmd()
         .arg("install")
         .assert()
@@ -291,7 +298,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .stderr(predicates::str::contains("dep@file:./dep").not());
     assert!(
         marker_exists_under(&node_modules, "BUILT_527_MARKER"),
-        "approving a local-source dep must let its build script run on reinstall"
+        "the approved build must survive a reinstall"
     );
     sbx.cmd()
         .arg("ignored-builds")

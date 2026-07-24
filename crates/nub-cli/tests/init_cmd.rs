@@ -110,6 +110,40 @@ fn js_variant_skips_tsconfig_and_type_devdeps() {
     assert_eq!(pkg["scripts"]["start"], "nub index.js");
 }
 
+/// `git check-ignore` is the only honest test of a `.gitignore`: the scaffold's
+/// pattern list has a negation in it, so matching on file contents would pin
+/// the spelling without proving the effect.
+fn git_ignores(dir: &Path, path: &str) -> bool {
+    Command::new("git")
+        .args(["check-ignore", "-q", path])
+        .current_dir(dir)
+        .status()
+        .expect("failed to spawn git check-ignore")
+        .success()
+}
+
+#[test]
+fn scoped_name_reaches_the_manifest_and_the_env_example_stays_tracked() {
+    let dir = tmpdir("scoped");
+    let out = run_init(&dir, &["-y", "--no-install", "--name", "@My Org/My App"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+
+    let pkg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(
+        pkg["name"], "@my-org/my-app",
+        "the scope must survive sanitization"
+    );
+
+    for secret in [".env", ".env.local", ".env.production", ".env.development"] {
+        assert!(git_ignores(&dir, secret), "{secret} must stay out of git");
+    }
+    assert!(
+        !git_ignores(&dir, ".env.example"),
+        ".env.example is the committed template — it must stay tracked"
+    );
+}
+
 #[test]
 fn refuses_existing_files_and_force_overwrites() {
     let dir = tmpdir("conflict");

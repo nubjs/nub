@@ -13,7 +13,7 @@ name: Trunk red
 #
 # Scope: report only. It never reruns, reverts, or gates anything.
 
-on:
+on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusion for main, never checks out or runs PR-controlled code
   workflow_run:
     workflows:
       - CI

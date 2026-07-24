@@ -1,0 +1,26 @@
+name: zizmor
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: ['.github/workflows/**']
+
+permissions: {}
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
+        with:
+          advanced-security: false
+          # Scan only nub's own workflows/actions. vendor/aube ships aube's
+          # workflow FILES, but GitHub never executes workflows outside the
+          # root .github/ — inert vendored bytes, not attack surface here,
+          # and not ours to harden in this repo.
+          inputs: .github/

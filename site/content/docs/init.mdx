@@ -73,7 +73,7 @@ The tsconfig targets Node's own TypeScript semantics — `nodenext` resolution, 
 }
 ```
 
-The generated project is not locked to Nub: everything runs on plain Node too (the `devEngines` policy is `warn`, not a hard block), and swapping the start script to a plain `node` invocation is the only change a non-Nub user would make.
+The generated project is not locked to Nub: everything runs on plain Node too (the `devEngines` policy is `warn`, not a hard block), and swapping the start script to a plain `node` invocation is the only change a non-Nub user would make. Plain `node` runs the TypeScript entry on Node ≥22.18 (type stripping, unflagged in 23.6 and backported to 22.18); on older Node, scaffold with `--js` instead.
 
 ## Prompts
 
@@ -85,7 +85,7 @@ In a terminal, `nub init` asks three questions — project name, TypeScript or J
 |---|---|
 | `-y`, `--yes` | Skip all prompts, take the defaults. |
 | `--js` | JavaScript variant: writes `index.js`, no tsconfig, no devDependencies. |
-| `--name <name>` | Project name (default: the directory name, sanitized). |
+| `--name <name>` | Project name (default: the directory name, sanitized). Scoped names (`@scope/pkg`) are preserved. |
 | `--no-git` | Skip `git init`. |
 | `--no-install` | Skip the install step. |
 | `--force` | Overwrite existing files. |

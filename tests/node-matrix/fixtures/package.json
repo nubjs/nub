@@ -1,0 +1,8 @@
+{
+  "name": "node-matrix-fixtures",
+  "private": true,
+  "workspaces": [],
+  "engines": {
+    "node": ">=18"
+  }
+}

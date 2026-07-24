@@ -9,8 +9,8 @@
 #                              package is on the floor allowlist (it is a
 #                              long-lived, registry-only, well-known build tool).
 #                              The floor must: (a) allow the build to run,
-#                              (b) emit WARN_NUB_DEFAULT_TRUST_BUILDS disclosing
-#                              the package by name, (c) produce a working module.
+#                              (b) disclose the package by name, (c) produce a
+#                              working module.
 #
 #   better-sqlite3 (11.10.0) — compiles a C++ N-API addon via node-gyp at
 #                              postinstall. Also on the floor allowlist. Same
@@ -63,7 +63,7 @@ trap cleanup EXIT
 # depends on nub's packument cache, which lives in $XDG_CACHE_HOME/nub/pm/ —
 # a completely cold sandbox defeats the gate, causing the floor to fall back to
 # deny+warn (`WARN_NUB_IGNORED_BUILD_SCRIPTS`) instead of the expected allow+
-# disclose path (`WARN_NUB_DEFAULT_TRUST_BUILDS`). On CI (ubuntu-latest),
+# disclose path. On CI (ubuntu-latest),
 # the runner has network access and the XDG cache starts cold — but the
 # resolver warms it during the resolve phase before the scripts phase, so the
 # OSV gate runs and the floor fires correctly. Sandboxing the project dirs
@@ -90,10 +90,10 @@ if echo "$install_out" | grep -qiE 'aube|jdx\.dev'; then
 fi
 
 # Default-trust disclosure: both floor-allowed packages must be named in the
-# WARN_NUB_DEFAULT_TRUST_BUILDS line — the floor is NOT a silent allow path.
+# defaultTrust warning — the floor is NOT a silent allow path.
 # This fires before the lifecycle script phase, so it is present even when a
 # build (e.g. better-sqlite3's node-gyp compile) fails afterward.
-echo "$install_out" | grep -q 'WARN_NUB_DEFAULT_TRUST_BUILDS' \
+echo "$install_out" | grep -q 'WARN defaultTrust: running build scripts' \
   || fail "defaultTrust disclosure missing from output (floor allowed builds silently). Output: $install_out"
 echo "$install_out" | grep -q 'esbuild' \
   || fail "esbuild not named in defaultTrust disclosure. Output: $install_out"
@@ -151,7 +151,7 @@ if echo "$frozen_out" | grep -qiE 'aube|jdx\.dev'; then
 fi
 
 # The floor must fire on the frozen install exactly as on the fresh one.
-echo "$frozen_out" | grep -q 'WARN_NUB_DEFAULT_TRUST_BUILDS' \
+echo "$frozen_out" | grep -q 'WARN defaultTrust: running build scripts' \
   || fail "FROZEN INSTALL: defaultTrust disclosure missing — the floor fell closed on a frozen install (Decision 2 bug). Output: $frozen_out"
 echo "$frozen_out" | grep -q 'esbuild' \
   || fail "FROZEN INSTALL: esbuild not named in defaultTrust disclosure. Output: $frozen_out"

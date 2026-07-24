@@ -1,4 +1,12 @@
-CARGO   ?= cargo
+# Clamp make-driven cargo to utility QoS on darwin so fleet builds never starve
+# interactive work — same contention control as scripts/rust-build.sh (which
+# covers `make verify` already). NUB_BUILD_FG=1 opts out; no-op off macOS.
+ifeq ($(NUB_BUILD_FG),1)
+  QOS =
+else
+  QOS = $(shell command -v taskpolicy >/dev/null 2>&1 && echo taskpolicy -c utility)
+endif
+CARGO   ?= $(QOS) cargo
 PROFILE ?= release
 BIN_DIR ?= /usr/local/bin
 RUST_BUILD = $(CURDIR)/scripts/rust-build.sh
@@ -10,7 +18,7 @@ else
   CARGO_FLAGS =
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -43,7 +51,7 @@ addon:
 # The fast profile rebuilds it in a fraction of that. addon-fast builds the
 # native addon under the same profile so a single `cargo build --profile fast`
 # pass serves both.
-install-dev: addon-fast
+install-dev: addon-fast qos-global
 	$(CARGO) build --profile fast
 	ln -sf $(CURDIR)/target/fast/nub $(BIN_DIR)/nub-dev
 	ln -sf $(CURDIR)/target/fast/nub $(BIN_DIR)/nubx-dev
@@ -63,6 +71,12 @@ addon-fast:
 	 cp target/fast/nub_native.dll runtime/addons/nub-native.node 2>/dev/null || \
 	 echo "Warning: could not find nub-native library"
 	@echo "Built: runtime/addons/nub-native.node (fast profile)"
+
+# Machine-global rustc QoS clamp: every cargo invocation on this host — any
+# worktree, clone, or direct `cargo` call — compiles at utility QoS, closing the
+# gap the entry-point clamps above leave open. See scripts/rustc-qos.sh.
+qos-global:
+	@scripts/qos-global.sh
 
 uninstall-dev:
 	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev

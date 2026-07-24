@@ -9,16 +9,21 @@ name: commit-hygiene
 on:
   pull_request:
 
+permissions: {}
+
 jobs:
   no-agent-trailers:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           # Fetch the full range so the merge base with the target branch resolves.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Scan PR commit messages for agent-attribution trailers
         env:

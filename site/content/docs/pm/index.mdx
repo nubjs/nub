@@ -166,4 +166,6 @@ registry=https://npm.corp.example
 //npm.corp.example/:_authToken=${CORP_NPM_TOKEN}
 ```
 
+Environment placeholders (`${VAR}`) in these values expand from your user `~/.npmrc` and `npm_config_*` — but not from a project `.npmrc` committed to the repo, which is read literally. A hostile `registry=` or auth line in a checked-out repo therefore can't interpolate a secret like `${NPM_TOKEN}` into a request to an attacker's host. On trusted CI where the project file genuinely needs expansion, set `PNPM_CONFIG_NPMRC_AUTH_FILE=.npmrc` to opt back in — it comes from the environment, so a repo can't set it for itself.
+
 To fetch package managers from a different registry than your dependencies, `COREPACK_NPM_REGISTRY` (+ `COREPACK_NPM_TOKEN`) overrides the PM-download registry — teams migrating off corepack keep their existing CI vars.

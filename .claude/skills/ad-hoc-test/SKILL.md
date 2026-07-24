@@ -40,6 +40,8 @@ EOF
 
 Keep it minimal: the smaller the fixture, the clearer the signal.
 
+> **Give each fixture a UNIQUE package identity when the behavior touches install / linking / build-approval.** nub's global virtual store persists built package cells across runs, so a second fixture that reuses a dependency's `name@version` can link the *first* run's already-built cell instead of building yours — and the behavior you're testing (does the build run? does the script fire?) silently reads the stale result. This produces a **false confirmation**: the run "proves" your hypothesis because it never exercised your package at all. Burned repeatedly verifying an approve-builds claim: a `file:./dirdep` dep named `dirdep@1.0.0` linked a cell built by an earlier same-named fixture, complete with a marker file the current fixture never wrote. Fix: name the dependency uniquely per run (e.g. `dep$(date +%s)@9.9.9`) — or wipe the store between runs — and confirm the linked `node_modules/<dep>/` contents are actually YOURS before trusting the result.
+
 ### 2. Build the dev `nub`
 
 Use the `fast` profile from a worktree with a stable target dir (see the `dev-loop` skill). Either invoke the binary by path or via the `nub-dev` symlink:

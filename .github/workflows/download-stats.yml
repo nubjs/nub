@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1 # zizmor: ignore[artipacked] the commit step below pushes to download-stats-data with the checkout credentials
       - name: Set snapshot timestamp
         id: ts
         run: echo "value=$(date -u +"%Y%m%dT%H%M%SZ")" >> "$GITHUB_OUTPUT"
@@ -37,8 +37,10 @@ jobs:
           echo "$last30" > /tmp/npm-counts.json
 
       - name: Write snapshot
+        env:
+          SNAPSHOT_TS: ${{ steps.ts.outputs.value }}
         run: |
-          ts="${{ steps.ts.outputs.value }}"
+          ts="$SNAPSHOT_TS"
           node - "$ts" <<'EOF'
           const fs = require("fs");
           // `node - "$ts"` puts the `-` stdin marker at argv[1]; the timestamp is argv[2].
@@ -68,8 +70,9 @@ jobs:
         # point report.mjs at it). The on-main archive stops updating by design.
         env:
           DATA_BRANCH: download-stats-data
+          SNAPSHOT_TS: ${{ steps.ts.outputs.value }}
         run: |
-          ts="${{ steps.ts.outputs.value }}"
+          ts="$SNAPSHOT_TS"
           snap="stats/download-counts/${ts}.json"
           # Preserve the just-written snapshot across the branch switch below.
           cp "$snap" /tmp/snapshot.json

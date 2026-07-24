@@ -21,12 +21,12 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
+      - name: Checkout code # zizmor: ignore[artipacked] vendored template forbids edits; job token is read-only (contents: read)
+        uses: actions/checkout@v6 # zizmor: ignore[unpinned-uses] vendored template forbids edits; upstream tracks the major tag
         with:
           fetch-depth: 1
       - name: Run agent
-        uses: pullfrog/pullfrog@v0
+        uses: pullfrog/pullfrog@v0 # zizmor: ignore[unpinned-uses] vendored template forbids edits; upstream tracks the major tag
         with:
           prompt: ${{ inputs.prompt }}
         env:

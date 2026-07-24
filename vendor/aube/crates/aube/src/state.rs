@@ -445,7 +445,7 @@ fn check_needs_install_compute(
             aube_util::diag::Span::new(aube_util::diag::Category::Frozen, "settings_hash");
         let current_settings_hash = hash_settings(project_dir, cli_flags);
         if current_settings_hash != state.settings_hash {
-            return Some(".npmrc or workspace config has changed".into());
+            return Some("install settings or the active Node version have changed".into());
         }
     }
 
@@ -1468,6 +1468,31 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
         hasher.update(b"\x1f");
     }
     hasher.update(b"\0");
+    // The Node engine builds run against. Without it a Node major switch leaves
+    // this hash unchanged, the install reports itself current, and a native
+    // addon compiled for the previous ABI is never revisited — the delta filter
+    // and the side-effects cache downstream never get the chance.
+    //
+    // Gated on the embedder owning Node provisioning, because only then is the
+    // value STABLE ACROSS THIS HASH'S TWO CALL SITES. The freshness check runs
+    // before `runtime::ensure` populates `runtime::current()`, the state write
+    // runs after; under runtime switching those observe different versions, so
+    // folding a resolver-derived value would hash differently at check time and
+    // write time and never converge — a permanent warm-path miss. An embedder
+    // that provisions Node publishes its resolved version into the engine
+    // context before any install code runs, so both sites read one value.
+    // Standalone aube keeps its byte-for-byte hash; its own delta gate
+    // (`dep_build_policy_hash`) is engine-aware and computed after `ensure`,
+    // where the resolver has settled.
+    if !aube_util::embedder().runtime_switching {
+        let engine = crate::engines::build_node_version()
+            .map_or_else(aube_lockfile::graph_hash::platform_name, |v| {
+                aube_lockfile::graph_hash::engine_name_default(&v).0
+            });
+        hasher.update(b"engine=");
+        hasher.update(engine.as_bytes());
+        hasher.update(b"\0");
+    }
     // Embedder-supplied extra fingerprint: an install-shape input the host
     // controls outside aube's resolved settings (nub's phantom-eject flag,
     // which changes which packages materialize but rides no setting). `None`

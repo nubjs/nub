@@ -24,10 +24,11 @@ grep -viE \
 > "$TMP_FILE"
 
 # Collapse multiple trailing blank lines, discard a lone trailing blank line.
+# Trailing blanks are simply never flushed at EOF — no END block needed (a
+# C-style /* */ comment in one broke BSD awk, silently skipping this step).
 awk '
   /^[[:space:]]*$/ { blanks++; next }
   { for (i = 0; i < (blanks > 1 ? 1 : blanks); i++) print ""; blanks = 0; print }
-  END { /* discard any trailing blank lines */ }
 ' "$TMP_FILE" > "${TMP_FILE}.2" && mv "${TMP_FILE}.2" "$TMP_FILE"
 
 mv "$TMP_FILE" "$MSG_FILE"

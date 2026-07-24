@@ -28,7 +28,12 @@ scripts/rust-build.sh test  -p nub-cli --test integration
 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
 ```
 
-It prints which target dir it chose and why, then execs `cargo` with `CARGO_TARGET_DIR` set. Nothing else changes — same profiles, same args.
+It prints which target dir it chose and why, then execs `cargo` with `CARGO_TARGET_DIR` set. Same profiles, same args — plus two default-on contention controls (added 2026-07-23 after ~20 concurrent agent builds drove the 10-core host to load ~190):
+
+- **QoS clamp (darwin only):** cargo runs under `taskpolicy -c utility`, so interactive work always preempts fleet builds; an uncontended build still gets all cores. `NUB_BUILD_FG=1` opts out for a latency-sensitive foreground build.
+- **Default job cap on big hosts (>8 cores):** `CARGO_BUILD_JOBS = ncpu-4` unless the caller already chose (pre-set `CARGO_BUILD_JOBS`, `NUB_BUILD_JOBS`, or an explicit `-j`/`--jobs` flag — cargo's CLI flag outranks the env var).
+
+These wrapper-level controls only cover builds that go THROUGH the wrapper (or make). Direct `cargo build`/`test` invocations are clamped by a third, machine-global control: `make qos-global` installs `scripts/rustc-qos.sh` as the cargo `rustc-wrapper` in `~/.cargo/config.toml`, so every rustc on the host — any worktree, any clone, any entry point — compiles at utility QoS (`install-dev` re-runs it, so it self-heals). Same `NUB_BUILD_FG=1` opt-out; toggling the wrapper does not invalidate cargo fingerprints, so mixed builds share a target dir without rebuild churn.
 
 ## Why one shared target dir
 

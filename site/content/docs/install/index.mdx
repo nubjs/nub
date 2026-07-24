@@ -425,9 +425,7 @@ A fresh resolve, or a lockfile Nub itself wrote (which carries the `time:` block
 ```console
 # captured: nub 0.0.44, pnpm-incumbent, esbuild@0.21.5 — no allowBuilds entry
 $ nub install
-WARN defaultTrust: running build scripts for 1 default-trusted
-     package(s): esbuild@0.21.5 code=WARN_NUB_DEFAULT_TRUST_BUILDS
-     count=1 packages=["esbuild@0.21.5"]   # ✓ all three gates passed
+WARN defaultTrust: running build scripts for esbuild@0.21.5   # ✓ all three gates passed
 dependencies:
 + esbuild@0.21.5
 ```

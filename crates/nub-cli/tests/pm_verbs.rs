@@ -129,6 +129,39 @@ const IS_POSITIVE_PACKAGE_LOCK: &str = r#"{
 /// `demo-plugin@1.0.0(demo-host@1.0.0)`; the #453 bug wrote a bare
 /// `demo-plugin@1.0.0`. `import` reads peer data straight from the lockfile —
 /// no registry — so synthetic package names exercise the pass fully offline.
+/// bun.lock counterpart of [`PEER_DEP_PACKAGE_LOCK`]: ajv@6.12.6 +
+/// ajv-keywords@3.5.2 (a real published peer pair, captured from `bun install`).
+/// Exercises the same import peer pass through the BUN parser, whose
+/// peer-dependency plumbing is separate from the npm one.
+const AJV_PEER_BUN_LOCK: &str = r#"{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "fixture",
+      "dependencies": {
+        "ajv": "6.12.6",
+        "ajv-keywords": "3.5.2",
+      },
+    },
+  },
+  "packages": {
+    "ajv": ["ajv@6.12.6", "", { "dependencies": { "fast-deep-equal": "^3.1.1", "fast-json-stable-stringify": "^2.0.0", "json-schema-traverse": "^0.4.1", "uri-js": "^4.2.2" } }, "sha512-j3fVLgvTo527anyYyJOGTYJbG+vnnQYvE0m5mmkc1TK+nxAppkCLMIL0aZ4dblVCNoGShhm+kzE4ZUykBoMg4g=="],
+
+    "ajv-keywords": ["ajv-keywords@3.5.2", "", { "peerDependencies": { "ajv": "^6.9.1" } }, "sha512-5p6WTN0DdTGVQk6VjcEju19IgaHudalcfabD7yhDGeA6bcQnmL+CpveLJq/3hvfwd1aof6L386Ougkx6RfyMIQ=="],
+
+    "fast-deep-equal": ["fast-deep-equal@3.1.3", "", {}, "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q=="],
+
+    "fast-json-stable-stringify": ["fast-json-stable-stringify@2.1.0", "", {}, "sha512-lhd/wF+Lk98HZoTCtlVraHtfh5XYijIjalXck7saUtuanSDyLMxnHhSXEDJqHxD7msR8D0uCmqlkwjCV8xvwHw=="],
+
+    "json-schema-traverse": ["json-schema-traverse@0.4.1", "", {}, "sha512-xbbCH5dCYU5T8LcEhhuh7HJ88HXuW3qsI3Y0zOZFKfZEHcpWiHU/Jxzk629Brsab/mMiHQti9wMP+845RPe3Vg=="],
+
+    "punycode": ["punycode@2.3.1", "", {}, "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg=="],
+
+    "uri-js": ["uri-js@4.4.1", "", { "dependencies": { "punycode": "^2.1.0" } }, "sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg=="],
+  }
+}"#;
+
 const PEER_DEP_PACKAGE_LOCK: &str = r#"{
   "name": "fixture",
   "version": "1.0.0",
@@ -690,6 +723,49 @@ fn import_writes_peer_suffixes_for_suffixless_source() {
     assert!(
         lock.contains("demo-plugin@1.0.0(demo-host@1.0.0)"),
         "imported pnpm-lock must peer-suffix the plugin key (#453): {lock}"
+    );
+}
+
+/// Same guarantee through the BUN lockfile parser: a real published peer pair
+/// (ajv-keywords peers on ajv) must come out suffixed with the resolved peer
+/// mirrored into the snapshot's dependencies — the edge that gives the
+/// store-resident copy its sibling link under the isolated layout (#453).
+#[test]
+fn import_writes_peer_suffixes_for_bun_lock_source() {
+    let dir = pm_tmpdir("import-peer-bun");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"fixture","version":"1.0.0","dependencies":{"ajv":"6.12.6","ajv-keywords":"3.5.2"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("bun.lock"), AJV_PEER_BUN_LOCK).unwrap();
+
+    let out = run_nub(&dir, &["import"]);
+    assert_eq!(
+        out.code, 0,
+        "stdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    let lock = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+    assert!(
+        lock.contains("ajv-keywords@3.5.2(ajv@6.12.6)"),
+        "bun-sourced import must carry the peer-context suffix: {lock}"
+    );
+    // Bound the check to ajv-keywords' OWN snapshot block: split on its
+    // suffixed key (unique to the snapshots section — the packages key stays
+    // bare), then cut at the blank line that separates snapshot entries. The
+    // whole-file remainder would let a peer edge that landed on the wrong
+    // snapshot still pass.
+    let snapshot = lock
+        .split("ajv-keywords@3.5.2(ajv@6.12.6):")
+        .nth(1)
+        .unwrap_or("")
+        .split("\n\n")
+        .next()
+        .unwrap_or("");
+    assert!(
+        snapshot.contains("ajv: 6.12.6"),
+        "resolved peer must be mirrored into ajv-keywords' snapshot deps: {snapshot}"
     );
 }
 

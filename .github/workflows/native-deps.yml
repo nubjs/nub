@@ -6,7 +6,7 @@ name: Native-dep floor
 # Two fixture legs:
 #   floor-allowed: esbuild + better-sqlite3 (both on the allowlist). Asserts:
 #     (a) install exits 0 and artifacts materialize,
-#     (b) WARN_NUB_DEFAULT_TRUST_BUILDS discloses both packages by name — the
+#     (b) the defaultTrust warning discloses both packages by name — the
 #         floor is NOT a silent allow path,
 #     (c) native modules are loadable after install.
 #   floor-denied:  core-js (not on the allowlist). Asserts:
@@ -37,6 +37,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -46,9 +48,13 @@ jobs:
     runs-on: ubuntu-latest
     # node-gyp compile (better-sqlite3) + real registry installs can be slow on cold runners.
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:

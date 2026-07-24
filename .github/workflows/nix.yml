@@ -33,18 +33,24 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   check:
     name: nix flake check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # A cold from-source build of the whole nub + vendored-aube workspace under Nix
     # (no Swatinem cache) is far heavier than the old fetchurl repackage.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v16
+        uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
 
       # Real Node on PATH so the cold TS run below exercises the embedded-runtime
       # extraction deterministically instead of provisioning a Node first.

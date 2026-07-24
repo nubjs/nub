@@ -51,6 +51,9 @@ pub(crate) fn configure_script_settings(
             .as_ref()
             .and_then(|r| r.node_bin.clone())
             .or_else(aube_runtime::node_on_path),
+        // No ambient fallback: `None` means "same binary as `node_exe`", which
+        // already carries one. Only a wrapping embedder sets this.
+        node_execpath: runtime.as_ref().and_then(|r| r.node_execpath.clone()),
         env_overlay: overlay.env_overlay,
         path_prepends: overlay.path_prepends,
         command: command.map(str::to_string),

@@ -19,6 +19,12 @@
 # (target/<profile>/libnub_native.*) would miss it.
 !crates/nub-native/.cargo/
 !crates/nub-native/.cargo/config.toml
+# Root .cargo/config.toml carries the min-publish-age soak window for
+# cargo's dependency resolution — tracked for the same reason as above.
+!.cargo/
+!.cargo/config.toml
+# Root .npmrc carries the npm-side soak window (min-release-age) — same regime.
+!.npmrc
 
 # Vendored aube is plain in-tree files (Pattern B) — track its ENTIRE tree,
 # including dot-prefixed entries the broad `.*` rule above would otherwise hide
@@ -127,3 +133,8 @@ tests/bench/RESULTS.md
 
 # local-only design corpus (symlink to external dir) — never tracked
 wiki
+
+# The repo root is npm-only — a root pnpm-lock.yaml (beside a workspace
+# yaml) would mark the root as a workspace for nub and re-trigger the
+# engines-redirect the soak surfaces were moved to tools/ to avoid.
+/pnpm-lock.yaml
