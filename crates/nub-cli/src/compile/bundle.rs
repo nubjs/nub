@@ -271,7 +271,12 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
     Ok(map)
 }
 
-fn alias_entries(raw: &[String]) -> Result<Option<Vec<(String, Vec<Option<String>>)>>> {
+/// Rolldown's `ResolveOptions::alias` shape: a specifier maps to an ordered list
+/// of replacements (`None` meaning "resolve to nothing"). nub only ever emits a
+/// single concrete target per alias.
+type AliasEntries = Vec<(String, Vec<Option<String>>)>;
+
+fn alias_entries(raw: &[String]) -> Result<Option<AliasEntries>> {
     if raw.is_empty() {
         return Ok(None);
     }
