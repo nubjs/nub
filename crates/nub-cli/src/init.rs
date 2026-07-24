@@ -218,8 +218,9 @@ const TSCONFIG: &str = r#"{
 "#;
 
 /// Keep demand's text editor, but use its inline mode so editing and submitted
-/// states occupy the same row. Demand cannot use a different separator after
-/// submission, so replace its success row with Nub's dim-label `:` form.
+/// states occupy the same row. Demand under-counts an inline input's height as
+/// zero, so its editing row survives submission alongside its success row;
+/// clear both before writing Nub's dim-label `:` form.
 fn prompt_name(default_name: &str) -> Result<Option<String>> {
     let mut theme = demand::Theme::new();
     theme.title.set_dimmed(true);
@@ -245,7 +246,7 @@ fn prompt_name(default_name: &str) -> Result<Option<String>> {
             } else {
                 sanitize_name(&raw)
             };
-            term.clear_last_lines(1)
+            term.clear_last_lines(2)
                 .context("clearing project-name prompt")?;
             write_prompt_answer(&term, "Project name", &name)?;
             Ok(Some(name))
