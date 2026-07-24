@@ -170,7 +170,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
     let node_cache = base
         .join("compile-node")
         .join(format!("{}-{}", m.node_version, key));
-    let node_bin = node_cache.join("node");
+    let node_bin = node_cache.join(node_exe_name());
 
     // Warm: this exact embedded Node already extracted.
     if node_bin.is_file() {
@@ -179,7 +179,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
 
     // Dedup: an official Node of the same version already in nub's store.
     if let Some(store) = discovery::node_store_dir() {
-        let official = store.join(&m.node_version).join("bin").join("node");
+        let official = node_in_version_dir(&store.join(&m.node_version));
         if official.is_file() {
             return Ok(official);
         }
@@ -197,7 +197,7 @@ fn acquire_embedded_node(view: &PayloadView<'_>) -> Result<PathBuf> {
     ));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    let tmp_bin = tmp.join("node");
+    let tmp_bin = tmp.join(node_exe_name());
     decompress_to_file(view.node_blob, &tmp_bin).context("decompressing the embedded Node")?;
     set_executable(&tmp_bin)?;
 
@@ -260,7 +260,7 @@ fn best_store_node(store: &Path, target: &NodeVersion) -> Option<PathBuf> {
         if ver < *target {
             continue;
         }
-        let bin = entry.path().join("bin").join("node");
+        let bin = node_in_version_dir(&entry.path());
         if !bin.is_file() {
             continue;
         }
@@ -279,7 +279,7 @@ fn probe_path_node() -> Option<(PathBuf, NodeVersion)> {
     }
     let ver: NodeVersion = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
     // Resolve the actual path so we don't re-PATH-search at spawn.
-    let path = which_on_path("node").unwrap_or_else(|| PathBuf::from("node"));
+    let path = which_on_path(node_exe_name()).unwrap_or_else(|| PathBuf::from("node"));
     Some((path, ver))
 }
 
@@ -359,12 +359,12 @@ fn provision_smol_node(version: &NodeVersion) -> Result<PathBuf> {
     // `<store>/<version>/`.
     let extracted = work.join(format!("node-v{version}-{token}"));
     let final_dir = store.join(version.to_string());
-    if !final_dir.join("bin").join("node").is_file() {
+    if !node_in_version_dir(&final_dir).is_file() {
         let _ = fs::rename(&extracted, &final_dir);
     }
     let _ = fs::remove_dir_all(&work);
 
-    let node = final_dir.join("bin").join("node");
+    let node = node_in_version_dir(&final_dir);
     if !node.is_file() {
         bail!(
             "provisioned Node {version} but its binary is missing at {}",
@@ -556,6 +556,22 @@ fn set_executable(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+/// The Node executable's filename on this platform.
+fn node_exe_name() -> &'static str {
+    if cfg!(windows) { "node.exe" } else { "node" }
+}
+
+/// The Node executable inside a provisioned version dir. The two dist layouts
+/// differ: the Windows zip puts `node.exe` at the root, the tarballs put
+/// `bin/node`.
+fn node_in_version_dir(version_dir: &Path) -> PathBuf {
+    if cfg!(windows) {
+        version_dir.join("node.exe")
+    } else {
+        version_dir.join("bin").join("node")
+    }
 }
 
 fn host_platform_token() -> String {

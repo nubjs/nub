@@ -424,7 +424,7 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
     }
     if ok {
         ok = if target.is_host() {
-            run_ok(tmp.to_str().unwrap_or_default(), &["--version".as_ref()])
+            node_runs(&tmp)
         } else {
             // Can't execute a foreign binary — settle for "still the right kind
             // of image, and not obviously truncated".
@@ -444,6 +444,28 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
 
     eprintln!("note: strip failed verification — embedding Node unstripped");
     Ok(original)
+}
+
+/// Does this Node binary still execute? Asks it for `--version` with the ambient
+/// Node configuration REMOVED.
+///
+/// The env scrub is load-bearing, not hygiene. A developer machine routinely
+/// carries a `NODE_OPTIONS` aimed at a different Node than the one being embedded
+/// — nub's own dev shell exports one — and Node rejects the whole invocation when
+/// a flag in it is unknown to that binary. Inheriting it made a perfectly good
+/// stripped Node look broken, and the fallback then silently shipped the
+/// unstripped one (~27 MB heavier) with only a note. The check must test the
+/// BINARY, not the environment it happens to run in.
+fn node_runs(node: &Path) -> bool {
+    std::process::Command::new(node)
+        .arg("--version")
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_REPL_EXTERNAL_MODULE")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // ---- launcher template --------------------------------------------------------
@@ -487,15 +509,19 @@ fn locate_launcher_template_in(
         );
     }
 
+    // Both the suffixed and bare spellings, because a Windows template may be
+    // published either way; on a non-Windows target they coincide, so dedupe.
     let triple = target.triple();
     let suffix = target.exe_suffix();
-    let mut names = vec![
-        format!("nub-launcher-{triple}{suffix}"),
-        format!("nub-launcher-{triple}"),
-    ];
+    let mut names = vec![format!("nub-launcher-{triple}{suffix}")];
+    if !suffix.is_empty() {
+        names.push(format!("nub-launcher-{triple}"));
+    }
     if target.is_host() {
         names.push(format!("nub-launcher{suffix}"));
-        names.push("nub-launcher".to_string());
+        if !suffix.is_empty() {
+            names.push("nub-launcher".to_string());
+        }
     }
 
     if let Some(dir) = nub_dir {
