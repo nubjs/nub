@@ -389,6 +389,30 @@ curl -fsSL https://nubjs.com/install.sh | NUB_INSTALL_DIR="$HOME/.local/nub" NUB
 
 On Windows, set `$env:NUB_INSTALL_DIR` / `$env:NUB_NO_MODIFY_PATH` before the `irm | iex`.
 
+## Can I run the canary build?
+
+Yes. Every code push to main publishes a full 8-platform build under the rolling [canary release](https://github.com/nubjs/nub/releases/tag/canary) and to npm under the `canary` dist-tag. Install it with the install script:
+
+```bash
+curl -fsSL https://nubjs.com/install.sh | bash -s canary
+```
+
+On Windows:
+
+```powershell
+iex "& { $(irm https://nubjs.com/install.ps1) } canary"
+```
+
+Or through npm:
+
+```bash
+npm install -g --ignore-scripts=false @nubjs/nub@canary
+```
+
+An existing script install switches channels in place with `nub upgrade --canary`; `nub upgrade --stable` returns to the latest stable release. On a canary build, a plain `nub upgrade` stays on the canary channel. Canary versions are date-stamped — `nub --version` prints something like `v0.5.1-canary.20260724.117`.
+
+Canary is the bleeding edge: it may break, and each build replaces the last. Homebrew and winget carry only stable releases, so upgrading through them always lands on a release.
+
 ## Does it have a dev server?
 
 No. Vite already owns this; `nub run dev` runs whatever your project's `dev` script is — faster, because the `nub run` wrapper costs less than the `pnpm run` wrapper, but the dev server itself is still Vite (or Next.js, or whatever you're running).

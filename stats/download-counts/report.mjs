@@ -64,6 +64,11 @@ if (snapshots.length < 2) {
 function assetMap(snapshot) {
   const map = {};
   for (const release of snapshot.data.github_releases ?? []) {
+    // Skip the rolling canary release (belt-and-suspenders — the snapshot
+    // workflow already filters it): its per-asset counters are destroyed by
+    // every canary build's --clobber re-upload, so a snapshot that caught one
+    // would read as a reset-to-zero (negative delta) in the series.
+    if (release.tag === "canary") continue;
     for (const asset of release.assets ?? []) {
       // Skip checksum sidecars — they're downloaded alongside the archive
       // and inflate the count without adding signal

@@ -882,8 +882,17 @@ pub enum Command {
     /// Upgrade Nub to the latest version.
     Upgrade {
         /// Target version (default: latest).
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["canary", "stable"])]
         version: Option<String>,
+
+        /// Upgrade to the latest canary build (rebuilt from every commit).
+        #[arg(long, conflicts_with = "stable")]
+        canary: bool,
+
+        /// Upgrade to the latest stable release — the default on stable
+        /// builds; on a canary build this opts back out of the canary channel.
+        #[arg(long)]
+        stable: bool,
 
         /// Show what would happen without performing the upgrade.
         #[arg(long)]
@@ -2421,9 +2430,11 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         }),
         Some(Command::Upgrade {
             version,
+            canary,
+            stable,
             dry_run,
             yes,
-        }) => run_upgrade(version.as_deref(), dry_run, yes),
+        }) => run_upgrade(version.as_deref(), canary, stable, dry_run, yes),
         Some(Command::Help { command }) => {
             // `nub help <cmd>` routes to that command's help; `nub help` alone →
             // the curated top-level page. Same router as `nub <cmd> -h`.
@@ -5394,6 +5405,19 @@ const RELEASE_DOWNLOAD_BASE_ENV: &str = "NUB_RELEASE_BASE_URL";
 /// testable against a `file://` fixture.
 const RELEASE_LATEST_API_ENV: &str = "NUB_RELEASE_LATEST_URL";
 
+/// The rolling release tag the canary channel publishes under — release.yml's
+/// canary-release job recreates it at every built main commit, so the archive
+/// lives at `<base>/canary/nub-<target>.<ext>` with no `v` prefix (bun's exact
+/// layout). npm carries the same builds under the `canary` dist-tag; Homebrew
+/// and winget carry only stable releases.
+const CANARY_TAG: &str = "canary";
+
+/// Internal, test-only override for the canary release-by-tag endpoint
+/// (default: GitHub's `…/releases/tags/canary`). Serves the JSON whose `name`
+/// is `Canary <X.Y.Z>-canary.<date>.<run>` (release.yml's canary-release job
+/// titles it so). Same contract as [`RELEASE_LATEST_API_ENV`].
+const RELEASE_CANARY_API_ENV: &str = "NUB_RELEASE_CANARY_URL";
+
 /// The releases-download base URL — the test seam's override if set, else the
 /// canonical github.com path. Centralized so the override is read in exactly one
 /// place and the default is the single source of truth.
@@ -5407,6 +5431,59 @@ fn release_download_base() -> String {
 fn release_latest_api() -> String {
     std::env::var(RELEASE_LATEST_API_ENV)
         .unwrap_or_else(|_| format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest"))
+}
+
+/// The canary release-by-tag API URL — the test seam's override if set, else
+/// GitHub's `releases/tags/canary` endpoint.
+fn release_canary_api() -> String {
+    std::env::var(RELEASE_CANARY_API_ENV).unwrap_or_else(|_| {
+        format!("https://api.github.com/repos/{RELEASE_REPO}/releases/tags/{CANARY_TAG}")
+    })
+}
+
+/// True when THIS binary is a canary build — the canary pipeline stamps the
+/// compiled version as `<X.Y.Z>-canary.<date>.<run>` (release.yml's
+/// set-version.mjs step), so the marker rides CARGO_PKG_VERSION. bun-mirror: a
+/// canary build's bare `nub upgrade` stays on the canary channel (see
+/// [`choose_release_channel`]).
+fn is_canary_build() -> bool {
+    env!("CARGO_PKG_VERSION").contains("-canary.")
+}
+
+/// Which release channel an upgrade pulls from — orthogonal to
+/// [`UpgradeChannel`] (HOW the binary got installed): stable is the versioned
+/// `v*` tags, canary the rolling [`CANARY_TAG`] prerelease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseChannel {
+    Stable,
+    Canary,
+}
+
+/// The bun-mirrored channel decision, pure for testability: `--canary` opts
+/// in; a canary build defaults back to canary so bare `nub upgrade` tracks the
+/// channel you're on; `--stable` or an explicit `--version` opts out.
+fn choose_release_channel(
+    flag_canary: bool,
+    flag_stable: bool,
+    explicit_version: bool,
+    running_is_canary: bool,
+) -> ReleaseChannel {
+    if flag_canary || (running_is_canary && !flag_stable && !explicit_version) {
+        ReleaseChannel::Canary
+    } else {
+        ReleaseChannel::Stable
+    }
+}
+
+/// Where to send a user whose install channel cannot serve the canary (npm and
+/// Homebrew only carry stable releases): the standalone installer, whose
+/// `canary` argument installs the rolling build into the self-owned `~/.nub`.
+fn canary_install_hint() -> &'static str {
+    if cfg!(windows) {
+        r#"iex "& { $(irm https://nubjs.com/install.ps1) } canary""#
+    } else {
+        "curl -fsSL https://nubjs.com/install.sh | bash -s canary"
+    }
 }
 
 /// The npm package users `npm install -g`. The bare `nub` name is an unrelated
@@ -5429,12 +5506,25 @@ enum UpgradeChannel {
     Npm,
     /// Homebrew install (path under a Homebrew prefix).
     Homebrew,
+    /// winget portable install (path under WinGet's package store). ADVISE,
+    /// never execute: spawning `winget upgrade` from inside a running nub would
+    /// try to replace the in-use nub.exe, which fails AND corrupts winget's
+    /// version bookkeeping (winget-cli #5235 records the upgrade as done);
+    /// self-swapping the file instead would leave winget's tracked version
+    /// stale forever (portable packages have no version hook, winget-cli
+    /// discussion #3304) and the next real `winget upgrade` would silently
+    /// clobber it. So this channel only prints the command to run.
+    Winget,
     /// The curl/`~/.nub` self-owned install — Nub owns the binary and swaps it
     /// in place. `install_dir` is the `…/.nub` root (parent of `bin/`).
     SelfOwned { install_dir: PathBuf },
     /// Couldn't tell — print the manual-instruction message and exit non-zero.
     Unknown,
 }
+
+/// The exact command a winget-installed user upgrades with. Advisory only —
+/// see [`UpgradeChannel::Winget`] for why nub never spawns it.
+const WINGET_UPGRADE_DISPLAY: &str = "winget upgrade --id Nubjs.Nub";
 
 /// Classify the install channel from the canonicalized binary path. Pure (no
 /// I/O) so the routing matrix is unit-testable; the actual `current_nub_binary`
@@ -5448,6 +5538,12 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
     }
     if s.contains("/homebrew/") || s.contains("/Cellar/") || s.contains("/linuxbrew/") {
         return UpgradeChannel::Homebrew;
+    }
+    // winget's portable-package store (%LOCALAPPDATA%\Microsoft\WinGet\Packages\…).
+    // The Links\ stub is a symlink into it, and `current_nub_binary` canonicalizes,
+    // so the real store path is what arrives here.
+    if s.contains("\\Microsoft\\WinGet\\Packages\\") || s.contains("/Microsoft/WinGet/Packages/") {
+        return UpgradeChannel::Winget;
     }
     // Self-owned: the binary sits at `<install_dir>/bin/nub`. Derive install_dir
     // by walking up from the binary, then accept it as self-owned when EITHER the
@@ -5557,67 +5653,129 @@ fn archive_ext(target: &str) -> &'static str {
     }
 }
 
-/// GitHub release archive URL for a resolved version + platform target. Mirrors
-/// install.sh's `url=` line (install.ps1's on Windows) so the self-owned channel
-/// pulls the same artifact the installer did. The base is
+/// GitHub release archive URL for a release TAG (`v<X.Y.Z>` for stable,
+/// [`CANARY_TAG`] for the rolling canary) + platform target. Mirrors
+/// install.sh's `url=` line (install.ps1's on Windows) so the self-owned
+/// channel pulls the same artifact the installer did. The base is
 /// [`release_download_base`] so the test seam can redirect it to a local
 /// fixture; unset → the canonical github.com URL.
-fn archive_url(version: &str, target: &str) -> String {
+fn archive_url_for_tag(tag: &str, target: &str) -> String {
     format!(
-        "{}/v{version}/nub-{target}.{}",
+        "{}/{tag}/nub-{target}.{}",
         release_download_base(),
         archive_ext(target)
     )
 }
 
-/// SHA-256 checksum sidecar URL for the archive. release.yml publishes a
-/// `<archive>.sha256` next to each archive; the self-owned channel fetches it
-/// and verifies the download before extracting.
-fn checksum_url(version: &str, target: &str) -> String {
-    format!("{}.sha256", archive_url(version, target))
+/// [`archive_url_for_tag`] for a resolved stable version (`v<version>` tag).
+fn archive_url(version: &str, target: &str) -> String {
+    archive_url_for_tag(&format!("v{version}"), target)
 }
 
-fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> {
+/// SHA-256 checksum sidecar URL for the archive. release.yml publishes a
+/// `<archive>.sha256` next to each archive (stable and canary alike); the
+/// self-owned channel fetches it
+/// and verifies the download before extracting.
+fn checksum_url_for_tag(tag: &str, target: &str) -> String {
+    format!("{}.sha256", archive_url_for_tag(tag, target))
+}
+
+/// [`checksum_url_for_tag`] for a resolved stable version (`v<version>` tag).
+fn checksum_url(version: &str, target: &str) -> String {
+    checksum_url_for_tag(&format!("v{version}"), target)
+}
+
+fn run_upgrade(
+    version: Option<&str>,
+    canary: bool,
+    stable: bool,
+    dry_run: bool,
+    _yes: bool,
+) -> Result<i32> {
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let bin_str = nub_binary.to_string_lossy().into_owned();
     let channel = detect_channel(&nub_binary);
+    let release_channel =
+        choose_release_channel(canary, stable, version.is_some(), is_canary_build());
     let target = version.unwrap_or("latest");
 
     if dry_run {
         match &channel {
             UpgradeChannel::Npm => {
-                println!("would upgrade to {target} via npm");
-                println!("  command: {}", npm_upgrade_command(target));
+                // npm serves the canary channel as the `canary` dist-tag
+                // (release.yml publishes every canary build under it), so the
+                // npm path is the same command with a different spec.
+                let npm_target = match release_channel {
+                    ReleaseChannel::Canary => CANARY_TAG,
+                    ReleaseChannel::Stable => target,
+                };
+                println!("would upgrade to {npm_target} via npm");
+                println!("  command: {}", npm_upgrade_command(npm_target));
             }
             UpgradeChannel::Homebrew => {
-                println!("would upgrade to {target} via homebrew");
-                println!("  command: {HOMEBREW_UPGRADE_DISPLAY}");
+                if release_channel == ReleaseChannel::Canary {
+                    println!(
+                        "would upgrade to canary, but canary builds are not published to Homebrew"
+                    );
+                    println!("  install instead: {}", canary_install_hint());
+                } else {
+                    println!("would upgrade to {target} via homebrew");
+                    println!("  command: {HOMEBREW_UPGRADE_DISPLAY}");
+                }
+            }
+            UpgradeChannel::Winget => {
+                if release_channel == ReleaseChannel::Canary {
+                    println!(
+                        "would upgrade to canary, but canary builds are not published to winget"
+                    );
+                    println!("  install instead: {}", canary_install_hint());
+                } else {
+                    println!("would upgrade to {target} via winget (run it yourself)");
+                    println!("  command: {WINGET_UPGRADE_DISPLAY}");
+                }
             }
             UpgradeChannel::SelfOwned { install_dir } => {
                 // Show the resolved dir, not a hardcoded ~/.nub — a receipt-marked
                 // NUB_INSTALL_DIR relocates it.
+                let channel_word = match release_channel {
+                    ReleaseChannel::Canary => "canary",
+                    ReleaseChannel::Stable => target,
+                };
                 println!(
-                    "would upgrade to {target} via self-owned ({})",
+                    "would upgrade to {channel_word} via self-owned ({})",
                     install_dir.display()
                 );
                 match platform_target() {
                     Some(plat) => {
-                        // Resolve `latest` to a concrete tag so the printed URL is
-                        // the real artifact, not a bogus `vlatest`. A dry-run is an
-                        // explicit user action where one GitHub API call is fine;
-                        // if it fails (offline), fall back to the literal spec and
-                        // say so rather than fabricate a version.
-                        let resolved = resolve_version(target);
-                        let ver = match &resolved {
-                            Ok(v) => v.as_str(),
-                            Err(_) => target,
+                        let tag = match release_channel {
+                            ReleaseChannel::Canary => {
+                                // The rolling tag needs no resolution; surface the
+                                // advertised canary version when the API answers.
+                                if let Some(v) = resolve_canary_version() {
+                                    println!("  canary:   v{v}");
+                                }
+                                CANARY_TAG.to_string()
+                            }
+                            ReleaseChannel::Stable => {
+                                // Resolve `latest` to a concrete tag so the printed URL is
+                                // the real artifact, not a bogus `vlatest`. A dry-run is an
+                                // explicit user action where one GitHub API call is fine;
+                                // if it fails (offline), fall back to the literal spec and
+                                // say so rather than fabricate a version.
+                                let resolved = resolve_version(target);
+                                let ver = match &resolved {
+                                    Ok(v) => v.as_str(),
+                                    Err(_) => target,
+                                };
+                                if resolved.is_err() && target == "latest" {
+                                    println!("  (could not resolve `latest`; showing literal)");
+                                }
+                                format!("v{ver}")
+                            }
                         };
-                        if resolved.is_err() && target == "latest" {
-                            println!("  (could not resolve `latest`; showing literal)");
-                        }
                         println!("  platform: {plat}");
-                        println!("  archive:  {}", archive_url(ver, plat));
-                        println!("  sha256:   {}", checksum_url(ver, plat));
+                        println!("  archive:  {}", archive_url_for_tag(&tag, plat));
+                        println!("  sha256:   {}", checksum_url_for_tag(&tag, plat));
                         println!("  install:  {}", install_dir.display());
                     }
                     None => println!(
@@ -5636,11 +5794,37 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
         return Ok(0);
     }
 
+    // Homebrew and winget only carry stable releases — a canary ask on those
+    // channels has nothing to install, so route the user to the standalone
+    // installer rather than silently handing them a stable build. (npm DOES
+    // carry canary, as the `canary` dist-tag — handled in the npm arm below.)
+    if release_channel == ReleaseChannel::Canary
+        && matches!(channel, UpgradeChannel::Homebrew | UpgradeChannel::Winget)
+    {
+        bail!(
+            "nub upgrade: canary builds are not published to {}.\n\
+             Install the canary via the standalone installer instead:\n  {}",
+            if channel == UpgradeChannel::Homebrew {
+                "Homebrew"
+            } else {
+                "winget"
+            },
+            canary_install_hint()
+        );
+    }
+
     match channel {
         UpgradeChannel::Npm => {
-            let cmd = npm_upgrade_command(target);
+            // The canary channel rides npm's `canary` dist-tag (release.yml
+            // publishes every canary build under it), so a canary ask is the
+            // same install with a different spec.
+            let npm_target = match release_channel {
+                ReleaseChannel::Canary => CANARY_TAG,
+                ReleaseChannel::Stable => target,
+            };
+            let cmd = npm_upgrade_command(npm_target);
             println!("running `{cmd}`");
-            let status = npm_upgrade_command_invocation(target).status()?;
+            let status = npm_upgrade_command_invocation(npm_target).status()?;
             let code = nub_core::node::spawn::exit_code_from_status(&status);
             // npm wrote a NEW inode; existing shim hardlinks still carry the
             // old bytes until `nub pm shim` re-links them.
@@ -5680,8 +5864,25 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
             }
             Ok(code)
         }
+        UpgradeChannel::Winget => {
+            // Advisory only — see the enum doc: spawning winget here would try
+            // to replace this running nub.exe (fails + corrupts winget's version
+            // tracking), and self-swapping would strand winget's bookkeeping.
+            bail!(
+                "nub upgrade: this nub was installed by winget, which must perform the upgrade \
+                 itself.\nRun: {WINGET_UPGRADE_DISPLAY}"
+            );
+        }
         UpgradeChannel::SelfOwned { install_dir } => {
-            perform_selfowned_upgrade(&install_dir, target)?;
+            if is_canary_build() && release_channel == ReleaseChannel::Stable {
+                // Explicit --stable (or --version) from a canary build: make the
+                // channel switch visible (bun's "Downgrading … to stable" moment).
+                println!(
+                    "leaving the canary channel (v{}) for a stable release",
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+            perform_selfowned_upgrade(&install_dir, release_channel, target)?;
             // nub owns the swapped-in binary's path — re-link the shims to the
             // new inode in place (the post-upgrade re-link story).
             relink_shims_after_selfowned(&install_dir);
@@ -5692,10 +5893,43 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                 "nub upgrade: could not detect install channel.\n\
                  Binary at: {bin_str}\n\
                  Upgrade manually: {}",
-                npm_upgrade_command(target)
+                if release_channel == ReleaseChannel::Canary {
+                    canary_install_hint().to_string()
+                } else {
+                    npm_upgrade_command(target)
+                }
             );
         }
     }
+}
+
+/// Best-effort resolve of the canary release's advertised version: release.yml
+/// titles the rolling release `Canary <X.Y.Z>-canary.<date>.<run>`, so the
+/// release-by-tag API's `name` field carries the version after the word
+/// (tolerating a bare or `v`-prefixed name too). `None` on ANY failure — the
+/// rolling-tag download needs no version resolution, so a flaky API must never
+/// block a canary upgrade; it only costs the version label and the
+/// already-up-to-date short-circuit.
+fn resolve_canary_version() -> Option<String> {
+    let api = release_canary_api();
+    let out = std::process::Command::new("curl")
+        .args(["--fail", "--silent", "--location", &api])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let name = body.get("name")?.as_str()?.trim();
+    let version = name
+        .strip_prefix("Canary ")
+        .unwrap_or(name)
+        .trim()
+        .trim_start_matches('v');
+    if version.is_empty() {
+        return None;
+    }
+    Some(version.to_string())
 }
 
 /// Resolve a `latest`/explicit version spec to a concrete `X.Y.Z` string via the
@@ -5747,7 +5981,11 @@ fn resolve_version(spec: &str) -> Result<String> {
 /// `detect_channel`, `archive_url`, `checksum_url`, `platform_target`,
 /// `sha256_hex`, and sidecar parsing — are individually exercised; the glue here
 /// is kept deliberately linear and small so its correctness is reviewable by eye.
-fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<()> {
+fn perform_selfowned_upgrade(
+    install_dir: &Path,
+    release_channel: ReleaseChannel,
+    version_spec: &str,
+) -> Result<()> {
     let target = platform_target().ok_or_else(|| {
         anyhow::anyhow!(
             "nub upgrade: no published archive for this platform ({}/{}). \
@@ -5756,11 +5994,31 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
             std::env::consts::ARCH
         )
     })?;
-    let version = resolve_version(version_spec)?;
-    let url = archive_url(&version, target);
-    let sha_url = checksum_url(&version, target);
+    let (tag, label) = match release_channel {
+        ReleaseChannel::Stable => {
+            let version = resolve_version(version_spec)?;
+            (format!("v{version}"), format!("v{version}"))
+        }
+        ReleaseChannel::Canary => match resolve_canary_version() {
+            Some(v) => {
+                if v == env!("CARGO_PKG_VERSION") {
+                    // bun-mirror: a no-op canary upgrade says so instead of
+                    // re-downloading identical bytes.
+                    println!("already on the latest canary build (v{v})");
+                    println!("to return to the latest stable release: nub upgrade --stable");
+                    return Ok(());
+                }
+                (CANARY_TAG.to_string(), format!("canary v{v}"))
+            }
+            // The rolling tag downloads without resolution; a flaky API only
+            // costs the label + the up-to-date short-circuit.
+            None => (CANARY_TAG.to_string(), "canary".to_string()),
+        },
+    };
+    let url = archive_url_for_tag(&tag, target);
+    let sha_url = checksum_url_for_tag(&tag, target);
 
-    println!("upgrading to v{version} ({target})");
+    println!("upgrading to {label} ({target})");
 
     // Stage downloads + extraction in a sibling temp dir on the same filesystem
     // as the install so the final swap is a same-filesystem rename (atomic).
@@ -5848,7 +6106,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         }
     }
 
-    println!("installed v{version} to {}", install_dir.display());
+    println!("installed {label} to {}", install_dir.display());
     Ok(())
 }
 
@@ -9286,6 +9544,17 @@ mod tests {
         }
     }
 
+    // The channel flags are mutually exclusive, and an explicit version pins a
+    // stable release so it can't combine with either channel flag.
+    #[test]
+    fn subcommand_upgrade_channel_flags_conflict() {
+        assert!(parse(&["nub", "upgrade", "--canary"]).is_ok());
+        assert!(parse(&["nub", "upgrade", "--stable"]).is_ok());
+        assert!(parse(&["nub", "upgrade", "--canary", "--stable"]).is_err());
+        assert!(parse(&["nub", "upgrade", "--version", "1.2.3", "--canary"]).is_err());
+        assert!(parse(&["nub", "upgrade", "--version", "1.2.3", "--stable"]).is_err());
+    }
+
     // P0 regression guard: a self-owned upgrade must leave bin/nub EXECUTABLE.
     // The release tarball ships the binary at 0644 (CI's artifact round-trip
     // strips +x), so after the staging-extract + swap_dir the freshly-installed
@@ -9387,6 +9656,14 @@ mod tests {
             detect_channel(Path::new("/opt/homebrew/Cellar/nub/0.0.6/bin/nub")),
             UpgradeChannel::Homebrew
         );
+        // winget's portable-package store, in the canonicalized (post-Links-
+        // symlink) form the router actually sees.
+        assert_eq!(
+            detect_channel(Path::new(
+                "C:\\Users\\u\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Nubjs.Nub_Microsoft.Winget.Source_8wekyb3d8bbwe\\nub.exe"
+            )),
+            UpgradeChannel::Winget
+        );
         match detect_channel(Path::new("/home/u/.nub/bin/nub")) {
             UpgradeChannel::SelfOwned { install_dir } => {
                 assert_eq!(install_dir, Path::new("/home/u/.nub"));
@@ -9481,7 +9758,8 @@ mod tests {
     }
 
     /// Serializes the tests that read or mutate the release-URL env seams
-    /// (`NUB_RELEASE_BASE_URL` / `NUB_RELEASE_LATEST_URL`). Those vars are
+    /// (`NUB_RELEASE_BASE_URL` / `NUB_RELEASE_LATEST_URL` /
+    /// `NUB_RELEASE_CANARY_URL`). Those vars are
     /// process-global, so a test that sets them mustn't run concurrently with one
     /// that asserts the unset-default URL shape.
     static RELEASE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -9517,6 +9795,53 @@ mod tests {
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    // The rolling canary tag's URLs: un-versioned `download/canary/` path, the
+    // same `.sha256` pairing + per-platform extension rules as stable, and the
+    // release-by-tag resolve endpoint. Default (env-seam unset) shapes, so it
+    // holds the release-env lock like the stable URL test above.
+    #[test]
+    fn canary_urls_use_the_rolling_tag_path() {
+        let _g = RELEASE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            archive_url_for_tag(CANARY_TAG, "linux-x64"),
+            "https://github.com/nubjs/nub/releases/download/canary/nub-linux-x64.tar.gz"
+        );
+        assert_eq!(
+            checksum_url_for_tag(CANARY_TAG, "win32-x64"),
+            "https://github.com/nubjs/nub/releases/download/canary/nub-win32-x64.zip.sha256"
+        );
+        assert_eq!(
+            release_canary_api(),
+            "https://api.github.com/repos/nubjs/nub/releases/tags/canary"
+        );
+    }
+
+    // The bun-mirrored channel decision table: `--canary` opts in, a canary
+    // build's bare `nub upgrade` stays on canary, and `--stable` or an explicit
+    // `--version` opts back to the stable channel.
+    #[test]
+    fn release_channel_decision_mirrors_bun() {
+        use ReleaseChannel::*;
+        // (flag_canary, flag_stable, explicit_version, running_is_canary) → chosen
+        let cases = [
+            ((false, false, false, false), Stable),
+            ((true, false, false, false), Canary),
+            ((false, true, false, false), Stable),
+            ((false, false, true, false), Stable),
+            ((false, false, false, true), Canary),
+            ((false, true, false, true), Stable),
+            ((false, false, true, true), Stable),
+            ((true, false, false, true), Canary),
+        ];
+        for ((c, s, v, r), want) in cases {
+            assert_eq!(
+                choose_release_channel(c, s, v, r),
+                want,
+                "choose_release_channel({c}, {s}, {v}, {r})"
+            );
+        }
     }
 
     // END-TO-END upgrade test against a LOCAL fake release — closes the "upgrade
@@ -9621,7 +9946,7 @@ mod tests {
         );
 
         // The full download→verify→extract→swap→chmod→symlink path.
-        let result = perform_selfowned_upgrade(&install, "latest");
+        let result = perform_selfowned_upgrade(&install, ReleaseChannel::Stable, "latest");
 
         // Wrong-checksum sub-case: corrupt the archive after digesting it and prove
         // the verify step REFUSES it (run before asserting the happy path so a
@@ -9635,7 +9960,7 @@ mod tests {
             format!("{}  nub-{target}.tar.gz\n", "0".repeat(64)),
         )
         .unwrap();
-        let bad = perform_selfowned_upgrade(&bad_install, "latest");
+        let bad = perform_selfowned_upgrade(&bad_install, ReleaseChannel::Stable, "latest");
 
         // Restore env BEFORE asserting so a failed assertion can't leak the seam.
         unsafe {
@@ -9763,7 +10088,7 @@ mod tests {
         unsafe {
             std::env::set_var(RELEASE_DOWNLOAD_BASE_ENV, &base_url);
         }
-        let result = perform_selfowned_upgrade(&install, FAKE_VERSION);
+        let result = perform_selfowned_upgrade(&install, ReleaseChannel::Stable, FAKE_VERSION);
         unsafe {
             std::env::remove_var(RELEASE_DOWNLOAD_BASE_ENV);
         }
@@ -9777,6 +10102,114 @@ mod tests {
         assert!(
             !install.join("runtime").exists(),
             "the new upgrader removes ~/.nub/runtime; the archive's runtime/ is ignored"
+        );
+    }
+
+    // CANARY CHANNEL e2e: drives `ReleaseChannel::Canary` through the same
+    // file:// seams. (a) With the release-by-tag API advertising a version other
+    // than this build's, the full download→verify→swap runs from the
+    // UN-VERSIONED rolling-tag asset path (`releases/download/canary/…` — no
+    // `v` prefix, the exact layout the canary pipeline publishes). (b) With the API
+    // advertising THIS build's own version, the upgrade short-circuits as
+    // already-up-to-date and leaves the install untouched.
+    #[cfg(unix)]
+    #[test]
+    fn canary_upgrade_pulls_the_rolling_tag_and_short_circuits_when_current() {
+        let Some(target) = platform_target() else {
+            eprintln!("skipping: no published tarball target for this platform");
+            return;
+        };
+        let _g = RELEASE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        const NEW_NUB_BYTES: &[u8] = b"#!/bin/sh\necho fake-canary-nub\n";
+        let fixture = tempfile::tempdir().expect("fixture root");
+
+        let build = fixture.path().join("build");
+        std::fs::create_dir_all(build.join("bin")).unwrap();
+        std::fs::write(build.join("bin").join("nub"), NEW_NUB_BYTES).unwrap();
+
+        let asset_dir = fixture
+            .path()
+            .join("releases")
+            .join("download")
+            .join(CANARY_TAG);
+        std::fs::create_dir_all(&asset_dir).unwrap();
+        let archive = asset_dir.join(format!("nub-{target}.tar.gz"));
+        assert!(
+            std::process::Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&build)
+                .args(["bin"])
+                .status()
+                .expect("tar the fixture archive")
+                .success(),
+            "fixture archive must tar cleanly"
+        );
+        let digest = sha256_hex(&std::fs::read(&archive).unwrap());
+        std::fs::write(
+            asset_dir.join(format!("nub-{target}.tar.gz.sha256")),
+            format!("{digest}  nub-{target}.tar.gz\n"),
+        )
+        .unwrap();
+
+        // The release-by-tag response: `name` is release.yml's `Canary <ver>`
+        // title form; the advertised version here ≠ this build's version.
+        let canary_json = fixture.path().join("canary.json");
+        std::fs::write(
+            &canary_json,
+            r#"{"tag_name":"canary","name":"Canary 9.9.10-canary.20990101.7"}"#,
+        )
+        .unwrap();
+
+        let install = fixture.path().join(".nub");
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        std::fs::write(install.join("bin").join("nub"), b"OLD\n").unwrap();
+
+        let base_url = format!("file://{}/releases/download", fixture.path().display());
+        unsafe {
+            std::env::set_var(RELEASE_DOWNLOAD_BASE_ENV, &base_url);
+            std::env::set_var(
+                RELEASE_CANARY_API_ENV,
+                format!("file://{}", canary_json.display()),
+            );
+        }
+
+        // (a) advertised ≠ running → the rolling-tag download+swap runs.
+        let upgraded = perform_selfowned_upgrade(&install, ReleaseChannel::Canary, "latest");
+
+        // (b) advertised == running → short-circuit, nothing touched.
+        let current_install = fixture.path().join(".nub-current");
+        std::fs::create_dir_all(current_install.join("bin")).unwrap();
+        std::fs::write(current_install.join("bin").join("nub"), b"OLD\n").unwrap();
+        std::fs::write(
+            &canary_json,
+            format!(
+                r#"{{"tag_name":"canary","name":"Canary {}"}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        let current = perform_selfowned_upgrade(&current_install, ReleaseChannel::Canary, "latest");
+
+        unsafe {
+            std::env::remove_var(RELEASE_DOWNLOAD_BASE_ENV);
+            std::env::remove_var(RELEASE_CANARY_API_ENV);
+        }
+
+        upgraded.expect("canary upgrade against the local fake rolling release must succeed");
+        assert_eq!(
+            std::fs::read(install.join("bin").join("nub")).unwrap(),
+            NEW_NUB_BYTES,
+            "canary upgrade must swap in the rolling-tag archive's bytes"
+        );
+
+        current.expect("an already-current canary upgrade must succeed as a no-op");
+        assert_eq!(
+            std::fs::read(current_install.join("bin").join("nub")).unwrap(),
+            b"OLD\n",
+            "an already-current canary must short-circuit without touching the install"
         );
     }
 
