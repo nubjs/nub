@@ -785,6 +785,10 @@ jobs:
           path: nub-pkg
       - name: Assert the built binary runs and reports the release version
         shell: bash
+        env:
+          # Hoisted from the run block: an expression expanding inside the
+          # script is zizmor error-level template injection; env is inert.
+          CANARY_VERSION: ${{ needs.verify.outputs.canary_version }}
         run: |
           set -euo pipefail
           BIN="nub-pkg/${{ matrix.bin }}"
@@ -807,12 +811,12 @@ jobs:
           # it runs + prints a non-empty semver-ish string.
           EXPECTED=""
           if [ "${{ github.event_name }}" = "push" ]; then
-            # $GITHUB_REF (the ambient env var) not ${{ github.ref }}: same
-            # value, but the expression form is a zizmor error-level
-            # template-injection finding that reds the whole workflow audit.
+            # $GITHUB_REF (the ambient env var), never the github.ref
+            # expression form — expressions expand into the script text
+            # (zizmor error-level template injection).
             case "$GITHUB_REF" in
               refs/tags/*) EXPECTED="${GITHUB_REF_NAME#v}" ;;
-              *)           EXPECTED="${{ needs.verify.outputs.canary_version }}" ;;
+              *)           EXPECTED="$CANARY_VERSION" ;;
             esac
           fi
           if [ -n "$EXPECTED" ]; then
