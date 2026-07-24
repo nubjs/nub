@@ -50,6 +50,9 @@ pub(super) struct LinkPhaseInput<'a> {
     pub(super) manifests: &'a [(String, aube_manifest::PackageJson)],
     pub(super) manifest: &'a aube_manifest::PackageJson,
     pub(super) build_policy: &'a aube_scripts::BuildPolicy,
+    /// Mirrors the lifecycle phase's floor gate so the engine fold covers every
+    /// package that can build. See [`super::build_may_key_engine`].
+    pub(super) default_trust_enabled: bool,
     pub(super) node_version: Option<&'a str>,
     pub(super) prewarm_graph_hashes:
         Option<&'a std::sync::Arc<aube_lockfile::graph_hash::GraphHashes>>,
@@ -101,6 +104,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         manifests,
         manifest,
         build_policy,
+        default_trust_enabled,
         node_version,
         prewarm_graph_hashes,
         aube_dir,
@@ -345,7 +349,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         } else {
             let engine = node_version.map(aube_lockfile::graph_hash::engine_name_default);
             let allow = |pkg: &aube_lockfile::LockedPackage| {
-                super::package_build_is_allowed(build_policy, pkg)
+                super::build_may_key_engine(build_policy, pkg, default_trust_enabled)
             };
             aube_lockfile::graph_hash::compute_graph_hashes_full(
                 graph_for_link,

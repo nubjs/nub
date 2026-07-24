@@ -14,6 +14,9 @@ pub(super) struct GvsPrewarmInputs {
     pub patch_hashes: std::collections::BTreeMap<String, String>,
     pub node_version: Option<String>,
     pub build_policy: std::sync::Arc<aube_scripts::BuildPolicy>,
+    /// See [`super::build_may_key_engine`] — the prewarm must key exactly as the
+    /// link phase will, or link discards these hashes and recomputes.
+    pub default_trust_enabled: bool,
     pub use_global_virtual_store_override: Option<bool>,
     /// The RESOLVED per-project virtual store dir (the same value the
     /// link phase applies via `with_aube_dir_override`). Threaded here
@@ -121,6 +124,7 @@ pub(super) async fn run_gvs_prewarm_materializer(
         patch_hashes,
         node_version,
         build_policy,
+        default_trust_enabled,
         use_global_virtual_store_override,
         virtual_store_dir,
         supported_architectures,
@@ -213,7 +217,7 @@ pub(super) async fn run_gvs_prewarm_materializer(
             "graph_hash_compute",
         );
         let allow = |pkg: &aube_lockfile::LockedPackage| {
-            super::package_build_is_allowed(&build_policy_for_hash, pkg)
+            super::build_may_key_engine(&build_policy_for_hash, pkg, default_trust_enabled)
         };
         let patch_hash_fn = |name: &str, version: &str| -> Option<String> {
             let key = format!("{name}@{version}");

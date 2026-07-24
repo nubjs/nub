@@ -1465,12 +1465,10 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     // (`dep_build_policy_hash`) is engine-aware and computed after `ensure`,
     // where the resolver has settled.
     if !aube_util::embedder().runtime_switching {
-        let engine = crate::engines::effective_node_version(
-            aube_settings::resolved::node_version(&ctx).as_deref(),
-        )
-        .map_or_else(aube_lockfile::graph_hash::platform_name, |v| {
-            aube_lockfile::graph_hash::engine_name_default(&v).0
-        });
+        let engine = crate::engines::build_node_version()
+            .map_or_else(aube_lockfile::graph_hash::platform_name, |v| {
+                aube_lockfile::graph_hash::engine_name_default(&v).0
+            });
         hasher.update(b"engine=");
         hasher.update(engine.as_bytes());
         hasher.update(b"\0");

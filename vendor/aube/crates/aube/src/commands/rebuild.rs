@@ -150,9 +150,7 @@ pub async fn run(
                 } else {
                     None
                 };
-            let node_version = crate::engines::effective_node_version(
-                aube_settings::resolved::node_version(&settings_ctx).as_deref(),
-            );
+            let node_version = crate::engines::build_node_version();
             // Re-emit per-dep `.bin/` shims so a rebuild on a tree
             // that pre-dates the transitive-bin fix still lands them
             // on PATH for the lifecycle scripts. `link_bins_for_dep`

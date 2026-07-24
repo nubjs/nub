@@ -231,6 +231,34 @@ pub(crate) fn package_build_is_allowed(
     )
 }
 
+/// Whether a package's virtual-store path must carry the engine fingerprint.
+///
+/// Deliberately a SUPERSET of the policy decision: the lifecycle phase also
+/// builds packages the `defaultTrust` floor clears, and a package that builds
+/// writes its artifacts into that directory. Keying only on an explicit allow
+/// would give a floor-built native addon an engine-agnostic path — shared
+/// across every project on the machine — so two Node majors would overwrite
+/// each other's `build/Release/*.node` there.
+///
+/// The floor's dynamic gates (advisory vetting, the cooling window) are
+/// deliberately NOT consulted: they only ever narrow what builds, and they are
+/// unknown at prewarm time, which computes these same hashes before the floor
+/// exists. Folding the engine for a package that then does not build costs a
+/// little store dedup; omitting it for one that does is the ABI bug.
+pub(crate) fn build_may_key_engine(
+    policy: &aube_scripts::BuildPolicy,
+    pkg: &aube_lockfile::LockedPackage,
+    default_trust_enabled: bool,
+) -> bool {
+    package_build_is_allowed(policy, pkg)
+        || (default_trust_enabled
+            // Registry-resolved only, matching `DefaultTrustFloor::trusts` so an
+            // alias or a file:/git package cannot borrow a listed name's bucket.
+            && pkg.local_source.is_none()
+            && !pkg.registry_git_hosted
+            && aube_scripts::is_default_trusted(pkg.registry_name()))
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 struct TrustPolicyValidationStamp {
     key: String,
@@ -1018,10 +1046,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // does, so a fresh install and the drift check agree.
     let effective_package_extensions_checksum =
         if aube_util::engine_context().enforce_package_extensions_checksum {
-            aube_lockfile::pnpm::package_extensions_checksum(&settings::effective_package_extensions(
-                &manifest,
-                &settings_ctx,
-            ))
+            aube_lockfile::pnpm::package_extensions_checksum(
+                &settings::effective_package_extensions(&manifest, &settings_ctx),
+            )
         } else {
             None
         };
@@ -1445,9 +1472,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let network_mode = opts.network_mode;
             let cwd_for_client = cwd.clone();
 
-            let lock_node_version = crate::engines::effective_node_version(
-                aube_settings::resolved::node_version(&settings_ctx).as_deref(),
-            );
+            let lock_node_version = crate::engines::build_node_version();
             let lock_build_policy = std::sync::Arc::new(build_policy.clone());
             let lock_strategy = resolve_link_strategy(&cwd, &settings_ctx, planned_gvs)?;
             let (lock_patches, lock_patch_hashes) =
@@ -1466,6 +1491,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 patch_hashes: lock_patch_hashes,
                 node_version: lock_node_version,
                 build_policy: lock_build_policy,
+                default_trust_enabled,
                 use_global_virtual_store_override: prewarm_gvs_override,
                 virtual_store_dir: aube_dir.clone(),
                 supported_architectures: lock_supported_architectures,
@@ -1603,9 +1629,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // await) can compute the same graph hashes the link phase
             // will. Keeping a single source of truth avoids any
             // subdir-name drift between prewarm and link step 1.
-            let node_version_for_prewarm = crate::engines::effective_node_version(
-                aube_settings::resolved::node_version(&settings_ctx).as_deref(),
-            );
+            let node_version_for_prewarm = crate::engines::build_node_version();
             let build_policy_for_prewarm = std::sync::Arc::new(build_policy.clone());
             let client =
                 std::sync::Arc::new(make_client(&cwd).with_network_mode(opts.network_mode));
@@ -2380,6 +2404,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 patch_hashes: materialize_patch_hashes,
                 node_version: node_version_for_prewarm.clone(),
                 build_policy: build_policy_for_prewarm.clone(),
+                default_trust_enabled,
                 use_global_virtual_store_override: prewarm_gvs_override,
                 virtual_store_dir: aube_dir.clone(),
                 supported_architectures: prewarm_supported_architectures,
@@ -2869,7 +2894,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let (jail_policy, jail_policy_warnings) =
         JailBuildPolicy::from_settings(&settings_ctx, &ws_config_shared);
     let node_version_override = aube_settings::resolved::node_version(&settings_ctx);
+    // Two questions with two answers: the `engines.node` check honors the
+    // validation-only `node-version` override; the ABI cache keys must reflect
+    // the Node that actually compiles the artifacts, which the override never
+    // switches.
     let node_version = crate::engines::effective_node_version(node_version_override.as_deref());
+    let build_node_version = crate::engines::build_node_version();
     crate::engines::run_checks(
         &aube_dir,
         &manifest,
@@ -2927,7 +2957,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         manifests: &manifests,
         manifest: &manifest,
         build_policy: &build_policy,
-        node_version: node_version.as_deref(),
+        default_trust_enabled,
+        node_version: build_node_version.as_deref(),
         prewarm_graph_hashes: prewarm_graph_hashes.as_ref(),
         aube_dir: &aube_dir,
         modules_dir_name: &modules_dir_name,
@@ -2977,7 +3008,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         aube_dir: &aube_dir,
         virtual_store_dir_max_length,
         child_concurrency,
-        node_version: node_version.as_deref(),
+        node_version: build_node_version.as_deref(),
         side_effects_cache_setting,
         side_effects_cache_readonly_setting,
         strict_dep_builds_setting,
@@ -3010,6 +3041,59 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod build_may_key_engine_tests {
+    use super::*;
+
+    fn pkg(name: &str) -> aube_lockfile::LockedPackage {
+        aube_lockfile::LockedPackage {
+            name: name.into(),
+            version: "1.0.0".into(),
+            dep_path: format!("{name}@1.0.0"),
+            ..Default::default()
+        }
+    }
+
+    fn empty_policy() -> aube_scripts::BuildPolicy {
+        aube_scripts::BuildPolicy::from_config(&BTreeMap::new(), &[], &[], false).0
+    }
+
+    #[test]
+    fn floor_trusted_package_keys_the_engine_without_an_explicit_allow() {
+        // The regression: the lifecycle phase builds `better-sqlite3` off the
+        // default-trust floor, but the virtual-store path folded the engine
+        // only for an explicitly allowed package — so its native build landed
+        // in a machine-global directory shared by every Node major.
+        let policy = empty_policy();
+        assert!(
+            build_may_key_engine(&policy, &pkg("better-sqlite3"), true),
+            "a floor-built package writes native artifacts and must key the engine"
+        );
+        assert!(
+            !build_may_key_engine(&policy, &pkg("better-sqlite3"), false),
+            "with the floor off the package cannot build, so the path stays engine-agnostic"
+        );
+        assert!(
+            !build_may_key_engine(&policy, &pkg("left-pad"), true),
+            "an unlisted package the floor never trusts must not fold the engine"
+        );
+    }
+
+    #[test]
+    fn floor_trust_does_not_extend_to_non_registry_sources() {
+        // Mirrors `DefaultTrustFloor::trusts`: an alias or a file:/git package
+        // must not borrow a listed name's bucket.
+        let policy = empty_policy();
+        let mut local = pkg("better-sqlite3");
+        local.local_source = Some(aube_lockfile::LocalSource::Directory("../vendored".into()));
+        assert!(!build_may_key_engine(&policy, &local, true));
+
+        let mut hosted = pkg("better-sqlite3");
+        hosted.registry_git_hosted = true;
+        assert!(!build_may_key_engine(&policy, &hosted, true));
+    }
 }
 
 #[cfg(test)]

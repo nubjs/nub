@@ -1390,10 +1390,21 @@ fn augmentation_to_lifecycle_overlay(
 /// re-entrant / broken install); the resolved Node *version* is published to the
 /// engine either way. Called once per command from [`engine_session`].
 fn apply_lifecycle_augmentation(cwd: &Path) {
+    // Anchor Node discovery at the workspace root — the directory aube keys its
+    // install state and virtual store at (`dirs::workspace_or_project_root`). An
+    // install from a member materializes the ONE shared tree for the whole
+    // workspace, so the Node its build scripts compile against — and the engine
+    // that keys the ABI caches — must be the root's pin, not whichever member the
+    // shell sits in. Discovering from the raw cwd instead lets a member's own
+    // `.nvmrc` flip the engine key against a root-anchored state file, thrashing
+    // the warm path. `detect_project` walks up by the same rule aube's root does.
+    let anchor = nub_core::workspace::detect::detect_project(cwd)
+        .map(|p| p.workspace_root.unwrap_or(p.root))
+        .unwrap_or_else(|| cwd.to_path_buf());
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
     // path pins npm_node_execpath. Mirrors build_script_command's discovery.
-    let discovered = nub_core::node::discovery::discover_node(cwd);
+    let discovered = nub_core::node::discovery::discover_node(&anchor);
     // Published ABOVE the early returns: the engine keys its GVS virtual-store
     // paths — and validates `engines.node` — off this version, so it has to name
     // the Node dependency build scripts actually compile against. That stays the
