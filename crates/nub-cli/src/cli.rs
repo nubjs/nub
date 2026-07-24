@@ -5786,9 +5786,22 @@ fn run_upgrade(
                 }
             }
             UpgradeChannel::Unknown => {
-                println!("would upgrade to {target}, but the install channel is unknown");
+                // Mirror the real-run Unknown arm: a canary ask gets the
+                // installer hint, not the stable npm command.
+                let channel_word = match release_channel {
+                    ReleaseChannel::Canary => "canary",
+                    ReleaseChannel::Stable => target,
+                };
+                println!("would upgrade to {channel_word}, but the install channel is unknown");
                 println!("  binary: {bin_str}");
-                println!("  manual: {}", npm_upgrade_command(target));
+                match release_channel {
+                    ReleaseChannel::Canary => {
+                        println!("  manual: {}", canary_install_hint())
+                    }
+                    ReleaseChannel::Stable => {
+                        println!("  manual: {}", npm_upgrade_command(target))
+                    }
+                }
             }
         }
         return Ok(0);
