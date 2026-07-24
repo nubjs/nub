@@ -137,12 +137,29 @@ function installSyncPolyfills(preloaded) {
   }
 
   // ── MessageEvent.ports → frozen array (WHATWG read-only requirement) ─
-  // The spec mandates `MessageEvent.ports` be a read-only (frozen) array; Node's
-  // native MessageEvent returns a mutable array. Wrap the configurable prototype
-  // getter so every read yields a frozen array, for both a native MessageChannel's
-  // delivery and nub's worker-side MessageEvents. Idempotent (the wrapper is marked
-  // so a re-run in the same realm doesn't double-wrap).
-  if (typeof globalThis.MessageEvent === "function") {
+  // The spec mandates `MessageEvent.ports` be a read-only (frozen) array. Below Node
+  // 22.3 the global is `internal/worker/io`'s MessageEvent, whose `ports` getter
+  // returns a MUTABLE array, so wrap the configurable prototype getter to freeze
+  // every read — for both a native MessageChannel's delivery and nub's worker-side
+  // MessageEvents. Idempotent (the wrapper is marked so a re-run in the same realm
+  // doesn't double-wrap).
+  //
+  // NEVER lift this version gate into a `typeof globalThis.MessageEvent` check.
+  // Node 22.3 replaced the global with undici's (nodejs/node#52370), which already
+  // freezes in its own `get ports()` — so the wrapper is a strict no-op there — and
+  // installed it as a V8 LAZY DATA PROPERTY. Any property operation that reads that
+  // slot — `typeof`, a bare read, `getOwnPropertyDescriptor`, even `defineProperty`
+  // — materializes it, pulling `internal/deps/undici/undici` and ~112 further
+  // builtins (node:http, net, the whole internal/streams tree, worker_threads) into
+  // EVERY augmented startup. There is no lazy wrapper to write instead: the accessor
+  // cannot be read or shadowed without materializing, and the one free operation
+  // (plain assignment) discards the native constructor irrecoverably. So the
+  // decision must be made from the version alone, without touching the global.
+  const [__meMajor = 0, __meMinor = 0] = process.versions.node
+    .split(".")
+    .map((n) => parseInt(n, 10));
+  const nativePortsFrozen = __meMajor > 22 || (__meMajor === 22 && __meMinor >= 3);
+  if (!nativePortsFrozen && typeof globalThis.MessageEvent === "function") {
     const proto = globalThis.MessageEvent.prototype;
     const desc = Object.getOwnPropertyDescriptor(proto, "ports");
     if (desc && typeof desc.get === "function" && desc.configurable && !desc.get.__nubFreezesPorts) {
