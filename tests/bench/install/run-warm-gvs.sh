@@ -134,7 +134,7 @@ run_warm() {
   echo "[setup] pre-populating nub CAS store + GVS (showing any GVS warning)..."
   # Capture nub's stderr so the GVS auto-disable warning is visible for the
   # ineligible fixture. env -u CI → GVS on (default).
-  env -u CI "$NUB" install --frozen-lockfile --cwd "$WD_NUB" 2>&1 | tail -6 || true
+  env -u CI "$NUB" --cwd "$WD_NUB" install --frozen-lockfile 2>&1 | tail -6 || true
 
   # Report which linking path nub actually took. Both GVS-on and GVS-off use the
   # node_modules/<pkg> -> .store/<pkg>/node_modules/<pkg> symlink layout, so the
@@ -152,7 +152,7 @@ run_warm() {
   fi
 
   local outfile="$RESULTS_DIR/warm-gvs-${fixture}-${TIMESTAMP}.json"
-  local nub_cmd="env -u CI NPM_CONFIG_USERCONFIG='$EMPTY_NPMRC' NPM_CONFIG_GLOBALCONFIG='$EMPTY_NPMRC' '$NUB' install --frozen-lockfile --cwd '$WD_NUB' -s"
+  local nub_cmd="env -u CI NPM_CONFIG_USERCONFIG='$EMPTY_NPMRC' NPM_CONFIG_GLOBALCONFIG='$EMPTY_NPMRC' '$NUB' --cwd '$WD_NUB' install --frozen-lockfile -s"
 
   local HF_ARGS=(
     --warmup "$WARMUP" --runs "$RUNS"
@@ -177,7 +177,7 @@ run_warm() {
   fi
 
   # re-populate nub node_modules consumed by the symlink check above
-  env -u CI "$NUB" install --frozen-lockfile --cwd "$WD_NUB" -s 2>/dev/null || true
+  env -u CI "$NUB" --cwd "$WD_NUB" install --frozen-lockfile -s 2>/dev/null || true
 
   hyperfine "${HF_ARGS[@]}" --export-json "$outfile"
 

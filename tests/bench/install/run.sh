@@ -423,16 +423,14 @@ run_cold() {
     local t0; t0=$(ms_now)
     XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" \
       NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC" NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC" \
-      "$NUB" install \
+      "$NUB" --cwd "$wd" install \
       --frozen-lockfile \
-      --cwd "$wd" \
       -s \
       2>/dev/null \
       || XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" \
            NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC" NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC" \
-           "$NUB" install \
+           "$NUB" --cwd "$wd" install \
            --frozen-lockfile \
-           --cwd "$wd" \
            2>&1 | tail -2
     local t1; t1=$(ms_now)
     local ms=$(( t1 - t0 ))
