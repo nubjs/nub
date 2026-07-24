@@ -21,16 +21,17 @@
 #![allow(clippy::collapsible_if)]
 
 mod cache;
+mod ui;
 
-use std::cell::Cell;
 use std::fs;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use anyhow::{Context, Result, anyhow, bail};
 use nub_core::compile::{self, Manifest, PayloadView, Shape};
 use nub_core::node::{discovery, flags, spawn, version::NodeVersion};
+use ui::{FirstRun, Progress};
 
 fn main() {
     std::process::exit(run());
@@ -97,6 +98,9 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
 
     let node_path = acquire_node(view, &base, &notice)?;
     let app_dir = ensure_app(view, &base)?;
+    // Hand the terminal back BEFORE anything the app might print — the box lives
+    // on the alternate screen, so this restores the user's scrollback intact.
+    notice.finish();
     let entry = app_dir.join(&view.manifest.entry);
 
     let version: NodeVersion = view
@@ -145,35 +149,6 @@ fn launch(view: &PayloadView<'_>) -> Result<ExitStatus> {
             anyhow::Error::new(e).context("spawning Node")
         }
     })
-}
-
-/// The one-shot first-run line. The launcher owns the terminal before it does any
-/// work, so a cold run announces itself instead of going silent for seconds; a
-/// warm run never constructs a reason to print. Non-TTY stays silent so piped
-/// output and logs are unaffected.
-struct FirstRun {
-    text: Option<String>,
-    printed: Cell<bool>,
-}
-
-impl FirstRun {
-    fn new(text: Option<&str>) -> Self {
-        let tty = std::io::stderr().is_terminal();
-        Self {
-            text: text.filter(|t| !t.is_empty() && tty).map(str::to_string),
-            printed: Cell::new(false),
-        }
-    }
-
-    /// Announce the cold path. Idempotent: extraction and provisioning both call
-    /// it, and a run that does both prints one line.
-    fn announce(&self) {
-        if let Some(text) = &self.text {
-            if !self.printed.replace(true) {
-                eprintln!("{text}");
-            }
-        }
-    }
 }
 
 /// The `__probe` self-check `nub compile` runs on the produced binary at compile
@@ -255,7 +230,8 @@ fn acquire_embedded_node(
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let tmp_bin = tmp.join(node_exe_name());
-    decompress_to_file(view.node_blob, &tmp_bin).context("decompressing the embedded Node")?;
+    decompress_to_file(view.node_blob, &tmp_bin, &notice.progress())
+        .context("decompressing the embedded Node")?;
     set_executable(&tmp_bin)?;
 
     fs::create_dir_all(node_cache.parent().unwrap()).ok();
@@ -393,7 +369,7 @@ fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) ->
 
     let tarball = work.join(&filename);
     notice.announce();
-    download_via_shell(&url, &tarball).inspect_err(|_| {
+    download_via_shell(&url, &tarball, notice).inspect_err(|_| {
         let _ = fs::remove_dir_all(&work);
     })?;
 
@@ -403,7 +379,7 @@ fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) ->
     // version_management::provision_node_from's fail-closed commit gate.
     let shasums_path = work.join("SHASUMS256.txt");
     let shasums_url = format!("{mirror}/v{version}/SHASUMS256.txt");
-    download_via_shell(&shasums_url, &shasums_path).inspect_err(|_| {
+    download_via_shell(&shasums_url, &shasums_path, notice).inspect_err(|_| {
         let _ = fs::remove_dir_all(&work);
     })?;
     let shasums = fs::read_to_string(&shasums_path)
@@ -446,26 +422,47 @@ fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) ->
 
 /// Download `url` to `dest` via `curl`, then `wget`. When neither exists, the
 /// no-downloader error names the fix (a binary built with the default shape).
-fn download_via_shell(url: &str, dest: &Path) -> Result<()> {
+///
+/// While the first-run box owns the terminal the downloader is muted — two
+/// writers on one screen is torn output — and its progress is read off `dest`'s
+/// growth instead. Without the box, the downloader's own meter is left alone.
+fn download_via_shell(url: &str, dest: &Path, notice: &FirstRun) -> Result<()> {
+    let muted = notice.owns_terminal();
+    if muted {
+        notice.progress().watch_file(dest);
+    }
+    let restore = || notice.progress().reset();
+
     if command_exists("curl") {
-        let status = Command::new("curl")
-            .args(["-fSL", "--retry", "2", "-o"])
+        let mut cmd = Command::new("curl");
+        cmd.args(["-fSL", "--retry", "2"]);
+        if muted {
+            cmd.arg("-s");
+        }
+        let status = cmd
+            .arg("-o")
             .arg(dest)
             .arg(url)
             .status()
             .context("running curl")?;
+        restore();
         if status.success() {
             return Ok(());
         }
         bail!("curl failed to download {url}");
     }
     if command_exists("wget") {
-        let status = Command::new("wget")
+        let mut cmd = Command::new("wget");
+        if muted {
+            cmd.arg("-q");
+        }
+        let status = cmd
             .arg("-O")
             .arg(dest)
             .arg(url)
             .status()
             .context("running wget")?;
+        restore();
         if status.success() {
             return Ok(());
         }
@@ -602,9 +599,14 @@ fn short_key(hex: &str) -> String {
 /// ~60 ms of it) at roughly half the peak RSS — which is what decides the run on
 /// a memory-capped host whose writable filesystem is tmpfs charged against that
 /// same limit.
-fn decompress_to_file(compressed: &[u8], dest: &Path) -> Result<()> {
-    let mut decoder =
-        zstd::stream::Decoder::new(compressed).map_err(|e| anyhow!("zstd init: {e}"))?;
+///
+/// Progress counts the COMPRESSED side: its length is known exactly and the
+/// decoder consumes it linearly, so the percentage is real rather than inferred
+/// from an output size nobody recorded.
+fn decompress_to_file(compressed: &[u8], dest: &Path, progress: &Progress) -> Result<()> {
+    progress.set_total(compressed.len() as u64);
+    let source = ui::Counting::new(compressed, progress.clone());
+    let mut decoder = zstd::stream::Decoder::new(source).map_err(|e| anyhow!("zstd init: {e}"))?;
     let file = fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
     let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
     std::io::copy(&mut decoder, &mut out)

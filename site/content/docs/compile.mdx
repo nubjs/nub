@@ -109,22 +109,25 @@ nub compile app.ts --compress xz   # smaller file, slower first run
 
 ## `--install-message` / `--no-install-message`
 
-The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. Both shapes announce that with a line before the work begins, defaulting to the output name:
+The first run sets itself up before the app starts — extracting the embedded Node, or downloading one under `--smol`. On a terminal the launcher shows a centered box with a spinner while that runs, and a determinate bar where the byte total is known, defaulting the text to the output name:
 
-```console
-$ ./app
-Setting up app
-hello from app
+```
+        ╭──────────────────────────────╮
+        │                              │
+        │      ⠹  Setting up app       │
+        │   ━━━━━━━━━━━━━━━━━━━━   62%  │
+        │                              │
+        ╰──────────────────────────────╯
 ```
 
-Set your own text, or start silently:
+The box lives on the alternate screen, so when setup finishes it disappears and the app's own output starts on a clean terminal. Set your own text, or start silently:
 
 ```bash
 nub compile app.ts --install-message "Preparing the toolchain, one moment"
 nub compile app.ts --no-install-message
 ```
 
-The line goes to stderr, and only on an interactive terminal — piped output and log files never see it. Later runs hit the warm cache and print nothing.
+It renders to stderr, and only on an interactive terminal — piped output and log files see nothing at all. A terminal too small for the box, or one that can't be sized, degrades to a single line. Later runs hit the warm cache and show nothing.
 
 ## `--platform`
 
