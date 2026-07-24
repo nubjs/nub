@@ -33,6 +33,10 @@ const fixture = resolve(opt("fixture", "fixture"));
 const workRoot = resolve(opt("work", join(fixture, "..", "work")));
 const timeoutMs = Number(opt("timeout", "12000"));
 const timingIters = Number(opt("timing-iters", "20"));
+// Argv inserted BEFORE `-c`. busybox is a multi-call binary: the applet name is
+// mandatory (`busybox64.exe ash -c <body>`), and `-X` is its opt-out for the
+// backslash→forward-slash argument rewriting.
+const argvPrefix = (opt("argv-prefix", "") || "").split(",").filter(Boolean);
 
 if (!shellId || !shellBin) {
   process.stderr.write("usage: run-matrix.mjs --shell <id> --bin <path> [--fixture <dir>]\n");
@@ -52,7 +56,7 @@ function buildSpawn(body) {
     // npm / nub's Windows default: the body is handed to cmd VERBATIM.
     return { args: ["/d", "/s", "/c", body], verbatim: true };
   }
-  return { args: ["-c", body], verbatim: false };
+  return { args: [...argvPrefix, "-c", body], verbatim: false };
 }
 
 // PATH: the fixture's node_modules/.bin FIRST, exactly as `nub run` / `npm run`
@@ -72,7 +76,7 @@ childEnv.PATH = childPath;
 // ── header ───────────────────────────────────────────────────────────────────
 out(`\n##### SHELL ${shellId} @ ${shellBin}\n`);
 {
-  const v = spawnSync(shellBin, shellId === "cmd" ? ["/d", "/s", "/c", "ver"] : ["--version"], {
+  const v = spawnSync(shellBin, shellId === "cmd" ? ["/d", "/s", "/c", "ver"] : [...argvPrefix, "--version"], {
     encoding: "utf8",
     windowsVerbatimArguments: shellId === "cmd",
   });
@@ -130,7 +134,7 @@ for (const c of CASES) {
 
 // ── startup overhead ─────────────────────────────────────────────────────────
 {
-  const trivial = shellId === "cmd" ? ["/d", "/s", "/c", "exit /b 0"] : ["-c", "exit 0"];
+  const trivial = shellId === "cmd" ? ["/d", "/s", "/c", "exit /b 0"] : [...argvPrefix, "-c", "exit 0"];
   // one warm-up spawn so the first-run page-in cost is not counted
   spawnSync(shellBin, trivial, { stdio: "ignore", windowsVerbatimArguments: shellId === "cmd" });
   const t0 = Date.now();

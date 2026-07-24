@@ -22,7 +22,11 @@ const bin = join(root, "node_modules", ".bin");
 mkdirSync(bin, { recursive: true });
 
 // One package dir per tool, mirroring npm's layout so the shims' `..` walk is real.
-for (const tool of ["mytool", "onlycmd", "onlysh"]) {
+// `which` is deliberate: the npm package `which` really does ship a `which`
+// binary, AND busybox has a built-in `which` applet. busybox prefers its own
+// applets over anything on PATH, so this pair is the applet-shadowing test —
+// a real `.bin` tool a busybox-backed `nub run` could silently hijack.
+for (const tool of ["mytool", "onlycmd", "onlysh", "which"]) {
   const pkgBin = join(root, "node_modules", tool, "bin");
   mkdirSync(pkgBin, { recursive: true });
   writeFileSync(
@@ -107,6 +111,11 @@ writeShim(join(bin, "onlycmd.cmd"), cmdShim("onlycmd"));
 
 // onlysh: extensionless sh script ONLY — shebang interpretation required.
 writeShim(join(bin, "onlysh"), shShim("onlysh"), true);
+
+// which: collides with busybox's built-in `which` applet (see above).
+writeShim(join(bin, "which.cmd"), cmdShim("which"));
+writeShim(join(bin, "which"), shShim("which"), true);
+writeShim(join(bin, "which.ps1"), ps1Shim("which"));
 
 // Input files the POSIX-ism cases read.
 writeFileSync(join(root, "a.txt"), "AAA\n");

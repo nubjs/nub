@@ -30,6 +30,9 @@ export const CASES = [
   { id: "shim_chained", group: "shim", spec: "npm", body: "mytool a && mytool b" },
   { id: "shim_command_v", group: "shim", spec: "POSIX", body: "command -v mytool" },
   { id: "shim_quoted_arg", group: "shim", spec: "npm", body: 'mytool --msg "two words"' },
+  // busybox prefers its own built-in applets over PATH. `which` is a real npm
+  // bin AND a busybox applet, so this row detects silent hijack of a `.bin` tool.
+  { id: "shim_shadowed_applet", group: "shim", spec: "npm", body: "which --flag value" },
 
   // ── basic external command + quoting ─────────────────────────────────────
   { id: "node_basic", group: "basic", spec: "POSIX", body: 'node -e "console.log(1+1)"' },
@@ -53,6 +56,15 @@ export const CASES = [
   { id: "redirect_then_cat", group: "posix", spec: "POSIX", body: "echo hi > out.txt && cat out.txt" },
   { id: "append_redirect", group: "posix", spec: "POSIX", body: "echo a > ap.txt && echo b >> ap.txt && cat ap.txt" },
   { id: "dev_null", group: "posix", spec: "POSIX", body: "echo noisy > /dev/null && echo quiet" },
+  // busybox-w32's README warns its device emulations "can't be used as
+  // arguments to other programs" — only as redirection targets. This row is the
+  // difference, and `--log=/dev/null`-shaped args are common in npm scripts.
+  {
+    id: "dev_null_as_arg",
+    group: "posix",
+    spec: "POSIX",
+    body: `node -e "const fs=require('fs');try{fs.appendFileSync(process.argv[1],'x');console.log('OPENED-OK')}catch(e){console.log('OPEN-FAIL '+e.code)}" /dev/null`,
+  },
   { id: "export_var", group: "posix", spec: "POSIX", body: 'export FOO=bar && node -e "console.log(process.env.FOO)"' },
   { id: "glob", group: "posix", spec: "POSIX", body: "echo *.txt" },
   { id: "test_builtin", group: "posix", spec: "POSIX", body: "test -f a.txt && echo file-exists" },
@@ -134,6 +146,8 @@ export const CASES = [
     body: String.raw`node printargv.js "C:\Users\runneradmin"`,
   },
   { id: "path_flag_win", group: "path", spec: "win", body: String.raw`node printargv.js --out=C:\path\to\thing` },
+  { id: "path_prefix_unix", group: "path", spec: "win", body: "node printargv.js --prefix=/usr/local" },
+  { id: "path_docker_volume", group: "path", spec: "win", body: "node printargv.js -v /c/Users/x:/app" },
   { id: "path_pwd", group: "path", spec: "POSIX", body: "pwd" },
   { id: "path_cd_persist", group: "path", spec: "POSIX", body: "mkdir -p sub && cd sub && pwd" },
 
@@ -153,4 +167,17 @@ export const CASES = [
     body: 'node -e "setInterval(()=>{},1000)" & echo started',
   },
   { id: "background_bounded", group: "hang", spec: "POSIX", guard: true, body: "sleep 2 & echo bg-started" },
+
+  // ── fork cost ────────────────────────────────────────────────────────────
+  // 200 command substitutions = 200 subshells. Read the RESULT line's elapsed
+  // field: this is the load-bearing number for whether an MSYS/Cygwin fork
+  // emulation (Git Bash) is materially slower than a native-Win32 shell
+  // (busybox-w32, brush) at the thing script bodies do constantly.
+  {
+    id: "fork_cost_200_subshells",
+    group: "perf",
+    spec: "POSIX",
+    guard: true,
+    body: "i=0; while [ $i -lt 200 ]; do x=$(true); i=$((i+1)); done; echo forks-done",
+  },
 ];
