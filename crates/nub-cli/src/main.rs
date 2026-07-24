@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod dynamic_phantom;
 mod init;
+mod install_engine;
 mod nubx_consent;
 mod phantom_scan;
 mod pm_engine;

@@ -115,6 +115,12 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
         return None;
     }
 
+    // Engine repair runs BEFORE the staleness walk: a tree built for another
+    // Node major is stale in a way the walk cannot see (the wrong-ABI package
+    // is present and version-satisfying), and the reinstall that fixes it also
+    // settles whatever the walk would have reported.
+    repair_engine_mismatch(&project, policy);
+
     let reason = needs_install_reason(&project)?; // fresh / uncertain → proceed silently
     // Defense-in-depth brand pass: the reason strings are nub-native today, but
     // route them through the same rewrite all engine-adjacent output uses so no
@@ -253,6 +259,94 @@ fn parse_policy_value(value: &serde_json::Value) -> Option<Policy> {
         serde_json::Value::String(s) => parse_policy(s),
         _ => None,
     }
+}
+
+/// Reinstall a nub-installed tree that was built for a different Node engine.
+///
+/// The carve-out this makes to the no-auto-install posture documented on
+/// [`parse_policy`] is deliberate and narrow. That posture says nub will not
+/// reshape a tree ANOTHER package manager installed; the stamp is written only
+/// by a successful nub install, so a mismatch here means nub is redoing nub's
+/// own work. Every other kind of staleness still only warns.
+///
+/// The reinstall is a PLAIN `nub install` — the exact command the warning path
+/// tells users to run — with default flags: the engine folds into the install's
+/// own freshness/delta hash (`state.rs`, `finalize.rs`), so a present,
+/// satisfying lockfile is not re-resolved (nub's no-churn write leaves it
+/// untouched) while the native dependency is relinked from its per-engine store
+/// build, or rebuilt when this engine was never built before. A frozen install
+/// is deliberately NOT used — it forces a full lifecycle re-run even when the
+/// store already holds the build, defeating the relink.
+///
+/// Best-effort throughout — a failed repair prints and lets the run continue,
+/// because the script at hand may not touch the native dependency at all, and
+/// aborting a run that works today would be a regression.
+fn repair_engine_mismatch(project: &Project, policy: Policy) {
+    let Some(anchor) = crate::install_engine::anchor(&project.root) else {
+        return;
+    };
+    // Anchored at the install root, matching how the installer resolved the
+    // Node it built against (`pm_engine::apply_lifecycle_augmentation`). Only a
+    // tree carrying nub's stamp reaches this closure (see `engine_repair_needed`),
+    // so a foreign tree pays a single failed file read, never a Node resolution.
+    // The spawn-free cached resolver runs first; its under-report (`None` on a
+    // cold version cache) is unacceptable here — the first run after a switch is
+    // the whole point — so it falls through to the full resolution the launch is
+    // about to perform anyway.
+    let resolve_current = || {
+        let node = nub_core::node::discovery::discover_node_cached(&anchor)
+            .or_else(|| nub_core::node::discovery::discover_node(&anchor).ok())?;
+        Some(crate::install_engine::engine_name(
+            &node.version.to_string(),
+        ))
+    };
+    let Some((recorded, current)) = engine_repair_needed(policy, &anchor, resolve_current) else {
+        return;
+    };
+
+    let (was, now) = crate::install_engine::describe(&recorded, &current);
+    eprintln!(
+        "nub: dependencies were installed for {was}, this run uses {now}. \
+         Reinstalling — native addons are built per Node major."
+    );
+    let flags = crate::pm_engine::InstallFlags {
+        dir: Some(anchor),
+        ..Default::default()
+    };
+    // `-C <dir>` chdirs the process and never restores it (a PM verb exits right
+    // after), but here the RUN still has to happen — from its own cwd, which the
+    // caller may have set explicitly (a workspace member under `nub exec -r`).
+    let restore = std::env::current_dir().ok();
+    let outcome = crate::pm_engine::run_install(flags);
+    if let Some(cwd) = restore {
+        let _ = std::env::set_current_dir(cwd);
+    }
+    match outcome {
+        Ok(0) => {}
+        // A non-zero code already carried the engine's own diagnostic.
+        Ok(_) => eprintln!("nub: reinstall failed; continuing with the tree as installed."),
+        Err(e) => eprintln!("nub: reinstall failed: {e}"),
+    }
+}
+
+/// `(engine the tree was built for, engine this run uses)` when they differ.
+///
+/// The stamp read comes FIRST and `current` is a closure, so the run path's cost
+/// on a tree nub did not install is a single failed file read — no Node
+/// resolution at all. Pure over the on-disk stamp, so the three cases that
+/// matter — a real mismatch, a matching engine (never repair on the happy path),
+/// and the `off` opt-out — are testable without switching Node.
+fn engine_repair_needed(
+    policy: Policy,
+    anchor: &Path,
+    current: impl FnOnce() -> Option<String>,
+) -> Option<(String, String)> {
+    if policy == Policy::Off {
+        return None;
+    }
+    let recorded = crate::install_engine::recorded(anchor)?;
+    let current = current()?;
+    (recorded != current).then_some((recorded, current))
 }
 
 /// The staleness verdict for `project`: `Some(reason)` if the tree looks stale,
@@ -444,6 +538,52 @@ mod tests {
         assert!(version_mismatch("foo", "^2.0.0", &at("1.0.0-beta.1")).is_none());
         // No readable installed version → skip.
         assert!(version_mismatch("foo", "^2.0.0", &InstalledPkg { version: None }).is_none());
+    }
+
+    /// The whole engine-repair contract, at the decision boundary: a tree nub
+    /// built for another Node major is repaired; a matching one never is (a
+    /// false positive here would reinstall on EVERY run); a tree nub did not
+    /// install is untouched; and `off` opts out of all of it.
+    #[test]
+    fn engine_repair_fires_only_on_a_nub_tree_built_for_another_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = dir.path();
+        let stamp = |engine: &str| {
+            std::fs::create_dir_all(anchor.join("node_modules")).unwrap();
+            std::fs::write(anchor.join("node_modules/.nub-engine"), engine).unwrap();
+        };
+        let node26 = crate::install_engine::engine_name("26.5.0");
+        let node22 = crate::install_engine::engine_name("22.15.0");
+        let running_26 = || Some(node26.clone());
+        let moved = || Some((node22.clone(), node26.clone()));
+
+        // No stamp: another PM's tree (or a pre-stamp nub install). The current
+        // engine is never even resolved.
+        assert_eq!(
+            engine_repair_needed(Policy::Warn, anchor, || panic!(
+                "a tree nub did not install must not cost a Node resolution"
+            )),
+            None
+        );
+
+        stamp(&node22);
+        assert_eq!(
+            engine_repair_needed(Policy::Warn, anchor, running_26),
+            moved()
+        );
+        assert_eq!(
+            engine_repair_needed(Policy::Error, anchor, running_26),
+            moved(),
+            "`error` is a stricter policy, not an opt-out of the repair"
+        );
+        assert_eq!(engine_repair_needed(Policy::Off, anchor, running_26), None);
+
+        stamp(&node26);
+        assert_eq!(
+            engine_repair_needed(Policy::Warn, anchor, running_26),
+            None,
+            "the engine that built the tree must never trigger a reinstall"
+        );
     }
 
     #[test]
