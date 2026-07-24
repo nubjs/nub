@@ -629,4 +629,48 @@ await import(`./${name}.js`);
         assert!(msg.contains("import(pluginPath)"), "got: {msg}");
         assert!(msg.contains("--allow-unresolved"), "got: {msg}");
     }
+
+    fn bundle_fixture(source: &str, o: &BundleOptions) -> String {
+        // A unique dir per call keeps parallel test threads from colliding on
+        // the entry path (the bundler keys diagnostics on it).
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("nub-bundle-test-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("entry.ts"), source).unwrap();
+        let res = bundle(&dir.join("entry.ts"), o).expect("bundle succeeds");
+        let code = String::from_utf8(res.files[0].bytes.clone()).expect("utf8 bundle");
+        let _ = std::fs::remove_dir_all(&dir);
+        code
+    }
+
+    // The load-bearing guarantee: minify is ON by default and would rename
+    // `Registry` to a single letter, silently breaking every framework that
+    // keys on `Class.name` at runtime inside a frozen binary. Setting the
+    // rolldown flag is NOT proof it works (Bun's own --keep-names is a verified
+    // no-op), so this asserts against the EMITTED, minified bundle.
+    #[test]
+    fn keep_names_survives_minification() {
+        const SRC: &str = "class Registry {}\nfunction handler() {}\n\
+                           globalThis.OUT = Registry.name + handler.name;\n";
+
+        let mut kept = opts();
+        kept.reject_unresolved = false;
+        let code = bundle_fixture(SRC, &kept);
+        assert!(
+            code.contains("Registry") && code.contains("handler"),
+            "keep_names=true must preserve the class/fn names through minify, got:\n{code}"
+        );
+
+        let mut mangled = opts();
+        mangled.reject_unresolved = false;
+        mangled.keep_names = false;
+        let code = bundle_fixture(SRC, &mangled);
+        assert!(
+            !code.contains("Registry"),
+            "control: keep_names=false must let minify rename the class (else the \
+             positive case proves nothing), got:\n{code}"
+        );
+    }
 }
