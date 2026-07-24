@@ -277,8 +277,8 @@ grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pn
   the Cargo.toml `rust-version` conflicts on every bump (upstream's 1.91-for-mise comment vs. nub's
   divergence note) — resolve OURS every time. Behaviorally inert (a codegen hint), so it never changes
   standalone-aube behavior — it just can't upstream (it would break mise's build floor). nub-cli depends
-  on aube, so this also holds nub's root `rust-version` at 1.95 and the CI MSRV `Check` job runs the root
-  leg on 1.95.0 (nub-phantom, aube-free, keeps the 1.93 leg).
+  on aube, so `crates/nub-cli/Cargo.toml` sets `rust-version = "1.95"` (the workspace floor stays 1.93);
+  the CI MSRV `Check` job runs the root leg on 1.95.0 and the aube-free nub-phantom leg on 1.93.0.
 - **Runtime / lifecycle-script env** — the embedder runtime seam. `crates/aube-util/src/engine_context.rs`
   is a whole nub-only module (`EngineContext` = process-global `OnceLock<RwLock<..>>`); its
   `runtime_node_dir` / `runtime_node_bin` / `env_overlay` / `path_prepends` / `lifecycle_user_agent_product`

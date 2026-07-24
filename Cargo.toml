@@ -92,10 +92,11 @@ split-debuginfo = "unpacked"
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
-# 1.95 for core::hint::cold_path() in the vendored aube engine, a path dep of
-# nub-cli (see vendor/aube/Cargo.toml). nub-native already required 1.95, so
-# this only aligns the root floor with what the full build already needs.
-rust-version = "1.95"
+# Workspace floor stays 1.93; only nub-cli needs 1.95 (it depends on the
+# vendored aube, which uses core::hint::cold_path()), so that crate sets its
+# own rust-version rather than raising every member — keeps nub-phantom-core /
+# nub-phantom-scan buildable on 1.93 for the aube-free nub-phantom eval tool.
+rust-version = "1.93"
 license = "MIT"
 repository = "https://github.com/nubjs/nub"
 
