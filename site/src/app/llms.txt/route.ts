@@ -1,4 +1,4 @@
-import { source, guidesSource, blog } from '@/lib/source';
+import { source, guidesSource, blog, isPublicDoc } from '@/lib/source';
 
 // Static at build time — the content set only changes on rebuild.
 export const dynamic = 'force-static';
@@ -64,7 +64,7 @@ function orderedDocPages(): DocPage[] {
     }
   }
 
-  return ordered;
+  return ordered.filter(isPublicDoc);
 }
 
 export function GET() {

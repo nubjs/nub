@@ -16,3 +16,9 @@ export const blog = loader({
   baseUrl: '/blog',
   source: toFumadocsSource(blogPosts, []),
 });
+
+export type DocPage = ReturnType<typeof source.getPages>[number];
+
+export function isPublicDoc(page: DocPage): boolean {
+  return page.data.unlisted !== true;
+}

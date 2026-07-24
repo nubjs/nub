@@ -1,0 +1,494 @@
+---
+title: Project configuration
+description: Configure Nub's runtime, dependency installs, and temporary package runs from one project file.
+---
+
+Put `nub.jsonc` at the project root. Nub finds the nearest file by walking up from the command's working directory.
+
+```jsonc title="nub.jsonc"
+{
+  "$schema": "https://nubjs.com/schema/nub.json",
+
+  "preload": ["./instrumentation.ts"],
+  "env": ["./env/base.env", "./env/local.env"],
+
+  "install": {
+    "nodeLinker": "symlink",
+    "minimumReleaseAge": "3d"
+  },
+
+  "dlx": {
+    "consent": "prompt"
+  }
+}
+```
+
+The file uses JSON with comments and trailing commas. Unknown keys and invalid values stop the command with an error.
+
+## `$schema`
+
+Add the public schema URL for editor completion and validation.
+
+```jsonc title="nub.jsonc"
+{
+  "$schema": "https://nubjs.com/schema/nub.json"
+}
+```
+
+## Project and global configuration
+
+Use a project `nub.jsonc` for settings that belong to one repository. Use the
+global file for personal defaults that should apply everywhere:
+
+```text title="Global configuration"
+~/.config/nub/nub.jsonc
+```
+
+`$XDG_CONFIG_HOME/nub/nub.jsonc` is used when `XDG_CONFIG_HOME` is set.
+On Windows, the default path is `%APPDATA%\nub\nub.jsonc`.
+
+Project files fail loudly when they contain invalid values. The global file is
+best-effort: Nub ignores it when it cannot be read or parsed.
+
+More specific settings replace broader ones:
+
+```text
+command-line option
+  ↓
+environment setting
+  ↓
+project nub.jsonc
+  ↓
+global nub.jsonc
+  ↓
+built-in default
+```
+
+Relative paths come from the file that supplied the final value. A project
+`preload` path is relative to the project file; a global `preload` path is
+relative to the global file.
+
+## Runtime
+
+The top-level fields configure file runs, package scripts, and watch mode.
+
+### `preload`
+
+Load one or more modules before the entry file.
+
+```jsonc title="nub.jsonc"
+{
+  "preload": [
+    "./instrumentation.ts",
+    "./register-hooks.mjs"
+  ]
+}
+```
+
+Paths are resolved from the directory containing `nub.jsonc`.
+
+```ts title="instrumentation.ts"
+globalThis.performance.mark("app-start");
+```
+
+### `nodeOptions`
+
+Pass Node options to runtime commands.
+
+```jsonc title="nub.jsonc"
+{
+  "nodeOptions": [
+    "--enable-source-maps",
+    "--stack-trace-limit=50"
+  ]
+}
+```
+
+### `v8Flags`
+
+Pass V8 flags without adding them to every command.
+
+```jsonc title="nub.jsonc"
+{
+  "v8Flags": [
+    "--max-old-space-size=4096"
+  ]
+}
+```
+
+### `env`
+
+Keep automatic environment-file discovery with `true`.
+
+```jsonc title="nub.jsonc"
+{
+  "env": true
+}
+```
+
+Disable environment-file loading with `false`.
+
+```jsonc title="nub.jsonc"
+{
+  "env": false
+}
+```
+
+Read one exact file instead of the automatic set.
+
+```jsonc title="nub.jsonc"
+{
+  "env": "./env/development.env"
+}
+```
+
+Compose several files in order. Later files replace earlier values.
+
+```jsonc title="nub.jsonc"
+{
+  "env": [
+    "./env/base.env",
+    "./env/development.env",
+    "./env/local.env"
+  ]
+}
+```
+
+Paths are resolved from the directory containing `nub.jsonc`, not the shell's current directory.
+
+### `define`
+
+Replace identifiers at compile time. Each value is a JavaScript source string.
+
+```jsonc title="nub.jsonc"
+{
+  "define": {
+    "APP_VERSION": "\"1.4.0\"",
+    "FEATURE_SEARCH": "true",
+    "BUILD_NUMBER": "42"
+  }
+}
+```
+
+```ts title="version.ts"
+console.log(APP_VERSION);   // "1.4.0"
+console.log(FEATURE_SEARCH); // true
+console.log(BUILD_NUMBER);   // 42
+```
+
+### `loader`
+
+Choose a loader for a file extension.
+
+```jsonc title="nub.jsonc"
+{
+  "loader": {
+    ".txt": "text",
+    ".config": "jsonc",
+    ".data": "yaml",
+    ".component": "tsx"
+  }
+}
+```
+
+The supported loader names are:
+
+```text
+text
+jsonc
+json5
+toml
+yaml
+ts
+tsx
+jsx
+```
+
+### `conditions`
+
+Add package export conditions.
+
+```jsonc title="nub.jsonc"
+{
+  "conditions": [
+    "development",
+    "react-server"
+  ]
+}
+```
+
+```json title="node_modules/example/package.json"
+{
+  "exports": {
+    ".": {
+      "development": "./development.js",
+      "default": "./production.js"
+    }
+  }
+}
+```
+
+### `tsconfig`
+
+Choose the TypeScript configuration used by Nub's runtime.
+
+```jsonc title="nub.jsonc"
+{
+  "tsconfig": "./tsconfig.runtime.json"
+}
+```
+
+```jsonc title="tsconfig.runtime.json"
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}
+```
+
+### `verifyDepsBeforeRun`
+
+Warn when installed dependencies may be stale.
+
+```jsonc title="nub.jsonc"
+{
+  "verifyDepsBeforeRun": "warn"
+}
+```
+
+Choose another response:
+
+```jsonc title="nub.jsonc"
+{
+  // Install the missing or stale dependencies.
+  "verifyDepsBeforeRun": "install"
+}
+```
+
+```jsonc title="nub.jsonc"
+{
+  // Stop instead of running.
+  "verifyDepsBeforeRun": "error"
+}
+```
+
+```jsonc title="nub.jsonc"
+{
+  // Ask in a terminal.
+  "verifyDepsBeforeRun": "prompt"
+}
+```
+
+```jsonc title="nub.jsonc"
+{
+  // Skip the check.
+  "verifyDepsBeforeRun": false
+}
+```
+
+### `nodeCompat`
+
+Use plain Node behavior while keeping Nub's Node version selection.
+
+```jsonc title="nub.jsonc"
+{
+  "nodeCompat": true
+}
+```
+
+This is the project-wide form of the `--node` escape hatch. Nub does not load its runtime hooks, environment files, preloads, custom loaders, defines, or conditions.
+
+## `install`
+
+The install block configures Nub's package manager and dependency lifecycle scripts.
+
+### `nodeLinker`
+
+Use Nub's shared symlink layout.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "nodeLinker": "symlink"
+  }
+}
+```
+
+Use a project-local isolated store.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "nodeLinker": "isolated"
+  }
+}
+```
+
+Use a flat, real-directory layout.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "nodeLinker": "hoisted"
+  }
+}
+```
+
+The `"pnp"` value is accepted by the schema but reserved for future
+Plug'n'Play support. An install that uses it is rejected until support is
+enabled.
+
+### `symlinkDisablePattern`
+
+Materialize selected packages inside the project instead of linking them from the shared store.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "symlinkDisablePattern": [
+      "electron",
+      "@company/native-*"
+    ]
+  }
+}
+```
+
+### `hoist`
+
+Hoist every package.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "hoist": true
+  }
+}
+```
+
+Keep the strict layout.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "hoist": false
+  }
+}
+```
+
+Hoist only matching packages.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "hoist": [
+      "*eslint*",
+      "@types/*"
+    ]
+  }
+}
+```
+
+### `minimumReleaseAge`
+
+Reject versions published too recently.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "minimumReleaseAge": "3d"
+  }
+}
+```
+
+Durations use an integer plus one unit.
+
+```text
+30s  # seconds
+20m  # minutes
+12h  # hours
+3d   # days
+2w   # weeks
+```
+
+Exclude selected packages when they must update immediately.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "minimumReleaseAge": "3d",
+    "minimumReleaseAgeExclude": [
+      "@company/*",
+      "typescript"
+    ]
+  }
+}
+```
+
+### `nodeOptions`
+
+Pass Node options to dependency lifecycle scripts.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "nodeOptions": [
+      "--max-old-space-size=8192"
+    ]
+  }
+}
+```
+
+## `dlx`
+
+The dlx block configures temporary package runs through `nubx`, `nub dlx`, and `nub x`.
+
+### `consent`
+
+Ask before an implicit `nubx` registry fetch.
+
+```jsonc title="nub.jsonc"
+{
+  "dlx": {
+    "consent": "prompt"
+  }
+}
+```
+
+Disable implicit registry fetches.
+
+```jsonc title="nub.jsonc"
+{
+  "dlx": {
+    "consent": "never"
+  }
+}
+```
+
+Explicit `nub dlx` runs still work because the command itself supplies consent.
+
+### `env`
+
+Use a separate environment file for temporary tools.
+
+```jsonc title="nub.jsonc"
+{
+  "dlx": {
+    "env": "./env/tools.env"
+  }
+}
+```
+
+Disable environment-file loading for temporary tools.
+
+```jsonc title="nub.jsonc"
+{
+  "dlx": {
+    "env": false
+  }
+}
+```
+
+The field accepts the same boolean, string, and string-array forms as the top-level `env` field.

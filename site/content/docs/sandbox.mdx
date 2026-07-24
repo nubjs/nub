@@ -1,13 +1,16 @@
 ---
-title: Sandbox configuration
-description: Configure filesystem, network, environment, and proxy access for commands run by Nub.
+title: Sandbox configuration preview
+description: Reference the sandbox engine's filesystem, network, and environment syntax.
+unlisted: true
 ---
 
-> **Preview:** project `nub.jsonc` discovery is disabled in the current sandbox branch. The policy compiler implements the syntax below, but the project-config bridge is not complete. In particular, `proxy`, object-level inheritance, policy-file references, and per-scope policy lowering are not connected to `nub.jsonc` yet.
+> **Preview:** The sandbox engine implements the syntax on this page, but the `nub.jsonc` bridge is inert. The project-config parser validates and retains a restricted shape, but Nub does not apply those values to runtime commands, installs, or temporary package runs.
 
-A sandbox policy can allow only the files, hosts, and environment variables a command needs.
+> **Decision audit in progress:** This unlisted page records experimental engine behavior, not an approved public contract. Proxy modes and credential brokering are being redesigned and must not be published from this draft.
 
-```jsonc title="nub.jsonc"
+The engine can allow only the files, hosts, and environment variables a command needs. Its examples are a reference for the active engine syntax, not settings that `nub.jsonc` applies today.
+
+```jsonc title="sandbox configuration"
 {
   "sandbox": {
     "fs": {
@@ -16,14 +19,15 @@ A sandbox policy can allow only the files, hosts, and environment variables a co
       "<tmp>": "rw"
     },
     "net": ["registry.npmjs.org"],
+    "proxy": "passthrough",
     "env": ["...", "NODE_ENV", "!*_TOKEN"]
   }
 }
 ```
 
-## Policy locations
+## Project configuration bridge
 
-The project config parser recognizes three policy locations.
+The project config parser recognizes sandbox values in three locations.
 
 ```jsonc title="nub.jsonc"
 {
@@ -39,51 +43,32 @@ The project config parser recognizes three policy locations.
   "dlx": {
     "sandbox": {
       "fs": ["..."],
-      "net": ["registry.npmjs.org"],
+      "net": false,
       "env": ["..."]
     }
   }
 }
 ```
 
-These values are parsed and retained on the current branch, but they do not change runtime, install, or dlx behavior while project discovery and policy lowering remain disabled.
+Each location accepts a boolean, a string, or an object containing only `fs`, `net`, and `env`; each axis accepts a boolean, a string array, or an object. Unknown axis names and non-string array entries are rejected. The parser retains object values without interpreting their rules.
 
-## Policy values
+The engine reference below accepts more detailed object syntax, including inheritance. Those detailed objects are not yet valid project configuration unless they fit the restricted parser shape above, and no project configuration sandbox value has an effect yet.
 
-Use `false` to run without confinement.
+## External sandbox config files
 
-```jsonc
+The hidden runner accepts a bare sandbox object.
+
+```jsonc title="sandbox.jsonc"
 {
-  "sandbox": false
+  "fs": ["./src", "./dist"],
+  "net": false,
+  "env": ["PATH", "NODE_ENV"]
 }
 ```
 
-Use `true` for the secure compiler defaults:
+It also accepts the same object under a top-level `sandbox` key.
 
-- read access except known secret-bearing paths and `.env*` files
-- no filesystem writes
-- no network access
-- a small, non-secret environment
-
-```jsonc
-{
-  "sandbox": true
-}
-```
-
-Use `"build-jail"` for the dependency-build preset. The current preset can read non-secret files, write inside the project, and cannot use the network or ambient environment.
-
-```jsonc
-{
-  "install": {
-    "sandbox": "build-jail"
-  }
-}
-```
-
-Use an object for a custom policy.
-
-```jsonc
+```jsonc title="sandbox.jsonc"
 {
   "sandbox": {
     "fs": ["./src", "./dist"],
@@ -93,20 +78,11 @@ Use an object for a custom policy.
 }
 ```
 
-An empty object denies filesystem, network, and ambient environment access.
+An empty sandbox object denies filesystem, network, and ambient environment access.
 
-```jsonc
+```jsonc title="sandbox.jsonc"
 {
   "sandbox": {}
-}
-```
-
-Policy-file strings are reserved but not resolved by the current frontend. Keep policies inline.
-
-```jsonc
-{
-  // Parsed as a file reference, then rejected until file loading is wired.
-  "sandbox": "./sandbox.json"
 }
 ```
 
@@ -179,7 +155,7 @@ Object values accept `"r"`, `"rw"`, `true`, or `false`.
 }
 ```
 
-`true` means `"rw"`. `false` denies both reads and writes. There is no write-only mode.
+An object value of `true` means `"rw"`, while `false` denies both reads and writes. There is no write-only mode.
 
 ### Use project-relative paths
 
@@ -214,7 +190,7 @@ The compiler recognizes `<home>`, `~`, `<cache>`, and `<tmp>`.
 }
 ```
 
-`<tmp>` is special. It requests a fresh private temporary directory for the run.
+The `<tmp>` root requests a fresh private temporary directory for the run.
 
 ```jsonc
 {
@@ -303,9 +279,9 @@ Rules are checked in order. The last matching rule wins.
 }
 ```
 
-### Keep the inherited filesystem policy
+### Keep inherited filesystem settings
 
-Use `"..."` inside an array to insert the enclosing policy at that position.
+Use `"..."` inside an array to insert the enclosing sandbox settings at that position.
 
 ```jsonc
 {
@@ -335,7 +311,7 @@ At the outermost level, `"..."` inserts the secure filesystem defaults.
 
 ### Resolve a path with a command
 
-A `$(command)` expression runs while the policy is compiled. Its single-line output becomes the path.
+A `$(command)` expression runs while the sandbox config is compiled. Its single-line output becomes the path.
 
 ```jsonc
 {
@@ -410,6 +386,21 @@ The `net` key controls outbound network access.
 }
 ```
 
+Coarse allow-all and deny-all settings do not start a proxy. Adding `proxy` beside either boolean is an error.
+
+Fine-grained host, CIDR, and private-network allows require a sibling proxy mode.
+
+```jsonc
+{
+  "sandbox": {
+    "net": ["api.example.com"],
+    "proxy": "passthrough"
+  }
+}
+```
+
+Use `passthrough` to enforce connection-level rules without terminating TLS. The `auto` and `terminate` modes remain experimental and are part of the current decision audit.
+
 ### Allow specific hosts
 
 ```jsonc
@@ -418,7 +409,8 @@ The `net` key controls outbound network access.
     "net": [
       "registry.npmjs.org",
       "api.github.com"
-    ]
+    ],
+    "proxy": "passthrough"
   }
 }
 ```
@@ -434,7 +426,8 @@ A leading `*.` matches the named domain and subdomains at any depth.
   "sandbox": {
     "net": [
       "*.example.com"
-    ]
+    ],
+    "proxy": "passthrough"
   }
 }
 ```
@@ -453,21 +446,23 @@ Use CIDR notation.
     "net": [
       "203.0.113.0/24",
       "2001:db8::/32"
-    ]
+    ],
+    "proxy": "passthrough"
   }
 }
 ```
 
 ### Allow private networks
 
-Private IPv4 and IPv6 ranges remain blocked unless the policy names `<private>` or its `<local>` alias.
+Private IPv4 and IPv6 ranges remain blocked unless the sandbox config names `<private>` or its `<local>` alias.
 
 ```jsonc
 {
   "sandbox": {
     "net": [
       "<private>"
-    ]
+    ],
+    "proxy": "passthrough"
   }
 }
 ```
@@ -478,7 +473,8 @@ Private IPv4 and IPv6 ranges remain blocked unless the policy names `<private>` 
     "net": [
       "api.example.com",
       "<local>"
-    ]
+    ],
+    "proxy": "passthrough"
   }
 }
 ```
@@ -493,7 +489,8 @@ Prefix an array entry with `!`.
     "net": [
       "*",
       "!*.tracking.example"
-    ]
+    ],
+    "proxy": "passthrough"
   }
 }
 ```
@@ -507,7 +504,8 @@ The last matching rule wins.
       "*",
       "!api.example.com",
       "api.example.com"
-    ]
+    ],
+    "proxy": "passthrough"
   }
 }
 ```
@@ -522,14 +520,15 @@ The final rule re-allows `api.example.com`.
     "net": {
       "registry.npmjs.org": true,
       "*.tracking.example": false
-    }
+    },
+    "proxy": "passthrough"
   }
 }
 ```
 
-Object values accept `true`, `false`, or an `inject` rule. Network values do not accept filesystem modes such as `"r"` or `"rw"`.
+Object values carry engine-specific network rules. Network values do not accept filesystem modes such as `"r"` or `"rw"`.
 
-### Keep the inherited network policy
+### Keep inherited network settings
 
 Use `"..."` in an array.
 
@@ -539,16 +538,17 @@ Use `"..."` in an array.
     "net": [
       "...",
       "api.example.com"
-    ]
+    ],
+    "proxy": "passthrough"
   }
 }
 ```
 
-At the outermost level, the inherited secure network policy allows no outbound connections.
+At the outermost level, the inherited secure network settings allow no outbound connections.
 
 ## `env`
 
-The `env` key controls the environment passed to the child process. Nub builds a new environment from the allowed entries.
+The `env` key controls the environment passed to the child process. The engine builds a new environment from the allowed entries.
 
 ### Pass everything or nothing
 
@@ -568,7 +568,7 @@ The `env` key controls the environment passed to the child process. Nub builds a
 }
 ```
 
-On POSIX systems, `false` passes no ambient variables. On Windows, Nub retains only the small set needed to start the child reliably.
+On POSIX systems, `false` passes no ambient variables. On Windows, the engine retains only the small set needed to start the child reliably.
 
 ### Pass selected variables
 
@@ -677,7 +677,7 @@ The string form accepts `string`, `integer`, `number`, `port`, a regular express
 }
 ```
 
-`number` must be finite. `port` must be an integer from 1 through 65535.
+A `number` value must be finite. A `port` value must be an integer from 1 through 65535.
 
 ### Mark a value as sensitive
 
@@ -735,35 +735,6 @@ The extras object accepts `format`, `optional`, `sensitive`, and `value`.
 }
 ```
 
-### Resolve a value with a command
-
-A `$(command)` expression runs in the Nub parent process. Its output becomes the value.
-
-```jsonc
-{
-  "sandbox": {
-    "env": {
-      "API_TOKEN": "$(op read op://engineering/api/token)"
-    }
-  }
-}
-```
-
-```jsonc
-{
-  "sandbox": {
-    "env": {
-      "DATABASE_URL": {
-        "value": "postgres://app:$(op read op://engineering/db/password)@db.example.com/app",
-        "sensitive": true
-      }
-    }
-  }
-}
-```
-
-Environment command substitution is allowed only in approved user config. Dependency-controlled policy cannot run a command or source a value this way.
-
 ### Keep the safe inherited environment
 
 Use `"..."` in an array.
@@ -795,93 +766,9 @@ Use `"..."`: `true` in the object form.
 
 At the outermost level, `"..."` inserts the curated, non-secret environment used by `sandbox: true`.
 
-## `proxy`
-
-The sandbox uses a local proxy to enforce per-host network rules. The `proxy` key chooses whether Nub may terminate TLS.
-
-> **Current bridge gap:** the sandbox compiler accepts `proxy`, but the project `nub.jsonc` parser does not accept this key yet.
-
-### Choose automatically
-
-`"auto"` is the default. Nub keeps normal allowed hosts as blind tunnels and terminates TLS only when a rule needs header injection.
-
-```jsonc
-{
-  "sandbox": {
-    "net": ["api.example.com"],
-    "proxy": "auto"
-  }
-}
-```
-
-### Never terminate TLS
-
-```jsonc
-{
-  "sandbox": {
-    "net": ["api.example.com"],
-    "proxy": "passthrough"
-  }
-}
-```
-
-An `inject` rule combined with `"passthrough"` is an error.
-
-### Terminate TLS for allowed hosts
-
-```jsonc
-{
-  "sandbox": {
-    "net": ["api.example.com"],
-    "proxy": "terminate"
-  }
-}
-```
-
-Nub uses an ephemeral certificate authority for the run. It does not change the operating system trust store.
-
-### Inject a request header
-
-An `inject` rule adds a header without placing the secret in the child environment.
-
-```jsonc
-{
-  "sandbox": {
-    "net": {
-      "api.github.com": {
-        "inject": {
-          "Authorization": "Bearer $(op read op://engineering/github/token)"
-        }
-      }
-    },
-    "proxy": "auto"
-  }
-}
-```
-
-Literal header values also work.
-
-```jsonc
-{
-  "sandbox": {
-    "net": {
-      "api.example.com": {
-        "inject": {
-          "X-Client": "build-worker"
-        }
-      }
-    }
-  }
-}
-```
-
-Header names may contain letters, digits, `-`, and `_`. An injection target may be a literal host or a host wildcard. Avoid broad wildcards because the same credential is sent to every matching host.
-
-Header injection and command substitution are allowed only in approved user config. Dependency-controlled policy cannot inject credentials.
-
 ## Inheritance
 
-A policy object is a complete statement. If it names only `fs`, the omitted `net` and `env` axes are denied.
+A sandbox object is a complete statement. If it names only `fs`, the omitted `net` and `env` axes are denied.
 
 ```jsonc
 {
@@ -891,7 +778,7 @@ A policy object is a complete statement. If it names only `fs`, the omitted `net
 }
 ```
 
-The policy above means:
+The sandbox config above means:
 
 ```jsonc
 {
@@ -903,7 +790,7 @@ The policy above means:
 }
 ```
 
-Use object-level `"..."`: `true` to keep every omitted axis from the enclosing policy.
+Use object-level `"..."`: `true` to keep every omitted axis from the enclosing sandbox config.
 
 ```jsonc
 {
@@ -914,7 +801,7 @@ Use object-level `"..."`: `true` to keep every omitted axis from the enclosing p
 }
 ```
 
-> **Current bridge gap:** object-level `"..."` works in the policy compiler, but the project `nub.jsonc` parser does not accept it yet.
+> **Current bridge gap:** object-level `"..."` works in the sandbox compiler, but the project `nub.jsonc` parser does not accept it yet.
 
 Within an axis array, `"..."` inserts that one inherited axis at its position.
 
@@ -923,6 +810,7 @@ Within an axis array, `"..."` inserts that one inherited axis at its position.
   "sandbox": {
     "fs": ["...", "./dist"],
     "net": ["...", "api.example.com"],
+    "proxy": "passthrough",
     "env": ["...", "NODE_ENV"]
   }
 }
@@ -948,7 +836,7 @@ The example inherits the safe environment, strips every `AWS_*` value, then re-a
 
 ### Build without network access
 
-```jsonc title="nub.jsonc"
+```jsonc title="sandbox configuration"
 {
   "sandbox": {
     "fs": {
@@ -969,7 +857,7 @@ The example inherits the safe environment, strips every `AWS_*` value, then re-a
 
 ### Development server
 
-```jsonc title="nub.jsonc"
+```jsonc title="sandbox configuration"
 {
   "sandbox": {
     "fs": {
@@ -982,38 +870,13 @@ The example inherits the safe environment, strips every `AWS_*` value, then re-a
       "api.example.com",
       "*.sentry.io"
     ],
+    "proxy": "passthrough",
     "env": {
       "...": true,
       "NODE_ENV": "'development'",
       "PORT?": "port",
       "DATABASE_URL": true
     }
-  }
-}
-```
-
-### Release task with brokered credentials
-
-```jsonc title="nub.jsonc"
-{
-  "sandbox": {
-    "fs": {
-      "./": "r",
-      "./dist": "rw",
-      "<tmp>": "rw"
-    },
-    "net": {
-      "registry.npmjs.org": {
-        "inject": {
-          "Authorization": "Bearer $(op read op://engineering/npm/token)"
-        }
-      }
-    },
-    "env": {
-      "PATH": true,
-      "CI?": "string"
-    },
-    "proxy": "auto"
   }
 }
 ```

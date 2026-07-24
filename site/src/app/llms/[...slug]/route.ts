@@ -1,4 +1,4 @@
-import { source, guidesSource, blog } from '@/lib/source';
+import { source, guidesSource, blog, isPublicDoc } from '@/lib/source';
 import { getLLMText } from '@/lib/get-llm-text';
 import { notFound } from 'next/navigation';
 
@@ -30,7 +30,7 @@ export async function GET(
     source.getPages().find((p) => p.url === url) ??
     guidesSource.getPages().find((p) => p.url === url) ??
     blog.getPages().find((p) => p.url === url);
-  if (!page) notFound();
+  if (!page || ('unlisted' in page.data && !isPublicDoc(page))) notFound();
 
   return new Response(await getLLMText(page), {
     headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
@@ -49,7 +49,7 @@ export function generateStaticParams() {
   };
 
   return [
-    ...source.getPages().map((p) => toParams(p.url)),
+    ...source.getPages().filter(isPublicDoc).map((p) => toParams(p.url)),
     ...guidesSource.getPages().map((p) => toParams(p.url)),
     ...blog.getPages().map((p) => toParams(p.url)),
   ];

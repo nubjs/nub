@@ -1,5 +1,5 @@
 import type { MetadataRoute } from 'next';
-import { source, blog } from '@/lib/source';
+import { source, blog, isPublicDoc } from '@/lib/source';
 
 const SITE = 'https://nubjs.com';
 
@@ -21,12 +21,15 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: `${SITE}/blog`, lastModified: now, changeFrequency: 'weekly', priority: 0.6 },
   ];
 
-  const docsRoutes: MetadataRoute.Sitemap = source.getPages().map((page) => ({
-    url: `${SITE}${page.url}`,
-    lastModified: now,
-    changeFrequency: 'weekly',
-    priority: page.url === '/docs' ? 0.9 : 0.8,
-  }));
+  const docsRoutes: MetadataRoute.Sitemap = source
+    .getPages()
+    .filter(isPublicDoc)
+    .map((page) => ({
+      url: `${SITE}${page.url}`,
+      lastModified: now,
+      changeFrequency: 'weekly',
+      priority: page.url === '/docs' ? 0.9 : 0.8,
+    }));
 
   const blogRoutes: MetadataRoute.Sitemap = blog.getPages().map((page) => ({
     url: `${SITE}${page.url}`,

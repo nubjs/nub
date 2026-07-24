@@ -1,4 +1,4 @@
-import { source } from '@/lib/source';
+import { source, isPublicDoc } from '@/lib/source';
 import { getLLMText } from '@/lib/get-llm-text';
 
 // Static at build time — the content set only changes on rebuild.
@@ -13,7 +13,7 @@ export const revalidate = false;
  * `blog.getPages()` here too.
  */
 export async function GET() {
-  const scanned = await Promise.all(source.getPages().map(getLLMText));
+  const scanned = await Promise.all(source.getPages().filter(isPublicDoc).map(getLLMText));
 
   return new Response(scanned.join('\n\n'), {
     headers: { 'Content-Type': 'text/plain; charset=utf-8' },

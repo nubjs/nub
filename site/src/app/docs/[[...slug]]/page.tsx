@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { source } from '@/lib/source';
+import { source, isPublicDoc } from '@/lib/source';
 import {
   DocsPage,
   DocsBody,
@@ -150,5 +150,6 @@ export async function generateMetadata(props: {
       description,
       images: [ogImage],
     },
+    robots: isPublicDoc(page) ? undefined : { index: false, follow: false },
   };
 }

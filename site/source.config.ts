@@ -14,6 +14,9 @@ import { remarkGithubAlerts } from './src/lib/remark-github-alerts';
 export const docs = defineDocs({
   dir: 'content/docs',
   docs: {
+    schema: frontmatterSchema.extend({
+      unlisted: z.boolean().optional(),
+    }),
     // Export stringified Markdown via `_markdown` so `page.data.getText('processed')`
     // works (used by /llms.txt, /llms-full.txt, and /llms/*.mdx).
     postprocess: {
