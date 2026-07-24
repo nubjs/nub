@@ -30,6 +30,9 @@ jobs:
   # Everything that needs no compilation.
   preinstalled:
     name: busybox-w32 / Git Bash / cmd.exe
+    # `[brush-only]` in the commit subject re-runs just the brush leg, so a
+    # follow-up brush question does not re-pay a full Windows runner.
+    if: ${{ !contains(github.event.head_commit.message, '[brush-only]') }}
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -296,6 +299,25 @@ jobs:
             $body = [IO.File]::ReadAllText($p)
             Write-Host "  as -c  :"; & $brush -c $body 2>&1 | ForEach-Object { Write-Host "    $_" }; Write-Host "  -c   exit=$LASTEXITCODE"
           }
+          Write-Host "----- LINE BISECT: first prefix of posixprobe.sh brush cannot parse -----"
+          $all = [IO.File]::ReadAllLines("tests/win-shell-probe/posixprobe.sh")
+          $prev = 0
+          for ($k = 1; $k -le $all.Length; $k++) {
+            $p = "$t\prefix.sh"
+            [IO.File]::WriteAllLines($p, $all[0..($k-1)])
+            & $brush -n $p 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "FIRST_BAD_LINE=$k"
+              Write-Host "LINE_CONTENT: $($all[$k-1])"
+              & $brush -n $p 2>&1 | ForEach-Object { Write-Host "  parse: $_" }
+              # bash's own verdict on the same prefix, for contrast
+              & "C:\Program Files\Git\usr\bin\bash.exe" -n $p 2>&1 | ForEach-Object { Write-Host "  bash -n: $_" }
+              Write-Host "  bash -n exit=$LASTEXITCODE"
+              break
+            }
+            $prev = $k
+          }
+          Write-Host "LAST_GOOD_LINE=$prev of $($all.Length)"
           Write-Host "----- the real probe, as FILE vs -c -----"
           & $brush tests/win-shell-probe/posixprobe.sh 2>&1 | Select-Object -First 3 | Out-Host
           Write-Host "  file exit=$LASTEXITCODE"
