@@ -1,0 +1,177 @@
+# Ad-hoc, branch-scoped probe (no PR required — see .claude/skills/ci-adhoc-test).
+#
+# THE QUESTION: which candidate shell can actually run real `package.json` script
+# bodies on REAL Windows — above all, can it resolve and execute a
+# `node_modules/.bin/*.cmd` shim, which is the entire reason nub wants a
+# cross-platform script shell at all?
+#
+# Candidates: brush (Rust bash-compatible shell) · Git-for-Windows bash (MSYS2,
+# preinstalled on the runner) · cmd.exe (today's npm/nub Windows default) ·
+# busybox-w32 (native-Win32 POSIX ash, no MSYS layer).
+#
+# The compat bar is POSIX sh, NOT bash: npm runs script bodies with `sh -c`, and
+# on Debian/Ubuntu that is dash. cases.mjs tags every case accordingly.
+name: win-shell-probe
+
+on:
+  push:
+    branches: [win-shell-probe]
+    paths:
+      - "tests/win-shell-probe/**"
+      - ".github/workflows/win-shell-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything that needs no compilation: results land in ~4 minutes.
+  preinstalled:
+    name: preinstalled shells (Git Bash / cmd.exe / busybox-w32)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Environment inventory
+        shell: pwsh
+        run: |
+          Write-Host "== node =="        ; node --version
+          Write-Host "== PATHEXT =="     ; $env:PATHEXT
+          Write-Host "== cmd ver =="     ; cmd /d /s /c ver
+          Write-Host "== git bash =="
+          $gb = "C:\Program Files\Git\bin\bash.exe"
+          if (Test-Path $gb) { & $gb --version } else { Write-Host "ABSENT: $gb" }
+          Write-Host "== git bash sh.exe =="
+          $gs = "C:\Program Files\Git\bin\sh.exe"
+          if (Test-Path $gs) { & $gs --version } else { Write-Host "ABSENT: $gs" }
+          Write-Host "== where bash =="  ; where.exe bash 2>&1 | Out-Host
+
+      - name: Install busybox-w32 (best effort)
+        id: busybox
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $dest = "$env:RUNNER_TEMP\busybox"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $exe = "$dest\busybox.exe"
+          $ok = $false
+          # 1) chocolatey (present on windows-latest)
+          try {
+            choco install busybox --no-progress -y | Out-Host
+            $c = (Get-Command busybox -ErrorAction SilentlyContinue)
+            if ($c) { $exe = $c.Source; $ok = $true }
+          } catch { Write-Host "choco path failed: $_" }
+          # 2) single-exe download
+          if (-not $ok) {
+            foreach ($u in @("https://frippery.org/files/busybox/busybox64u.exe",
+                             "https://frippery.org/files/busybox/busybox64.exe",
+                             "https://frippery.org/files/busybox/busybox.exe")) {
+              try {
+                Invoke-WebRequest -Uri $u -OutFile $exe -UseBasicParsing -TimeoutSec 60
+                $ok = $true; Write-Host "downloaded $u"; break
+              } catch { Write-Host "download failed: $u -> $_" }
+            }
+          }
+          if ($ok) {
+            & $exe --help 2>&1 | Select-Object -First 3 | Out-Host
+            "path=$exe" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "BUSYBOX UNAVAILABLE — the busybox rows will be reported as not tested."
+            "path=" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Build fixture
+        shell: pwsh
+        run: node tests/win-shell-probe/make-fixture.mjs "$env:RUNNER_TEMP\fixture"
+
+      - name: 'MATRIX: cmd.exe (baseline — today''s npm/nub Windows default)'
+        shell: pwsh
+        run: |
+          node tests/win-shell-probe/run-matrix.mjs --shell cmd `
+            --bin "$env:ComSpec" `
+            --fixture "$env:RUNNER_TEMP\fixture" --work "$env:RUNNER_TEMP\work"
+
+      - name: "MATRIX: Git Bash (MSYS2 — what Claude Code requires on Windows)"
+        shell: pwsh
+        run: |
+          node tests/win-shell-probe/run-matrix.mjs --shell gitbash `
+            --bin "C:\Program Files\Git\bin\bash.exe" `
+            --fixture "$env:RUNNER_TEMP\fixture" --work "$env:RUNNER_TEMP\work"
+
+      - name: "MATRIX: Git Bash with MSYS_NO_PATHCONV=1 (path-translation opt-out)"
+        shell: pwsh
+        env:
+          MSYS_NO_PATHCONV: "1"
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          node tests/win-shell-probe/run-matrix.mjs --shell gitbash-nopathconv `
+            --bin "C:\Program Files\Git\bin\bash.exe" `
+            --fixture "$env:RUNNER_TEMP\fixture" --work "$env:RUNNER_TEMP\work"
+
+      - name: "MATRIX: busybox-w32 ash"
+        if: steps.busybox.outputs.path != ''
+        shell: pwsh
+        run: |
+          node tests/win-shell-probe/run-matrix.mjs --shell busybox `
+            --bin "${{ steps.busybox.outputs.path }}" `
+            --fixture "$env:RUNNER_TEMP\fixture" --work "$env:RUNNER_TEMP\work"
+
+  # brush has NO Windows CI leg upstream and publishes NO Windows release
+  # binary, so it must be built here. That build time is itself a finding.
+  brush:
+    name: brush (built from crates.io)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version; cargo --version
+
+      # brush's workspace denies all warnings, so a newer rustc than the one the
+      # authors tested would fail the build on a lint rather than a real error.
+      # Cap lints so we measure whether the CODE works on Windows, not whether it
+      # is lint-clean on today's stable.
+      - name: Build + install brush-shell 0.4.0 (timed)
+        id: brushbuild
+        continue-on-error: true
+        timeout-minutes: 35
+        shell: pwsh
+        env:
+          RUSTFLAGS: "--cap-lints allow"
+          CARGO_INCREMENTAL: "0"
+          CARGO_TERM_COLOR: never
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          cargo install brush-shell --locked --version 0.4.0 --root "$env:RUNNER_TEMP\brushroot"
+          $code = $LASTEXITCODE
+          $sw.Stop()
+          Write-Host "BRUSH_BUILD_SECONDS=$([int]$sw.Elapsed.TotalSeconds) exit=$code"
+          "seconds=$([int]$sw.Elapsed.TotalSeconds)" >> $env:GITHUB_OUTPUT
+          $exe = "$env:RUNNER_TEMP\brushroot\bin\brush.exe"
+          if (Test-Path $exe) { "path=$exe" >> $env:GITHUB_OUTPUT } else { "path=" >> $env:GITHUB_OUTPUT }
+          exit $code
+
+      - name: Report build outcome
+        shell: pwsh
+        run: |
+          Write-Host "BRUSH_BUILD|seconds=${{ steps.brushbuild.outputs.seconds }}|outcome=${{ steps.brushbuild.outcome }}|binary=${{ steps.brushbuild.outputs.path }}"
+
+      - name: Build fixture
+        if: steps.brushbuild.outputs.path != ''
+        shell: pwsh
+        run: node tests/win-shell-probe/make-fixture.mjs "$env:RUNNER_TEMP\fixture"
+
+      - name: "MATRIX: brush"
+        if: steps.brushbuild.outputs.path != ''
+        shell: pwsh
+        run: |
+          & "${{ steps.brushbuild.outputs.path }}" --version
+          node tests/win-shell-probe/run-matrix.mjs --shell brush `
+            --bin "${{ steps.brushbuild.outputs.path }}" `
+            --fixture "$env:RUNNER_TEMP\fixture" --work "$env:RUNNER_TEMP\work"
