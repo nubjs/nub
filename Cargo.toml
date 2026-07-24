@@ -92,7 +92,10 @@ split-debuginfo = "unpacked"
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.93"
+# 1.95 for core::hint::cold_path() in the vendored aube engine, a path dep of
+# nub-cli (see vendor/aube/Cargo.toml). nub-native already required 1.95, so
+# this only aligns the root floor with what the full build already needs.
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/nubjs/nub"
 

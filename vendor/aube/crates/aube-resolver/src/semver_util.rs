@@ -509,6 +509,7 @@ fn with_cached_range<R>(range_str: &str, f: impl FnOnce(Option<&node_semver::Ran
     CACHE.with(|cell| {
         let mut map = cell.borrow_mut();
         if !map.contains_key(range_str) {
+            core::hint::cold_path();
             let parsed = node_semver::Range::parse(range_str).ok();
             map.insert(range_str.to_string(), parsed);
         }
@@ -527,6 +528,7 @@ fn with_cached_version<R>(version: &str, f: impl FnOnce(Option<&node_semver::Ver
     CACHE.with(|cell| {
         let mut map = cell.borrow_mut();
         if !map.contains_key(version) {
+            core::hint::cold_path();
             let parsed = node_semver::Version::parse(version).ok();
             map.insert(version.to_string(), parsed);
         }

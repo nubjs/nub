@@ -245,7 +245,7 @@ applies. Reverting was correct. Let the tests arbitrate; don't defend a graft.
 Grep after every bump — if one vanished, a resolution was wrong:
 
 ```sh
-grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pnpm_config\|env_prefix\|cache_namespace\|engine_context\|env_overlay\|path_prepends\|runtime_node" vendor/aube/crates
+grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pnpm_config\|env_prefix\|cache_namespace\|engine_context\|env_overlay\|path_prepends\|runtime_node\|cold_path" vendor/aube/crates
 ```
 
 - **Embedder profile plumbing** — `env_prefix`, `cache_namespace`, `lockfile_basename`,
@@ -268,6 +268,17 @@ grep -rn "workspace_markers\|lockfile_basename\|EmbedderProfile\|read_branded_pn
   it to show as fork delta rather than converge on the next bump.
 - **Registry** — `registry_url_for` returns an owned `String` (a `namedRegistries` route lookup borrows
   through a lock guard), mTLS/`npmAlwaysAuth`, the Android hickory carve-out.
+- **`cold_path()` hints + the 1.95 MSRV** — `core::hint::cold_path()` on the rare arms of the hot
+  install loops (`aube-linker/materialize.rs` link fallbacks, `aube-resolver/semver_util.rs` cache
+  misses, `aube-lockfile/pnpm/subset.rs` parser bails, `aube-store/tarball.rs` validation rejects), and
+  the matching `rust-version = "1.95"` in `vendor/aube/Cargo.toml`. Upstream deliberately holds aube at
+  1.91 for mise's distro packaging; nub does not (it vendors aube and builds on stable), so this is a
+  standing fork delta, NOT a convergence. The `cold_path` grep above catches the hints going missing;
+  the Cargo.toml `rust-version` conflicts on every bump (upstream's 1.91-for-mise comment vs. nub's
+  divergence note) — resolve OURS every time. Behaviorally inert (a codegen hint), so it never changes
+  standalone-aube behavior — it just can't upstream (it would break mise's build floor). nub-cli depends
+  on aube, so this also holds nub's root `rust-version` at 1.95 and the CI MSRV `Check` job runs the root
+  leg on 1.95.0 (nub-phantom, aube-free, keeps the 1.93 leg).
 - **Runtime / lifecycle-script env** — the embedder runtime seam. `crates/aube-util/src/engine_context.rs`
   is a whole nub-only module (`EngineContext` = process-global `OnceLock<RwLock<..>>`); its
   `runtime_node_dir` / `runtime_node_bin` / `env_overlay` / `path_prepends` / `lifecycle_user_agent_product`
