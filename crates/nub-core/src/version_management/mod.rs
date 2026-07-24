@@ -48,8 +48,9 @@ pub enum NodeArch {
 
 /// The host nub is running on, normalized to what nodejs.org/dist publishes. nub
 /// ships a per-platform binary, so `std::env::consts::{OS,ARCH}` already reflect
-/// the host; only musl needs a runtime probe (the official dist is glibc-only, so
-/// a musl host must route to unofficial-builds).
+/// the host; the libc flavor is likewise the running binary's own build target
+/// (`detect_musl`), since the official dist is glibc-only and a musl host must
+/// route to unofficial-builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostTarget {
     os: NodeOs,
@@ -123,22 +124,27 @@ pub fn host_is_musl() -> bool {
     detect_musl()
 }
 
-/// Detect a musl libc host via the dynamic-loader presence under `/lib` (the
-/// spec's prescription — cheap + reliable), falling back to the compile-time
-/// `target_env`. A glibc-built nub on a musl host (uncommon) is still caught by
-/// the `/lib/ld-musl-*` probe.
+/// Whether THIS host runs musl — the running nub binary's own build-target libc,
+/// NOT a filesystem probe.
+///
+/// This is `cfg!(target_env = "musl")` and nothing else. It replaced a `/lib`
+/// scan that returned `true` on the mere presence of a `ld-musl-*` loader file,
+/// which FALSE-POSITIVED on any glibc host carrying musl cross-libs (`musl-tools`,
+/// a CI runner with a musl Rust target, the nub Linux VM): the default
+/// `nub compile` then embedded a musl Node into a glibc artifact and it died at
+/// runtime with `libstdc++.so.6` relocation errors. A loader file only proves
+/// "some musl loader exists somewhere", never "THIS host runs musl".
+///
+/// Why the binary's own libc is authoritative for the host's: nub ships as
+/// per-platform packages gated by the npm `libc` field (`glibc` vs `musl`) whose
+/// selector keys on Node's `glibcVersionRuntime` (the robust detect-libc signal),
+/// so the glibc binary only ever lands on glibc hosts and the musl binary only on
+/// musl hosts. The musl binary is statically linked (musl's default crt-static)
+/// yet still reports `target_env = "musl"`, so static linking does not change this
+/// answer. The one case it cannot see — a static-musl binary hand-run on a glibc
+/// host — is a misuse the per-platform install flow prevents, and no in-process
+/// signal resolves it anyway (a static ELF carries no interpreter to inspect).
 fn detect_musl() -> bool {
-    if let Ok(entries) = std::fs::read_dir("/lib") {
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("ld-musl-"))
-            {
-                return true;
-            }
-        }
-    }
     cfg!(target_env = "musl")
 }
 
@@ -790,6 +796,17 @@ mod tests {
         // The dev box + every CI runner is a published platform.
         let h = HostTarget::detect().expect("host should be a published Node platform");
         assert!(!h.platform_token().is_empty());
+    }
+
+    /// Regression guard for the musl false-positive: detection is exactly the
+    /// running binary's build-target libc, immune to whatever loader files exist
+    /// under `/lib`. A re-introduced filesystem scan would break this on any
+    /// glibc box that has musl cross-libs installed (the scan says musl, the cfg
+    /// says glibc) — the dev VM and musl-cross CI runners are exactly such boxes.
+    #[test]
+    fn musl_detection_is_the_build_target_not_a_loader_file() {
+        assert_eq!(detect_musl(), cfg!(target_env = "musl"));
+        assert_eq!(host_is_musl(), cfg!(target_env = "musl"));
     }
 
     /// A minimal HTTP server for the streamed-provisioning tests: serves

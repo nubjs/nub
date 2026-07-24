@@ -229,10 +229,15 @@ fn acquire_embedded_node(
         return Ok(node_bin);
     }
 
-    // Dedup: an official Node of the same version already in nub's store.
+    // Dedup: an official Node of the same version already in nub's store — but
+    // only when it can actually run HERE. The store is keyed by version alone, so
+    // a foreign-libc Node of the same version (a musl Node poisoned into a glibc
+    // host's store by an older nub, or a cross-provision) sits under the same
+    // path; reusing it would spawn a Node the host's loader can't resolve
+    // (`libstdc++.so.6` relocation errors). Gate the reuse on libc compatibility.
     for store in node_stores(base) {
         let official = node_in_version_dir(&store.join(&m.node_version));
-        if official.is_file() {
+        if official.is_file() && store_node_matches_target(&official, &m.triple) {
             return Ok(official);
         }
     }
@@ -667,19 +672,104 @@ fn host_archive_ext() -> &'static str {
     }
 }
 
+/// Whether this launcher runs on musl — its OWN build-target libc, since the
+/// per-triple launcher is built for and shipped to exactly one platform. NOT a
+/// `/lib` scan: a `ld-musl-*` loader file merely existing (a glibc host with musl
+/// cross-libs) is not this host running musl, and treating it as such made
+/// `--smol` fetch a musl Node onto a glibc box. Mirrors nub-core's `detect_musl`.
 fn is_musl() -> bool {
-    if let Ok(entries) = fs::read_dir("/lib") {
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("ld-musl-"))
-            {
-                return true;
-            }
-        }
-    }
     cfg!(target_env = "musl")
+}
+
+// ---- store-node libc compatibility --------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ElfLibc {
+    Glibc,
+    Musl,
+}
+
+/// Whether a Node already in nub's version store may be reused for a payload
+/// targeting `triple`, instead of decompressing the embedded one. The store is
+/// keyed by version alone, so this is the guard that a musl and a glibc Node of
+/// the SAME version — not interchangeable — are told apart.
+///
+/// Only Linux splits libc; a macOS/Windows store node of the right version is
+/// format-compatible by construction (the store lives on the host the payload
+/// targets), so those short-circuit to reuse. On Linux the candidate's libc is
+/// read from its OWN ELF interpreter (`PT_INTERP`) — `ld-musl-*` ⇒ musl,
+/// `ld-linux*` ⇒ glibc — which is definitional and needs no exec. A static Node
+/// (no interpreter) runs against any libc, so it is accepted; anything unreadable
+/// as an ELF is refused, degrading to the always-correct embedded-Node path.
+fn store_node_matches_target(node: &Path, triple: &str) -> bool {
+    if !triple.starts_with("linux") {
+        return true;
+    }
+    let want_musl = triple.ends_with("-musl");
+    match read_elf_interp_libc(node) {
+        Some(Some(ElfLibc::Musl)) => want_musl,
+        Some(Some(ElfLibc::Glibc)) => !want_musl,
+        Some(None) => true, // valid ELF, no interpreter (static) → libc-agnostic
+        None => false,      // unreadable / not a 64-bit LE ELF → don't risk reuse
+    }
+}
+
+/// Read a candidate's `PT_INTERP` and classify its libc, over a BOUNDED prefix —
+/// the interpreter string lives in the first LOAD segment, so a Node binary's
+/// tens of MB are never slurped to answer this.
+fn read_elf_interp_libc(path: &Path) -> Option<Option<ElfLibc>> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(64 * 1024)
+        .read_to_end(&mut buf)
+        .ok()?;
+    classify_elf_interp(&buf)
+}
+
+/// The pure parser behind [`read_elf_interp_libc`], over an in-memory prefix — the
+/// seam the tests drive with hand-built ELF headers. `None` = not a 64-bit LE ELF
+/// (or an unrecognized interpreter); `Some(None)` = valid ELF, no interpreter
+/// (statically linked); `Some(Some(libc))` = the dynamic linker's libc.
+fn classify_elf_interp(buf: &[u8]) -> Option<Option<ElfLibc>> {
+    // ELF ident: magic, EI_CLASS==2 (64-bit), EI_DATA==1 (LE). `nub compile` only
+    // targets linux-{x64,arm64}, both 64-bit LE, so any other ELF in the store is
+    // foreign — refuse rather than classify it.
+    if buf.len() < 64 || &buf[0..4] != b"\x7fELF" || buf[4] != 2 || buf[5] != 1 {
+        return None;
+    }
+    let rd_u16 =
+        |o: usize| -> Option<u16> { Some(u16::from_le_bytes(buf.get(o..o + 2)?.try_into().ok()?)) };
+    let rd_u32 =
+        |o: usize| -> Option<u32> { Some(u32::from_le_bytes(buf.get(o..o + 4)?.try_into().ok()?)) };
+    let rd_u64 =
+        |o: usize| -> Option<u64> { Some(u64::from_le_bytes(buf.get(o..o + 8)?.try_into().ok()?)) };
+
+    let e_phoff = rd_u64(0x20)? as usize;
+    let e_phentsize = rd_u16(0x36)? as usize;
+    let e_phnum = rd_u16(0x38)? as usize;
+    const PT_INTERP: u32 = 3;
+    for i in 0..e_phnum {
+        let ph = e_phoff.checked_add(i.checked_mul(e_phentsize)?)?;
+        if rd_u32(ph)? != PT_INTERP {
+            continue;
+        }
+        let p_offset = rd_u64(ph + 8)? as usize;
+        let p_filesz = rd_u64(ph + 32)? as usize;
+        let end = p_offset.checked_add(p_filesz)?;
+        let interp = buf.get(p_offset..end)?;
+        let interp = interp.split(|&b| b == 0).next().unwrap_or(interp);
+        let s = std::str::from_utf8(interp).ok()?;
+        if s.contains("ld-musl") {
+            return Some(Some(ElfLibc::Musl));
+        }
+        if s.contains("ld-linux") {
+            return Some(Some(ElfLibc::Glibc));
+        }
+        return None; // unrecognized interpreter — refuse rather than guess
+    }
+    Some(None) // no PT_INTERP → statically linked
 }
 
 fn rand_suffix() -> u64 {
@@ -754,5 +844,82 @@ mod tests {
         assert!(!is_safe_relative_name("a/../../evil"));
         assert!(!is_safe_relative_name("/etc/passwd"));
         assert!(!is_safe_relative_name("./main.js"));
+    }
+
+    /// A minimal 64-bit LE ELF carrying one `PT_INTERP` program header pointing at
+    /// `interp` — enough to exercise the libc classifier without a real binary.
+    fn elf_with_interp(interp: &str) -> Vec<u8> {
+        let mut b = vec![0u8; 64];
+        b[0..4].copy_from_slice(b"\x7fELF");
+        b[4] = 2; // 64-bit
+        b[5] = 1; // little-endian
+        b[0x20..0x28].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+        b[0x36..0x38].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize (64-bit)
+        b[0x38..0x3a].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+        let interp_off = 64 + 56;
+        let mut interp_bytes = interp.as_bytes().to_vec();
+        interp_bytes.push(0);
+        let mut ph = vec![0u8; 56];
+        ph[0..4].copy_from_slice(&3u32.to_le_bytes()); // p_type = PT_INTERP
+        ph[8..16].copy_from_slice(&(interp_off as u64).to_le_bytes()); // p_offset
+        ph[32..40].copy_from_slice(&(interp_bytes.len() as u64).to_le_bytes()); // p_filesz
+        b.extend_from_slice(&ph);
+        b.extend_from_slice(&interp_bytes);
+        b
+    }
+
+    /// A 64-bit LE ELF with no program headers → statically linked.
+    fn elf_static() -> Vec<u8> {
+        let mut b = vec![0u8; 64];
+        b[0..4].copy_from_slice(b"\x7fELF");
+        b[4] = 2;
+        b[5] = 1;
+        b[0x20..0x28].copy_from_slice(&64u64.to_le_bytes());
+        b[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+        b[0x38..0x3a].copy_from_slice(&0u16.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn elf_interp_classifier_reads_the_libc() {
+        assert_eq!(
+            classify_elf_interp(&elf_with_interp("/lib64/ld-linux-x86-64.so.2")),
+            Some(Some(ElfLibc::Glibc))
+        );
+        assert_eq!(
+            classify_elf_interp(&elf_with_interp("/lib/ld-linux-aarch64.so.1")),
+            Some(Some(ElfLibc::Glibc))
+        );
+        assert_eq!(
+            classify_elf_interp(&elf_with_interp("/lib/ld-musl-x86_64.so.1")),
+            Some(Some(ElfLibc::Musl))
+        );
+        // Valid ELF, no interpreter → static, libc-agnostic.
+        assert_eq!(classify_elf_interp(&elf_static()), Some(None));
+        // Not an ELF at all → unclassifiable.
+        assert_eq!(classify_elf_interp(b"#!/usr/bin/env node\n"), None);
+    }
+
+    /// The dedup gate: a musl store Node is refused for a glibc payload (the VM
+    /// bug), a glibc one for a musl payload, and either is reused for its matching
+    /// libc; a non-Linux target has no libc split and always reuses.
+    #[test]
+    fn store_node_gate_matches_only_compatible_libc() {
+        let dir = std::env::temp_dir().join(format!("nub-libc-gate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let glibc = dir.join("glibc-node");
+        let musl = dir.join("musl-node");
+        fs::write(&glibc, elf_with_interp("/lib64/ld-linux-x86-64.so.2")).unwrap();
+        fs::write(&musl, elf_with_interp("/lib/ld-musl-x86_64.so.1")).unwrap();
+
+        assert!(store_node_matches_target(&glibc, "linux-x64"));
+        assert!(!store_node_matches_target(&musl, "linux-x64"));
+        assert!(store_node_matches_target(&musl, "linux-x64-musl"));
+        assert!(!store_node_matches_target(&glibc, "linux-x64-musl"));
+        // No libc concept off Linux → always compatible.
+        assert!(store_node_matches_target(&musl, "darwin-arm64"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
