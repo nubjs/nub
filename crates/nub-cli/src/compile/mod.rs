@@ -217,9 +217,9 @@ fn determine_target(target: Option<&str>, cwd: &Path) -> Result<(VersionPin, Str
     }
 }
 
-/// The first-run line to bake into the artifact. One mechanism covers both
-/// shapes: the default shape prints it before decompressing the embedded Node,
-/// `--smol` before downloading one. The launcher has no app name of its own, so
+/// The first-run text to bake into the artifact. One mechanism covers both
+/// shapes: the default shape shows it while decompressing the embedded Node,
+/// `--smol` while downloading one. The launcher has no app name of its own, so
 /// the default text is derived here from the output file name.
 fn install_message(opts: &CompileOptions, out: &Path) -> Option<String> {
     if opts.no_install_message {

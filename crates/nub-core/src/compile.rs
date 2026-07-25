@@ -75,11 +75,12 @@ pub struct Manifest {
     /// Whether the bundle was minified (informational; affects nothing at runtime).
     #[serde(default)]
     pub minify: bool,
-    /// The line the launcher prints before a FIRST RUN extracts the embedded Node
+    /// The text the launcher shows while a FIRST RUN extracts the embedded Node
     /// or provisions one — the only thing between the user and a multi-second
     /// silent startup. Baked at compile time (default `Setting up <app-name>`)
     /// because the launcher has no app name of its own. `None` is
-    /// `--no-install-message`: stay quiet. Printed on a TTY only, both shapes.
+    /// `--no-install-message`: stay quiet. Shown on a TTY only, both shapes; the
+    /// launcher chooses between its box and one plain line from the terminal.
     #[serde(default)]
     pub install_message: Option<String>,
 }

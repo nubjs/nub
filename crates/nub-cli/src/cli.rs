@@ -905,12 +905,12 @@ pub enum Command {
         #[arg(long, value_name = "KEY=VALUE", action = ArgAction::Append)]
         define: Vec<String>,
 
-        /// First-run message the compiled binary prints while it sets itself up.
+        /// First-run message the compiled binary shows while it sets itself up.
         /// Default: `Setting up <output-name>`. Shown on a terminal only.
         #[arg(long, value_name = "TEXT", conflicts_with = "no_install_message")]
         install_message: Option<String>,
 
-        /// Start silently on first run instead of printing a setup message.
+        /// Start silently on first run instead of showing a setup message.
         #[arg(long = "no-install-message")]
         no_install_message: bool,
 
