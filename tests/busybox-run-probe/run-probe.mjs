@@ -81,8 +81,11 @@ writeFileSync(
         cmdsubst: 'echo sub=$(node -e "console.log(42)")',
         forloop: "for i in a b c; do echo item=$i; done",
         // busybox-w32 historically did its OWN argv globbing; confirm the shell
-        // (not the applet) expands an unquoted pattern to the matching paths.
-        glob: "mkdir -p g && echo 1 > g/a.txt && echo 2 > g/b.txt && echo GLOB:g/*.txt",
+        // (not the applet) expands an unquoted pattern to the matching paths. The
+        // pattern is its own word — a `GLOB:g/*.txt` (prefix fused to the pattern)
+        // matches no file and POSIX leaves it literal on EVERY shell, so keep the
+        // marker and the glob separate words.
+        glob: "mkdir -p g && echo 1 > g/a.txt && echo 2 > g/b.txt && echo GLOB: g/*.txt",
         // The load-bearing augmentation property, probed not inferred: a `node`
         // spawned INSIDE a busybox script must inherit nub's NODE_OPTIONS preload
         // (busybox passes the inherited env to children), so it transpiles a
@@ -132,7 +135,9 @@ const cases = [
     id: "posix_glob",
     args: [],
     script: "glob",
-    ok: (o) => o.includes("GLOB:g/a.txt") && o.includes("g/b.txt"),
+    // Expanded stdout carries `g/a.txt g/b.txt`; the `$ …` preamble only ever
+    // shows the unexpanded `g/*.txt`, so matching both paths proves expansion.
+    ok: (o) => o.includes("g/a.txt") && o.includes("g/b.txt"),
   },
   // Augmentation reaches a node child spawned by a busybox script (NODE_OPTIONS
   // preload inherited → TS annotation transpiled, not a SyntaxError).
