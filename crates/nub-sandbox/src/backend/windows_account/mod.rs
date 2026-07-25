@@ -401,7 +401,10 @@ pub(crate) fn apply(
             return Err(crate::backend::Degradation {
                 lost: vec!["fs".to_string(), "net".to_string()],
                 reason: Some(format!(
-                    "nub's sandbox setup record exists but is not readable by this user ({e}).                      The state directory is readable only by administrators and the user who                      ran the setup — run the sandboxed command as that user, or re-run                      `nub run --sandbox-admin setup` as the user who will run it."
+                    "nub's sandbox setup record exists but is not readable by this user ({e}). \
+                     The state directory is readable only by administrators and the user who \
+                     ran the setup — run the sandboxed command as that user, or re-run \
+                     `nub run --sandbox-admin setup` as the user who will run it."
                 )),
             });
         }

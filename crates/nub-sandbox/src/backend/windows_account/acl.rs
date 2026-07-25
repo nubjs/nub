@@ -492,7 +492,10 @@ fn add_ace(
             // permissive state wholesale, and silently skipping it would leave a hole while
             // reporting full enforcement.
             _ => Err(io::Error::other(format!(
-                "sandbox: cannot deny {} to the sandbox account — the path has a NULL DACL                  (unrestricted access), and adding a deny there would replace that with a DACL                  that locks out its own owner. Give the path an explicit DACL, or drop it from                  the policy's deny list.",
+                "sandbox: cannot deny {} to the sandbox account — the path has a NULL DACL \
+                 (unrestricted access), and adding a deny there would replace that with a DACL \
+                 that locks out its own owner. Give the path an explicit DACL, or drop it from \
+                 the policy's deny list.",
                 path.display()
             ))),
         };
