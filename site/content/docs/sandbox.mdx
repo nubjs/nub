@@ -4,158 +4,112 @@ description: Reference the sandbox engine's filesystem, network, and environment
 unlisted: true
 ---
 
-> **Preview:** The sandbox engine implements the syntax on this page, but the `nub.jsonc` bridge is inert. The project-config parser validates and retains a restricted shape, but Nub does not apply those values to runtime commands, installs, or temporary package runs.
+> **Preview:** This page documents the sandbox engine's configuration grammar. Today the engine is reachable only through the `--sandbox <file>` flag on `nub run`; the `nub.jsonc` bridge is inert. Credential brokering is still being finalized.
 
-> **Decision audit in progress:** This unlisted page records experimental engine behavior, not an approved public contract. Proxy modes and credential brokering are being redesigned and must not be published from this draft.
+The engine grants a command only the files, hosts, and environment variables it needs. A policy has axes for the filesystem (`fs`), the network (`net`), and environment variables — `vars` for ordinary ones and `secrets` for sensitive ones.
 
-The engine can allow only the files, hosts, and environment variables a command needs. Its examples are a reference for the active engine syntax, not settings that `nub.jsonc` applies today.
-
-```jsonc title="sandbox configuration"
+```jsonc title="sandbox.jsonc"
 {
-  "sandbox": {
-    "fs": {
-      "./src": "r",
-      "./dist": "rw",
-      "<tmp>": "rw"
-    },
-    "net": ["registry.npmjs.org"],
-    "proxy": "passthrough",
-    "env": ["...", "NODE_ENV", "!*_TOKEN"]
-  }
+  "fs": { "./src": "r", "./dist": "rw" },
+  "net": ["registry.npmjs.org"],
+  "secrets": { "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] } }
 }
 ```
 
-## Project configuration bridge
+## Where a policy lives
 
-The project config parser recognizes sandbox values in three locations.
+A `nub.jsonc` sandbox value is a **preset name** or a **file reference** — never an inline policy object. Keeping the policy in its own file lets Nub exclude that file from the filesystem grant.
 
 ```jsonc title="nub.jsonc"
 {
-  // File runs and package scripts
-  "sandbox": true,
-
-  // Dependency lifecycle scripts
-  "install": {
-    "sandbox": "build-jail"
-  },
-
-  // nubx, nub dlx, and nub x
-  "dlx": {
-    "sandbox": {
-      "fs": ["..."],
-      "net": false,
-      "env": ["..."]
-    }
-  }
+  "sandbox": "build-jail",
+  "install": { "sandbox": "./policies/install.jsonc" }
 }
 ```
 
-Each location accepts a boolean, a string, or an object containing only `fs`, `net`, and `env`; each axis accepts a boolean, a string array, or an object. Unknown axis names and non-string array entries are rejected. The parser retains object values without interpreting their rules.
-
-The engine reference below accepts more detailed object syntax, including inheritance. Those detailed objects are not yet valid project configuration unless they fit the restricted parser shape above, and no project configuration sandbox value has an effect yet.
-
-## External sandbox config files
-
-The hidden runner accepts a bare sandbox object.
+A policy file holds the axes object directly, or under a `sandbox` key. Unspecified keys fail closed.
 
 ```jsonc title="sandbox.jsonc"
 {
   "fs": ["./src", "./dist"],
-  "net": false,
-  "env": ["PATH", "NODE_ENV"]
+  "net": [],
+  "vars": ["PATH", "NODE_ENV"]
 }
 ```
 
-It also accepts the same object under a top-level `sandbox` key.
+<Callout type="warn">
+Nub excludes the policy file itself from the filesystem grant. A confined process can never read or rewrite the policy that confines it.
+</Callout>
 
-```jsonc title="sandbox.jsonc"
-{
-  "sandbox": {
-    "fs": ["./src", "./dist"],
-    "net": false,
-    "env": ["PATH", "NODE_ENV"]
-  }
-}
-```
+## Rule order
 
-An empty sandbox object denies filesystem, network, and ambient environment access.
-
-```jsonc title="sandbox.jsonc"
-{
-  "sandbox": {}
-}
-```
+A rule set is an array or an object, and either way the rules apply in order — the last matching rule wins. (JSON preserves key order, so an object's keys are ordered too.) A broad rule early in the set becomes a default that a later, narrower rule overrides. An empty set, or an omitted axis, allows nothing — but a set of *only* deny rules is rejected as a likely mistake: it also allows nothing, so write `[]` if that is the intent, or add the allow rule you meant.
 
 ## `fs`
 
-The `fs` key controls filesystem reads and writes.
+The `fs` axis controls filesystem reads and writes. It takes either an **array** (every grant is read-write) or an **object** (per-path access). Pick one form; they are not mixed in a single axis.
 
-### Allow everything or nothing
+### Grant paths (array form)
+
+Every entry in the array grants read-write access, and a path covers everything beneath it.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": true
+  "fs": ["./src", "./dist", "$cache/my-tool"]
+}
+```
+
+### Read vs read-write (object form)
+
+Switch to the object form for per-path access. Values are `"r"`, `"rw"`, and `false` to deny. There is no write-only mode.
+
+```jsonc
+{
+  "fs": {
+    "./src": "r",
+    "./dist": "rw",
+    "./secrets": false
   }
 }
 ```
 
-```jsonc
-{
-  "sandbox": {
-    "fs": false
-  }
-}
-```
+### Deny a path
 
-### Allow several paths
-
-Array entries grant read and write access. A path also covers everything below it.
+In the array form, prefix an entry with `!` to deny it; in the object form, give the path a `false` value. Order matters, so the last matching rule wins.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": [
-      "./src",
-      "./dist",
-      "<cache>/my-tool"
-    ]
-  }
+  "fs": ["./data", "!./data/private"]
 }
 ```
 
-The example above is equivalent to:
+Reverse the order and the last rule re-allows the path.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": {
-      "./src": "rw",
-      "./dist": "rw",
-      "<cache>/my-tool": "rw"
-    }
-  }
+  "fs": ["!./data/private", "./data"]
 }
 ```
 
-### Choose read or read-write access
+### Allow or deny everything
 
-Object values accept `"r"`, `"rw"`, `true`, or `false`.
+An empty list denies all filesystem access.
 
 ```jsonc
-{
-  "sandbox": {
-    "fs": {
-      "./src": "r",
-      "./dist": "rw",
-      "./secrets": false,
-      "./generated": true
-    }
-  }
-}
+{ "fs": [] }
 ```
 
-An object value of `true` means `"rw"`, while `false` denies both reads and writes. There is no write-only mode.
+To allow broadly, grant a directory — a directory grant is recursive, so it covers everything beneath it. Grant the project root for the whole project, or `/` for the whole filesystem.
+
+```jsonc
+{ "fs": ["."] }
+```
+
+```jsonc
+{ "fs": ["/"] }
+```
+
+Prefer a directory grant over the glob `["*"]`. A glob is resolved to its matching paths once, at startup, so `["*"]` skips dotfiles like `.git` and never covers a top-level file created after launch. A directory grant has neither gap — the effect is otherwise the same, since the policy on a granted directory already applies to all its children.
 
 ### Use project-relative paths
 
@@ -163,720 +117,414 @@ Relative paths resolve from the project root.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": {
-      "./src": "r",
-      "dist": "rw",
-      "../shared/schema": "r"
-    }
+  "fs": {
+    "./src": "r",
+    "dist": "rw",
+    "../shared/schema": "r"
   }
 }
 ```
 
-### Use symbolic roots
+### Built-in locations
 
-The compiler recognizes `<home>`, `~`, `<cache>`, and `<tmp>`.
+A few names refer to well-known directories: `~` for the home directory, plus a closed set of `$`-prefixed names. An unrecognized `$name` is an error, and `$( … )` is command substitution, distinguished by its parentheses.
+
+| Name | Directory |
+| --- | --- |
+| `~` | The user's home directory |
+| `$cache` | The platform cache directory — `~/Library/Caches` (macOS), `%LOCALAPPDATA%` (Windows), `$XDG_CACHE_HOME` or `~/.cache` (Linux) |
+| `$tmp` | A fresh, private temporary directory for this run |
+
+`$tmp` provisions a private temporary directory for the run; omit it to give the command no temporary directory. A read-only `$tmp` is rejected rather than silently widened, and a literal `/tmp` means the host's shared temp directory, not the private one.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": {
-      "<home>/.config/my-tool": "r",
-      "~/.cache/my-tool": "rw",
-      "<cache>/typescript": "rw",
-      "<tmp>": "rw"
-    }
+  "fs": {
+    "~/.config/my-tool": "r",
+    "$cache/typescript": "rw",
+    "$tmp": "rw"
   }
 }
 ```
 
-The `<tmp>` root requests a fresh private temporary directory for the run.
+<Callout type="info">
+On macOS, granting `$tmp` also grants Apple's fixed compiler-cache directory, so native (`node-gyp`) builds work — the only part of `$tmp` that is shared rather than private.
+</Callout>
+
+### `$tooldirs` (built-in cache set)
+
+`$tooldirs` is the filesystem counterpart to `net`'s [`$trusted`](#trusted-built-in-host-set): it expands to the on-disk caches and stores of common developer tools — the package managers (nub, npm, pnpm, yarn, bun), git, and compiler caches — resolved to their real location on each OS. Because nub's own store is among them, granting `$tooldirs` **read** is the shorthand that lets a sandboxed command reach its installed dependencies and reuse existing caches.
 
 ```jsonc
-{
-  "sandbox": {
-    "fs": {
-      "<tmp>": "rw"
-    }
-  }
-}
+{ "fs": { "$tooldirs": "r", "./dist": "rw" } }
 ```
 
-Use `false` to hide temporary storage.
+Grant it read for the common case — resolving dependencies and reusing caches; grant it read-write only when the command itself installs packages or must populate a cache. The concrete paths differ per platform — the set resolves them for you, and the full mapping is versioned with the engine.
 
-```jsonc
-{
-  "sandbox": {
-    "fs": {
-      "<tmp>": false
-    }
-  }
-}
-```
-
-If `<tmp>` is absent, temporary storage follows the normal filesystem rules. A literal `/tmp` means the host's shared temporary directory, not the private directory.
-
-```jsonc
-{
-  "sandbox": {
-    "fs": {
-      "/tmp": "r"
-    }
-  }
-}
-```
-
-### Match several paths
+### Full glob support
 
 Filesystem patterns support `*`, `**`, `?`, character classes, and brace expansion.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": {
-      "packages/*/src": "r",
-      "packages/**/dist": "rw",
-      "logs/worker-?.log": "r",
-      "certs/[ab].pem": "r",
-      "logs/{app,worker}.log": "r"
-    }
+  "fs": {
+    "packages/*/src": "r",
+    "packages/**/dist": "rw",
+    "logs/worker-?.log": "r",
+    "certs/[ab].pem": "r",
+    "logs/{app,worker}.log": "r"
   }
 }
 ```
 
-### Deny a path
+### Reuse another policy's rules
 
-Prefix an array entry with `!`.
-
-```jsonc
-{
-  "sandbox": {
-    "fs": [
-      "./data",
-      "!./data/private"
-    ]
-  }
-}
-```
-
-Rules are checked in order. The last matching rule wins.
+There is no implicit inheritance between policies. To splice another list in, reference it with a `...:` prefix followed by a JSON pointer into the current document. The pointer's list is inserted at that position, and ordering still applies.
 
 ```jsonc
 {
+  "shared": { "fs": ["./src", "$cache/tool"] },
   "sandbox": {
-    // private stays denied
-    "fs": ["./data", "!./data/private"]
-  }
-}
-```
-
-```jsonc
-{
-  "sandbox": {
-    // ./data appears last, so it re-allows private
-    "fs": ["!./data/private", "./data"]
-  }
-}
-```
-
-### Keep inherited filesystem settings
-
-Use `"..."` inside an array to insert the enclosing sandbox settings at that position.
-
-```jsonc
-{
-  "sandbox": {
-    "fs": [
-      "...",
-      "./generated"
-    ]
-  }
-}
-```
-
-At the outermost level, `"..."` inserts the secure filesystem defaults.
-
-```jsonc
-{
-  "sandbox": {
-    "fs": [
-      "...",
-      "./dist"
-    ],
-    "net": false,
-    "env": false
+    "fs": ["...:#/shared/fs", "./dist"]
   }
 }
 ```
 
 ### Resolve a path with a command
 
-A `$(command)` expression runs while the sandbox config is compiled. Its single-line output becomes the path.
+A `$( … )` expression runs while the policy compiles, and its single-line output becomes the path. It runs the same POSIX shell on every OS — see [Nub Run](/docs/run) for the shell Nub bundles.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": {
-      "$(pnpm store path)": "r",
-      "$(npm config get cache)": "rw"
-    }
+  "fs": {
+    "$(pnpm store path)": "r",
+    "$(npm config get cache)/v3": "rw"
   }
 }
 ```
 
-```jsonc
-{
-  "sandbox": {
-    "fs": {
-      "$(pnpm store path)/v3": "rw"
-    }
-  }
-}
-```
+A key holds one `$( … )` expression with optional literal text around it. A failed command, empty output, multiple output lines, or an unterminated `$(` is an error.
 
-A failed command, empty output, multiple output lines, or an unfinished `$(` expression is an error.
-
-### Read an `.env` file explicitly
-
-Read-granting policies deny `.env*` files by default. Grant an exact file when a command must read it.
+To read an environment variable into a path, resolve it with a command such as `printenv`.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": {
-      "./.env.production": "r"
-    }
-  }
+  "fs": { "$(printenv MY_TOOL_DIR)": "r" }
 }
 ```
 
-A broad directory or glob does not reopen `.env*` files.
+### `.env` files are always blocked
+
+<Callout type="warn">
+Nub never grants read access to a `.env*` file. The block is the highest-precedence rule on the filesystem axis — no directory grant, glob, or exact path can reopen it.
+</Callout>
+
+A broad grant reads the rest of the directory but never the `.env*` files inside it.
 
 ```jsonc
 {
-  "sandbox": {
-    "fs": {
-      "./": "r"
-    }
-  }
+  // ./.env, ./.env.local, etc. stay denied
+  "fs": { "./": "r" }
 }
 ```
 
-An exact grant can reopen one `.env*` file, but it cannot reopen the contents of a directory such as `.env.d`.
+The block covers the workspace root and each project root. To pass a value from a `.env` file into a command, read the file yourself and hand it in through `vars` — or `secrets`, to broker it (both below).
 
 ## `net`
 
-The `net` key controls outbound network access.
+The `net` axis controls outbound network access. Fine-grained rules are enforced by a local egress proxy that Nub starts automatically; a non-cooperating program that dials a raw socket fails closed rather than escaping.
 
 ### Allow everything or nothing
 
+Use the string `"*"` to allow all outbound access, or an empty list to deny it.
+
 ```jsonc
-{
-  "sandbox": {
-    "net": true
-  }
-}
+{ "net": "*" }
 ```
 
 ```jsonc
-{
-  "sandbox": {
-    "net": false
-  }
-}
+{ "net": [] }
 ```
 
-Coarse allow-all and deny-all settings do not start a proxy. Adding `proxy` beside either boolean is an error.
+`"*"` allows any host — public, private, and host-local alike.
 
-Fine-grained host, CIDR, and private-network allows require a sibling proxy mode.
-
-```jsonc
-{
-  "sandbox": {
-    "net": ["api.example.com"],
-    "proxy": "passthrough"
-  }
-}
-```
-
-Use `passthrough` to enforce connection-level rules without terminating TLS. The `auto` and `terminate` modes remain experimental and are part of the current decision audit.
+<Callout type="warn">
+Cloud-metadata and link-local addresses (for example `169.254.169.254`, the endpoint behind the Capital One breach) are always blocked, even under `"*"`. It is the highest-precedence rule on the network axis and cannot be reopened.
+</Callout>
 
 ### Allow specific hosts
 
+A list allows only the hosts it names; everything else — including private ranges and loopback — is denied.
+
 ```jsonc
-{
-  "sandbox": {
-    "net": [
-      "registry.npmjs.org",
-      "api.github.com"
-    ],
-    "proxy": "passthrough"
-  }
-}
+{ "net": ["registry.npmjs.org", "api.github.com"] }
 ```
 
-Anything not listed is denied.
+### `$trusted` (built-in host set)
+
+`$trusted` expands to a curated set of widely-used developer hosts — package registries, tool and CI APIs, documentation sites, and source hosts. Use it as a base and name your own hosts alongside it.
+
+```jsonc
+{ "net": ["$trusted", "api.mycompany.com"] }
+```
+
+The set deliberately omits blanket object-store wildcards such as `*.amazonaws.com` and `storage.googleapis.com`. Those would let a confined command upload to an attacker-controlled bucket, which is the exfiltration path the sandbox exists to close — so a project that genuinely needs one names the specific bucket host itself. The always-blocked metadata floor still applies. The full list is versioned with the engine.
 
 ### Allow a domain and its subdomains
 
-A leading `*.` matches the named domain and subdomains at any depth.
+A leading `*.` matches subdomains at any depth, but not the apex domain. List the apex separately to allow it too.
 
 ```jsonc
-{
-  "sandbox": {
-    "net": [
-      "*.example.com"
-    ],
-    "proxy": "passthrough"
-  }
-}
+{ "net": ["example.com", "*.example.com"] }
 ```
 
-This matches `example.com`, `api.example.com`, and `a.b.example.com`. It does not match `notexample.com` or `example.com.attacker.test`.
-
-The only host wildcards are bare `*` and leading `*.`. Patterns such as `api.*.example.com` are errors.
+`*.example.com` matches `api.example.com` and `a.b.example.com`; it does not match `example.com` on its own, `notexample.com`, or `example.com.attacker.test`. The only host wildcards are a bare `*` and a leading `*.`.
 
 ### Allow an IP range
 
-Use CIDR notation.
+Use CIDR notation. Rules match on the resolved address, so a hostname that resolves into a denied range is still blocked.
 
 ```jsonc
-{
-  "sandbox": {
-    "net": [
-      "203.0.113.0/24",
-      "2001:db8::/32"
-    ],
-    "proxy": "passthrough"
-  }
-}
+{ "net": ["203.0.113.0/24", "2001:db8::/32"] }
 ```
 
-### Allow private networks
+### Reach private or local networks
 
-Private IPv4 and IPv6 ranges remain blocked unless the sandbox config names `<private>` or its `<local>` alias.
-
-```jsonc
-{
-  "sandbox": {
-    "net": [
-      "<private>"
-    ],
-    "proxy": "passthrough"
-  }
-}
-```
+Within a named allowlist, private ranges and host loopback are denied unless you name them. Add a CIDR for a private range, or `localhost` for host-local services.
 
 ```jsonc
-{
-  "sandbox": {
-    "net": [
-      "api.example.com",
-      "<local>"
-    ],
-    "proxy": "passthrough"
-  }
-}
+{ "net": ["api.example.com", "10.0.5.0/24", "localhost"] }
 ```
 
 ### Deny a host
 
-Prefix an array entry with `!`.
+Prefix an entry with `!`; the last matching rule wins.
+
+```jsonc
+{ "net": ["*", "!*.tracking.example"] }
+```
+
+### Reuse another policy's rules
+
+Splice a list in with `...:` and a JSON pointer.
 
 ```jsonc
 {
+  "shared": { "net": ["registry.npmjs.org"] },
   "sandbox": {
-    "net": [
-      "*",
-      "!*.tracking.example"
-    ],
-    "proxy": "passthrough"
+    "net": ["...:#/shared/net", "api.example.com"]
   }
 }
 ```
 
-The last matching rule wins.
+## `vars`
 
-```jsonc
-{
-  "sandbox": {
-    "net": [
-      "*",
-      "!api.example.com",
-      "api.example.com"
-    ],
-    "proxy": "passthrough"
-  }
-}
-```
+The `vars` axis controls the non-secret environment variables the child sees. Nub builds a fresh environment from the allowed entries, on top of a small safe baseline (`PATH`, `HOME`, `LANG`, `TERM`, `TZ`, and the OS-startup keys a process needs to launch) that always passes. Sensitive values go in [`secrets`](#secrets) instead.
 
-The final rule re-allows `api.example.com`.
-
-### Use the object form
-
-```jsonc
-{
-  "sandbox": {
-    "net": {
-      "registry.npmjs.org": true,
-      "*.tracking.example": false
-    },
-    "proxy": "passthrough"
-  }
-}
-```
-
-Object values carry engine-specific network rules. Network values do not accept filesystem modes such as `"r"` or `"rw"`.
-
-### Keep inherited network settings
-
-Use `"..."` in an array.
-
-```jsonc
-{
-  "sandbox": {
-    "net": [
-      "...",
-      "api.example.com"
-    ],
-    "proxy": "passthrough"
-  }
-}
-```
-
-At the outermost level, the inherited secure network settings allow no outbound connections.
-
-## `env`
-
-The `env` key controls the environment passed to the child process. The engine builds a new environment from the allowed entries.
+<Callout type="info">
+`vars` and `secrets` both govern environment variables — the split is sensitivity, not mechanism. On-disk `.env*` files are a separate, always-blocked filesystem floor (see [`.env` files are always blocked](#env-files-are-always-blocked)); to use a value from one, read it and pass it in here.
+</Callout>
 
 ### Pass everything or nothing
 
+Use the string `"*"` to pass all ambient variables, or an empty list to pass only the safe baseline.
+
 ```jsonc
-{
-  "sandbox": {
-    "env": true
-  }
-}
+{ "vars": "*" }
 ```
 
 ```jsonc
-{
-  "sandbox": {
-    "env": false
-  }
-}
+{ "vars": [] }
 ```
-
-On POSIX systems, `false` passes no ambient variables. On Windows, the engine retains only the small set needed to start the child reliably.
 
 ### Pass selected variables
 
-Array entries are optional. A missing variable does not cause an error.
+Array entries are name globs, and a missing variable is not an error.
 
 ```jsonc
-{
-  "sandbox": {
-    "env": [
-      "PATH",
-      "HOME",
-      "NODE_ENV",
-      "VITE_*"
-    ]
-  }
-}
+{ "vars": ["NODE_ENV", "CI", "VITE_*"] }
 ```
 
 ### Strip selected variables
 
+You can also deny specific variables. A denylist is convenient but leaky — secret names vary — so an explicit allowlist is safer.
+
+```jsonc
+{ "vars": ["*", "!*_TOKEN", "!*_SECRET", "!AWS_*"] }
+```
+
+### The object form
+
+Switch to the object form to validate, default, or require a variable. Each key is a variable name, and its value is one of: `true` (require it, any value), a validation string like `"port"` (see [`format`](#format)), or an extras object. A plain key is required, `?` makes it optional, and a glob key is always optional.
+
 ```jsonc
 {
-  "sandbox": {
-    "env": [
-      "*",
-      "!*_TOKEN",
-      "!*_SECRET",
-      "!AWS_*"
-    ]
+  "vars": {
+    "DATABASE_HOST": true,
+    "LOG_LEVEL?": true,
+    "VITE_*": true
   }
 }
 ```
 
-This denylist is convenient, but an explicit allowlist is safer because secret names vary.
+### `format`
+
+Validate the value against a type: `string`, `integer`, `number`, `port`, a `/regex/`, or an `enum:a|b|c` list of allowed literals. A `number` must be finite; a `port` an integer from 1 to 65535.
 
 ```jsonc
 {
-  "sandbox": {
-    "env": [
-      "PATH",
-      "HOME",
-      "NODE_ENV"
-    ]
+  "vars": {
+    "PORT": "port",
+    "REGION": "/^[a-z]{2}-[a-z]+-\\d$/",
+    "LOG_LEVEL": "enum:debug|info|warn|error"
   }
 }
 ```
 
-### Require a variable
+A bare validation string is shorthand for `{ "format": … }`; use the object form to combine it with other keys.
 
-Plain object keys are required.
+### `optional`
+
+A plain key is required and fails compilation if the variable is absent. Make it optional with a trailing `?` on the key, or `optional: true` in the object form. Glob keys are always optional. This marker is environment-only — `fs` and `net` have no required-to-exist check for it to relax (a granted path needn't exist yet, and a missing deny is a no-op).
 
 ```jsonc
 {
-  "sandbox": {
-    "env": {
-      "DATABASE_URL": true
-    }
+  "vars": {
+    "DATABASE_HOST": true,
+    "LOG_LEVEL?": "enum:debug|info|warn|error"
   }
 }
 ```
 
-Compilation fails when `DATABASE_URL` is absent.
+### `value`
 
-### Make a variable optional
-
-Add `?` to the key.
+Set a literal value instead of passing one through from the ambient environment.
 
 ```jsonc
 {
-  "sandbox": {
-    "env": {
-      "LOG_LEVEL?": true
-    }
+  "vars": {
+    "NODE_ENV": { "value": "production" }
   }
 }
 ```
 
-Glob keys are always optional.
+## `secrets`
+
+The `secrets` axis carries sensitive environment variables. Everything named here is redacted from Nub's own output by default — policy dumps, effective-environment views, diagnostics, and error messages never reveal it — and a secret can be brokered so the child never holds the real value at all. Like `vars`, each entry becomes an environment variable in the child; the only difference is protection.
+
+### Name the secrets
+
+The array form lists the secrets to pass through. The child receives the real value; Nub scrubs it from its own output.
+
+```jsonc
+{ "secrets": ["DATABASE_URL", "STRIPE_KEY"] }
+```
+
+### Validate or require a secret
+
+The object form takes the same `format` and `optional` keys as `vars`, plus `value` to set a literal.
 
 ```jsonc
 {
-  "sandbox": {
-    "env": {
-      "VITE_*": true
-    }
+  "secrets": {
+    "DATABASE_URL": { "format": "string" },
+    "STRIPE_KEY?": true
   }
 }
 ```
 
-### Validate values
+### Broker a secret to specific hosts
 
-The string form accepts `string`, `integer`, `number`, `port`, a regular expression, or a literal union.
+Add `brokerTo` and the child receives a random marker instead of the real value — see [Credential brokering](#credential-brokering) for how the swap works. The real value is revealed only on requests to the listed hosts, each of which must also appear in [`net`](#net).
 
 ```jsonc
 {
-  "sandbox": {
-    "env": {
-      "NODE_ENV": "string",
-      "WORKERS": "integer",
-      "RATIO": "number",
-      "PORT": "port",
-      "REGION": "/^[a-z]{2}-[a-z]+-\\d$/",
-      "LOG_LEVEL": "'debug'|'info'|'warn'|'error'"
-    }
+  "secrets": {
+    "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] }
   }
 }
 ```
 
-A `number` value must be finite. A `port` value must be an integer from 1 through 65535.
+## Credential brokering
 
-### Mark a value as sensitive
-
-Environment object entries are sensitive by default. Use `sensitive: false` only for a value that can be shown in logs and diagnostics.
+Brokering lets a command authenticate to a host without ever holding the real secret. At startup Nub reads the secret and replaces it, in the child's environment, with a random marker. The child uses the variable however it likes — any header, query parameter, or body. When Nub's proxy sees that marker in a request to a brokered host, it swaps in the real value; a marker sent anywhere else stays an inert hash.
 
 ```jsonc
 {
-  "sandbox": {
-    "env": {
-      "API_TOKEN": {
-        "sensitive": true
-      },
-      "PUBLIC_ORIGIN": {
-        "sensitive": false
-      }
-    }
+  "secrets": {
+    "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] }
   }
 }
 ```
 
-### Combine validation and options
+Because the child never holds the secret, a dependency that reads `GITHUB_TOKEN` and posts it to another host leaks only the marker. Brokering is placement-agnostic — Nub substitutes the marker wherever the child already put it, and never attaches or rewrites a header itself. Brokering does not open the network: a brokered host must also appear in `net`.
+
+## Composition and nesting
+
+A policy is a complete, self-contained statement — there is no implicit inheritance from a global or project scope. Reuse is always explicit, through a `...:` pointer or a file reference.
+
+A policy names the axes it confines; an omitted axis allows nothing. Naming only `fs` denies the network and every environment variable, so the policy below is equivalent to spelling out empty `net`, `vars`, and `secrets`.
 
 ```jsonc
-{
-  "sandbox": {
-    "env": {
-      "PORT": {
-        "format": "port",
-        "sensitive": false
-      },
-      "LOG_LEVEL": {
-        "format": "'debug'|'info'|'warn'|'error'",
-        "optional": true,
-        "sensitive": false
-      }
-    }
-  }
-}
+{ "fs": ["./dist"] }
 ```
 
-The extras object accepts `format`, `optional`, `sensitive`, and `value`.
-
-### Set a literal value
-
-```jsonc
-{
-  "sandbox": {
-    "env": {
-      "NODE_ENV": {
-        "value": "production",
-        "sensitive": false
-      }
-    }
-  }
-}
-```
-
-### Keep the safe inherited environment
-
-Use `"..."` in an array.
-
-```jsonc
-{
-  "sandbox": {
-    "env": [
-      "...",
-      "NODE_ENV"
-    ]
-  }
-}
-```
-
-Use `"..."`: `true` in the object form.
-
-```jsonc
-{
-  "sandbox": {
-    "env": {
-      "...": true,
-      "NODE_ENV": true,
-      "AWS_*": false
-    }
-  }
-}
-```
-
-At the outermost level, `"..."` inserts the curated, non-secret environment used by `sandbox: true`.
-
-## Inheritance
-
-A sandbox object is a complete statement. If it names only `fs`, the omitted `net` and `env` axes are denied.
-
-```jsonc
-{
-  "sandbox": {
-    "fs": ["./dist"]
-  }
-}
-```
-
-The sandbox config above means:
-
-```jsonc
-{
-  "sandbox": {
-    "fs": ["./dist"],
-    "net": false,
-    "env": false
-  }
-}
-```
-
-Use object-level `"..."`: `true` to keep every omitted axis from the enclosing sandbox config.
-
-```jsonc
-{
-  "sandbox": {
-    "...": true,
-    "fs": ["...", "./dist"]
-  }
-}
-```
-
-> **Current bridge gap:** object-level `"..."` works in the sandbox compiler, but the project `nub.jsonc` parser does not accept it yet.
-
-Within an axis array, `"..."` inserts that one inherited axis at its position.
-
-```jsonc
-{
-  "sandbox": {
-    "fs": ["...", "./dist"],
-    "net": ["...", "api.example.com"],
-    "proxy": "passthrough",
-    "env": ["...", "NODE_ENV"]
-  }
-}
-```
-
-Order still matters after inheritance.
-
-```jsonc
-{
-  "sandbox": {
-    "env": [
-      "...",
-      "!AWS_*",
-      "AWS_REGION"
-    ]
-  }
-}
-```
-
-The example inherits the safe environment, strips every `AWS_*` value, then re-allows `AWS_REGION`.
+When one sandboxed process launches another, the operating system confines the child inside its parent — it can only tighten what the parent already allows, never widen it, regardless of what the child's own policy requests.
 
 ## Complete examples
 
 ### Build without network access
 
-```jsonc title="sandbox configuration"
+```jsonc title="sandbox.jsonc"
 {
-  "sandbox": {
-    "fs": {
-      "./src": "r",
-      "./package.json": "r",
-      "./dist": "rw",
-      "<tmp>": "rw"
-    },
-    "net": false,
-    "env": {
-      "PATH": true,
-      "NODE_ENV?": "'development'|'production'",
-      "CI?": "string"
-    }
+  "fs": {
+    "./src": "r",
+    "./package.json": "r",
+    "./dist": "rw",
+    "$tmp": "rw"
+  },
+  "net": [],
+  "vars": {
+    "PATH": true,
+    "NODE_ENV?": "enum:development|production",
+    "CI?": "string"
   }
 }
 ```
 
 ### Development server
 
-```jsonc title="sandbox configuration"
+```jsonc title="sandbox.jsonc"
 {
-  "sandbox": {
-    "fs": {
-      "./": "r",
-      "./.next": "rw",
-      "<cache>": "rw",
-      "<tmp>": "rw"
-    },
-    "net": [
-      "api.example.com",
-      "*.sentry.io"
-    ],
-    "proxy": "passthrough",
-    "env": {
-      "...": true,
-      "NODE_ENV": "'development'",
-      "PORT?": "port",
-      "DATABASE_URL": true
-    }
+  "fs": {
+    "./": "r",
+    "./.next": "rw",
+    "$cache": "rw",
+    "$tmp": "rw"
+  },
+  "net": ["api.example.com", "*.sentry.io", "localhost"],
+  "vars": {
+    "NODE_ENV": { "value": "development" },
+    "PORT?": "port"
+  },
+  "secrets": {
+    "DATABASE_URL": true
+  }
+}
+```
+
+### Agent sandbox with a brokered token
+
+```jsonc title="sandbox.jsonc"
+{
+  "fs": {
+    "/": "r",
+    "./": "rw",
+    "./.git/config": false
+  },
+  "net": ["api.github.com", "localhost"],
+  "secrets": {
+    "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] }
   }
 }
 ```
