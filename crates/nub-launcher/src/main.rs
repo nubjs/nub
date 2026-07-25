@@ -342,18 +342,29 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Provision `version` for the host from nodejs.org via a lean shell-out
-/// (`curl`→`wget`, then `tar`). No in-binary TLS stack — the design's `--smol`
-/// rule. Installs into nub's store so `nub run` and future launches reuse it.
-fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
-    let token = host_platform_token();
-    if host_archive_ext() != "tar.xz" {
+/// The spike provisions only from `.tar.xz` dists (the `tar -xJf` shell-out), so a
+/// `.zip` host (Windows) has no provisioning path yet. Reject it as an `Err` — the
+/// caller turns that into an actionable non-zero exit, never a silent success.
+fn ensure_smol_provision_supported(archive_ext: &str, version: &NodeVersion) -> Result<()> {
+    if archive_ext != "tar.xz" {
         bail!(
             "--smol provisioning on this platform is not implemented in the spike \
              (only tar.xz hosts); install Node {version} manually, or use a binary \
              built with the default (embed-Node) shape"
         );
     }
+    Ok(())
+}
+
+/// Provision `version` for the host from nodejs.org via a lean shell-out
+/// (`curl`→`wget`, then `tar`). No in-binary TLS stack — the design's `--smol`
+/// rule. Installs into nub's store so `nub run` and future launches reuse it.
+fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) -> Result<PathBuf> {
+    let token = host_platform_token();
+    // Unsupported-host guard: this MUST surface as an `Err` (→ non-zero exit via
+    // `run`), never a printed-then-exit-0 dead end — a build tool that reports
+    // failure while exiting 0 breaks every CI/`set -e` caller downstream.
+    ensure_smol_provision_supported(host_archive_ext(), version)?;
     let mirror = smol_mirror_base();
     let filename = format!("node-v{version}-{token}.tar.xz");
     let url = format!("{mirror}/v{version}/{filename}");
@@ -822,6 +833,21 @@ mod tests {
         assert!(verify_tarball_checksum(&tarball, &good, filename).is_ok());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `.zip` host (Windows) has no spike provisioning path, and that MUST be an
+    /// `Err` so `run` exits non-zero — a build tool that prints failure but exits 0
+    /// silently passes in every CI/`set -e` caller. A `.tar.xz` host is accepted.
+    #[test]
+    fn unsupported_smol_host_is_an_error_not_a_silent_success() {
+        let version = NodeVersion::new(22, 15, 0);
+
+        let err = ensure_smol_provision_supported("zip", &version).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not implemented"), "got: {msg}");
+        assert!(msg.contains("embed-Node"), "got: {msg}");
+
+        assert!(ensure_smol_provision_supported("tar.xz", &version).is_ok());
     }
 
     #[test]
