@@ -3945,11 +3945,13 @@ fn build_script_command(
     //     to %TMP%/%TEMP%, so `mktemp` worked; ash variable expansion does not.)
     //   * literal `/tmp` — busybox resolves an absolute POSIX path against the
     //     current drive root, so `/tmp` is `<project-drive>:\tmp` with no remap.
-    //     Best-effort materialize it so `> /tmp/x` redirections work; ignoring the
-    //     error keeps a locked-down drive root a no-regression (the old cmd.exe
-    //     default had no `/tmp` at all), while `$TMPDIR`/`mktemp` still resolve via
-    //     the env above. Skipped under an explicit `--script-shell` (that shell
-    //     owns its own environment model).
+    //     Materialize it ONLY when the body actually references `/tmp` — most
+    //     scripts never do, so the ordinary run creates nothing and no stray
+    //     drive-root `\tmp` appears. When a body does write `> /tmp/x`, best-effort
+    //     create it; ignoring the error keeps a locked-down drive root a
+    //     no-regression (the old cmd.exe default had no `/tmp` at all), while
+    //     `$TMPDIR`/`mktemp` still resolve via the env above. Skipped under an
+    //     explicit `--script-shell` (that shell owns its own environment model).
     #[cfg(windows)]
     if custom_shell.is_none() {
         if std::env::var_os("TMPDIR").is_none()
@@ -3957,7 +3959,9 @@ fn build_script_command(
         {
             command.env("TMPDIR", tmp);
         }
-        if let Some(drive_root) = project.root.ancestors().last() {
+        if full_cmd.contains("/tmp")
+            && let Some(drive_root) = project.root.ancestors().last()
+        {
             let _ = std::fs::create_dir_all(drive_root.join("tmp"));
         }
     }

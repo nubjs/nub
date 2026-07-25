@@ -80,6 +80,15 @@ writeFileSync(
         braced: "echo mem=${NODE_MEM:-4096}",
         cmdsubst: 'echo sub=$(node -e "console.log(42)")',
         forloop: "for i in a b c; do echo item=$i; done",
+        // busybox-w32 historically did its OWN argv globbing; confirm the shell
+        // (not the applet) expands an unquoted pattern to the matching paths.
+        glob: "mkdir -p g && echo 1 > g/a.txt && echo 2 > g/b.txt && echo GLOB:g/*.txt",
+        // The load-bearing augmentation property, probed not inferred: a `node`
+        // spawned INSIDE a busybox script must inherit nub's NODE_OPTIONS preload
+        // (busybox passes the inherited env to children), so it transpiles a
+        // TS-only annotation. A bare env_clear (the closed deno_task_shell path)
+        // would strip the preload and this would throw on `: number`.
+        transpile: "node probe.ts",
         tmpredir: "echo hi > /tmp/nub_probe_out.txt && cat /tmp/nub_probe_out.txt",
         // $BASH_VERSION is set only by real bash — empty under busybox sh. Run once
         // on the default shell (must be `none` ⇒ busybox) and once via
@@ -91,6 +100,10 @@ writeFileSync(
     2,
   ),
 );
+
+// TS-only syntax: transpiles under nub's augmentation, throws under plain node —
+// so the `transpile` case proves the preload reached the busybox-spawned child.
+writeFileSync(join(fixture, "probe.ts"), 'const n: number = 7;\nconsole.log("TS_OK=" + n);\n');
 
 // ── run each case through the integrated `nub run` ───────────────────────────
 function run(extraArgs, script) {
@@ -115,6 +128,15 @@ const cases = [
     script: "forloop",
     ok: (o) => o.includes("item=a") && o.includes("item=b") && o.includes("item=c"),
   },
+  {
+    id: "posix_glob",
+    args: [],
+    script: "glob",
+    ok: (o) => o.includes("GLOB:g/a.txt") && o.includes("g/b.txt"),
+  },
+  // Augmentation reaches a node child spawned by a busybox script (NODE_OPTIONS
+  // preload inherited → TS annotation transpiled, not a SyntaxError).
+  { id: "augmentation_transpiles_ts", args: [], script: "transpile", ok: (o) => o.includes("TS_OK=7") },
   { id: "posix_tmp_redirect", args: [], script: "tmpredir", ok: (o) => o.includes("hi") },
   // The default shell must be busybox, NOT a system bash: $BASH_VERSION is unset.
   { id: "default_shell_is_busybox", args: [], script: "bashver", ok: (o) => o.includes("bashver=none") },
