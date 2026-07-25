@@ -80,6 +80,15 @@ pub struct DlxArgs {
 ///   3. Exec `<tmp>/node_modules/.bin/<command>` from the user's original cwd.
 ///   4. tempfile removes the scratch dir on drop.
 pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
+    run_with_child_env(args, BTreeMap::new()).await
+}
+
+/// Embedder entry point for adding environment values to the executed tool.
+/// The ordinary [`run`] path supplies an empty map and remains unchanged.
+pub async fn run_with_child_env(
+    args: DlxArgs,
+    child_env: BTreeMap<String, String>,
+) -> miette::Result<Option<i32>> {
     args.network.install_overrides();
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
@@ -168,12 +177,13 @@ pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
             // Local-bin fast path: no scratch dir was created, so nothing
             // needs to run after the tool. Hand off via image replacement
             // on the standalone binary (embedded/Windows supervise).
-            return super::exec::exec_bin_terminal(
+            return super::exec::exec_bin_terminal_with_env(
                 &initial_cwd,
                 &bin_path,
                 &bin_name,
                 &bin_args,
                 false,
+                &child_env,
             )
             .await;
         }
@@ -255,6 +265,7 @@ pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
         let mut cmd = aube_scripts::spawn_shell(&line);
         crate::runtime::apply_child_env(&mut cmd);
         cmd.env("PATH", &new_path)
+            .envs(&child_env)
             .current_dir(&prev_cwd)
             .stderr(aube_scripts::child_stderr());
         crate::process_guard::spawn_and_wait(cmd)
@@ -292,6 +303,7 @@ pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
         let exec_path = super::exec::resolve_exec_shim(&bin_path);
         let mut cmd = tokio::process::Command::new(&exec_path);
         cmd.args(&bin_args)
+            .envs(&child_env)
             .current_dir(&prev_cwd)
             .stderr(aube_scripts::child_stderr());
         // Shebang shims resolve `node` through PATH — give them the
@@ -669,6 +681,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &empty_workspace,

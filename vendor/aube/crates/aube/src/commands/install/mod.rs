@@ -744,6 +744,13 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         control::complete(total);
         return Ok(());
     }
+    // Only settings drift can require policy revalidation. A manifest edit,
+    // missing node_modules, or other ordinary slow-path reason keeps normal
+    // prefer-frozen lockfile reuse; the active-policy check happens after the
+    // settings context is loaded below. Standalone aube leaves the opt-in off,
+    // so it never pays this extra post-miss fingerprint.
+    let release_policy_settings_drift = opts.revalidate_release_policy
+        && crate::state::install_settings_changed_since_last_run(&cwd, &opts.cli_flags);
 
     // Yaml-only workspace roots (`pnpm-workspace.yaml` only, no root
     // `package.json`) install with a synthesized empty manifest so
@@ -1036,8 +1043,24 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         && lockfile_enabled
         && matches!(mode, FrozenMode::Fix | FrozenMode::Prefer)
         && aube_lockfile::active_lockfile_has_conflict_markers(&lockfile_dir);
-    let existing_for_resolver: Option<&aube_lockfile::LockfileGraph> =
-        lockfile_pre_parse.as_ref().map(|(g, _)| g);
+    // An embedder may require active release-age policy to be re-applied when
+    // this install has already missed the unchanged-tree fast path. Prefer mode
+    // then takes a fresh-metadata resolver path; explicit Frozen remains
+    // lockfile-as-truth.
+    let revalidate_release_policy = release_policy_settings_drift
+        && opts
+            .minimum_release_age_override
+            .unwrap_or_else(|| aube_settings::resolved::minimum_release_age(&settings_ctx))
+            > 0;
+    // Resolver reuse can accept a locked package without fetching its publish
+    // time, which would bypass the age gate we are here to revalidate. Match
+    // `--force` for this one path by withholding the existing-graph hint.
+    let existing_for_resolver: Option<&aube_lockfile::LockfileGraph> = if revalidate_release_policy
+    {
+        None
+    } else {
+        lockfile_pre_parse.as_ref().map(|(g, _)| g)
+    };
 
     // The project's effective packageExtensions checksum, for the lockfile
     // drift check. Computed only under an enforcing embedder (nub); standalone
@@ -1079,6 +1102,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 workspace_catalogs: &workspace_catalogs,
                 is_workspace_project,
                 lockfile_pre_parse: lockfile_pre_parse.as_ref(),
+                revalidate_release_policy,
                 effective_package_extensions_checksum: effective_package_extensions_checksum
                     .clone(),
             })? {
@@ -1111,6 +1135,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             settings_ctx: &settings_ctx,
             dependency_policy: &dependency_policy,
             lockfile_pre_parse: lockfile_pre_parse.as_ref(),
+            revalidate_release_policy,
             lockfile_conflict_marker_warning_emitted,
             existing_for_resolver,
             source_kind_before,
@@ -1279,6 +1304,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         workspace_catalogs: &workspace_catalogs,
         is_workspace_project,
         lockfile_pre_parse: lockfile_pre_parse.as_ref(),
+        revalidate_release_policy,
         effective_package_extensions_checksum,
     })?;
 

@@ -2323,6 +2323,22 @@ fn test_pick_version_cutoff_allows_missing_time_entries() {
 }
 
 #[test]
+fn test_pick_version_strict_cutoff_rejects_missing_time_entries() {
+    let packument = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    let result = pick_version(
+        &packument,
+        "^1.0.0",
+        None,
+        false,
+        Some("2000-01-01T00:00:00.000Z"),
+        None,
+        true,
+        |_, _| false,
+    );
+    assert!(matches!(result, PickResult::AgeGated));
+}
+
+#[test]
 fn test_pick_version_with_deps() {
     let mut packument = make_packument("foo", &["1.0.0"], "1.0.0");
     packument
