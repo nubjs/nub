@@ -270,7 +270,7 @@ nub compile app.ts --sourcemap=external --no-sources-content
 
 ## Where the runtime is extracted
 
-The default shape extracts Node once into a shared cache, so every compiled binary and every `nub run` project on the machine reuses one runtime. The binary takes the first directory it can create, write to, and execute from:
+The default shape extracts Node once into a shared cache, keyed by the runtime's content hash — so every compiled binary and every `nub run` project that needs that Node reuses one extracted copy instead of each carrying a private one. The binary takes the first directory it can create, write to, and execute from:
 
 ```bash
 NUB_COMPILE_CACHE_DIR   # explicit override, used exactly as given
@@ -296,6 +296,16 @@ For a locked-down deploy, warm the cache at image-build time — run the binary 
 ```dockerfile
 ENV NUB_COMPILE_CACHE_DIR=/opt/nub-cache
 RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
+```
+
+## Distributing on macOS
+
+A compiled macOS binary is ad-hoc-signed, not notarized. It runs locally without a prompt, but macOS quarantines anything downloaded — a release asset, a browser download, `curl` — so Gatekeeper blocks the first launch, reporting that it cannot verify the app is free of malware. Every non-notarized binary behaves this way; it is not specific to Nub, and `spctl --assess` rejects such a binary for the same reason.
+
+Notarizing is yours to do, because it needs your Apple Developer identity. To ship a macOS binary without the warning, sign it with a Developer ID certificate and notarize it through [Apple's notarization service](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution). Someone who already holds an un-notarized binary can clear the quarantine flag instead:
+
+```bash
+xattr -d com.apple.quarantine ./app   # or, once: right-click the app → Open
 ```
 
 ## Runtime behavior
