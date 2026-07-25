@@ -31,8 +31,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// Spinner period. 12.5 fps reads as smooth and costs nothing.
-const FRAME: Duration = Duration::from_millis(80);
+/// Spinner period. Matches aube's install spinner (`SPIN_FRAME_MS`): ~16 fps, the
+/// 10-frame loop cycling in 600 ms.
+const FRAME: Duration = Duration::from_millis(60);
 /// Work that finishes faster than this never paints, so a warm-ish cold start
 /// doesn't flash a box for one frame.
 const FIRST_PAINT: Duration = Duration::from_millis(120);
@@ -141,7 +142,10 @@ impl Sty {
         match self {
             Sty::Plain => "",
             Sty::Dim => "\x1b[2m",
-            Sty::Accent => "\x1b[36m",
+            // Blue — byte-for-byte aube's install spinner (`clx::style::eblue`,
+            // i.e. `console`'s standard-blue SGR), so nub's compiled-binary
+            // first-run spinner matches the one shown during `nub install`.
+            Sty::Accent => "\x1b[34m",
         }
     }
 }
@@ -160,9 +164,9 @@ struct Glyphs {
     spin: &'static [&'static str],
 }
 
-/// A half-filled disc whose filled side rotates. It fills the cell and sits on the
-/// label's baseline — unlike the sparse `⠋⠙…` braille cycle, which lights only the
-/// upper-left dots and reads as a small mark floating above the text.
+/// The braille "dots" spinner — the exact frames aube renders during `nub install`
+/// (its `SPIN_FRAMES`, clx's `mini_dot` set), so a compiled binary's first-run
+/// spinner is the same one the user already watches on every install.
 const UNICODE_GLYPHS: Glyphs = Glyphs {
     tl: '╭',
     tr: '╮',
@@ -170,7 +174,7 @@ const UNICODE_GLYPHS: Glyphs = Glyphs {
     br: '╯',
     h: '─',
     v: '│',
-    spin: &["◐", "◓", "◑", "◒"],
+    spin: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
 };
 
 const ASCII_GLYPHS: Glyphs = Glyphs {
@@ -697,21 +701,30 @@ mod tests {
         }
     }
 
-    /// The maintainer's spec for the message line: spinner, ONE space, label —
-    /// nothing between them, and the spinner glyph fills its own cell (width 1).
+    /// The message line: spinner, ONE space, label — nothing between them — and the
+    /// spinner is aube's exact blue braille "dots" set (matching `nub install`),
+    /// each glyph one cell wide.
     #[test]
-    fn message_is_spinner_one_space_then_label() {
+    fn message_is_blue_braille_spinner_one_space_then_label() {
+        // The frames aube renders during `nub install` (its `SPIN_FRAMES`).
+        const AUBE_SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        assert_eq!(UNICODE_GLYPHS.spin, AUBE_SPIN);
+        // Blue — `console`/clx `eblue`, byte-for-byte aube's spinner color.
+        assert_eq!(Sty::Accent.escape(), "\x1b[34m");
+
         let l = boxed(plan(Some("Setting up app"), &caps(true, Some((80, 24)))));
-        let row = l.message_row(0);
-        let (spin_sty, spin) = &row[1];
-        assert_eq!(*spin_sty, Sty::Accent);
-        assert_eq!(display_width(spin), 1, "spinner must occupy one cell");
-        assert!(UNICODE_GLYPHS.spin.contains(&spin.as_str()));
-        let (_, after) = &row[2];
-        assert!(
-            after.starts_with(" Setting up app"),
-            "want exactly one space before the label, got {after:?}"
-        );
+        for (frame, want) in AUBE_SPIN.iter().enumerate() {
+            let row = l.message_row(frame);
+            let (spin_sty, spin) = &row[1];
+            assert_eq!(*spin_sty, Sty::Accent);
+            assert_eq!(spin, want, "frame {frame} glyph");
+            assert_eq!(display_width(spin), 1, "spinner must occupy one cell");
+            let (_, after) = &row[2];
+            assert!(
+                after.starts_with(" Setting up app"),
+                "want exactly one space before the label, got {after:?}"
+            );
+        }
     }
 
     /// A message longer than the viewport is truncated into the box, never
