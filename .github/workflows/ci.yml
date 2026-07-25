@@ -850,6 +850,11 @@ jobs:
           mkdir -p runtime/addons
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cp target/debug/nub_native.dll runtime/addons/nub-native.node
+            # The PnP matrix's `run`/`ws-run` scenarios execute package scripts, so
+            # the built nub needs its Windows script shell. Stage busybox next to
+            # nub.exe exactly as the win32 package does, exercising the REAL
+            # current_exe() sidecar resolution (no test-only env override here).
+            cp vendor/busybox-w32/busybox64.exe target/debug/busybox.exe
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             cp target/debug/libnub_native.dylib runtime/addons/nub-native.node
           else
