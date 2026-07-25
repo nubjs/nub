@@ -1,8 +1,8 @@
 //! Provisioning marker + the ACL ledger — the only durable state the account backend keeps.
 //!
-//! TWO FILES, TWO JOBS. The **marker** records what the elevated setup created (account, SID,
-//! the WFP-authorized loopback port window) so an UNELEVATED run can decide whether it may
-//! proceed and which port to bind — WFP gates even *enumeration* on administrator, so an
+//! TWO FILES, TWO JOBS. The **marker** records what the elevated setup created (the account's
+//! SID and the WFP-authorized loopback port window) so an UNELEVATED run can decide whether it
+//! may proceed and which port to bind — WFP gates even *enumeration* on administrator, so an
 //! unelevated process cannot ask the firewall what is installed and must read it here.
 //! The **ledger** records every path ever ACL'd for the sandbox SID so a sweep can undo them
 //! after a crash.
@@ -18,9 +18,11 @@
 //! recorded BEFORE the ace is applied, so a crash in between leaves a ledger entry for an ace
 //! that was never written — and stripping a path that has no ace is a no-op.
 //!
-//! Both live under `%PROGRAMDATA%\nub\sandbox`, whose inherited DACL gives Administrators and
-//! SYSTEM full control and ordinary users read — exactly the asymmetry wanted: any user may
-//! read the marker, only an elevated process may write it.
+//! Both live under `%PROGRAMDATA%\nub\sandbox`, which the elevated setup locks to SYSTEM,
+//! `BUILTIN\Administrators` and the provisioning user (see [`super::acl::lock_to_admins`] —
+//! the same directory holds the DPAPI credential, and its DACL is that blob's ONLY boundary).
+//! So the provisioning user reads the marker and appends the ledger unelevated, while another
+//! standard user on the box reads neither and fails closed with "not provisioned".
 
 // Compiled on the dev host too, so the marker parse + ledger de-duplication are unit-tested
 // without a Windows box; only the Windows launch/setup paths actually call the rest.
@@ -31,13 +33,18 @@ use std::path::{Path, PathBuf};
 
 /// Bumped when the on-disk shape changes. A marker from a newer nub is refused rather than
 /// misread — an unelevated run acting on a misparsed SID would ACL the wrong principal.
-pub(crate) const MARKER_VERSION: u32 = 1;
+/// v2 dropped the account NAME field, so a v1 marker is refused rather than read past.
+pub(crate) const MARKER_VERSION: u32 = 2;
 
 /// What the one-time elevated setup recorded.
+///
+/// DELIBERATELY CARRIES NO ACCOUNT NAME. The identity is the compile-time
+/// [`super::SANDBOX_ACCOUNT`] const, and the launch validates the SID below against a live
+/// lookup of THAT const. A name read from disk would have been an attacker-chosen logon target
+/// that still passed the SID check — nothing about the identity comes off disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Marker {
     pub(crate) version: u32,
-    pub(crate) account: String,
     /// The account's SID string. Every WFP filter and every granted ace keys on this, so a
     /// marker whose SID no longer resolves means the account was deleted out from under us.
     pub(crate) sid: String,
@@ -53,9 +60,8 @@ impl Marker {
     /// hurt us, so it stays explicit and total.
     pub(crate) fn to_json(&self) -> String {
         format!(
-            "{{\"version\":{},\"account\":{},\"sid\":{},\"port_low\":{},\"port_high\":{}}}\n",
+            "{{\"version\":{},\"sid\":{},\"port_low\":{},\"port_high\":{}}}\n",
             self.version,
-            json_string(&self.account),
             json_string(&self.sid),
             self.port_low,
             self.port_high
@@ -83,7 +89,7 @@ impl Marker {
                 io::ErrorKind::InvalidData,
                 format!(
                     "sandbox marker is version {version}, this nub understands {MARKER_VERSION} \
-                     — re-run the elevated sandbox setup"
+                     — re-run `nub run --sandbox-admin setup` from an elevated prompt"
                 ),
             ));
         }
@@ -108,7 +114,6 @@ impl Marker {
         };
         let m = Marker {
             version,
-            account: as_str(field("account")?, "account")?,
             sid: as_str(field("sid")?, "sid")?,
             port_low: as_port(field("port_low")?, "port_low")?,
             port_high: as_port(field("port_high")?, "port_high")?,
@@ -140,13 +145,20 @@ fn json_string(s: &str) -> String {
 
 /// `%PROGRAMDATA%\nub\sandbox`. Machine-scoped on purpose: the account, the WFP filters and
 /// the ledger are all machine state, not per-user state.
+///
+/// THE ONE DEFINITION OF THIS PATH — [`super::account::credential_dir`] delegates here. The
+/// credential, the marker and the ledger all live in this directory, and setup locks it by
+/// asking for the CREDENTIAL directory, so a second definition that ever drifted would silently
+/// protect a directory the credential is not in.
 pub(crate) fn state_dir() -> io::Result<PathBuf> {
-    let base = std::env::var_os("PROGRAMDATA").ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "PROGRAMDATA is not set — cannot locate the nub sandbox state directory",
-        )
-    })?;
+    let base = std::env::var_os("PROGRAMDATA")
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "PROGRAMDATA is not set — cannot locate the nub sandbox state directory",
+            )
+        })?;
     Ok(PathBuf::from(base).join("nub").join("sandbox"))
 }
 
@@ -245,7 +257,6 @@ mod tests {
     fn sample() -> Marker {
         Marker {
             version: MARKER_VERSION,
-            account: "nub-sandbox".into(),
             sid: "S-1-5-21-1-2-3-1001".into(),
             port_low: 59080,
             port_high: 59089,
@@ -264,26 +275,36 @@ mod tests {
     #[test]
     fn a_future_marker_version_is_refused() {
         let json = format!(
-            "{{\"version\":{},\"account\":\"a\",\"sid\":\"S-1-5-21-1\",\"port_low\":1,\"port_high\":2}}",
+            "{{\"version\":{},\"sid\":\"S-1-5-21-1\",\"port_low\":1,\"port_high\":2}}",
             MARKER_VERSION + 1
         );
         let err = Marker::from_json(&json).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string()
-                .contains("re-run the elevated sandbox setup")
-        );
+        assert!(err.to_string().contains("--sandbox-admin setup"));
+    }
+
+    /// The v1 marker carried the account NAME, and the launch logged on as it. Anyone able to
+    /// write the marker file could keep the real SID (so the SID check still passed) while
+    /// pointing the name at an account they controlled — every "sandboxed" run then launched
+    /// unfenced. v2 removed the field, so a v1 marker must be REFUSED outright rather than
+    /// parsed with its name ignored.
+    #[test]
+    fn a_v1_marker_carrying_an_account_name_is_refused() {
+        let json = "{\"version\":1,\"account\":\"attacker\",\"sid\":\"S-1-5-21-1\",\
+                    \"port_low\":1,\"port_high\":2}";
+        let err = Marker::from_json(json).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     /// An inverted or zero range would make the proxy's bind-in-range search fail in a way
     /// that reads as "no free port" rather than "your setup is corrupt".
     #[test]
     fn a_malformed_port_range_is_refused() {
-        for json in [
-            "{\"version\":1,\"account\":\"a\",\"sid\":\"S\",\"port_low\":900,\"port_high\":800}",
-            "{\"version\":1,\"account\":\"a\",\"sid\":\"S\",\"port_low\":0,\"port_high\":800}",
-        ] {
-            assert!(Marker::from_json(json).is_err(), "{json}");
+        for (low, high) in [(900, 800), (0, 800)] {
+            let json = format!(
+                "{{\"version\":{MARKER_VERSION},\"sid\":\"S\",\"port_low\":{low},\"port_high\":{high}}}"
+            );
+            assert!(Marker::from_json(&json).is_err(), "{json}");
         }
     }
 

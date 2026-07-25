@@ -105,6 +105,11 @@ features = [
   "Win32_System_Registry",
   "Win32_UI_Shell",
   "Win32_Storage_FileSystem",
+  # Window-station / desktop aces for the launch. A non-interactive caller (a service, an SSH
+  # session, a CI agent) runs on a per-logon `Service-0x0-…$` station, NOT `WinSta0`, and the
+  # Secondary Logon service's auto-grant does not cover it — without an explicit ace the child
+  # dies in loader init with STATUS_DLL_INIT_FAILED (VM-diagnosed 2026-07-24).
+  "Win32_System_StationsAndDesktops",
 ]
 
 [dev-dependencies]
@@ -136,6 +141,15 @@ harness = false
 name = "windows_residuals"
 harness = false
 
+# OPT-IN ONLY. This probe is not a unit test: on an unprovisioned machine it exits non-zero
+# by design, and when run elevated it CREATES a local account, a local group, four persistent
+# WFP filters and a Winlogon registry value. Left ungated, bare `cargo test` on a
+# windows-latest runner would either turn the leg red or silently provision the runner. A
+# human (or the VM harness) opts in with `--features windows-sandbox-probe`.
+[features]
+windows-sandbox-probe = []
+
 [[test]]
 name = "windows_account_enforcement"
 harness = false
+required-features = ["windows-sandbox-probe"]

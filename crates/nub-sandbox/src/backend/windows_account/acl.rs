@@ -1,12 +1,16 @@
-//! Filesystem confinement for the dedicated sandbox account: explicit ACEs keyed on its SID.
+//! Every DACL write the account backend makes: explicit ACEs keyed on the sandbox SID for the
+//! policy's paths, plus the two non-filesystem objects a launch touches (the caller's window
+//! station and desktop) and the lock on nub's own credential store.
 //!
-//! THE MODEL IS PURELY ADDITIVE. The sandbox account is a DIFFERENT local principal, so every
-//! path it was never granted is already unreachable — the invoking user's profile needs no ACE
-//! authored at all. This module therefore only ever ADDS ACEs for the sandbox SID and later
-//! removes exactly those. It never rewrites, protects, or snapshots a user path's descriptor,
-//! which is why there is no crash journal here and nothing to restore after a hard kill beyond
-//! [`strip`]. (The abandoned deny-strip design — `SE_DACL_PROTECTED` plus a DACL restore
-//! journal — is why that distinction is worth stating; see [`super`].)
+//! ON USER PATHS THE MODEL IS PURELY ADDITIVE. The sandbox account is a DIFFERENT local
+//! principal, so every path it was never granted is already unreachable — the invoking user's
+//! profile needs no ACE authored at all. [`grant`]/[`deny`]/[`strip`] therefore only ever ADD
+//! ACEs for the sandbox SID and later remove exactly those. They never rewrite, protect, or
+//! snapshot a user path's descriptor, which is why there is no crash journal here and nothing
+//! to restore after a hard kill beyond [`strip`]. (The abandoned deny-strip design —
+//! `SE_DACL_PROTECTED` plus a DACL restore journal — is why that distinction is worth stating;
+//! see [`super`].) [`lock_to_admins`] is the ONE protected write, and it lands on nub's own
+//! state directory, never a user path.
 //!
 //! CANONICAL DACL ORDER IS THE WHOLE MECHANISM. Windows resolves an access check first-match
 //! over the DACL and orders ACEs explicit-DENY → explicit-ALLOW → explicit-other → inherited
@@ -19,7 +23,7 @@
 //! hand, and `deny_inside_a_grant_lands_before_the_inherited_allow` pins the result rather
 //! than trusting either.
 //!
-//! INHERITANCE IS DELIBERATELY LEFT UNPROTECTED. Every write passes
+//! ON A USER PATH, INHERITANCE IS DELIBERATELY LEFT UNPROTECTED. Every write there passes
 //! `DACL_SECURITY_INFORMATION` alone, never `PROTECTED_DACL_SECURITY_INFORMATION`: the
 //! invoking user's own inherited access must survive so they can still read what the sandbox
 //! child creates inside a granted tree.
@@ -27,20 +31,24 @@
 #![cfg(target_os = "windows")]
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, LocalFree,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ACCESS_MODE, ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS,
-    GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW,
-    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    GetNamedSecurityInfoW, GetSecurityInfo, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SE_WINDOW_OBJECT,
+    SetEntriesInAclW, SetNamedSecurityInfoW, SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+    TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, AddAce,
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
-    InitializeAcl, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+    GetTokenInformation, InitializeAcl, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 // `FILE_TRAVERSE` is the SAME bit as `FILE_EXECUTE` — the kernel reads it as traverse on a
 // directory and as execute on a file, and no primitive separates them. It is imported under
 // the traverse spelling because that is the property the mask assertions below are about.
@@ -76,6 +84,11 @@ const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
 const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
 const INHERITED_ACE_FLAG: u8 = 0x10;
 
+/// `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators`, by well-known SID because the NAMES are
+/// localized ("Administratoren", "Administrateurs") and the SIDs are not.
+const SID_LOCAL_SYSTEM: &str = "S-1-5-18";
+const SID_BUILTIN_ADMINISTRATORS: &str = "S-1-5-32-544";
+
 /// What a grant hands the sandbox account on a subtree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Access {
@@ -104,6 +117,10 @@ pub(crate) fn grant(path: &Path, sid: &str, access: Access) -> io::Result<()> {
 
 /// Add an inheritable DENY ace for `sid` on `path`, plus the parent-side carve that stops the
 /// account deleting or renaming `path` through its parent directory.
+///
+/// Stamps exactly the paths [`deny_targets`] reports, which the caller must have recorded in
+/// the ledger first — the parent carve is a SECOND ace on a SECOND object, and one that is
+/// never stripped outlives every run as a permanent explicit DENY for the sandbox SID.
 pub(crate) fn deny(path: &Path, sid: &str) -> io::Result<()> {
     let (target, is_dir) = resolve(path)?;
     let sid = OwnedSid::parse(sid)?;
@@ -115,17 +132,288 @@ pub(crate) fn deny(path: &Path, sid: &str) -> io::Result<()> {
     // the parent closes `del`/`ren` of the denied target. NOT inheritable — the check that
     // matters is against the parent directory object itself, so propagating it down would
     // confine sibling subtrees for no gain. (SRT applies the same carve with `(OI)(CI)`.)
-    let Some(parent) = target.parent() else {
-        // A volume root has nothing above it to delete through.
+    let Some(parent) = carve_parent(&target) else {
         return Ok(());
     };
-    add_ace(parent, &sid, FILE_DELETE_CHILD, DENY_ACCESS, false)
+    add_ace(&parent, &sid, FILE_DELETE_CHILD, DENY_ACCESS, false)
 }
 
-/// Deny `sid` all access to `dir` and everything under it — used to lock the credential store
-/// against the sandbox account. Same mechanism as [`deny`], named for its call site.
-pub(crate) fn lock_out(dir: &Path, sid: &str) -> io::Result<()> {
-    deny(dir, sid)
+/// Every path a [`deny`] on `path` will stamp: the resolved target, and the parent carrying
+/// its `FILE_DELETE_CHILD` carve when there is one.
+///
+/// Exposed rather than merely returned by [`deny`] so the caller can honor the ledger's
+/// record-BEFORE-apply rule for both aces — recording after the fact would leave the parent
+/// carve unrecorded across the window a crash can land in.
+pub(crate) fn deny_targets(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let (target, _) = resolve(path)?;
+    let mut out = Vec::with_capacity(2);
+    out.extend(carve_parent(&target));
+    out.push(target);
+    Ok(out)
+}
+
+/// The directory `target`'s delete-through carve belongs on, or `None` when there is none.
+///
+/// `Path::parent` on the extended-length spellings [`resolve`] produces returns the VOLUME
+/// ROOT for a top-level target (`\\?\C:\secrets.env` → `\\?\C:\`), which must not be ACE'd:
+/// unelevated that fails the whole run with a misleading error, and where the caller does hold
+/// `WRITE_DAC` it writes a permanent explicit DENY onto the drive itself. The accepted cost is
+/// that a deny on a volume-root child gets no delete-through carve — `BUILTIN\Users` holds no
+/// `FILE_DELETE_CHILD` on a default `C:\`, so the account has nothing to carve away.
+fn carve_parent(target: &Path) -> Option<PathBuf> {
+    target
+        .parent()
+        .filter(|p| !is_volume_root(p))
+        .map(Path::to_path_buf)
+}
+
+/// Whether `p` names a volume root — a prefix and its root separator with no named component
+/// under it. Covers both forms [`resolve`] emits: `\\?\C:\` (`Prefix` + `RootDir`) and
+/// `\\?\UNC\server\share\`, where the share itself is part of the prefix.
+fn is_volume_root(p: &Path) -> bool {
+    p.components()
+        .all(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+}
+
+/// Take ownership of `dir` and replace its DACL with a PROTECTED one naming ONLY SYSTEM,
+/// `BUILTIN\Administrators` and the calling user — the lock on nub's own sandbox state
+/// directory.
+///
+/// PROTECTED IS CORRECT HERE AND NOWHERE ELSE IN THIS MODULE. `%PROGRAMDATA%\nub\sandbox`
+/// inherits ProgramData's `BUILTIN\Users:(RX)`, and it holds the DPAPI credential — whose
+/// machine scope is explicitly NOT a boundary, so any local user who can READ the ciphertext
+/// can decrypt it and then hold the sandbox account's password. Blocking that inheritance is
+/// the entire boundary; an additive deny cannot express it. This is nub's own state directory,
+/// so the module doc's unprotected rule (which exists to preserve a USER's inherited access on
+/// THEIR files) does not apply.
+///
+/// THE OWNER IS RESET TOO, AND THAT HALF IS NOT OPTIONAL. An object's owner holds implicit
+/// `READ_CONTROL | WRITE_DAC` whatever the DACL says, and `%PROGRAMDATA%` grants
+/// `BUILTIN\Users:(CI)(AD)` — so a standard user can pre-create this directory before setup
+/// has ever run, stay its owner through the lock, then rewrite the DACL back and read the
+/// credential. Handing ownership to `BUILTIN\Administrators` is what closes that; a protected
+/// DACL on its own does not. (Same pre-create-and-own primitive the marker's identity check
+/// defends against — see [`super::state::Marker`].)
+///
+/// The calling user is named so the provisioning administrator's later UNELEVATED runs can
+/// still read the marker and append the ledger. Consequence, deliberate: when setup is
+/// elevated with a DIFFERENT admin account (over-the-shoulder UAC), the ordinary user is not
+/// named and their runs fail closed as "not provisioned".
+pub(crate) fn lock_to_admins(dir: &Path) -> io::Result<()> {
+    let (target, _) = resolve(dir)?;
+    let system = OwnedSid::parse(SID_LOCAL_SYSTEM)?;
+    let admins = OwnedSid::parse(SID_BUILTIN_ADMINISTRATORS)?;
+    let token_user = current_token_user()?;
+    // SAFETY: the block holds one `TOKEN_USER` whose `User.Sid` points inside it, and it
+    // outlives every use of the pointer below.
+    let me = unsafe { (*token_user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+    let entries: Vec<EXPLICIT_ACCESS_W> = [system.0, admins.0, me]
+        .into_iter()
+        .map(|sid| explicit_access(sid, FILE_ALL_ACCESS, GRANT_ACCESS, true))
+        .collect();
+
+    let mut new_dacl: *mut ACL = std::ptr::null_mut();
+    // A NULL "old ACL" is the point: the result is built from these three entries ALONE, so
+    // nothing pre-existing and nothing inherited survives into it.
+    // SAFETY: every entry and the SIDs they point at outlive the call; `new_dacl` is a valid
+    // out-slot.
+    let rc = unsafe {
+        SetEntriesInAclW(
+            entries.len() as u32,
+            entries.as_ptr(),
+            std::ptr::null_mut(),
+            &mut new_dacl,
+        )
+    };
+    if rc != 0 {
+        return Err(win32_err("SetEntriesInAclW", &target, rc));
+    }
+    let _guard = LocalFreeGuard(new_dacl.cast());
+
+    let wpath = wide(&target);
+    // SAFETY: `new_dacl` is a live ACL from SetEntriesInAclW, `admins` outlives the call, and
+    // `wpath` is NUL-terminated UTF-16. An elevated token carries `BUILTIN\Administrators` as
+    // a valid owner, so the OWNER write needs no extra privilege.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            wpath.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION,
+            admins.0,
+            std::ptr::null_mut(),
+            new_dacl,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(win32_err("SetNamedSecurityInfoW", &target, rc));
+    }
+    Ok(())
+}
+
+/// The calling process's `TOKEN_USER` block. Returned as its raw backing buffer because the
+/// SID inside it is only valid while that buffer lives. `u64`-backed because `TOKEN_USER`'s
+/// first field is a `PSID` POINTER — 8-aligned on x64, which a `Vec<u32>` does not promise.
+fn current_token_user() -> io::Result<Vec<u64>> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: query-only handle onto this process's own token.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let out = read_token_user(token);
+    // SAFETY: `token` came from a successful OpenProcessToken and is closed exactly once.
+    unsafe { CloseHandle(token) };
+    out
+}
+
+fn read_token_user(token: HANDLE) -> io::Result<Vec<u64>> {
+    let mut len: u32 = 0;
+    // SAFETY: the documented sizing form — NULL buffer, zero length; it fails and sets `len`.
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    if len == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buf: Vec<u64> = vec![0; (len as usize).div_ceil(8)];
+    // SAFETY: `buf` holds at least `len` bytes and outlives the call.
+    let ok =
+        unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(buf)
+}
+
+// ── window station + desktop: the launch's other securable objects ──────────────
+
+/// Add an ALLOW ace for `sid` on a window-station or desktop HANDLE, returning the DACL that
+/// was there first so [`restore_window_object`] can put it back byte-exactly.
+///
+/// These are `SE_WINDOW_OBJECT`s — handle-addressed, with no named-path form — so this is the
+/// `Get`/`SetSecurityInfo` twin of [`add_ace`] rather than a variant of it. The ace is NOT
+/// inheritable: the caller aces the desktop directly rather than relying on propagation from
+/// the station.
+pub(crate) fn grant_window_object(
+    handle: HANDLE,
+    sid: &str,
+    mask: u32,
+) -> io::Result<Option<Vec<u32>>> {
+    let sid = OwnedSid::parse(sid)?;
+    let existing = ReadWindowDacl::open(handle)?;
+    let saved = copy_acl(existing.acl);
+
+    let ea = explicit_access(sid.0, mask, GRANT_ACCESS, false);
+    let mut new_dacl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: `ea` and the SID it points at outlive the call; `existing.acl` came from
+    // GetSecurityInfo and may legitimately be NULL.
+    let rc = unsafe { SetEntriesInAclW(1, &ea, existing.acl, &mut new_dacl) };
+    if rc != 0 {
+        return Err(win32_obj_err("SetEntriesInAclW", rc));
+    }
+    let _guard = LocalFreeGuard(new_dacl.cast());
+    set_window_dacl(handle, new_dacl)?;
+    Ok(saved)
+}
+
+/// Put back what [`grant_window_object`] returned; `None` restores the NULL DACL the object
+/// had. A byte-exact restore rather than a trustee-keyed strip because this module already
+/// documents that `SetEntriesInAclW(REVOKE_ACCESS)` cannot be trusted to remove an ace (see
+/// [`strip`]). It is NOT better under concurrency — restoring the DACL the FIRST run saw
+/// discards a second run's ace while its child is still alive, and a SID-keyed strip would
+/// too, since every run shares the account (recorded in LIMITATIONS.md).
+pub(crate) fn restore_window_object(handle: HANDLE, dacl: Option<&[u32]>) -> io::Result<()> {
+    let ptr = dacl.map_or(std::ptr::null(), |d| d.as_ptr().cast::<ACL>());
+    set_window_dacl(handle, ptr)
+}
+
+fn set_window_dacl(handle: HANDLE, dacl: *const ACL) -> io::Result<()> {
+    // SAFETY: `handle` is a live window-station/desktop handle owned by this process; `dacl`
+    // is NULL or a live ACL outliving the call. DACL only — never PROTECTED, so whatever the
+    // object inherited stays.
+    let rc = unsafe {
+        SetSecurityInfo(
+            handle,
+            SE_WINDOW_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(win32_obj_err("SetSecurityInfo", rc));
+    }
+    Ok(())
+}
+
+/// A DWORD-aligned byte copy of `acl`, or `None` for a NULL (no-DACL) descriptor. The source
+/// lives inside a descriptor freed the moment the read guard drops, so a later restore has to
+/// own its bytes.
+fn copy_acl(acl: *mut ACL) -> Option<Vec<u32>> {
+    if acl.is_null() {
+        return None;
+    }
+    // SAFETY: `acl` is a live ACL, whose `AclSize` is its own total length in bytes.
+    let size = usize::from(unsafe { (*acl).AclSize });
+    let mut buf: Vec<u32> = vec![0; size.div_ceil(4)];
+    // SAFETY: source and destination are both at least `size` bytes and cannot overlap.
+    unsafe {
+        std::ptr::copy_nonoverlapping(acl.cast::<u8>(), buf.as_mut_ptr().cast::<u8>(), size);
+    }
+    Some(buf)
+}
+
+/// A window object's DACL plus the descriptor owning its storage — the `SE_WINDOW_OBJECT` twin
+/// of [`ReadDacl`]. The descriptor MUST outlive every read of `acl`, which points INTO it.
+struct ReadWindowDacl {
+    acl: *mut ACL,
+    _sd: LocalFreeGuard,
+}
+
+impl ReadWindowDacl {
+    fn open(handle: HANDLE) -> io::Result<Self> {
+        let mut acl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `handle` is a live window-station/desktop handle; every out-param is a valid
+        // slot and the unwanted ones are NULL.
+        let rc = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_WINDOW_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut acl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != 0 {
+            return Err(win32_obj_err("GetSecurityInfo", rc));
+        }
+        Ok(ReadWindowDacl {
+            acl,
+            _sd: LocalFreeGuard(sd),
+        })
+    }
+}
+
+/// The handle-addressed counterpart to [`win32_err`]: a window object has no path to name, and
+/// access-denied here means the caller cannot re-ACL its own station rather than anything
+/// about a file.
+fn win32_obj_err(op: &str, rc: u32) -> io::Error {
+    if rc == ERROR_ACCESS_DENIED {
+        return io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{op} on this session's window object: access denied"),
+        );
+    }
+    io::Error::other(format!(
+        "{op} on this session's window object failed (Win32 error {rc})"
+    ))
 }
 
 /// Remove EVERY explicit ace whose trustee is `sid`, preserving all other explicit aces
@@ -182,24 +470,7 @@ fn add_ace(
     let wpath = wide(path);
     let dacl = ReadDacl::open(path)?;
 
-    let ea = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: mask,
-        grfAccessMode: mode,
-        grfInheritance: if inherit {
-            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
-        } else {
-            0
-        },
-        Trustee: TRUSTEE_W {
-            pMultipleTrustee: std::ptr::null_mut(),
-            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-            TrusteeForm: TRUSTEE_IS_SID,
-            // UNKNOWN, not `TRUSTEE_IS_USER`: the same helper stamps the sandbox GROUP's SID
-            // for the credential-store lock-out, and the field is advisory anyway.
-            TrusteeType: TRUSTEE_IS_UNKNOWN,
-            ptstrName: sid.0.cast(),
-        },
-    };
+    let ea = explicit_access(sid.0, mask, mode, inherit);
 
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
     // SAFETY: `ea` and the SID it points at outlive the call; `dacl.acl` came from
@@ -227,6 +498,29 @@ fn add_ace(
         return Err(win32_err("SetNamedSecurityInfoW", path, rc));
     }
     Ok(())
+}
+
+/// One ace description for `SetEntriesInAclW`. The returned struct BORROWS `sid`, which must
+/// outlive the call it is passed to.
+fn explicit_access(sid: PSID, mask: u32, mode: ACCESS_MODE, inherit: bool) -> EXPLICIT_ACCESS_W {
+    EXPLICIT_ACCESS_W {
+        grfAccessPermissions: mask,
+        grfAccessMode: mode,
+        grfInheritance: if inherit {
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+        } else {
+            0
+        },
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            // UNKNOWN, not `TRUSTEE_IS_USER`: this helper also stamps the well-known
+            // `BUILTIN\Administrators` and SYSTEM SIDs, and the field is advisory anyway.
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.cast(),
+        },
+    }
 }
 
 /// Rebuild `existing`'s ace list without any explicit ace for `sid`, in canonical order.
@@ -272,6 +566,17 @@ fn rebuild_without_sid(
     })?;
 
     if dropped == 0 {
+        return Ok(None);
+    }
+    // Leaving our own ace in place is the deliberate lesser evil: a residual ace for a confined
+    // account is over-permission, while an empty DACL locks the OWNER out of their own file
+    // and is not recoverable without taking ownership.
+    if kept.is_empty() {
+        tracing::debug!(
+            path = %path.display(),
+            "sandbox: ace strip skipped — our aces are the only ones on this path, and an \
+             empty DACL would deny everyone"
+        );
         return Ok(None);
     }
     kept.sort_by_key(|&(bucket, index, _, _)| (bucket, index));
@@ -588,6 +893,24 @@ mod tests {
     const SID: &str = "S-1-5-32-545";
     /// Everyone — a second, distinct trustee for the preservation test.
     const OTHER_SID: &str = "S-1-1-0";
+
+    /// A top-level deny target's `Path::parent` IS the volume root, so without this check
+    /// `deny: ["C:/creds.json"]` writes a permanent explicit DENY ace onto the whole drive
+    /// (or, unelevated, aborts the run with an error naming a path the policy never mentioned).
+    #[test]
+    fn a_volume_root_is_recognized_and_carries_no_carve() {
+        for root in [r"\\?\C:\", r"\\?\UNC\server\share\"] {
+            assert!(is_volume_root(Path::new(root)), "{root}");
+        }
+        for under in [r"\\?\C:\creds.json", r"\\?\UNC\server\share\creds.json"] {
+            assert!(!is_volume_root(Path::new(under)), "{under}");
+        }
+        assert_eq!(carve_parent(Path::new(r"\\?\C:\creds.json")), None);
+        assert_eq!(
+            carve_parent(Path::new(r"\\?\C:\proj\.env")),
+            Some(PathBuf::from(r"\\?\C:\proj"))
+        );
+    }
 
     /// The property the whole agent-sandbox fs axis rests on: a deny written onto a file
     /// inside a granted tree must land AHEAD of the allow the tree's `(OI)(CI)` grant

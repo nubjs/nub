@@ -355,7 +355,7 @@ mod win {
                 eprintln!(
                     "\nABORT: this machine has no provisioned nub sandbox account, so there is \
                      nothing to probe.\n       Run this ONCE from an elevated (Run as \
-                     administrator) prompt:\n\n           nub run --sandbox-setup\n\n       then \
+                     administrator) prompt:\n\n           nub run --sandbox-admin setup\n\n       then \
                      re-run this probe. (Run the probe itself elevated and it will provision + \
                      tear down for you.)"
                 );

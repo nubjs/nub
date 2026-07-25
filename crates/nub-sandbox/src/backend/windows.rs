@@ -369,7 +369,18 @@ pub(crate) fn apply(
     // expresses all three but costs a one-time elevated setup. build-jail's shape (pure
     // default-deny allowlist, coarse or absent net) never matches, so `nub install` stays
     // admin-free. See `windows_account`'s module doc for why the split falls exactly here.
-    if sandboxing && super::windows_account::needs_account_backend(policy) {
+    // PROVISIONING IS PART OF THE PREDICATE, not just a precondition checked later. Without
+    // it this branch subsumes the whole strict-Windows tier below — `Tier1`/`FailUnelevated`
+    // require exactly `net.enforce && any(Allow)`, which is byte-identical to
+    // `needs_account_backend`'s per-host arm and also forces `sandboxing` — so an
+    // unprovisioned machine would take the account route, fail closed, and leave that tier
+    // unreachable. Falling through instead keeps the AppContainer tier live and degrading
+    // honestly (over-confined reads, a reported deny it cannot carve), which is strictly
+    // better than refusing to run on a machine that never opted into the elevated setup.
+    if sandboxing
+        && super::windows_account::needs_account_backend(policy)
+        && super::windows_account::is_provisioned()
+    {
         return super::windows_account::apply(policy, spec, proxy_port, proxy_token, ca_bundle);
     }
 

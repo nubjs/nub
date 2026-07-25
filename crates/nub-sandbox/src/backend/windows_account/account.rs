@@ -12,9 +12,10 @@
 //! self-elevated child may not have the user's master key loaded at all — user-scope DPAPI
 //! does not round-trip across that split, machine scope does. The honest consequence is that
 //! machine scope is **not a security boundary**: any local principal that can READ the
-//! ciphertext can decrypt it, the sandbox account included. The file's DACL is the only gate,
-//! and this module never writes a DACL — [`credential_dir`] exists so the setup path can hand
-//! the directory to the acl module, which owns every DACL write.
+//! ciphertext can decrypt it, the sandbox account included. The directory's DACL is the only
+//! gate, and this module never writes a DACL — [`credential_dir`] exists so the setup path can
+//! hand the directory to the acl module (which owns every DACL write) and have it locked down
+//! BEFORE [`provision`] writes a credential into it.
 //!
 //! Mirrors SRT's `vendor/srt-win-src/src/{user,sam,dpapi}.rs` (read 2026-07-24); Codex's
 //! `windows-sandbox-rs/src/bin/setup_main/win/sandbox_users.rs` is the second reference.
@@ -162,13 +163,13 @@ pub(crate) fn lookup_sid() -> io::Result<Option<String>> {
     lookup_account_sid(SANDBOX_ACCOUNT)
 }
 
-/// UNELEVATED. Decrypt the stored credential.
+/// UNELEVATED. Decrypt the stored credential into a [`Secret`], which zeroes itself on drop.
 ///
-/// The returned plaintext is the CALLER's to bound — it goes straight into
-/// `CreateProcessWithLogonW`, so it is deliberately a plain `String` rather than a scrubbing
-/// wrapper the FFI boundary would defeat anyway. Every intermediate buffer this function owns
-/// is zeroed before it returns.
-pub(crate) fn load_credential() -> io::Result<String> {
+/// Every buffer the plaintext passes through is zeroed: DPAPI's own output block (in
+/// [`take_blob`], before it is freed), the decoded copy here, the `Secret` on drop, and the
+/// UTF-16 relay the launch builds for `CreateProcessWithLogonW`. That bounds how long the
+/// password sits readable in nub's heap; it is not a defence against a process-memory attacker.
+pub(crate) fn load_credential() -> io::Result<Secret> {
     let path = credential_path()?;
     let ciphertext = std::fs::read(&path).map_err(|e| {
         io::Error::new(
@@ -182,25 +183,21 @@ pub(crate) fn load_credential() -> io::Result<String> {
     })?;
     let mut plaintext = dpapi_unprotect(&ciphertext)?;
     let out = std::str::from_utf8(&plaintext)
-        .map(str::to_owned)
+        .map(|s| Secret(s.to_owned()))
         .map_err(|_| io::Error::other("the stored sandbox credential is corrupt (not UTF-8)"));
     scrub_u8(&mut plaintext);
     out
 }
 
-/// The credential store's directory. Its DACL must DENY [`SANDBOX_GROUP`] — machine-scope
-/// DPAPI protects nothing on its own, so that DENY is the whole boundary. It is applied by
-/// the setup path via the acl module; this module never writes a DACL.
+/// The credential store's directory — the SAME directory as the marker and the ledger, which is
+/// why it delegates rather than recomputing the path: setup locks whatever THIS returns, so a
+/// second definition that drifted would protect a directory the credential is not in.
+///
+/// Machine-scope DPAPI protects nothing on its own, so that directory's owner + DACL are the
+/// whole boundary: the setup path hands it to [`super::acl::lock_to_admins`] BEFORE any
+/// credential is written into it. This module never writes a DACL.
 pub(crate) fn credential_dir() -> io::Result<PathBuf> {
-    let root = std::env::var_os("PROGRAMDATA")
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| {
-            io::Error::other(
-                "PROGRAMDATA is not set, so nub cannot locate the machine-wide sandbox \
-                 credential store",
-            )
-        })?;
-    Ok(PathBuf::from(root).join("nub").join("sandbox"))
+    super::state::state_dir()
 }
 
 pub(crate) fn credential_path() -> io::Result<PathBuf> {
@@ -263,7 +260,10 @@ fn scrub_u8(buf: &mut [u8]) {
     }
 }
 
-fn scrub_u16(buf: &mut [u16]) {
+/// Also the launch's own UTF-16 relay into `CreateProcessWithLogonW`, which is why this is
+/// `pub(crate)`: a plain `fill(0)` on a buffer about to be dropped is a dead store the
+/// optimizer may delete, and the password would survive in the heap.
+pub(crate) fn scrub_u16(buf: &mut [u16]) {
     for b in buf {
         // SAFETY: as above.
         unsafe { std::ptr::write_volatile(b, 0) };
@@ -273,10 +273,10 @@ fn scrub_u16(buf: &mut [u16]) {
 /// A plaintext credential zeroed on drop. NOT a defence against a process-memory attacker
 /// (the value was copied at least once on the way in) — it bounds how long the password sits
 /// readable in nub's heap, which is the part this module controls.
-struct Secret(String);
+pub(crate) struct Secret(String);
 
 impl Secret {
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -688,7 +688,7 @@ fn reassert_flags(name_w: &[u16]) -> io::Result<()> {
 
 fn ensure_group() -> io::Result<()> {
     let mut name_w = to_wide(SANDBOX_GROUP);
-    let mut comment_w = to_wide("nub: holds the sandbox account; DENY trustee for nub state");
+    let mut comment_w = to_wide("nub: holds the dedicated account used for OS-enforced sandboxing");
     let info = LOCALGROUP_INFO_1 {
         lgrpi1_name: name_w.as_mut_ptr(),
         lgrpi1_comment: comment_w.as_mut_ptr(),
@@ -841,12 +841,18 @@ fn dpapi_unprotect(ciphertext: &[u8]) -> io::Result<Vec<u8>> {
 
 /// # Safety
 /// `out` must be a blob DPAPI filled in on a successful call; ownership transfers here.
+///
+/// The block is SCRUBBED before it is freed: on the unprotect path it holds the decrypted
+/// password, and `LocalFree` only returns the pages to the heap.
 unsafe fn take_blob(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
     if out.pbData.is_null() {
         return Vec::new();
     }
-    // SAFETY: DPAPI guarantees `cbData` readable bytes at `pbData`.
-    let v = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec() };
+    // SAFETY: DPAPI guarantees `cbData` readable+writable bytes at `pbData`, which this call
+    // now owns exclusively.
+    let block = unsafe { std::slice::from_raw_parts_mut(out.pbData, out.cbData as usize) };
+    let v = block.to_vec();
+    scrub_u8(block);
     // SAFETY: freed exactly once, and freed even when `cbData` is 0 — which the API can
     // return for an empty plaintext.
     unsafe { LocalFree(out.pbData.cast()) };

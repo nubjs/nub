@@ -1696,6 +1696,7 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             // Internal `--sandbox <FILE>` (hidden) takes a separate-token policy
             // path, so its value must not mis-bind as the script positional.
             "--sandbox",
+            "--sandbox-admin",
         ],
         // Exec's workspace value-flags must be listed so `nubx --filter @org/api
         // tsc` binds `@org/api` to the filter, not the bin positional. (Exec's

@@ -24,7 +24,7 @@
 //! mandatory. See `.fray/sandbox-decisions-current.md` §2.
 //!
 //! **THE PRIVILEGE SPLIT IS THE WHOLE PRODUCT DECISION.** One elevated
-//! `nub run --sandbox-setup` per machine creates the account and installs four persistent
+//! `nub run --sandbox-admin setup` per machine creates the account and installs four persistent
 //! WFP filters over a pre-authorized loopback port window. Every run after that is
 //! **fully unelevated**: read the credential, ACL the policy's paths, and
 //! `CreateProcessWithLogonW` the child through the Secondary Logon service — which needs no
@@ -35,9 +35,10 @@
 //! hop straight to the target. SRT and Codex add a second hop that re-launches through a
 //! runner holding a *restricted* token; nub's confinement comes from the account's ACL reach
 //! plus SID-keyed WFP, neither of which needs that token, so hop 2 is a hardening follow-up.
-//! Consequences: `lpDesktop` stays NULL (so seclogon's window-station auto-grant applies and
-//! no `WinSta0` ACE work is needed) at the cost of desktop isolation, and Job-Object
-//! whole-tree kill is best-effort because seclogon's own job refuses cross-session nesting.
+//! Consequences: `lpDesktop` stays NULL, at the cost of desktop isolation (and NOT because it
+//! avoids window-station work — seclogon's auto-grant covers only `WinSta0`, so the launch
+//! aces the caller's station and desktop itself; see [`launch`]), and Job-Object whole-tree
+//! kill is best-effort because seclogon's own job refuses cross-session nesting.
 
 #![cfg(any(target_os = "windows", test))]
 
@@ -61,9 +62,11 @@ pub(crate) mod wfp;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) const SANDBOX_ACCOUNT: &str = "nub-sandbox";
 
-/// A local group whose sole purpose is being a STABLE DENY TRUSTEE: the credential store's
-/// DACL denies the GROUP, so a future per-session-account design adds members instead of
-/// rewriting DACLs. (SRT's rationale; mirrored.)
+/// A local group holding the sandbox account. NOTHING KEYS ON IT TODAY: the credential store
+/// is locked by a PROTECTED DACL naming SYSTEM, `BUILTIN\Administrators` and the provisioning
+/// user, which needs no deny trustee at all. It is created and deleted anyway because it is the
+/// stable trustee a future per-session-account design would add members to rather than
+/// rewriting DACLs (SRT's rationale), and provisioning it is free.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) const SANDBOX_GROUP: &str = "nub-sandbox-users";
 
@@ -120,6 +123,17 @@ pub(crate) struct AccountLaunch {
 // (the degradation it reports and the port-window gate it enforces) and then carried by the
 // PERSISTENT WFP filters the elevated setup installed. There is no per-run network work to
 // do, which is exactly the property that keeps every run unelevated.
+
+/// Whether this machine has completed the one-time elevated setup.
+///
+/// Cheap and read-only: the marker's mere presence is the signal. [`apply`] re-reads it and
+/// re-validates the recorded SID against the live account, so a stale or tampered marker still
+/// fails closed there — this is a ROUTING question ("is the account path available at all?"),
+/// deliberately not the trust decision.
+#[cfg(target_os = "windows")]
+pub(crate) fn is_provisioned() -> bool {
+    matches!(state::read_marker(), Ok(Some(_)))
+}
 
 /// Whether a policy needs the ACCOUNT backend rather than the AppContainer allowlist.
 ///
@@ -213,13 +227,16 @@ pub(crate) fn plan_net(net: &crate::policy::NetPolicy) -> AccountNet {
 
 // ── one-time setup / teardown / status (the elevated half) ──────────────────────
 
-/// ELEVATED, once per machine. Create the sandbox account, lock the credential store against
-/// it, install the WFP egress fence over `port_range`, and record the marker every later
-/// unelevated run reads. Idempotent — safe to re-run to repair a partial install.
+/// ELEVATED, once per machine. Lock nub's state directory, create the sandbox account, install
+/// the WFP egress fence over `port_range`, and record the marker every later unelevated run
+/// reads. Idempotent — safe to re-run to repair a partial install.
 ///
-/// ORDER IS DELIBERATE: the marker is written LAST, so a failure anywhere leaves the machine
-/// looking un-provisioned and every run fails closed with "run the setup", rather than
-/// half-provisioned and failing in some less legible way later.
+/// ORDER IS DELIBERATE AT BOTH ENDS. The state directory is locked FIRST, before `provision`
+/// writes a credential into it: the DACL is the DPAPI blob's only boundary, so writing the
+/// credential first would leave it world-readable for a live account if the lock then failed.
+/// The marker is written LAST, so a failure anywhere leaves the machine looking un-provisioned
+/// and every run fails closed with "run the setup", rather than half-provisioned and failing in
+/// some less legible way later.
 #[cfg(target_os = "windows")]
 pub fn setup(port_range: Option<(u16, u16)>) -> std::io::Result<String> {
     if !account::is_elevated() {
@@ -231,14 +248,15 @@ pub fn setup(port_range: Option<(u16, u16)>) -> std::io::Result<String> {
         ));
     }
     let range = port_range.unwrap_or(wfp::DEFAULT_PROXY_PORT_RANGE);
+    // `store_credential` uses `create_dir_all`, a no-op on the directory created here, and the
+    // elevated writer keeps access through the Administrators ace this stamps.
+    let cred_dir = account::credential_dir()?;
+    std::fs::create_dir_all(&cred_dir)?;
+    acl::lock_to_admins(&cred_dir)?;
     let sid = account::provision()?;
-    // The credential is DPAPI machine-scope, which is explicitly NOT a boundary — the
-    // ciphertext's DACL is. Denying the sandbox account is that boundary.
-    acl::lock_out(&account::credential_dir()?, &sid)?;
     wfp::install(&sid, range)?;
     state::write_marker(&state::Marker {
         version: state::MARKER_VERSION,
-        account: SANDBOX_ACCOUNT.to_string(),
         sid: sid.clone(),
         port_low: range.0,
         port_high: range.1,
@@ -277,6 +295,16 @@ pub fn clean() -> std::io::Result<usize> {
     let Some(marker) = state::read_marker()? else {
         return Ok(0);
     };
+    // The SAME live-SID check the launch makes, for the same reason. This sweep strips explicit
+    // aces for whatever trustee the marker names, from whatever paths the ledger lists — BOTH
+    // read off disk. Trusting them unverified would make `clean` an ace-removal primitive
+    // aimed by anyone who can write nub's state directory.
+    if account::lookup_sid()?.as_deref() != Some(marker.sid.as_str()) {
+        return Err(std::io::Error::other(
+            "the recorded sandbox SID does not match the live account, so nub will not sweep \
+             aces for it — re-run `nub run --sandbox-admin setup` from an elevated prompt",
+        ));
+    }
     let paths = state::ledger_paths()?;
     let mut swept = 0;
     for p in &paths {
@@ -308,19 +336,21 @@ pub fn status() -> std::io::Result<String> {
         (None, None) => out.push_str("sandbox account: not set up\n"),
         (None, Some(sid)) => out.push_str(&format!(
             "sandbox account: `{SANDBOX_ACCOUNT}` exists ({sid}) but nub has no setup record — \
-             re-run the elevated setup\n"
+             re-run `nub run --sandbox-admin setup` from an elevated prompt\n"
         )),
         (Some(m), None) => out.push_str(&format!(
-            "sandbox account: recorded as {} but no longer exists — re-run the elevated setup\n",
+            "sandbox account: recorded as {} but no longer exists — re-run `nub run \
+             --sandbox-admin setup` from an elevated prompt\n",
             m.sid
         )),
         (Some(m), Some(sid)) if m.sid != *sid => out.push_str(&format!(
-            "sandbox account: SID changed (recorded {}, live {sid}) — re-run the elevated setup\n",
+            "sandbox account: SID changed (recorded {}, live {sid}) — re-run `nub run \
+             --sandbox-admin setup` from an elevated prompt\n",
             m.sid
         )),
         (Some(m), Some(sid)) => out.push_str(&format!(
-            "sandbox account: `{}` ({sid})\nproxy port window: {}-{}\n",
-            m.account, m.port_low, m.port_high
+            "sandbox account: `{SANDBOX_ACCOUNT}` ({sid})\nproxy port window: {}-{}\n",
+            m.port_low, m.port_high
         )),
     }
     out.push_str(
@@ -382,7 +412,7 @@ pub(crate) fn apply(
                 reason: Some(format!(
                     "nub's egress proxy bound port {port}, outside the {}-{} loopback window the \
                      installed WFP filters permit — the sandboxed child could not reach it. Free a \
-                     port in that range, or re-run `nub run --sandbox-setup` from an elevated \
+                     port in that range, or re-run `nub run --sandbox-admin setup` from an elevated \
                      prompt to authorize a different one.",
                     marker.port_low, marker.port_high
                 )),
@@ -482,8 +512,8 @@ fn not_set_up(detail: &str) -> crate::backend::Degradation {
         reason: Some(format!(
             "{detail}. This policy needs nub's dedicated Windows sandbox account (it uses a \
              generous-read base, a deny inside a granted directory, or per-host network rules — \
-             none of which Windows can express without one). Run `nub run --sandbox-setup` once \
-             from an elevated (Run as administrator) prompt."
+             none of which Windows can express without one). Run `nub run --sandbox-admin setup` \
+             once from an elevated (Run as administrator) prompt."
         )),
     }
 }
@@ -656,6 +686,24 @@ mod tests {
     #[test]
     fn generous_read_needs_the_account_backend() {
         let p = policy(fs_policy(Effect::Allow, vec![]), net_off());
+        assert!(needs_account_backend(&p));
+    }
+
+    /// The whole-fs `**` Allow entry is what the compiler actually emits for `"..."` /
+    /// `sandbox: true` — the primary real-world agent-sandbox policy — so its routing is
+    /// pinned separately from the `default_effect == Allow` arm above.
+    #[test]
+    fn whole_fs_allow_entry_needs_the_account_backend() {
+        let p = policy(
+            fs_policy(
+                Effect::Deny,
+                vec![
+                    rule("**", Effect::Allow, FsAccess::Read),
+                    rule("C:/proj", Effect::Allow, FsAccess::ReadWrite),
+                ],
+            ),
+            net_off(),
+        );
         assert!(needs_account_backend(&p));
     }
 
