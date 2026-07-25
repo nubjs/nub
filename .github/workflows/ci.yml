@@ -989,7 +989,9 @@ jobs:
     name: oxc lockstep
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - run: node scripts/check-oxc-lockstep.mjs
 
   # Make THIS job (`CI gate`) the sole required status check in branch protection.
