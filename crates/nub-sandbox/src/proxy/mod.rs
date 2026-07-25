@@ -131,7 +131,8 @@ fn bind_in_range(low: u16, high: u16) -> io::Result<TcpListener> {
         io::ErrorKind::AddrInUse,
         format!(
             "every loopback port in the sandbox proxy window {low}-{high} is in use{}",
-            last.map(|e| format!(" (last error: {e})")).unwrap_or_default()
+            last.map(|e| format!(" (last error: {e})"))
+                .unwrap_or_default()
         ),
     ))
 }

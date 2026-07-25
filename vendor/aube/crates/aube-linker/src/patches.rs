@@ -466,9 +466,7 @@ fn evaluate_hunk(
     }
     let mut context_index = base as usize;
     // `fileLines.length - contextIndex < original.length` → null.
-    if file_lines.len() < context_index
-        || file_lines.len() - context_index < hunk.original_length
-    {
+    if file_lines.len() < context_index || file_lines.len() - context_index < hunk.original_length {
         return None;
     }
 
@@ -531,7 +529,9 @@ fn apply_hunks(base_image: &str, hunks: &[Hunk]) -> Result<String, String> {
                 -fuzzing_offset - 1
             };
             if fuzzing_offset.abs() > 20 {
-                return Err(format!("could not apply hunk {i} (offset drift > 20 lines)"));
+                return Err(format!(
+                    "could not apply hunk {i} (offset drift > 20 lines)"
+                ));
             }
         };
         all_mods.push(mods);
@@ -550,7 +550,9 @@ fn apply_hunks(base_image: &str, hunks: &[Hunk]) -> Result<String, String> {
                 } => {
                     let at = (*index as isize + diff_offset) as usize;
                     let end = (at + num_to_delete).min(file_lines.len());
-                    let removed: Vec<String> = file_lines.splice(at..end, lines_to_insert.iter().cloned()).collect();
+                    let removed: Vec<String> = file_lines
+                        .splice(at..end, lines_to_insert.iter().cloned())
+                        .collect();
                     diff_offset += lines_to_insert.len() as isize - removed.len() as isize;
                 }
                 Modification::Pop => {
@@ -996,7 +998,8 @@ mod tests {
         // no-trailing-newline EOF. With the newline-agnostic line array
         // this round-trips for free — the marker is informational here.
         let original = "a\nb\nlast";
-        let body = "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n last\n\\ No newline at end of file\n";
+        let body =
+            "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n last\n\\ No newline at end of file\n";
         assert_eq!(apply_body(original, body).unwrap(), "a\nB\nlast");
     }
 
@@ -1042,7 +1045,10 @@ mod tests {
         // comparing; the old diffy byte-exact match rejected. We match.
         let original = "alpha   \nbeta\ngamma\n"; // "alpha" has trailing spaces
         let body = "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
-        assert_eq!(apply_body(original, body).unwrap(), "alpha   \nBETA\ngamma\n");
+        assert_eq!(
+            apply_body(original, body).unwrap(),
+            "alpha   \nBETA\ngamma\n"
+        );
     }
 
     #[test]
@@ -1105,8 +1111,12 @@ mod tests {
     #[test]
     fn happy_path_simple_edit_byte_identical() {
         let original = "module.exports = 'old';\n";
-        let body = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-module.exports = 'old';\n+module.exports = 'new';\n";
-        assert_eq!(apply_body(original, body).unwrap(), "module.exports = 'new';\n");
+        let body =
+            "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-module.exports = 'old';\n+module.exports = 'new';\n";
+        assert_eq!(
+            apply_body(original, body).unwrap(),
+            "module.exports = 'new';\n"
+        );
     }
 
     #[test]
@@ -1115,7 +1125,10 @@ mod tests {
         let body = "--- a/x\n+++ b/x\n\
                     @@ -1,3 +1,3 @@\n 1\n-2\n+TWO\n 3\n\
                     @@ -6,3 +6,3 @@\n 6\n-7\n+SEVEN\n 8\n";
-        assert_eq!(apply_body(original, body).unwrap(), "1\nTWO\n3\n4\n5\n6\nSEVEN\n8\n");
+        assert_eq!(
+            apply_body(original, body).unwrap(),
+            "1\nTWO\n3\n4\n5\n6\nSEVEN\n8\n"
+        );
     }
 
     #[test]

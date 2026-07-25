@@ -63,8 +63,12 @@ impl Marker {
     }
 
     pub(crate) fn from_json(s: &str) -> io::Result<Self> {
-        let v: serde_json::Value = serde_json::from_str(s)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("sandbox marker is not valid JSON: {e}")))?;
+        let v: serde_json::Value = serde_json::from_str(s).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("sandbox marker is not valid JSON: {e}"),
+            )
+        })?;
         let field = |k: &str| -> io::Result<&serde_json::Value> {
             v.get(k).ok_or_else(|| {
                 io::Error::new(
@@ -265,7 +269,10 @@ mod tests {
         );
         let err = Marker::from_json(&json).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("re-run the elevated sandbox setup"));
+        assert!(
+            err.to_string()
+                .contains("re-run the elevated sandbox setup")
+        );
     }
 
     /// An inverted or zero range would make the proxy's bind-in-range search fail in a way

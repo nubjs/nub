@@ -477,9 +477,7 @@ pub(crate) fn apply(
     // proxy's minted leaves. Grant it as nub infra (not user config), mirroring the
     // mac/linux ca-bundle read grant. Only under a real per-host tier (`tier1`); the plain
     // path handles CA-trust via `set_ca_env` on an unconfined fs.
-    if tier1
-        && let Some(bundle) = ca_bundle
-    {
+    if tier1 && let Some(bundle) = ca_bundle {
         let b = bundle.to_path_buf();
         if !read_grants.contains(&b) {
             read_grants.push(b);
@@ -629,7 +627,10 @@ fn build_child_env(
 /// name → PATH search trying the name and common executable extensions. Windows-only
 /// (its PATHEXT search is Windows semantics; the host build never calls it).
 #[cfg(target_os = "windows")]
-pub(super) fn resolve_program(program: &std::ffi::OsStr, child_cwd: Option<&Path>) -> Option<PathBuf> {
+pub(super) fn resolve_program(
+    program: &std::ffi::OsStr,
+    child_cwd: Option<&Path>,
+) -> Option<PathBuf> {
     let p = Path::new(program);
     if p.is_absolute() {
         return Some(p.to_path_buf());
@@ -679,14 +680,14 @@ pub(super) mod launch {
         CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
         SetHandleInformation, WAIT_OBJECT_0,
     };
+    use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
+        NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
+        NetworkIsolationSetAppContainerConfig,
+    };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
         NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
         SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
-    };
-    use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
-        NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
-        NetworkIsolationSetAppContainerConfig,
     };
     use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
@@ -751,9 +752,7 @@ pub(super) mod launch {
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
             return false;
         }
-        let mut elevation = TOKEN_ELEVATION {
-            TokenIsElevated: 0,
-        };
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
         let mut ret_len: u32 = 0;
         // SAFETY: `elevation` is a correctly-sized TOKEN_ELEVATION out-buffer.
         let ok = unsafe {
@@ -1404,7 +1403,10 @@ pub(super) mod launch {
     /// Build a mutable UTF-16 command line from program + args, quoting each token per
     /// the CommandLineToArgvW rules std uses. lpApplicationName is NULL, so the child
     /// gets a conventional argv.
-    pub(in crate::backend) fn build_command_line(program: &std::ffi::OsStr, args: &[std::ffi::OsString]) -> Vec<u16> {
+    pub(in crate::backend) fn build_command_line(
+        program: &std::ffi::OsStr,
+        args: &[std::ffi::OsString],
+    ) -> Vec<u16> {
         let mut line: Vec<u16> = Vec::new();
         append_quoted(&mut line, program);
         for a in args {
@@ -1455,7 +1457,9 @@ pub(super) mod launch {
     /// expects (the source `BTreeMap` is case-sensitive, so a lowercase key like
     /// `windir` would otherwise sort after all-uppercase keys and violate the
     /// convention).
-    pub(in crate::backend) fn build_env_block(env: &std::collections::BTreeMap<String, String>) -> Vec<u16> {
+    pub(in crate::backend) fn build_env_block(
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<u16> {
         let mut pairs: Vec<(&String, &String)> = env.iter().collect();
         pairs.sort_by_key(|a| a.0.to_ascii_uppercase());
         let mut block: Vec<u16> = Vec::new();
@@ -1707,9 +1711,15 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         });
-        let deg = apply(&deny_all, crate::CommandSpec::new("cmd.exe"), None, None, None)
-            .expect("apply deny-all")
-            .degradation;
+        let deg = apply(
+            &deny_all,
+            crate::CommandSpec::new("cmd.exe"),
+            None,
+            None,
+            None,
+        )
+        .expect("apply deny-all")
+        .degradation;
         assert!(
             !deg.lost.iter().any(|s| s == "net-per-host"),
             "deny-all is coarse-enforced, not degraded (got {:?})",
@@ -1742,7 +1752,11 @@ mod tests {
                 deg.lost
             );
         } else {
-            let err = res.expect_err("unelevated per-host must fail-closed, not degrade");
+            // `expect_err` would need `Prepared: Debug`, which it is not (it owns a live
+            // proxy and a launch plan) — so destructure instead.
+            let Err(err) = res else {
+                panic!("unelevated per-host must fail-closed, not degrade");
+            };
             assert!(
                 err.lost.iter().any(|s| s == "net-per-host"),
                 "the fail-closed Degradation must name net-per-host (got {:?})",

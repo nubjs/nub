@@ -24,7 +24,7 @@
 //!     cross-session. The assignment is attempted and its failure reported, never silently
 //!     swallowed — whole-tree reap is genuinely weaker here than on the AppContainer path.
 
-use super::{AccountLaunch, AccountNet, acl, account, state};
+use super::{AccountLaunch, account, acl, state};
 use crate::backend::windows::launch::{build_command_line, build_env_block, to_wide};
 use std::io;
 use std::os::windows::io::AsRawHandle;
@@ -52,7 +52,7 @@ const ERROR_SERVICE_DISABLED: i32 = 1058;
 /// Strips every ace this run applied, on drop. Ordering matters: declared before the child is
 /// spawned but dropped after the wait returns, so a granted path is never revoked out from
 /// under a live child. Best-effort — a failed strip leaves an over-permissive ace for a
-/// confined account, which the ledger sweep (`nub run --sandbox-clean`) collects later.
+/// confined account, which the ledger sweep (`nub run --sandbox-admin clean`) collects later.
 struct AceGuard {
     paths: Vec<std::path::PathBuf>,
     sid: String,
@@ -88,7 +88,6 @@ impl AccountLaunch {
         // Ledger BEFORE apply: a crash between the two leaves a recorded path whose ace was
         // never written, and stripping an absent ace is a no-op. The reverse order would
         // leave an ace nothing knows about.
-        let mut applied = Vec::new();
         let mut guard = AceGuard {
             paths: Vec::new(),
             sid: marker.sid.clone(),
@@ -97,12 +96,15 @@ impl AccountLaunch {
             .read_grants
             .iter()
             .map(|p| (p, acl::Access::Read))
-            .chain(self.write_grants.iter().map(|p| (p, acl::Access::ReadWrite)))
+            .chain(
+                self.write_grants
+                    .iter()
+                    .map(|p| (p, acl::Access::ReadWrite)),
+            )
         {
             state::record_acl_path(path)?;
             guard.paths.push(path.clone());
             acl::grant(path, &marker.sid, access)?;
-            applied.push(path.clone());
         }
         // Denies go on AFTER the grants so the deny ace is inserted into a DACL that already
         // carries the grant it must outrank — the canonical-order insert has to see both.
@@ -122,10 +124,7 @@ impl AccountLaunch {
         let user_w = to_wide(account_name);
         // "." targets the LOCAL SAM regardless of whether the machine is domain-joined.
         let domain_w = to_wide(".");
-        let mut password_w: Vec<u16> = password
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let mut password_w: Vec<u16> = password.encode_utf16().chain(std::iter::once(0)).collect();
         let mut cmdline = build_command_line(&self.program, &self.args);
         let app_w = to_wide(&self.program.to_string_lossy());
         let cwd_w = self.cwd.as_ref().map(|c| to_wide(&c.to_string_lossy()));
@@ -143,14 +142,13 @@ impl AccountLaunch {
         }
 
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-        let mut flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED;
+        let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED;
         let env_ptr: *const std::ffi::c_void = match &env_block {
             Some(b) => b.as_ptr().cast(),
             // NULL + LOGON_WITH_PROFILE makes seclogon build the SANDBOX ACCOUNT's own
             // profile environment — isolated USERPROFILE/TEMP/LOCALAPPDATA, machine PATH.
             None => std::ptr::null(),
         };
-        let _ = &mut flags;
 
         // SAFETY: every buffer referenced (user/domain/password/app/cmdline/cwd/env/si)
         // outlives this call; `lpCommandLine` is a writable UTF-16 buffer as required.
@@ -294,16 +292,5 @@ fn map_spawn_error(e: io::Error, account: &str) -> io::Error {
              may be disabled by group policy).",
         ),
         _ => e,
-    }
-}
-
-/// Net posture is enforced entirely by the persistent WFP filters installed at setup, keyed
-/// on the account SID — there is nothing per-run to do. This exists so the caller's match on
-/// [`AccountNet`] is exhaustive at the launch site and a future posture cannot be added
-/// without visiting here.
-pub(crate) fn net_is_enforced_by_setup(net: AccountNet) -> bool {
-    match net {
-        AccountNet::ProxyOnly | AccountNet::DenyAll => true,
-        AccountNet::UnconfinedButFenced => false,
     }
 }

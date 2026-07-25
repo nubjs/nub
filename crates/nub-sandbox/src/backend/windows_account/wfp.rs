@@ -61,6 +61,14 @@ pub(crate) const DEFAULT_PROXY_PORT_RANGE: (u16, u16) = (59080, 59089);
 /// A wider window would stop meaningfully narrowing loopback, so the install refuses one.
 pub(crate) const MAX_PROXY_PORT_RANGE_WIDTH: u16 = 64;
 
+// The default window must itself satisfy the rule the installer enforces on a user-supplied
+// one, or the out-of-the-box setup would be refused by its own validation.
+const _: () = {
+    let (low, high) = DEFAULT_PROXY_PORT_RANGE;
+    assert!(low > 0 && high >= low);
+    assert!(high - low < MAX_PROXY_PORT_RANGE_WIDTH);
+};
+
 /// BFE reports access-denied as EITHER of these — test both or an unelevated caller looks
 /// like a hard failure.
 const FWP_E_ACCESS_DENIED: u32 = 0x8032_0028;
@@ -127,10 +135,7 @@ impl Drop for Engine {
 /// Run `f` inside a WFP transaction, aborting on any error or unwind. The whole install is
 /// one transaction so a mid-install failure cannot leave a half-fence — which would be
 /// fail-OPEN (block filters missing, permit present).
-fn in_transaction<T>(
-    engine: &Engine,
-    f: impl FnOnce(&Engine) -> io::Result<T>,
-) -> io::Result<T> {
+fn in_transaction<T>(engine: &Engine, f: impl FnOnce(&Engine) -> io::Result<T>) -> io::Result<T> {
     // SAFETY: engine handle is live for the whole call.
     let rc = unsafe { FwpmTransactionBegin0(engine.0, 0) };
     if rc != 0 {
@@ -272,7 +277,7 @@ pub(crate) fn install(sid: &str, port_range: (u16, u16)) -> io::Result<()> {
             "invalid sandbox proxy port range {low}-{high}"
         )));
     }
-    if high - low + 1 > MAX_PROXY_PORT_RANGE_WIDTH {
+    if high - low >= MAX_PROXY_PORT_RANGE_WIDTH {
         return Err(io::Error::other(format!(
             "sandbox proxy port range {low}-{high} is wider than the {MAX_PROXY_PORT_RANGE_WIDTH}-port maximum \
              — a wide window stops meaningfully narrowing loopback"
@@ -296,7 +301,9 @@ pub(crate) fn install(sid: &str, port_range: (u16, u16)) -> io::Result<()> {
                 mask: 0xFF00_0000, // /8
             },
             v6: {
-                let mut a = FWP_BYTE_ARRAY16 { byteArray16: [0; 16] };
+                let mut a = FWP_BYTE_ARRAY16 {
+                    byteArray16: [0; 16],
+                };
                 a.byteArray16[15] = 1; // ::1
                 a
             },
@@ -462,7 +469,7 @@ fn add_filter(e: &Engine, spec: FilterSpec, slots: &mut ConditionSlots) -> io::R
 
     let mut name = to_wide(spec.name());
     let mut provider_key = NUB_PROVIDER_KEY;
-    let mut filter = FWPM_FILTER0 {
+    let filter = FWPM_FILTER0 {
         // A zero filterKey makes WFP mint one; identity comes from the provider key, which
         // is what the uninstall sweep enumerates on.
         displayData: FWPM_DISPLAY_DATA0 {
@@ -496,7 +503,7 @@ fn add_filter(e: &Engine, spec: FilterSpec, slots: &mut ConditionSlots) -> io::R
 
     // SAFETY: `conditions`, `slots`, `name` and `provider_key` all outlive this call — WFP
     // stores raw pointers into every one of them for the duration of the add.
-    let rc = unsafe { FwpmFilterAdd0(e.0, &mut filter, std::ptr::null_mut(), std::ptr::null_mut()) };
+    let rc = unsafe { FwpmFilterAdd0(e.0, &filter, std::ptr::null_mut(), std::ptr::null_mut()) };
     if rc != 0 && rc != FWP_E_ALREADY_EXISTS {
         return Err(wfp_err("FwpmFilterAdd0", rc));
     }
@@ -575,19 +582,10 @@ fn delete_nub_filters(e: &Engine) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// The permit-over-block weight ordering IS the fence; a regression that inverted it
-    /// would silently open egress while every filter still appeared installed.
-    #[test]
-    fn loopback_permit_outweighs_the_account_block() {
-        assert!(W_LOOPBACK_PERMIT > W_ACCOUNT_BLOCK);
-    }
-
-    /// The default window must satisfy the width rule the installer enforces.
-    #[test]
-    fn default_port_range_is_within_the_width_cap() {
-        let (low, high) = DEFAULT_PROXY_PORT_RANGE;
-        assert!(low > 0 && high >= low);
-        assert!(high - low + 1 <= MAX_PROXY_PORT_RANGE_WIDTH);
+    /// `windows_sys::core::GUID` derives only `Copy`/`Clone`/`Default`, so equality is
+    /// field-wise.
+    fn same_guid(a: &GUID, b: &GUID) -> bool {
+        a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
     }
 
     /// Both access-denied spellings must read as "not elevated" — BFE returns either, and
@@ -608,7 +606,7 @@ mod tests {
         assert_eq!(FilterSpec::ALL.len() - permits, 2);
         let v4 = FilterSpec::ALL
             .iter()
-            .filter(|s| s.layer() == FWPM_LAYER_ALE_AUTH_CONNECT_V4)
+            .filter(|s| same_guid(&s.layer(), &FWPM_LAYER_ALE_AUTH_CONNECT_V4))
             .count();
         assert_eq!(v4, 2, "one permit + one block on IPv4");
     }

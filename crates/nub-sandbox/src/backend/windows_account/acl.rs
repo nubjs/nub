@@ -55,8 +55,8 @@ const RW: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | 
 /// Read + execute. What a policy's read grant stamps.
 const RO: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
-// The EXCLUSIONS are the security property, so they are asserted at compile time rather than
-// left to a reader to re-derive from two hex literals.
+// What these masks LEAVE OUT is the security property, and an omission is invisible on
+// inspection — so each exclusion is asserted at compile time, against windows-sys' own values.
 const _: () = {
     // `FILE_DELETE_CHILD` on a granted PARENT is checked INSTEAD OF `DELETE` on the child, so
     // including it would let the account delete a file carrying a full deny ACE. That single

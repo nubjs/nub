@@ -9,6 +9,7 @@
 //!   2. **Deny-inside-allow does not hold.** A secret under a dir carrying an inherited
 //!      `ALL APPLICATION PACKAGES` grant is readable regardless of the allow-set — the AAP
 //!      grant satisfies the LowBox check before default-deny is reached.
+//!
 //! Both dissolve when the child runs as a **separate local principal**: the invoking user's
 //! own profile (`~/.ssh`, `~/.aws`, a home-dir `.env`) is denied by DEFAULT with no ACE
 //! authored at all, and no AAP grant ever covers a user SID, so an explicit deny ACE on a
@@ -113,8 +114,12 @@ pub(crate) struct AccountLaunch {
     /// `Some` ⇒ the child env IS this map. `None` ⇒ seclogon builds the account's own
     /// profile environment.
     pub(crate) env: Option<BTreeMap<String, String>>,
-    pub(crate) net: AccountNet,
 }
+
+// The net posture deliberately does NOT ride the launch plan: it is fully decided in `apply`
+// (the degradation it reports and the port-window gate it enforces) and then carried by the
+// PERSISTENT WFP filters the elevated setup installed. There is no per-run network work to
+// do, which is exactly the property that keeps every run unelevated.
 
 /// Whether a policy needs the ACCOUNT backend rather than the AppContainer allowlist.
 ///
@@ -125,12 +130,11 @@ pub(crate) struct AccountLaunch {
 /// admin-free AppContainer path.
 pub(crate) fn needs_account_backend(policy: &crate::policy::SandboxPolicy) -> bool {
     let fs = &policy.fs;
-    let generous_read = fs.rules.default_effect == Effect::Allow
-        || fs
-            .rules
-            .entries
-            .iter()
-            .any(|r| r.effect == Effect::Allow && super::windows::is_whole_fs(r.matcher.as_str()));
+    let generous_read =
+        fs.rules.default_effect == Effect::Allow
+            || fs.rules.entries.iter().any(|r| {
+                r.effect == Effect::Allow && super::windows::is_whole_fs(r.matcher.as_str())
+            });
     // A deny only needs carving when it can land inside something the policy also grants;
     // `deny_shadows_grant` is exactly that test, and it is the AppContainer's known hole.
     let (read_grants, _, _) = super::windows::derive_grants(fs);
@@ -146,7 +150,9 @@ pub(crate) fn needs_account_backend(policy: &crate::policy::SandboxPolicy) -> bo
 /// sandbox SID on a path inside a granted subtree outranks the grant's *inherited* allow,
 /// because Windows orders every explicit ACE ahead of every inherited one. That ordering is
 /// the mechanism the whole agent-sandbox fs axis rests on.
-pub(crate) fn derive_plan(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>, AccountFsDegrade) {
+pub(crate) fn derive_plan(
+    fs: &FsPolicy,
+) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>, AccountFsDegrade) {
     let mut read = Vec::new();
     let mut write = Vec::new();
     let mut deny = Vec::new();
@@ -215,7 +221,7 @@ pub(crate) fn plan_net(net: &crate::policy::NetPolicy) -> AccountNet {
 /// looking un-provisioned and every run fails closed with "run the setup", rather than
 /// half-provisioned and failing in some less legible way later.
 #[cfg(target_os = "windows")]
-pub(crate) fn setup(port_range: Option<(u16, u16)>) -> std::io::Result<String> {
+pub fn setup(port_range: Option<(u16, u16)>) -> std::io::Result<String> {
     if !account::is_elevated() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -244,7 +250,7 @@ pub(crate) fn setup(port_range: Option<(u16, u16)>) -> std::io::Result<String> {
 /// objects, delete the account/group/profile, and drop the marker. Every step is idempotent
 /// and a later failure never skips the cleanup already done.
 #[cfg(target_os = "windows")]
-pub(crate) fn teardown() -> std::io::Result<()> {
+pub fn teardown() -> std::io::Result<()> {
     if !account::is_elevated() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -267,7 +273,7 @@ pub(crate) fn teardown() -> std::io::Result<()> {
 /// Returns how many paths were swept. A path that no longer exists is pruned rather than
 /// retried forever.
 #[cfg(target_os = "windows")]
-pub(crate) fn clean() -> std::io::Result<usize> {
+pub fn clean() -> std::io::Result<usize> {
     let Some(marker) = state::read_marker()? else {
         return Ok(0);
     };
@@ -294,7 +300,7 @@ pub(crate) fn clean() -> std::io::Result<usize> {
 /// administrator, so an unelevated caller genuinely cannot see it and the report says so
 /// rather than implying the fence is absent.
 #[cfg(target_os = "windows")]
-pub(crate) fn status() -> std::io::Result<String> {
+pub fn status() -> std::io::Result<String> {
     let marker = state::read_marker()?;
     let live_sid = account::lookup_sid()?;
     let mut out = String::new();
@@ -317,11 +323,15 @@ pub(crate) fn status() -> std::io::Result<String> {
             m.account, m.port_low, m.port_high
         )),
     }
-    out.push_str(&match (account::is_elevated(), wfp::installed_filter_count()) {
-        (false, _) => "wfp filters: cannot read (enumeration requires administrator)\n".to_string(),
-        (true, Ok(n)) => format!("wfp filters: {n} installed\n"),
-        (true, Err(e)) => format!("wfp filters: could not read ({e})\n"),
-    });
+    out.push_str(
+        &match (account::is_elevated(), wfp::installed_filter_count()) {
+            (false, _) => {
+                "wfp filters: cannot read (enumeration requires administrator)\n".to_string()
+            }
+            (true, Ok(n)) => format!("wfp filters: {n} installed\n"),
+            (true, Err(e)) => format!("wfp filters: could not read ({e})\n"),
+        },
+    );
     out.push_str(&format!(
         "acl ledger: {} path(s) recorded\n",
         state::ledger_paths().map(|p| p.len()).unwrap_or(0)
@@ -455,7 +465,6 @@ pub(crate) fn apply(
         write_grants,
         denies,
         env: build_child_env(&policy.env, proxy_port, proxy_token, ca_bundle),
-        net,
     };
 
     Ok(Prepared {

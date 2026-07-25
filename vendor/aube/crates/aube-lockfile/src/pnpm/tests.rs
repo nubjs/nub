@@ -1889,8 +1889,7 @@ fn patched_dependency_roundtrips_through_real_pnpm() {
     // Captured from `corepack pnpm@10.15.1 install` on the patched-deps
     // fixture — the exact bytes real pnpm wrote.
     const HASH: &str = "dcac38e61b21e4c1fbc036fbd04c2c57fc5aca4d595709258e1654cf8529c5c1";
-    const EXPECTED_BLOCK: &str =
-        "patchedDependencies:\n  is-odd@3.0.1:\n    hash: dcac38e61b21e4c1fbc036fbd04c2c57fc5aca4d595709258e1654cf8529c5c1\n    path: patches/is-odd@3.0.1.patch";
+    const EXPECTED_BLOCK: &str = "patchedDependencies:\n  is-odd@3.0.1:\n    hash: dcac38e61b21e4c1fbc036fbd04c2c57fc5aca4d595709258e1654cf8529c5c1\n    path: patches/is-odd@3.0.1.patch";
 
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");
@@ -3175,10 +3174,7 @@ snapshots:
     // is read for its hash only, and the path map stays empty.
     assert!(graph.patched_dependencies.is_empty());
     assert_eq!(
-        graph
-            .patched_dependency_hashes
-            .get("is-odd@3.0.1")
-            .unwrap(),
+        graph.patched_dependency_hashes.get("is-odd@3.0.1").unwrap(),
         "sha256-deadbeef"
     );
     assert_eq!(
@@ -4826,7 +4822,9 @@ fn npm_to_pnpm_conversion_omits_phantom_member_links_on_empty_root() {
     let manifest = PackageJson {
         name: Some("wsroot".to_string()),
         version: Some("1.0.0".to_string()),
-        workspaces: Some(aube_manifest::Workspaces::Array(vec!["packages/*".to_string()])),
+        workspaces: Some(aube_manifest::Workspaces::Array(vec![
+            "packages/*".to_string(),
+        ])),
         ..PackageJson::default()
     };
 

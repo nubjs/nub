@@ -887,9 +887,9 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
                                         path: path.clone(),
                                     }
                                 }
-                                (Some(hash), None) => WritablePatchedDependency::HashOnly {
-                                    hash: hash.clone(),
-                                },
+                                (Some(hash), None) => {
+                                    WritablePatchedDependency::HashOnly { hash: hash.clone() }
+                                }
                                 (None, Some(path)) => {
                                     WritablePatchedDependency::PathOnly(path.clone())
                                 }
