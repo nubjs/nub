@@ -1,0 +1,674 @@
+//! Filesystem confinement for the dedicated sandbox account: explicit ACEs keyed on its SID.
+//!
+//! THE MODEL IS PURELY ADDITIVE. The sandbox account is a DIFFERENT local principal, so every
+//! path it was never granted is already unreachable — the invoking user's profile needs no ACE
+//! authored at all. This module therefore only ever ADDS ACEs for the sandbox SID and later
+//! removes exactly those. It never rewrites, protects, or snapshots a user path's descriptor,
+//! which is why there is no crash journal here and nothing to restore after a hard kill beyond
+//! [`strip`]. (The abandoned deny-strip design — `SE_DACL_PROTECTED` plus a DACL restore
+//! journal — is why that distinction is worth stating; see [`super`].)
+//!
+//! CANONICAL DACL ORDER IS THE WHOLE MECHANISM. Windows resolves an access check first-match
+//! over the DACL and orders ACEs explicit-DENY → explicit-ALLOW → explicit-other → inherited
+//! (any type). Because *explicit* always precedes *inherited*, a DENY written directly onto
+//! `<project>/.env` outranks the ALLOW that `<project>`'s `(OI)(CI)` grant PROPAGATED onto it
+//! as an inherited ACE. That is exactly the deny-inside-allow the AppContainer backend cannot
+//! express. The hazard: a non-canonical order is ACCEPTED by Windows and still resolves
+//! first-match, so a misplaced DENY silently resolves as ALLOW — a security failure with no
+//! error anywhere. `SetEntriesInAclW` canonicalizes on insert and [`strip`] canonicalizes by
+//! hand, and `deny_inside_a_grant_lands_before_the_inherited_allow` pins the result rather
+//! than trusting either.
+//!
+//! INHERITANCE IS DELIBERATELY LEFT UNPROTECTED. Every write passes
+//! `DACL_SECURITY_INFORMATION` alone, never `PROTECTED_DACL_SECURITY_INFORMATION`: the
+//! invoking user's own inherited access must survive so they can still read what the sandbox
+//! child creates inside a granted tree.
+
+#![cfg(target_os = "windows")]
+
+use std::io;
+use std::path::{Path, PathBuf};
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ACCESS_MODE, ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+    GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW,
+    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+};
+use windows_sys::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, AddAce,
+    CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
+    InitializeAcl, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+};
+
+// Win32 file access rights, spelled numerically so this module needs no
+// `Win32_Storage_FileSystem` feature for nine frozen constants — the same call
+// `backend::windows` already makes. Every value confirmed against windows-sys 0.61.2
+// `src/Windows/Win32/Storage/FileSystem/mod.rs` at the cited line.
+const FILE_GENERIC_READ: u32 = 0x0012_0089; // :1535 (1179785)
+const FILE_GENERIC_WRITE: u32 = 0x0012_0116; // :1536 (1179926)
+const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0; // :1534 (1179808)
+const FILE_ALL_ACCESS: u32 = 0x001F_01FF; // :1396 (2032127)
+const FILE_DELETE_CHILD: u32 = 0x0000_0040; // :1459 (64)
+/// The same bit as `FILE_EXECUTE` (:1488) — the kernel reads it as traverse on a directory
+/// and as execute on a file. There is no primitive that separates them.
+const FILE_TRAVERSE: u32 = 0x0000_0020; // :1859 (32)
+const DELETE: u32 = 0x0001_0000; // :1119 (65536)
+const WRITE_DAC: u32 = 0x0004_0000; // :4363 (262144)
+const WRITE_OWNER: u32 = 0x0008_0000; // :4364 (524288)
+
+/// Read + write + execute + delete. What a policy's write grant stamps.
+const RW: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+
+/// Read + execute. What a policy's read grant stamps.
+const RO: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+
+// The EXCLUSIONS are the security property, so they are asserted at compile time rather than
+// left to a reader to re-derive from two hex literals.
+const _: () = {
+    // `FILE_DELETE_CHILD` on a granted PARENT is checked INSTEAD OF `DELETE` on the child, so
+    // including it would let the account delete a file carrying a full deny ACE. That single
+    // bit voids every deny-inside-allow rule the policy can express.
+    assert!(RW & FILE_DELETE_CHILD == 0);
+    // Either bit lets the confined account rewrite its own confinement.
+    assert!(RW & (WRITE_DAC | WRITE_OWNER) == 0);
+    assert!(RO & (WRITE_DAC | WRITE_OWNER) == 0);
+    // The ladder must nest, or a read grant could reach something a write grant cannot.
+    assert!(RW & RO == RO);
+    // Without traverse, `SetCurrentDirectoryW` into a granted directory fails
+    // ERROR_ACCESS_DENIED — which is why `FILE_GENERIC_EXECUTE` is in BOTH masks.
+    assert!(RO & FILE_TRAVERSE != 0);
+};
+
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
+const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
+const INHERITED_ACE_FLAG: u8 = 0x10;
+
+/// What a grant hands the sandbox account on a subtree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Access {
+    Read,
+    ReadWrite,
+}
+
+impl Access {
+    fn mask(self) -> u32 {
+        match self {
+            Access::Read => RO,
+            Access::ReadWrite => RW,
+        }
+    }
+}
+
+/// Add an inheritable ALLOW ace for `sid` on `path`.
+///
+/// Inheritance is applied only on a directory: `(OI)(CI)` on a leaf file is meaningless and
+/// Windows would reject or silently strip it.
+pub(crate) fn grant(path: &Path, sid: &str, access: Access) -> io::Result<()> {
+    let (target, is_dir) = resolve(path)?;
+    let sid = OwnedSid::parse(sid)?;
+    add_ace(&target, &sid, access.mask(), GRANT_ACCESS, is_dir)
+}
+
+/// Add an inheritable DENY ace for `sid` on `path`, plus the parent-side carve that stops the
+/// account deleting or renaming `path` through its parent directory.
+pub(crate) fn deny(path: &Path, sid: &str) -> io::Result<()> {
+    let (target, is_dir) = resolve(path)?;
+    let sid = OwnedSid::parse(sid)?;
+    add_ace(&target, &sid, FILE_ALL_ACCESS, DENY_ACCESS, is_dir)?;
+
+    // The counterpart to excluding `FILE_DELETE_CHILD` from the grant masks: that exclusion
+    // only covers rights WE stamp, while the account may hold the bit on the parent through
+    // an inherited `BUILTIN\Users` ACE it picks up as a local user. Denying it explicitly on
+    // the parent closes `del`/`ren` of the denied target. NOT inheritable — the check that
+    // matters is against the parent directory object itself, so propagating it down would
+    // confine sibling subtrees for no gain. (SRT applies the same carve with `(OI)(CI)`.)
+    let Some(parent) = target.parent() else {
+        // A volume root has nothing above it to delete through.
+        return Ok(());
+    };
+    add_ace(parent, &sid, FILE_DELETE_CHILD, DENY_ACCESS, false)
+}
+
+/// Deny `sid` all access to `dir` and everything under it — used to lock the credential store
+/// against the sandbox account. Same mechanism as [`deny`], named for its call site.
+pub(crate) fn lock_out(dir: &Path, sid: &str) -> io::Result<()> {
+    deny(dir, sid)
+}
+
+/// Remove EVERY explicit ace whose trustee is `sid`, preserving all other explicit aces
+/// verbatim and leaving inherited aces alone. Idempotent; safe on a path with no such ace.
+///
+/// This deliberately does NOT use `SetEntriesInAclW(REVOKE_ACCESS)`: on Windows 11 25H2 that
+/// fails to remove explicit `ACCESS_DENIED` aces (field-observed, and regression-tested as
+/// MXC's `deny_round_trip_leaves_no_residue`). The documented behavior and the observed
+/// behavior disagree, so the DACL is rebuilt by hand instead.
+pub(crate) fn strip(path: &Path, sid: &str) -> io::Result<()> {
+    let (target, _) = resolve(path)?;
+    let sid = OwnedSid::parse(sid)?;
+
+    let dacl = ReadDacl::open(&target)?;
+    let Some(rebuilt) = rebuild_without_sid(&target, dacl.acl, &sid)? else {
+        // Nothing matched. Returning early is not just an optimization: writing a rebuilt
+        // DACL onto a path whose DACL is NULL would replace "no DACL, everyone allowed" with
+        // an EMPTY DACL, which denies everyone — a catastrophic silent lockout on a path we
+        // were only asked to clean up.
+        return Ok(());
+    };
+
+    let wpath = wide(&target);
+    // SAFETY: `rebuilt` is a live, DWORD-aligned, InitializeAcl'd buffer that outlives the
+    // call; `wpath` is NUL-terminated UTF-16 and likewise outlives it. DACL only —
+    // inheritance stays unprotected so the invoking user keeps their inherited access.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            wpath.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            rebuilt.as_ptr().cast::<ACL>(),
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(win32_err("SetNamedSecurityInfoW", &target, rc));
+    }
+    Ok(())
+}
+
+/// One `SetEntriesInAclW` read-modify-write. `SetEntriesInAclW` merges the new entry into the
+/// path's existing DACL and canonicalizes on insert, so this is additive: no pre-existing ace,
+/// explicit or inherited, is disturbed.
+fn add_ace(
+    path: &Path,
+    sid: &OwnedSid,
+    mask: u32,
+    mode: ACCESS_MODE,
+    inherit: bool,
+) -> io::Result<()> {
+    let wpath = wide(path);
+    let dacl = ReadDacl::open(path)?;
+
+    let ea = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: mask,
+        grfAccessMode: mode,
+        grfInheritance: if inherit {
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+        } else {
+            0
+        },
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            // UNKNOWN, not `TRUSTEE_IS_USER`: the same helper stamps the sandbox GROUP's SID
+            // for the credential-store lock-out, and the field is advisory anyway.
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid.0.cast(),
+        },
+    };
+
+    let mut new_dacl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: `ea` and the SID it points at outlive the call; `dacl.acl` came from
+    // GetNamedSecurityInfoW and may legitimately be NULL.
+    let rc = unsafe { SetEntriesInAclW(1, &ea, dacl.acl, &mut new_dacl) };
+    if rc != 0 {
+        return Err(win32_err("SetEntriesInAclW", path, rc));
+    }
+    let _new_guard = LocalFreeGuard(new_dacl.cast());
+
+    // SAFETY: `new_dacl` is a live ACL from SetEntriesInAclW; the path buffer is
+    // NUL-terminated. `DACL_SECURITY_INFORMATION` only — never PROTECTED (see module doc).
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            wpath.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            new_dacl,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(win32_err("SetNamedSecurityInfoW", path, rc));
+    }
+    Ok(())
+}
+
+/// Rebuild `existing`'s ace list without any explicit ace for `sid`, in canonical order.
+/// `Ok(None)` means nothing matched and the caller must not write anything back.
+///
+/// The rebuilt buffer is a `Vec<u32>` because `InitializeAcl` requires DWORD alignment.
+fn rebuild_without_sid(
+    path: &Path,
+    existing: *mut ACL,
+    sid: &OwnedSid,
+) -> io::Result<Option<Vec<u32>>> {
+    // (bucket, original index, ace pointer, ace size). The stable sort on (bucket, index)
+    // preserves each bucket's original ordering so unrelated aces never shuffle.
+    let mut kept: Vec<(u8, u32, *const std::ffi::c_void, u32)> = Vec::new();
+    let mut kept_bytes: u32 = 0;
+    let mut dropped = 0usize;
+
+    walk_aces(existing, path, |i, header, ace| {
+        let inherited = header.AceFlags & INHERITED_ACE_FLAG != 0;
+        // Only the allow/deny types share the `{ header, mask, SidStart }` layout the SID is
+        // read out of, and they are the only types this module ever writes. An ace of any
+        // other type — object, callback, audit — is copied through untouched rather than
+        // guessed at: keeping a foreign ace is safe, dropping one corrupts someone else's ACL.
+        let is_ours = !inherited
+            && matches!(
+                header.AceType,
+                ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE
+            )
+            // SAFETY: layout checked above; `SidStart` is the first DWORD of the inline SID.
+            && unsafe { EqualSid(sid_of(ace), sid.0) } != 0;
+
+        if is_ours {
+            dropped += 1;
+            return;
+        }
+        kept.push((
+            canonical_bucket(header.AceType, inherited),
+            i,
+            ace.cast_const(),
+            u32::from(header.AceSize),
+        ));
+        kept_bytes += u32::from(header.AceSize);
+    })?;
+
+    if dropped == 0 {
+        return Ok(None);
+    }
+    kept.sort_by_key(|&(bucket, index, _, _)| (bucket, index));
+
+    let acl_bytes = (std::mem::size_of::<ACL>() as u32 + kept_bytes).next_multiple_of(4);
+    let mut buf: Vec<u32> = vec![0; (acl_bytes as usize).div_ceil(4)];
+    let acl = buf.as_mut_ptr().cast::<ACL>();
+
+    // Preserve the source revision rather than assuming ACL_REVISION: an ACL carrying object
+    // aces is revision 4, and AddAce rejects a revision-4 ace into a revision-2 ACL.
+    // SAFETY: `existing` is live; `acl` points at `acl_bytes` of zeroed, DWORD-aligned space.
+    let revision = u32::from(unsafe { (*existing).AclRevision });
+    // SAFETY: as above.
+    if unsafe { InitializeAcl(acl, acl_bytes, revision) } == 0 {
+        return Err(win32_last_err("InitializeAcl", path));
+    }
+
+    // `AddAce` and the `AddAccess{Allowed,Denied}AceEx` family both APPEND at the tail and do
+    // NOT canonicalize despite the latter's name, so the bucket order above is what actually
+    // produces a canonical DACL. Emitting out of order would still be accepted by Windows and
+    // would silently resolve a deny as an allow.
+    for &(_, _, ace, size) in &kept {
+        // SAFETY: `acl` was sized to hold exactly these aces; each `ace` is a live
+        // `size`-byte ace inside the descriptor `ReadDacl` keeps alive across this call.
+        if unsafe { AddAce(acl, revision, u32::MAX, ace, size) } == 0 {
+            return Err(win32_last_err("AddAce", path));
+        }
+    }
+    Ok(Some(buf))
+}
+
+/// Walk every ace in `acl` in DACL order. A NULL `acl` means "no DACL, everything allowed"
+/// and yields nothing.
+fn walk_aces(
+    acl: *mut ACL,
+    path: &Path,
+    mut f: impl FnMut(u32, ACE_HEADER, *mut std::ffi::c_void),
+) -> io::Result<()> {
+    if acl.is_null() {
+        return Ok(());
+    }
+    let mut info = ACL_SIZE_INFORMATION {
+        AceCount: 0,
+        AclBytesInUse: 0,
+        AclBytesFree: 0,
+    };
+    // SAFETY: `acl` is a live ACL from GetNamedSecurityInfoW; `info` is a correctly sized
+    // out-slot for the AclSizeInformation class.
+    let ok = unsafe {
+        GetAclInformation(
+            acl,
+            std::ptr::from_mut(&mut info).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    };
+    if ok == 0 {
+        return Err(win32_last_err("GetAclInformation", path));
+    }
+    for i in 0..info.AceCount {
+        let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: `i` is below the reported AceCount of a live ACL.
+        if unsafe { GetAce(acl, i, &mut ace) } == 0 {
+            return Err(win32_last_err("GetAce", path));
+        }
+        // SAFETY: every ace GetAce yields begins with an ACE_HEADER.
+        f(i, unsafe { *ace.cast::<ACE_HEADER>() }, ace);
+    }
+    Ok(())
+}
+
+/// The trustee SID of an allow/deny ace. Caller must have checked the type — the inline
+/// `SidStart` field is only at this offset for the types sharing `ACCESS_ALLOWED_ACE`'s
+/// layout.
+fn sid_of(ace: *mut std::ffi::c_void) -> PSID {
+    // SAFETY: `addr_of!` takes the field address without forming a reference to the
+    // variable-length SID that follows it.
+    unsafe { std::ptr::addr_of!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart) }
+        .cast_mut()
+        .cast()
+}
+
+/// Canonical-order bucket: explicit DENY, explicit ALLOW, explicit other, then inherited.
+/// Smaller sorts earlier.
+fn canonical_bucket(ace_type: u8, inherited: bool) -> u8 {
+    if inherited {
+        return 3;
+    }
+    match ace_type {
+        ACCESS_DENIED_ACE_TYPE => 0,
+        ACCESS_ALLOWED_ACE_TYPE => 1,
+        _ => 2,
+    }
+}
+
+/// A path's DACL plus the security descriptor that owns its storage. The descriptor MUST
+/// outlive every read of `acl` — the ACL points INTO it.
+struct ReadDacl {
+    acl: *mut ACL,
+    _sd: LocalFreeGuard,
+}
+
+impl ReadDacl {
+    fn open(path: &Path) -> io::Result<Self> {
+        let wpath = wide(path);
+        let mut acl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `wpath` is NUL-terminated UTF-16 and outlives the call; every out-param is
+        // a valid slot and the unwanted ones are NULL.
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                wpath.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut acl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != 0 {
+            return Err(win32_err("GetNamedSecurityInfoW", path, rc));
+        }
+        Ok(ReadDacl {
+            acl,
+            _sd: LocalFreeGuard(sd),
+        })
+    }
+}
+
+/// A SID parsed from its string form, `LocalFree`d on drop.
+struct OwnedSid(PSID);
+
+impl OwnedSid {
+    fn parse(s: &str) -> io::Result<Self> {
+        let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; `sid` is a valid out-slot.
+        if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) } == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("not a valid SID string: {s}"),
+            ));
+        }
+        Ok(OwnedSid(sid))
+    }
+}
+
+impl Drop for OwnedSid {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from ConvertStringSidToSidW, which documents LocalFree.
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+struct LocalFreeGuard(*mut std::ffi::c_void);
+
+impl Drop for LocalFreeGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: every pointer wrapped here came from an API documenting LocalFree.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+}
+
+/// Canonicalize for the Win32 security APIs, returning the path and whether it is a directory.
+///
+/// `fs::canonicalize` emits `\\?\C:\…` and `\\?\UNC\server\share\…` — the extended-length
+/// spellings both `Get`/`SetNamedSecurityInfoW` accept, and the only forms that are correct
+/// for BOTH drive and UNC inputs (a naive `\\?\` prefix produces a malformed UNC path). It
+/// also supplies the not-found check for free. Deliberate consequence: a symlink or junction
+/// resolves to its TARGET, so the ACE lands on the object an open actually reaches rather than
+/// on a reparse point, which does not gate content access.
+fn resolve(path: &Path) -> io::Result<(PathBuf, bool)> {
+    let canonical = std::fs::canonicalize(path).map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("sandbox ACL target does not exist: {}", path.display()),
+            )
+        } else {
+            io::Error::other(format!(
+                "resolving sandbox ACL target {}: {e}",
+                path.display()
+            ))
+        }
+    })?;
+    let is_dir = std::fs::metadata(&canonical)?.is_dir();
+    Ok((canonical, is_dir))
+}
+
+fn wide(p: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn win32_err(op: &str, path: &Path, rc: u32) -> io::Error {
+    match rc {
+        ERROR_ACCESS_DENIED => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{op} on {}: access denied — nub holds no WRITE_DAC on this path, so the \
+                 sandbox account's access cannot be set",
+                path.display()
+            ),
+        ),
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{op} on {}: path no longer exists", path.display()),
+        ),
+        _ => io::Error::other(format!(
+            "{op} on {} failed (Win32 error {rc})",
+            path.display()
+        )),
+    }
+}
+
+/// For the ACL-surgery calls, which report failure through `GetLastError` rather than a
+/// returned status.
+fn win32_last_err(op: &str, path: &Path) -> io::Error {
+    let rc = io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+    win32_err(op, path, rc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One ace, flattened enough to assert ordering and byte-level preservation without
+    /// holding a pointer into a freed descriptor.
+    struct Ace {
+        ace_type: u8,
+        inherited: bool,
+        bytes: Vec<u8>,
+    }
+
+    /// Every ace on `path`'s DACL, in DACL order. Shares [`walk_aces`] with the production
+    /// rebuild so the assertion can never drift from what `strip` actually sees.
+    fn read_aces(path: &Path) -> Vec<Ace> {
+        let (canonical, _) = resolve(path).expect("resolve");
+        let dacl = ReadDacl::open(&canonical).expect("GetNamedSecurityInfoW");
+        let mut out = Vec::new();
+        walk_aces(dacl.acl, &canonical, |_, header, ace| {
+            // SAFETY: `AceSize` is the ace's own length, inside the descriptor `dacl` holds.
+            let bytes =
+                unsafe { std::slice::from_raw_parts(ace.cast::<u8>(), header.AceSize as usize) };
+            out.push(Ace {
+                ace_type: header.AceType,
+                inherited: header.AceFlags & INHERITED_ACE_FLAG != 0,
+                bytes: bytes.to_vec(),
+            });
+        })
+        .expect("walk DACL");
+        out
+    }
+
+    /// The raw SID bytes a `S-1-…` string parses to, for matching aces by trustee.
+    fn sid_bytes(sid: &str) -> Vec<u8> {
+        let parsed = OwnedSid::parse(sid).expect("parse SID");
+        // SubAuthorityCount is byte 1; a SID is 8 + 4 * count bytes.
+        let head = unsafe { std::slice::from_raw_parts(parsed.0.cast::<u8>(), 2) };
+        let len = 8 + 4 * head[1] as usize;
+        unsafe { std::slice::from_raw_parts(parsed.0.cast::<u8>(), len) }.to_vec()
+    }
+
+    /// Explicit allow/deny aces on `aces` whose trustee is `sid` — the SID sits at offset 8,
+    /// immediately after the 4-byte header and the 4-byte mask.
+    fn explicit_for(aces: &[Ace], sid: &[u8]) -> Vec<Vec<u8>> {
+        aces.iter()
+            .filter(|a| {
+                !a.inherited
+                    && matches!(a.ace_type, ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE)
+                    && a.bytes.len() >= 8 + sid.len()
+                    && &a.bytes[8..8 + sid.len()] == sid
+            })
+            .map(|a| a.bytes.clone())
+            .collect()
+    }
+
+    /// No explicit ace after any inherited one; no explicit DENY after any explicit ALLOW.
+    fn assert_canonical(aces: &[Ace], label: &str) {
+        let order: Vec<(u8, bool)> = aces.iter().map(|a| (a.ace_type, a.inherited)).collect();
+        let mut saw_inherited = false;
+        let mut saw_allow = false;
+        for (i, a) in aces.iter().enumerate() {
+            if a.inherited {
+                saw_inherited = true;
+                continue;
+            }
+            assert!(
+                !saw_inherited,
+                "{label}: explicit ace at {i} follows an inherited ace; order={order:?}"
+            );
+            match a.ace_type {
+                ACCESS_DENIED_ACE_TYPE => assert!(
+                    !saw_allow,
+                    "{label}: explicit DENY at {i} follows an explicit ALLOW — Windows accepts \
+                     this and resolves it first-match, so the deny would silently read as \
+                     allow; order={order:?}"
+                ),
+                ACCESS_ALLOWED_ACE_TYPE => saw_allow = true,
+                _ => {}
+            }
+        }
+    }
+
+    /// BUILTIN\Users. Always resolves, harmless to ace on a temp dir the test owns, and does
+    /// not appear as an *explicit* ace under a user-profile `%TEMP%`.
+    const SID: &str = "S-1-5-32-545";
+    /// Everyone — a second, distinct trustee for the preservation test.
+    const OTHER_SID: &str = "S-1-1-0";
+
+    /// The property the whole agent-sandbox fs axis rests on: a deny written onto a file
+    /// inside a granted tree must land AHEAD of the allow the tree's `(OI)(CI)` grant
+    /// propagated onto that file. Windows accepts the wrong order silently, so nothing but an
+    /// assertion catches a regression here.
+    #[test]
+    fn deny_inside_a_grant_lands_before_the_inherited_allow() {
+        let td = tempfile::tempdir().unwrap();
+        grant(td.path(), SID, Access::ReadWrite).expect("grant");
+
+        // Created AFTER the grant, so the inheritable allow propagates onto it as an
+        // INHERITED ace — the exact shape the deny has to outrank.
+        let secret = td.path().join(".env");
+        std::fs::write(&secret, b"TOKEN=x").unwrap();
+        deny(&secret, SID).expect("deny");
+
+        let aces = read_aces(&secret);
+        assert_canonical(&aces, "deny inside grant");
+        assert!(
+            aces.iter().any(|a| a.inherited),
+            "the grant should have propagated an inherited ace onto the file"
+        );
+        assert!(
+            aces.iter()
+                .any(|a| !a.inherited && a.ace_type == ACCESS_DENIED_ACE_TYPE),
+            "the deny should be present as an EXPLICIT ace"
+        );
+    }
+
+    /// The regression `SetEntriesInAclW(REVOKE_ACCESS)` fails: on Windows 11 25H2 an explicit
+    /// ACCESS_DENIED ace survives a REVOKE. Baseline-relative so a pre-existing ace for the
+    /// same SID cannot make it pass or fail spuriously.
+    #[test]
+    fn strip_removes_a_deny_ace() {
+        let td = tempfile::tempdir().unwrap();
+        let sid = sid_bytes(SID);
+        let baseline = explicit_for(&read_aces(td.path()), &sid).len();
+
+        grant(td.path(), SID, Access::ReadWrite).expect("grant");
+        deny(td.path(), SID).expect("deny");
+        assert!(
+            explicit_for(&read_aces(td.path()), &sid).len() > baseline,
+            "setup did not add any explicit ace to strip"
+        );
+
+        strip(td.path(), SID).expect("strip");
+        assert_eq!(
+            explicit_for(&read_aces(td.path()), &sid).len(),
+            baseline,
+            "strip left residue — the REVOKE_ACCESS deny-survival defect is back"
+        );
+        assert_canonical(&read_aces(td.path()), "after strip");
+    }
+
+    /// Teardown must not disturb aces nub did not author — including ones written by other
+    /// tools. Byte-identical, not merely present: a rebuild that re-encoded a kept ace would
+    /// silently rewrite a third party's rights.
+    #[test]
+    fn strip_preserves_foreign_aces() {
+        let td = tempfile::tempdir().unwrap();
+        grant(td.path(), OTHER_SID, Access::Read).expect("seed foreign ace");
+        grant(td.path(), SID, Access::ReadWrite).expect("grant");
+
+        let foreign = sid_bytes(OTHER_SID);
+        let before = explicit_for(&read_aces(td.path()), &foreign);
+        assert!(!before.is_empty(), "foreign ace was not seeded");
+
+        strip(td.path(), SID).expect("strip");
+        assert_eq!(
+            explicit_for(&read_aces(td.path()), &foreign),
+            before,
+            "stripping our SID altered another trustee's aces"
+        );
+    }
+}

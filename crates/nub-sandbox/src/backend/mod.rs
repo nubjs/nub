@@ -48,6 +48,11 @@ mod linux_connect_notify;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 
+// The Windows dedicated-account + WFP backend (agent-sandbox). Same cfg as `windows` so its
+// OS-agnostic plan derivation and mode-selection are unit-tested on the macOS dev host.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod windows_account;
+
 // The OS-agnostic Landlock grant derivation. Compiled on Linux (its real consumer)
 // and under `test` on any host — so its security-critical carve logic is unit-tested
 // on the macOS dev host over tempfile trees, without a kernel.
@@ -199,7 +204,30 @@ fn start_proxy_if_needed(policy: &SandboxPolicy) -> Option<EgressProxy> {
         }
         Inspection::Connection => None,
     };
-    EgressProxy::start(decider, mitm).ok()
+    EgressProxy::start_in_range(decider, mitm, proxy_port_range(policy)).ok()
+}
+
+/// The loopback window the proxy must bind inside, when one applies.
+///
+/// Only Windows' dedicated-account backend has one: its WFP permit is installed ONCE, by the
+/// elevated setup, over a fixed port window — so the proxy binds into that window rather than
+/// a filter chasing an ephemeral port, which would cost a UAC prompt every run. Everywhere
+/// else the deny-layer carves the exact port at launch and no range is needed.
+#[cfg(target_os = "windows")]
+fn proxy_port_range(policy: &SandboxPolicy) -> Option<(u16, u16)> {
+    if !windows_account::needs_account_backend(policy) {
+        return None;
+    }
+    // An absent or unreadable marker is NOT decided here: `windows_account::apply` fails
+    // closed with the actionable "run the elevated setup" message, and an ephemeral bind in
+    // the meantime is harmless because that launch never happens.
+    let m = windows_account::state::read_marker().ok().flatten()?;
+    Some((m.port_low, m.port_high))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn proxy_port_range(_policy: &SandboxPolicy) -> Option<(u16, u16)> {
+    None
 }
 
 /// The CA-trust env keys pointed at the child CA bundle (ephemeral CA + real roots).

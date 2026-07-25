@@ -92,6 +92,19 @@ features = [
   "Win32_System_JobObjects",
   "Win32_System_Memory",
   "Win32_NetworkManagement_WindowsFirewall",
+  # The dedicated-account + WFP backend (backend/windows_account/): the SID-keyed egress
+  # fence (WindowsFilteringPlatform; System_Rpc only because FwpmEngineOpen0's signature
+  # names SEC_WINNT_AUTH_IDENTITY_W), local-account lifecycle (NetManagement), the
+  # DPAPI-sealed credential (Security_Cryptography), the Winlogon user-picker hide
+  # (System_Registry), profile deletion (DeleteProfileW lives under UI_Shell), and the FILE_GENERIC_* access
+  # masks the grant/deny aces are built from (Storage_FileSystem).
+  "Win32_NetworkManagement_WindowsFilteringPlatform",
+  "Win32_System_Rpc",
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_Security_Cryptography",
+  "Win32_System_Registry",
+  "Win32_UI_Shell",
+  "Win32_Storage_FileSystem",
 ]
 
 [dev-dependencies]
