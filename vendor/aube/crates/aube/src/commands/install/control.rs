@@ -39,6 +39,11 @@ pub struct InstallProgressSnapshot {
     pub downloaded: usize,
     pub downloaded_bytes: u64,
     pub estimated_bytes: u64,
+    /// Files — not packages — the linker has materialized so far. This is
+    /// the same live counter the CLI renderers show as `N files` during
+    /// linking; it only advances once the install driver hands the linker
+    /// its counter, so a host that takes no progress UI sees `0`.
+    pub files_linked: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +182,9 @@ impl InstallControl {
             downloaded: 0,
             downloaded_bytes: 0,
             estimated_bytes: 0,
+            // Fast path: freshness state was already satisfied, so no link
+            // pass ran and no file was materialized.
+            files_linked: 0,
         }));
     }
 }

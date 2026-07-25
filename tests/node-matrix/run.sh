@@ -38,6 +38,9 @@ fail() { echo "  FAIL  $1"; fails=$((fails + 1)); }
 # leg is redirected; this assertion is the backstop — it fails the leg if the running Node is
 # not the matrix-selected one (a stray pin, a transitive constraint, a floor bump). Probe from
 # the pin-free fixtures dir so the probe itself isn't redirected.
+# fixtures/package.json anchors that isolation: `workspaces: []` is a workspace boundary, ending
+# nub's project walk at the fixtures dir so repo-root config (pnpm-workspace.yaml + the root
+# engines) can never capture the legs.
 ACTUAL_VER="$(cd "$FIX/async-loader-collision" && "$NUB" --eval 'process.stdout.write(process.version)' 2>/dev/null || true)"
 if [[ -n "$ACTUAL_VER" && -n "$NODE_VER" && "$NODE_VER" != "unknown" && "$ACTUAL_VER" != "$NODE_VER" ]]; then
   fail "version mismatch — matrix selected $NODE_VER but nub ran on $ACTUAL_VER (a pin is masking this leg's coverage)"

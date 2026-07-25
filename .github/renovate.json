@@ -6,6 +6,8 @@
   "schedule": ["before 4am on Monday"],
   "semanticCommits": "disabled",
   "separateMajorMinor": true,
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
   "enabledManagers": ["github-actions", "cargo", "npm"],
   "cargo": {
     "rangeStrategy": "update-lockfile",

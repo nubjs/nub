@@ -89,9 +89,9 @@ if (!rt) {
   errors.push(`package.json: @oxc-project/runtime is ${rt}, expected ${canonical} (the Cargo.toml oxc pin)`);
 }
 
-// The repo carries an npm, a pnpm and a bun lockfile (cross-PM dogfooding), and
-// only whichever one the installer happens to use gets regenerated on a bump —
-// so each is checked for a stale helper-runtime pin.
+// The repo carries an npm and a bun lockfile (cross-PM dogfooding), and only
+// whichever one the installer happens to use gets regenerated on a bump — so
+// each is checked for a stale helper-runtime pin.
 if (canonical) {
   const staleIn = (lock, found) => {
     const stale = [...new Set(found)].filter((v) => v !== canonical);
@@ -110,8 +110,8 @@ if (canonical) {
       .flatMap(([, e]) => [e.version, e.resolved?.match(/runtime-([\d.]+)\.tgz/)?.[1]])
       .filter(Boolean),
   );
-  // pnpm and bun both key the package as `@oxc-project/runtime@X.Y.Z`.
-  for (const lock of ["pnpm-lock.yaml", "bun.lock"]) {
+  // bun keys the package as `@oxc-project/runtime@X.Y.Z`.
+  for (const lock of ["bun.lock"]) {
     staleIn(lock, [...read(lock).matchAll(/@oxc-project\/runtime@(\d+\.\d+\.\d+)/g)].map((m) => m[1]));
   }
 }

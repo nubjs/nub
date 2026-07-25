@@ -29,6 +29,8 @@ on:
     - cron: "0 5 * * *"
   workflow_dispatch:
 
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -42,12 +44,18 @@ jobs:
   plan:
     name: Plan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # dorny/paths-filter lists a PR's changed files via the API on pull_request events.
+      pull-requests: read
     outputs:
       smoke_versions: ${{ steps.plan.outputs.smoke_versions }}
       run_full: ${{ steps.plan.outputs.run_full }}
       run_realapps: ${{ steps.plan.outputs.run_realapps }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
         id: filter
         with:
@@ -62,6 +70,8 @@ jobs:
               - '.github/workflows/node-matrix.yml'
       - id: plan
         shell: bash
+        env:
+          AUG_CHANGED: ${{ steps.filter.outputs.aug }}
         run: |
           set -euo pipefail
           run_full=false; run_realapps=false
@@ -71,7 +81,7 @@ jobs:
           smoke='["22.12","22.15","22.16","24.11","26"]'
           if [[ "${{ github.event_name }}" != "pull_request" ]]; then
             run_full=true; run_realapps=true
-          elif [[ "${{ steps.filter.outputs.aug }}" == "true" ]]; then
+          elif [[ "$AUG_CHANGED" == "true" ]]; then
             # A PR touching the augmentation surface gets the full version sweep + real apps.
             run_full=true; run_realapps=true
           fi
@@ -88,16 +98,20 @@ jobs:
             echo "run_full=$run_full"
             echo "run_realapps=$run_realapps"
           } >> "$GITHUB_OUTPUT"
-          echo "event=${{ github.event_name }} aug=${{ steps.filter.outputs.aug }} run_full=$run_full smoke=$smoke"
+          echo "event=${{ github.event_name }} aug=$AUG_CHANGED run_full=$run_full smoke=$smoke"
 
   # Build nub + the native addon ONCE; publish as an artifact the matrix legs reuse.
   build:
     name: Build nub (once)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       # Stable shared-key (restore main's warm cache on PR); save-if:main → PRs
       # read-only. Same debug nub-cli + nub-native footprint as ci.yml's build legs.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
@@ -141,12 +155,16 @@ jobs:
     needs: [plan, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         node: ${{ fromJSON(needs.plan.outputs.smoke_versions) }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: ${{ matrix.node }}
@@ -174,6 +192,8 @@ jobs:
     if: ${{ needs.plan.outputs.run_realapps == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -182,7 +202,9 @@ jobs:
         # a curated subset rather than the full version list.
         node: ["22.16", "24.11", "24.12", "26"]
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: ${{ matrix.node }}
@@ -208,6 +230,7 @@ jobs:
     needs: [smoke, real-apps]
     if: always()
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - shell: bash
         run: |

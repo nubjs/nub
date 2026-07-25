@@ -26,7 +26,7 @@ pub use local_source::resolve_exec_script_path;
 pub use package_ext::is_deprecation_allowed;
 pub use peer_context::{
     AutoInstalledPeers, PeerContextOptions, UnmetPeer, apply_peer_contexts, detect_unmet_peers,
-    hoist_auto_installed_peers, remove_auto_installed_peers,
+    hoist_auto_installed_peers, peer_pass_for_import, remove_auto_installed_peers,
 };
 pub use platform::{SupportedArchitectures, is_supported};
 pub use primer::{PruneStats as PrimerPruneStats, prune_cache as prune_primer_cache};

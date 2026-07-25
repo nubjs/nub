@@ -80,6 +80,13 @@ pub async fn add_to_project(
         .wrap_err("failed to snapshot package.json before embedded add")?;
     let lockfile_path = no_save::lockfile_path_for_project(lock.project_dir())?;
     let original_lockfile = no_save::snapshot_lockfile(&lockfile_path)?;
+    // The rollback set must match what `--no-save` snapshots (`no_save::Snapshot`
+    // and the filtered add's root snapshot): the current-name lockfile *plus*
+    // every pre-rename legacy basename. A write during the add MIGRATES the
+    // legacy name (writes the current name, deletes the legacy file), so
+    // restoring only `lockfile_path` would leave the host's checked-in legacy
+    // lockfile deleted. Empty — hence inert — for standalone aube.
+    let original_legacy = no_save::snapshot_legacy_lockfiles(&lockfile_path)?;
     let mutation_control = options.control.clone();
     let mutation_result = install::control::scope(options.control.clone(), async {
         tokio::select! {
@@ -141,6 +148,16 @@ pub async fn add_to_project(
             let manifest_restore =
                 aube_util::fs_atomic::atomic_write(&manifest_path, &original_manifest);
             let lockfile_restore = no_save::restore_lockfile(&lockfile_path, &original_lockfile);
+            // Every path is attempted before any error is surfaced, so one
+            // unwritable file cannot strand the rest half-restored.
+            let mut legacy_restore: Result<(), miette::Report> = Ok(());
+            for (path, bytes) in &original_legacy {
+                if let Err(error) = no_save::restore_lockfile(path, bytes)
+                    && legacy_restore.is_ok()
+                {
+                    legacy_restore = Err(error);
+                }
+            }
             if let Err(restore_error) = manifest_restore {
                 return Err(miette!(
                     code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
@@ -148,6 +165,12 @@ pub async fn add_to_project(
                 ));
             }
             if let Err(restore_error) = lockfile_restore {
+                return Err(miette!(
+                    code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
+                    "install cancelled and lockfile rollback failed: {restore_error}"
+                ));
+            }
+            if let Err(restore_error) = legacy_restore {
                 return Err(miette!(
                     code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
                     "install cancelled and lockfile rollback failed: {restore_error}"

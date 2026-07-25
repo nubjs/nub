@@ -26,7 +26,7 @@
 
 use crate::version_satisfies;
 use crate::{FxHashMap, FxHashSet};
-use aube_lockfile::{DepType, DirectDep, LockedPackage, LockfileGraph};
+use aube_lockfile::{DepType, DirectDep, LockedPackage, LockfileGraph, LockfileKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A peer dependency whose declared range doesn't match the version the
@@ -456,6 +456,48 @@ pub fn apply_peer_contexts(
         current
     };
     Ok(result)
+}
+
+/// The peer pass every *import* path runs after parsing a foreign lockfile,
+/// before writing the converted one. A no-op for source formats that already
+/// carry peer context.
+///
+/// npm/bun lockfiles serialize a flat, pre-hoisted tree with no peer-context
+/// suffixes and no mirrored peer edges — while install deliberately SKIPS its
+/// own peer pass for pnpm/aube incumbents, on the assumption that such a
+/// lockfile is already peer-resolved. An import that writes a suffix-less
+/// target therefore breaks that invariant: under the isolated store layout a
+/// peer-dependent package lands with no sibling peer link and dies at runtime
+/// with `Cannot find package` (#453).
+///
+/// Deliberately narrower than install's equivalent sequence:
+///
+/// * [`platform::filter_graph`](crate::platform::filter_graph) is NOT run — an
+///   imported lockfile stays cross-platform, so no host pruning.
+/// * Yarn is excluded because real `yarn.lock` files record no per-entry
+///   `peerDependencies`; the pass would be a no-op without a packument fetch,
+///   which is a separate, deeper change.
+/// * [`PeerContextOptions::default()`] is used because import threads no
+///   settings context. Those defaults match aube's own settings defaults, so a
+///   project with no peer-knob overrides gets install-identical suffixes; one
+///   that DOES override a knob (e.g. `dedupe-peers`) won't see it reflected —
+///   a fidelity gap, never a runtime break, since a later install reads the
+///   written lockfile as an already-resolved incumbent and consumes the
+///   suffixes as-is.
+pub fn peer_pass_for_import(
+    graph: LockfileGraph,
+    kind: LockfileKind,
+) -> Result<LockfileGraph, crate::Error> {
+    if !matches!(
+        kind,
+        LockfileKind::Npm | LockfileKind::NpmShrinkwrap | LockfileKind::Bun
+    ) {
+        return Ok(graph);
+    }
+    let (hoisted, auto_installed) = hoist_auto_installed_peers(graph);
+    let mut graph = apply_peer_contexts(hoisted, &PeerContextOptions::default())?;
+    remove_auto_installed_peers(&mut graph, &auto_installed);
+    Ok(graph)
 }
 
 /// Cross-subtree peer-variant dedupe. When `dedupe-peer-dependents` is

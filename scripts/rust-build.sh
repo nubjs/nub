@@ -71,8 +71,41 @@ else
 fi
 
 mkdir -p "$target"
-printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s\n' "$why" "$target" >&2
-# NUB_SHARED_TARGET is routing input for this wrapper, not part of the command's
-# environment. In particular, tests must not expose it to spawned user code.
-unset NUB_SHARED_TARGET
-exec env CARGO_TARGET_DIR="$target" cargo "$@"
+
+# CONTENTION CONTROL. Many agent worktrees build concurrently, and every cargo
+# assumes it owns the machine — ~20 parallel builds drove the 10-core dev host to
+# load ~190 and starved the UI (2026-07-23). Two default-on levers, both no-ops
+# where they don't apply:
+#   - QoS clamp (darwin only): run cargo at 'utility' QoS so interactive work
+#     always preempts builds. An uncontended build still gets all cores — the
+#     clamp only yields under pressure. NUB_BUILD_FG=1 opts out for a
+#     latency-sensitive foreground build.
+#   - Default job cap on big hosts (>8 cores): CARGO_BUILD_JOBS = ncpu-4 leaves
+#     scheduler/memory headroom when N builds overlap. Any caller choice wins:
+#     a pre-set CARGO_BUILD_JOBS, NUB_BUILD_JOBS, or an explicit -j/--jobs flag
+#     (cargo's CLI flag outranks the env var).
+ncpu=$( { sysctl -n hw.ncpu || nproc; } 2>/dev/null || echo 4 )
+if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+  if [ -n "${NUB_BUILD_JOBS:-}" ]; then
+    CARGO_BUILD_JOBS="$NUB_BUILD_JOBS" && export CARGO_BUILD_JOBS
+  elif [ "$ncpu" -gt 8 ]; then
+    CARGO_BUILD_JOBS=$((ncpu - 4)) && export CARGO_BUILD_JOBS
+  fi
+fi
+qos=""
+if [ "${NUB_BUILD_FG:-}" != "1" ] && [ "$(uname)" = "Darwin" ] \
+  && command -v taskpolicy >/dev/null 2>&1; then
+  qos="taskpolicy -c utility"
+fi
+
+printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s jobs=%s qos=%s\n' \
+  "$why" "$target" "${CARGO_BUILD_JOBS:-default}" "${qos:-none}" >&2
+# NUB_* vars are routing input for this wrapper, not part of the command's
+# environment. In particular, tests must not expose them to spawned user code.
+unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG
+# RUSTC_WRAPPER= disables the machine-global rustc-qos wrapper (make qos-global)
+# for this invocation: QoS is already applied at the cargo level here, and with
+# NUB_BUILD_FG unset above, a foreground (NUB_BUILD_FG=1) build would otherwise
+# be re-clamped at the rustc level. Cargo treats the empty value as "no wrapper".
+# $qos word-splits deliberately (empty, or "taskpolicy -c utility").
+exec env CARGO_TARGET_DIR="$target" RUSTC_WRAPPER= $qos cargo "$@"

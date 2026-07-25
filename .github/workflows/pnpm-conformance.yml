@@ -32,6 +32,8 @@ on:
         required: false
         default: ""
 
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
   # Pin pnpm to the EXACT version nub spoofs on `pnpm --version`
@@ -52,10 +54,14 @@ jobs:
     name: pnpm black-box suite vs nub (ubuntu)
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -68,7 +74,7 @@ jobs:
         # The suite's registry mock launches verdaccio via a real `pnpm
         # --use-node-version` — that is test INFRASTRUCTURE, separate from the
         # commands under test (which the seam routes to nub). Pin it to PNPM_PIN.
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] intentional global install, exact-version pinned via PNPM_PIN
           npm install -g "pnpm@${PNPM_PIN}"
           echo "real pnpm (registry infra): $(pnpm --version)"
 
@@ -76,11 +82,15 @@ jobs:
         env:
           PNPM_CLONE_DIR: ${{ runner.temp }}/pnpm-conformance-clone
           KEEP_CLONE: "1"
+          JEST_ARGS: ${{ github.event.inputs.jest_args }}
         run: |
+          # JEST_ARGS is intentionally unquoted: it carries zero-or-more extra
+          # jest args (blank means none) and must word-split like the dispatch
+          # input always has.
           tests/pnpm-conformance/run.sh \
             target/debug/nub \
             "${PNPM_TAG}" \
-            ${{ github.event.inputs.jest_args }}
+            ${JEST_ARGS}
 
       - name: Upload jest results
         if: always()

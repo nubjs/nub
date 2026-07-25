@@ -111,7 +111,10 @@ function githubReleases() {
     ["api", `repos/${REPO}/releases`, "--paginate"],
     { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
   );
-  const releases = JSON.parse(raw.replace(/\]\s*\[/g, ",")); // join paginated arrays
+  // Join paginated arrays, and drop prereleases: the rolling `canary` release
+  // is recreated on every main push, so its counts reset and would corrupt the
+  // snapshot deltas.
+  const releases = JSON.parse(raw.replace(/\]\s*\[/g, ",")).filter((r) => !r.prerelease);
   const header = "snapshot_date,tag,published_at,asset,download_count";
   const rows = releases.flatMap((rel) =>
     rel.assets.map(

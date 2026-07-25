@@ -255,7 +255,7 @@ It's fast — avoids the per-command Node.js bootstrap lag incurred by JS-based 
 - 🛡️ Blocks postinstall by default
 - 🦠 Checks [osv.dev](https://osv.dev) for known-malicious package versions during resolution by default
 - 🔻 Refuses provenance downgrades by default
-- ⏳ 24-hour `minimumReleaseAge` by default
+- ⏳ Strict 24-hour `minimumReleaseAge` by default
 
 ### Compatibility
 

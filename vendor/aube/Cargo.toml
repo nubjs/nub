@@ -33,10 +33,15 @@ panic = "unwind"
 [workspace.package]
 version = "1.32.0"
 edition = "2024"
-# Kept at the floor mise can build with (its distro packaging pins the
-# toolchain) so mise can embed the library crates. CI enforces this via
-# `cargo msrv verify` — bump deliberately, not as a side effect.
-rust-version = "1.91"
+# DELIBERATE NUB FORK DELTA — do not converge to upstream on a sync.
+# Upstream holds this at 1.91 so mise (which embeds aube's library crates and
+# is packaged by distros that pin an old toolchain) can build it. nub does not
+# ship that way: it vendors aube and compiles every binary on current stable,
+# and nub CI does not MSRV-check the vendored tree — so upstream's floor does
+# not bind us. We raise it to 1.95 for core::hint::cold_path() on the rare arms
+# of the hot install loops (linker, resolver cache, lockfile subset parser,
+# tarball validation). Preserve this on every aube bump — see the aube-bump skill.
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/jdx/aube"
 homepage = "https://github.com/jdx/aube"

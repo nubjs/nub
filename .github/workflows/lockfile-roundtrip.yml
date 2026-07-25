@@ -55,6 +55,8 @@ on:
     - cron: "0 7 * * *"
   workflow_dispatch: {}
 
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -75,10 +77,14 @@ jobs:
     # Skip the scheduled run — the nightly job covers the full set.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -87,7 +93,7 @@ jobs:
         with:
           bun-version: ${{ env.BUN_PIN }}
       - name: Pin package managers on PATH
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] versions pinned via workflow-level *_PIN env vars
           npm install -g "npm@${NPM_PIN}" "pnpm@${PNPM_PIN}"
           echo "npm:  $(npm --version)"
           echo "pnpm: $(pnpm --version)"
@@ -107,10 +113,14 @@ jobs:
     name: drop-in round-trip, full matrix (ubuntu)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -119,7 +129,7 @@ jobs:
         with:
           bun-version: ${{ env.BUN_PIN }}
       - name: Pin package managers on PATH
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] versions pinned via workflow-level *_PIN env vars
           npm install -g "npm@${NPM_PIN}" "pnpm@${PNPM_PIN}" "yarn@${YARN_PIN}"
           echo "npm:  $(npm --version)"
           echo "pnpm: $(pnpm --version)"
@@ -134,10 +144,14 @@ jobs:
     name: cross-format conversion, full matrix (ubuntu)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -146,7 +160,7 @@ jobs:
         with:
           bun-version: ${{ env.BUN_PIN }}
       - name: Pin package managers on PATH
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] versions pinned via workflow-level *_PIN env vars
           npm install -g "npm@${NPM_PIN}" "pnpm@${PNPM_PIN}" "yarn@${YARN_PIN}"
           echo "npm:  $(npm --version)"
           echo "pnpm: $(pnpm --version)"
@@ -168,10 +182,14 @@ jobs:
     name: lockfile mutation differential, full matrix (ubuntu)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -180,7 +198,7 @@ jobs:
         with:
           bun-version: ${{ env.BUN_PIN }}
       - name: Pin package managers on PATH
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] versions pinned via workflow-level *_PIN env vars
           npm install -g "npm@${NPM_PIN}" "pnpm@${PNPM_PIN}"
           echo "npm:  $(npm --version)"
           echo "pnpm: $(pnpm --version)"

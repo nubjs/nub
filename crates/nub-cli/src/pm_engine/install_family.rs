@@ -816,7 +816,7 @@ fn import_to_pnpm_lock(force: bool) -> miette::Result<String> {
         }
     };
 
-    let (mut graph, kind) = match aube_lockfile::parse_for_import(&root, &manifest) {
+    let (graph, kind) = match aube_lockfile::parse_for_import(&root, &manifest) {
         Ok(pair) => pair,
         Err(aube_lockfile::Error::NotFound(_)) => {
             restore(&backup);
@@ -831,47 +831,18 @@ fn import_to_pnpm_lock(force: bool) -> miette::Result<String> {
         }
     };
 
-    // npm/bun lockfiles serialize a flat, pre-hoisted tree with no peer context.
-    // A pnpm-lock is expected to carry peer-context suffixes, and the install
-    // path deliberately skips its peer pass for pnpm incumbents on exactly that
-    // assumption (aube's `apply_lockfile_graph_platform_rules`). Writing a
-    // suffix-less pnpm-lock here violates that invariant: under the isolated
-    // store layout a peer-dependent package lands with no sibling peer link and
-    // dies at runtime with `Cannot find package` (#453). Re-establish the edges
-    // with the same pass the install path runs — `hoist_auto_installed_peers`
-    // then `apply_peer_contexts`, both pure offline graph transforms (no
-    // registry). `filter_graph` is intentionally omitted: an imported lockfile
-    // stays cross-platform, so no platform pruning. Yarn is excluded because
-    // real `yarn.lock` files don't record per-entry `peerDependencies`, so the
-    // pass would be a no-op without a packument fetch — a separate, deeper change.
-    //
-    // Uses pnpm's default peer options (import has no settings ctx here); those
-    // defaults match aube's own settings defaults, so a project without peer-knob
-    // overrides gets install-identical suffixes. A project that DOES override a
-    // knob (e.g. `dedupe-peers`) won't see it reflected in the import, but a later
-    // `nub install` reads this as a pnpm incumbent and skips its own peer pass, so
-    // the suffixes are consumed as-is — a fidelity gap, never a runtime break.
-    if matches!(
-        kind,
-        LockfileKind::Npm | LockfileKind::NpmShrinkwrap | LockfileKind::Bun
-    ) {
-        let (hoisted, auto_installed) = aube_resolver::hoist_auto_installed_peers(graph);
-        match aube_resolver::apply_peer_contexts(
-            hoisted,
-            &aube_resolver::PeerContextOptions::default(),
-        ) {
-            Ok(contextualized) => {
-                graph = contextualized;
-                aube_resolver::remove_auto_installed_peers(&mut graph, &auto_installed);
-            }
-            // Restore a moved-aside pnpm-lock like every other error path here;
-            // a bare `?` would orphan the user's original as `.import-backup`.
-            Err(e) => {
-                restore(&backup);
-                return Err(miette!("peer-context pass failed: {e}"));
-            }
+    // install skips its own peer pass for a pnpm incumbent, assuming a pnpm-lock
+    // is already peer-resolved — so a suffix-less source (npm / bun) has to be
+    // contextualized here or nothing downstream ever restores the edges (#453).
+    let graph = match aube_resolver::peer_pass_for_import(graph, kind) {
+        Ok(graph) => graph,
+        // Restore a moved-aside pnpm-lock like every other error path here;
+        // a bare `?` would orphan the user's original as `.import-backup`.
+        Err(e) => {
+            restore(&backup);
+            return Err(miette!("peer-context pass failed: {e}"));
         }
-    }
+    };
 
     match aube_lockfile::write_lockfile_as(&root, &graph, &manifest, LockfileKind::Pnpm) {
         Ok(_) => {

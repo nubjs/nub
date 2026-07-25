@@ -42,11 +42,16 @@ impl RuntimeSource {
 }
 
 /// Who provided the resolved node binary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeProvenance {
     Mise,
     AubeManaged,
     System,
+    /// A host embedding aube supplied the node itself — not resolved by
+    /// aube, not mise. The honest label when no specific provider is
+    /// named, and the default for [`EmbedderRuntime`].
+    #[default]
+    Embedder,
 }
 
 impl RuntimeProvenance {
@@ -55,6 +60,7 @@ impl RuntimeProvenance {
             RuntimeProvenance::Mise => "mise",
             RuntimeProvenance::AubeManaged => aube_util::embedder().name,
             RuntimeProvenance::System => "system",
+            RuntimeProvenance::Embedder => "embedder",
         }
     }
 }
@@ -66,6 +72,12 @@ pub struct RuntimeContext {
     pub bin_dir: Option<PathBuf>,
     /// Absolute path of the selected node binary, when one resolved.
     pub node_bin: Option<PathBuf>,
+    /// The `npm_node_execpath` an embedder pins to the *real* Node when it
+    /// differs from the program that drives `NODE`/PATH — a wrapping host
+    /// points `NODE` at a shim, but tooling (node-gyp, node-pre-gyp,
+    /// re-spawners) must still locate the real Node's install prefix.
+    /// `None` ⇒ falls back to `node_bin` (today's behavior).
+    pub node_execpath: Option<PathBuf>,
     /// Exact resolved version (`"24.4.1"`), when known.
     pub version: Option<String>,
     /// The requested range/spec as written (`"^24.4.0"`, `"lts/jod"`).
@@ -87,6 +99,7 @@ impl RuntimeContext {
         RuntimeContext {
             bin_dir: None,
             node_bin: None,
+            node_execpath: None,
             version: None,
             requested: None,
             source: RuntimeSource::PathFallback,
@@ -131,17 +144,69 @@ pub fn current() -> Option<Arc<RuntimeContext>> {
     }
 }
 
+/// A node runtime supplied by an embedding host, for [`seed_embedder_runtime`].
+///
+/// Keeps the three paths a *wrapping* host must distinguish independent — the
+/// PATH entry, the program `NODE`/spawn sites invoke, and the real Node tooling
+/// reads as `npm_node_execpath` — where a *selecting* host ([`seed_embedder_node`])
+/// collapses all three onto one directory. Every field is behavior-neutral when
+/// unset: [`Default`] plus [`seed_embedder_node`]'s delegation reproduce the
+/// single-directory seed exactly.
+#[derive(Debug, Clone, Default)]
+pub struct EmbedderRuntime {
+    /// Directory prepended to the script PATH ([`path_entries`]). Need not
+    /// contain a `node` — a host may point `NODE` at a shim elsewhere.
+    pub bin_dir: Option<PathBuf>,
+    /// The program `NODE` and spawn sites use ([`node_program`]).
+    /// `None` ⇒ `bin_dir.join("node")`, today's derivation.
+    pub node_program: Option<PathBuf>,
+    /// The real Node for `npm_node_execpath`, when it differs from the program
+    /// driving `NODE`. `None` ⇒ falls back to `node_program`.
+    pub node_execpath: Option<PathBuf>,
+    /// Version to record. `Some` skips the probe — the graph-hash opt-out (a
+    /// recorded version reaches the virtual-store hash via engine resolution).
+    pub version: Option<String>,
+    /// Probe `<node_program> --version` when `version` is `None`.
+    /// [`seed_embedder_node`] opts in (today's behavior); the default is off.
+    pub probe_version: bool,
+    /// Provenance surfaced by `runtime`/`doctor`. Defaults to
+    /// [`RuntimeProvenance::Embedder`]; [`seed_embedder_node`] pins `Mise`.
+    pub provenance: RuntimeProvenance,
+}
+
 /// Seed the current install's runtime slot with a node binary supplied by an
 /// embedding host (e.g. mise), so lifecycle scripts spawn on that node and
 /// find it on PATH instead of relying on an ambient `node`.
 ///
-/// `bin_dir` is the directory containing the `node` executable; it is
-/// prepended to the script PATH ([`path_entries`]) and its `node` is used as
-/// [`node_program`]. Must be called inside a [`scope`] (the install task) and
-/// before [`ensure`] runs — `ensure` returns early when the slot is already
-/// set, so this override wins without aube probing for its own runtime. A
-/// no-op outside a scope or if the slot is already populated.
+/// `bin_dir` is the directory containing the `node` executable; it is prepended
+/// to the script PATH ([`path_entries`]) and its `node` is used as
+/// [`node_program`]. A directory selector: `NODE` and `npm_node_execpath` both
+/// resolve to `bin_dir/node`, and the version is probed. A host that *wraps*
+/// Node (distinct program, distinct real execpath, known version) uses
+/// [`seed_embedder_runtime`].
+///
+/// Must be called inside a [`scope`] (the install task) and before [`ensure`]
+/// runs — `ensure` returns early when the slot is already set, so this override
+/// wins without aube probing for its own runtime. A no-op outside a scope or if
+/// the slot is already populated.
 pub async fn seed_embedder_node(bin_dir: PathBuf) {
+    seed_embedder_runtime(EmbedderRuntime {
+        bin_dir: Some(bin_dir),
+        probe_version: true,
+        provenance: RuntimeProvenance::Mise,
+        ..Default::default()
+    })
+    .await
+}
+
+/// Seed the current install's runtime slot with a host-supplied
+/// [`EmbedderRuntime`], keeping the PATH entry, `NODE` program, and
+/// `npm_node_execpath` independent.
+///
+/// Same scope/ordering contract as [`seed_embedder_node`]: a no-op outside a
+/// [`scope`] or when the slot is already set, so the guard precedes any path
+/// resolution or version probe.
+pub async fn seed_embedder_runtime(runtime: EmbedderRuntime) {
     // No-op outside an install scope, or when the slot is already seeded.
     // Check first so the path/version probing below is skipped entirely in
     // those cases (a later `set` would be a no-op anyway).
@@ -151,19 +216,51 @@ pub async fn seed_embedder_node(bin_dir: PathBuf) {
     if !should_seed {
         return;
     }
-    // Absolutize: lifecycle scripts may run with a different working
-    // directory, so both `node_program()` and the prepended PATH entry must
-    // resolve independently of cwd. `absolute` doesn't require the dir to
+    // Absolutize every supplied path: lifecycle scripts may run with a
+    // different working directory, so the PATH entry, program, and execpath
+    // must resolve independently of cwd. `absolute` doesn't require the path to
     // exist or touch symlinks; fall back to the input if it errors.
-    let bin_dir = std::path::absolute(&bin_dir).unwrap_or(bin_dir);
+    let absolutize = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
+    let bin_dir = runtime.bin_dir.map(absolutize);
     let node_exe = if cfg!(windows) { "node.exe" } else { "node" };
-    let node_bin = bin_dir.join(node_exe);
-    // Probe the supplied node for its version so engine checks and
-    // virtual-store hashing key off the *same* node as lifecycle scripts,
-    // instead of `effective_node_version` falling back to an ambient `node`.
-    // Async spawn so the install task doesn't block a Tokio worker on the
-    // child process.
-    let version = tokio::process::Command::new(&node_bin)
+    // Program: the explicit one, else `bin_dir/node` — today's derivation.
+    let node_program = runtime
+        .node_program
+        .map(absolutize)
+        .or_else(|| bin_dir.as_ref().map(|dir| dir.join(node_exe)));
+    let node_execpath = runtime.node_execpath.map(absolutize);
+    // Version: the supplied one wins; else probe the program when asked, so
+    // engine checks and virtual-store hashing key off the *same* node as
+    // lifecycle scripts instead of `effective_node_version` falling back to an
+    // ambient `node`.
+    let version = match runtime.version.filter(|v| !v.is_empty()) {
+        supplied @ Some(_) => supplied,
+        None if runtime.probe_version => match node_program.as_deref() {
+            Some(program) => probe_node_version(program).await,
+            None => None,
+        },
+        None => None,
+    };
+    let ctx = RuntimeContext {
+        node_bin: node_program,
+        node_execpath,
+        bin_dir,
+        version,
+        requested: None,
+        source: RuntimeSource::Embedder,
+        provenance: runtime.provenance,
+        fresh_pin: None,
+    };
+    let _ = INSTALL_RUNTIME.try_with(|slot| {
+        let _ = slot.set(Arc::new(ctx));
+    });
+}
+
+/// Probe a node binary for its version (`"24.4.1"`); `None` if the spawn fails,
+/// exits non-zero, or yields empty output. Strips the leading `v`. Async so the
+/// install task doesn't block a Tokio worker on the child process.
+async fn probe_node_version(node_bin: &Path) -> Option<String> {
+    tokio::process::Command::new(node_bin)
         .arg("--version")
         .output()
         .await
@@ -171,19 +268,7 @@ pub async fn seed_embedder_node(bin_dir: PathBuf) {
         .filter(|out| out.status.success())
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .map(|v| v.trim().trim_start_matches('v').to_string())
-        .filter(|v| !v.is_empty());
-    let ctx = RuntimeContext {
-        node_bin: Some(node_bin),
-        bin_dir: Some(bin_dir),
-        version,
-        requested: None,
-        source: RuntimeSource::Embedder,
-        provenance: RuntimeProvenance::Mise,
-        fresh_pin: None,
-    };
-    let _ = INSTALL_RUNTIME.try_with(|slot| {
-        let _ = slot.set(Arc::new(ctx));
-    });
+        .filter(|v| !v.is_empty())
 }
 
 /// The node executable spawn sites should use: the switched runtime's
@@ -231,23 +316,31 @@ pub fn path_entries() -> Vec<PathBuf> {
 /// ([`aube_scripts::aube_user_agent`]), so a tool sees one UA whether it ran
 /// as a postinstall or under dlx.
 ///
-/// Prefers the switched runtime's node; then the embedder-provisioned node
-/// ([`EngineContext::runtime_node_bin`]) when an embedder owns provisioning —
-/// so on a node-less machine these stay the provisioned node instead of
-/// resolving to nothing; then the ambient `node` on `PATH`. pnpm/npm always
-/// set them, and tools (`node-gyp`, `node-pre-gyp`, re-spawners) read
-/// `npm_node_execpath` to locate the exact node that drove the package manager.
+/// `NODE` is the program spawn sites use — the switched runtime's node; then the
+/// embedder-provisioned node ([`EngineContext::runtime_node_bin`]) when an
+/// embedder owns provisioning, so on a node-less machine it stays the
+/// provisioned node instead of resolving to nothing; then the ambient `node` on
+/// `PATH`. `npm_node_execpath` prefers the runtime's
+/// [`RuntimeContext::node_execpath`] — the *real* Node a wrapping embedder pins
+/// so tools (`node-gyp`, `node-pre-gyp`, re-spawners) locate the exact node that
+/// drove the package manager — and falls back to the program when unset (today's
+/// behavior, where both name the same binary). pnpm/npm always set both.
 ///
 /// [`EngineContext::runtime_node_bin`]: aube_util::EngineContext::runtime_node_bin
 pub fn apply_child_env(cmd: &mut tokio::process::Command) {
     cmd.env("npm_config_user_agent", aube_scripts::aube_user_agent());
+    let ctx = current();
     let node_bin = resolve_node_bin(
-        current().and_then(|ctx| ctx.node_bin.clone()),
+        ctx.as_ref().and_then(|c| c.node_bin.clone()),
         aube_util::engine_context().runtime_node_bin,
         aube_runtime::node_on_path(),
     );
     if let Some(node_bin) = node_bin {
-        cmd.env("npm_node_execpath", &node_bin);
+        let execpath = ctx
+            .as_ref()
+            .and_then(|c| c.node_execpath.clone())
+            .unwrap_or_else(|| node_bin.clone());
+        cmd.env("npm_node_execpath", &execpath);
         cmd.env("NODE", &node_bin);
     }
 }
@@ -505,6 +598,9 @@ async fn resolve_context(
         Some(res) => RuntimeContext {
             bin_dir: res.bin_dir.clone(),
             node_bin: Some(res.node_bin.clone()),
+            // The resolver selects one node; `NODE`/`npm_node_execpath` name the
+            // same binary. Only a wrapping embedder splits them.
+            node_execpath: None,
             version: Some(res.version.to_string()),
             requested: Some(requested),
             source,
@@ -868,6 +964,17 @@ mod tests {
         context
     }
 
+    /// The value `apply_child_env` set for `key`, as a `PathBuf` (these env
+    /// vars are always node-binary paths). Reads the built command's env map
+    /// without spawning.
+    fn env_of(cmd: &tokio::process::Command, key: &str) -> Option<PathBuf> {
+        cmd.as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(PathBuf::from)
+    }
+
     #[tokio::test]
     async fn seed_embedder_node_drives_node_program_and_path() {
         scope(async {
@@ -886,10 +993,64 @@ mod tests {
             assert_eq!(node_program(), expected.join(node_exe));
             assert_eq!(path_entries(), vec![expected.clone()]);
 
+            // Delegation preserves today's semantics: mise provenance, no
+            // separate execpath, so `apply_child_env` names one binary for both
+            // env vars (the conflation the selector case keeps).
+            assert_eq!(ctx.provenance, RuntimeProvenance::Mise);
+            assert!(ctx.node_execpath.is_none());
+            let mut cmd = tokio::process::Command::new("true");
+            apply_child_env(&mut cmd);
+            assert_eq!(env_of(&cmd, "NODE"), Some(expected.join(node_exe)));
+            assert_eq!(
+                env_of(&cmd, "npm_node_execpath"),
+                Some(expected.join(node_exe))
+            );
+
             // `ensure`-style early return: a second seed does not clobber the
             // first (OnceCell is set once).
             seed_embedder_node(PathBuf::from("/other")).await;
             assert_eq!(node_program(), expected.join(node_exe));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn seed_embedder_runtime_splits_three_paths() {
+        scope(async {
+            assert!(current().is_none(), "slot starts empty");
+            // A wrapping host: a shim dir on PATH, `NODE` a wrapper program in a
+            // different dir, `npm_node_execpath` the real node, explicit version.
+            let bin_dir = PathBuf::from("/opt/wrapper/bin");
+            let program = PathBuf::from("/opt/wrapper/libexec/node-shim");
+            let execpath = PathBuf::from("/opt/real/node/bin/node");
+            seed_embedder_runtime(EmbedderRuntime {
+                bin_dir: Some(bin_dir.clone()),
+                node_program: Some(program.clone()),
+                node_execpath: Some(execpath.clone()),
+                version: Some("22.15.0".to_string()),
+                probe_version: false,
+                provenance: RuntimeProvenance::Embedder,
+            })
+            .await;
+
+            let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+            let ctx = current().expect("slot seeded");
+
+            // The three paths stay independent: PATH entry, program, execpath.
+            assert_eq!(path_entries(), vec![abs(&bin_dir)]);
+            assert_eq!(node_program(), abs(&program));
+            let mut cmd = tokio::process::Command::new("true");
+            apply_child_env(&mut cmd);
+            assert_eq!(env_of(&cmd, "NODE"), Some(abs(&program)));
+            assert_eq!(env_of(&cmd, "npm_node_execpath"), Some(abs(&execpath)));
+
+            // Explicit version recorded verbatim. `version: Some` plus
+            // `probe_version: false` each independently skip the `--version`
+            // spawn, so the fake paths above are never executed.
+            assert_eq!(ctx.version.as_deref(), Some("22.15.0"));
+            // Provenance flows and labels honestly, not "mise".
+            assert_eq!(ctx.provenance, RuntimeProvenance::Embedder);
+            assert_eq!(ctx.provenance.label(), "embedder");
         })
         .await;
     }

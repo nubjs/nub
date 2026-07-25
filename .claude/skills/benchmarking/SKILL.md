@@ -20,7 +20,7 @@ Benchmarking `nub install` against another PM; producing or refreshing the homep
 ```sh
 # COLD: empty the tool's REAL cache + wipe node_modules before each run (untimed), then time the install.
 hyperfine --warmup 0 --runs 5 \
-  --prepare 'rm -rf node_modules && rm -rf "$(bun pm cache)"' \
+  --prepare 'rm -rf node_modules && d="$(bun pm cache)" && rm -rf "${d:?}"' \
   'bun install --ignore-scripts'
 
 # WARM-RELINK: cache populated, wipe ONLY node_modules before each run.

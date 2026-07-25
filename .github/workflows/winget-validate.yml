@@ -22,12 +22,16 @@ on:
       - ".github/workflows/winget-validate.yml"
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   install-from-manifest:
     name: winget install --manifest (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       # GitHub-hosted Windows runners do not reliably ship the winget CLI (it is a
       # desktop App Installer component, not a Server feature). Install it if it's

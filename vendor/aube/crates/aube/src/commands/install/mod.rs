@@ -68,7 +68,9 @@ use materialize::{
 pub(crate) use settings::PeerDependencyRules;
 pub(crate) use settings::resolve_minimum_release_age;
 pub(crate) use settings::{ResolverConfigInputs, configure_resolver, finalize_lockfile_graph};
-pub(crate) use side_effects_cache::{SideEffectsCacheConfig, side_effects_cache_root};
+pub(crate) use side_effects_cache::{
+    SideEffectsCacheConfig, SideEffectsCacheLocation, side_effects_cache_root,
+};
 
 use settings::{
     check_unmet_peers, default_lockfile_network_concurrency, default_streaming_network_concurrency,
@@ -227,6 +229,34 @@ pub(crate) fn package_build_is_allowed(
         ),
         aube_scripts::AllowDecision::Allow
     )
+}
+
+/// Whether a package's virtual-store path must carry the engine fingerprint.
+///
+/// Deliberately a SUPERSET of the policy decision: the lifecycle phase also
+/// builds packages the `defaultTrust` floor clears, and a package that builds
+/// writes its artifacts into that directory. Keying only on an explicit allow
+/// would give a floor-built native addon an engine-agnostic path — shared
+/// across every project on the machine — so two Node majors would overwrite
+/// each other's `build/Release/*.node` there.
+///
+/// The floor's dynamic gates (advisory vetting, the cooling window) are
+/// deliberately NOT consulted: they only ever narrow what builds, and they are
+/// unknown at prewarm time, which computes these same hashes before the floor
+/// exists. Folding the engine for a package that then does not build costs a
+/// little store dedup; omitting it for one that does is the ABI bug.
+pub(crate) fn build_may_key_engine(
+    policy: &aube_scripts::BuildPolicy,
+    pkg: &aube_lockfile::LockedPackage,
+    default_trust_enabled: bool,
+) -> bool {
+    package_build_is_allowed(policy, pkg)
+        || (default_trust_enabled
+            // Registry-resolved only, matching `DefaultTrustFloor::trusts` so an
+            // alias or a file:/git package cannot borrow a listed name's bucket.
+            && pkg.local_source.is_none()
+            && !pkg.registry_git_hosted
+            && aube_scripts::is_default_trusted(pkg.registry_name()))
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -1016,10 +1046,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // does, so a fresh install and the drift check agree.
     let effective_package_extensions_checksum =
         if aube_util::engine_context().enforce_package_extensions_checksum {
-            aube_lockfile::pnpm::package_extensions_checksum(&settings::effective_package_extensions(
-                &manifest,
-                &settings_ctx,
-            ))
+            aube_lockfile::pnpm::package_extensions_checksum(
+                &settings::effective_package_extensions(&manifest, &settings_ctx),
+            )
         } else {
             None
         };
@@ -1443,9 +1472,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let network_mode = opts.network_mode;
             let cwd_for_client = cwd.clone();
 
-            let lock_node_version = crate::engines::effective_node_version(
-                aube_settings::resolved::node_version(&settings_ctx).as_deref(),
-            );
+            let lock_node_version = crate::engines::build_node_version();
             let lock_build_policy = std::sync::Arc::new(build_policy.clone());
             let lock_strategy = resolve_link_strategy(&cwd, &settings_ctx, planned_gvs)?;
             let (lock_patches, lock_patch_hashes) =
@@ -1464,6 +1491,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 patch_hashes: lock_patch_hashes,
                 node_version: lock_node_version,
                 build_policy: lock_build_policy,
+                default_trust_enabled,
                 use_global_virtual_store_override: prewarm_gvs_override,
                 virtual_store_dir: aube_dir.clone(),
                 supported_architectures: lock_supported_architectures,
@@ -1601,9 +1629,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // await) can compute the same graph hashes the link phase
             // will. Keeping a single source of truth avoids any
             // subdir-name drift between prewarm and link step 1.
-            let node_version_for_prewarm = crate::engines::effective_node_version(
-                aube_settings::resolved::node_version(&settings_ctx).as_deref(),
-            );
+            let node_version_for_prewarm = crate::engines::build_node_version();
             let build_policy_for_prewarm = std::sync::Arc::new(build_policy.clone());
             let client =
                 std::sync::Arc::new(make_client(&cwd).with_network_mode(opts.network_mode));
@@ -2378,6 +2404,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 patch_hashes: materialize_patch_hashes,
                 node_version: node_version_for_prewarm.clone(),
                 build_policy: build_policy_for_prewarm.clone(),
+                default_trust_enabled,
                 use_global_virtual_store_override: prewarm_gvs_override,
                 virtual_store_dir: aube_dir.clone(),
                 supported_architectures: prewarm_supported_architectures,
@@ -2475,6 +2502,18 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // default `aube-lock.yaml`. Skipped entirely when
             // `lockfile=false`.
             let write_kind = source_kind_before.unwrap_or(aube_lockfile::LockfileKind::Aube);
+            // pnpm persists a top-level `time:` block only under
+            // `resolution-mode=time-based`; every other mode writes a
+            // `time:`-free lockfile even when the resolver kept publish
+            // times in memory (minimumReleaseAge / trustPolicy / the
+            // defaultTrust floor). Decided once here so EVERY lockfile
+            // write below — the main overlapped/inline write and the
+            // catch-up integrity rewrite alike — routes its graph through
+            // `lockfile_graph_for_write(_, persist_times)` and cannot
+            // diverge on the `time:` axis (the integrity rewrite once
+            // wrote its own un-stripped clone, re-introducing `time:`).
+            let persist_times = settings::resolve_resolution_mode(&settings_ctx)
+                == aube_resolver::ResolutionMode::TimeBased;
             if lockfile_enabled {
                 // When `lockfileIncludeTarballUrl=true`, record the
                 // registry tarball URL on every registry-sourced
@@ -2539,18 +2578,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 // snapshot metadata (`optional: true`, `transitivePeerDependencies`)
                 // before the write and before the host-only `filter_graph` below.
                 crate::commands::prepare_resolved_graph_for_lockfile_write(&mut graph);
-                // pnpm persists a top-level `time:` block only under
-                // `resolution-mode=time-based`; in every other mode the
-                // lockfile stays `time:`-free even when the resolver kept
-                // publish times in memory for `minimumReleaseAge` /
-                // `trustPolicy` / the `defaultTrust` floor. Strip them on
-                // the writer's view (a clone) WITHOUT mutating the shared
-                // `graph` — the floor clones `graph` further down and
-                // still needs `graph.times`. Both write paths below
-                // consume this same view, so the overlapped write and the
-                // killswitch write stay byte-identical to each other.
-                let persist_times = settings::resolve_resolution_mode(&settings_ctx)
-                    == aube_resolver::ResolutionMode::TimeBased;
+                // Strip `time:` on the writer's view (a clone) WITHOUT
+                // mutating the shared `graph` — the `defaultTrust` floor
+                // clones `graph` further down and still needs
+                // `graph.times`. Both write paths below consume this same
+                // view, so the overlapped write and the killswitch write
+                // stay byte-identical to each other.
                 let write_graph = lockfile_dir::lockfile_graph_for_write(&graph, persist_times);
                 // The serialize + reformat + atomic write is the slowest
                 // serial span before the linker (10-55 ms on large trees).
@@ -2716,11 +2749,17 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         if let Some(handle) = lockfile_write_handle.take() {
                             lockfile_write_overlap::join(handle).await?;
                         }
+                        // Same `time:`-strip the main write applied: this
+                        // rewrite overwrites that output, so it must honor
+                        // `persist_times` identically or it re-introduces a
+                        // `time:` block on non-time-based lockfiles.
+                        let lock_write_graph =
+                            lockfile_dir::lockfile_graph_for_write(lock_graph, persist_times);
                         if shared_workspace_lockfile || !has_workspace {
                             write_lockfile_dir_remapped(
                                 &lockfile_dir,
                                 &lockfile_importer_key,
-                                lock_graph,
+                                &lock_write_graph,
                                 &manifest,
                                 write_kind,
                             )
@@ -2729,7 +2768,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         } else {
                             write_per_project_lockfiles(
                                 &cwd,
-                                lock_graph,
+                                &lock_write_graph,
                                 &manifests,
                                 write_kind,
                                 per_project_write_selection.as_ref(),
@@ -2855,7 +2894,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let (jail_policy, jail_policy_warnings) =
         JailBuildPolicy::from_settings(&settings_ctx, &ws_config_shared);
     let node_version_override = aube_settings::resolved::node_version(&settings_ctx);
+    // Two questions with two answers: the `engines.node` check honors the
+    // validation-only `node-version` override; the ABI cache keys must reflect
+    // the Node that actually compiles the artifacts, which the override never
+    // switches.
     let node_version = crate::engines::effective_node_version(node_version_override.as_deref());
+    let build_node_version = crate::engines::build_node_version();
     crate::engines::run_checks(
         &aube_dir,
         &manifest,
@@ -2913,7 +2957,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         manifests: &manifests,
         manifest: &manifest,
         build_policy: &build_policy,
-        node_version: node_version.as_deref(),
+        default_trust_enabled,
+        node_version: build_node_version.as_deref(),
         prewarm_graph_hashes: prewarm_graph_hashes.as_ref(),
         aube_dir: &aube_dir,
         modules_dir_name: &modules_dir_name,
@@ -2963,6 +3008,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         aube_dir: &aube_dir,
         virtual_store_dir_max_length,
         child_concurrency,
+        node_version: build_node_version.as_deref(),
         side_effects_cache_setting,
         side_effects_cache_readonly_setting,
         strict_dep_builds_setting,
@@ -2995,6 +3041,187 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod build_may_key_engine_tests {
+    use super::*;
+
+    fn pkg(name: &str) -> aube_lockfile::LockedPackage {
+        aube_lockfile::LockedPackage {
+            name: name.into(),
+            version: "1.0.0".into(),
+            dep_path: format!("{name}@1.0.0"),
+            ..Default::default()
+        }
+    }
+
+    fn empty_policy() -> aube_scripts::BuildPolicy {
+        aube_scripts::BuildPolicy::from_config(&BTreeMap::new(), &[], &[], false).0
+    }
+
+    #[test]
+    fn floor_trusted_package_keys_the_engine_without_an_explicit_allow() {
+        // The regression: the lifecycle phase builds `better-sqlite3` off the
+        // default-trust floor, but the virtual-store path folded the engine
+        // only for an explicitly allowed package — so its native build landed
+        // in a machine-global directory shared by every Node major.
+        let policy = empty_policy();
+        assert!(
+            build_may_key_engine(&policy, &pkg("better-sqlite3"), true),
+            "a floor-built package writes native artifacts and must key the engine"
+        );
+        assert!(
+            !build_may_key_engine(&policy, &pkg("better-sqlite3"), false),
+            "with the floor off the package cannot build, so the path stays engine-agnostic"
+        );
+        assert!(
+            !build_may_key_engine(&policy, &pkg("left-pad"), true),
+            "an unlisted package the floor never trusts must not fold the engine"
+        );
+    }
+
+    #[test]
+    fn floor_trust_does_not_extend_to_non_registry_sources() {
+        // Mirrors `DefaultTrustFloor::trusts`: an alias or a file:/git package
+        // must not borrow a listed name's bucket.
+        let policy = empty_policy();
+        let mut local = pkg("better-sqlite3");
+        local.local_source = Some(aube_lockfile::LocalSource::Directory("../vendored".into()));
+        assert!(!build_may_key_engine(&policy, &local, true));
+
+        let mut hosted = pkg("better-sqlite3");
+        hosted.registry_git_hosted = true;
+        assert!(!build_may_key_engine(&policy, &hosted, true));
+    }
+}
+
+/// The GVS prewarm ([`materialize`]) and the link phase ([`link`]) hash the same
+/// graph independently, and link REUSES the prewarm's hashes whenever the key
+/// sets match — its filter compares key presence and count, never hash VALUES.
+/// So a gate that folds the engine in one phase but not the other never surfaces
+/// as a mismatch: link silently serves the prewarm's hashes, and a native addon
+/// lands at a virtual-store path shared across Node majors. Nothing at runtime
+/// can catch that, which is why it is pinned here.
+#[cfg(test)]
+mod engine_fold_agreement_tests {
+    use super::*;
+
+    const LINK_SRC: &str = include_str!("link.rs");
+    const PREWARM_SRC: &str = include_str!("materialize.rs");
+
+    /// The engine-fold gate's arguments at a file's graph-hash site, minus the
+    /// leading policy binding (each phase holds the policy differently) and with
+    /// whitespace collapsed.
+    fn engine_fold_gate(src: &str, file: &str) -> String {
+        let mut calls = src.match_indices("build_may_key_engine(");
+        let (idx, marker) = calls.next().unwrap_or_else(|| {
+            panic!(
+                "{file} no longer gates its graph-hash `allow` closure on \
+                 `build_may_key_engine`; the two phases must agree or link serves \
+                 wrong-ABI hashes"
+            )
+        });
+        assert!(
+            calls.next().is_none(),
+            "{file} gained a second `build_may_key_engine` call — this check only \
+             knows how to compare one graph-hash site per phase"
+        );
+        let open = idx + marker.len();
+        let args = &src[open..open + src[open..].find(')').expect("unterminated call")];
+        let (_policy, rest) = args
+            .split_once(',')
+            .expect("engine-fold gate takes (policy, pkg, default_trust_enabled)");
+        rest.split_whitespace().collect()
+    }
+
+    #[test]
+    fn the_prewarm_and_the_link_phase_gate_the_engine_fold_identically() {
+        assert_eq!(
+            engine_fold_gate(PREWARM_SRC, "materialize.rs"),
+            engine_fold_gate(LINK_SRC, "link.rs"),
+            "the prewarm and the link phase disagree on which packages fold the \
+             engine into their virtual-store path; link reuses the prewarm's \
+             hashes on a key-set match without comparing values, so this ships as \
+             a wrong-ABI store path rather than a failure"
+        );
+    }
+
+    #[test]
+    fn a_floor_built_package_taints_its_dependents_under_both_phases_hashers() {
+        // `better-sqlite3` builds off the `defaultTrust` floor rather than an
+        // explicit allow — the case #548 fixed, and the one link's reuse path
+        // hits on a plain warm install.
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        let mut consumer = locked("app-db");
+        consumer
+            .dependencies
+            .insert("better-sqlite3".into(), "1.0.0".into());
+        graph.packages.insert("app-db@1.0.0".into(), consumer);
+        graph
+            .packages
+            .insert("better-sqlite3@1.0.0".into(), locked("better-sqlite3"));
+
+        let policy = aube_scripts::BuildPolicy::from_config(&BTreeMap::new(), &[], &[], false).0;
+        let engine = aube_lockfile::graph_hash::engine_name_default("22.15.0");
+        let no_patch = |_: &str, _: &str| -> Option<String> { None };
+        // Link only reuses the prewarm's hashes when it has no content
+        // fingerprints of its own, so this is the shape that matters.
+        let no_content = |_: &str| -> Option<String> { None };
+
+        let allow = |pkg: &aube_lockfile::LockedPackage| build_may_key_engine(&policy, pkg, true);
+        let prewarm = aube_lockfile::graph_hash::compute_graph_hashes_with_patches(
+            &graph,
+            &allow,
+            Some(&engine),
+            &no_patch,
+        );
+        let link = aube_lockfile::graph_hash::compute_graph_hashes_full(
+            &graph,
+            &allow,
+            Some(&engine),
+            &no_patch,
+            &no_content,
+        );
+        assert_eq!(
+            prewarm.node_hash, link.node_hash,
+            "the prewarm's hashes are reused verbatim by the link phase; they must \
+             be byte-identical to what link would have computed itself"
+        );
+
+        // Control: without the floor nothing in this graph may build, so the
+        // hashes stay engine-agnostic. That the two differ is what proves the
+        // assertion above compared engine-KEYED hashes rather than passing
+        // vacuously.
+        let floor_off =
+            |pkg: &aube_lockfile::LockedPackage| build_may_key_engine(&policy, pkg, false);
+        let unkeyed = aube_lockfile::graph_hash::compute_graph_hashes_with_patches(
+            &graph,
+            &floor_off,
+            Some(&engine),
+            &no_patch,
+        );
+        assert_ne!(
+            prewarm.node_hash["better-sqlite3@1.0.0"], unkeyed.node_hash["better-sqlite3@1.0.0"],
+            "a floor-built native package must not share one virtual-store path \
+             across Node majors"
+        );
+        assert_ne!(
+            prewarm.node_hash["app-db@1.0.0"], unkeyed.node_hash["app-db@1.0.0"],
+            "the engine taint must cascade to every dependent, or a consumer's \
+             path points at an ABI it did not key"
+        );
+    }
+
+    fn locked(name: &str) -> aube_lockfile::LockedPackage {
+        aube_lockfile::LockedPackage {
+            name: name.into(),
+            version: "1.0.0".into(),
+            integrity: Some(format!("sha512-{name}")),
+            dep_path: format!("{name}@1.0.0"),
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]

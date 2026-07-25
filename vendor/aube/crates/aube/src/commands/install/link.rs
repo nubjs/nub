@@ -50,6 +50,9 @@ pub(super) struct LinkPhaseInput<'a> {
     pub(super) manifests: &'a [(String, aube_manifest::PackageJson)],
     pub(super) manifest: &'a aube_manifest::PackageJson,
     pub(super) build_policy: &'a aube_scripts::BuildPolicy,
+    /// Mirrors the lifecycle phase's floor gate so the engine fold covers every
+    /// package that can build. See [`super::build_may_key_engine`].
+    pub(super) default_trust_enabled: bool,
     pub(super) node_version: Option<&'a str>,
     pub(super) prewarm_graph_hashes:
         Option<&'a std::sync::Arc<aube_lockfile::graph_hash::GraphHashes>>,
@@ -101,6 +104,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         manifests,
         manifest,
         build_policy,
+        default_trust_enabled,
         node_version,
         prewarm_graph_hashes,
         aube_dir,
@@ -208,10 +212,14 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     }
     // Feed the progress UI its live file-linking counter so the linking
     // phase surfaces a ticking file count. Gated on the embedder opting
-    // into the redesigned progress UX (nub); standalone aube leaves it
-    // off, so its link pass never touches the counter (byte-identical).
+    // into the redesigned progress UX (nub), OR on Events mode, whose
+    // `InstallProgressSnapshot.files_linked` is otherwise pinned at zero for
+    // a host that consumes events without the TTY UX. Standalone aube sets
+    // neither on its default path, so its link pass never touches the
+    // counter (byte-identical).
     if let Some(p) = prog_ref
-        && aube_util::embedder().tty_progress
+        && (aube_util::embedder().tty_progress
+            || super::control::current().output_mode() == super::control::InstallOutputMode::Events)
     {
         linker = linker.with_link_progress(p.link_progress_counter());
     }
@@ -345,7 +353,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         } else {
             let engine = node_version.map(aube_lockfile::graph_hash::engine_name_default);
             let allow = |pkg: &aube_lockfile::LockedPackage| {
-                super::package_build_is_allowed(build_policy, pkg)
+                super::build_may_key_engine(build_policy, pkg, default_trust_enabled)
             };
             aube_lockfile::graph_hash::compute_graph_hashes_full(
                 graph_for_link,

@@ -201,9 +201,15 @@ INIT_CWD                   # the directory you invoked `nub run` from
 
 Inside a script, spawning `node` (by shebang or `child_process.spawn("node", …)`) re-enters Nub through the PATH shim, so child processes stay transpiled and augmented — see [`--node`](#--node) below.
 
+## The script shell
+
+Nub runs every script body through a POSIX `sh`, so one script behaves the same on macOS, Linux, and Windows — `rm -rf dist && mkdir dist`, `NODE_ENV=production node build.js`, `${PORT:-3000}`, `$(…)`, `&&`, and pipes all work everywhere. On macOS and Linux that is the system `/bin/sh`; Windows has no POSIX shell, so Nub ships a small one (busybox) next to its binary and uses it by default instead of `cmd.exe`.
+
+It is POSIX `sh`, not bash: bash-only extensions such as `[[ … ]]`, arrays, and `${VAR^^}` are not guaranteed — the same contract `npm` gives, whose `sh -c` is dash on Debian and Ubuntu.
+
 ## `--script-shell`
 
-If your `.npmrc` sets `script-shell`, Nub uses it to invoke script bodies. The rest of `.npmrc` (registry, auth, `node-linker`, `hoist-pattern`) is package-manager territory and is not read here.
+To pin a specific shell instead, set `script-shell` in `.npmrc` and Nub invokes script bodies with it on every platform. The rest of `.npmrc` (registry, auth, `node-linker`, `hoist-pattern`) is package-manager territory and is not read here.
 
 ```ini
 # .npmrc

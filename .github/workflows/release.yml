@@ -1,7 +1,24 @@
 name: Release
 
+# Two publish paths share this file (npm OIDC trusted publishing binds ONE
+# workflow filename per package, so the canary publish cannot live in its own
+# workflow):
+#   - TAG (v*): the versioned release — unchanged: npm `latest`, a versioned
+#     GitHub Release, docker/homebrew/winget, post-publish install smokes.
+#   - CANARY (push to main): bun-style rolling prerelease. Every code push to
+#     main builds the full 8-platform matrix with an uncommitted
+#     `<base>-canary.<yyyymmdd>.<run#>` version stamp, publishes all packages to
+#     npm under the `canary` dist-tag, and recreates the rolling `canary`
+#     GitHub prerelease at the built commit. Docs-only pushes are skipped (the
+#     `verify` job's canary gate); the test/conformance gates are skipped too —
+#     ci.yml runs them on the same commit, and the canary contract is "newest
+#     main, built and installable," not a second CI.
+# Tag-only jobs gate on `startsWith(github.ref, 'refs/tags/')`; canary-only jobs
+# gate on `github.ref == 'refs/heads/main'` (both under event_name == 'push').
+# A main push must NEVER reach the tag publish path.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -14,9 +31,20 @@ on:
         type: boolean
         default: false
 
-permissions:
-  id-token: write
-  contents: write
+# Default-deny at the workflow level; each job requests exactly the scopes its
+# steps use (id-token:write only in publish-npm for npm OIDC trusted publishing;
+# contents:write only in github-release, which creates the release + assets).
+permissions: {}
+
+# Canary runs coalesce WITHOUT cancellation: all main pushes share one group, a
+# running build always finishes (cancelling mid-`npm publish` could strand a
+# half-published canary version), and GitHub keeps only the NEWEST pending run —
+# intermediate pushes are superseded, so the rolling canary converges on the
+# newest commit at a max lag of one build. Tag/dispatch runs get per-run groups:
+# never queued against each other, never cancelled.
+concurrency:
+  group: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'canary' || format('release-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,11 +61,19 @@ jobs:
   verify:
     name: Verify version consistency
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      # Canary plumbing (empty on tag/dispatch runs): whether this main push
+      # warrants a canary build, and the prerelease version it publishes as.
+      canary: ${{ steps.canary.outputs.canary }}
+      canary_version: ${{ steps.canary.outputs.canary_version }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] verify is a check-only gate; nothing built here is published
         with:
           node-version: "24"
       # Internal consistency: all npm packages + Cargo.toml + preload.mjs agree.
@@ -47,11 +83,12 @@ jobs:
       # preload.mjs is shipped as-is, so the tag MUST match what's committed —
       # otherwise the published npm version (set from the tag) would disagree
       # with the binary's reported version and the transpile-cache key.
-      # Only meaningful on a tag push — a workflow_dispatch has no tag
-      # (GITHUB_REF_NAME is the branch, e.g. "main"). The internal consistency
-      # check above (make version-check) already runs on dispatch.
+      # Only meaningful on a tag push — a workflow_dispatch has no tag and a
+      # canary (main) push has no tag to match (GITHUB_REF_NAME is the branch,
+      # e.g. "main"). The internal consistency check above (make version-check)
+      # already runs on every trigger.
       - name: Check tag matches committed version
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           COMMITTED=$(node -e "console.log(require('./npm/nub/package.json').version)")
@@ -83,11 +120,86 @@ jobs:
             SEL=$(echo "$FULL" | jq -c '.')
           fi
           echo "matrix={\"include\":$SEL}" >> "$GITHUB_OUTPUT"
+      # Canary gate + version, main pushes only. The version mirrors bun's
+      # scheme (`1.3.13-canary.20260425.1`): the committed base version plus
+      # `-canary.<utc-date>.<run#>` — run_number is monotonic per workflow, so
+      # every canary version is unique and semver-orders after the previous one.
+      # The gate skips the 8-platform build for pushes that cannot change the
+      # binary or its packaging. Polarity is deliberate: BUILD unless every
+      # changed file is provably inert (markdown anywhere; site/; .claude/;
+      # .github/ except this workflow), and BUILD on any compare-API failure,
+      # force-push, or truncated file list — a wasted build is cheap, a missing
+      # canary is a silent gap.
+      - id: canary
+        name: Canary gate + version (main pushes only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Event data flows in via env, not ${{ }}-interpolation into the
+          # script body — head_commit.message is attacker-shaped text.
+          BEFORE: ${{ github.event.before }}
+          HEAD_TS: ${{ github.event.head_commit.timestamp }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # The release flow (`git push origin main --tags`) delivers the
+          # version-bump commit as a main push AND the v* tag as a tag push.
+          # The tag run builds this exact tree, so a canary of it is a wasted
+          # 8-platform matrix — skip when the head commit is the release bump
+          # (subject exactly `v<semver>`, per the release runbook).
+          FIRST_LINE="$(printf '%s' "$HEAD_MSG" | head -1)"
+          if [[ "$FIRST_LINE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "canary=false" >> "$GITHUB_OUTPUT"
+            echo "canary_version=" >> "$GITHUB_OUTPUT"
+            echo "release-bump push ($FIRST_LINE) — the tag run builds this tree; skipping the canary build"
+            exit 0
+          fi
+          BUILD=true
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            COMPARE=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BEFORE}...${GITHUB_SHA}" 2>/dev/null) || COMPARE=""
+            if [ -n "$COMPARE" ]; then
+              COUNT=$(echo "$COMPARE" | jq '.files | length')
+              # The compare API caps .files at 300 — a truncated list could hide
+              # a code file, so only trust a complete one.
+              if [ "$COUNT" -gt 0 ] && [ "$COUNT" -lt 300 ]; then
+                BUILD=false
+                while IFS= read -r f; do
+                  case "$f" in
+                    .github/workflows/release.yml) BUILD=true; break ;;
+                    *.md) ;;
+                    site/*|.claude/*|.github/*) ;;
+                    *) BUILD=true; break ;;
+                  esac
+                done < <(echo "$COMPARE" | jq -r '.files[].filename')
+              fi
+            fi
+          fi
+          BASE=$(node -e "console.log(require('./npm/nub/package.json').version)")
+          # Date from the head commit's timestamp, not wall clock: a re-run of a
+          # failed canary run keeps its run_number, and a wall-clock date would
+          # mint a DIFFERENT version for the same run after UTC midnight —
+          # semver-sorting it past newer same-base canaries. The commit
+          # timestamp is stable across re-runs.
+          DATE=$(date -u -d "$HEAD_TS" +%Y%m%d 2>/dev/null) || DATE=$(date -u +%Y%m%d)
+          CANARY_VERSION="${BASE}-canary.${DATE}.${GITHUB_RUN_NUMBER}"
+          echo "canary=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "canary_version=$CANARY_VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$BUILD" = "true" ]; then
+            echo "canary build: $CANARY_VERSION at ${GITHUB_SHA}"
+          else
+            echo "docs-only push — skipping the canary build"
+          fi
 
   primer:
     name: Generate metadata primer (once, shared to all builds)
     needs: verify
+    # Runs for tag + dispatch always; for a main push only when the canary gate
+    # said build. Skipping primer here is what skips the whole canary pipeline
+    # on a docs-only push — build `needs:` primer, and everything heavier
+    # `needs:` build, so the skip cascades.
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || needs.verify.outputs.canary == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
     # Must match what vendor/aube/crates/aube-resolver/build.rs computes for a
     # `--release` build, because TOP/CAP form the on-disk primer filename
@@ -97,8 +209,10 @@ jobs:
       AUBE_PRIMER_TOP: "2000"
       AUBE_PRIMER_VERSION_CAP: "100"
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] this job runs no package install (generate-primer.mjs uses node: builtins only), so the default cache is unused
         with:
           node-version: "24"
       # === produce-the-blob: source decision (ISOLATED on purpose) ================
@@ -248,7 +362,14 @@ jobs:
   test:
     name: Test gate (cargo test + compat suite)
     needs: verify
+    # Tag + dispatch only. Canary runs skip this gate: ci.yml runs the same
+    # suite on the same commit, and the canary contract is "newest main, built
+    # and installable" — a broken canary is what canary means, and doubling the
+    # test run per main push only burns the shared runner pool.
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       # No release without a green `cargo test` (fast unit + integration suite).
       # `publish` needs this job, so a broken fast suite blocks the release (the
@@ -259,20 +380,22 @@ jobs:
       # fan-out (regressed during the 2026-06 repo move; tracked separately). It
       # still runs in ci.yml as its own must-pass signal, just not in the publish
       # critical path.
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - name: Init node-suite submodule (shallow)
         run: git submodule update --init --depth 1 tests/node-suite
         shell: bash
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2 # zizmor: ignore[cache-poisoning] test gate only; objects compiled here never reach published artifacts
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] test gate only; node_modules here only feed cargo test
         with:
           node-version: "24"
-          cache: "pnpm"
-      - run: pnpm install --frozen-lockfile
+          cache: "npm"
+      - run: npm ci
       # The data-format loader tests (data_format_loaders, and the env-* tests whose
       # fixture imports a .json5/.yaml file) need the nub-native addon — the npm
       # parser fallback (yaml/@iarna/toml/json5) isn't a dev dependency, so without
@@ -289,6 +412,9 @@ jobs:
   conformance:
     name: Lockfile conformance gate (real PMs)
     needs: verify
+    # Tag + dispatch only — same rationale as the `test` gate above: the
+    # aube-parity workflow covers main, and canary doesn't re-gate.
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     # The lockfile-compat regression gate that 0.0.35/0.0.36 slipped through:
     # those releases shipped with the conformance suite RED because publish only
     # gated on the fast `test:` job, and the conformance/daily-driver/native-dep
@@ -309,15 +435,19 @@ jobs:
     # harness exercises the PM engine (install/add/pm use), not the data-format
     # loaders.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2 # zizmor: ignore[cache-poisoning] conformance gate; the debug binary built here is exercised, not published
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] conformance gate; nothing built here is published
         with:
           node-version: "24"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2 # zizmor: ignore[cache-poisoning] bun only judges lockfiles in the conformance gate; nothing published
         with:
           # Keep in sync with BUN_PIN in tests/aube-conformance/run.sh.
           bun-version: "1.3.14"
@@ -330,6 +460,8 @@ jobs:
     name: Build (${{ matrix.platform }})
     needs: [verify, primer]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     # Primer embed (see the `primer` job + the "Download metadata primer" step):
     # TOP/CAP select which downloaded primer-top{TOP}-v{CAP}-s<schema> file
     # vendor/aube's build.rs embeds; AUBE_REQUIRE_PRIMER=1 makes build.rs FAIL LOUD
@@ -349,7 +481,9 @@ jobs:
       matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
 
       # Pull the metadata primer generated ONCE by the `primer` job into the dir
       # vendor/aube/crates/aube-resolver/build.rs reads. It lands as the
@@ -365,11 +499,11 @@ jobs:
           name: metadata-primer
           path: vendor/aube/crates/aube-resolver/data
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2 # zizmor: ignore[cache-poisoning] tag runs restore only caches saved by main/tag runs (PR caches are branch-isolated), so seeding requires push access
         with:
           key: ${{ matrix.platform }}
 
@@ -377,13 +511,27 @@ jobs:
         with:
           version: 10
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] tag runs restore only caches saved by main/tag runs (PR caches are branch-isolated), so seeding requires push access
         with:
           node-version: "24"
-          cache: "pnpm"
+          cache: "npm"
 
       - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci
+
+      # Canary builds self-report the canary version: `--version` is asserted by
+      # the pre-publish gate and NUB_VERSION keys the transpile cache, so every
+      # version surface must carry the canary string BEFORE the addon + binary
+      # builds embed it. Stamped locally on the runner, never committed. Plain
+      # node (not `make version`) because the Windows runners can't be trusted
+      # to have make, and the Cargo.lock refresh the make target adds is
+      # unnecessary here — the build below reconciles the lock itself.
+      - name: Stamp canary version (uncommitted)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          CANARY_VERSION: ${{ needs.verify.outputs.canary_version }}
+        run: node scripts/set-version.mjs "$CANARY_VERSION"
 
       - name: Install cross
         if: matrix.cross
@@ -399,39 +547,43 @@ jobs:
       # location needs no env override (and so it works inside the cross containers,
       # which mount the project — no AUBE_*-style passthrough needed).
       - name: Build + stage nub-native addon (embedded into the binary)
+        env:
+          MATRIX_CROSS: ${{ matrix.cross }}
+          MATRIX_TARGET: ${{ matrix.target }}
+          MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
-          CMD="cargo"; [ "${{ matrix.cross }}" = "true" ] && CMD="cross"
-          case "${{ matrix.target }}" in
+          CMD="cargo"; [ "$MATRIX_CROSS" = "true" ] && CMD="cross"
+          case "$MATRIX_TARGET" in
             *-musl)
               # musl's default crt-static can't produce a cdylib (a .node is a
               # dynamic lib); disable it for the ADDON only so it builds dynamic.
               # The static nub BINARY (built below) is untouched. napi-rs's canonical
               # musl recipe (what oxc/swc ship); the crate-local Cross.toml carries
               # the RUSTFLAGS passthrough into the cross container.
-              (cd crates/nub-native && RUSTFLAGS="-C target-feature=-crt-static" $CMD build --release --target ${{ matrix.target }})
+              (cd crates/nub-native && RUSTFLAGS="-C target-feature=-crt-static" $CMD build --release --target "$MATRIX_TARGET")
               ;;
             *)
-              (cd crates/nub-native && $CMD build --release --target ${{ matrix.target }})
+              (cd crates/nub-native && $CMD build --release --target "$MATRIX_TARGET")
               ;;
           esac
           mkdir -p runtime/addons
-          if [[ "${{ matrix.platform }}" == win32-* ]]; then
-            cp "target/${{ matrix.target }}/release/nub_native.dll" runtime/addons/nub-native.node
-          elif [[ "${{ matrix.platform }}" == darwin-* ]]; then
-            cp "target/${{ matrix.target }}/release/libnub_native.dylib" runtime/addons/nub-native.node
+          if [[ "$MATRIX_PLATFORM" == win32-* ]]; then
+            cp "target/$MATRIX_TARGET/release/nub_native.dll" runtime/addons/nub-native.node
+          elif [[ "$MATRIX_PLATFORM" == darwin-* ]]; then
+            cp "target/$MATRIX_TARGET/release/libnub_native.dylib" runtime/addons/nub-native.node
           else
-            cp "target/${{ matrix.target }}/release/libnub_native.so" runtime/addons/nub-native.node
+            cp "target/$MATRIX_TARGET/release/libnub_native.so" runtime/addons/nub-native.node
           fi
           # The addon is MANDATORY — if it didn't build, it would be silently absent
           # from the embedded runtime and the data-format loaders would be dead. Gate
           # it here, BEFORE the binary build embeds the staged tree.
           test -f runtime/addons/nub-native.node \
-            || { echo "::error::missing nub-native.node for ${{ matrix.platform }} — the addon didn't build; it would be absent from the embedded runtime. Fix the addon build before releasing."; exit 1; }
+            || { echo "::error::missing nub-native.node for $MATRIX_PLATFORM — the addon didn't build; it would be absent from the embedded runtime. Fix the addon build before releasing."; exit 1; }
         shell: bash
 
       - name: Stage vendored runtime node_modules (embedded into the binary)
         shell: bash
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] the npm install below is pinned to the exact versions the pnpm lockfile installed (read via ver()); --no-save vendoring is the point
           # Vendor the pure-JS runtime deps into runtime/node_modules at the EXACT
           # versions installed in the workspace (so a shipped nub's transpile output
           # is byte-identical to dev's). Read versions by relative-FILE require from
@@ -464,11 +616,14 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
       - name: Build binary (embeds the staged runtime)
+        env:
+          MATRIX_CROSS: ${{ matrix.cross }}
+          MATRIX_TARGET: ${{ matrix.target }}
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release -p nub-cli --features embed-runtime --target ${{ matrix.target }}
+          if [ "$MATRIX_CROSS" = "true" ]; then
+            cross build --release -p nub-cli --features embed-runtime --target "$MATRIX_TARGET"
           else
-            cargo build --release -p nub-cli --features embed-runtime --target ${{ matrix.target }}
+            cargo build --release -p nub-cli --features embed-runtime --target "$MATRIX_TARGET"
           fi
         shell: bash
 
@@ -484,10 +639,13 @@ jobs:
       # would correctly fail the cross builds — it lands together with the fix.)
       - name: Gate — binary embeds a non-empty primer
         shell: bash
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+          MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
-          case "${{ matrix.platform }}" in
-            win32-*) BIN="target/${{ matrix.target }}/release/nub.exe" ;;
-            *)       BIN="target/${{ matrix.target }}/release/nub" ;;
+          case "$MATRIX_PLATFORM" in
+            win32-*) BIN="target/$MATRIX_TARGET/release/nub.exe" ;;
+            *)       BIN="target/$MATRIX_TARGET/release/nub" ;;
           esac
           # A handful of packages near-certain to be in any "top npm packages"
           # primer; require at least one to be embedded as a string literal in the
@@ -497,26 +655,41 @@ jobs:
           # Windows runner). The patterns are distinctive enough not to collide
           # with unrelated rodata.
           if grep -aqE 'react-dom|@babel/core|typescript|@types/node' "$BIN"; then
-            echo "✓ ${{ matrix.platform }}: binary embeds a non-empty primer"
+            echo "✓ $MATRIX_PLATFORM: binary embeds a non-empty primer"
           else
-            echo "::error::${{ matrix.platform }}: binary does NOT embed a populated primer — the primer index is empty (the 0.0.37 cross-build bug). The 'Download metadata primer' step or the AUBE_* cross passthrough is broken."
+            echo "::error::$MATRIX_PLATFORM: binary does NOT embed a populated primer — the primer index is empty (the 0.0.37 cross-build bug). The 'Download metadata primer' step or the AUBE_* cross passthrough is broken."
             exit 1
           fi
 
       - name: Assemble platform package (single binary — bin/ only)
         shell: bash
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+          MATRIX_PLATFORM: ${{ matrix.platform }}
         run: |
           # The runtime is EMBEDDED in the binary (staged + built above), so the
           # platform package ships ONLY bin/ — no runtime/ sidecar. Both verbs are
           # real binary copies (nub picks its verb from the argv[0] basename).
-          PKG="npm/nub-${{ matrix.platform }}"
+          PKG="npm/nub-$MATRIX_PLATFORM"
           mkdir -p "$PKG/bin"
-          if [[ "${{ matrix.platform }}" == win32-* ]]; then
-            cp "target/${{ matrix.target }}/release/nub.exe" "$PKG/bin/nub.exe"
-            cp "target/${{ matrix.target }}/release/nub.exe" "$PKG/bin/nubx.exe"
+          if [[ "$MATRIX_PLATFORM" == win32-* ]]; then
+            cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nub.exe"
+            cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nubx.exe"
+            # Bundle the arch-appropriate busybox-w32 POSIX-sh sidecar next to
+            # nub.exe (nub's Windows script shell — see vendor/busybox-w32/README.md
+            # and crates/nub-cli/src/cli.rs resolve_bundled_busybox). Verify the
+            # vendored bytes against upstream's published SHA-256 before shipping —
+            # a mismatch means the vendored binary drifted and MUST block the release.
+            case "$MATRIX_PLATFORM" in
+              win32-x64)   SRC=vendor/busybox-w32/busybox64.exe;  SHA=07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075 ;;
+              win32-arm64) SRC=vendor/busybox-w32/busybox64a.exe; SHA=e67f873d19d58c535cc9f0c4965ffd622e19b7bab87e3da89cb2185fb54464d7 ;;
+            esac
+            echo "$SHA  $SRC" | sha256sum -c - \
+              || { echo "::error::vendored busybox ($SRC) failed its pinned SHA-256 — refusing to ship a drifted shell binary"; exit 1; }
+            cp "$SRC" "$PKG/bin/busybox.exe"
           else
-            cp "target/${{ matrix.target }}/release/nub" "$PKG/bin/nub"
-            cp "target/${{ matrix.target }}/release/nub" "$PKG/bin/nubx"
+            cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nub"
+            cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nubx"
             chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
           fi
 
@@ -590,7 +763,8 @@ jobs:
     # and exec's the staged binary once.
     name: Pre-publish smoke gate (${{ matrix.platform }})
     if: ${{ github.event_name == 'push' || inputs.publish }}
-    needs: build
+    # verify supplies the expected canary version on main pushes.
+    needs: [verify, build]
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     strategy:
@@ -625,6 +799,10 @@ jobs:
           path: nub-pkg
       - name: Assert the built binary runs and reports the release version
         shell: bash
+        env:
+          # Hoisted from the run block: an expression expanding inside the
+          # script is zizmor error-level template injection; env is inert.
+          CANARY_VERSION: ${{ needs.verify.outputs.canary_version }}
         run: |
           set -euo pipefail
           BIN="nub-pkg/${{ matrix.bin }}"
@@ -641,16 +819,26 @@ jobs:
           REPORTED="$("$BIN" --version 2>/dev/null | head -1 | tr -d '[:space:]')"
           REPORTED="${REPORTED#v}"
           echo "${{ matrix.platform }} binary reports: '$REPORTED'"
-          # On a tag push the expected version is the tag (minus the leading v); on a
-          # manual publish dispatch there's no tag, so just assert it runs + prints a
-          # non-empty semver-ish string.
+          # On a tag push the expected version is the tag (minus the leading v);
+          # on a canary (main) push it's the stamped canary version from verify;
+          # on a manual publish dispatch there's no expectation, so just assert
+          # it runs + prints a non-empty semver-ish string.
+          EXPECTED=""
           if [ "${{ github.event_name }}" = "push" ]; then
-            EXPECTED="${GITHUB_REF_NAME#v}"
+            # $GITHUB_REF (the ambient env var), never the github.ref
+            # expression form — expressions expand into the script text
+            # (zizmor error-level template injection).
+            case "$GITHUB_REF" in
+              refs/tags/*) EXPECTED="${GITHUB_REF_NAME#v}" ;;
+              *)           EXPECTED="$CANARY_VERSION" ;;
+            esac
+          fi
+          if [ -n "$EXPECTED" ]; then
             if [ "$REPORTED" != "$EXPECTED" ]; then
-              echo "::error::built ${{ matrix.platform }} binary reports version '$REPORTED' but the release tag is '$EXPECTED'. A broken/stale build must not publish."
+              echo "::error::built ${{ matrix.platform }} binary reports version '$REPORTED' but this run publishes '$EXPECTED'. A broken/stale build must not publish."
               exit 1
             fi
-            echo "✓ ${{ matrix.platform }} binary reports the release version ($EXPECTED) — safe to publish"
+            echo "✓ ${{ matrix.platform }} binary reports the publish version ($EXPECTED) — safe to publish"
           else
             if [ -z "$REPORTED" ]; then
               echo "::error::built ${{ matrix.platform }} binary produced no --version output — refusing to publish a non-runnable build."
@@ -672,7 +860,9 @@ jobs:
     # 9/16 archives → curl-install 404'd on 3 platforms). publish-npm does ONLY the
     # 10-package npm publish; github-release does ONLY the release + assets and is
     # independently re-runnable.
-    if: ${{ github.event_name == 'push' || inputs.publish }}
+    # TAG pushes (and explicit publish dispatches) ONLY — a canary (main) push
+    # must never reach this job; it publishes via canary-publish-npm below.
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || inputs.publish }}
     # Gate on the test, conformance, glibc-floor, AND pre-publish smoke jobs: a
     # broken test, a lockfile-compat regression, a glibc-floor regression, or a
     # build that can't run / reports the wrong version must block publish — not
@@ -680,9 +870,16 @@ jobs:
     # the 0.0.44 gap; pre-publish-gate = a build that links but doesn't run.)
     needs: [build, test, conformance, glibc-floor-guard, pre-publish-gate]
     runs-on: ubuntu-latest
+    permissions:
+      # checkout reads; npm publish authenticates via OIDC trusted publishing,
+      # which mints its token from the job's OIDC identity (id-token: write).
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] this job installs nothing; the published bits come from the build artifacts, not the cache
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -718,7 +915,7 @@ jobs:
             node -e "
               const fs = require('fs');
               const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
-              p.version = '${{ env.VERSION }}';
+              p.version = process.env.VERSION;
               fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
             "
             NAME="@nubjs/nub-$platform"
@@ -736,9 +933,9 @@ jobs:
           node -e "
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('npm/nub/package.json', 'utf8'));
-            p.version = '${{ env.VERSION }}';
+            p.version = process.env.VERSION;
             for (const k of Object.keys(p.optionalDependencies || {})) {
-              p.optionalDependencies[k] = '${{ env.VERSION }}';
+              p.optionalDependencies[k] = process.env.VERSION;
             }
             fs.writeFileSync('npm/nub/package.json', JSON.stringify(p, null, 2));
           "
@@ -759,7 +956,7 @@ jobs:
           node -e "
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('npm/nub-types/package.json', 'utf8'));
-            p.version = '${{ env.VERSION }}';
+            p.version = process.env.VERSION;
             fs.writeFileSync('npm/nub-types/package.json', JSON.stringify(p, null, 2) + '\n');
           "
           if [ "$(npm view "@nubjs/types@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
@@ -777,11 +974,18 @@ jobs:
     # artifacts (deterministic), creates/updates the release, then VERIFIES all 16
     # expected assets are present — re-uploading any missing and FAILING LOUD if a
     # gap survives the retries. This codifies the v0.0.48 manual fix.
-    if: ${{ github.event_name == 'push' || inputs.publish }}
+    # TAG pushes (and explicit publish dispatches) ONLY — canary (main) pushes
+    # update the rolling `canary` prerelease via canary-release below.
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || inputs.publish }}
     needs: publish-npm
     runs-on: ubuntu-latest
+    permissions:
+      # Creates/updates the GitHub Release and uploads/re-uploads its assets.
+      contents: write
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - name: Download all platform artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -841,7 +1045,7 @@ jobs:
           ls -la release-archives
 
       - name: Create GitHub Release (with asset-upload retry)
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2 # zizmor: ignore[superfluous-actions] idempotent create-or-update + generated notes the re-runnable job relies on; a gh-cli rewrite risks changing release behavior
         with:
           generate_release_notes: true
           # Re-running this job overwrites the release + re-uploads assets.
@@ -928,6 +1132,256 @@ jobs:
           fi
           echo "✓ all ${#EXPECTED[@]} release assets present on $TAG"
 
+  canary-publish-npm:
+    name: Publish canary to npm
+    # Canary (main) pushes only — the npm half of the bun-style canary channel.
+    # Mirrors publish-npm above (keep the two in sync) with three differences:
+    # the version is the uncommitted canary stamp from verify, every publish
+    # carries `--tag canary` so `latest` never moves, and the gates are build +
+    # glibc-floor + pre-publish smoke — not test/conformance, which canary runs
+    # skip (see the `test` job comment). Deliberately its OWN job rather than a
+    # conditional branch of publish-npm: threading canary through the tag job
+    # would loosen its needs/if gating, and the tag path must stay untouched.
+    # Publish ORDER is the safety property shared with publish-npm: all 8
+    # platform packages first, the root package LAST — so `@nubjs/nub@canary`
+    # only ever resolves to a version whose exact-pinned platform deps all
+    # published.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [verify, build, glibc-floor-guard, pre-publish-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      # Same grant as publish-npm (the job this mirrors): checkout reads; npm
+      # publish authenticates via OIDC trusted publishing, which mints its
+      # token from the job's OIDC identity (id-token: write). The workflow
+      # baseline is `permissions: {}`, so omitting this block deny-alls the
+      # job — the maiden canary run failed exactly here (npm PUT E404 from the
+      # unauthenticated fallback).
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.verify.outputs.canary_version }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      # ACCEPTED TRADEOFF (maintainer, 2026-07-24): zizmor's cache-poisoning
+      # audit flags publishing from a main-push-triggered workflow whose build
+      # jobs restore rust/pnpm caches — a poisoned Actions cache could in
+      # theory reach published canary bits. Accepted: the tag-path stable
+      # releases build from these same caches, and cold-building 8 platforms
+      # per push is not worth the surface reduction (bun/deno ship canaries
+      # the same way). setup-node is v5-pinned by SHA like every other action.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # zizmor: ignore[cache-poisoning]
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: artifacts
+
+      - name: Prepare and publish platform packages (idempotent)
+        run: |
+          # Same idempotent loop as publish-npm: a re-run skips already-published
+          # versions instead of aborting on npm's E403.
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
+            PKG="artifacts/nub-$platform"
+            if [ ! -d "$PKG" ]; then
+              echo "⚠️  Skipping $platform (not built)"
+              continue
+            fi
+            cp "npm/nub-$platform/package.json" "$PKG/package.json"
+            node -e "
+              const fs = require('fs');
+              const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
+              p.version = process.env.VERSION;
+              fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
+            "
+            NAME="@nubjs/nub-$platform"
+            if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+              echo "✓ $NAME@$VERSION already published — skipping"
+              continue
+            fi
+            echo "→ $NAME@$VERSION (canary)"
+            (cd "$PKG" && npm publish --access public --tag canary)
+          done
+
+      - name: Prepare and publish root package (idempotent)
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('npm/nub/package.json', 'utf8'));
+            p.version = process.env.VERSION;
+            for (const k of Object.keys(p.optionalDependencies || {})) {
+              p.optionalDependencies[k] = process.env.VERSION;
+            }
+            fs.writeFileSync('npm/nub/package.json', JSON.stringify(p, null, 2));
+          "
+          if [ "$(npm view "@nubjs/nub@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "✓ @nubjs/nub@$VERSION already published — skipping"
+          else
+            echo "→ @nubjs/nub@$VERSION (canary)"
+            (cd npm/nub && npm publish --access public --tag canary)
+          fi
+
+      - name: Prepare and publish types package (idempotent)
+        run: |
+          # @nubjs/types tracks the binary version in lockstep on the canary
+          # channel too, so a canary install can pull matching declarations.
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('npm/nub-types/package.json', 'utf8'));
+            p.version = process.env.VERSION;
+            fs.writeFileSync('npm/nub-types/package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+          if [ "$(npm view "@nubjs/types@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "✓ @nubjs/types@$VERSION already published — skipping"
+          else
+            echo "→ @nubjs/types@$VERSION (canary)"
+            (cd npm/nub-types && npm publish --access public --tag canary)
+          fi
+
+  canary-release:
+    name: Update rolling canary release
+    # The GitHub half of the canary channel: recreate the rolling `canary`
+    # prerelease at the built commit, carrying the same 16 assets a versioned
+    # release ships (so the future `nub upgrade --canary` and the curl installer
+    # can read `releases/download/canary/...`). Runs AFTER the npm publish so
+    # the release never points at a commit whose npm canary didn't go out.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [verify, canary-publish-npm]
+    runs-on: ubuntu-latest
+    permissions:
+      # Deletes + recreates the rolling release and the canary tag ref with
+      # GITHUB_TOKEN (same grant as github-release). The workflow baseline is
+      # `permissions: {}`, so without this block every gh/git write here 403s.
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.canary_version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: artifacts
+
+      - name: Package release archives (single binary)
+        run: |
+          # Mirrors github-release's packaging (keep in sync): bin/ plus the
+          # vestigial empty runtime/ the sidecar-era self-upgrader needs (see
+          # that job's comment for the full story), +x re-applied before tarring
+          # (the artifact round-trip strips mode bits), and a `.sha256` sidecar
+          # per archive for download verification.
+          mkdir -p release-archives
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
+            PKG="artifacts/nub-$platform"
+            [ -d "$PKG" ] || { echo "skip $platform (not built)"; continue; }
+            mkdir -p "$PKG/runtime"
+            if [[ "$platform" == win32-* ]]; then
+              archive="nub-$platform.zip"
+              (cd "$PKG" && zip -qr "$GITHUB_WORKSPACE/release-archives/$archive" bin runtime)
+            else
+              chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
+              archive="nub-$platform.tar.gz"
+              tar -czf "release-archives/$archive" -C "$PKG" bin runtime
+            fi
+            (cd release-archives && sha256sum "$archive" > "$archive.sha256")
+          done
+          ls -la release-archives
+
+      - name: Recreate rolling canary release
+        run: |
+          # Rolling tag: delete the previous release + tag, recreate at the
+          # built commit. The brief no-canary window between the two self-heals
+          # on the next run, and the shared `canary` concurrency group keeps two
+          # canary runs from interleaving here.
+          gh release delete canary --yes 2>/dev/null || true
+          # The tag deletion must NOT be error-swallowed: `gh release create`
+          # silently attaches to an EXISTING tag (ignoring --target), so a
+          # leftover `canary` tag would pin the "new" release to the old commit.
+          # Tolerate only genuine absence (first run); fail loud otherwise.
+          if git ls-remote --exit-code --tags origin canary >/dev/null 2>&1; then
+            # gh api, not `git push :refs/tags/canary`: the checkout no longer
+            # persists credentials (artipacked), and GH_TOKEN authenticates gh.
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/canary"
+          fi
+          {
+            echo "Rolling canary build of \`main\`, rebuilt on every code push."
+            echo
+            echo "- Version: \`$VERSION\`"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Install: \`npm install -g @nubjs/nub@canary\`"
+            echo
+            echo "Prerelease channel — the assets below always track the newest main commit."
+          } > canary-notes.md
+          gh release create canary \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Canary $VERSION" \
+            --notes-file canary-notes.md \
+            release-archives/*
+
+      - name: Verify all canary assets present (re-upload missing, else FAIL)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Same 16-asset completeness check as github-release (keep in sync),
+          # against the rolling `canary` tag: list, re-upload any missing with
+          # retries, fail loud if a gap survives.
+          EXPECTED=(
+            nub-darwin-arm64.tar.gz nub-darwin-arm64.tar.gz.sha256
+            nub-darwin-x64.tar.gz nub-darwin-x64.tar.gz.sha256
+            nub-linux-x64.tar.gz nub-linux-x64.tar.gz.sha256
+            nub-linux-x64-musl.tar.gz nub-linux-x64-musl.tar.gz.sha256
+            nub-linux-arm64.tar.gz nub-linux-arm64.tar.gz.sha256
+            nub-linux-arm64-musl.tar.gz nub-linux-arm64-musl.tar.gz.sha256
+            nub-win32-x64.zip nub-win32-x64.zip.sha256
+            nub-win32-arm64.zip nub-win32-arm64.zip.sha256
+          )
+          TAG="canary"
+
+          missing_assets() {
+            local present
+            present="$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            local m=()
+            for a in "${EXPECTED[@]}"; do
+              if ! grep -qxF "$a" <<<"$present"; then m+=("$a"); fi
+            done
+            printf '%s\n' "${m[@]}"
+          }
+
+          for pass in 1 2 3; do
+            mapfile -t MISSING < <(missing_assets)
+            [ "${#MISSING[@]}" -eq 1 ] && [ -z "${MISSING[0]}" ] && MISSING=()
+            if [ "${#MISSING[@]}" -eq 0 ]; then
+              echo "✓ all ${#EXPECTED[@]} canary assets present"
+              exit 0
+            fi
+            echo "--- pass $pass: ${#MISSING[@]} asset(s) missing: ${MISSING[*]} ---"
+            for a in "${MISSING[@]}"; do
+              f="release-archives/$a"
+              if [ ! -f "$f" ]; then
+                echo "::error::expected asset $a was never built (no $f) — cannot complete the canary release. Check the build matrix."
+                exit 1
+              fi
+              echo "re-uploading $a"
+              gh release upload "$TAG" "$f" --clobber || echo "  (upload of $a failed this pass; will retry)"
+            done
+            sleep 10
+          done
+
+          mapfile -t STILL < <(missing_assets)
+          [ "${#STILL[@]}" -eq 1 ] && [ -z "${STILL[0]}" ] && STILL=()
+          if [ "${#STILL[@]}" -ne 0 ]; then
+            echo "::error::canary release is STILL missing ${#STILL[@]} asset(s) after retries: ${STILL[*]}"
+            exit 1
+          fi
+          echo "✓ all ${#EXPECTED[@]} canary assets present"
+
   docker:
     name: Publish Docker images
     # Republish the official Docker images (ghcr.io/nubjs/nub) for THIS release, as a
@@ -939,9 +1393,10 @@ jobs:
     # `workflow_call` runs the build+push INSIDE this run (no cascade) and `needs:
     # publish-npm` sequences it after `@nubjs/nub@<version>` is live on npm, which the
     # image installs at build time. Real tag-push releases only (mirrors bump-homebrew-
-    # tap / submit-winget) — a build-only debug dispatch must not push an image.
+    # tap / submit-winget) — a build-only debug dispatch or a canary (main) push
+    # must not push an image.
     needs: publish-npm
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     # The called workflow inherits the calling job's token scope; the GHCR push needs
     # packages:write (release.yml's top-level token has only id-token+contents).
     permissions:
@@ -952,11 +1407,13 @@ jobs:
     # strips the leading v into a bare NUB_VERSION.
     with:
       nub_version: ${{ github.ref_name }}
-    secrets: inherit
+    secrets: inherit # zizmor: ignore[secrets-inherit] docker.yml declares no workflow_call secrets, so explicit pass-through of the DOCKERHUB_TOKEN it reads would need a docker.yml change
 
   test-install:
     name: Test install (${{ matrix.os }})
     needs: publish-npm
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -969,8 +1426,10 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] post-publish smoke of the already-published package; this job publishes nothing
         with:
           node-version: "24"
       - name: Install from npm and smoke (with propagation-race retry)
@@ -983,7 +1442,7 @@ jobs:
         # every attempt (real breakage is not masked — all 12 must fail to report red).
         # The retry re-runs npm install each attempt so the binary resolves fresh.
         shell: bash
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] installs the package this run just published to smoke it; no lockfile applies to a global install
           MAX=12; attempt=0
           while true; do
             attempt=$((attempt + 1))
@@ -1011,18 +1470,22 @@ jobs:
     name: Test install (linux-musl)
     needs: publish-npm
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     container: node:22-alpine
     steps:
       - name: Toolchain (bash + git for checkout/smoke)
         run: apk add --no-cache bash git
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
       - name: Install from npm and smoke (with propagation-race retry)
         # Same retry logic as the runner-OS legs above — musl hit the 0.0.38
         # propagation race. Wrapped identically: both install + smoke per attempt.
         # Up to 12 attempts with stepped backoff (30 s × first 3 retries, then 60 s)
         # ≈ 9.5 min max window. A genuine bad release fails every attempt.
         shell: bash
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] installs the package this run just published to smoke it; no lockfile applies to a global install
           MAX=12; attempt=0
           while true; do
             attempt=$((attempt + 1))
@@ -1045,15 +1508,21 @@ jobs:
   bump-homebrew-tap:
     name: Bump Homebrew tap formula
     # Update the nubjs/homebrew-tap formula to this release. Runs ONLY on a real
-    # tag-push release (never the debug `workflow_dispatch` build-only path) and
-    # AFTER github-release, because it reads the published `.sha256` sidecar
-    # assets from the release this run created.
-    if: github.event_name == 'push'
+    # tag-push release (never the debug `workflow_dispatch` build-only path, nor
+    # a canary main push) and AFTER github-release, because it reads the
+    # published `.sha256` sidecar assets from the release this run created.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: github-release
     runs-on: ubuntu-latest
+    permissions:
+      # Reads this repo + the release's .sha256 sidecars; the tap push itself
+      # uses the HOMEBREW_TAP_TOKEN PAT, not the job token.
+      contents: read
     steps:
       # Check out the nub repo for the formula generator script.
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
 
       # Push access to nubjs/homebrew-tap is CROSS-REPO, so the default
       # GITHUB_TOKEN (scoped to nubjs/nub only) cannot push there. A PAT (or
@@ -1074,7 +1543,7 @@ jobs:
 
       - name: Check out the tap
         if: steps.gate.outputs.enabled == 'true'
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1 # zizmor: ignore[artipacked] the commit-and-push step below pushes with this checkout's persisted HOMEBREW_TAP_TOKEN
         with:
           repository: nubjs/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -1108,9 +1577,10 @@ jobs:
   submit-winget:
     name: Submit winget manifest
     # Open/refresh the Nubjs.Nub manifest in microsoft/winget-pkgs for this release.
-    # Runs ONLY on a real tag-push release (never the debug workflow_dispatch path)
-    # and AFTER github-release, because the manifest references the published
-    # release-asset URLs + their SHA256 sidecars this run created.
+    # Runs ONLY on a real tag-push release (never the debug workflow_dispatch path,
+    # nor a canary main push) and AFTER github-release, because the manifest
+    # references the published release-asset URLs + their SHA256 sidecars this
+    # run created.
     #
     # HELD FOR MAINTAINER ENABLEMENT — this is an EXTERNAL, effectively-irreversible
     # publish under the nubjs publisher identity (winget-releaser opens a PR on
@@ -1120,9 +1590,13 @@ jobs:
     # fires NOTHING. winget-releaser also UPDATES an existing package — the FIRST
     # version (Nubjs.Nub v1) is bootstrapped manually from the committed
     # winget/manifests/... set. Both are documented in winget/README.md.
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: github-release
     runs-on: ubuntu-latest
+    permissions:
+      # Reads this repo's release assets; the winget-pkgs submission itself
+      # uses the WINGET_PAT token, not the job token.
+      contents: read
     steps:
       # winget-releaser opens the PR under a FORK of microsoft/winget-pkgs owned by
       # the WINGET_PAT account. The default GITHUB_TOKEN cannot fork or push there,

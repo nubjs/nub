@@ -224,7 +224,10 @@ impl<'a> Parser<'a> {
                 }
                 // Any top-level key we don't recognize: bail to serde so
                 // we never silently drop a field a future pnpm adds.
-                _ => return None,
+                _ => {
+                    core::hint::cold_path();
+                    return None;
+                }
             }
         }
 
@@ -304,6 +307,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if line.indent != min_indent {
+                core::hint::cold_path();
                 return None;
             }
             let (k, v) = split_key(line.body)?;
@@ -350,6 +354,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if line.indent != 2 {
+                core::hint::cold_path();
                 return None;
             }
             // `<importerPath>:` header. pnpm writes an empty importer
@@ -395,7 +400,10 @@ impl<'a> Parser<'a> {
                 b"devDependencies" => dev_dependencies = Some(specs),
                 b"optionalDependencies" => optional_dependencies = Some(specs),
                 b"skippedOptionalDependencies" => skipped_optional_dependencies = Some(specs),
-                _ => return None,
+                _ => {
+                    core::hint::cold_path();
+                    return None;
+                }
             }
         }
         Some(RawImporter {
@@ -415,6 +423,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if line.indent != entry_indent {
+                core::hint::cold_path();
                 return None;
             }
             let (name, rest) = split_key(line.body)?;
@@ -432,6 +441,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 if c.indent != child_indent {
+                    core::hint::cold_path();
                     return None;
                 }
                 let (ck, cv) = split_key(c.body)?;
@@ -440,7 +450,10 @@ impl<'a> Parser<'a> {
                 match ck {
                     b"specifier" => specifier = Some(scalar_string(cv)?),
                     b"version" => version = Some(scalar_string(cv)?),
-                    _ => return None,
+                    _ => {
+                        core::hint::cold_path();
+                        return None;
+                    }
                 }
             }
             map.insert(
@@ -468,6 +481,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if line.indent != 2 {
+                core::hint::cold_path();
                 return None;
             }
             let (key, rest) = split_key(line.body)?;
@@ -510,6 +524,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if line.indent != 2 {
+                core::hint::cold_path();
                 return None;
             }
             let (key, rest) = split_key(line.body)?;
@@ -540,6 +555,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if line.indent != indent {
+                core::hint::cold_path();
                 return None;
             }
             let (key, rest) = split_key(line.body)?;
@@ -560,7 +576,10 @@ impl<'a> Parser<'a> {
                 b"transitivePeerDependencies" => {
                     transitive_peer_dependencies = Some(self.parse_seq_value(rest, indent + 2)?);
                 }
-                _ => return None,
+                _ => {
+                    core::hint::cold_path();
+                    return None;
+                }
             }
         }
         Some(RawSnapshot {
@@ -637,6 +656,7 @@ fn split_key(body: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
         }
         i += 1;
     }
+    core::hint::cold_path();
     None
 }
 

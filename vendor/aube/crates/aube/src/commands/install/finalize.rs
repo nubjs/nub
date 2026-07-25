@@ -2,7 +2,9 @@ use super::dep_selection::DepSelection;
 use super::lifecycle::{
     JailBuildPolicy, run_dep_lifecycle_scripts, run_root_lifecycle, unreviewed_dep_builds,
 };
-use super::side_effects_cache::{SideEffectsCacheConfig, side_effects_cache_root};
+use super::side_effects_cache::{
+    SideEffectsCacheConfig, SideEffectsCacheLocation, side_effects_cache_root,
+};
 use super::summary::{print_direct_dependency_summary, should_print_human_install_summary};
 use super::sweep::sweep_orphaned_aube_entries;
 use super::workspace::importer_project_dir;
@@ -38,6 +40,10 @@ pub(super) struct FinalizePhaseInput<'a> {
     pub(super) aube_dir: &'a std::path::Path,
     pub(super) virtual_store_dir_max_length: usize,
     pub(super) child_concurrency: usize,
+    /// Node the dep lifecycle scripts will run under, keying the
+    /// side-effects cache so post-build artifacts never cross an ABI.
+    /// `None` when discovery failed.
+    pub(super) node_version: Option<&'a str>,
     pub(super) side_effects_cache_setting: bool,
     pub(super) side_effects_cache_readonly_setting: bool,
     pub(super) strict_dep_builds_setting: bool,
@@ -53,18 +59,31 @@ pub(super) struct FinalizePhaseInput<'a> {
     pub(super) phase_timings: &'a mut InstallPhaseTimings,
 }
 
+/// Gates whether the next install may narrow its lifecycle phase to changed
+/// packages. The engine belongs in it because build scripts compile against a
+/// specific Node ABI: without it, switching Node majors leaves the prior
+/// install's state looking current, the delta filter selects nothing, and a
+/// native addon built for the old major survives untouched — the cache layers
+/// downstream never get consulted. Engine-name granularity (major, os, arch)
+/// rather than the raw version keeps a patch bump from forcing a full scan.
 fn dep_build_policy_hash(
     build_policy: &aube_scripts::BuildPolicy,
     default_trust_floor: &super::default_trust::DefaultTrustFloor,
+    node_version: Option<&str>,
 ) -> String {
     let policy = build_policy.fingerprint();
     let floor = default_trust_floor.fingerprint();
+    let engine = node_version.map_or_else(aube_lockfile::graph_hash::platform_name, |v| {
+        aube_lockfile::graph_hash::engine_name_default(v).0
+    });
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"dep-build-policy-v1");
+    hasher.update(b"dep-build-policy-v2");
     hasher.update(&(policy.len() as u64).to_le_bytes());
     hasher.update(policy.as_bytes());
     hasher.update(&(floor.len() as u64).to_le_bytes());
     hasher.update(floor.as_bytes());
+    hasher.update(&(engine.len() as u64).to_le_bytes());
+    hasher.update(engine.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
 
@@ -169,6 +188,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         aube_dir,
         virtual_store_dir_max_length,
         child_concurrency,
+        node_version,
         side_effects_cache_setting,
         side_effects_cache_readonly_setting,
         strict_dep_builds_setting,
@@ -221,7 +241,8 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     }
 
     let filtered_install = !workspace_filter_empty || dep_selection.is_filtered();
-    let dep_build_policy_hash = dep_build_policy_hash(build_policy, default_trust_floor);
+    let dep_build_policy_hash =
+        dep_build_policy_hash(build_policy, default_trust_floor, node_version);
     let lifecycle_delta_filter = if ignore_scripts {
         None
     } else {
@@ -263,10 +284,11 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         let side_effects_cache = side_effects_cache_root
             .as_deref()
             .map(|root| {
+                let location = SideEffectsCacheLocation { root, node_version };
                 if side_effects_cache_readonly_setting {
-                    SideEffectsCacheConfig::RestoreOnly(root)
+                    SideEffectsCacheConfig::RestoreOnly(location)
                 } else {
-                    SideEffectsCacheConfig::RestoreAndSave(root)
+                    SideEffectsCacheConfig::RestoreAndSave(location)
                 }
             })
             .unwrap_or(SideEffectsCacheConfig::Disabled);
@@ -643,6 +665,37 @@ mod tests {
             "unexpected policy warnings: {warnings:?}"
         );
         policy
+    }
+
+    #[test]
+    fn dep_build_policy_hash_tracks_the_node_major() {
+        // The delta filter reuses the prior install's selection whenever this
+        // hash is unchanged, so a Node major switch has to move it — otherwise
+        // the lifecycle phase is skipped and a native addon built for the old
+        // ABI is never rebuilt. A patch bump must NOT move it: the engine name
+        // is major-granular, and rescanning every build on a 22.15.0 → 22.15.1
+        // upgrade would be pure cost.
+        let (policy, floor) = (
+            policy(),
+            super::super::default_trust::DefaultTrustFloor::disabled(),
+        );
+        let h = |v: Option<&str>| dep_build_policy_hash(&policy, &floor, v);
+
+        assert_ne!(
+            h(Some("22.15.0")),
+            h(Some("26.5.0")),
+            "a Node major switch must widen the lifecycle scan"
+        );
+        assert_eq!(
+            h(Some("22.15.0")),
+            h(Some("22.15.1")),
+            "a patch bump shares the ABI and must stay a narrow scan"
+        );
+        assert_ne!(
+            h(None),
+            h(Some("22.15.0")),
+            "an unresolved version must not collide with a resolved one"
+        );
     }
 
     #[test]
