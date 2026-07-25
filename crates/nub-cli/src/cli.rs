@@ -3750,6 +3750,50 @@ enum StreamMode {
     Prefixed,
 }
 
+/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
+/// bodies on Windows. The win32 package lays `busybox.exe` beside `nub.exe` in the
+/// package's `bin/` dir, so it resolves relative to the running executable
+/// (canonicalized, matching `current_nub_binary`). `__NUB_BUSYBOX_EXE` overrides
+/// the location — an internal test/CI seam that lets the Rust suite and the
+/// branch-scoped Windows probe supply a busybox without the release-packaging step;
+/// it is NOT a documented user knob (`--script-shell` is the user-facing override).
+/// A missing sidecar is a clean error, never a panic and never a silent cmd.exe
+/// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
+/// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
+/// it compiles everywhere.
+fn resolve_bundled_busybox() -> Result<String> {
+    let to_utf8 = |p: PathBuf| -> Result<String> {
+        p.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("busybox path is not valid UTF-8: {}", p.display()))
+    };
+    if let Some(over) = std::env::var_os("__NUB_BUSYBOX_EXE") {
+        let p = PathBuf::from(over);
+        if !p.is_file() {
+            bail!(
+                "__NUB_BUSYBOX_EXE points at a missing file: {}",
+                p.display()
+            );
+        }
+        return to_utf8(p);
+    }
+    let exe = std::env::current_exe().context("could not determine path to nub binary")?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("nub binary has no parent directory"))?;
+    let busybox = dir.join("busybox.exe");
+    if !busybox.is_file() {
+        bail!(
+            "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
+             executable at {}. Reinstall nub, or set `script-shell` in .npmrc to a \
+             POSIX shell on PATH.",
+            busybox.display()
+        );
+    }
+    to_utf8(busybox)
+}
+
 /// Build the shell `Command` for a package script with Nub's augmentation
 /// applied exactly once: `NODE_OPTIONS` (injected flags + preload + webstorage),
 /// the PATH shim prepended to the `node_modules/.bin` walk-up chain, `.env`
@@ -3814,27 +3858,22 @@ fn build_script_command(
         &ua_product,
     );
 
-    // Shell precedence: the explicit `--script-shell <path>` flag wins, then a
-    // `.npmrc` `script-shell=` setting, then the platform default. A custom
-    // POSIX shell uses `-c`; only the implicit Windows `cmd` default uses `/d /s /c`.
+    // Shell precedence: an explicit `--script-shell <path>` flag wins, then a
+    // `.npmrc` `script-shell=` setting, then the platform default. The default is
+    // the system `/bin/sh` on Unix and, on Windows, a bundled busybox-w32 POSIX
+    // `sh` resolved next to nub.exe — a real spawnable child process, so one POSIX
+    // script body runs identically on macOS/Linux/Windows and a future OS sandbox
+    // can confine it (an in-process interpreter could do neither). This replaces
+    // the former implicit `cmd.exe` default. busybox is a multi-call binary, so
+    // its `sh` applet name precedes `-c`; every other shell here takes plain `-c`.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
-    let (shell, shell_flag) = if let Some(ref s) = custom_shell {
-        (s.as_str(), "-c")
-    } else if cfg!(windows) {
-        // npm's exact flags: `/d` (skip AutoRun), `/s` (strip outer quotes), `/c`.
-        ("cmd", "/d /s /c")
-    } else {
-        ("sh", "-c")
+    let (shell, shell_args): (String, Vec<&str>) = match custom_shell {
+        Some(ref s) => (s.clone(), vec!["-c"]),
+        None if cfg!(windows) => (resolve_bundled_busybox()?, vec!["sh", "-c"]),
+        None => ("sh".to_string(), vec!["-c"]),
     };
-    // The implicit Windows `cmd` default must spawn with verbatim arguments — the
-    // script body is passed to cmd.exe exactly as written (npm's
-    // `windowsVerbatimArguments: true`), so Rust's MSVCRT re-quoting never mangles
-    // a `node -e "…"` body or undoes the per-arg cmd escaping below. A custom POSIX
-    // shell (e.g. Git-Bash `sh.exe` via `--script-shell`) does its own parsing,
-    // so it takes the normal escaped-`arg` path.
-    let cmd_verbatim = custom_shell.is_none() && cfg!(windows);
 
     // Append the user's extra args the way npm does (@npmcli/promise-spawn):
     // each arg is escaped for the target shell and spliced onto the UNescaped
@@ -3844,7 +3883,7 @@ fn build_script_command(
     // not security — the args are the user's own argv (A42). The returned
     // `full_cmd` is also what the `$ <cmd>` preamble echoes, so the displayed
     // command matches the effective one (issue #146).
-    let full_cmd = nub_core::workspace::shell_escape::splice_args(cmd, args, shell);
+    let full_cmd = nub_core::workspace::shell_escape::splice_args(cmd, args, &shell);
 
     // Augmentation: NODE_OPTIONS + PATH shim so child `node` processes inside
     // the script inherit transpilation, polyfills, flag injection, and
@@ -3868,31 +3907,14 @@ fn build_script_command(
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
     );
 
-    let mut command = StdCommand::new(shell);
-    // Windows cmd: split the multi-token flag (`/d /s /c`) and pass the body
-    // verbatim via `raw_arg`, the Rust equivalent of Node's
-    // `windowsVerbatimArguments: true`, so MSVCRT re-quoting never mangles a
-    // `node -e "…"` body or undoes the per-arg cmd escaping. A custom POSIX shell
-    // (e.g. Git-Bash `sh.exe`) does its own parsing → the escaped-`arg` path.
-    #[cfg(windows)]
-    let spawned = if cmd_verbatim {
-        use std::os::windows::process::CommandExt;
-        for flag in shell_flag.split(' ') {
-            command.arg(flag);
-        }
-        command.raw_arg(&full_cmd);
-        true
-    } else {
-        false
-    };
-    #[cfg(not(windows))]
-    let spawned = {
-        let _ = cmd_verbatim;
-        false
-    };
-    if !spawned {
-        command.arg(shell_flag).arg(&full_cmd);
-    }
+    // Every shell here parses `-c <body>` with the body as a single word (system
+    // `sh`, busybox `sh <-c>`, or a custom POSIX `--script-shell`), so the args
+    // are escaped + spliced onto the body above and passed as one string. The
+    // former implicit Windows `cmd` default — the sole `windowsVerbatimArguments`
+    // consumer — is gone; an explicit `script-shell=cmd` still takes this path
+    // with cmd-escaped args (unchanged), it was never the verbatim default.
+    let mut command = StdCommand::new(&shell);
+    command.args(&shell_args).arg(&full_cmd);
     command.current_dir(&project.root);
 
     // PATH: shim dir (when augmenting) → `.bin` walk-up chain → system PATH.
@@ -3912,6 +3934,33 @@ fn build_script_command(
         None => std::ffi::OsString::from(bin_path.clone()),
     };
     command.env("PATH", path);
+
+    // busybox-w32 script-shell integration (Windows default only; `bin_path` on
+    // the PATH above already lets it resolve `node_modules/.bin/*.cmd` shims).
+    // Two POSIX temp conventions the native-Win32 busybox does not provide:
+    //   * `${TMPDIR}` shell expansion — ash reads it from the process env, and on
+    //     Windows it is normally unset (the OS uses %TMP%/%TEMP%), so a script's
+    //     `${TMPDIR}` would be empty. Point it at the real OS temp dir, leaving a
+    //     user-set value untouched. (busybox's own C `getenv` already falls back
+    //     to %TMP%/%TEMP%, so `mktemp` worked; ash variable expansion does not.)
+    //   * literal `/tmp` — busybox resolves an absolute POSIX path against the
+    //     current drive root, so `/tmp` is `<project-drive>:\tmp` with no remap.
+    //     Best-effort materialize it so `> /tmp/x` redirections work; ignoring the
+    //     error keeps a locked-down drive root a no-regression (the old cmd.exe
+    //     default had no `/tmp` at all), while `$TMPDIR`/`mktemp` still resolve via
+    //     the env above. Skipped under an explicit `--script-shell` (that shell
+    //     owns its own environment model).
+    #[cfg(windows)]
+    if custom_shell.is_none() {
+        if std::env::var_os("TMPDIR").is_none()
+            && let Some(tmp) = std::env::temp_dir().to_str()
+        {
+            command.env("TMPDIR", tmp);
+        }
+        if let Some(drive_root) = project.root.ancestors().last() {
+            let _ = std::fs::create_dir_all(drive_root.join("tmp"));
+        }
+    }
 
     // Default-on compile cache for script children (same decision as spawn_node,
     // 2026-06-10): a script's node subtree inherits this env, so heavyweight

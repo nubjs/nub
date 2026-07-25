@@ -673,6 +673,18 @@ jobs:
           if [[ "$MATRIX_PLATFORM" == win32-* ]]; then
             cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nub.exe"
             cp "target/$MATRIX_TARGET/release/nub.exe" "$PKG/bin/nubx.exe"
+            # Bundle the arch-appropriate busybox-w32 POSIX-sh sidecar next to
+            # nub.exe (nub's Windows script shell — see vendor/busybox-w32/README.md
+            # and crates/nub-cli/src/cli.rs resolve_bundled_busybox). Verify the
+            # vendored bytes against upstream's published SHA-256 before shipping —
+            # a mismatch means the vendored binary drifted and MUST block the release.
+            case "$MATRIX_PLATFORM" in
+              win32-x64)   SRC=vendor/busybox-w32/busybox64.exe;  SHA=07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075 ;;
+              win32-arm64) SRC=vendor/busybox-w32/busybox64a.exe; SHA=e67f873d19d58c535cc9f0c4965ffd622e19b7bab87e3da89cb2185fb54464d7 ;;
+            esac
+            echo "$SHA  $SRC" | sha256sum -c - \
+              || { echo "::error::vendored busybox ($SRC) failed its pinned SHA-256 — refusing to ship a drifted shell binary"; exit 1; }
+            cp "$SRC" "$PKG/bin/busybox.exe"
           else
             cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nub"
             cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nubx"

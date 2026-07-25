@@ -1,0 +1,54 @@
+# Branch-scoped Windows probe (see .claude/skills/ci-adhoc-test) — NO PR needed.
+# Pushing to the busybox-shell branch runs this on a real windows-latest runner.
+# It builds a real nub, stages busybox.exe next to nub.exe exactly as the win32
+# package lays it out, and drives the integrated `nub run` (production sidecar
+# resolution, /tmp glue, .bin shim resolution, --script-shell override) — the
+# acceptance test for the bundled busybox script shell that macOS/Linux cannot run.
+name: busybox-run-probe
+on:
+  push:
+    branches: [busybox-shell]
+    paths:
+      - 'tests/busybox-run-probe/**'
+      - '.github/workflows/busybox-run-probe.yml'
+      - 'crates/nub-cli/src/cli.rs'
+      - 'vendor/busybox-w32/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: busybox `nub run` (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: busybox-run-probe
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: 24
+          cache: 'npm'
+      # Root deps (runtime polyfills the augmentation preload resolves) + the
+      # nub-native addon, mirroring ci.yml's Windows test leg — the proven recipe
+      # that makes `nub run node …` work on a real runner.
+      - run: npm ci
+      - name: Build nub-native addon
+        shell: bash
+        run: |
+          (cd crates/nub-native && cargo build)
+          mkdir -p runtime/addons
+          cp target/debug/nub_native.dll runtime/addons/nub-native.node
+      - name: Build nub
+        run: cargo build -p nub-cli
+      - name: Stage busybox next to nub.exe (production sidecar layout)
+        shell: bash
+        run: cp vendor/busybox-w32/busybox64.exe target/debug/busybox.exe
+      - name: Probe integrated `nub run` through busybox
+        shell: bash
+        run: node tests/busybox-run-probe/run-probe.mjs target/debug/nub.exe "$RUNNER_TEMP/bbrp"

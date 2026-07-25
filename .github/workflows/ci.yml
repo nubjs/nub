@@ -760,6 +760,16 @@ jobs:
           else
             cp target/debug/libnub_native.so runtime/addons/nub-native.node
           fi
+      # nub's Windows script shell is a bundled busybox-w32 sidecar that
+      # release.yml stages next to nub.exe — absent from cargo's target dir, so the
+      # many `nub run` integration tests would have no shell here. Point the
+      # internal resolver override (crates/nub-cli/src/cli.rs resolve_bundled_busybox)
+      # at the vendored binary (windows-latest is x64) so those tests exercise the
+      # real busybox script path. Unix uses the system /bin/sh and ignores this var.
+      - name: Point nub run at the vendored busybox (Windows script shell)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "__NUB_BUSYBOX_EXE=$GITHUB_WORKSPACE/vendor/busybox-w32/busybox64.exe" >> "$GITHUB_ENV"
       - run: cargo test
       # Brand-boundary sweep for the embedded PM engine: a real `nub install`
       # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
