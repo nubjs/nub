@@ -1149,7 +1149,7 @@ jobs:
     env:
       VERSION: ${{ needs.verify.outputs.canary_version }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
       # ACCEPTED TRADEOFF (maintainer, 2026-07-24): zizmor's cache-poisoning
@@ -1249,7 +1249,7 @@ jobs:
       VERSION: ${{ needs.verify.outputs.canary_version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
       - name: Download all platform artifacts
