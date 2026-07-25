@@ -325,6 +325,19 @@ failure logged; a descendant that outlives the target may survive.
   field changes, which git reports as "dubious ownership" and which leaves an orphaned owner
   SID if the account is later deleted. Neither reference implementation solves this.
 
+### A path with a NULL DACL cannot carry a deny
+
+Windows reads a NULL DACL as UNRESTRICTED access, not as an empty allow-set. Merging a deny
+into it would yield a DACL containing only that ace, replacing the object's permissive state
+with one that locks out its own owner — so the engine refuses rather than writing it. A grant
+on such a path is skipped instead (the account already has access).
+
+- **Why bounded:** fail-closed and loud. The launch aborts with a message naming the path.
+  Ordinary project and profile directories carry a real DACL and are unaffected; this was
+  observed only under `C:\Windows\Temp`.
+- **Where fixed:** synthesize the equivalent explicit DACL (a deny for the sandbox account plus
+  an `Everyone` full-access allow preserving the NULL-DACL semantics) rather than refusing.
+
 ### Residue after a crash
 
 A run killed between granting an ace and stripping it leaves the ace behind. The ledger at

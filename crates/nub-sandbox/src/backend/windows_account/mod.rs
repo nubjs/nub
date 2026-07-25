@@ -283,6 +283,9 @@ pub fn teardown() -> std::io::Result<()> {
     let account_result = account::deprovision();
     let _ = state::remove_marker();
     let _ = state::clear_ledger();
+    // The state directory carries the protected DACL and Administrators owner `setup` wrote,
+    // so leaving it behind is residue an unelevated user cannot clear themselves.
+    let _ = state::state_dir().map(std::fs::remove_dir_all);
     wfp_result.and(account_result)
 }
 
@@ -391,6 +394,17 @@ pub(crate) fn apply(
     let marker = match state::read_marker() {
         Ok(Some(m)) => m,
         Ok(None) => return Err(not_set_up("this machine has no nub sandbox account")),
+        // A marker that exists but cannot be READ is a different failure from one that was
+        // never written: re-running setup does not fix a permission problem, so it must not
+        // borrow that instruction.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(crate::backend::Degradation {
+                lost: vec!["fs".to_string(), "net".to_string()],
+                reason: Some(format!(
+                    "nub's sandbox setup record exists but is not readable by this user ({e}).                      The state directory is readable only by administrators and the user who                      ran the setup — run the sandboxed command as that user, or re-run                      `nub run --sandbox-admin setup` as the user who will run it."
+                )),
+            });
+        }
         Err(e) => return Err(not_set_up(&e.to_string())),
     };
 

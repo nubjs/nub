@@ -470,6 +470,34 @@ fn add_ace(
     let wpath = wide(path);
     let dacl = ReadDacl::open(path)?;
 
+    // A NULL DACL means "no DACL at all", which Windows reads as UNRESTRICTED access — not as
+    // an empty allow-set. `SetEntriesInAclW` merging into NULL yields a DACL containing ONLY
+    // our ace, and writing that converts unrestricted into "the sandbox account and nobody
+    // else", permanently locking out the object's own owner. That is destructive and violates
+    // this module's additive-on-user-paths contract, so neither polarity may write here.
+    // (VM-observed on a `C:\Windows\Temp` child, 2026-07-25: a grant reduced a 7-ace DACL to
+    // one `nub-sandbox` ace and the owner lost traverse. `strip` already guards the mirror
+    // case; `add_ace` did not.)
+    if dacl.acl.is_null() {
+        return match mode {
+            // Nothing to grant: a NULL DACL already admits the sandbox account.
+            GRANT_ACCESS => {
+                tracing::debug!(
+                    path = %path.display(),
+                    "sandbox: grant skipped — path has a NULL DACL, so access is already unrestricted"
+                );
+                Ok(())
+            }
+            // FAIL CLOSED. The deny cannot be expressed without replacing the object's
+            // permissive state wholesale, and silently skipping it would leave a hole while
+            // reporting full enforcement.
+            _ => Err(io::Error::other(format!(
+                "sandbox: cannot deny {} to the sandbox account — the path has a NULL DACL                  (unrestricted access), and adding a deny there would replace that with a DACL                  that locks out its own owner. Give the path an explicit DACL, or drop it from                  the policy's deny list.",
+                path.display()
+            ))),
+        };
+    }
+
     let ea = explicit_access(sid.0, mask, mode, inherit);
 
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
