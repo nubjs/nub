@@ -197,6 +197,53 @@ fn argv0_pnpm_dispatches_to_the_shim_and_falls_through_when_unpinned() {
 }
 
 #[test]
+fn argv0_pm_shim_initializes_one_project_config_snapshot() {
+    let work = tmp("config-snapshot");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("nub.jsonc"),
+        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
+    )
+    .unwrap();
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    let fake = fake_pm(&sys, "pnpm");
+    let link = shim_link(&work, "pnpm");
+    let log = work.join("snapshot.log");
+
+    let (stdout, stderr, code) = run(
+        &link,
+        &["--version"],
+        &proj,
+        &[
+            ("PATH", sys.to_str().unwrap()),
+            ("HOME", work.to_str().unwrap()),
+            ("__NUB_TEST_CONFIG_SNAPSHOT_LOG", log.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "an inert sandbox config must not block PM-shim exec; stderr:\n{stderr}"
+    );
+    assert_eq!(stdout, format!("FAKE:{}:--version\n", fake.display()));
+
+    let lines: Vec<_> = std::fs::read_to_string(&log)
+        .expect("PM-shim route must initialize the config snapshot")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![format!(
+            "cwd={} project=loaded",
+            proj.canonicalize().unwrap().display()
+        )],
+        "the successful argv0 PM route must initialize exactly one snapshot from its resolved cwd"
+    );
+}
+
+#[test]
 fn mismatched_pm_in_a_pinned_project_refuses_with_the_redirect() {
     let work = tmp("refuse");
     let proj = work.join("proj");
