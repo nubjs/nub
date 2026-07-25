@@ -606,6 +606,7 @@ mod win {
             enforce: true,
             rules: Vec::new(),
             default_effect: Effect::Deny,
+            ..Default::default()
         };
         expect_in(
             &mut fails,

@@ -496,6 +496,18 @@ pub enum Command {
         #[arg(long = "sandbox", value_name = "FILE", hide = true)]
         sandbox: Option<String>,
 
+        /// INTERNAL, UNDOCUMENTED: administer the Windows dedicated sandbox account.
+        /// `setup`/`teardown` need an elevated prompt (they create a local account and
+        /// install network filters); `status`/`clean` do not. The one-time-elevated half
+        /// of the Windows agent-sandbox backend — see `nub-sandbox`'s `windows_account`.
+        #[arg(
+            long = "sandbox-admin",
+            value_name = "ACTION",
+            hide = true,
+            value_parser = ["setup", "teardown", "status", "clean"]
+        )]
+        sandbox_admin: Option<String>,
+
         /// Remaining arguments forwarded to the script.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1684,6 +1696,7 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             // Internal `--sandbox <FILE>` (hidden) takes a separate-token policy
             // path, so its value must not mis-bind as the script positional.
             "--sandbox",
+            "--sandbox-admin",
         ],
         // Exec's workspace value-flags must be listed so `nubx --filter @org/api
         // tsc` binds `@org/api` to the filter, not the bin positional. (Exec's
@@ -1905,9 +1918,13 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             aggregate_output,
             resume_from,
             sandbox,
+            sandbox_admin,
             mut args,
         }) => {
             args.extend(suffix);
+            if let Some(action) = sandbox_admin {
+                return sandbox_admin_action(&action);
+            }
             // INTERNAL test entry: `nub run --sandbox <file.json> <cmd> [args]`
             // compiles an explicit surface policy and launches <cmd> under the
             // sandbox engine. Bypasses the whole script-run/workspace path (this
@@ -2674,6 +2691,41 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
         .status()
         .with_context(|| format!("spawning `{program}` under the sandbox"))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// INTERNAL, UNDOCUMENTED: the Windows agent-sandbox backend's machine administration.
+///
+/// This is the one-time-elevated half of that backend and the reason the per-run launch is
+/// NOT elevated: `setup` creates the dedicated local account and installs the SID-keyed WFP
+/// egress filters once, after which every sandboxed run is an ordinary unelevated process.
+/// `clean` is unelevated and exists for crash residue (aces left behind by a run that died
+/// between grant and teardown).
+#[cfg(target_os = "windows")]
+fn sandbox_admin_action(action: &str) -> Result<i32> {
+    match action {
+        "setup" => {
+            let sid = nub_sandbox::windows_admin::setup(None)?;
+            println!("nub sandbox account ready ({sid})");
+        }
+        "teardown" => {
+            nub_sandbox::windows_admin::teardown()?;
+            println!("nub sandbox account and network filters removed");
+        }
+        "status" => print!("{}", nub_sandbox::windows_admin::status()?),
+        "clean" => {
+            let n = nub_sandbox::windows_admin::clean()?;
+            println!("swept {n} recorded path(s)");
+        }
+        other => anyhow::bail!("unknown --sandbox-admin action `{other}`"),
+    }
+    Ok(0)
+}
+
+/// The sandbox account backend is Windows-only — no other OS needs a second principal to
+/// express the policy grammar, so there is nothing to administer.
+#[cfg(not(target_os = "windows"))]
+fn sandbox_admin_action(_action: &str) -> Result<i32> {
+    anyhow::bail!("--sandbox-admin is Windows-only")
 }
 
 /// The per-OS home anchors the sandbox compiler expands symbolic roots against.

@@ -134,6 +134,222 @@ residuals:
 - **Port-agnostic broker scoping.** A literal broker host matches regardless of port —
   brokering configured for `api.example.com` applies to that host on any port.
 
+## Windows dedicated-account backend (agent-sandbox) — bounded residuals
+
+The account backend (`backend/windows_account/`) runs the child as a dedicated local account
+fenced by SID-keyed WFP filters. It carries the residuals below. Everything here is a
+deliberate spike bound or an inherited platform property, not an unknown.
+
+### One-time elevation is required, and per-run is not
+
+`nub run --sandbox-admin setup` needs administrator: it creates a local account and installs
+WFP filters, and Windows gates both. Every sandboxed run afterwards is unelevated. This is the
+whole reason the WFP permit covers a loopback PORT WINDOW rather than the run's exact proxy
+port — a filter tracking an ephemeral port would need a WFP write, hence a UAC prompt, on
+every run.
+
+- **Cost of the window:** the permit admits any local principal to loopback on those ports for
+  as long as the filters are installed, rather than admitting only nub's proxy on one port.
+  Bounded by the window's width (10 ports by default, 64 max, enforced at install).
+- **Where fixed:** an elevated helper service could add an exact-port filter per run. Not
+  built; the window is the deliberate trade.
+- **The sandbox belongs to whoever ran setup.** `%PROGRAMDATA%\nub\sandbox` holds the
+  DPAPI-sealed account credential, and machine-scope DPAPI is explicitly not a boundary — any
+  local principal that can READ the ciphertext can decrypt it and then hold the sandbox
+  account's password. Setup therefore replaces that directory's DACL with a PROTECTED one
+  naming only SYSTEM, `BUILTIN\Administrators`, and the account that ran setup. Another
+  standard user on the same box reads neither the credential nor the provisioning marker and
+  fails closed with "not provisioned" — including the ordinary user of a machine where the UAC
+  prompt was satisfied with a DIFFERENT administrator account. Re-running setup as that user
+  re-points the lock at them.
+
+### Egress coverage is `ALE_AUTH_CONNECT` only
+
+The fence blocks outbound connects for the account on IPv4 and IPv6. It does NOT filter
+inbound (`ALE_AUTH_RECV_ACCEPT_*`) or bind/listen (`ALE_RESOURCE_ASSIGNMENT_*`), so the
+account may still open a listening socket. Neither of the reference implementations nub
+mirrors (SRT, Codex) covers those layers either.
+
+- **Why bounded:** the policy grammar's net axis is about EGRESS. A listener the child opens
+  is reachable only by something already on the box.
+
+### DNS still resolves
+
+`getaddrinfo` is serviced by the `Dnscache` service running as `NETWORK SERVICE`, so name
+resolution succeeds under a different token even though the child's own `connect()` is
+blocked. No filter set can close this while keying on the connecting token.
+
+- **Why harmless here:** the child reaches nub's proxy by IP and the PROXY resolves. A blocked
+  host is blocked at connect regardless of whether its name resolved.
+
+### Per-user tool installs are unreachable without an explicit grant
+
+The child is a DIFFERENT principal, so anything under the invoking user's profile — an
+nvm/fnm-managed Node, a Scoop or per-user winget package, `pip install --user`,
+`%LOCALAPPDATA%\Programs\…` — resolves on `PATH` but cannot be opened. This lands
+particularly hard on nub, whose premise is running the user's installed Node.
+
+- **What the engine does:** auto-grants the resolved program FILE (never its parent directory,
+  which would sweep in a neighbouring secret).
+- **Launcher contract:** a program that loads SIBLING DLLs from its own directory needs the
+  front-end to put that toolchain directory in the read allow-set — the same contract the
+  macOS "toolchain read-confine for a non-system interpreter" residual defines.
+
+### Certificate revocation checks fail under schannel
+
+CryptoAPI's CRL/OCSP fetch goes out via WinHTTP under the caller's token and ignores proxy
+environment variables, so it is blocked. `curl`, `git`, and `cargo` surface
+`CRYPT_E_REVOCATION_OFFLINE` (`0x80092013`) unless revocation is disabled
+(`curl --ssl-no-revoke`, `git -c http.schannelCheckRevoke=false`,
+`CARGO_HTTP_CHECK_REVOKE=false`). `Invoke-WebRequest`, .NET `HttpClient`, and `gh` are
+unaffected.
+
+### Glob denies are not enforceable as aces
+
+A deny whose matcher carries glob metacharacters (`**/.env`, `C:/proj/*.pem`) cannot be one
+ACE. The engine reports `fs-deny-glob` as a LOST axis — distinct from the over-confinement
+degradations, because a missed deny is a hole, not extra confinement. Literal deny paths are
+enforced exactly.
+
+### A grant or deny target that does not exist at launch is skipped
+
+An ACE needs an object, so a policy path absent when the run starts gets none. Skipping rather
+than failing is deliberate: the flagship agent policy denies `~/.ssh`, `~/.aws`,
+`~/.docker/config.json` and `<proj>/.env`, most of which are absent on any given machine, and
+aborting on the first missing one would kill the backend on its own headline shape. Denying a
+path that does not exist denies nothing, which is correct — but a file created LATER at that
+path, INSIDE a granted tree, inherits the tree's grant with no explicit deny to outrank it.
+Every error other than not-found stays fatal.
+
+- **Why bounded:** it needs the denied path to sit under a grant AND to be created after the
+  aces land. A denied path outside every grant is unreachable to the account regardless.
+- **Where fixed:** pre-create the deny target (as the Linux backend pre-creates write targets),
+  or re-apply denies when the child creates a matching path. Neither is built.
+
+### Junction/symlink TOCTOU on an ace target
+
+Every ace target is canonicalized before the ace is written, so a symlink or junction resolves
+to its TARGET and the ace lands on the object an open actually reaches — a reparse point does
+not gate content access. Nothing then re-checks that the resolved object is still inside the
+path the policy named. A child holding DELETE on a nested grant target can replace it with a
+junction between runs, so the NEXT run stamps an inheritable grant on wherever that junction
+points.
+
+- **Why bounded:** it needs a prior run that granted write inside the tree, and it MOVES a
+  grant rather than widening one — the next run's confinement is wrong, the current run's is
+  not.
+- **Where fixed:** open the target with `FILE_FLAG_OPEN_REPARSE_POINT` and ace the HANDLE, or
+  re-verify the canonicalized target against the policy's own prefix after resolution.
+
+### The child inherits the parent's real console handles
+
+`CreateProcessWithLogonW` has no `bInheritHandles` parameter and no `STARTUPINFOEX` overload, so
+stdio must ride the three `STARTF_USESTDHANDLES` fields — and nub marks the parent's own
+stdin/stdout/stderr permanently inheritable to supply them. A foreign-user child therefore holds
+the parent shell's real console INPUT handle, which is a `WriteConsoleInput` keystroke-injection
+path back into that shell.
+
+- **Where fixed:** give the child three anonymous pipes and relay, flipping nub's own ends
+  non-inheritable — what SRT does. Not built; it also costs the child a real console (no PTY
+  semantics, no `isatty`).
+
+### A policy that confines only the network still runs as a foreign principal
+
+Backend selection is per-POLICY, not per-axis: a policy with per-host egress rules and no
+filesystem confinement still routes here, and its child then runs as the sandbox account —
+which reaches nothing under the invoking user's profile. The user's own project files become
+unreachable although they asked for nothing about the filesystem.
+
+- **Why it is a surprise, not a hole:** it is over-confinement, and the engine reports `fs-read`
+  as a degradation. It is listed because the SIZE of the behavioral change is easy to miss when
+  the policy names only the net axis.
+- **Where fixed:** the launcher supplies the project directory in the read allow-set — the same
+  launcher contract as the per-user tool installs item above.
+
+### Window-station access is granted per run, and verified only in session 0
+
+seclogon's window-station auto-grant covers `WinSta0` only. A NON-INTERACTIVE caller — SSH, a
+service, a CI agent — runs on a per-logon `Service-0x0-…$` station instead, where the auto-grant
+does not apply and the child dies in loader init with `0xC0000142 STATUS_DLL_INIT_FAILED`. The
+launch therefore aces the caller's own window station and desktop for the sandbox SID before
+spawning, and restores both DACLs when the run ends. `READ_CONTROL` in the station mask is
+load-bearing: without it the child HANGS in loader init rather than failing. Setting `lpDesktop`
+explicitly does not substitute for the aces.
+
+- **Verified in session 0 only.** The failure and the fix were both reproduced from a
+  non-interactive session. The interactive `WinSta0` path — where seclogon's auto-grant should
+  make the aces redundant — is untested; the aces are written there too and are expected to be
+  a no-op.
+- **The granted rights are BROAD, and on an interactive session that matters.** The masks are
+  `WINSTA_ALL_ACCESS | READ_CONTROL` and the full documented `DESKTOP_*` union — what the VM
+  diagnosis established as working, not a bisected minimum. Against the caller's own
+  `WinSta0\Default` that hands the confined account `DESKTOP_JOURNALRECORD` and
+  `DESKTOP_HOOKCONTROL` (desktop-wide keystroke capture), `DESKTOP_JOURNALPLAYBACK` (input
+  injection into the user's session), `WINSTA_READSCREEN` (screen capture) and
+  `WINSTA_ACCESSCLIPBOARD` — for the run's duration, at the same integrity level as the user's
+  own apps, so UIPI does not block hooks against them. On a `Service-0x0-…$` station there is
+  no user session to reach and the cost is nil.
+- **Where fixed:** bisect the real floor on a VM and narrow both masks — plausibly station
+  `READ_CONTROL | ENUMDESKTOPS | READATTRIBUTES | CREATEDESKTOP | ACCESSGLOBALATOMS |
+  EXITWINDOWS`, desktop `READ_CONTROL | READOBJECTS | WRITEOBJECTS | CREATEWINDOW`. Not done
+  here: the broad set is the one actually verified to work, and `READ_CONTROL`'s hang-vs-fail
+  behavior already shows this surface punishes guessing.
+- **Cost while the child runs:** concurrent runs share the station too — the restore puts back
+  the DACL the FIRST of them saw, so a second run's ace can be removed while its child is still
+  alive, and that run's own restore then re-writes the first's ace permanently. Same shape as
+  the shared-account bound below.
+
+### Whole-tree kill is best-effort
+
+`AssignProcessToJobObject` on a `CreateProcessWithLogonW` child commonly returns
+`ERROR_NOT_SUPPORTED`: the Secondary Logon service already placed it in its own job and
+current Windows refuses that nesting cross-session. The assignment is attempted and the
+failure logged; a descendant that outlives the target may survive.
+
+- **Where fixed:** the two-hop broker→runner design SRT and Codex use, where the runner owns a
+  job it can assign into. Deferred.
+
+### Spike bounds carried deliberately
+
+- **Single-hop launch.** The child is started directly, not through a runner holding a
+  restricted token. Confinement comes from the account's ACL reach plus SID-keyed WFP, neither
+  of which needs that token — but the token would additionally strip privileges and groups.
+- **`lpDesktop` is NULL**, so the child shares the caller's desktop instead of getting a
+  private one. A private desktop is the hardening follow-up and would additionally need a
+  session-`BaseNamedObjects` ace. The station and desktop aces themselves are NOT part of this
+  bound — the launch writes them on every run (see the window-station item above).
+- **Concurrent runs share one account.** Two simultaneous sandboxed runs grant and strip aces
+  for the SAME SID, so one run's teardown can revoke a grant the other still needs.
+- **Child-created files are owned by the sandbox account.** Access is preserved (the grant is
+  written UNPROTECTED so the user's inherited aces survive on new children), but the OWNER
+  field changes, which git reports as "dubious ownership" and which leaves an orphaned owner
+  SID if the account is later deleted. Neither reference implementation solves this.
+
+### A path with a NULL DACL cannot carry a deny
+
+Windows reads a NULL DACL as UNRESTRICTED access, not as an empty allow-set. Merging a deny
+into it would yield a DACL containing only that ace, replacing the object's permissive state
+with one that locks out its own owner — so the engine refuses rather than writing it. A grant
+on such a path is skipped instead (the account already has access).
+
+- **Why bounded:** fail-closed and loud. The launch aborts with a message naming the path.
+  Ordinary project and profile directories carry a real DACL and are unaffected; this was
+  observed only under `C:\Windows\Temp`.
+- **Where fixed:** synthesize the equivalent explicit DACL (a deny for the sandbox account plus
+  an `Everyone` full-access allow preserving the NULL-DACL semantics) rather than refusing.
+
+### Residue after a crash
+
+A run killed between granting an ace and stripping it leaves the ace behind. The ledger at
+`%PROGRAMDATA%\nub\sandbox\acl-ledger.txt` records every path so
+`nub run --sandbox-admin clean` (unelevated) collects them. A leaked grant is over-permission
+for a confined account, not a host compromise — hygiene, not a correctness boundary.
+
+- **`clean` is a machine-wide sweep, so it can revoke a LIVE run's aces.** The ledger is
+  machine-wide and `clean` is unelevated, so a sweep strips every path it lists — including
+  ones a concurrent sandboxed run still needs. Same root as the shared-account bound above:
+  every run's aces key on the one SID, and nothing distinguishes a live grant from residue.
+
 ## Launcher-handoff items (engine correct; launcher must complete the guarantee)
 
 ### macOS ascendant-env via `KERN_PROCARGS2` — CLOSED in-engine

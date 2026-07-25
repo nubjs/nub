@@ -16,13 +16,13 @@
 //!
 //! LAUNCH SEAM: a backend either configures [`Prepared::command`] for the caller to
 //! spawn (macOS wraps `sandbox-exec`; Linux installs a `pre_exec` hook; the skeleton
-//! just scrubs env) OR — Windows only — OWNS the whole spawn lifecycle, because an
-//! AppContainer launch cannot be a pre-built `std::process::Command`: it needs a
-//! custom `CreateProcessW` with `STARTUPINFOEX`/`SECURITY_CAPABILITIES`, a Job Object
-//! assigned at creation, and per-run ACL grants that must be TORN DOWN after the
-//! child exits. [`Prepared::status`] is the uniform verb: mac/linux/skeleton delegate
-//! to `command.status()`; Windows runs its launcher (setup → spawn → wait → RAII
-//! teardown) when a launch plan is attached.
+//! just scrubs env) OR — Windows only — OWNS the whole spawn lifecycle, because
+//! neither Windows launch can be a pre-built `std::process::Command`: the AppContainer
+//! one needs a custom `CreateProcessW` with `STARTUPINFOEX`/`SECURITY_CAPABILITIES`,
+//! the dedicated-account one needs `CreateProcessWithLogonW`, and BOTH need per-run
+//! ACL grants TORN DOWN after the child exits. [`Prepared::status`] is the uniform
+//! verb: mac/linux/skeleton delegate to `command.status()`; Windows runs whichever
+//! launcher its plan names (setup → spawn → wait → RAII teardown).
 
 use crate::policy::{Effect, Inspection, ProxyMode, SandboxPolicy};
 use crate::proxy::mitm::MitmEngine;
@@ -47,6 +47,11 @@ mod linux_connect_notify;
 // without a Windows machine (the FFI launcher itself stays `#[cfg(windows)]`).
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+
+// The Windows dedicated-account + WFP backend (agent-sandbox). Same cfg as `windows` so its
+// OS-agnostic plan derivation and mode-selection are unit-tested on the macOS dev host.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod windows_account;
 
 // The OS-agnostic Landlock grant derivation. Compiled on Linux (its real consumer)
 // and under `test` on any host — so its security-critical carve logic is unit-tested
@@ -127,9 +132,9 @@ impl CommandSpec {
 /// rides the `status` seam, not the `command` field).
 pub struct Prepared {
     /// The configured child for the mac/linux/skeleton path. On Windows this is the
-    /// env-scrubbed plain child used ONLY when nothing needs AppContainer confinement
-    /// (`launch` is `None`); when confinement applies, `launch` owns the spawn and
-    /// this field is unused.
+    /// env-scrubbed plain child used ONLY when no confinement mechanism applies
+    /// (`launch` is `None`); when one does — either Windows variant — `launch` owns the
+    /// spawn and this field is unused.
     pub command: Command,
     pub degradation: Degradation,
     /// The running egress proxy (design.md §2.5), when the policy enforces per-host
@@ -145,9 +150,10 @@ pub struct Prepared {
     /// where the supervisor is viable); `None` otherwise.
     #[cfg(target_os = "linux")]
     pub(crate) connect_notify: Option<linux_connect_notify::ConnectNotify>,
-    /// Windows AppContainer launch plan — the backend owns spawn+wait+teardown when
-    /// this is `Some`. Absent (or on other OSes) → [`Prepared::status`] spawns
-    /// `command`.
+    /// Windows launch plan — the backend owns spawn+wait+teardown when this is `Some`.
+    /// A two-variant enum, one per Windows mechanism: the per-run AppContainer (LowBox
+    /// token) and the dedicated local account (`CreateProcessWithLogonW`, no LowBox
+    /// token). Absent (or on other OSes) → [`Prepared::status`] spawns `command`.
     #[cfg(target_os = "windows")]
     pub(crate) launch: Option<windows::WindowsLaunch>,
 }
@@ -155,8 +161,10 @@ pub struct Prepared {
 impl Prepared {
     /// Launch the prepared child and wait for it, returning its exit status. The
     /// UNIFORM launch verb across backends: mac/linux/skeleton spawn `command`;
-    /// Windows runs its AppContainer launcher (ACL setup → `CreateProcessW` under a
-    /// LowBox token → wait → RAII teardown) when a launch plan is attached.
+    /// Windows runs whichever launcher its plan names when one is attached — both
+    /// follow the same shape (ACL setup → a custom spawn → wait → RAII teardown), and
+    /// differ in the spawn: `CreateProcessW` under a LowBox token for the AppContainer,
+    /// `CreateProcessWithLogonW` as the dedicated account for the other.
     ///
     /// The egress proxy (`self.proxy`) is held for the child's whole run and dropped
     /// (listener shut down) only after the child exits — `self` owns it until this
@@ -199,7 +207,30 @@ fn start_proxy_if_needed(policy: &SandboxPolicy) -> Option<EgressProxy> {
         }
         Inspection::Connection => None,
     };
-    EgressProxy::start(decider, mitm).ok()
+    EgressProxy::start_in_range(decider, mitm, proxy_port_range(policy)).ok()
+}
+
+/// The loopback window the proxy must bind inside, when one applies.
+///
+/// Only Windows' dedicated-account backend has one: its WFP permit is installed ONCE, by the
+/// elevated setup, over a fixed port window — so the proxy binds into that window rather than
+/// a filter chasing an ephemeral port, which would cost a UAC prompt every run. Everywhere
+/// else the deny-layer carves the exact port at launch and no range is needed.
+#[cfg(target_os = "windows")]
+fn proxy_port_range(policy: &SandboxPolicy) -> Option<(u16, u16)> {
+    if !windows_account::needs_account_backend(policy) {
+        return None;
+    }
+    // An absent or unreadable marker is NOT decided here: `windows_account::apply` fails
+    // closed with the actionable "run the elevated setup" message, and an ephemeral bind in
+    // the meantime is harmless because that launch never happens.
+    let m = windows_account::state::read_marker().ok().flatten()?;
+    Some((m.port_low, m.port_high))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn proxy_port_range(_policy: &SandboxPolicy) -> Option<(u16, u16)> {
+    None
 }
 
 /// The CA-trust env keys pointed at the child CA bundle (ephemeral CA + real roots).

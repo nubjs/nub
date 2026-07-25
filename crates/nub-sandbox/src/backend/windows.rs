@@ -58,7 +58,7 @@ use std::path::{Path, PathBuf};
 /// IR→plan derivation is unit-tested on the dev host; [`WindowsLaunch::run`] (the FFI)
 /// is `#[cfg(windows)]`.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) struct WindowsLaunch {
+pub(crate) struct AppContainerLaunch {
     program: OsString,
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
@@ -78,9 +78,30 @@ pub(crate) struct WindowsLaunch {
     register_loopback_exemption: bool,
 }
 
+/// Which Windows mechanism owns this launch. Exactly one applies, which is why this is an
+/// enum rather than two `Option` fields: build-jail's admin-free AppContainer and
+/// agent-sandbox's dedicated account are alternatives, never a combination.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) enum WindowsLaunch {
+    /// Per-run AppContainer (LowBox) — the pure-allowlist path. No elevation, ever.
+    AppContainer(AppContainerLaunch),
+    /// Dedicated local account + WFP — the full-grammar path. Needs a one-time elevated setup.
+    Account(super::windows_account::AccountLaunch),
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsLaunch {
+    pub(crate) fn run(self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            WindowsLaunch::AppContainer(l) => l.run(),
+            WindowsLaunch::Account(l) => l.run(),
+        }
+    }
+}
+
 /// What the allowlist model could NOT express for a policy, so the caller can be told.
 #[derive(Debug, Default, PartialEq)]
-struct FsDegrade {
+pub(super) struct FsDegrade {
     /// A generous-read base (`default_effect == Allow`, OR a whole-fs `**` Allow entry
     /// — the shape the compiler actually emits for `"..."`/`sandbox: true`). The
     /// allowlist can't express read-all-minus-secrets; reads are confined to the
@@ -98,7 +119,7 @@ struct FsDegrade {
 /// and is reported via [`FsDegrade`] (fail-safe: over-confine + name it, never widen).
 /// (The deny-shadowing check is done by [`deny_shadows_grant`] in `apply`, AFTER the
 /// program-dir grant is folded into the read set.)
-fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
+pub(super) fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
     let mut read = Vec::new();
     let mut write = Vec::new();
     let mut degrade = FsDegrade {
@@ -144,7 +165,7 @@ fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
 /// shadows it. Matching is case-insensitive (Windows paths are). Run against the
 /// policy-derived SUBTREE grants only — the caller excludes the program-file grant (a
 /// single leaf with no subtree, an exec necessity), which cannot host a deny "inside" it.
-fn deny_shadows_grant(entries: &[FsRule], read_grants: &[PathBuf]) -> bool {
+pub(super) fn deny_shadows_grant(entries: &[FsRule], read_grants: &[PathBuf]) -> bool {
     if read_grants.is_empty() {
         return false;
     }
@@ -203,12 +224,12 @@ fn path_prefixes(a: &Path, b: &Path) -> bool {
 }
 
 /// Whether a canonical IR glob contains glob metacharacters.
-fn has_glob_meta(glob: &str) -> bool {
+pub(super) fn has_glob_meta(glob: &str) -> bool {
     glob.contains(['*', '?', '[', ']', '{', '}'])
 }
 
 /// Whether a glob addresses the whole filesystem (the generous-read base spellings).
-fn is_whole_fs(glob: &str) -> bool {
+pub(super) fn is_whole_fs(glob: &str) -> bool {
     matches!(glob, "**" | "/**" | "/")
 }
 
@@ -216,7 +237,7 @@ fn is_whole_fs(glob: &str) -> bool {
 /// as one inheritable ACE. A plain absolute literal, or a literal + trailing `/**`
 /// subtree twin, yields that directory; anything with embedded globs (or the whole-fs
 /// spellings) yields `None`. Mirrors the macOS backend's `to_match_term` subpath case.
-fn literal_subtree(glob: &str) -> Option<PathBuf> {
+pub(super) fn literal_subtree(glob: &str) -> Option<PathBuf> {
     if is_whole_fs(glob) {
         return None;
     }
@@ -238,7 +259,7 @@ fn literal_subtree(glob: &str) -> Option<PathBuf> {
 /// filesystem-wide write hole. The Windows twin of the macOS `is_dangerous_write_root`
 /// (reads are exempt; a generous read is a legitimate posture, and read is separately
 /// allowlist-confined here anyway). Matches on the forward-slashed canonical form.
-fn is_dangerous_write_root(dir: &Path) -> bool {
+pub(super) fn is_dangerous_write_root(dir: &Path) -> bool {
     let Some(s) = dir.to_str() else { return false };
     let s = s.trim_end_matches('/');
     // Drive root (`C:`), the Windows dir, and Program Files are the roots a stray `..`
@@ -341,6 +362,27 @@ pub(crate) fn apply(
 
     let confine_fs = fs_confines(&policy.fs);
     let sandboxing = confine_fs || policy.net.enforce;
+
+    // ── agent-sandbox route (dedicated account + WFP) ────────────────────────────
+    // A policy the ALLOWLIST cannot carry — a generous-read base, a deny that must be carved
+    // inside a grant, or per-host egress — goes to the dedicated-account backend, which
+    // expresses all three but costs a one-time elevated setup. build-jail's shape (pure
+    // default-deny allowlist, coarse or absent net) never matches, so `nub install` stays
+    // admin-free. See `windows_account`'s module doc for why the split falls exactly here.
+    // PROVISIONING IS PART OF THE PREDICATE, not just a precondition checked later. Without
+    // it this branch subsumes the whole strict-Windows tier below — `Tier1`/`FailUnelevated`
+    // require exactly `net.enforce && any(Allow)`, which is byte-identical to
+    // `needs_account_backend`'s per-host arm and also forces `sandboxing` — so an
+    // unprovisioned machine would take the account route, fail closed, and leave that tier
+    // unreachable. Falling through instead keeps the AppContainer tier live and degrading
+    // honestly (over-confined reads, a reported deny it cannot carve), which is strictly
+    // better than refusing to run on a machine that never opted into the elevated setup.
+    if sandboxing
+        && super::windows_account::needs_account_backend(policy)
+        && super::windows_account::is_provisioned()
+    {
+        return super::windows_account::apply(policy, spec, proxy_port, proxy_token, ca_bundle);
+    }
 
     // ── net posture (strict-Windows tier decision) ──────────────────────────────
     // Per-host + MITM ride nub's loopback proxy, which an AppContainer child can reach
@@ -446,9 +488,7 @@ pub(crate) fn apply(
     // proxy's minted leaves. Grant it as nub infra (not user config), mirroring the
     // mac/linux ca-bundle read grant. Only under a real per-host tier (`tier1`); the plain
     // path handles CA-trust via `set_ca_env` on an unconfined fs.
-    if tier1
-        && let Some(bundle) = ca_bundle
-    {
+    if tier1 && let Some(bundle) = ca_bundle {
         let b = bundle.to_path_buf();
         if !read_grants.contains(&b) {
             read_grants.push(b);
@@ -495,7 +535,7 @@ pub(crate) fn apply(
     // degraded when it isn't. See the module doc.)
     deg.reason = reason;
 
-    let launch = WindowsLaunch {
+    let launch = AppContainerLaunch {
         program: spec.program,
         args: spec.args,
         cwd: spec.cwd,
@@ -516,7 +556,7 @@ pub(crate) fn apply(
         command: std::process::Command::new(&launch.program),
         degradation: deg,
         proxy: None,
-        launch: Some(launch),
+        launch: Some(WindowsLaunch::AppContainer(launch)),
     })
 }
 
@@ -598,7 +638,10 @@ fn build_child_env(
 /// name → PATH search trying the name and common executable extensions. Windows-only
 /// (its PATHEXT search is Windows semantics; the host build never calls it).
 #[cfg(target_os = "windows")]
-fn resolve_program(program: &std::ffi::OsStr, child_cwd: Option<&Path>) -> Option<PathBuf> {
+pub(super) fn resolve_program(
+    program: &std::ffi::OsStr,
+    child_cwd: Option<&Path>,
+) -> Option<PathBuf> {
     let p = Path::new(program);
     if p.is_absolute() {
         return Some(p.to_path_buf());
@@ -634,8 +677,8 @@ fn resolve_program(program: &std::ffi::OsStr, child_cwd: Option<&Path>) -> Optio
 // ── the FFI launcher ────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
-mod launch {
-    use super::WindowsLaunch;
+pub(super) mod launch {
+    use super::AppContainerLaunch;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
@@ -648,14 +691,14 @@ mod launch {
         CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
         SetHandleInformation, WAIT_OBJECT_0,
     };
+    use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
+        NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
+        NetworkIsolationSetAppContainerConfig,
+    };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
         NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
         SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
-    };
-    use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
-        NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
-        NetworkIsolationSetAppContainerConfig,
     };
     use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
@@ -720,9 +763,7 @@ mod launch {
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
             return false;
         }
-        let mut elevation = TOKEN_ELEVATION {
-            TokenIsElevated: 0,
-        };
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
         let mut ret_len: u32 = 0;
         // SAFETY: `elevation` is a correctly-sized TOKEN_ELEVATION out-buffer.
         let ok = unsafe {
@@ -841,7 +882,7 @@ mod launch {
         }
     }
 
-    impl WindowsLaunch {
+    impl AppContainerLaunch {
         /// Own the full spawn lifecycle: create a per-run AppContainer profile, grant
         /// the inheritable allow-ACEs, launch the child under the LowBox token inside a
         /// kill-on-close Job, wait, then tear everything down (RAII).
@@ -1359,7 +1400,7 @@ mod launch {
     }
 
     /// UTF-16, NUL-terminated.
-    fn to_wide(s: &str) -> Vec<u16> {
+    pub(in crate::backend) fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
@@ -1373,7 +1414,10 @@ mod launch {
     /// Build a mutable UTF-16 command line from program + args, quoting each token per
     /// the CommandLineToArgvW rules std uses. lpApplicationName is NULL, so the child
     /// gets a conventional argv.
-    fn build_command_line(program: &std::ffi::OsStr, args: &[std::ffi::OsString]) -> Vec<u16> {
+    pub(in crate::backend) fn build_command_line(
+        program: &std::ffi::OsStr,
+        args: &[std::ffi::OsString],
+    ) -> Vec<u16> {
         let mut line: Vec<u16> = Vec::new();
         append_quoted(&mut line, program);
         for a in args {
@@ -1424,7 +1468,9 @@ mod launch {
     /// expects (the source `BTreeMap` is case-sensitive, so a lowercase key like
     /// `windir` would otherwise sort after all-uppercase keys and violate the
     /// convention).
-    fn build_env_block(env: &std::collections::BTreeMap<String, String>) -> Vec<u16> {
+    pub(in crate::backend) fn build_env_block(
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<u16> {
         let mut pairs: Vec<(&String, &String)> = env.iter().collect();
         pairs.sort_by_key(|a| a.0.to_ascii_uppercase());
         let mut block: Vec<u16> = Vec::new();
@@ -1676,9 +1722,15 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         });
-        let deg = apply(&deny_all, crate::CommandSpec::new("cmd.exe"), None, None, None)
-            .expect("apply deny-all")
-            .degradation;
+        let deg = apply(
+            &deny_all,
+            crate::CommandSpec::new("cmd.exe"),
+            None,
+            None,
+            None,
+        )
+        .expect("apply deny-all")
+        .degradation;
         assert!(
             !deg.lost.iter().any(|s| s == "net-per-host"),
             "deny-all is coarse-enforced, not degraded (got {:?})",
@@ -1711,7 +1763,11 @@ mod tests {
                 deg.lost
             );
         } else {
-            let err = res.expect_err("unelevated per-host must fail-closed, not degrade");
+            // `expect_err` would need `Prepared: Debug`, which it is not (it owns a live
+            // proxy and a launch plan) — so destructure instead.
+            let Err(err) = res else {
+                panic!("unelevated per-host must fail-closed, not degrade");
+            };
             assert!(
                 err.lost.iter().any(|s| s == "net-per-host"),
                 "the fail-closed Degradation must name net-per-host (got {:?})",

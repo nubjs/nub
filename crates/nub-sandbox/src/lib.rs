@@ -97,6 +97,18 @@ pub mod policy;
 pub mod proxy;
 
 pub use backend::{CommandSpec, Degradation, Prepared, apply};
+
+/// The Windows dedicated-account backend's machine administration, surfaced for the CLI.
+///
+/// These are the ONLY operations that need administrator, and they are the reason the
+/// per-run launch does not: one elevated `setup` installs the account and the SID-keyed WFP
+/// egress fence, after which every sandboxed run is unelevated. `clean` is unelevated and
+/// exists for crash residue. Windows-only by construction — no other OS needs a second
+/// principal to express the grammar.
+#[cfg(target_os = "windows")]
+pub mod windows_admin {
+    pub use crate::backend::windows_account::{clean, setup, status, teardown};
+}
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, compile, compile_with_warnings,
 };
