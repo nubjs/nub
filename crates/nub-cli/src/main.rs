@@ -12,6 +12,7 @@ mod install_engine;
 mod nubx_consent;
 mod phantom_scan;
 mod pm_engine;
+mod project_config;
 mod self_shim;
 mod verify_deps;
 

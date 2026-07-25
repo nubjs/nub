@@ -791,6 +791,11 @@ fn engine_session_inner(
     // `Too many open files (os error 24)`.
     resource_limits::raise_nofile_limit();
     apply_dir(dir)?;
+    // Install-family `-C/--dir` is verb-local, so this is the first point at
+    // which its final effective cwd is known. Initialize exactly one project
+    // snapshot here; the ordinary CLI routes have already initialized theirs,
+    // making this call an inert OnceLock read on those paths.
+    crate::cli::initialize_config_snapshot(false, false)?;
     engine_brand_preflight();
     let cwd = std::env::current_dir()?;
     let detected = resolve_identity_walk_up(&cwd, strictness)?;
@@ -832,24 +837,208 @@ fn engine_session_inner(
     let truly_fresh = is_truly_fresh_project(&cwd, detected.as_ref());
     // Set-unless-user-set: ranks below CLI flags, env vars, and every
     // config file in the engine's settings precedence.
-    aube_settings::set_embedder_defaults(nub_setting_defaults(
-        detected.as_ref(),
-        truly_fresh,
-        &cwd,
-        store_locality,
-    ));
+    let setting_defaults =
+        nub_setting_defaults(detected.as_ref(), truly_fresh, &cwd, store_locality);
+    let native_mode = native_pm_mode(detected.as_ref(), truly_fresh, &cwd);
+    let native_install = if noise == ConfigScopeNoise::Warn && native_mode {
+        native_install_settings(detected.as_ref(), truly_fresh, &cwd, &setting_defaults)?
+    } else {
+        None
+    };
+    aube_settings::set_embedder_defaults(setting_defaults);
+    aube_util::update_engine_context(|c| {
+        c.project_config_settings = native_install
+            .as_ref()
+            .map(|config| config.settings.clone())
+            .unwrap_or_default();
+    });
+    phantom_closure::set_native_config_seed(
+        native_install
+            .as_ref()
+            .map(|config| config.symlink_disable_pattern.clone())
+            .unwrap_or_default(),
+    );
     // Route the engine's lifecycle scripts through nub's runtime augmentation
     // (project-pinned + augmented Node, shim on PATH, preload) — the SAME
     // augmentation `nub run` / `nub exec` apply, so run / exec / lifecycle
     // share one source. Closes the ABI bug where dep build scripts (node-gyp)
     // compiled against ambient Node instead of the project's. Default-empty
     // overlay when augmentation can't engage ⇒ behavior preserved.
-    apply_lifecycle_augmentation(&cwd);
+    apply_lifecycle_augmentation(
+        &cwd,
+        native_install
+            .as_ref()
+            .and_then(|config| config.node_options.as_deref()),
+    );
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
         truly_fresh,
         cwd,
+    })
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NativeInstallSettings {
+    settings: Vec<(String, String)>,
+    node_options: Option<String>,
+    symlink_disable_pattern: Vec<String>,
+}
+
+fn native_install_settings(
+    detected: Option<&DetectedLockfile>,
+    truly_fresh: bool,
+    cwd: &Path,
+    embedder_defaults: &[(String, String)],
+) -> Result<Option<NativeInstallSettings>> {
+    if !native_pm_mode(detected, truly_fresh, cwd) {
+        return Ok(None);
+    }
+    let Some(config) = crate::project_config::effective_config() else {
+        return Ok(Some(NativeInstallSettings::default()));
+    };
+    lower_native_install_settings(&config.values.install, embedder_defaults).map(Some)
+}
+
+fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &Path) -> bool {
+    if truly_fresh {
+        return true;
+    }
+    let Some(detected) = detected else {
+        return false;
+    };
+    let declared = nub_core::pm::resolve::declared_pm_raw(&detected.dir)
+        .or_else(|| nub_core::pm::resolve::declared_pm_raw(cwd));
+    config_scope::role_of(
+        declared.as_ref().map(|(name, _)| name.as_str()),
+        Some(detected.kind),
+    ) == Some(config_scope::Role::Nub)
+}
+
+/// Whether Nub's native-only hard release-age default applies. Lenient engine
+/// sessions collapse identity contradictions to `None`, so `truly_fresh` alone
+/// is insufficient there: independently prove that strict identity resolution
+/// also sees no incumbent signal before treating an undetected project as new.
+fn native_release_age_default_enabled(
+    detected: Option<&DetectedLockfile>,
+    truly_fresh: bool,
+    cwd: &Path,
+) -> bool {
+    if detected.is_some() {
+        return native_pm_mode(detected, truly_fresh, cwd);
+    }
+    truly_fresh
+        && matches!(
+            resolve_identity_walk_up(cwd, IdentityStrictness::Strict),
+            Ok(None)
+        )
+}
+
+fn lower_native_install_settings(
+    install: &crate::project_config::InstallConfig,
+    embedder_defaults: &[(String, String)],
+) -> Result<NativeInstallSettings> {
+    use crate::project_config::{Hoist, NodeLinker};
+
+    let linker = install.node_linker.unwrap_or(NodeLinker::Symlink);
+    if linker == NodeLinker::Pnp {
+        anyhow::bail!(
+            "nub: `install.nodeLinker: \"pnp\"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]"
+        );
+    }
+    if install.hoist.is_some() && linker != NodeLinker::Isolated {
+        anyhow::bail!(
+            "nub: `install.hoist` is supported only with `install.nodeLinker: \"isolated\"` [ERR_NUB_CONFIG_UNSUPPORTED]"
+        );
+    }
+    if install.symlink_disable_pattern.is_some() && linker != NodeLinker::Symlink {
+        anyhow::bail!(
+            "nub: `install.symlinkDisablePattern` is supported only with `install.nodeLinker: \"symlink\"` [ERR_NUB_CONFIG_UNSUPPORTED]"
+        );
+    }
+
+    let mut settings = Vec::new();
+    if install.node_linker.is_some() {
+        settings.push((
+            "nodeLinker".to_string(),
+            match linker {
+                NodeLinker::Symlink | NodeLinker::Isolated => "isolated",
+                NodeLinker::Hoisted => "hoisted",
+                NodeLinker::Pnp => unreachable!("pnp rejected above"),
+            }
+            .to_string(),
+        ));
+        if linker == NodeLinker::Isolated {
+            settings.push(("enableGlobalVirtualStore".to_string(), "false".to_string()));
+        }
+    }
+
+    if let Some(hoist) = install.hoist.as_ref() {
+        match hoist {
+            Hoist::Bool(enabled) => {
+                settings.push(("hoist".to_string(), enabled.to_string()));
+                if *enabled {
+                    settings.push(("hoistPattern".to_string(), "*".to_string()));
+                }
+            }
+            Hoist::Patterns(patterns) => {
+                settings.push(("hoist".to_string(), "true".to_string()));
+                settings.push(("hoistPattern".to_string(), patterns.join(",")));
+            }
+        }
+    }
+
+    if let Some(patterns) = install.symlink_disable_pattern.as_ref() {
+        for key in [
+            "disableGlobalVirtualStoreForPackages",
+            "diskMaterializePackages",
+        ] {
+            let mut merged = embedder_defaults
+                .iter()
+                .rev()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| {
+                    value
+                        .split(',')
+                        .filter(|entry| !entry.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for pattern in patterns {
+                if !merged.contains(pattern) {
+                    merged.push(pattern.clone());
+                }
+            }
+            settings.push((key.to_string(), merged.join(",")));
+        }
+    }
+
+    if let Some(age) = install.minimum_release_age {
+        let seconds = age.as_secs();
+        let minutes = seconds / 60 + u64::from(seconds % 60 != 0);
+        settings.push(("minimumReleaseAge".to_string(), minutes.to_string()));
+        settings.push(("minimumReleaseAgeStrict".to_string(), "true".to_string()));
+    }
+    if let Some(exclude) = install.minimum_release_age_exclude.as_ref() {
+        settings.push(("minimumReleaseAgeExclude".to_string(), exclude.join(",")));
+    }
+
+    let node_options = install.node_options.as_ref().map(|options| {
+        options
+            .iter()
+            .map(|option| nub_core::node::spawn::node_options_token(option))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    if let Some(value) = node_options.as_ref() {
+        settings.push(("nodeOptions".to_string(), value.clone()));
+    }
+
+    Ok(NativeInstallSettings {
+        settings,
+        node_options,
+        symlink_disable_pattern: install.symlink_disable_pattern.clone().unwrap_or_default(),
     })
 }
 
@@ -1360,6 +1549,9 @@ fn augmentation_to_lifecycle_overlay(
     if let Some(node_path) = &aug.node_path {
         overlay.push((OsString::from("NODE_PATH"), node_path.clone()));
     }
+    aug.apply_compat_restore_markers(|key, value| {
+        overlay.push((OsString::from(key), value.to_os_string()));
+    });
     // localStorage-neutralize signal for dependency build scripts' node children
     // (webstorage flag-needed band, no user --localstorage-file); preload reads + deletes.
     aug.apply_localstorage_env(|k, v| {
@@ -1406,7 +1598,7 @@ fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
 /// (behavior preserved) when augmentation can't be computed (compat /
 /// re-entrant / broken install); the resolved Node *version* is published to the
 /// engine either way. Called once per command from [`engine_session`].
-fn apply_lifecycle_augmentation(cwd: &Path) {
+fn apply_lifecycle_augmentation(cwd: &Path, configured_node_options: Option<&str>) {
     let anchor = lifecycle_node_anchor(cwd);
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
@@ -1429,7 +1621,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
     };
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let pnp_ctx = nub_core::pnp::detect(cwd);
-    let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
+    let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
         node.path.as_std_path(),
         node.version,
@@ -1440,6 +1632,21 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
     ) else {
         return;
     };
+    if std::env::var_os("NODE_OPTIONS").is_none() {
+        let selected = std::env::var("NPM_CONFIG_NODE_OPTIONS")
+            .ok()
+            .or_else(|| std::env::var("npm_config_node_options").ok())
+            .or_else(|| configured_node_options.map(str::to_string));
+        if let Some(selected) = selected.filter(|value| !value.is_empty()) {
+            match aug.node_options.as_mut() {
+                Some(options) => {
+                    options.push(' ');
+                    options.push_str(&selected);
+                }
+                None => aug.node_options = Some(selected),
+            }
+        }
+    }
     let (env_overlay, path_prepends) = augmentation_to_lifecycle_overlay(&aug, node.path.as_str());
     // The shim dir + provisioned node for the engine's runtime spawn helpers —
     // the boundary the transient bin-exec paths (dlx / create / `nubx <tool>`)
@@ -2168,8 +2375,8 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 
 /// - Layout policy: EVERY project defaults to the isolated layout
 ///   (`nodeLinker=isolated`) — strict (no phantom deps) and GVS-fast; a project
-///   that relies on phantom deps opts back into the flat tree with one `.npmrc`
-///   line (`node-linker=hoisted`). Hoisting is left GVS-AWARE via the engine's
+///   that relies on phantom deps opts back into the flat tree with
+///   `install.nodeLinker="hoisted"`. Hoisting is left GVS-AWARE via the engine's
 ///   `gvs_over_default_hoist` profile: a NON-injected project leaves `hoist` at
 ///   the built-in default (`true`), and under that profile a DEFAULT hoist no
 ///   longer vetoes the shared store — so the global virtual store engages
@@ -2181,7 +2388,8 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 ///   carve-out is injected deps (`dependenciesMeta.*.injected`): they need the
 ///   hidden tree unconditionally, so nub pushes an EXPLICIT `hoist=true`, which
 ///   DOES veto GVS under the profile (per-project + hidden tree, always). A
-///   user-set `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins — embedder-tier.
+///   higher-precedence CLI/environment values still win over native config;
+///   incumbent projects keep resolving their own PM config unchanged.
 /// - Fresh-write lockfile format: a TRULY-fresh project (no PM-preference
 ///   signal of any kind — `truly_fresh`) writes nub's neutral `nub.lock`
 ///   (`defaultLockfileFormat=aube`, which under the nub embedder resolves to
@@ -2202,11 +2410,12 @@ fn nub_setting_defaults(
     // ejects them through #319's ancestor-closure, subsuming the old 14-entry
     // const (incl. the singleton-hazard adapters the closure now makes sound). So
     // this embedder default carries ONLY the #315 vite eject; empty otherwise
-    // (aube's `parse_string_list` drops the empty entry). nub exposes NO
-    // user-facing `diskMaterializePackages` knob (maintainer 2026-07-07): the
-    // detector is the sole eject mechanism, and nub's hook drops every user-source
-    // seed name (`phantom_closure::nub_internal_seed`), keeping only this internal
-    // vite entry. (Standalone aube installs no hook and still honors the knob.)
+    // (aube's `parse_string_list` drops the empty entry). nub exposes no direct
+    // user-facing `diskMaterializePackages` knob: native
+    // `install.symlinkDisablePattern` contributes an explicit seed, while nub's
+    // hook drops incumbent `.npmrc`/env/workspace seed names and retains only the
+    // native seed plus this internal vite entry. Standalone aube installs no hook
+    // and still honors its setting unchanged.
     //
     // Vite symlink-GVS compat (#315): eject the `vite` package project-local so
     // its dist can be patched with the backported fs.allow sniff (< 8.1) without
@@ -2290,6 +2499,16 @@ fn nub_setting_defaults(
         ),
         ("diskMaterializePackages".to_string(), disk_materialize),
     ];
+    // Nub-native projects make the default 24-hour release-age gate hard: if
+    // registry metadata cannot establish a publish time, resolution fails
+    // closed. Incumbent npm/pnpm/yarn/bun projects retain their own prior
+    // setting/default behavior unchanged, as does standalone aube.
+    if native_release_age_default_enabled(detected, truly_fresh, cwd) {
+        defaults.insert(
+            2,
+            ("minimumReleaseAgeStrict".to_string(), "true".to_string()),
+        );
+    }
     if let Some(data) = nub_data_dir() {
         defaults.push((
             "storeDir".to_string(),
@@ -2312,8 +2531,8 @@ fn nub_setting_defaults(
     // (`dependenciesMeta.*.injected`) are the ONE carve-out: they need the
     // hidden tree unconditionally, so nub pushes an EXPLICIT `hoist=true`, which
     // DOES veto GVS under the profile (per-project + hidden tree, always) —
-    // proven, where injected-under-GVS is not. A user-set `nodeLinker`/`hoist`
-    // (env/.npmrc/yaml) still wins.
+    // proven, where injected-under-GVS is not. Higher-precedence CLI/environment
+    // values and native install config still override these defaults.
     defaults.push(("nodeLinker".to_string(), "isolated".to_string()));
     if injected {
         defaults.push(("hoist".to_string(), "true".to_string()));
@@ -2833,6 +3052,7 @@ pub(crate) fn with_fd_captured<T>(_fd: i32, f: impl FnOnce() -> T) -> (T, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_config::{Hoist, InstallConfig, NodeLinker};
 
     fn get<'a>(defaults: &'a [(String, String)], key: &str) -> Option<&'a str> {
         defaults
@@ -2870,6 +3090,243 @@ mod tests {
         assert_eq!(
             call(None, None, true),
             Some(home.join(".local/share").join("nub"))
+        );
+    }
+
+    #[test]
+    fn native_install_fields_lower_to_engine_settings() {
+        let install = InstallConfig {
+            node_linker: Some(NodeLinker::Isolated),
+            hoist: Some(Hoist::Patterns(vec![
+                "@types/*".into(),
+                "!@types/node".into(),
+            ])),
+            minimum_release_age: Some(std::time::Duration::from_secs(61)),
+            minimum_release_age_exclude: Some(Vec::new()),
+            node_options: Some(vec![
+                "--max-old-space-size=2048".into(),
+                "--trace-warnings".into(),
+            ]),
+            ..InstallConfig::default()
+        };
+        let lowered = lower_native_install_settings(&install, &[]).unwrap();
+
+        assert_eq!(get(&lowered.settings, "nodeLinker"), Some("isolated"));
+        assert_eq!(
+            get(&lowered.settings, "enableGlobalVirtualStore"),
+            Some("false")
+        );
+        assert_eq!(get(&lowered.settings, "hoist"), Some("true"));
+        assert_eq!(
+            get(&lowered.settings, "hoistPattern"),
+            Some("@types/*,!@types/node")
+        );
+        assert_eq!(get(&lowered.settings, "minimumReleaseAge"), Some("2"));
+        assert_eq!(
+            get(&lowered.settings, "minimumReleaseAgeStrict"),
+            Some("true")
+        );
+        assert_eq!(get(&lowered.settings, "minimumReleaseAgeExclude"), Some(""));
+        assert_eq!(
+            get(&lowered.settings, "nodeOptions"),
+            Some("--max-old-space-size=2048 --trace-warnings")
+        );
+        assert_eq!(
+            lowered.node_options.as_deref(),
+            Some("--max-old-space-size=2048 --trace-warnings")
+        );
+    }
+
+    #[test]
+    fn symlink_disable_patterns_extend_internal_fallbacks() {
+        let defaults = vec![
+            (
+                "disableGlobalVirtualStoreForPackages".into(),
+                "next,react-native".into(),
+            ),
+            ("diskMaterializePackages".into(), "vite".into()),
+        ];
+        let install = InstallConfig {
+            node_linker: Some(NodeLinker::Symlink),
+            symlink_disable_pattern: Some(vec!["@corp/tool-*".into(), "next".into()]),
+            ..InstallConfig::default()
+        };
+        let lowered = lower_native_install_settings(&install, &defaults).unwrap();
+
+        assert_eq!(get(&lowered.settings, "nodeLinker"), Some("isolated"));
+        assert_eq!(get(&lowered.settings, "enableGlobalVirtualStore"), None);
+        assert_eq!(
+            get(&lowered.settings, "disableGlobalVirtualStoreForPackages"),
+            Some("next,react-native,@corp/tool-*")
+        );
+        assert_eq!(
+            get(&lowered.settings, "diskMaterializePackages"),
+            Some("vite,@corp/tool-*,next")
+        );
+        assert_eq!(
+            lowered.symlink_disable_pattern,
+            vec!["@corp/tool-*".to_string(), "next".to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_false_and_empty_install_values_survive_lowering() {
+        let install = InstallConfig {
+            node_linker: Some(NodeLinker::Isolated),
+            hoist: Some(Hoist::Bool(false)),
+            minimum_release_age_exclude: Some(Vec::new()),
+            node_options: Some(Vec::new()),
+            ..InstallConfig::default()
+        };
+        let lowered = lower_native_install_settings(&install, &[]).unwrap();
+        assert_eq!(get(&lowered.settings, "hoist"), Some("false"));
+        assert_eq!(get(&lowered.settings, "minimumReleaseAgeExclude"), Some(""));
+        assert_eq!(get(&lowered.settings, "nodeOptions"), Some(""));
+        assert_eq!(lowered.node_options.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn native_node_options_preserve_each_json_element_as_one_token() {
+        let install = InstallConfig {
+            node_options: Some(vec![
+                "--conditions=plain".into(),
+                "--require=/tmp/a path/preload.cjs".into(),
+                r#"--conditions=a"b"#.into(),
+                r#"--require=C:\Users\Jane Doe\preload.cjs"#.into(),
+            ]),
+            ..InstallConfig::default()
+        };
+        let lowered = lower_native_install_settings(&install, &[]).unwrap();
+        assert_eq!(
+            lowered.node_options.as_deref(),
+            Some(
+                r#"--conditions=plain "--require=/tmp/a path/preload.cjs" "--conditions=a\"b" "--require=C:\\Users\\Jane Doe\\preload.cjs""#
+            )
+        );
+        assert_eq!(
+            get(&lowered.settings, "nodeOptions"),
+            lowered.node_options.as_deref()
+        );
+    }
+
+    #[test]
+    fn reserved_install_combinations_fail_loudly() {
+        for (install, needle) in [
+            (
+                InstallConfig {
+                    node_linker: Some(NodeLinker::Pnp),
+                    ..InstallConfig::default()
+                },
+                "reserved",
+            ),
+            (
+                InstallConfig {
+                    node_linker: Some(NodeLinker::Hoisted),
+                    hoist: Some(Hoist::Bool(true)),
+                    ..InstallConfig::default()
+                },
+                "install.hoist",
+            ),
+            (
+                InstallConfig {
+                    node_linker: Some(NodeLinker::Isolated),
+                    symlink_disable_pattern: Some(vec!["pkg".into()]),
+                    ..InstallConfig::default()
+                },
+                "install.symlinkDisablePattern",
+            ),
+        ] {
+            let err = lower_native_install_settings(&install, &[]).unwrap_err();
+            assert!(err.to_string().contains(needle), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn install_sandbox_remains_inert() {
+        // Every policy shape (not just `false`) must lower identically to the
+        // no-sandbox baseline until the sandbox execution slice lands.
+        let baseline = lower_native_install_settings(&InstallConfig::default(), &[]).unwrap();
+        for (raw, shape) in crate::project_config::sandbox_shapes::five_shapes() {
+            let configured = lower_native_install_settings(
+                &InstallConfig {
+                    sandbox: Some(shape),
+                    ..InstallConfig::default()
+                },
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                configured, baseline,
+                "install lowering must not react to sandbox shape {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_config_mode_gate_accepts_only_nub_identity_or_truly_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let detected = |kind| DetectedLockfile {
+            kind,
+            dir: dir.path().to_path_buf(),
+            fresh: false,
+        };
+        assert!(native_pm_mode(None, true, dir.path()));
+        assert!(native_pm_mode(
+            Some(&detected(LockfileKind::Aube)),
+            false,
+            dir.path()
+        ));
+        for kind in [
+            LockfileKind::Npm,
+            LockfileKind::Pnpm,
+            LockfileKind::Yarn,
+            LockfileKind::YarnBerry,
+            LockfileKind::Bun,
+        ] {
+            assert!(!native_pm_mode(Some(&detected(kind)), false, dir.path()));
+        }
+    }
+
+    #[test]
+    fn project_snapshot_reaches_install_lowering() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("nub.jsonc"),
+            r#"{
+              "install": {
+                "nodeLinker": "isolated",
+                "hoist": false,
+                "minimumReleaseAge": "3d",
+                "minimumReleaseAgeExclude": ["@internal/*"],
+                "nodeOptions": ["--trace-warnings"]
+              }
+            }"#,
+        )
+        .unwrap();
+        let snapshot = crate::project_config::load_effective_config(
+            dir.path(),
+            crate::project_config::ConfigOverlays::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .project
+                .as_ref()
+                .map(|project| project.source.root.as_path()),
+            Some(dir.path())
+        );
+
+        let lowered = lower_native_install_settings(&snapshot.values.install, &[]).unwrap();
+        assert_eq!(get(&lowered.settings, "nodeLinker"), Some("isolated"));
+        assert_eq!(get(&lowered.settings, "hoist"), Some("false"));
+        assert_eq!(get(&lowered.settings, "minimumReleaseAge"), Some("4320"));
+        assert_eq!(
+            get(&lowered.settings, "minimumReleaseAgeExclude"),
+            Some("@internal/*")
+        );
+        assert_eq!(
+            get(&lowered.settings, "nodeOptions"),
+            Some("--trace-warnings")
         );
     }
 
@@ -3277,7 +3734,6 @@ mod tests {
                 Some("true"),
                 "{label}: defaultTrust must be \"true\""
             );
-
             // Must never inject an allow-all build-script key.
             assert_eq!(
                 get(&defaults, "dangerouslyAllowAllBuilds"),
@@ -3285,6 +3741,85 @@ mod tests {
                 "{label}: dangerouslyAllowAllBuilds must not appear in defaults"
             );
         }
+    }
+
+    #[test]
+    fn minimum_release_age_strict_default_is_native_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let detected = |kind| DetectedLockfile {
+            kind,
+            dir: dir.path().to_path_buf(),
+            fresh: false,
+        };
+
+        for kind in [
+            LockfileKind::Npm,
+            LockfileKind::NpmShrinkwrap,
+            LockfileKind::Pnpm,
+            LockfileKind::Yarn,
+            LockfileKind::YarnBerry,
+            LockfileKind::Bun,
+        ] {
+            let incumbent = detected(kind);
+            let defaults = nub_setting_defaults(
+                Some(&incumbent),
+                false,
+                dir.path(),
+                VirtualStoreLocality::Default,
+            );
+            assert_eq!(
+                get(&defaults, "minimumReleaseAgeStrict"),
+                None,
+                "{kind:?} incumbent must retain the engine's prior default"
+            );
+        }
+
+        let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
+        assert_eq!(
+            get(&fresh, "minimumReleaseAgeStrict"),
+            Some("true"),
+            "a truly fresh Nub-native project must fail closed"
+        );
+
+        let nub = detected(LockfileKind::Aube);
+        let nub_defaults =
+            nub_setting_defaults(Some(&nub), false, dir.path(), VirtualStoreLocality::Default);
+        assert_eq!(
+            get(&nub_defaults, "minimumReleaseAgeStrict"),
+            Some("true"),
+            "an existing Nub-native project must fail closed"
+        );
+    }
+
+    #[test]
+    fn minimum_release_age_strict_default_rejects_lenient_identity_ambiguity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"ambiguous","packageManager":"npm@10.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+
+        assert!(
+            resolve_identity_walk_up(dir.path(), IdentityStrictness::Lenient)
+                .unwrap()
+                .is_none(),
+            "the regression requires the lenient session to suppress the contradiction"
+        );
+        assert!(
+            resolve_identity_walk_up(dir.path(), IdentityStrictness::Strict).is_err(),
+            "strict identity resolution must retain the contradiction"
+        );
+
+        // Lenient callers previously passed this lossy `None` together with a
+        // derived fresh=true, which incorrectly enabled Nub's native default.
+        let defaults = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
+        assert_eq!(
+            get(&defaults, "minimumReleaseAgeStrict"),
+            None,
+            "an ambiguous incumbent project must not be treated as Nub-native"
+        );
     }
 
     #[test]

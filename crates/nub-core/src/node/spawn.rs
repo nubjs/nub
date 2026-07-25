@@ -704,6 +704,8 @@ pub struct SpawnConfig<'a> {
     /// a node bin run via `nub exec -r` executes IN the member, seeing its own
     /// `.env` / Node pin / `.bin` chain rather than the workspace root's.
     pub cwd: &'a Path,
+    /// Resolved project/global Node options, already validated against this Node.
+    pub runtime_node_options: &'a [String],
 }
 
 /// The result of spawning a Node process.
@@ -748,6 +750,15 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // process cwd (a no-op); the workspace-bin path threads a member dir so a
     // node bin executes IN that member rather than inheriting the parent's cwd.
     cmd.current_dir(config.cwd);
+
+    // A compat re-entry may arrive through an augmented parent's PATH shim.
+    // Restore the environment captured before that parent installed Nub's
+    // NODE_OPTIONS/NODE_PATH/NODE/compile-cache values, and remove its exact
+    // shim component. This makes a nested `NODE_COMPAT=1 node ...` genuinely
+    // vanilla instead of merely skipping a second augmentation pass.
+    if config.compat_mode {
+        restore_compat_environment(&mut cmd);
+    }
 
     // Permission model detection and auto-grant.
     let has_permission = config.user_args.iter().any(|a| is_permission_flag(a));
@@ -810,6 +821,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // a half-setup (flags + a nested shim, no preload). See
     // wiki/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
+        install_compat_restore_marker(&mut cmd, COMPAT_NODE_OPTIONS_ENV, "NODE_OPTIONS");
+        install_compat_restore_marker(&mut cmd, COMPAT_NODE_PATH_ENV, "NODE_PATH");
+        install_compat_restore_marker(&mut cmd, COMPAT_NODE_ENV, "NODE");
+        install_compat_restore_marker(
+            &mut cmd,
+            COMPAT_NODE_COMPILE_CACHE_ENV,
+            "NODE_COMPILE_CACHE",
+        );
         // Flag injection — intersected with the binary's actual accepted-flag set
         // (probed + cached) so an open-ended `Unflag` band never injects a flag a
         // future Node has removed (which would abort startup with "bad option").
@@ -888,6 +907,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
                 new_path.push(existing);
             }
             cmd.env("PATH", new_path);
+            cmd.env(COMPAT_SHIM_DIR_ENV, shim_dir.as_str());
         }
 
         // `process.versions.nub` source: hand the running binary's version to the
@@ -1059,12 +1079,13 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         if let Some(pnp) = config.pnp {
             node_opts_parts.push(format!(
                 "--require={}",
-                node_options_quote(&pnp.display().to_string())
+                node_options_token(&pnp.display().to_string())
             ));
         }
         if let Some(ref inj) = injection {
             node_opts_parts.push(inj.node_options_token());
         }
+        node_opts_parts.extend(config.runtime_node_options.iter().cloned());
         // Coverage-exclude nub's own runtime (R9) — via NODE_OPTIONS, not just argv.
         // The CLI-arg form at the `cmd.arg(glob)` site above only reaches the DIRECT
         // child nub spawns. But the test-runner coverage fixtures spawn the actual
@@ -1093,7 +1114,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             // silently drop the exclude.
             node_opts_parts.push(format!(
                 "--test-coverage-exclude={}",
-                node_options_quote(&format!("{}/**", runtime_dir.display()))
+                node_options_token(&format!("{}/**", runtime_dir.display()))
             ));
         }
         // Web Storage (mirrors the argv site above): always inject
@@ -1758,6 +1779,24 @@ pub fn compute_augmentation_env(
     compat_mode: bool,
     pnp: Option<&Path>,
 ) -> Option<AugmentationEnv> {
+    compute_augmentation_env_with_options(
+        nub_binary,
+        node_path,
+        node_version,
+        compat_mode,
+        pnp,
+        &[],
+    )
+}
+
+pub fn compute_augmentation_env_with_options(
+    nub_binary: &Path,
+    node_path: &Path,
+    node_version: super::version::NodeVersion,
+    compat_mode: bool,
+    pnp: Option<&Path>,
+    runtime_node_options: &[String],
+) -> Option<AugmentationEnv> {
     if compat_mode {
         return None;
     }
@@ -1810,10 +1849,11 @@ pub fn compute_augmentation_env(
     if let Some(pnp) = pnp {
         node_opts_parts.push(format!(
             "--require={}",
-            node_options_quote(&pnp.display().to_string())
+            node_options_token(&pnp.display().to_string())
         ));
     }
     node_opts_parts.push(injection.node_options_token());
+    node_opts_parts.extend(runtime_node_options.iter().cloned());
     // Web Storage (mirrors `spawn_node`): always inject
     // `--experimental-webstorage` on the flag-needed band (22.4–24.x) so a
     // script-run child shell's `node` has `sessionStorage` out of the box, with no
@@ -1884,6 +1924,24 @@ pub struct AugmentationEnv {
 }
 
 impl AugmentationEnv {
+    /// Preserve the environment that a later compat-mode PATH-shim re-entry must
+    /// restore before it launches plain Node. Empty marker values mean the
+    /// corresponding variable was absent before augmentation.
+    pub fn apply_compat_restore_markers(&self, mut set_env: impl FnMut(&str, &std::ffi::OsStr)) {
+        let node_options = compat_restore_value(COMPAT_NODE_OPTIONS_ENV, "NODE_OPTIONS");
+        let node_path = compat_restore_value(COMPAT_NODE_PATH_ENV, "NODE_PATH");
+        let node = compat_restore_value(COMPAT_NODE_ENV, "NODE");
+        let compile_cache =
+            compat_restore_value(COMPAT_NODE_COMPILE_CACHE_ENV, "NODE_COMPILE_CACHE");
+        set_env(COMPAT_NODE_OPTIONS_ENV, &node_options);
+        set_env(COMPAT_NODE_PATH_ENV, &node_path);
+        set_env(COMPAT_NODE_ENV, &node);
+        set_env(COMPAT_NODE_COMPILE_CACHE_ENV, &compile_cache);
+        if let Some(shim_dir) = self.shim_dir.as_deref() {
+            set_env(COMPAT_SHIM_DIR_ENV, std::ffi::OsStr::new(shim_dir));
+        }
+    }
+
     /// The PATH-shim's `node` entry (a symlink/hardlink → nub), suitable as the
     /// `$NODE` value that npm/pnpm set so userland `$NODE child.js` (and
     /// `spawn(process.env.NODE, …)`) invoke "the same Node this script runs under."
@@ -2038,6 +2096,8 @@ const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 /// the same preload via NODE_OPTIONS) and they advertise the marker too.
 const VERSION_ENV: &str = "__NUB_VERSION";
 
+pub const RUNTIME_CONFIG_ENV: &str = "__NUB_RUNTIME_CONFIG";
+
 /// Tells nub's fast-tier preload to register its module hooks via the ASYNC
 /// loader-worker path (`module.register`) instead of the sync
 /// `module.registerHooks`, even on a Node that supports the sync fast tier. Set
@@ -2048,6 +2108,57 @@ const VERSION_ENV: &str = "__NUB_VERSION";
 /// `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the brand
 /// boundary.
 const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
+
+const COMPAT_NODE_OPTIONS_ENV: &str = "__NUB_COMPAT_NODE_OPTIONS";
+const COMPAT_NODE_PATH_ENV: &str = "__NUB_COMPAT_NODE_PATH";
+const COMPAT_NODE_ENV: &str = "__NUB_COMPAT_NODE";
+const COMPAT_NODE_COMPILE_CACHE_ENV: &str = "__NUB_COMPAT_NODE_COMPILE_CACHE";
+const COMPAT_SHIM_DIR_ENV: &str = "__NUB_COMPAT_SHIM_DIR";
+
+fn compat_restore_value(marker: &str, name: &str) -> std::ffi::OsString {
+    env::var_os(marker)
+        .or_else(|| env::var_os(name))
+        .unwrap_or_default()
+}
+
+fn install_compat_restore_marker(cmd: &mut Command, marker: &str, name: &str) {
+    cmd.env(marker, compat_restore_value(marker, name));
+}
+
+fn restore_compat_environment(cmd: &mut Command) {
+    for (marker, name) in [
+        (COMPAT_NODE_OPTIONS_ENV, "NODE_OPTIONS"),
+        (COMPAT_NODE_PATH_ENV, "NODE_PATH"),
+        (COMPAT_NODE_ENV, "NODE"),
+        (COMPAT_NODE_COMPILE_CACHE_ENV, "NODE_COMPILE_CACHE"),
+    ] {
+        if let Some(value) = env::var_os(marker) {
+            if value.is_empty() {
+                cmd.env_remove(name);
+            } else {
+                cmd.env(name, value);
+            }
+        }
+        cmd.env_remove(marker);
+    }
+
+    if let Some(shim_dir) = env::var_os(COMPAT_SHIM_DIR_ENV) {
+        if let Some(path) = env::var_os("PATH") {
+            let filtered = env::split_paths(&path)
+                .filter(|entry| entry.as_os_str() != shim_dir.as_os_str())
+                .collect::<Vec<_>>();
+            if let Ok(path) = env::join_paths(filtered) {
+                cmd.env("PATH", path);
+            }
+        }
+        cmd.env_remove(COMPAT_SHIM_DIR_ENV);
+    }
+
+    cmd.env_remove(RUNTIME_CONFIG_ENV);
+    cmd.env_remove(VERSION_ENV);
+    cmd.env_remove(NEUTRALIZE_LOCALSTORAGE_ENV);
+    cmd.env_remove(FORCE_ASYNC_TIER_ENV);
+}
 
 /// Node versions where the async `module.register` loader's `resolveSync`/
 /// `loadSync` are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`.
@@ -2215,6 +2326,11 @@ fn to_file_url(path: &str, windows: bool) -> String {
     }
 }
 
+/// Convert an absolute native path to the file URL spelling Node expects.
+pub fn path_to_file_url(path: &str) -> String {
+    to_file_url(path, cfg!(windows))
+}
+
 /// How nub injects its preload, chosen BY TIER. The fast tier (Node 22.15+) loads a
 /// CommonJS preload via `--require`; the compat tier (18.19–22.14) loads the ESM
 /// preload via `--import`. The channel choice is load-bearing: an `--import` ESM
@@ -2238,14 +2354,14 @@ impl PreloadInjection {
     /// which doubles as the re-entrancy key: a child detects a parent-injected
     /// preload by finding this exact token in its inherited NODE_OPTIONS.
     ///
-    /// The VALUE half is quoted with [`node_options_quote`] so a preload path
+    /// The VALUE half is quoted with [`node_options_token`] so a preload path
     /// containing a space (e.g. a cache or temp dir under `C:\Users\John Doe\…`,
     /// or a macOS `~/Library/Application Support/…`) survives Node's NODE_OPTIONS
     /// tokenizer, which splits on unquoted spaces. The re-entrancy detector
     /// ([`is_reentrant_in`]) compares against this same quoted form, so the key
     /// still round-trips.
     pub fn node_options_token(&self) -> String {
-        format!("{}={}", self.flag, node_options_quote(&self.value))
+        format!("{}={}", self.flag, node_options_token(&self.value))
     }
 }
 
@@ -2259,13 +2375,14 @@ impl PreloadInjection {
 /// Single quotes do NOT work — Node has no single-quote handling, so they'd
 /// become literal characters in the path (`ERR_INVALID_STATE` on the store).
 ///
-/// Values WITHOUT a space are returned unchanged: they tokenize fine bare, and
-/// not quoting them keeps NODE_OPTIONS readable and matches plain-Node argv.
+/// Values without whitespace, quotes, or emptiness are returned unchanged: they
+/// tokenize fine bare, and not quoting them keeps NODE_OPTIONS readable and
+/// matches plain-Node argv.
 /// Use this for EVERY value-bearing flag nub writes into NODE_OPTIONS
 /// (`--test-coverage-exclude=`, the preload `--require=`/`--import=` token,
 /// PnP `--require=`).
-fn node_options_quote(value: &str) -> String {
-    if value.contains(' ') {
+pub fn node_options_token(value: &str) -> String {
+    if value.is_empty() || value.chars().any(char::is_whitespace) || value.contains('"') {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{escaped}\"")
     } else {
@@ -2632,29 +2749,54 @@ mod tests {
     use crate::node::version::NodeVersion;
 
     #[test]
-    fn node_options_quote_only_wraps_spacey_values() {
+    fn node_options_token_preserves_spaces_quotes_and_backslashes() {
         // No space → returned bare (tokenizes fine, stays readable / argv-like).
-        assert_eq!(node_options_quote("/tmp/store.sqlite"), "/tmp/store.sqlite");
+        assert_eq!(node_options_token("/tmp/store.sqlite"), "/tmp/store.sqlite");
         // Space → wrapped in double quotes (single quotes are literal to Node's
         // tokenizer and would corrupt the path → ERR_INVALID_STATE).
         assert_eq!(
-            node_options_quote("/tmp/nub cache/store.sqlite"),
+            node_options_token("/tmp/nub cache/store.sqlite"),
             "\"/tmp/nub cache/store.sqlite\""
         );
         // Windows: backslashes inside the quotes are escape chars to Node, so each
         // must be doubled or `\U`/`\J`/`\.` get eaten. Only quoted when spacey.
         assert_eq!(
-            node_options_quote(r"C:\Users\John Doe\.cache\store.sqlite"),
+            node_options_token(r"C:\Users\John Doe\.cache\store.sqlite"),
             r#""C:\\Users\\John Doe\\.cache\\store.sqlite""#
         );
         // A backslash path WITHOUT a space stays bare — Node only treats `\` as an
         // escape INSIDE a quoted string, so an unquoted backslash is literal.
         assert_eq!(
-            node_options_quote(r"C:\Users\John\.cache\store.sqlite"),
+            node_options_token(r"C:\Users\John\.cache\store.sqlite"),
             r"C:\Users\John\.cache\store.sqlite"
         );
         // An embedded double-quote in a spacey value is backslash-escaped.
-        assert_eq!(node_options_quote(r#"/tmp/a "b" c"#), r#""/tmp/a \"b\" c""#);
+        assert_eq!(node_options_token(r#"/tmp/a "b" c"#), r#""/tmp/a \"b\" c""#);
+        assert_eq!(
+            node_options_token(r#"--conditions=a"b"#),
+            r#""--conditions=a\"b""#
+        );
+        assert_eq!(node_options_token(""), r#""""#);
+    }
+
+    #[test]
+    fn node_options_token_round_trips_as_one_real_node_option() {
+        let title = r#"hello "quoted" C:\tmp"#;
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg("process.stdout.write(process.title)")
+            .env(
+                "NODE_OPTIONS",
+                node_options_token(&format!("--title={title}")),
+            )
+            .output()
+            .expect("host Node must run");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), title);
     }
 
     #[test]

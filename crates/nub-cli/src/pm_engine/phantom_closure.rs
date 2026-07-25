@@ -71,20 +71,25 @@ pub(crate) fn register() {
     aube_linker::set_disk_materialize_expand_hook(Box::new(expand));
 }
 
-/// nub's own embedder-default names that may seed the eject set. nub exposes NO
-/// user-facing `diskMaterializePackages` knob (maintainer 2026-07-07): the dynamic
-/// phantom detector is the sole eject mechanism, so a hand-listed package is
-/// redundant. The resolved seed still carries nub's INTERNAL vite #315 embedder
-/// default ([`super::mod::nub_setting_defaults`]) — kept so the phantom-eject
-/// opt-out (no-hook) path still ejects vite<8.1 — but every OTHER name arrived
-/// from a user source (`.npmrc`/env/`pnpm-workspace.yaml`) and is dropped by
-/// [`nub_internal_seed`]. Standalone aube installs no hook and honors the full
-/// seed verbatim, so its `diskMaterializePackages` knob is unaffected.
+/// nub's own embedder-default names that may seed the eject set. Native
+/// `install.symlinkDisablePattern` entries are admitted separately; incumbent
+/// `.npmrc`/env/workspace values remain ignored. Standalone aube installs no
+/// hook and honors its full `diskMaterializePackages` knob unchanged.
 ///
 /// SHARED with [`super::nub_setting_defaults`], which seeds exactly this name as
 /// the embedder default — sourcing both from one const so a future internal
 /// default can't be added in one place and silently dropped by the other.
 pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
+
+static NATIVE_CONFIG_SEED: std::sync::LazyLock<std::sync::RwLock<Vec<String>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+
+pub(super) fn set_native_config_seed(seed: Vec<String>) {
+    match NATIVE_CONFIG_SEED.write() {
+        Ok(mut current) => *current = seed,
+        Err(poisoned) => *poisoned.into_inner() = seed,
+    }
+}
 
 /// Curated "project-context" packages (nub#457): each one's build script READS or
 /// MUTATES the CONSUMING project rather than only its own dir — git-hook installers
@@ -165,13 +170,18 @@ fn eject_list_token(names: &[&str]) -> String {
     format!("{hash:016x}")
 }
 
-/// Keep only nub's own embedder-default seed names, dropping every user-source
-/// entry — the mechanism that retires the user-facing `diskMaterializePackages`
-/// knob under nub while leaving standalone aube's byte-for-byte.
+/// Keep nub's internal and native-config seed names, dropping every
+/// incumbent/user-source `diskMaterializePackages` entry.
 fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
+    let configured = match NATIVE_CONFIG_SEED.read() {
+        Ok(seed) => seed.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
     resolved_seed
         .iter()
-        .filter(|n| NUB_INTERNAL_DISK_MATERIALIZE_SEED.contains(&n.as_str()))
+        .filter(|n| {
+            NUB_INTERNAL_DISK_MATERIALIZE_SEED.contains(&n.as_str()) || configured.contains(n)
+        })
         .cloned()
         .collect()
 }
@@ -179,9 +189,7 @@ fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
 /// The hook entry: read the per-version scanner's sidecars (the store-IO half)
 /// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
 /// closure/seed policy — is unit-tested with injected flags and never touches
-/// the host store. The resolved seed is first filtered to nub's internal names
-/// ([`nub_internal_seed`]) so a user's `diskMaterializePackages` value has no
-/// effect under nub.
+/// the host store. The resolved seed is filtered through [`nub_internal_seed`].
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
     plan_from_flags(
         graph,
@@ -242,10 +250,11 @@ fn plan_from_flags(
         .collect();
     let is_top_level = |name: &str| root_provided.contains(name);
 
-    // Seed set by NAME: the caller's disk-materialize list ∪ every dynamically-
+    // Seed set by NAME: every dynamically-
     // flagged importer that SURVIVES the precision seed-selection filter. Embedded
-    // vite<8.1 is seeded by dep_path below.
-    let mut seed_names_set: HashSet<&str> = seed_names.iter().copied().collect();
+    // vite<8.1 and caller-supplied package-name patterns are seeded by dep_path
+    // below.
+    let mut seed_names_set: HashSet<&str> = HashSet::new();
 
     // Dynamic phantom source (the per-version scanner's sidecars) — the replacement
     // for the retired hand-curated map. Each SURVIVING flagged importer seeds the
@@ -302,6 +311,9 @@ fn plan_from_flags(
     let mut seed_dep_paths: HashSet<&str> = HashSet::new();
     for (dep_path, pkg) in &graph.packages {
         if seed_names_set.contains(pkg.name.as_str())
+            || seed_names
+                .iter()
+                .any(|pattern| aube_linker::package_name_matches(pattern, &pkg.name))
             || (pkg.name == "vite" && super::vite_compat::vite_lt_8_1(&pkg.version))
         {
             seed_dep_paths.insert(dep_path.as_str());
@@ -332,7 +344,7 @@ fn plan_from_flags(
     // Rung-1 names: every closure member's name ∪ the original seed names (the
     // executor is name-keyed). Original seed names are kept even if absent from
     // the graph — the executor simply never matches an absent name.
-    let mut names: HashSet<String> = seed_names.iter().map(|s| s.to_string()).collect();
+    let mut names: HashSet<String> = HashSet::new();
     for dep_path in &closure {
         if let Some(pkg) = graph.packages.get(dep_path) {
             names.insert(pkg.name.clone());
@@ -732,6 +744,28 @@ mod tests {
             project_context_eject_token(),
             "deterministic across calls"
         );
+    }
+
+    #[test]
+    fn configured_seed_patterns_match_wildcards_and_literals() {
+        let g = graph(&[
+            ("app@1.0.0", "app", &[("is-number", "7.0.0")]),
+            ("is-number@7.0.0", "is-number", &[]),
+            ("left-pad@1.3.0", "left-pad", &[]),
+        ]);
+        for pattern in ["is-*", "is-number"] {
+            let plan = plan_from_flags(&g, &[pattern.to_string()], &[]);
+            let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+            assert!(
+                names.contains("is-number"),
+                "pattern {pattern} seeds the package"
+            );
+            assert!(
+                names.contains("app"),
+                "pattern {pattern} expands its importer closure"
+            );
+            assert!(!names.contains("left-pad"));
+        }
     }
 
     #[test]

@@ -87,8 +87,8 @@ fn cache() -> &'static Mutex<HashMap<String, Arc<Loaded>>> {
 /// Discover + parse + resolve the nearest tsconfig walking up from `dir`.
 /// Memoized per `dir`. Returns null-ish fields when none is found.
 #[napi]
-pub fn load_tsconfig(dir: String) -> TsconfigResult {
-    let loaded = load_for_dir(&dir);
+pub fn load_tsconfig(dir: String, explicit: Option<String>) -> TsconfigResult {
+    let loaded = load_for_dir(&dir, explicit.as_deref());
     TsconfigResult {
         path: loaded.path.clone(),
         compiler_options: loaded.compiler_options.clone(),
@@ -98,20 +98,24 @@ pub fn load_tsconfig(dir: String) -> TsconfigResult {
 
 /// Shared internal entry — returns the cached `Loaded` (with its matcher) so the
 /// resolver can reuse the same per-dir state without re-reading the FS.
-fn load_for_dir(dir: &str) -> Arc<Loaded> {
-    if let Some(hit) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(dir) {
+fn load_for_dir(dir: &str, explicit: Option<&str>) -> Arc<Loaded> {
+    let key = format!("{dir}\0{}", explicit.unwrap_or_default());
+    if let Some(hit) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return hit.clone();
     }
-    let loaded = Arc::new(build_loaded(dir));
+    let loaded = Arc::new(build_loaded(dir, explicit));
     cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(dir.to_string(), loaded.clone());
+        .insert(key, loaded.clone());
     loaded
 }
 
-fn build_loaded(dir: &str) -> Loaded {
-    let Some(config_path) = find_up(dir, "tsconfig.json") else {
+fn build_loaded(dir: &str, explicit: Option<&str>) -> Loaded {
+    let config_path = explicit
+        .map(str::to_string)
+        .or_else(|| find_up(dir, "tsconfig.json"));
+    let Some(config_path) = config_path else {
         return Loaded {
             path: None,
             compiler_options: None,
@@ -1141,8 +1145,8 @@ impl PathsMatcher {
 
 /// Run the cached matcher for `dir`'s tsconfig against `specifier`. Returns the
 /// candidate paths (possibly empty) — the resolver probes each with the FS.
-pub(crate) fn match_paths(dir: &str, specifier: &str) -> Vec<String> {
-    let loaded = load_for_dir(dir);
+pub(crate) fn match_paths(dir: &str, specifier: &str, explicit: Option<&str>) -> Vec<String> {
+    let loaded = load_for_dir(dir, explicit);
     match &loaded.matcher {
         Some(m) => m.matches(specifier),
         None => Vec::new(),

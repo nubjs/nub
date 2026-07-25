@@ -560,7 +560,11 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     // std::process::exit — control does not return here on that path. Output
     // flags quiet the fetch; the run tool's own output is preserved (the
     // silencer registers the saved fd for child stderr).
-    finish_code_quieted(&globals.output, &session, aube::commands::dlx::run(verb))
+    finish_code_quieted(
+        &globals.output,
+        &session,
+        aube::commands::dlx::run_with_child_env(verb, crate::cli::dlx_child_env(false)),
+    )
 }
 
 /// DLX fallback for the `nubx <tool> [args]` entry point: the bin was absent
@@ -591,6 +595,7 @@ pub fn run_dlx_for_nubx(
     bin: &str,
     args: &[String],
     flags: &crate::cli::NubxDlxFlags,
+    compat_mode: bool,
 ) -> Result<(i32, bool)> {
     if flags.quiet {
         // Same knob aube's own startup flips for `--silent`: drop the animated
@@ -607,7 +612,12 @@ pub fn run_dlx_for_nubx(
     // Ok(None)); `Err` = the fetch/install failed before the tool ran. We surface
     // the Err's report exactly as `finish_code` would, but also report the
     // success bit so the consent caller never records a failed fetch.
-    match session.runtime.block_on(aube::commands::dlx::run(verb)) {
+    match session
+        .runtime
+        .block_on(aube::commands::dlx::run_with_child_env(
+            verb,
+            crate::cli::dlx_child_env(compat_mode),
+        )) {
         Ok(code) => Ok((code.unwrap_or(0), true)),
         Err(report) => Ok((present::emit_report(&report), false)),
     }
@@ -767,6 +777,7 @@ fn run_import(typed: &str, args: &[String]) -> Result<i32> {
     // import needs neither the runtime nor the layout policy — just the
     // chdir and the brand seams (registered before any engine read).
     super::apply_dir(globals.dir.as_deref())?;
+    crate::cli::initialize_config_snapshot(false, false)?;
     super::engine_brand_preflight();
     match import_to_pnpm_lock(verb.force) {
         Ok(summary) => {
@@ -1060,6 +1071,11 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
 
     // yaml_prefer_frozen: None — see KNOWN APPROXIMATIONS in the module doc.
     let mut opts = args.into_options(global_frozen, None, cli_flags, super::env_snapshot());
+    // The settings hash makes release-policy drift miss the no-op warm path.
+    // Once there is real install work, validate the existing lockfile picks by
+    // re-resolving under the effective age gate. Explicit frozen modes remain
+    // lockfile-as-truth inside the engine.
+    opts.revalidate_release_policy = true;
     // yarn `enableScripts: false` — honor the security opt-out by forcing a
     // block-all-builds policy that overrides even nub's curated default-trust floor.
     if config.scripts_disabled {
