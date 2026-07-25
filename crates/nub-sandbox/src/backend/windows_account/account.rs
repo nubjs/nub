@@ -3,18 +3,18 @@
 //! THE PRIVILEGE SPLIT LIVES HERE. [`provision`] and [`deprovision`] are the ELEVATED
 //! one-time halves — SAM writes (`NetUserAdd`, `NetLocalGroupAddMembers`) and an `HKLM` value
 //! all demand administrator. [`lookup_sid`] and [`load_credential`] are the UNELEVATED
-//! per-run halves the broker calls on every launch. Keeping the split visible in this file's
-//! signatures is what stops a per-run code path from quietly acquiring an elevation
-//! requirement (see [`super`]'s module doc: every run after setup is unelevated).
+//! per-run halves the broker calls on every launch. Keeping that split visible in this file's
+//! signatures is what stops a per-run path from quietly acquiring an elevation requirement
+//! (see [`super`]'s module doc: every run after setup is unelevated).
 //!
 //! WHY THE CREDENTIAL IS DPAPI **MACHINE** SCOPE. The elevated setup writes the blob and the
 //! unelevated broker reads it. Those are the same *user* but DIFFERENT LOGON SESSIONS, and a
 //! self-elevated child may not have the user's master key loaded at all — user-scope DPAPI
 //! does not round-trip across that split, machine scope does. The honest consequence is that
 //! machine scope is **not a security boundary**: any local principal that can READ the
-//! ciphertext can decrypt it, including the sandbox account itself. The credential file's
-//! DACL is the only gate, and this module never writes a DACL — [`credential_dir`] exists so
-//! the setup path can hand the directory to the acl module, which owns every DACL write.
+//! ciphertext can decrypt it, the sandbox account included. The file's DACL is the only gate,
+//! and this module never writes a DACL — [`credential_dir`] exists so the setup path can hand
+//! the directory to the acl module, which owns every DACL write.
 //!
 //! Mirrors SRT's `vendor/srt-win-src/src/{user,sam,dpapi}.rs` (read 2026-07-24); Codex's
 //! `windows-sandbox-rs/src/bin/setup_main/win/sandbox_users.rs` is the second reference.
@@ -24,6 +24,7 @@
 use super::{SANDBOX_ACCOUNT, SANDBOX_GROUP};
 use std::io;
 use std::path::PathBuf;
+use std::ptr::{from_mut, from_ref, null, null_mut};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
     ERROR_MEMBER_IN_ALIAS, ERROR_NONE_MAPPED, ERROR_SUCCESS, GetLastError, HANDLE, LocalFree,
@@ -59,7 +60,7 @@ const SID_BUILTIN_USERS: &str = "S-1-5-32-545";
 const WINLOGON_USERLIST: &str =
     r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList";
 
-/// Benign-idempotency codes with no `windows-sys` constant.
+/// Benign-idempotency codes `windows-sys` has no constant for.
 const ERROR_ALIAS_EXISTS: u32 = 1379;
 const ERROR_NO_SUCH_ALIAS: u32 = 1376;
 
@@ -71,8 +72,8 @@ const PW_LEN: usize = 32;
 /// ELEVATED. Create-or-repair the sandbox account and its group, rotate the credential, and
 /// store it. Idempotent — re-running repairs a half-provisioned machine (account present but
 /// out of `BUILTIN\Users`, flags cleared by a GPO, credential file deleted). Returns the
-/// account's SID, which is the identity every downstream object keys on: WFP's
-/// `ALE_USER_ID` descriptor and every granted or denied ACE.
+/// account's SID, the identity every downstream object keys on: WFP's `ALE_USER_ID`
+/// descriptor and every granted or denied ACE.
 pub(crate) fn provision() -> io::Result<String> {
     ensure_group()?;
     let password = ensure_user()?;
@@ -92,12 +93,13 @@ pub(crate) fn provision() -> io::Result<String> {
 
     // Deliberately NOT granting `SeDenyInteractiveLogonRight`: `CreateProcessWithLogonW` goes
     // through an INTERACTIVE-type logon, so a deny-interactive right plausibly breaks the
-    // launch outright. Neither SRT nor Codex sets one. Revisit only against a real Windows
-    // box that can prove the launch survives it.
+    // launch outright. Neither SRT nor Codex sets one. Revisit only against a real Windows box
+    // that can prove the launch survives it.
     set_hidden(true)?;
 
-    store_credential(password.as_str())?;
-    Ok(sid)
+    store_credential(password.as_str())
+        .map(|()| sid)
+        .map_err(|e| io::Error::new(e.kind(), format!("storing the sandbox credential: {e}")))
 }
 
 /// ELEVATED. Remove the account, its profile, the group, the Winlogon hide entry, and the
@@ -121,33 +123,31 @@ pub(crate) fn deprovision() -> io::Result<()> {
         // Best-effort by design: Windows only materializes the profile on first logon, and a
         // stuck child can hold it open. Neither may block the account delete below.
         // SAFETY: NUL-terminated SID string; NULL profile path and NULL computer name select
-        // the default local profile, which is the documented form.
-        unsafe { DeleteProfileW(sid_w.as_ptr(), std::ptr::null(), std::ptr::null()) };
+        // the local machine's default profile, which is the documented form.
+        unsafe { DeleteProfileW(sid_w.as_ptr(), null(), null()) };
     }
 
     let name_w = to_wide(SANDBOX_ACCOUNT);
     // SAFETY: NUL-terminated account name; NULL server means the local SAM.
-    let rc = unsafe { NetUserDel(std::ptr::null(), name_w.as_ptr()) };
+    let rc = unsafe { NetUserDel(null(), name_w.as_ptr()) };
     if rc != 0 && rc != NERR_UserNotFound {
         record(Err(net_err("NetUserDel", rc)));
     }
 
     let group_w = to_wide(SANDBOX_GROUP);
     // SAFETY: as above.
-    let rc = unsafe { NetLocalGroupDel(std::ptr::null(), group_w.as_ptr()) };
+    let rc = unsafe { NetLocalGroupDel(null(), group_w.as_ptr()) };
     if rc != 0 && rc != NERR_GroupNotFound && rc != ERROR_NO_SUCH_ALIAS {
         record(Err(net_err("NetLocalGroupDel", rc)));
     }
 
     record(set_hidden(false));
-
-    match credential_path().and_then(|p| match std::fs::remove_file(&p) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
-    }) {
-        Err(e) => record(Err(e)),
-        Ok(()) => {}
-    }
+    record(
+        credential_path().and_then(|p| match std::fs::remove_file(&p) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }),
+    );
 
     match failure {
         Some(e) => Err(e),
@@ -156,7 +156,7 @@ pub(crate) fn deprovision() -> io::Result<()> {
 }
 
 /// UNELEVATED. The sandbox account's SID, or `None` when it does not exist. An access-denied
-/// or transient LSA failure propagates — reporting "absent" for those would make an
+/// or transient LSA failure PROPAGATES — reporting "absent" for those would make an
 /// already-provisioned machine look unprovisioned and trigger a spurious elevation prompt.
 pub(crate) fn lookup_sid() -> io::Result<Option<String>> {
     lookup_account_sid(SANDBOX_ACCOUNT)
@@ -166,8 +166,8 @@ pub(crate) fn lookup_sid() -> io::Result<Option<String>> {
 ///
 /// The returned plaintext is the CALLER's to bound — it goes straight into
 /// `CreateProcessWithLogonW`, so it is deliberately a plain `String` rather than a scrubbing
-/// wrapper that the FFI boundary would defeat anyway. Every intermediate buffer this function
-/// owns is zeroed before it returns.
+/// wrapper the FFI boundary would defeat anyway. Every intermediate buffer this function owns
+/// is zeroed before it returns.
 pub(crate) fn load_credential() -> io::Result<String> {
     let path = credential_path()?;
     let ciphertext = std::fs::read(&path).map_err(|e| {
@@ -181,17 +181,11 @@ pub(crate) fn load_credential() -> io::Result<String> {
         )
     })?;
     let mut plaintext = dpapi_unprotect(&ciphertext)?;
-    let out = match std::str::from_utf8(&plaintext) {
-        Ok(s) => s.to_owned(),
-        Err(_) => {
-            scrub_u8(&mut plaintext);
-            return Err(io::Error::other(
-                "the stored sandbox credential is corrupt (not valid UTF-8)",
-            ));
-        }
-    };
+    let out = std::str::from_utf8(&plaintext)
+        .map(str::to_owned)
+        .map_err(|_| io::Error::other("the stored sandbox credential is corrupt (not UTF-8)"));
     scrub_u8(&mut plaintext);
-    Ok(out)
+    out
 }
 
 /// The credential store's directory. Its DACL must DENY [`SANDBOX_GROUP`] — machine-scope
@@ -217,7 +211,7 @@ pub(crate) fn credential_path() -> io::Result<PathBuf> {
 /// which the SAM and `HKLM` writes in [`provision`] succeed. A standard user and an admin's
 /// filtered Medium-IL token both report `false`, and both would get `ERROR_ACCESS_DENIED`.
 pub(crate) fn is_elevated() -> bool {
-    let mut token: HANDLE = std::ptr::null_mut();
+    let mut token: HANDLE = null_mut();
     // SAFETY: query-only handle into our own process token.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return false;
@@ -229,8 +223,8 @@ pub(crate) fn is_elevated() -> bool {
         GetTokenInformation(
             token,
             TokenElevation,
-            std::ptr::from_mut(&mut elevation).cast(),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            from_mut(&mut elevation).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
             &mut ret_len,
         )
     };
@@ -239,7 +233,7 @@ pub(crate) fn is_elevated() -> bool {
     ok != 0 && elevation.TokenIsElevated != 0
 }
 
-// ───────────────────────────── errors and scratch ─────────────────────────────
+// ───────────────────────────── errors, scratch, RAII ─────────────────────────────
 
 /// Access-denied on any of these operations means "you are not elevated", not a fault — the
 /// caller turns `PermissionDenied` into an actionable re-run-elevated message rather than
@@ -263,7 +257,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 
 fn scrub_u8(buf: &mut [u8]) {
     for b in buf {
-        // SAFETY: `b` is a live unique reference; volatile so the store survives a compiler
+        // SAFETY: `b` is a live unique reference. Volatile so the store survives a compiler
         // that would otherwise treat writing to a dying buffer as dead code.
         unsafe { std::ptr::write_volatile(b, 0) };
     }
@@ -311,15 +305,13 @@ struct LocalSid(PSID);
 impl LocalSid {
     fn parse(sid: &str) -> io::Result<Self> {
         let w = to_wide(sid);
-        let mut psid: PSID = std::ptr::null_mut();
+        let mut psid: PSID = null_mut();
         // SAFETY: `w` is NUL-terminated UTF-16; `psid` is a valid out-slot.
         let ok = unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut psid) };
         if ok == 0 {
-            return Err(io::Error::other(format!(
-                "ConvertStringSidToSidW({sid}) failed (status {})",
-                // SAFETY: read immediately after the failed call on this thread.
-                unsafe { GetLastError() }
-            )));
+            // SAFETY: read immediately after the failed call on this thread.
+            let rc = unsafe { GetLastError() };
+            return Err(net_err(&format!("ConvertStringSidToSidW({sid})"), rc));
         }
         Ok(LocalSid(psid))
     }
@@ -342,28 +334,28 @@ fn lookup_account_sid(name: &str) -> io::Result<Option<String>> {
     let name_w = to_wide(name);
     let mut cb_sid: u32 = 0;
     let mut cch_dom: u32 = 0;
-    let mut sid_use: SID_NAME_USE = 0;
+    let mut kind: SID_NAME_USE = 0;
 
     // SAFETY: the documented sizing form — NULL buffers with zeroed lengths.
     let ok = unsafe {
         LookupAccountNameW(
-            std::ptr::null(),
+            null(),
             name_w.as_ptr(),
-            std::ptr::null_mut(),
+            null_mut(),
             &mut cb_sid,
-            std::ptr::null_mut(),
+            null_mut(),
             &mut cch_dom,
-            &mut sid_use,
+            &mut kind,
         )
     };
     if ok == 0 {
         // SAFETY: read immediately after the failed call on this thread.
-        let e = unsafe { GetLastError() };
-        if e == ERROR_NONE_MAPPED {
+        let rc = unsafe { GetLastError() };
+        if rc == ERROR_NONE_MAPPED {
             return Ok(None);
         }
-        if e != ERROR_INSUFFICIENT_BUFFER {
-            return Err(net_err(&format!("LookupAccountNameW({name})"), e));
+        if rc != ERROR_INSUFFICIENT_BUFFER {
+            return Err(net_err(&format!("LookupAccountNameW({name})"), rc));
         }
     }
     if cb_sid == 0 {
@@ -377,22 +369,22 @@ fn lookup_account_sid(name: &str) -> io::Result<Option<String>> {
     // SAFETY: both buffers are sized by the call above and outlive this one.
     let ok = unsafe {
         LookupAccountNameW(
-            std::ptr::null(),
+            null(),
             name_w.as_ptr(),
             sid.as_mut_ptr().cast(),
             &mut cb_sid,
             dom.as_mut_ptr(),
             &mut cch_dom,
-            &mut sid_use,
+            &mut kind,
         )
     };
     if ok == 0 {
         // SAFETY: as above.
-        let e = unsafe { GetLastError() };
-        if e == ERROR_NONE_MAPPED {
+        let rc = unsafe { GetLastError() };
+        if rc == ERROR_NONE_MAPPED {
             return Ok(None);
         }
-        return Err(net_err(&format!("LookupAccountNameW({name})"), e));
+        return Err(net_err(&format!("LookupAccountNameW({name})"), rc));
     }
     // SAFETY: the buffer now holds a valid self-relative SID.
     Ok(Some(unsafe { sid_to_string(sid.as_mut_ptr().cast()) }?))
@@ -404,18 +396,18 @@ fn lookup_account_name(sid_str: &str) -> io::Result<String> {
     let sid = LocalSid::parse(sid_str)?;
     let mut cch_name: u32 = 0;
     let mut cch_dom: u32 = 0;
-    let mut sid_use: SID_NAME_USE = 0;
+    let mut kind: SID_NAME_USE = 0;
 
     // SAFETY: sizing call against a live PSID; both out-lengths are valid slots.
     unsafe {
         LookupAccountSidW(
-            std::ptr::null(),
+            null(),
             sid.0,
-            std::ptr::null_mut(),
+            null_mut(),
             &mut cch_name,
-            std::ptr::null_mut(),
+            null_mut(),
             &mut cch_dom,
-            &mut sid_use,
+            &mut kind,
         )
     };
     if cch_name == 0 {
@@ -428,20 +420,19 @@ fn lookup_account_name(sid_str: &str) -> io::Result<String> {
     // SAFETY: both buffers are sized by the call above and outlive this one.
     let ok = unsafe {
         LookupAccountSidW(
-            std::ptr::null(),
+            null(),
             sid.0,
             name.as_mut_ptr(),
             &mut cch_name,
             dom.as_mut_ptr(),
             &mut cch_dom,
-            &mut sid_use,
+            &mut kind,
         )
     };
     if ok == 0 {
         // SAFETY: read immediately after the failed call on this thread.
-        return Err(net_err(&format!("LookupAccountSidW({sid_str})"), unsafe {
-            GetLastError()
-        }));
+        let rc = unsafe { GetLastError() };
+        return Err(net_err(&format!("LookupAccountSidW({sid_str})"), rc));
     }
     Ok(String::from_utf16_lossy(&name[..cch_name as usize]))
 }
@@ -449,14 +440,14 @@ fn lookup_account_name(sid_str: &str) -> io::Result<String> {
 /// # Safety
 /// `sid` must point at a valid self-relative SID for the duration of the call.
 unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
-    let mut out: *mut u16 = std::ptr::null_mut();
+    let mut out: *mut u16 = null_mut();
     // SAFETY: caller guarantees `sid`; `out` is a valid slot.
     let ok = unsafe { ConvertSidToStringSidW(sid, &mut out) };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
     let mut len = 0usize;
-    // SAFETY: on success the buffer is NUL-terminated UTF-16 allocated by LocalAlloc.
+    // SAFETY: on success the buffer is NUL-terminated UTF-16 allocated by `LocalAlloc`.
     while unsafe { *out.add(len) } != 0 {
         len += 1;
     }
@@ -467,7 +458,7 @@ unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
     Ok(s)
 }
 
-// ───────────────────────────── account + group ─────────────────────────────
+// ───────────────────────────── password ─────────────────────────────
 
 /// The 85-symbol alphabet. It EXCLUDES `"`, `\`, backtick, whitespace and the shell-special
 /// `& | < > ^` set, so the credential survives any cmd / PowerShell / argv relay between here
@@ -484,11 +475,11 @@ const CLASSES: [&[u8]; 4] = [
 ];
 
 fn fill_random(buf: &mut [u8]) -> io::Result<()> {
-    // SAFETY: `buf` is a live writable slice of exactly `len` bytes; a NULL algorithm handle
+    // SAFETY: `buf` is a live writable slice of exactly `len()` bytes; a NULL algorithm handle
     // is what BCRYPT_USE_SYSTEM_PREFERRED_RNG requires.
     let st = unsafe {
         BCryptGenRandom(
-            std::ptr::null_mut(),
+            null_mut(),
             buf.as_mut_ptr(),
             buf.len() as u32,
             BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -502,9 +493,9 @@ fn fill_random(buf: &mut [u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// 32 chars rejection-sampled from [`ALPHA`] via the system CSPRNG. Rejection sampling is
-/// what makes each pick UNIFORM — 85 does not divide 256, so a bare `% 85` would bias the
-/// first 86 symbols.
+/// 32 chars rejection-sampled from [`ALPHA`] via the system CSPRNG (never a userspace PRNG).
+/// Rejection sampling is what makes each pick UNIFORM — 85 does not divide 256, so a bare
+/// `% 85` would bias the first 86 symbols.
 fn gen_password() -> io::Result<Secret> {
     let mut raw = [0u8; PW_LEN];
     fill_random(&mut raw)?;
@@ -531,9 +522,9 @@ fn gen_password() -> io::Result<Secret> {
     Ok(Secret(String::from_utf8(out).expect("ALPHA is ASCII")))
 }
 
-/// Force one character from each complexity class when the uniform draw missed one. The
-/// 2245 retry loop in [`ensure_user`] is the primary defence against a tightened local
-/// policy; this makes the FIRST attempt pass almost always.
+/// Force one character from each complexity class when the uniform draw missed one. The 2245
+/// retry loop in [`ensure_user`] is the primary defence against a tightened local policy;
+/// this makes the FIRST attempt pass almost always.
 fn apply_class_floor(out: &mut [u8], extra: &[u8; 5]) {
     if CLASSES.iter().all(|c| out.iter().any(|b| c.contains(b))) {
         return;
@@ -560,12 +551,11 @@ fn class_summary(password: &str) -> String {
     format!("len={} U={u} L={l} D={d} S={s}", password.len())
 }
 
-/// `(min_password_len, password_history_len)` from the local SAM, or `(-1, -1)` when the
-/// query itself fails.
+/// `(min_password_len, password_history_len)` from the local SAM, `(-1, -1)` when unreadable.
 fn local_password_policy() -> (i64, i64) {
-    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut buf: *mut u8 = null_mut();
     // SAFETY: NULL server = local SAM; `buf` is a valid out-slot.
-    if unsafe { NetUserModalsGet(std::ptr::null(), 0, &mut buf) } != 0 || buf.is_null() {
+    if unsafe { NetUserModalsGet(null(), 0, &mut buf) } != 0 || buf.is_null() {
         return (-1, -1);
     }
     // SAFETY: on success netapi returns one USER_MODALS_INFO_0 in its own buffer.
@@ -588,6 +578,8 @@ fn warn_password_rejected(op: &str, attempt: usize, password: &str) {
     );
 }
 
+// ───────────────────────────── account + group ─────────────────────────────
+
 /// Create the account, or rotate the credential of the one already present.
 ///
 /// Retries on `NERR_PasswordTooShort` (2245) because SAM returns that code for ANY local
@@ -600,30 +592,23 @@ fn ensure_user() -> io::Result<Secret> {
 
     for attempt in 0..MAX_PW_ATTEMPTS {
         let password = gen_password()?;
-        let mut pw_w = WideSecret(to_wide(password.as_str()));
+        let mut pw = WideSecret(to_wide(password.as_str()));
 
         let info = USER_INFO_1 {
             usri1_name: name_w.as_mut_ptr(),
-            usri1_password: pw_w.0.as_mut_ptr(),
+            usri1_password: pw.0.as_mut_ptr(),
             usri1_password_age: 0,
             usri1_priv: USER_PRIV_USER,
-            usri1_home_dir: std::ptr::null_mut(),
+            usri1_home_dir: null_mut(),
             usri1_comment: comment_w.as_mut_ptr(),
             // UF_SCRIPT is MANDATORY on workstation SKUs — a vestigial LAN-Manager flag SAM
             // still insists on. Omit it and NetUserAdd fails with NERR_BadUsername /
             // ERROR_INVALID_PARAMETER, neither of which hints at the real cause.
             usri1_flags: UF_SCRIPT | UF_DONT_EXPIRE_PASSWD,
-            usri1_script_path: std::ptr::null_mut(),
+            usri1_script_path: null_mut(),
         };
         // SAFETY: every PWSTR field points into a buffer that outlives this call.
-        let rc = unsafe {
-            NetUserAdd(
-                std::ptr::null(),
-                1,
-                std::ptr::from_ref(&info).cast(),
-                std::ptr::null_mut(),
-            )
-        };
+        let rc = unsafe { NetUserAdd(null(), 1, from_ref(&info).cast(), null_mut()) };
         if rc == 0 {
             return Ok(password);
         }
@@ -639,16 +624,16 @@ fn ensure_user() -> io::Result<Secret> {
         // live account. Levels 1003 (password) and 1008 (flags) rather than another level-1
         // SetInfo, which would clobber priv / home_dir / comment.
         let info = USER_INFO_1003 {
-            usri1003_password: pw_w.0.as_mut_ptr(),
+            usri1003_password: pw.0.as_mut_ptr(),
         };
         // SAFETY: `name_w` and the password buffer outlive this call.
         let rc = unsafe {
             NetUserSetInfo(
-                std::ptr::null(),
+                null(),
                 name_w.as_ptr(),
                 1003,
-                std::ptr::from_ref(&info).cast(),
-                std::ptr::null_mut(),
+                from_ref(&info).cast(),
+                null_mut(),
             )
         };
         if rc == NERR_PasswordTooShort && attempt + 1 < MAX_PW_ATTEMPTS {
@@ -671,9 +656,9 @@ fn ensure_user() -> io::Result<Secret> {
 /// have cleared it since the last provision, and an expiring password silently breaks every
 /// future launch with an opaque logon failure.
 fn reassert_flags(name_w: &[u16]) -> io::Result<()> {
-    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut buf: *mut u8 = null_mut();
     // SAFETY: NUL-terminated name; `buf` is a valid out-slot.
-    let rc = unsafe { NetUserGetInfo(std::ptr::null(), name_w.as_ptr(), 1, &mut buf) };
+    let rc = unsafe { NetUserGetInfo(null(), name_w.as_ptr(), 1, &mut buf) };
     if rc != 0 || buf.is_null() {
         return Err(net_err("NetUserGetInfo(1)", rc));
     }
@@ -685,14 +670,14 @@ fn reassert_flags(name_w: &[u16]) -> io::Result<()> {
     let info = USER_INFO_1008 {
         usri1008_flags: flags | UF_DONT_EXPIRE_PASSWD,
     };
-    // SAFETY: `info` and `name_w` outlive the call.
+    // SAFETY: `info` and `name_w` both outlive the call.
     let rc = unsafe {
         NetUserSetInfo(
-            std::ptr::null(),
+            null(),
             name_w.as_ptr(),
             1008,
-            std::ptr::from_ref(&info).cast(),
-            std::ptr::null_mut(),
+            from_ref(&info).cast(),
+            null_mut(),
         )
     };
     if rc != 0 {
@@ -709,14 +694,7 @@ fn ensure_group() -> io::Result<()> {
         lgrpi1_comment: comment_w.as_mut_ptr(),
     };
     // SAFETY: both PWSTR fields point into buffers that outlive this call.
-    let rc = unsafe {
-        NetLocalGroupAdd(
-            std::ptr::null(),
-            1,
-            std::ptr::from_ref(&info).cast(),
-            std::ptr::null_mut(),
-        )
-    };
+    let rc = unsafe { NetLocalGroupAdd(null(), 1, from_ref(&info).cast(), null_mut()) };
     if rc != 0 && rc != NERR_GroupExists && rc != ERROR_ALIAS_EXISTS {
         return Err(net_err("NetLocalGroupAdd", rc));
     }
@@ -732,15 +710,8 @@ fn add_member(group: &str, member: &LocalSid) -> io::Result<()> {
         lgrmi0_sid: member.0,
     };
     // SAFETY: `group_w` and the member's PSID both outlive this call.
-    let rc = unsafe {
-        NetLocalGroupAddMembers(
-            std::ptr::null(),
-            group_w.as_ptr(),
-            0,
-            std::ptr::from_ref(&info).cast(),
-            1,
-        )
-    };
+    let rc =
+        unsafe { NetLocalGroupAddMembers(null(), group_w.as_ptr(), 0, from_ref(&info).cast(), 1) };
     if rc != 0 && rc != ERROR_MEMBER_IN_ALIAS {
         return Err(net_err(&format!("NetLocalGroupAddMembers({group})"), rc));
     }
@@ -753,40 +724,30 @@ fn add_member(group: &str, member: &LocalSid) -> io::Result<()> {
 fn set_hidden(hide: bool) -> io::Result<()> {
     let sub_w = to_wide(WINLOGON_USERLIST);
     let val_w = to_wide(SANDBOX_ACCOUNT);
-    let mut key: HKEY = std::ptr::null_mut();
+    let mut key: HKEY = null_mut();
 
     if hide {
-        // SAFETY: NUL-terminated subkey; `key` is a valid out-slot. Create, because the
-        // SpecialAccounts subtree does not exist on a stock install.
+        // Create, not open: the SpecialAccounts subtree does not exist on a stock install.
+        // SAFETY: NUL-terminated subkey; `key` is a valid out-slot.
         let rc = unsafe {
             RegCreateKeyExW(
                 HKEY_LOCAL_MACHINE,
                 sub_w.as_ptr(),
                 0,
-                std::ptr::null(),
+                null(),
                 REG_OPTION_NON_VOLATILE,
                 KEY_SET_VALUE,
-                std::ptr::null(),
+                null(),
                 &mut key,
-                std::ptr::null_mut(),
+                null_mut(),
             )
         };
         if rc != ERROR_SUCCESS {
             return Err(net_err("RegCreateKeyExW(Winlogon SpecialAccounts)", rc));
         }
         let data = 0u32.to_ne_bytes();
-        // SAFETY: `key` is open for KEY_SET_VALUE; `data` is exactly 4 bytes as REG_DWORD
-        // requires.
-        let rc = unsafe {
-            RegSetValueExW(
-                key,
-                val_w.as_ptr(),
-                0,
-                REG_DWORD,
-                data.as_ptr(),
-                data.len() as u32,
-            )
-        };
+        // SAFETY: `key` is open for KEY_SET_VALUE; `data` is the 4 bytes REG_DWORD requires.
+        let rc = unsafe { RegSetValueExW(key, val_w.as_ptr(), 0, REG_DWORD, data.as_ptr(), 4) };
         // SAFETY: `key` came from a successful create and is closed once.
         unsafe { RegCloseKey(key) };
         if rc != ERROR_SUCCESS {
@@ -833,15 +794,15 @@ fn dpapi_protect(plaintext: &[u8]) -> io::Result<Vec<u8>> {
         pbData: plaintext.as_ptr().cast_mut(),
     };
     let mut out = CRYPT_INTEGER_BLOB::default();
-    // SAFETY: `input` borrows a live slice for the call; `out` is a valid out-slot. All
-    // optional parameters are NULL, which the API documents as "unused".
+    // SAFETY: `input` borrows a live slice for the call and `out` is a valid out-slot; every
+    // optional parameter is NULL, which the API documents as "unused".
     let ok = unsafe {
         CryptProtectData(
             &input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
+            null(),
+            null(),
+            null(),
+            null(),
             CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN,
             &mut out,
         )
@@ -859,15 +820,14 @@ fn dpapi_unprotect(ciphertext: &[u8]) -> io::Result<Vec<u8>> {
         pbData: ciphertext.as_ptr().cast_mut(),
     };
     let mut out = CRYPT_INTEGER_BLOB::default();
-    // SAFETY: as above. The scope flag is read back out of the blob header, so machine-scope
-    // ciphertext needs no flag here.
+    // SAFETY: as above. No scope flag: DPAPI reads it back out of the blob header.
     let ok = unsafe {
         CryptUnprotectData(
             &input,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
+            null_mut(),
+            null(),
+            null(),
+            null(),
             CRYPTPROTECT_UI_FORBIDDEN,
             &mut out,
         )
@@ -887,8 +847,8 @@ unsafe fn take_blob(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
     }
     // SAFETY: DPAPI guarantees `cbData` readable bytes at `pbData`.
     let v = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec() };
-    // SAFETY: freed exactly once; `LocalFree` is the documented release. Freed even when
-    // `cbData` is 0, which the API can return for an empty plaintext.
+    // SAFETY: freed exactly once, and freed even when `cbData` is 0 — which the API can
+    // return for an empty plaintext.
     unsafe { LocalFree(out.pbData.cast()) };
     v
 }
@@ -898,7 +858,7 @@ mod tests {
     use super::*;
 
     /// The alphabet is the whole reason the credential survives a cmd / PowerShell / argv
-    /// relay into `CreateProcessWithLogonW`. One stray metacharacter here turns into an
+    /// relay into `CreateProcessWithLogonW`. One stray metacharacter here becomes an
     /// intermittent, machine-specific logon failure.
     #[test]
     fn alphabet_excludes_every_shell_hostile_character() {
@@ -906,7 +866,7 @@ mod tests {
         for c in [b'"', b'\\', b'`', b'\'', b' ', b'&', b'|', b'<', b'>', b'^'] {
             assert!(!ALPHA.contains(&c), "ALPHA contains {}", c as char);
         }
-        assert!(ALPHA.iter().all(|b| b.is_ascii_graphic()));
+        assert!(ALPHA.iter().all(u8::is_ascii_graphic));
         // Every class must be drawable from ALPHA, or the floor below writes a character the
         // uniform draw could never produce.
         for class in CLASSES {
@@ -921,14 +881,14 @@ mod tests {
     fn class_floor_repairs_a_draw_missing_every_class() {
         let mut out = [b'a'; PW_LEN];
         apply_class_floor(&mut out, &[7, 0, 0, 0, 0]);
-        assert!(out.iter().any(|b| b.is_ascii_uppercase()));
-        assert!(out.iter().any(|b| b.is_ascii_lowercase()));
-        assert!(out.iter().any(|b| b.is_ascii_digit()));
+        assert!(out.iter().any(u8::is_ascii_uppercase));
+        assert!(out.iter().any(u8::is_ascii_lowercase));
+        assert!(out.iter().any(u8::is_ascii_digit));
         assert!(out.iter().any(|b| !b.is_ascii_alphanumeric()));
     }
 
-    /// A complete draw must be left ALONE — rewriting four slots with a deterministic pick
-    /// derived from five bytes would shed entropy on every generated password.
+    /// A complete draw must be left ALONE — rewriting four slots with a pick derived from
+    /// five bytes would shed entropy on every generated password.
     #[test]
     fn class_floor_leaves_a_complete_draw_untouched() {
         let mut out = *b"Aa1!Aa1!Aa1!Aa1!Aa1!Aa1!Aa1!Aa1!";
@@ -944,12 +904,11 @@ mod tests {
         let pw = "Aa1!Aa1!";
         let s = class_summary(pw);
         assert_eq!(s, "len=8 U=2 L=2 D=2 S=2");
-        assert!(!s.contains(pw));
-        assert!(!s.contains("Aa1"));
+        assert!(!s.contains(pw) && !s.contains("Aa1"));
     }
 
-    /// End-to-end shape of the generator against the real system CSPRNG. Needs Windows but
-    /// no elevation, so it runs on the ordinary CI leg.
+    /// End-to-end shape of the generator against the real system CSPRNG. Needs Windows but no
+    /// elevation, so it runs on the ordinary CI leg.
     #[test]
     fn generated_password_is_ascii_complex_and_unique() {
         let p = gen_password().expect("gen_password");

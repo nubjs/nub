@@ -41,22 +41,13 @@ use windows_sys::Win32::Security::{
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
     InitializeAcl, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
 };
-
-// Win32 file access rights, spelled numerically so this module needs no
-// `Win32_Storage_FileSystem` feature for nine frozen constants — the same call
-// `backend::windows` already makes. Every value confirmed against windows-sys 0.61.2
-// `src/Windows/Win32/Storage/FileSystem/mod.rs` at the cited line.
-const FILE_GENERIC_READ: u32 = 0x0012_0089; // :1535 (1179785)
-const FILE_GENERIC_WRITE: u32 = 0x0012_0116; // :1536 (1179926)
-const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0; // :1534 (1179808)
-const FILE_ALL_ACCESS: u32 = 0x001F_01FF; // :1396 (2032127)
-const FILE_DELETE_CHILD: u32 = 0x0000_0040; // :1459 (64)
-/// The same bit as `FILE_EXECUTE` (:1488) — the kernel reads it as traverse on a directory
-/// and as execute on a file. There is no primitive that separates them.
-const FILE_TRAVERSE: u32 = 0x0000_0020; // :1859 (32)
-const DELETE: u32 = 0x0001_0000; // :1119 (65536)
-const WRITE_DAC: u32 = 0x0004_0000; // :4363 (262144)
-const WRITE_OWNER: u32 = 0x0008_0000; // :4364 (524288)
+// `FILE_TRAVERSE` is the SAME bit as `FILE_EXECUTE` — the kernel reads it as traverse on a
+// directory and as execute on a file, and no primitive separates them. It is imported under
+// the traverse spelling because that is the property the mask assertions below are about.
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_ALL_ACCESS, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_TRAVERSE, WRITE_DAC, WRITE_OWNER,
+};
 
 /// Read + write + execute + delete. What a policy's write grant stamps.
 const RW: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
