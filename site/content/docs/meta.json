@@ -2,6 +2,7 @@
   "title": "Documentation",
   "pages": [
     "index",
+    "config",
     "runtime",
     "watch",
     "runner",
