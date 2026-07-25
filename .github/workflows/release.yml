@@ -1148,7 +1148,14 @@ jobs:
       VERSION: ${{ needs.verify.outputs.canary_version }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      # ACCEPTED TRADEOFF (maintainer, 2026-07-24): zizmor's cache-poisoning
+      # audit flags publishing from a main-push-triggered workflow whose build
+      # jobs restore rust/pnpm caches — a poisoned Actions cache could in
+      # theory reach published canary bits. Accepted: the tag-path stable
+      # releases build from these same caches, and cold-building 8 platforms
+      # per push is not worth the surface reduction (bun/deno ship canaries
+      # the same way). setup-node is v5-pinned by SHA like every other action.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # zizmor: ignore[cache-poisoning]
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
