@@ -749,10 +749,7 @@ fn pnpm11_npmrc_allowlist_drops_layout_keys_but_keeps_auth_registry_network() {
     let has = |k: &str| gated.project.iter().any(|(key, _)| key == k);
     assert!(!has("node-linker"), "layout key must be dropped");
     assert!(!has("ignore-scripts"), "behavior key must be dropped");
-    assert!(
-        !has("noproxy"),
-        "npm's `noproxy` spelling is not allowlisted"
-    );
+    assert!(!has("noproxy"), "npm's `noproxy` spelling is not allowlisted");
     assert!(has("registry"), "registry must survive");
     assert!(has("@myorg:registry"), "scoped registry must survive");
     assert!(

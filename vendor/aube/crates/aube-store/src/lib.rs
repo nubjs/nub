@@ -281,8 +281,7 @@ impl Store {
     ///
     /// [`virtual_store_subdir`]: aube_util::Embedder::virtual_store_subdir
     pub fn virtual_store_dir(&self) -> PathBuf {
-        self.cache_dir
-            .join(aube_util::embedder().virtual_store_subdir)
+        self.cache_dir.join(aube_util::embedder().virtual_store_subdir)
     }
 
     /// Root of the per-package *extracted-tree* tier, a sibling of the

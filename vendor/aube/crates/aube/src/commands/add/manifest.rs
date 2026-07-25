@@ -566,9 +566,7 @@ pub(super) async fn update_manifest_for_add(
     let catalog_target = if catalog_upserts.is_empty() {
         None
     } else {
-        Some(crate::commands::catalogs::resolve_catalog_write_target(
-            cwd,
-        )?)
+        Some(crate::commands::catalogs::resolve_catalog_write_target(cwd)?)
     };
 
     // Write the updated package.json. Under `--no-save` callers still

@@ -1820,10 +1820,8 @@ async fn primer_dist_tag_pick_refetches_when_registry_repointed_latest() {
     // served (the bug).
     let mut full = make_packument(&name, &[&primer_latest, &live_latest], &live_latest);
     full.modified = Some("2024-01-01T00:00:00.000Z".to_string());
-    full.time.insert(
-        primer_latest.clone(),
-        "2024-01-01T00:00:00.000Z".to_string(),
-    );
+    full.time
+        .insert(primer_latest.clone(), "2024-01-01T00:00:00.000Z".to_string());
     full.time
         .insert(live_latest.clone(), "2024-01-02T00:00:00.000Z".to_string());
     let full_body = serde_json::to_vec(&full).unwrap();
@@ -1870,9 +1868,7 @@ async fn primer_dist_tag_pick_refetches_when_registry_repointed_latest() {
         .with_packument_cache(base.join("packuments"))
         .with_force_metadata_primer(true);
     let mut manifest = PackageJson::default();
-    manifest
-        .dependencies
-        .insert(name.clone(), "latest".to_string());
+    manifest.dependencies.insert(name.clone(), "latest".to_string());
 
     let graph = resolver
         .resolve(&manifest, None)
@@ -5129,30 +5125,12 @@ fn colonless_dist_tag_still_resolves_after_scheme_guard() {
     packument
         .dist_tags
         .insert("nightly".to_string(), "1.0.0".to_string());
-    let result = pick_version(
-        &packument,
-        "nightly",
-        None,
-        false,
-        None,
-        None,
-        false,
-        |_, _| false,
-    )
-    .unwrap();
+    let result =
+        pick_version(&packument, "nightly", None, false, None, None, false, |_, _| false).unwrap();
     assert_eq!(result.version, "1.0.0");
 
-    let result = pick_version(
-        &packument,
-        "latest",
-        None,
-        false,
-        None,
-        None,
-        false,
-        |_, _| false,
-    )
-    .unwrap();
+    let result =
+        pick_version(&packument, "latest", None, false, None, None, false, |_, _| false).unwrap();
     assert_eq!(result.version, "2.0.0");
 }
 

@@ -1,6 +1,7 @@
 use super::dep_path::{
     dep_path_tail, parse_dep_path, peerless_alias_target, rewrite_peer_suffix,
-    rewrite_snapshot_alias_deps, version_to_dep_path,
+    rewrite_snapshot_alias_deps,
+    version_to_dep_path,
 };
 use super::raw::{
     RawBinSpec, RawDepSpec, RawRuntimeVariant, local_source_from_resolution, parse_raw_lockfile,

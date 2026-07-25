@@ -331,10 +331,7 @@ pub(crate) fn resolve_catalog_write_target(cwd: &Path) -> miette::Result<Catalog
     // key. Reject up front so the pre-flight fails before any manifest
     // mutation rather than half-way through.
     let manifest = crate::commands::load_manifest(&manifest_path)?;
-    if matches!(
-        manifest.workspaces,
-        Some(aube_manifest::Workspaces::String(_))
-    ) {
+    if matches!(manifest.workspaces, Some(aube_manifest::Workspaces::String(_))) {
         return Err(miette::miette!(
             "cannot save to a catalog: package.json#workspaces is a bare string; \
              convert it to an array or object form to hold a `workspaces.catalog`"
@@ -743,10 +740,7 @@ catalog:
     #[test]
     fn manifest_upsert_adds_default_catalog_preserving_packages() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_pkg(
-            dir.path(),
-            r#"{"name":"root","workspaces":{"packages":["apps/*"]}}"#,
-        );
+        let path = write_pkg(dir.path(), r#"{"name":"root","workspaces":{"packages":["apps/*"]}}"#);
         upsert_catalog_entries_in_manifest(&path, &[upsert("default", "@types/node", "^26.1.0")])
             .unwrap();
         let v: serde_json::Value =
@@ -791,9 +785,6 @@ catalog:
             .unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            v["workspaces"]["catalogs"]["types"]["@types/node"],
-            "^26.1.0"
-        );
+        assert_eq!(v["workspaces"]["catalogs"]["types"]["@types/node"], "^26.1.0");
     }
 }
