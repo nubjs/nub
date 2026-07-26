@@ -304,6 +304,8 @@ Prefix an entry with `!`; the last matching rule wins.
 { "net": ["*", "!*.tracking.example"] }
 ```
 
+A `*.` deny follows the same subdomains-only rule as a `*.` allow: `!*.tracking.example` blocks `ads.tracking.example` but not the apex `tracking.example`. Add `!tracking.example` to deny the apex as well.
+
 ### Reuse another policy's rules
 
 Splice a list in with `...:` and a JSON pointer.
