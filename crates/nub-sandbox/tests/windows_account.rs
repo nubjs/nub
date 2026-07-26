@@ -36,10 +36,14 @@ mod win {
     use windows_sys::Win32::Security::{
         GetTokenInformation, LogonUserW, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessWithLogonW, GetCurrentProcess, INFINITE, OpenProcessToken, PROCESS_INFORMATION,
+        STARTUPINFOW, WaitForSingleObject,
+    };
 
     const LOGON32_LOGON_BATCH: u32 = 4;
     const LOGON32_PROVIDER_DEFAULT: u32 = 0;
+    const LOGON_WITH_PROFILE: u32 = 0x1;
 
     pub fn run(role: &str) -> i32 {
         match role {
@@ -83,6 +87,7 @@ mod win {
                 }
             },
             "logon" => logon_check(),
+            "launchtest" => launch_test(),
             "teardown" => match windows_teardown() {
                 Ok(()) => {
                     println!("TEARDOWN-OK");
@@ -167,6 +172,75 @@ mod win {
         }
         println!("LOGON-OK account token SID is distinct from the user's SID");
         0
+    }
+
+    /// Bit-2 core-mechanism probe: launch a child AS the dedicated account via
+    /// `CreateProcessWithLogonW` (the unelevated secondary-logon path) and confirm the child
+    /// runs as a DISTINCT principal. The child (`cmd /c whoami /user`) writes its own SID to a
+    /// world-writable file. Also the acid test for bit 1's rights model: CreateProcessWithLogonW
+    /// performs an INTERACTIVE-type logon, so if the account is denied interactive logon this
+    /// fails with 1385 (ERROR_LOGON_TYPE_NOT_GRANTED) — the exact bit-1/bit-2 reconciliation.
+    fn launch_test() -> i32 {
+        let creds = match detect() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("LAUNCH-FAIL detect: {e}");
+                return 1;
+            }
+        };
+        let out = r"C:\Users\Public\childsid.out";
+        let _ = std::fs::remove_file(out);
+        let user = to_wide(&creds.account_name);
+        let domain = to_wide(".");
+        let pass = to_wide(&creds.password);
+        let mut cmdline = to_wide(&format!("cmd.exe /c whoami /user > {out} 2>&1"));
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: NUL-terminated wide inputs; cmdline is a writable buffer; env/appname/cwd NULL.
+        let ok = unsafe {
+            CreateProcessWithLogonW(
+                user.as_ptr(),
+                domain.as_ptr(),
+                pass.as_ptr(),
+                LOGON_WITH_PROFILE,
+                std::ptr::null(),
+                cmdline.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                &si,
+                &mut pi,
+            )
+        };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            eprintln!(
+                "LAUNCH-FAIL CreateProcessWithLogonW: err={err} ({})",
+                std::io::Error::from_raw_os_error(err as i32)
+            );
+            if err == 1385 {
+                eprintln!(
+                    "  → ERROR_LOGON_TYPE_NOT_GRANTED: the account is denied the logon type \
+                     CreateProcessWithLogonW uses (interactive). Bit 1 must grant it."
+                );
+            }
+            return 1;
+        }
+        unsafe {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        let child = std::fs::read_to_string(out).unwrap_or_default();
+        println!("LAUNCH child whoami output: {}", child.trim());
+        if child.contains(&creds.account_sid) {
+            println!("LAUNCH-OK child ran as the dedicated account (SID {})", creds.account_sid);
+            0
+        } else {
+            eprintln!("LAUNCH-FAIL: child SID does not match the account SID");
+            1
+        }
     }
 
     fn current_process_sid() -> std::io::Result<String> {
