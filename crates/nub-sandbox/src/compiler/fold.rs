@@ -347,6 +347,15 @@ fn resolve_fs_path(raw: &str, ctx: &CompileCtx, path: &str) -> Result<String, Co
 /// leaving `$cache` as the sole recognized sentinel that flows through.
 fn reject_unknown_fs_sentinel(raw: &str, path: &str) -> Result<(), CompileError> {
     let p = raw.trim_start();
+    // P0-F1: the pre-v2 angle-bracket fs sentinels (`<tmp>`/`<cache>`/`<home>`) were
+    // renamed to `$tmp`/`$cache`/`~`. A leading `<…>` is not a valid fs path, and left
+    // unrejected it degrades SILENTLY to an inert literal rule — `{"fs":{"<tmp>":"rw"}}`
+    // then leaves `tmp_mode = Shared` (not the private per-run dir), so a broad read
+    // re-exposes the host tmp. Fail loud like `$data` does, with a migration hint. (net's
+    // `<private>`/`<local>` are a separate axis handled in `push_net_rule`; this is fs-only.)
+    if p.starts_with('<') {
+        return Err(CompileError::shape(path, &deprecated_angle_sentinel_msg(p)));
+    }
     if p.starts_with("$(") || !p.starts_with('$') {
         return Ok(());
     }
@@ -365,6 +374,26 @@ fn reject_unknown_fs_sentinel(raw: &str, path: &str) -> Result<(), CompileError>
         path,
         "a bare `$` is not a valid filesystem path — the built-in sentinels are `$cache` and `$tmp`, and `$( … )` is command substitution",
     ))
+}
+
+/// Migration message for a removed `<…>` angle-bracket fs sentinel (P0-F1). The three
+/// renamed forms (`<tmp>`/`<cache>`/`<home>`, alone or with a `/subpath`) get a targeted
+/// `→ $tmp`/`$cache`/`~` hint; any other `<…>` is rejected generically (the whole
+/// angle-bracket syntax is gone).
+fn deprecated_angle_sentinel_msg(p: &str) -> String {
+    for (old, new) in [("<tmp>", "$tmp"), ("<cache>", "$cache"), ("<home>", "~")] {
+        if p == old
+            || p.strip_prefix(old)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return format!(
+                "`{p}` — the `<…>` filesystem sentinel syntax was removed; use `{new}` instead of `{old}`"
+            );
+        }
+    }
+    format!(
+        "`{p}` is not a valid filesystem path — the `<…>` sentinel syntax was removed; the built-in roots are `$tmp`, `$cache`, and `~`"
+    )
 }
 
 /// The fs `"..."` payload: at an inner scope splice the resolved parent's fs

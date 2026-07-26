@@ -209,6 +209,36 @@ fn fs_dollar_sentinel_cache_ok_unknown_errors() {
 }
 
 #[test]
+fn fs_deprecated_angle_sentinels_are_a_hard_error_with_migration_hint() {
+    // P0-F1: the pre-v2 `<tmp>`/`<cache>`/`<home>` fs sentinels were renamed to
+    // `$tmp`/`$cache`/`~`. They must ERROR (not silently degrade to an inert literal
+    // rule that leaves `tmp_mode = Shared`, re-exposing the host tmp under a broad read).
+    let ctx = common::ctx(true, &[]);
+    let cases = [
+        (json!({ "fs": { "<tmp>": "rw" } }), "$tmp"),
+        (json!({ "fs": { "<cache>": "r" } }), "$cache"),
+        (json!({ "fs": { "<home>": "r" } }), "~"),
+        (json!({ "fs": ["<tmp>/scratch"] }), "$tmp"),
+        (json!({ "fs": ["!<home>/.ssh"] }), "~"),
+    ];
+    for (bad, hint) in cases {
+        match compile(&bad, &ctx) {
+            Err(CompileError::Shape { message, .. }) => assert!(
+                message.contains(hint),
+                "expected a migration hint to `{hint}`, got: {message}"
+            ),
+            other => panic!("expected a shape error for {bad:?}, got {other:?}"),
+        }
+    }
+    // A `<…>` that is not one of the three renamed forms still errors (the whole
+    // angle-bracket syntax is gone), just without a specific `→` hint.
+    assert!(matches!(
+        compile(&json!({ "fs": ["<something>"] }), &ctx),
+        Err(CompileError::Shape { .. })
+    ));
+}
+
+#[test]
 fn empty_object_is_deny_all() {
     // `sandbox: {}` = deny-all, the opposite of `sandbox: true` (D5): every axis
     // floors because none is listed.
