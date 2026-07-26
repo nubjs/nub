@@ -573,6 +573,8 @@ fn secure_default_env(ctx: &CompileCtx) -> crate::policy::EnvPolicy {
         constructed,
         schema: Vec::new(),
         withheld,
+        // The curated baseline is secret-free by construction.
+        sensitive_keys: Vec::new(),
     }
 }
 

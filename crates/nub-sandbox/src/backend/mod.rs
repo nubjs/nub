@@ -131,6 +131,13 @@ pub struct CommandSpec {
     /// host is not set up for nesting. Default `false` leaves single-level launch
     /// candidate selection unchanged.
     pub require_nesting: bool,
+    /// Pipe the child's stdout so the host can stream it through a redactor before
+    /// forwarding. ONLY the request crosses this boundary — never the secret values
+    /// (the host holds those and does the scrub). Default `false` = inherit (today's
+    /// behavior, byte-for-byte).
+    pub redact_stdout: bool,
+    /// Pipe the child's stderr for host-side redaction. See [`redact_stdout`](Self::redact_stdout).
+    pub redact_stderr: bool,
 }
 
 impl CommandSpec {
@@ -141,6 +148,8 @@ impl CommandSpec {
             cwd: None,
             deny_search_roots: Vec::new(),
             require_nesting: false,
+            redact_stdout: false,
+            redact_stderr: false,
         }
     }
     pub fn arg(mut self, a: impl Into<std::ffi::OsString>) -> Self {
@@ -174,6 +183,14 @@ impl CommandSpec {
     }
     pub fn require_nesting(mut self, require: bool) -> Self {
         self.require_nesting = require;
+        self
+    }
+    pub fn redact_stdout(mut self, redact: bool) -> Self {
+        self.redact_stdout = redact;
+        self
+    }
+    pub fn redact_stderr(mut self, redact: bool) -> Self {
+        self.redact_stderr = redact;
         self
     }
 }
@@ -219,6 +236,12 @@ pub struct Prepared {
     /// `None` for `Shared`/`Deny`. Held only for its Drop — the backends read its PATH via
     /// the value threaded into their `apply` before it moves here.
     pub(crate) _private_tmp: Option<tempfile::TempDir>,
+    /// Pipe stdout/stderr at spawn so the host can drain them through an output redactor.
+    /// Copied from [`CommandSpec`] in [`apply_inner`], applied in
+    /// [`Prepared::spawn_with_signal_target`]. Both `false` (the default) = inherit,
+    /// byte-for-byte today's behavior.
+    pub(crate) redact_stdout: bool,
+    pub(crate) redact_stderr: bool,
 }
 
 /// A running prepared child together with every resource that must outlive it.
@@ -252,6 +275,18 @@ pub type PreparedSignalCallback =
 impl PreparedChild {
     pub fn id(&self) -> u32 {
         self.child_id
+    }
+
+    /// Take the piped stdout handle (present only when the launch requested
+    /// `redact_stdout`). The host drains it through its output redactor. `None` when
+    /// stdout was inherited or already taken.
+    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.as_mut().and_then(|c| c.stdout.take())
+    }
+
+    /// Take the piped stderr handle. See [`take_stdout`](Self::take_stdout).
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.as_mut().and_then(|c| c.stderr.take())
     }
 
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
@@ -421,6 +456,15 @@ impl Prepared {
         self.spawn_with_signal_target(|_| Ok(()))
     }
 
+    /// Whether this launch confines via the Windows AppContainer path, which owns
+    /// spawn+wait internally ([`status`](Self::status) → `launch.run()`) and cannot
+    /// hand back piped stdio. The host uses this to decide between the piped
+    /// spawn+drain path and the opaque `status()` path when redacting on Windows.
+    #[cfg(target_os = "windows")]
+    pub fn will_confine(&self) -> bool {
+        self.launch.is_some()
+    }
+
     /// Install a signal target while a supervised Linux child is still blocked.
     #[doc(hidden)]
     pub fn spawn_with_signal_target(
@@ -433,6 +477,15 @@ impl Prepared {
                 std::io::ErrorKind::Unsupported,
                 "asynchronous confined Windows launches are not available",
             ));
+        }
+        // Pipe the requested fds so the host can drain them through its redactor. stdin is
+        // left untouched (interactive input still reaches the child). Both flags off (the
+        // default) = inherit, so the non-redacting path is byte-for-byte unchanged.
+        if self.redact_stdout {
+            self.command.stdout(std::process::Stdio::piped());
+        }
+        if self.redact_stderr {
+            self.command.stderr(std::process::Stdio::piped());
         }
         #[allow(unused_mut)]
         let mut child = self.command.spawn()?;
@@ -758,6 +811,11 @@ fn apply_inner(
         });
     }
     validate_apply_inputs(policy, &spec)?;
+    // Captured before the per-OS backend consumes `spec`; re-applied to the returned
+    // `Prepared` below (ONE place) so every backend inherits the stdio-redaction request
+    // without threading the boolean through each `apply`.
+    let redact_stdout = spec.redact_stdout;
+    let redact_stderr = spec.redact_stderr;
     let mut runtime_policy = policy.clone();
     let runtime_brokers = if policy.net.brokers.is_empty() {
         Vec::new()
@@ -866,6 +924,8 @@ fn apply_inner(
         prepared.net_bridge = net_bridge;
     }
     prepared._private_tmp = private_tmp;
+    prepared.redact_stdout = redact_stdout;
+    prepared.redact_stderr = redact_stderr;
     Ok(prepared)
 }
 
@@ -1133,6 +1193,8 @@ fn generic_apply(
         #[cfg(target_os = "linux")]
         _inherited_files: Vec::new(),
         _private_tmp: None,
+        redact_stdout: false,
+        redact_stderr: false,
     })
 }
 

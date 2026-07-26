@@ -870,6 +870,7 @@ mod win {
             constructed: base_env(&[("NUB_SBX_ALLOWED", "yes")]),
             schema: Vec::new(),
             withheld: vec!["NUB_SBX_SECRET".to_string()],
+            sensitive_keys: Vec::new(),
         };
         // env-read-ascendant is OS-CLOSED (the AppContainer denies the parent
         // OpenProcess(PROCESS_VM_READ), run 29043151805) — apply() must NOT report it LOST

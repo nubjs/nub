@@ -329,6 +329,14 @@ pub struct EnvPolicy {
     /// ambient env, denied by policy). Surfaced verbatim in a failure hint — nub
     /// knows exactly what it removed. Deterministic (sorted) for stable output.
     pub withheld: Vec<String>,
+    /// The CONCRETE constructed keys classified sensitive — materialized here so an
+    /// output redactor scrubs their values without re-globbing `schema` (which is
+    /// keyed by PATTERN, not concrete key). Fail-safe: a key is sensitive iff ANY
+    /// matching rule is sensitive (order-robust; `vars:["*"]`+`secrets:["FOO"]` still
+    /// marks FOO). Names only — never values — so it leaks nothing `schema`/
+    /// `constructed` do not already carry. Deterministic (sorted).
+    #[serde(default)]
+    pub sensitive_keys: Vec<String>,
 }
 
 impl EnvPolicy {

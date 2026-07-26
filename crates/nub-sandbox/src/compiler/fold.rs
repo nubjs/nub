@@ -1527,7 +1527,13 @@ fn parse_env_extras(
             raw.to_string()
         };
         if let Some(t) = &ty {
-            t.validate(&resolved)
+            // A sensitive literal must not echo its value in a validation error.
+            let display = if sensitive {
+                "<redacted>"
+            } else {
+                resolved.as_str()
+            };
+            t.validate_display(&resolved, display)
                 .map_err(|e| CompileError::validation(&child(path, "value"), &e))?;
         }
         return Ok(EnvEntry {
@@ -1594,17 +1600,22 @@ fn construct_env(
                 verdict = Some(e);
             }
         }
-        match verdict.map(|e| &e.action) {
-            Some(EnvAction::Allow(ty)) => {
-                if let Some(t) = ty {
-                    t.validate(value)
-                        .map_err(|err| CompileError::validation(name, &err))?;
-                }
-                defaults::insert_env(&mut policy.constructed, name.clone(), value.clone());
+        // Retain the winning ENTRY (not just its action) so a failed validation on a
+        // sensitive source value can be redacted (L1) — never echo a secret's value.
+        // (Deny or a literal, handled above, falls through to withhold.)
+        if let Some(e) = verdict
+            && let EnvAction::Allow(ty) = &e.action
+        {
+            if let Some(t) = ty {
+                let display = if e.sensitive {
+                    "<redacted>"
+                } else {
+                    value.as_str()
+                };
+                t.validate_display(value, display)
+                    .map_err(|err| CompileError::validation(name, &err))?;
             }
-            _ => {
-                // Deny, no match, or a literal (handled above) → withhold.
-            }
+            defaults::insert_env(&mut policy.constructed, name.clone(), value.clone());
         }
     }
 
@@ -1651,6 +1662,23 @@ fn construct_env(
     policy.withheld = source
         .keys()
         .filter(|k| !defaults::env_contains_key(&policy.constructed, k))
+        .cloned()
+        .collect();
+
+    // 5. Sensitive-key set (fail-safe): a CONSTRUCTED key is sensitive iff ANY matching
+    //    entry is `sensitive` — order-robust, never flipped off by a later non-sensitive
+    //    rule (`vars:["*"]`+`secrets:["FOO"]` ⇒ FOO sensitive regardless of list order).
+    //    Materialized per concrete key so an output redactor never re-globs; reuses the
+    //    exact matchers the value verdict used. Sorted (BTreeMap key order).
+    policy.sensitive_keys = policy
+        .constructed
+        .keys()
+        .filter(|name| {
+            entries
+                .iter()
+                .zip(&matchers)
+                .any(|(e, m)| e.sensitive && m.hit(name))
+        })
         .cloned()
         .collect();
     Ok(())

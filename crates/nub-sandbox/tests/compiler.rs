@@ -370,6 +370,96 @@ fn glob_env_type_validates_every_matching_var() {
 }
 
 #[test]
+fn a_secrets_validation_error_redacts_the_value_but_names_the_key() {
+    // L1: a `secrets` value that fails format validation must NOT echo the secret — the
+    // key is still named (via the error path) so the failure stays actionable. Both the
+    // source-value path and the literal-`value:` path are covered.
+    let ctx = common::ctx(true, &[("STRIPE_KEY", "super-secret")]);
+    match compile(&json!({ "secrets": { "STRIPE_KEY": "port" } }), &ctx).unwrap_err() {
+        CompileError::Validation { path, message } => {
+            assert_eq!(path, "STRIPE_KEY", "the key is named");
+            assert!(
+                !message.contains("super-secret"),
+                "the secret value must not leak: {message}"
+            );
+            assert!(
+                message.contains("<redacted>"),
+                "the value is redacted: {message}"
+            );
+        }
+        other => panic!("expected Validation redacting the value, got {other:?}"),
+    }
+    // Literal-`value:` path (a resolved secret literal validated against a format).
+    let ctx = common::ctx(true, &[]);
+    match compile(
+        &json!({ "secrets": { "STRIPE_KEY": { "value": "super-secret", "format": "port" } } }),
+        &ctx,
+    )
+    .unwrap_err()
+    {
+        CompileError::Validation { message, .. } => {
+            assert!(
+                !message.contains("super-secret"),
+                "literal value must not leak: {message}"
+            );
+            assert!(
+                message.contains("<redacted>"),
+                "literal value redacted: {message}"
+            );
+        }
+        other => panic!("expected Validation on the literal, got {other:?}"),
+    }
+    // Companion: a NON-secret `vars` value DOES show — seeing the bad PORT is the useful,
+    // common case.
+    let ctx = common::ctx(true, &[("PORT", "notaport")]);
+    match compile(&json!({ "vars": { "PORT": "port" } }), &ctx).unwrap_err() {
+        CompileError::Validation { message, .. } => {
+            assert!(
+                message.contains("notaport"),
+                "a non-secret value stays visible: {message}"
+            );
+        }
+        other => panic!("expected Validation showing the value, got {other:?}"),
+    }
+}
+
+#[test]
+fn overlapping_axes_classify_the_key_sensitive_fail_safe() {
+    // `vars: ["*"]` (sensitive:false) + `secrets: ["FOO"]` (sensitive:true): FOO must be
+    // sensitive regardless of axis order, AND keep its real value (the child needs it).
+    let ctx = common::ctx(true, &[("FOO", "topsecret"), ("BAR", "ok")]);
+    let p = compile(&json!({ "vars": ["*"], "secrets": ["FOO"] }), &ctx).unwrap();
+    assert_eq!(
+        p.env.constructed.get("FOO").map(String::as_str),
+        Some("topsecret"),
+        "the child still receives the real value"
+    );
+    assert!(
+        p.env.sensitive_keys.contains(&"FOO".to_string()),
+        "FOO is sensitive (fail-safe): {:?}",
+        p.env.sensitive_keys
+    );
+    assert!(
+        !p.env.sensitive_keys.contains(&"BAR".to_string()),
+        "a plain var is not sensitive: {:?}",
+        p.env.sensitive_keys
+    );
+    // Glob variant: a `vars` entry names the exact key, a `secrets` GLOB also matches it →
+    // still sensitive (any matching sensitive pattern wins).
+    let ctx = common::ctx(true, &[("MY_TOKEN", "abc123")]);
+    let p = compile(
+        &json!({ "vars": ["MY_TOKEN"], "secrets": ["*_TOKEN"] }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(
+        p.env.sensitive_keys.contains(&"MY_TOKEN".to_string()),
+        "a glob secret marks the key sensitive: {:?}",
+        p.env.sensitive_keys
+    );
+}
+
+#[test]
 fn empty_fs_entry_is_rejected_fail_loud() {
     // `fs: [""]` used to grant the whole filesystem (fail-OPEN). Now a shape error
     // (D3), for both an empty and a whitespace-only entry, array and object forms.

@@ -88,6 +88,8 @@ pub fn apply(
             degradation: Degradation::full(),
             proxy: None,
             _private_tmp: None,
+            redact_stdout: false,
+            redact_stderr: false,
         });
     }
 
@@ -128,6 +130,8 @@ pub fn apply(
         degradation: degradation(policy, proxy_port, tmp_dir),
         proxy: None,
         _private_tmp: None,
+        redact_stdout: false,
+        redact_stderr: false,
     })
 }
 

@@ -143,6 +143,7 @@ fn env_scrub_policy() -> SandboxPolicy {
             constructed,
             schema: Vec::new(),
             withheld: vec!["SECRET_MARKER_VAR".to_string()],
+            sensitive_keys: Vec::new(),
         },
         ..Default::default()
     };

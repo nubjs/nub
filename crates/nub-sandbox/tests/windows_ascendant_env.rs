@@ -272,6 +272,7 @@ mod win {
             constructed: base_env(),
             schema: Vec::new(),
             withheld: vec!["NUB_ASC_SECRET".to_string()],
+            sensitive_keys: Vec::new(),
         };
 
         // Sanity: the child's OWN env really is scrubbed — the secret is absent from

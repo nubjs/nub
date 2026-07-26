@@ -3240,9 +3240,23 @@ fn run_sandboxed(
         eprintln!("warning: {w}");
     }
 
+    // Output redaction: scrub granted secret VALUES from the child's stdout/stderr before
+    // Nub forwards them, so a leaked value doesn't persist in a log/CI stream. The
+    // value-set stays Nub-side (built from the pre-apply compiled policy) — only a per-fd
+    // "pipe this" boolean crosses into the engine. A fd that is a TTY is left inherited
+    // (interactive use unchanged: the secret shows only on the human's own screen, colors/
+    // prompts preserved); a redirected fd (file/pipe/CI log), where a leak PERSISTS, is
+    // piped and scrubbed.
+    use std::io::IsTerminal;
+    let redactor = crate::sandbox_redact::SecretRedactor::build(&policy);
+    let redact_stdout = redactor.is_some() && !std::io::stdout().is_terminal();
+    let redact_stderr = redactor.is_some() && !std::io::stderr().is_terminal();
+
     let spec = nub_sandbox::CommandSpec::new(program)
         .args(prog_args.iter().map(String::as_str))
-        .cwd(&cwd);
+        .cwd(&cwd)
+        .redact_stdout(redact_stdout)
+        .redact_stderr(redact_stderr);
     #[cfg(target_os = "linux")]
     let spec = if nub_sandbox::requires_deny_search_roots(&policy) {
         let roots = nub_core::workspace::sandbox_inventory::discover(&cwd)
@@ -3263,37 +3277,73 @@ fn run_sandboxed(
     if let Some(warning) = prepared.degradation.warning() {
         eprintln!("warning: {warning}");
     }
-    #[cfg(unix)]
-    let forwarding = nub_core::node::spawn::SignalForwardingGuard::new();
-    #[cfg(unix)]
-    let mut child = prepared
-        .spawn_with_signal_target(|target| {
-            match target {
-                nub_sandbox::PreparedSignalTarget::Direct(target) => forwarding.set_target(target),
-                #[cfg(target_os = "linux")]
-                nub_sandbox::PreparedSignalTarget::Callback(callback) => {
-                    forwarding.set_callback(callback)
+    // Windows: the AppContainer-confined launch owns spawn+wait internally and cannot hand
+    // back piped stdio, so redaction there is not wired (fail-safe: output inherited as
+    // today, the value simply isn't scrubbed on that path). The plain-command Windows path
+    // (env-scrub only — the primary secret case) goes through the same spawn+drain code as
+    // Unix below.
+    #[cfg(windows)]
+    {
+        if (redact_stdout || redact_stderr) && !prepared.will_confine() {
+            let mut child = prepared
+                .spawn()
+                .with_context(|| format!("spawning `{program}` under the sandbox"))?;
+            let r = redactor
+                .as_ref()
+                .expect("redactor present when a fd is redacted");
+            let drains =
+                crate::sandbox_redact::attach_drains(&mut child, r, redact_stdout, redact_stderr);
+            let status = child
+                .wait()
+                .with_context(|| format!("waiting for `{program}` under the sandbox"))?;
+            crate::sandbox_redact::join_drains(drains);
+            return Ok(nub_core::node::spawn::exit_code_from_status(&status));
+        }
+        let status = prepared
+            .status()
+            .with_context(|| format!("spawning `{program}` under the sandbox"))?;
+        return Ok(nub_core::node::spawn::exit_code_from_status(&status));
+    }
+
+    #[cfg(not(windows))]
+    {
+        #[cfg(unix)]
+        let forwarding = nub_core::node::spawn::SignalForwardingGuard::new();
+        #[cfg(unix)]
+        let mut child = prepared
+            .spawn_with_signal_target(|target| {
+                match target {
+                    nub_sandbox::PreparedSignalTarget::Direct(target) => {
+                        forwarding.set_target(target)
+                    }
+                    #[cfg(target_os = "linux")]
+                    nub_sandbox::PreparedSignalTarget::Callback(callback) => {
+                        forwarding.set_callback(callback)
+                    }
                 }
+                Ok(())
+            })
+            .with_context(|| format!("spawning `{program}` under the sandbox"))?;
+        #[cfg(not(unix))]
+        let mut child = prepared
+            .spawn()
+            .with_context(|| format!("spawning `{program}` under the sandbox"))?;
+
+        // Drain piped fds through the redactor (only the fds `apply` actually piped). When
+        // nothing is redacted, `child` inherited stdio and this attaches no drains — the
+        // path is byte-for-byte today's behavior.
+        let drains = match redactor.as_ref() {
+            Some(r) => {
+                crate::sandbox_redact::attach_drains(&mut child, r, redact_stdout, redact_stderr)
             }
-            Ok(())
-        })
-        .with_context(|| format!("spawning `{program}` under the sandbox"))?;
-    #[cfg(all(not(unix), not(windows)))]
-    let mut child = prepared
-        .spawn()
-        .with_context(|| format!("spawning `{program}` under the sandbox"))?;
-    #[cfg(windows)]
-    let status = prepared
-        .status()
-        .with_context(|| format!("spawning `{program}` under the sandbox"))?;
-    #[cfg(windows)]
-    return Ok(nub_core::node::spawn::exit_code_from_status(&status));
-    #[cfg(not(windows))]
-    let status = child
-        .wait()
-        .with_context(|| format!("waiting for `{program}` under the sandbox"))?;
-    #[cfg(not(windows))]
-    Ok(nub_core::node::spawn::exit_code_from_status(&status))
+            None => Vec::new(),
+        };
+        let status = child
+            .wait()
+            .with_context(|| format!("waiting for `{program}` under the sandbox"))?;
+        crate::sandbox_redact::join_drains(drains);
+        Ok(nub_core::node::spawn::exit_code_from_status(&status))
+    }
 }
 
 /// The per-OS home anchors the sandbox compiler expands symbolic roots against.

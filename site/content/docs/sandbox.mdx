@@ -423,11 +423,15 @@ Set a literal value instead of passing one through from the ambient environment.
 
 ## `secrets`
 
-The `secrets` axis carries sensitive environment variables. Everything named here is redacted from Nub's own output by default — policy dumps, effective-environment views, diagnostics, and error messages never reveal it — and a secret can be brokered so the child never holds the real value at all. Like `vars`, each entry becomes an environment variable in the child; the only difference is protection.
+The `secrets` axis carries sensitive environment variables. The child receives the real value, but Nub scrubs that value from the command's stdout and stderr before forwarding them — so a leaked secret does not persist in a terminal or CI log — and never prints a secret's value in its own errors. A secret can also be brokered so the child never holds the real value at all. Like `vars`, each entry becomes an environment variable in the child; the only difference is protection.
+
+<Callout type="warn">
+Scrubbing the command's output is log hygiene, not containment: it removes secret values from stdout and stderr as Nub forwards them, but a command that writes a secret elsewhere — the network, a file, a descriptor Nub does not forward — can still surface it. Scrubbing engages when output is captured to a file, a pipe, or a CI log; on an interactive terminal the value is shown as it would be on a plain run.
+</Callout>
 
 ### Name the secrets
 
-The array form lists the secrets to pass through. The child receives the real value; Nub scrubs it from its own output.
+The array form lists the secrets to pass through. The child receives the real value; Nub scrubs it from the command's output.
 
 ```jsonc
 { "secrets": ["DATABASE_URL", "STRIPE_KEY"] }

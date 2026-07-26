@@ -326,6 +326,8 @@ pub fn apply(
             _inherited_files: Vec::new(),
             retained_monitor: None,
             _private_tmp: None,
+            redact_stdout: false,
+            redact_stderr: false,
         });
     };
 
@@ -428,6 +430,8 @@ pub fn apply(
         _inherited_files: setup_files,
         retained_monitor: Some(retained_monitor),
         _private_tmp: None,
+        redact_stdout: false,
+        redact_stderr: false,
     })
 }
 

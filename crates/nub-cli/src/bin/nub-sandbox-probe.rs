@@ -20,13 +20,20 @@ const DENIED: u8 = 7;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let action = args.first().map(String::as_str).unwrap_or("");
+    // `env-print` prints each named var's value to stdout (`KEY=VALUE` per line) so the
+    // output-redaction e2e can assert a granted secret's value is scrubbed on the wire
+    // while a non-secret var passes through. As a non-Node binary it also proves the
+    // scrub is language-agnostic. Its verdict is the printed bytes, not an exit code.
+    if action == "env-print" {
+        return do_env_print(&args[1..]);
+    }
     let allowed = match action {
         "read" => do_read(arg(&args, 1)),
         "write" => do_write(arg(&args, 1)),
         "connect" => do_connect(arg(&args, 1), arg(&args, 2)),
         "env" => do_env(arg(&args, 1)),
         _ => {
-            eprintln!("usage: nub-sandbox-probe <read|write|connect|env> <arg...>");
+            eprintln!("usage: nub-sandbox-probe <read|write|connect|env|env-print> <arg...>");
             return ExitCode::from(2);
         }
     };
@@ -91,4 +98,16 @@ fn do_connect(host: &str, port: &str) -> bool {
 /// placed in the child's constructed environment (the env-scrub verdict).
 fn do_env(key: &str) -> bool {
     std::env::var(key).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+/// Print each named var's value as `KEY=VALUE` to stdout — the child's raw output the
+/// Nub-side redactor scrubs. A missing var prints `KEY=<unset>`.
+fn do_env_print(keys: &[String]) -> ExitCode {
+    let mut out = std::io::stdout();
+    for key in keys {
+        let value = std::env::var(key).unwrap_or_else(|_| "<unset>".to_string());
+        let _ = writeln!(out, "{key}={value}");
+    }
+    let _ = out.flush();
+    ExitCode::SUCCESS
 }

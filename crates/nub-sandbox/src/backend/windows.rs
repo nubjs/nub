@@ -423,6 +423,8 @@ pub(crate) fn apply(
             proxy: None,
             launch: None,
             _private_tmp: None,
+            redact_stdout: false,
+            redact_stderr: false,
         });
     }
 
@@ -529,6 +531,8 @@ pub(crate) fn apply(
         proxy: None,
         launch: Some(launch),
         _private_tmp: None,
+        redact_stdout: false,
+        redact_stderr: false,
     })
 }
 

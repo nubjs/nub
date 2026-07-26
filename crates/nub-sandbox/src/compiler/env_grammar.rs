@@ -80,24 +80,27 @@ impl EnvType {
         }
     }
 
-    /// Validate a concrete value against this type. Errs with a human-readable
-    /// message on mismatch.
-    pub fn validate(&self, value: &str) -> Result<(), String> {
+    /// Validate `value` against this type; render any error message with `display` in
+    /// place of the raw value. A `secrets` entry passes `"<redacted>"` so a failed-
+    /// validation error never surfaces the secret; a non-sensitive `vars` entry passes
+    /// the value itself (seeing the bad `PORT` is the useful, common case). `display` is
+    /// cosmetic — the verdict is always computed against the real `value`.
+    pub fn validate_display(&self, value: &str, display: &str) -> Result<(), String> {
         match self {
             EnvType::AnyString => Ok(()),
             EnvType::Format(EnvFormat::Integer) => value
                 .parse::<i64>()
                 .map(|_| ())
-                .map_err(|_| format!("`{value}` is not an integer")),
+                .map_err(|_| format!("`{display}` is not an integer")),
             EnvType::Format(EnvFormat::Number) => match value.parse::<f64>() {
                 // Reject `inf`/`nan` — a config value typed `number` means a finite
                 // numeric string, not an IEEE special.
                 Ok(n) if n.is_finite() => Ok(()),
-                _ => Err(format!("`{value}` is not a finite number")),
+                _ => Err(format!("`{display}` is not a finite number")),
             },
             EnvType::Format(EnvFormat::Port) => match value.parse::<u32>() {
                 Ok(n) if (1..=65535).contains(&n) => Ok(()),
-                _ => Err(format!("`{value}` is not a valid port (1–65535)")),
+                _ => Err(format!("`{display}` is not a valid port (1–65535)")),
             },
             EnvType::Regex(pat) => {
                 let re =
@@ -105,14 +108,14 @@ impl EnvType {
                 if re.is_match(value) {
                     Ok(())
                 } else {
-                    Err(format!("`{value}` does not match /{pat}/"))
+                    Err(format!("`{display}` does not match /{pat}/"))
                 }
             }
             EnvType::Union(members) => {
                 if members.iter().any(|m| m == value) {
                     Ok(())
                 } else {
-                    Err(format!("`{value}` is not one of {members:?}"))
+                    Err(format!("`{display}` is not one of {members:?}"))
                 }
             }
         }

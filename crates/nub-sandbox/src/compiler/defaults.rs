@@ -480,6 +480,8 @@ pub fn strip_all_env(
         constructed,
         schema: Vec::new(),
         withheld,
+        // OS-essential baseline carries no user secrets.
+        sensitive_keys: Vec::new(),
     }
 }
 
