@@ -137,11 +137,11 @@ pub struct NetPolicy {
     pub enforce: bool,
     pub rules: Vec<NetRule>,
     pub default_effect: Effect,
-    /// The resolved proxy posture. [`ProxyMode::Disabled`] means the author omitted
-    /// `proxy`; that is valid only for coarse network policy and brokered rules. The
-    /// other modes are an explicit request to run the egress proxy. Authored at the
-    /// wrapper level (sibling of net); the compiler folds it onto the net axis it
-    /// governs.
+    /// The resolved proxy posture, DERIVED by the compiler (never authored — there is
+    /// no `proxy` config key). A pure function of the net axis: coarse `net: true` /
+    /// `net: false` and an all-deny net stay [`ProxyMode::Disabled`] (no proxy); a
+    /// fine-grained allow derives [`ProxyMode::Auto`] (the egress proxy runs).
+    /// Termination of the brokered hosts is carried by [`Inspection`], not this field.
     #[serde(default)]
     pub mode: ProxyMode,
     /// The tier the compiler DERIVED (default [`Inspection::Connection`]). A pure
@@ -172,24 +172,23 @@ impl Default for NetPolicy {
     }
 }
 
-/// The `proxy` wrapper knob. Omission leaves the proxy off, so an ordinary host/CIDR
-/// allow cannot accidentally start an in-path service. A credential broker is the
-/// intentional exception: it starts TLS termination because injection cannot work
-/// without it.
+/// The proxy posture, DERIVED by the compiler from the net axis (never authored —
+/// there is no `proxy` config key). [`Self::Disabled`] and [`Self::Auto`] are the only
+/// two the compiler emits; [`Self::Passthrough`] / [`Self::Terminate`] are dormant,
+/// retained (unreachable) so the IR and the backend `terminate_all` read stay stable —
+/// a deferred Phase-2 cleanup, not live grammar.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyMode {
-    /// No proxy was requested. Valid for coarse `net: true` / `net: false` and for a
-    /// credential broker, which derives its own terminating proxy.
+    /// No proxy. Derived for coarse `net: true` / `net: false` and an all-deny net.
     #[default]
     Disabled,
-    /// Start a blind pass-through proxy unless a broker requires termination.
+    /// The egress proxy runs. Derived for a fine-grained net allow; termination of the
+    /// brokered hosts is governed by [`Inspection::TlsInspect`], not this variant.
     Auto,
-    /// Forbid termination. A rule that REQUIRES it is a COMPILE ERROR (never a silent
-    /// drop) — the explicit "block MITM" posture; net stays connection-level only.
+    /// Dormant (never derived). Historically the explicit "block MITM" posture.
     Passthrough,
-    /// Force termination of all allowed TLS even under host-only rules (the
-    /// domain-fronting-closure hardening posture).
+    /// Dormant (never derived). Historically forced termination of all allowed TLS.
     Terminate,
 }
 

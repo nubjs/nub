@@ -421,8 +421,6 @@ fn splice_fs_defaults(ctx: &CompileCtx, out: &mut Vec<FsRule>) {
 /// `net: false` denies all egress.
 pub fn fold_net(
     value: &Value,
-    ctx: &CompileCtx,
-    caps: ScopeCapabilities,
     path: &str,
     parent: Option<&NetPolicy>,
 ) -> Result<NetPolicy, CompileError> {
@@ -450,7 +448,7 @@ pub fn fold_net(
                 if key == "..." {
                     return Err(CompileError::shape(&p, OBJECT_SENTINEL_MSG));
                 }
-                fold_net_object_value(key, val, ctx, caps, &p, &mut policy)?;
+                fold_net_object_value(key, val, &p, &mut policy)?;
             }
         }
         _ => {
@@ -489,74 +487,25 @@ fn fold_net_entry(
     push_net_rule(pattern, effect, path, &mut policy.rules)
 }
 
-/// One entry of the net OBJECT form: `"<host>": true | false | { rule object }`. A
-/// bool is a plain allow/deny (host-only, connection-level). A rule object with
-/// `env` enables credential brokering for an exact hostname, implicitly allowing
-/// that host and forcing the TlsInspect tier.
+/// One entry of the net OBJECT form: `"<host>": true | false`. A bool is a plain
+/// allow/deny (host-only, connection-level). Credential brokering moved to the
+/// `secrets` axis in Phase 2 (`secrets.<name>.brokerTo`), so a net host value is
+/// bool-only — an object (the old `{ "env": [...] }` broker rule) is a shape error
+/// pointing at the new form.
 fn fold_net_object_value(
     host: &str,
     val: &Value,
-    ctx: &CompileCtx,
-    caps: ScopeCapabilities,
     path: &str,
     policy: &mut NetPolicy,
 ) -> Result<(), CompileError> {
     match val {
         Value::Bool(true) => push_net_rule(host, Effect::Allow, path, &mut policy.rules),
         Value::Bool(false) => push_net_rule(host, Effect::Deny, path, &mut policy.rules),
-        Value::Object(rule) => fold_net_rule_object(host, rule, ctx, caps, path, policy),
         _ => Err(CompileError::shape(
             path,
-            "net host value must be true, false, or a credential rule object (e.g. { \"env\": [\"TOKEN\"] })",
+            "net host value must be true or false — broker a credential on the secrets axis: `secrets: { \"<NAME>\": { \"brokerTo\": [\"<host>\"] } }`",
         )),
     }
-}
-
-/// Parse an exact-host credential rule. The brokered host is also an ordinary
-/// Allow rule; a later explicit deny can still override it under last-match-wins.
-fn fold_net_rule_object(
-    host: &str,
-    rule: &serde_json::Map<String, Value>,
-    _ctx: &CompileCtx,
-    caps: ScopeCapabilities,
-    path: &str,
-    policy: &mut NetPolicy,
-) -> Result<(), CompileError> {
-    for key in rule.keys() {
-        if key == "inject" {
-            return Err(CompileError::shape(
-                &child(path, key),
-                "the old `inject` credential syntax is not supported; name parent environment variables with `{ \"env\": [\"TOKEN\"] }`",
-            ));
-        }
-        if key != "env" {
-            return Err(CompileError::shape(
-                &child(path, key),
-                &format!("unknown credential rule option `{key}` (allowed: env)"),
-            ));
-        }
-    }
-    // Gated on THIS scope's capability, not a compile-wide trust flag.
-    if !caps.credential_broker {
-        return Err(CompileError::shape(
-            path,
-            "credential brokering (`env`) is a trusted-only capability — it is not permitted in an untrusted (dependenciesMeta) grant",
-        ));
-    }
-    let env = rule.get("env").ok_or_else(|| {
-        CompileError::shape(
-            path,
-            "a credential rule object must contain `env` (for example `{ \"env\": [\"STRIPE_TOKEN\"] }`)",
-        )
-    })?;
-    validate_broker_host(host, path)?;
-    let env = parse_broker_env(env, &child(path, "env"))?;
-    push_net_rule(host, Effect::Allow, path, &mut policy.rules)?;
-    policy.brokers.push(CredentialBroker {
-        host: crate::matcher::host::strip_trailing_dot(host).to_string(),
-        env,
-    });
-    Ok(())
 }
 
 /// Credential release is intentionally narrower than ordinary net matching: one
@@ -598,48 +547,61 @@ fn validate_broker_host(pattern: &str, path: &str) -> Result<(), CompileError> {
     Ok(())
 }
 
-fn parse_broker_env(value: &Value, path: &str) -> Result<Vec<String>, CompileError> {
-    let items = value.as_array().ok_or_else(|| {
-        CompileError::shape(
+/// Validate the exact env NAME a secret is brokered under (the `secrets` key). One
+/// exact, non-empty name — no glob / optional-key syntax — and not a name owned by
+/// sandbox runtime plumbing (a marker written there would be overwritten before spawn
+/// while the real secret stayed live in proxy state). Mirrors the per-name checks the
+/// old net-axis `env` list ran, now applied to the secret key.
+fn validate_broker_env_name(name: &str, path: &str) -> Result<(), CompileError> {
+    if name.is_empty()
+        || name.contains(['=', '\0', '*', '?', '[', ']', '{', '}'])
+        || name.ends_with('?')
+    {
+        return Err(CompileError::shape(
             path,
-            "`env` must be a non-empty array of exact environment-variable names",
-        )
+            "a brokered secret must be one exact, non-empty name without glob or optional-key syntax",
+        ));
+    }
+    if crate::policy::credential_env_name_is_reserved(name) {
+        return Err(CompileError::shape(
+            path,
+            &format!("`{name}` is owned by sandbox runtime plumbing and cannot be brokered"),
+        ));
+    }
+    Ok(())
+}
+
+/// Parse a `secrets.<name>.brokerTo` value: a non-empty array of exact literal
+/// hostnames the secret may cross. Each host runs through [`validate_broker_host`]
+/// (one exact DNS name — no wildcard / IP / CIDR / symbolic class) and duplicates
+/// (trailing-dot- and case-insensitive) are rejected. Hosts are stored as authored;
+/// [`transpose_brokers`] trailing-dot-normalizes them onto `net.brokers`.
+fn parse_broker_hosts(value: &Value, path: &str) -> Result<Vec<String>, CompileError> {
+    let items = value.as_array().ok_or_else(|| {
+        CompileError::shape(path, "`brokerTo` must be a non-empty array of hostnames")
     })?;
     if items.is_empty() {
         return Err(CompileError::shape(
             path,
-            "`env` must name at least one environment variable",
+            "`brokerTo` must name at least one host",
         ));
     }
-    let mut out = Vec::with_capacity(items.len());
+    let mut out: Vec<String> = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let p = child(path, &index.to_string());
-        let name = as_str(item, &p)?;
-        if name.is_empty()
-            || name.contains(['=', '\0', '*', '?', '[', ']', '{', '}'])
-            || name.ends_with('?')
-        {
-            return Err(CompileError::shape(
-                &p,
-                "a brokered environment variable must be one exact, non-empty name without glob or optional-key syntax",
-            ));
-        }
-        if crate::policy::credential_env_name_is_reserved(name) {
-            return Err(CompileError::shape(
-                &p,
-                &format!("`{name}` is owned by sandbox runtime plumbing and cannot be brokered"),
-            ));
-        }
+        let host = as_str(item, &p)?;
+        validate_broker_host(host, &p)?;
+        let normalized = crate::matcher::host::strip_trailing_dot(host);
         if out
             .iter()
-            .any(|existing: &String| broker_env_key_eq(existing, name))
+            .any(|existing| crate::matcher::host::strip_trailing_dot(existing).eq_ignore_ascii_case(normalized))
         {
             return Err(CompileError::shape(
                 &p,
-                &format!("duplicate brokered environment variable `{name}`"),
+                &format!("duplicate brokered host `{host}`"),
             ));
         }
-        out.push(name.to_string());
+        out.push(host.to_string());
     }
     Ok(out)
 }
@@ -739,13 +701,17 @@ fn push_net_rule(
 /// vars FIRST, then secrets — so under last-match-wins a name in BOTH axes takes the
 /// later secrets rule (`sensitive:true`, fail-safe toward redaction). At least one
 /// axis is present (the caller floors/inherits when both are absent).
+///
+/// Returns the resolved env policy AND the [`BrokerIntent`]s harvested from any
+/// `secrets.<name>.brokerTo` entries — the caller ([`super::compile_object`])
+/// transposes these onto `net.brokers` (the env axis never sees the net policy).
 pub fn fold_env_axes(
     vars: Option<&Value>,
     secrets: Option<&Value>,
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
     parent: Option<&EnvPolicy>,
-) -> Result<EnvPolicy, CompileError> {
+) -> Result<(EnvPolicy, Vec<BrokerIntent>), CompileError> {
     // An explicit env-family axis always enforces (constructs the child env exactly).
     let mut policy = EnvPolicy {
         resolved: true,
@@ -766,7 +732,52 @@ pub fn fold_env_axes(
     // / `false` (no entries) to the strip-all posture (OS essentials only), matching
     // the complete-statement floor and `strip_all_env`.
     defaults::add_os_essential_env(&mut policy, &ctx.ambient_env);
-    Ok(policy)
+    // Harvest broker intents from the ordered entries (secrets carrying `brokerTo`).
+    let intents = entries
+        .iter()
+        .filter(|e| !e.broker_to.is_empty())
+        .map(|e| BrokerIntent {
+            secret: e.pattern.clone(),
+            hosts: e.broker_to.clone(),
+        })
+        .collect();
+    Ok((policy, intents))
+}
+
+/// A brokered secret harvested from a `secrets.<name>.brokerTo` entry: the secret's
+/// env NAME plus the exact hosts it may cross. Transposed onto `net.brokers` by
+/// [`transpose_brokers`] (the IR keeps one broker per host, not per secret).
+pub(super) struct BrokerIntent {
+    pub secret: String,
+    pub hosts: Vec<String>,
+}
+
+/// Transpose harvested [`BrokerIntent`]s onto `net.brokers`, COALESCING by host so
+/// each host yields exactly ONE [`CredentialBroker`] with a merged env list. This
+/// coalescing is load-bearing, not cosmetic: every broker consumer keys a host to one
+/// replacement set (the proxy's `broker_for_host` resolves a host via `.find()`, and
+/// `validate_apply_inputs` rejects duplicate-host brokers), so two secrets brokered to
+/// the same host MUST merge into one broker or all but the first would be silently
+/// dropped. Hosts are trailing-dot-normalized to match the IR the old net form emitted.
+pub(super) fn transpose_brokers(net: &mut NetPolicy, intents: &[BrokerIntent]) {
+    for intent in intents {
+        for raw_host in &intent.hosts {
+            let host = crate::matcher::host::strip_trailing_dot(raw_host).to_string();
+            match net.brokers.iter_mut().find(|b| {
+                crate::matcher::host::strip_trailing_dot(&b.host).eq_ignore_ascii_case(&host)
+            }) {
+                Some(existing) => {
+                    if !existing.env.iter().any(|e| broker_env_key_eq(e, &intent.secret)) {
+                        existing.env.push(intent.secret.clone());
+                    }
+                }
+                None => net.brokers.push(CredentialBroker {
+                    host,
+                    env: vec![intent.secret.clone()],
+                }),
+            }
+        }
+    }
 }
 
 /// Parse one env-family axis surface into ordered [`EnvEntry`]s. `default_sensitive`
@@ -821,6 +832,7 @@ fn env_catch_all(sensitive: bool) -> EnvEntry {
         format: None,
         key_match: KeyMatch::User,
         builtin: false,
+        broker_to: Vec::new(),
     }
 }
 
@@ -840,6 +852,11 @@ struct EnvEntry {
     /// keys / secret denies), NOT user-authored: excluded from the emitted
     /// `schema` (which carries user validation + redaction marks only).
     builtin: bool,
+    /// The brokerTo hosts a `secrets` entry may cross (empty on every other entry).
+    /// `fold_env_axes` harvests a non-empty list into a [`BrokerIntent`] and the
+    /// caller transposes it onto `net.brokers`; the secret's real value is then
+    /// withheld from the child, which receives an opaque marker instead.
+    broker_to: Vec<String>,
 }
 
 /// How an [`EnvEntry`]'s pattern is matched against an ambient env key.
@@ -928,6 +945,7 @@ fn parse_env_array(
             format: None,
             key_match: KeyMatch::User,
             builtin: false,
+            broker_to: Vec::new(),
         });
     }
     Ok(out)
@@ -1003,6 +1021,7 @@ fn parse_env_object_value(
             format: None,
             key_match: KeyMatch::User,
             builtin: false,
+            broker_to: Vec::new(),
         }),
         Value::Bool(false) => Ok(EnvEntry {
             pattern: key,
@@ -1012,6 +1031,7 @@ fn parse_env_object_value(
             format: None,
             key_match: KeyMatch::User,
             builtin: false,
+            broker_to: Vec::new(),
         }),
         Value::String(s) => {
             parse_env_string_value(key, optional, s, ctx, caps, path, default_sensitive)
@@ -1059,6 +1079,7 @@ fn parse_env_string_value(
             format: None,
             key_match: KeyMatch::User,
             builtin: false,
+            broker_to: Vec::new(),
         });
     }
     // Otherwise a type from the grammar. A string that fails to parse as a type yet
@@ -1085,6 +1106,7 @@ fn parse_env_string_value(
         format,
         key_match: KeyMatch::User,
         builtin: false,
+        broker_to: Vec::new(),
     })
 }
 
@@ -1100,17 +1122,8 @@ fn parse_env_extras(
     path: &str,
     default_sensitive: bool,
 ) -> Result<EnvEntry, CompileError> {
-    const ALLOWED: &[&str] = &["format", "value", "optional"];
+    const ALLOWED: &[&str] = &["format", "value", "optional", "brokerTo"];
     for k in extras.keys() {
-        // `brokerTo` is the Phase-2 secrets-brokering key; it is NOT accepted yet.
-        // Point at the current net-axis broker form rather than a generic
-        // unknown-option error. (Phase 2 relocates brokering onto the secrets axis.)
-        if k == "brokerTo" {
-            return Err(CompileError::shape(
-                &child(path, k),
-                "`brokerTo` is not supported yet — broker a credential on the net axis: `net: { \"<host>\": { \"env\": [\"NAME\"] } }`",
-            ));
-        }
         if !ALLOWED.contains(&k.as_str()) {
             return Err(CompileError::shape(
                 &child(path, k),
@@ -1144,6 +1157,55 @@ fn parse_env_extras(
         None => None,
     };
     let format = ty.as_ref().and_then(EnvType::format);
+    // `brokerTo` relocates credential brokering onto the secrets axis: the secret KEY
+    // is the brokered env name and the value is the exact hosts it may cross. Parsed
+    // into `broker_to` on the entry so the ordered list carries the intent;
+    // `fold_env_axes` harvests it and the caller transposes it onto `net.brokers`.
+    let broker_to = match extras.get("brokerTo") {
+        None => Vec::new(),
+        Some(hosts) => {
+            let bp = child(path, "brokerTo");
+            // Trusted-only, gated on THIS scope's capability (mirrors the old net
+            // form): dependency-controlled config never brokers a credential.
+            if !caps.credential_broker {
+                return Err(CompileError::shape(
+                    &bp,
+                    "credential brokering (`brokerTo`) is a trusted-only capability — it is not permitted in an untrusted (dependenciesMeta) grant",
+                ));
+            }
+            // Brokering protects a sensitive value, so it is a `secrets`-only knob.
+            if !default_sensitive {
+                return Err(CompileError::shape(
+                    &bp,
+                    "`brokerTo` is only valid on a `secrets` entry — move the entry to `secrets` to broker it",
+                ));
+            }
+            // A broker reads ONE real value and swaps it for a marker, so a fixed
+            // literal `value` has nothing to broker.
+            if extras.contains_key("value") {
+                return Err(CompileError::shape(
+                    &bp,
+                    "`brokerTo` cannot be combined with a literal `value` — a brokered secret's value is read from the environment at startup",
+                ));
+            }
+            // The secret key is the brokered env name: a glob binds no single
+            // credential, and an optional secret can be absent with nothing to broker.
+            if is_glob(&key) {
+                return Err(CompileError::shape(
+                    &bp,
+                    "`brokerTo` cannot be set on a glob key — name the exact secret to broker",
+                ));
+            }
+            if optional {
+                return Err(CompileError::shape(
+                    &bp,
+                    "a brokered secret cannot be optional — its value must be present at startup to broker",
+                ));
+            }
+            validate_broker_env_name(&key, &bp)?;
+            parse_broker_hosts(hosts, &bp)?
+        }
+    };
     // An explicit `value:` (optionally `$(…)`) overrides the ambient source.
     if let Some(v) = extras.get("value") {
         // A literal value has no single key to bind to under a glob — reject
@@ -1183,6 +1245,7 @@ fn parse_env_extras(
             format,
             key_match: KeyMatch::User,
             builtin: false,
+            broker_to: Vec::new(),
         });
     }
     Ok(EnvEntry {
@@ -1193,6 +1256,7 @@ fn parse_env_extras(
         format,
         key_match: KeyMatch::User,
         builtin: false,
+        broker_to,
     })
 }
 
@@ -1211,6 +1275,7 @@ fn splice_env_inherit(parent: Option<&EnvPolicy>, out: &mut Vec<EnvEntry>) {
             format: None,
             key_match: KeyMatch::InheritedKeys,
             builtin: true,
+            broker_to: Vec::new(),
         }),
         None => splice_env_defaults(out),
     }
@@ -1231,6 +1296,7 @@ fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
         format: None,
         key_match,
         builtin: true,
+        broker_to: Vec::new(),
     };
     for tok in defaults::SECRET_SUBSTR_TOKENS {
         out.push(secret_deny(tok.to_string(), KeyMatch::SecretSubstr));
@@ -1256,6 +1322,7 @@ fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
         format: None,
         key_match: KeyMatch::CuratedBaseline,
         builtin: true,
+        broker_to: Vec::new(),
     });
 }
 

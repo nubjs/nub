@@ -59,9 +59,9 @@ pub struct ScopeCapabilities {
     /// `$(…)` command substitution in env values. Denied to dependency-controlled
     /// config: it must never spawn a command the user did not author.
     pub env_substitution: bool,
-    /// Exact-host credential brokering (`net.<host>.env`) — forcing TLS termination
-    /// and releasing named parent credentials only where their opaque markers occur
-    /// in request headers. Denied to dependency-controlled config.
+    /// Credential brokering (`secrets.<name>.brokerTo`) — releasing a named parent
+    /// secret only on requests to the listed hosts, where its opaque marker occurs,
+    /// via a terminating proxy. Denied to dependency-controlled config.
     pub credential_broker: bool,
 }
 
@@ -285,7 +285,16 @@ fn compile_object(
     let obj = surface
         .as_object()
         .ok_or_else(|| CompileError::shape("", "expected a { fs, net, vars, secrets } object"))?;
-    fold::reject_unknown_keys(obj, &["fs", "net", "vars", "secrets", "proxy", "..."], "")?;
+    // `proxy` is no longer authored — the compiler DERIVES the proxy tier from the net
+    // allowlist and any brokered secrets. Give a stray `proxy` a targeted migration
+    // error rather than a generic unknown-key one.
+    if obj.contains_key("proxy") {
+        return Err(CompileError::shape(
+            "proxy",
+            "`proxy` is no longer authored — the sandbox derives the proxy tier from the `net` allowlist and any brokered secrets; remove it",
+        ));
+    }
+    fold::reject_unknown_keys(obj, &["fs", "net", "vars", "secrets", "..."], "")?;
     let inherit_base = object_spread(obj.get("..."))?;
 
     // Clobber detection runs per ARRAY axis (a total shadow between two entries of
@@ -312,35 +321,30 @@ fn compile_object(
         None => floor_fs(),
     };
     let mut net = match obj.get("net") {
-        Some(v) => fold::fold_net(v, ctx, caps, "net", parent.map(|p| &p.net))?,
+        Some(v) => fold::fold_net(v, "net", parent.map(|p| &p.net))?,
         None if inherit_base => inherit_net(parent),
         None => floor_net(),
     };
-    // The `proxy` knob is authored at the wrapper level (sibling of net) but governs the
-    // net axis. A child that inherits a parent net array through `"..."` also inherits
-    // the parent's explicit proxy posture; otherwise omission remains Disabled. That
-    // means a parent author can grant a proxy once without a nested scope silently
-    // widening it, while a fresh fine-grained allow still needs its own opt-in.
-    if obj.contains_key("proxy") {
-        net.mode = parse_proxy_mode(obj.get("proxy"))?;
-    } else if net_array_inherits_parent_mode(obj.get("net")) {
-        net.mode = parent
-            .map(|policy| policy.net.mode)
-            .unwrap_or(ProxyMode::Disabled);
-    }
-    reconcile_brokers(&mut net);
-    finalize_net_inspection(&mut net, "net")?;
-    // The env-family axes (`vars` + `secrets`) fold together into one EnvPolicy.
-    // Both absent: inherit (under `"..."`) or floor, exactly as the old single `env`
-    // axis did. Either present: an explicit, complete env statement — the other axis
+    // The env-family axes (`vars` + `secrets`) fold together into one EnvPolicy plus
+    // the broker intents harvested from `secrets.<name>.brokerTo`. Both absent:
+    // inherit (under `"..."`) or floor, exactly as the old single `env` axis did (no
+    // intents). Either present: an explicit, complete env statement — the other axis
     // defaults to no entries.
     let vars = obj.get("vars");
     let secrets = obj.get("secrets");
-    let mut env = match (vars, secrets) {
-        (None, None) if inherit_base => inherit_env(parent, ctx),
-        (None, None) => floor_env(ctx),
+    let (mut env, broker_intents) = match (vars, secrets) {
+        (None, None) if inherit_base => (inherit_env(parent, ctx), Vec::new()),
+        (None, None) => (floor_env(ctx), Vec::new()),
         _ => fold::fold_env_axes(vars, secrets, ctx, caps, parent.map(|p| &p.env))?,
     };
+    // Cross-axis transpose: brokered secrets become per-host credential brokers on the
+    // net axis (coalesced by host). This runs AFTER fold_net so inherited brokers and
+    // the authored ones merge into one list; the broker validation below and the tier
+    // derive then see the complete, final net policy.
+    fold::transpose_brokers(&mut net, &broker_intents);
+    validate_brokers(&net)?;
+    // Derive the proxy posture + inspection tier (pure function of enforce/allow/brokers).
+    finalize_net_inspection(&mut net);
     withhold_brokered_env(&net, &mut env, ctx);
     Ok(SandboxPolicy {
         fs,
@@ -350,35 +354,52 @@ fn compile_object(
     })
 }
 
-fn reconcile_brokers(net: &mut NetPolicy) {
-    let removed_hosts = net
-        .brokers
-        .iter()
-        .filter(|broker| !crate::matcher::HostMatcher::new(net).admits(&broker.host))
-        .map(|broker| broker.host.clone())
-        .collect::<Vec<_>>();
-    if removed_hosts.is_empty() {
-        return;
+/// Reject a broker the final net policy cannot serve. Brokering does NOT itself open
+/// the network (a `brokerTo` host contributes no allow rule), so two conditions must
+/// hold. First, net must actually run a fine-grained proxy to perform the marker→secret
+/// swap: coarse `net: true` (unrestricted) and an all-deny `net` (`net: false` / only
+/// denies) start no proxy, so a broker there could never fire. Second, every brokered
+/// host must be ADMITTED by the net verdict — a host named in `brokerTo` but absent
+/// from `net` (or later denied) is a hard error, never a silent drop.
+///
+/// Runs over the MERGED broker list (inherited + transposed) as the LAST net step, so
+/// a future `$trusted` net expansion (Phase 3) is already accounted for. The error
+/// path points at `secrets.<name>.brokerTo` — the field the author can act on.
+fn validate_brokers(net: &NetPolicy) -> Result<(), CompileError> {
+    if net.brokers.is_empty() {
+        return Ok(());
     }
-    net.brokers.retain(|broker| {
-        !removed_hosts
-            .iter()
-            .any(|host| host.eq_ignore_ascii_case(&broker.host))
-    });
-    // The object-form broker contributed an implicit exact-host Allow. Once a
-    // later rule denies that host, remove the now-shadowed grant with the broker;
-    // otherwise the syntactic Allow would spuriously require a proxy even though
-    // the final last-match verdict admits no brokered traffic.
-    net.rules.retain(|rule| {
-        !(rule.effect == Effect::Allow
-            && matches!(
-                &rule.target,
-                crate::policy::NetTarget::Host(host)
-                    if removed_hosts
-                        .iter()
-                        .any(|removed| removed.eq_ignore_ascii_case(host))
-            ))
-    });
+    let has_allow = net.rules.iter().any(|rule| rule.effect == Effect::Allow);
+    if !net.enforce || !has_allow {
+        return Err(CompileError::shape(
+            &broker_error_path(net.brokers.first()),
+            "a brokered secret needs a fine-grained `net` allowlist that names its host; `net: true` (unrestricted) and an all-deny `net` start no proxy to perform the marker→secret swap",
+        ));
+    }
+    let matcher = crate::matcher::HostMatcher::new(net);
+    for broker in &net.brokers {
+        if !matcher.admits(&broker.host) {
+            return Err(CompileError::shape(
+                &broker_error_path(Some(broker)),
+                &format!(
+                    "`{}` is brokered but not allowed in `net` — add it to the net axis",
+                    broker.host
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The `secrets.<name>.brokerTo` path for a broker's diagnostic (the broker's first
+/// env name is the secret). Empty name is unreachable from the compiler (every
+/// broker carries at least one secret) but handled for a clean fallback.
+fn broker_error_path(broker: Option<&crate::policy::CredentialBroker>) -> String {
+    let name = broker
+        .and_then(|b| b.env.first())
+        .map(String::as_str)
+        .unwrap_or("");
+    format!("secrets.{name}.brokerTo")
 }
 
 /// Brokered values never survive in the serializable compile result, even when
@@ -414,95 +435,29 @@ fn withhold_brokered_env(net: &NetPolicy, env: &mut EnvPolicy, ctx: &CompileCtx)
     env.withheld.sort();
 }
 
-/// Whether a net array splices the enclosing policy at least once. The fold copies
-/// inherited rules but not wrapper metadata, so this preserves the parent proxy mode
-/// across an explicit `"..."` splice. Object-form net deliberately has no sentinel.
-fn net_array_inherits_parent_mode(value: Option<&Value>) -> bool {
-    matches!(
-        value,
-        Some(Value::Array(items))
-            if items.iter().any(|item| matches!(item, Value::String(entry) if entry == "..."))
-    )
-}
-
-/// Parse the wrapper-level `proxy` knob into a [`ProxyMode`]. Omission leaves the
-/// proxy disabled. A fine-grained allow must opt into one of the explicit modes;
-/// a credential broker is the sole automatic-proxy capability.
-fn parse_proxy_mode(v: Option<&Value>) -> Result<ProxyMode, CompileError> {
-    match v {
-        None => Ok(ProxyMode::Disabled),
-        Some(Value::String(s)) => match s.as_str() {
-            "auto" => Ok(ProxyMode::Auto),
-            "passthrough" => Ok(ProxyMode::Passthrough),
-            "terminate" => Ok(ProxyMode::Terminate),
-            other => Err(CompileError::shape(
-                "proxy",
-                &format!(
-                    "`proxy` must be \"auto\", \"passthrough\", or \"terminate\" (got `{other}`)"
-                ),
-            )),
-        },
-        Some(_) => Err(CompileError::shape(
-            "proxy",
-            "`proxy` must be a string: \"auto\", \"passthrough\", or \"terminate\"",
-        )),
-    }
-}
-
-/// Derive the net enforcement tier and reject a policy whose requested net allows
-/// could not be enforced. Coarse `net: true` / `net: false` never need a proxy. An
-/// ordinary hostname/CIDR allow needs an explicit proxy mode; a credential broker is
-/// the narrow exception because it necessarily needs a terminating proxy to inject its
-/// headers. `passthrough` still forbids that termination.
-fn finalize_net_inspection(net: &mut NetPolicy, path: &str) -> Result<(), CompileError> {
+/// DERIVE the proxy posture (`mode`) + inspection tier from the net axis — a pure,
+/// infallible function of `enforce` / has-allow / brokers (there is no authored
+/// `proxy` knob any more). The table:
+///   coarse (`net: true`) or all-deny (`net: false` / only denies) → Disabled, Connection
+///   fine-grained allow, no brokers                                → Auto,     Connection
+///   fine-grained allow, brokers present                           → Auto,     TlsInspect
+/// A fine-grained net allow now AUTO-STARTS the egress proxy (was a compile error
+/// demanding an authored proxy); termination is engaged only for the brokered hosts,
+/// via the TlsInspect tier + per-host broker matching. Runs AFTER [`validate_brokers`],
+/// so a non-empty broker list implies enforce + has_allow.
+fn finalize_net_inspection(net: &mut NetPolicy) {
     let has_allow = net.rules.iter().any(|rule| rule.effect == Effect::Allow);
-    let needs_tls = !net.brokers.is_empty();
-
-    if !net.enforce {
-        if net.mode != ProxyMode::Disabled {
-            return Err(CompileError::shape(
-                "proxy",
-                "`proxy` requires a fine-grained net allow; `net: true` is unrestricted and does not start a proxy",
-            ));
-        }
+    if !net.enforce || !has_allow {
+        net.mode = ProxyMode::Disabled;
         net.inspection = Inspection::Connection;
-        return Ok(());
+        return;
     }
-
-    if !has_allow {
-        if net.mode != ProxyMode::Disabled {
-            return Err(CompileError::shape(
-                "proxy",
-                "`proxy` requires a fine-grained net allow; `net: false` denies all egress and does not start a proxy",
-            ));
-        }
-        net.inspection = Inspection::Connection;
-        return Ok(());
-    }
-
-    if !needs_tls && net.mode == ProxyMode::Disabled {
-        return Err(CompileError::shape(
-            path,
-            "a fine-grained net allow requires an explicit proxy — set `proxy` to \"auto\", \"passthrough\", or \"terminate\"",
-        ));
-    }
-
-    net.inspection = match net.mode {
-        ProxyMode::Passthrough => {
-            if needs_tls {
-                return Err(CompileError::shape(
-                    path,
-                    "a credential-broker rule requires TLS termination, but `proxy` is \"passthrough\" — remove the broker rule or set `proxy` to \"auto\"/\"terminate\"",
-                ));
-            }
-            Inspection::Connection
-        }
-        ProxyMode::Terminate => Inspection::TlsInspect,
-        ProxyMode::Disabled if needs_tls => Inspection::TlsInspect,
-        ProxyMode::Auto if needs_tls => Inspection::TlsInspect,
-        ProxyMode::Disabled | ProxyMode::Auto => Inspection::Connection,
+    net.mode = ProxyMode::Auto;
+    net.inspection = if net.brokers.is_empty() {
+        Inspection::Connection
+    } else {
+        Inspection::TlsInspect
     };
-    Ok(())
 }
 
 /// Parse a top-level object `"..."` key. `true` = inherit the enclosing base for
