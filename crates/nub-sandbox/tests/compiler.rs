@@ -273,7 +273,7 @@ fn env_spread_alone_is_the_curated_baseline_equals_sandbox_true() {
         ("RANDOM_VAR", "v"), // non-baseline, non-secret → not in the curated allowlist
     ];
     let ctx = common::ctx(true, env);
-    let spread = compile(&json!({ "env": ["..."] }), &ctx).unwrap();
+    let spread = compile(&json!({ "vars": ["..."] }), &ctx).unwrap();
     let truth = compile(&json!(true), &ctx).unwrap();
     // The whole env axis is identical to `sandbox: true`'s — the single source of
     // truth (`baseline_allows`) guarantees no drift.
@@ -310,8 +310,8 @@ fn env_spread_is_not_axis_true_passthrough() {
     // Guard the two DIFFERENT `true`s: axis `env: true` = passthrough (keeps the
     // secret); `env: ["..."]` = curated baseline (strips it).
     let ctx = common::ctx(true, &[("PATH", "/bin"), ("MY_TOKEN", "leak")]);
-    let passthrough = compile(&json!({ "env": true }), &ctx).unwrap();
-    let baseline = compile(&json!({ "env": ["..."] }), &ctx).unwrap();
+    let passthrough = compile(&json!({ "vars": true }), &ctx).unwrap();
+    let baseline = compile(&json!({ "vars": ["..."] }), &ctx).unwrap();
     assert!(
         passthrough.env.constructed.contains_key("MY_TOKEN"),
         "axis env:true passes the secret through"
@@ -331,10 +331,10 @@ fn sentinel_negation_is_a_shape_error_on_every_axis() {
         // array form, every axis
         json!({ "fs": ["!..."] }),
         json!({ "net": ["!..."] }),
-        json!({ "env": ["!..."] }),
+        json!({ "vars": ["!..."] }),
         // object-key form, every axis (env supports `"..."` inherit but rejects `"!..."`;
         // fs/net reject both a negated sentinel AND a bare `"..."` object key)
-        json!({ "env": { "!...": true } }),
+        json!({ "vars": { "!...": true } }),
         json!({ "fs": { "!...": "rw" } }),
         json!({ "net": { "!...": true } }),
         json!({ "fs": { "...": "rw" } }),
@@ -365,8 +365,8 @@ fn sentinel_scalar_value_is_a_shape_error_but_file_ref_defers() {
         json!({ "...": 5 }),
         json!({ "...": false }),
         json!({ "...": ["./a.json"] }),
-        json!({ "env": { "...": "port" } }),
-        json!({ "env": { "...": 5 } }),
+        json!({ "vars": { "...": "port" } }),
+        json!({ "vars": { "...": 5 } }),
         // fs/net reject a `"..."` OBJECT key outright (array-only sentinel).
         json!({ "fs": { "...": "r" } }),
         json!({ "net": { "...": "r" } }),
@@ -380,7 +380,7 @@ fn sentinel_scalar_value_is_a_shape_error_but_file_ref_defers() {
     // A genuine file-ref still defers to the frontend (unchanged) — no over-trigger.
     for surface in [
         json!({ "...": "./policy.json" }),
-        json!({ "env": { "...": "./p.json" } }),
+        json!({ "vars": { "...": "./p.json" } }),
     ] {
         assert!(
             matches!(
@@ -456,7 +456,7 @@ fn glob_env_type_validates_every_matching_var() {
     // var it matches, not just the first — an invalid later var errors, and all
     // matches pass through when every one is valid.
     let mixed = common::ctx(true, &[("VITE_A", "80"), ("VITE_B", "notaport")]);
-    match compile(&json!({ "env": { "VITE_*": "port" } }), &mixed).unwrap_err() {
+    match compile(&json!({ "vars": { "VITE_*": "port" } }), &mixed).unwrap_err() {
         CompileError::Validation { path, .. } => {
             assert_eq!(
                 path, "VITE_B",
@@ -468,12 +468,12 @@ fn glob_env_type_validates_every_matching_var() {
     // The FIRST match invalid also errors (proves the fold doesn't skip index 0).
     let first_bad = common::ctx(true, &[("VITE_A", "notaport"), ("VITE_B", "443")]);
     assert!(matches!(
-        compile(&json!({ "env": { "VITE_*": "port" } }), &first_bad).unwrap_err(),
+        compile(&json!({ "vars": { "VITE_*": "port" } }), &first_bad).unwrap_err(),
         CompileError::Validation { path, .. } if path == "VITE_A"
     ));
     // All valid → every matching var survives, each validated.
     let all_ok = common::ctx(true, &[("VITE_A", "80"), ("VITE_B", "443")]);
-    let p = compile(&json!({ "env": { "VITE_*": "port" } }), &all_ok).unwrap();
+    let p = compile(&json!({ "vars": { "VITE_*": "port" } }), &all_ok).unwrap();
     assert_eq!(
         p.env.constructed.get("VITE_A").map(String::as_str),
         Some("80")
@@ -507,7 +507,7 @@ fn keys_inside_an_axis_object_do_not_implicitly_inherit() {
     // never FOO-plus-inherited. `"..."` is the only add-parent mechanism. (Locked
     // so the future scope-chain frontend can't regress key-level inheritance.)
     let ctx = common::ctx(true, &[("FOO", "1"), ("PATH", "/bin"), ("BAR", "2")]);
-    let p = compile(&json!({ "env": { "FOO": true } }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": { "FOO": true } }), &ctx).unwrap();
     assert_eq!(p.env.constructed.len(), 1, "only the named key");
     assert!(p.env.constructed.contains_key("FOO"));
     assert!(
@@ -624,7 +624,7 @@ fn env_array_allowlist_and_deny_last_match_wins() {
         ],
     );
     // allow NODE_ENV + VITE_*, then deny *_TOKEN.
-    let p = compile(&json!({ "env": ["NODE_ENV", "VITE_*", "!*_TOKEN"] }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": ["NODE_ENV", "VITE_*", "!*_TOKEN"] }), &ctx).unwrap();
     let c = &p.env.constructed;
     assert_eq!(c.get("NODE_ENV").map(String::as_str), Some("prod"));
     assert_eq!(c.get("VITE_URL").map(String::as_str), Some("x"));
@@ -640,11 +640,11 @@ fn env_array_allowlist_and_deny_last_match_wins() {
 fn env_spread_defaults_deny_secrets_but_ordering_can_reallow() {
     let ctx = common::ctx(true, &[("GITHUB_TOKEN", "gh"), ("NORMAL", "n")]);
     // `["*", "..."]` — allow all, then secret defaults deny → GITHUB_TOKEN gone.
-    let denied = compile(&json!({ "env": ["*", "..."] }), &ctx).unwrap();
+    let denied = compile(&json!({ "vars": ["*", "..."] }), &ctx).unwrap();
     assert!(!denied.env.constructed.contains_key("GITHUB_TOKEN"));
     assert!(denied.env.constructed.contains_key("NORMAL"));
     // `["...", "*"]` — defaults first, then allow-all wins by ordering.
-    let allowed = compile(&json!({ "env": ["...", "*"] }), &ctx).unwrap();
+    let allowed = compile(&json!({ "vars": ["...", "*"] }), &ctx).unwrap();
     assert!(
         allowed.env.constructed.contains_key("GITHUB_TOKEN"),
         "later allow wins"
@@ -678,7 +678,7 @@ fn env_secret_defaults_deny_uppercase_secrets_without_overmatching() {
     env.extend(benign.iter().map(|k| (*k, "ok")));
 
     let ctx = common::ctx(true, &env);
-    let p = compile(&json!({ "env": ["*", "..."] }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": ["*", "..."] }), &ctx).unwrap();
     let c = &p.env.constructed;
     for leaked in secrets {
         assert!(
@@ -699,12 +699,12 @@ fn env_array_is_an_allowlist_not_required() {
     // Array exact keys are pass-through-if-present, NEVER required — the canonical
     // `["FOO", "BAR", "!*_TOKEN"]` must compile even when FOO/BAR are unset.
     let absent = common::ctx(true, &[("BAR", "b")]);
-    let p = compile(&json!({ "env": ["FOO", "BAR", "!*_TOKEN"] }), &absent).unwrap();
+    let p = compile(&json!({ "vars": ["FOO", "BAR", "!*_TOKEN"] }), &absent).unwrap();
     assert!(!p.env.constructed.contains_key("FOO"), "absent FOO omitted");
     assert_eq!(p.env.constructed.get("BAR").map(String::as_str), Some("b"));
 
     // Object plain-keys, by contrast, stay REQUIRED (fail on missing).
-    let err = compile(&json!({ "env": { "FOO": true } }), &absent).unwrap_err();
+    let err = compile(&json!({ "vars": { "FOO": true } }), &absent).unwrap_err();
     assert!(matches!(err, CompileError::MissingRequired { .. }));
 }
 
@@ -716,7 +716,7 @@ fn env_user_key_case_mirrors_os() {
     // (it is withheld). Same source, opposite verdict — the enforcement follows the
     // OS resource. (The Windows branch is exercised on the Windows VM / CI.)
     let ctx = common::ctx(true, &[("VITE_URL", "keep")]);
-    let p = compile(&json!({ "env": ["VITE_*", "!vite_url"] }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": ["VITE_*", "!vite_url"] }), &ctx).unwrap();
     let got = p.env.constructed.get("VITE_URL").map(String::as_str);
     if cfg!(windows) {
         assert_eq!(
@@ -737,7 +737,7 @@ fn env_user_exact_key_case_mirrors_os() {
     // D16 for the EXACT-key form (not only globs): a `path` allow catches ambient
     // `PATH` only on Windows; on POSIX they are distinct vars.
     let ctx = common::ctx(true, &[("PATH", "/bin")]);
-    let p = compile(&json!({ "env": ["path"] }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": ["path"] }), &ctx).unwrap();
     assert_eq!(
         p.env.constructed.contains_key("PATH"),
         cfg!(windows),
@@ -752,7 +752,7 @@ fn env_required_key_satisfied_case_mirrored() {
     // must compare case-mirrored, not exact) — but errors on POSIX where the
     // casings are distinct vars.
     let ctx = common::ctx(true, &[("Path", "/bin")]);
-    let r = compile(&json!({ "env": { "PATH": true } }), &ctx);
+    let r = compile(&json!({ "vars": { "PATH": true } }), &ctx);
     if cfg!(windows) {
         assert!(
             r.unwrap().env.constructed.contains_key("Path"),
@@ -811,7 +811,7 @@ fn fs_deny_access_is_normalized_to_one_value() {
 fn env_object_types_validate() {
     let ctx = common::ctx(true, &[("PORT", "8080"), ("COUNT", "12")]);
     let p = compile(
-        &json!({ "env": { "PORT": "port", "COUNT": "integer" } }),
+        &json!({ "vars": { "PORT": "port", "COUNT": "integer" } }),
         &ctx,
     )
     .unwrap();
@@ -827,7 +827,7 @@ fn env_object_types_validate() {
     );
 
     let bad = common::ctx(true, &[("PORT", "notaport")]);
-    let err = compile(&json!({ "env": { "PORT": "port" } }), &bad).unwrap_err();
+    let err = compile(&json!({ "vars": { "PORT": "port" } }), &bad).unwrap_err();
     assert!(matches!(err, CompileError::Validation { .. }));
 }
 
@@ -835,12 +835,12 @@ fn env_object_types_validate() {
 fn env_number_rejects_non_finite() {
     // `number` means a finite numeric string — `inf`/`nan` are not values.
     let ok = common::ctx(true, &[("RATIO", "1.5")]);
-    assert!(compile(&json!({ "env": { "RATIO": "number" } }), &ok).is_ok());
+    assert!(compile(&json!({ "vars": { "RATIO": "number" } }), &ok).is_ok());
     for bad in ["inf", "nan", "infinity"] {
         let ctx = common::ctx(true, &[("RATIO", bad)]);
         assert!(
             matches!(
-                compile(&json!({ "env": { "RATIO": "number" } }), &ctx),
+                compile(&json!({ "vars": { "RATIO": "number" } }), &ctx),
                 Err(CompileError::Validation { .. })
             ),
             "`{bad}` must be rejected as a number"
@@ -852,7 +852,7 @@ fn env_number_rejects_non_finite() {
 fn env_regex_and_enum_union() {
     let ctx = common::ctx(true, &[("MODE", "dev"), ("SHA", "abc123")]);
     let p = compile(
-        &json!({ "env": { "MODE": "enum:dev|prod", "SHA": "/^[a-f0-9]+$/" } }),
+        &json!({ "vars": { "MODE": "enum:dev|prod", "SHA": "/^[a-f0-9]+$/" } }),
         &ctx,
     )
     .unwrap();
@@ -866,19 +866,19 @@ fn env_regex_and_enum_union() {
     );
 
     let bad = common::ctx(true, &[("MODE", "staging")]);
-    assert!(compile(&json!({ "env": { "MODE": "enum:dev|prod" } }), &bad).is_err());
+    assert!(compile(&json!({ "vars": { "MODE": "enum:dev|prod" } }), &bad).is_err());
     // An empty `enum:` member is a shape error, not a silently-accepted type.
     let empty = common::ctx(true, &[("MODE", "dev")]);
-    assert!(compile(&json!({ "env": { "MODE": "enum:dev||prod" } }), &empty).is_err());
+    assert!(compile(&json!({ "vars": { "MODE": "enum:dev||prod" } }), &empty).is_err());
 }
 
 #[test]
 fn env_regex_is_checked_even_when_optional_and_unmatched() {
     let ctx = common::ctx(true, &[]);
-    let err = compile(&json!({ "env": { "SHA?": "/[a-/" } }), &ctx).unwrap_err();
+    let err = compile(&json!({ "vars": { "SHA?": "/[a-/" } }), &ctx).unwrap_err();
     match err {
         CompileError::Shape { path, message } => {
-            assert_eq!(path, "env.SHA?");
+            assert_eq!(path, "vars.SHA?");
             assert!(message.contains("invalid regex"), "{message}");
         }
         other => panic!("expected invalid regex shape error, got {other:?}"),
@@ -888,7 +888,7 @@ fn env_regex_is_checked_even_when_optional_and_unmatched() {
 #[test]
 fn env_unknown_type_names_the_supported_set() {
     let ctx = common::ctx(true, &[("X", "1")]);
-    let err = compile(&json!({ "env": { "X": "email" } }), &ctx).unwrap_err();
+    let err = compile(&json!({ "vars": { "X": "email" } }), &ctx).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("integer") && msg.contains("port"),
@@ -900,64 +900,187 @@ fn env_unknown_type_names_the_supported_set() {
 fn env_required_missing_key_errors_optional_is_ok() {
     let ctx = common::ctx(true, &[]);
     // required (no `?`) and absent → error.
-    let err = compile(&json!({ "env": { "DATABASE_URL": true } }), &ctx).unwrap_err();
+    let err = compile(&json!({ "vars": { "DATABASE_URL": true } }), &ctx).unwrap_err();
     assert!(matches!(err, CompileError::MissingRequired { .. }));
     // optional (`?`) and absent → fine.
-    assert!(compile(&json!({ "env": { "DATABASE_URL?": true } }), &ctx).is_ok());
+    assert!(compile(&json!({ "vars": { "DATABASE_URL?": true } }), &ctx).is_ok());
 }
 
 #[test]
-fn env_sensitive_mark_defaults_on_and_opts_out() {
-    // The single `sensitive` mark (D17): default-on, `sensitive: false` opts out.
-    let ctx = common::ctx(true, &[("PUB", "1"), ("PRIV", "2"), ("DEFLT", "3")]);
+fn sensitivity_is_set_by_the_axis_not_a_key() {
+    // Phase 1: sensitivity is no longer a per-entry `sensitive` extras key — the AXIS
+    // decides. Every `vars` entry is public (`sensitive:false`); every `secrets` entry
+    // is redacted (`sensitive:true`), across the array and object (incl. format) forms.
+    let ctx = common::ctx(
+        true,
+        &[("PUB", "1"), ("FMT", "2"), ("TOK", "3"), ("DB", "4")],
+    );
     let p = compile(
-        &json!({ "env": {
-            "PUB": { "sensitive": false },
-            "PRIV": { "sensitive": true },
-            "DEFLT": { "format": "string" },
-        } }),
+        &json!({
+            "vars": { "PUB": true, "FMT": { "format": "string" } },
+            "secrets": { "TOK": true, "DB": { "format": "string" } },
+        }),
         &ctx,
     )
     .unwrap();
     let rule = |k: &str| p.env.schema.iter().find(|r| r.key == k).unwrap();
+    assert!(!rule("PUB").sensitive, "a vars entry is public");
     assert!(
-        !rule("PUB").sensitive,
-        "sensitive:false opts out of redaction"
+        !rule("FMT").sensitive,
+        "a vars entry with a format is still public"
     );
-    assert!(rule("PRIV").sensitive);
-    assert!(rule("DEFLT").sensitive, "default-on when unmarked");
+    assert!(rule("TOK").sensitive, "a secrets entry is redacted");
+    assert!(
+        rule("DB").sensitive,
+        "a secrets entry with a format is still redacted"
+    );
+    // The array form marks sensitivity the same way.
+    let arr = compile(&json!({ "vars": ["PUB"], "secrets": ["TOK"] }), &ctx).unwrap();
+    let ar = |k: &str| arr.env.schema.iter().find(|r| r.key == k).unwrap();
+    assert!(!ar("PUB").sensitive, "array vars entry is public");
+    assert!(ar("TOK").sensitive, "array secrets entry is redacted");
 }
 
 #[test]
-fn env_extras_require_boolean_sensitive_and_optional() {
+fn env_extras_validate_optional_and_format() {
+    // `optional` must be a boolean; `format` must be a string. (`sensitive` is no
+    // longer an extras key — see env_extras_reject_removed_sensitivity_keys.)
     let ctx = common::ctx(true, &[("X", "1")]);
-    for (key, value) in [("sensitive", json!("false")), ("optional", json!(1))] {
-        let err = compile(&json!({ "env": { "X": { key: value } } }), &ctx).unwrap_err();
+    let opt_err = compile(&json!({ "vars": { "X": { "optional": 1 } } }), &ctx).unwrap_err();
+    match opt_err {
+        CompileError::Shape { path, message } => {
+            assert_eq!(path, "vars.X.optional");
+            assert_eq!(message, "optional must be a boolean");
+        }
+        other => panic!("expected optional shape error, got {other:?}"),
+    }
+    let fmt_err = compile(&json!({ "vars": { "X": { "format": 1 } } }), &ctx).unwrap_err();
+    match fmt_err {
+        CompileError::Shape { path, message } => {
+            assert_eq!(path, "vars.X.format");
+            assert_eq!(message, "format must be a string");
+        }
+        other => panic!("expected format shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn env_extras_reject_removed_sensitivity_keys() {
+    // `sensitive` (moved to the axis) and the older `secret`/`public` pair are no
+    // longer extras keys — each is an unknown-option shape error.
+    let ctx = common::ctx(true, &[("X", "1")]);
+    for key in ["sensitive", "secret", "public"] {
+        let err = compile(&json!({ "vars": { "X": { key: true } } }), &ctx).unwrap_err();
         match err {
-            CompileError::Shape { path, message } => {
-                assert_eq!(path, format!("env.X.{key}"));
-                assert_eq!(message, format!("{key} must be a boolean"));
+            CompileError::Shape { message, .. } => {
+                assert!(
+                    message.contains(key) && message.contains("unknown env option"),
+                    "{message}"
+                );
             }
-            other => panic!("expected {key} shape error, got {other:?}"),
+            other => panic!("expected an unknown-option shape error naming `{key}`, got {other:?}"),
         }
     }
 }
 
 #[test]
-fn env_extras_reject_the_old_secret_public_keys() {
-    // The collapsed pair (D17): `secret`/`public` are no longer valid extras keys.
+fn vars_and_secrets_construct_the_child_env_together() {
+    // Both axes are the same env mechanism: each named key reaches the child with its
+    // real value; only the schema's `sensitive` mark (redaction) differs by axis.
+    let ctx = common::ctx(true, &[("FOO", "bar"), ("DB_URL", "postgres://s")]);
+    let p = compile(&json!({ "vars": ["FOO"], "secrets": ["DB_URL"] }), &ctx).unwrap();
+    assert_eq!(
+        p.env.constructed.get("FOO").map(String::as_str),
+        Some("bar")
+    );
+    assert_eq!(
+        p.env.constructed.get("DB_URL").map(String::as_str),
+        Some("postgres://s"),
+        "a secret reaches the child with its real value"
+    );
+    let rule = |k: &str| p.env.schema.iter().find(|r| r.key == k).unwrap();
+    assert!(!rule("FOO").sensitive, "a var is public");
+    assert!(rule("DB_URL").sensitive, "a secret is redacted");
+}
+
+#[test]
+fn vars_secrets_name_collision_takes_the_secrets_rule() {
+    // vars entries precede secrets in the single last-match-wins list, so a name in
+    // BOTH axes records the later secrets rule (`sensitive:true`) — fail-safe toward
+    // redaction. A sibling matched only by the `vars: ["*"]` catch-all stays public.
+    let ctx = common::ctx(true, &[("FOO", "1"), ("PLAIN", "2")]);
+    let p = compile(&json!({ "vars": ["*"], "secrets": ["FOO"] }), &ctx).unwrap();
+    assert_eq!(p.env.constructed.get("FOO").map(String::as_str), Some("1"));
+    assert_eq!(
+        p.env.constructed.get("PLAIN").map(String::as_str),
+        Some("2")
+    );
+    let foo = p.env.schema.iter().find(|r| r.key == "FOO").unwrap();
+    assert!(foo.sensitive, "the colliding name takes the secrets rule");
+    let star = p.env.schema.iter().find(|r| r.key == "*").unwrap();
+    assert!(!star.sensitive, "the vars catch-all stays public");
+}
+
+#[test]
+fn vars_star_passes_all_and_emits_a_schema_rule() {
+    // `vars: "*"` (and back-compat `vars: true`) pass every ambient variable. Unlike
+    // the old `env: true` short-circuit, both now emit a real `"*"` Allow schema rule.
+    let ctx = common::ctx(true, &[("A", "1"), ("MY_TOKEN", "t")]);
+    for surface in [json!({ "vars": "*" }), json!({ "vars": true })] {
+        let p = compile(&surface, &ctx).unwrap();
+        assert!(p.env.constructed.contains_key("A"), "{surface} passes A");
+        assert!(
+            p.env.constructed.contains_key("MY_TOKEN"),
+            "{surface} passes everything, secrets included"
+        );
+        assert!(
+            p.env.schema.iter().any(|r| r.key == "*" && !r.sensitive),
+            "{surface} emits a public `\"*\"` schema rule"
+        );
+    }
+}
+
+#[test]
+fn secrets_rejects_catch_all_and_string_shapes() {
+    // `secrets` must NAME each secret: a catch-all `"*"`/`true` or any string is a
+    // shape error. `vars` accepts only `"*"` as a string (a non-`"*"` string errors).
     let ctx = common::ctx(true, &[("X", "1")]);
-    for key in ["secret", "public"] {
-        let err = compile(&json!({ "env": { "X": { key: true } } }), &ctx).unwrap_err();
-        match err {
-            CompileError::Shape { message, .. } => {
-                assert!(
-                    message.contains(key) && message.contains("sensitive"),
-                    "{message}"
-                );
-            }
-            other => panic!("expected a shape error naming `{key}`, got {other:?}"),
+    for bad in [
+        json!({ "secrets": "*" }),
+        json!({ "secrets": true }),
+        json!({ "secrets": "DB_URL" }),
+        json!({ "vars": "everything" }),
+    ] {
+        assert!(
+            matches!(compile(&bad, &ctx), Err(CompileError::Shape { .. })),
+            "{bad} must be a shape error, got {:?}",
+            compile(&bad, &ctx)
+        );
+    }
+    // `secrets: false` / `[]` are accepted (explicit no-secrets).
+    assert!(compile(&json!({ "secrets": false }), &ctx).is_ok());
+    assert!(compile(&json!({ "vars": ["X"], "secrets": [] }), &ctx).is_ok());
+}
+
+#[test]
+fn secrets_brokerto_is_deferred_to_the_net_axis() {
+    // Phase 1 keeps brokering on the net axis; `brokerTo` on a secret is not accepted
+    // yet, and its error points at the current net-axis form (Phase 2 relocates it).
+    let ctx = common::ctx(true, &[("GITHUB_TOKEN", "t")]);
+    let err = compile(
+        &json!({ "secrets": { "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] } } }),
+        &ctx,
+    )
+    .unwrap_err();
+    match err {
+        CompileError::Shape { path, message } => {
+            assert_eq!(path, "secrets.GITHUB_TOKEN.brokerTo");
+            assert!(
+                message.contains("brokerTo") && message.contains("net"),
+                "the message must point at the net-axis broker form: {message}"
+            );
         }
+        other => panic!("expected a brokerTo shape error, got {other:?}"),
     }
 }
 
@@ -970,7 +1093,7 @@ fn env_integer_format_leniency_is_the_rust_i64_parse() {
     for good in ["5", "+5", "007", "-42", "0"] {
         let ctx = common::ctx(true, &[("N", good)]);
         assert!(
-            compile(&json!({ "env": { "N": "integer" } }), &ctx).is_ok(),
+            compile(&json!({ "vars": { "N": "integer" } }), &ctx).is_ok(),
             "`{good}` must validate as an integer"
         );
     }
@@ -978,7 +1101,7 @@ fn env_integer_format_leniency_is_the_rust_i64_parse() {
         let ctx = common::ctx(true, &[("N", bad)]);
         assert!(
             matches!(
-                compile(&json!({ "env": { "N": "integer" } }), &ctx),
+                compile(&json!({ "vars": { "N": "integer" } }), &ctx),
                 Err(CompileError::Validation { .. })
             ),
             "`{bad}` must be rejected as an integer"
@@ -992,7 +1115,7 @@ fn env_empty_array_is_strip_all_not_passthrough() {
     // strip-all. The mental-model trap is reading an empty list as "no restrictions";
     // it is the opposite. Enforcing, every ambient var withheld, none constructed.
     let ctx = common::ctx(true, &[("FOO", "1"), ("BAR", "2"), ("BAZ", "3")]);
-    let p = compile(&json!({ "env": [] }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": [] }), &ctx).unwrap();
     assert!(p.env.enforce, "an explicit env axis always enforces");
     for k in ["FOO", "BAR", "BAZ"] {
         assert!(!p.env.constructed.contains_key(k), "{k} must be stripped");
@@ -1022,10 +1145,10 @@ fn constrained_windows_env_forms_keep_startup_essentials() {
         ],
     );
     for surface in [
-        json!({ "env": false }),
-        json!({ "env": [] }),
-        json!({ "env": ["ONLY"] }),
-        json!({ "env": { "ONLY": true } }),
+        json!({ "vars": false }),
+        json!({ "vars": [] }),
+        json!({ "vars": ["ONLY"] }),
+        json!({ "vars": { "ONLY": true } }),
     ] {
         let policy = compile(&surface, &ctx).unwrap();
         for key in ["SystemRoot", "SystemDrive", "TEMP", "TMP", "LOCALAPPDATA"] {
@@ -1051,7 +1174,7 @@ fn env_lone_deny_strips_everything_not_all_but_x() {
     // an array is an allowlist and there is no allow base, so it strips EVERYTHING (X and
     // every other var alike). To keep sibling vars you must allow them explicitly first.
     let ctx = common::ctx(true, &[("X", "1"), ("Y", "2"), ("Z", "3")]);
-    let p = compile(&json!({ "env": ["!X"] }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": ["!X"] }), &ctx).unwrap();
     assert!(p.env.enforce);
     for k in ["X", "Y", "Z"] {
         assert!(
@@ -1067,7 +1190,7 @@ fn env_lone_deny_strips_everything_not_all_but_x() {
 #[test]
 fn substitution_resolves_in_trusted_home() {
     let ctx = common::ctx(true, &[]);
-    let p = compile(&json!({ "env": { "GREETING": "$(echo hi)" } }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": { "GREETING": "$(echo hi)" } }), &ctx).unwrap();
     assert_eq!(
         p.env.constructed.get("GREETING").map(String::as_str),
         Some("hi")
@@ -1078,7 +1201,7 @@ fn substitution_resolves_in_trusted_home() {
 fn substitution_embedded_in_a_larger_value() {
     let ctx = common::ctx(true, &[]);
     let p = compile(
-        &json!({ "env": { "URL": { "value": "https://$(echo hi)/path" } } }),
+        &json!({ "vars": { "URL": { "value": "https://$(echo hi)/path" } } }),
         &ctx,
     )
     .unwrap();
@@ -1091,14 +1214,14 @@ fn substitution_embedded_in_a_larger_value() {
 #[test]
 fn substitution_forbidden_in_untrusted_home() {
     let ctx = common::ctx(false, &[]);
-    let err = compile(&json!({ "env": { "X": "$(echo hi)" } }), &ctx).unwrap_err();
+    let err = compile(&json!({ "vars": { "X": "$(echo hi)" } }), &ctx).unwrap_err();
     assert!(matches!(err, CompileError::UntrustedSubstitution { .. }));
 }
 
 #[test]
 fn substitution_failure_surfaces() {
     let ctx = common::ctx(true, &[]);
-    let err = compile(&json!({ "env": { "X": "$(fail)" } }), &ctx).unwrap_err();
+    let err = compile(&json!({ "vars": { "X": "$(fail)" } }), &ctx).unwrap_err();
     assert!(matches!(err, CompileError::Substitution { .. }));
 }
 
@@ -1121,13 +1244,13 @@ fn unterminated_substitution_is_named_not_unknown_type() {
         runner: Box::new(PanicRunner),
     };
     for surface in [
-        json!({ "env": { "X": "$(op read" } }),
-        json!({ "env": { "X": { "value": "postgres://$(op read@h" } } }),
+        json!({ "vars": { "X": "$(op read" } }),
+        json!({ "vars": { "X": { "value": "postgres://$(op read@h" } } }),
         // The command text carries a single quote — must NOT fall through to a
         // union-parse / "unknown env type" error (the coarse-guard gap).
-        json!({ "env": { "X": "$(op read 'op://vault/db/pw'" } }),
+        json!({ "vars": { "X": "$(op read 'op://vault/db/pw'" } }),
         // A leading `/` must NOT be mistaken for a regex and skip the check.
-        json!({ "env": { "X": "/$(cmd" } }),
+        json!({ "vars": { "X": "/$(cmd" } }),
     ] {
         match compile(&surface, &ctx).unwrap_err() {
             CompileError::Substitution { message, .. } => {
@@ -1148,8 +1271,8 @@ fn mixed_balanced_then_unterminated_substitution_errors() {
     // runner, not a panic-runner), then the residual opener is rejected.
     let ctx = common::ctx(true, &[]);
     for surface in [
-        json!({ "env": { "X": "$(echo hi) $(oops" } }),
-        json!({ "env": { "X": { "value": "$(echo hi)$(oops" } } }),
+        json!({ "vars": { "X": "$(echo hi) $(oops" } }),
+        json!({ "vars": { "X": { "value": "$(echo hi)$(oops" } } }),
     ] {
         match compile(&surface, &ctx).unwrap_err() {
             CompileError::Substitution { message, .. } => {
@@ -1166,11 +1289,11 @@ fn glob_object_key_reports_optional_in_schema() {
     // included) — it reports optional in the schema even without a trailing `?`, and
     // never triggers the required-var check when it matches nothing.
     let ctx = common::ctx(true, &[("VITE_URL", "x")]);
-    let p = compile(&json!({ "env": { "VITE_*": true } }), &ctx).unwrap();
+    let p = compile(&json!({ "vars": { "VITE_*": true } }), &ctx).unwrap();
     let rule = p.env.schema.iter().find(|r| r.key == "VITE_*").unwrap();
     assert!(rule.optional, "a glob key is optional in the schema");
     // A glob matching nothing does not error (contrast a required exact key).
-    assert!(compile(&json!({ "env": { "NOPE_*": true } }), &ctx).is_ok());
+    assert!(compile(&json!({ "vars": { "NOPE_*": true } }), &ctx).is_ok());
 }
 
 #[test]
@@ -1191,8 +1314,8 @@ fn glob_key_substitution_is_rejected_before_running() {
         runner: Box::new(PanicRunner),
     };
     for surface in [
-        json!({ "env": { "FOO_*": "$(echo hi)" } }),
-        json!({ "env": { "FOO_*": { "value": "$(echo hi)" } } }),
+        json!({ "vars": { "FOO_*": "$(echo hi)" } }),
+        json!({ "vars": { "FOO_*": { "value": "$(echo hi)" } } }),
     ] {
         assert!(matches!(
             compile(&surface, &ctx).unwrap_err(),
@@ -1310,9 +1433,9 @@ fn env_key_brace_alternation_is_a_shape_error() {
     // rejected the same class as a mid-host glob (list the keys, or use `*`).
     let ctx = common::ctx(true, &[("FOO_A", "1"), ("FOO_B", "2")]);
     for (cfg, want_path) in [
-        (json!({ "env": ["FOO_{A,B}"] }), "env.0"),
-        (json!({ "env": ["OK", "!SECRET_{X,Y}"] }), "env.1"),
-        (json!({ "env": { "FOO_{A,B}": true } }), "env.FOO_{A,B}"),
+        (json!({ "vars": ["FOO_{A,B}"] }), "vars.0"),
+        (json!({ "vars": ["OK", "!SECRET_{X,Y}"] }), "vars.1"),
+        (json!({ "vars": { "FOO_{A,B}": true } }), "vars.FOO_{A,B}"),
     ] {
         match compile(&cfg, &ctx).unwrap_err() {
             CompileError::Shape { path, message } => {
@@ -1413,7 +1536,7 @@ fn broker_compiles_to_an_allow_rule_plus_a_broker_and_engages_tls_inspect() {
     let p = compile(
         &json!({
             "net": { "api.stripe.com": { "env": ["STRIPE_TOKEN"] } },
-            "env": true
+            "vars": true
         }),
         &ctx,
     )

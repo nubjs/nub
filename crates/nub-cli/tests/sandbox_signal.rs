@@ -23,7 +23,7 @@ fn spawn_fixture(
     std::fs::write(project.join("package.json"), "{}").unwrap();
     let (script, ready) = make_script(&project);
     let policy = temp.path().join("policy.json");
-    std::fs::write(&policy, r#"{"fs":["...","./"],"net":true,"env":true}"#).unwrap();
+    std::fs::write(&policy, r#"{"fs":["...","./"],"net":true,"vars":true}"#).unwrap();
     let child = Command::new(nub_bin())
         .args(["run", "--sandbox"])
         .arg(policy)

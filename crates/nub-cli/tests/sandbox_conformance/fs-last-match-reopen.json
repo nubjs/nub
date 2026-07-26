@@ -3,7 +3,7 @@
   "note": "Filesystem entries are ordered: a later exact allow reopens only its subtree inside an earlier denied subtree.",
   "policy": {
     "fs": ["./", "!./private", "./private/reopened"],
-    "env": true,
+    "vars": true,
     "net": true
   },
   "relaxed": false,

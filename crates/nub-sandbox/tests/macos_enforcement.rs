@@ -140,7 +140,7 @@ fn system_sandbox_launcher_ignores_the_child_path() {
         ("FAKE_SANDBOX_MARKER", marker_path.as_str()),
     ];
     let policy = compile(
-        &serde_json::json!({ "fs": true, "net": false, "env": true }),
+        &serde_json::json!({ "fs": true, "net": false, "vars": true }),
         &f.ctx(env),
     )
     .expect("policy compiles");
@@ -168,7 +168,7 @@ fn bare_entry_program_is_granted_from_the_child_path() {
     let path = format!("{}:/usr/bin:/bin", s(&child_bin));
     assert!(
         f.allowed_env(
-            serde_json::json!({ "fs": [], "net": false, "env": true }),
+            serde_json::json!({ "fs": [], "net": false, "vars": true }),
             &[("PATH", path.as_str())],
             "child-path-tool",
             &[],
@@ -195,7 +195,7 @@ fn bare_entry_program_uses_relative_child_path_from_child_cwd() {
     );
     assert!(
         f.allowed_env(
-            serde_json::json!({ "fs": [], "net": false, "env": true }),
+            serde_json::json!({ "fs": [], "net": false, "vars": true }),
             &[("PATH", "bin")],
             "child-path-tool",
             &[],
@@ -690,7 +690,7 @@ fn env_scrub_strips_secrets_keeps_baseline() {
     // negative control — env passthrough keeps the secret:
     assert!(
         f.allowed_env(
-            serde_json::json!({ "env": true }),
+            serde_json::json!({ "vars": true }),
             env,
             "/bin/sh",
             &["-c", "test -n \"$MY_SECRET_TOKEN\""]

@@ -50,7 +50,7 @@ impl Fixture {
               "loader": { ".blob": "text", ".view": "jsx" },
               "conditions": ["runtime-config"],
               "tsconfig": "./tsconfig.runtime.jsonc",
-              "sandbox": { "fs": false, "net": false, "env": false }
+              "sandbox": { "fs": false, "net": false, "vars": false }
             }"#,
         )
         .unwrap();
@@ -225,9 +225,9 @@ fn inherited_runtime_snapshot_ignores_all_sandbox_config_positions() {
       "loader": {},
       "conditions": [],
       "tsconfig": null,
-      "sandbox": { "fs": false, "net": false, "env": false },
-      "install": { "sandbox": { "fs": false, "net": false, "env": false } },
-      "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
+      "sandbox": { "fs": false, "net": false, "vars": false },
+      "install": { "sandbox": { "fs": false, "net": false, "vars": false } },
+      "dlx": { "sandbox": { "fs": false, "net": false, "vars": false } }
     }"#;
     let output = fixture
         .command()

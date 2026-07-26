@@ -96,7 +96,7 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
     .unwrap();
     std::fs::write(
         target.join("nub.jsonc"),
-        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
+        r#"{ "sandbox": { "fs": false, "net": false, "vars": false } }"#,
     )
     .unwrap();
 

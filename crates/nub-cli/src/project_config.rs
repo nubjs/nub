@@ -56,7 +56,7 @@ const INSTALL_KEYS: &[&str] = &[
     "sandbox",
 ];
 const DLX_KEYS: &[&str] = &["consent", "sandbox", "env"];
-const SANDBOX_AXIS_KEYS: &[&str] = &["fs", "net", "env"];
+const SANDBOX_AXIS_KEYS: &[&str] = &["fs", "net", "vars", "secrets"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -367,26 +367,31 @@ pub enum SandboxSetting {
     Preset(String),
     /// A `"./file.json"` external sandbox config reference.
     FileRef(String),
-    /// The granular `{ fs, net, env }` object form.
+    /// The granular `{ fs, net, vars, secrets }` object form.
     Granular(SandboxAxes),
 }
 
-/// The three sandbox axes. Each is independently optional; the Phase-1 compiler
-/// assigns the decided floor/inheritance semantics.
+/// The sandbox axes. Each is independently optional; the Phase-1 compiler assigns
+/// the decided floor/inheritance semantics. The environment is split by sensitivity
+/// into `vars` (non-secret) and `secrets` (redacted/brokered) — the same mechanism,
+/// different protection.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SandboxAxes {
     pub fs: Option<SandboxAxis>,
     pub net: Option<SandboxAxis>,
-    pub env: Option<SandboxAxis>,
+    pub vars: Option<SandboxAxis>,
+    pub secrets: Option<SandboxAxis>,
 }
 
-/// One axis value. Both surface forms are accepted (spec: every axis takes
-/// `false | true | array | pattern-keyed object`). Entry semantics (polarity,
-/// per-axis value ladder, env grammar) are the Phase-1 compiler's job — the
-/// object form keeps its raw values so nothing is lost before then.
+/// One axis value. Surface forms accepted here shape-only: `false | true | "*" |
+/// array | pattern-keyed object`. Entry semantics (polarity, per-axis value ladder,
+/// env grammar, and which axes actually accept `"*"`/`true`) are the Phase-1
+/// compiler's job — the object form keeps its raw values so nothing is lost before then.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SandboxAxis {
     Bool(bool),
+    /// String form: the `vars: "*"` catch-all (the compiler owns the vars-only rule).
+    String(String),
     /// Array form: ordered glob entries (validated all-strings).
     Array(Vec<String>),
     /// Pattern-keyed object form: `{ "<pattern>": <value> }`, values kept raw.
@@ -1251,8 +1256,11 @@ fn validate_sandbox_axes(v: &Value, path: &str) -> Result<SandboxAxes> {
     if let Some(v) = obj.get("net") {
         axes.net = Some(validate_sandbox_axis(v, &child(path, "net"))?);
     }
-    if let Some(v) = obj.get("env") {
-        axes.env = Some(validate_sandbox_axis(v, &child(path, "env"))?);
+    if let Some(v) = obj.get("vars") {
+        axes.vars = Some(validate_sandbox_axis(v, &child(path, "vars"))?);
+    }
+    if let Some(v) = obj.get("secrets") {
+        axes.secrets = Some(validate_sandbox_axis(v, &child(path, "secrets"))?);
     }
     Ok(axes)
 }
@@ -1260,6 +1268,9 @@ fn validate_sandbox_axes(v: &Value, path: &str) -> Result<SandboxAxes> {
 fn validate_sandbox_axis(v: &Value, path: &str) -> Result<SandboxAxis> {
     match v {
         Value::Bool(b) => Ok(SandboxAxis::Bool(*b)),
+        // Shape-only: the `vars: "*"` catch-all. The compiler enforces the vars-only
+        // rule (a `secrets` string is a shape error there).
+        Value::String(s) => Ok(SandboxAxis::String(s.clone())),
         Value::Array(_) => Ok(SandboxAxis::Array(as_string_array(v, path)?)),
         Value::Object(obj) => Ok(SandboxAxis::Object(
             obj.iter()
@@ -1268,7 +1279,7 @@ fn validate_sandbox_axis(v: &Value, path: &str) -> Result<SandboxAxis> {
         )),
         _ => Err(ConfigError::Type {
             path: path.into(),
-            expected: "a boolean, array, or object",
+            expected: "a boolean, string, array, or object",
         }),
     }
 }
@@ -1693,7 +1704,8 @@ mod tests {
         let granular = serde_json::json!({
             "fs": { "./data": { "read": true, "write": false } },
             "net": [],
-            "env": false
+            "vars": "*",
+            "secrets": false
         });
         let cases = vec![
             ("false".to_string(), SandboxSetting::Disabled),
@@ -1714,7 +1726,8 @@ mod tests {
                         serde_json::json!({ "read": true, "write": false }),
                     )]))),
                     net: Some(SandboxAxis::Array(Vec::new())),
-                    env: Some(SandboxAxis::Bool(false)),
+                    vars: Some(SandboxAxis::String("*".into())),
+                    secrets: Some(SandboxAxis::Bool(false)),
                 }),
             ),
         ];
@@ -1739,11 +1752,12 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_axes_accept_array_and_object_forms() {
+    fn sandbox_axes_accept_string_array_and_object_forms() {
         let cfg = parse(
             r#"{
               "sandbox": {
-                "env": ["NODE_ENV", "VITE_*", "!*_TOKEN"],
+                "vars": ["NODE_ENV", "VITE_*", "!*_TOKEN"],
+                "secrets": ["DB_URL"],
                 "fs": { "./data": "rw", "~/.ssh": false },
                 "net": { "*.sentry.io": true, "*": false }
               }
@@ -1753,20 +1767,31 @@ mod tests {
             panic!("expected granular sandbox");
         };
         assert_eq!(
-            axes.env,
+            axes.vars,
             Some(SandboxAxis::Array(vec![
                 "NODE_ENV".into(),
                 "VITE_*".into(),
                 "!*_TOKEN".into()
             ]))
         );
+        assert_eq!(
+            axes.secrets,
+            Some(SandboxAxis::Array(vec!["DB_URL".into()]))
+        );
         assert!(matches!(axes.fs, Some(SandboxAxis::Object(_))));
         assert!(matches!(axes.net, Some(SandboxAxis::Object(_))));
+        // The `vars: "*"` string catch-all passes the shape gate (the compiler owns
+        // the vars-only rule and the secrets-string rejection).
+        let star = parse(r#"{ "sandbox": { "vars": "*" } }"#);
+        let Some(SandboxSetting::Granular(axes)) = star.sandbox else {
+            panic!("expected granular sandbox");
+        };
+        assert_eq!(axes.vars, Some(SandboxAxis::String("*".into())));
     }
 
     #[test]
     fn sandbox_axis_array_rejects_non_strings() {
-        let err = parse_project_config(r#"{ "sandbox": { "env": ["OK", 5] } }"#).unwrap_err();
+        let err = parse_project_config(r#"{ "sandbox": { "vars": ["OK", 5] } }"#).unwrap_err();
         assert!(matches!(err, ConfigError::Type { .. }));
     }
 

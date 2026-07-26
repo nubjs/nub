@@ -60,7 +60,9 @@ fn build_jail() -> Value {
         "fs": ["...", "./"],
         // deny all egress (the build-jail thread adds prefetch + grants).
         "net": false,
-        // strip the ambient env (the embedder injects the curated baseline).
-        "env": false
+        // strip the ambient env (the embedder injects the curated baseline). `vars:
+        // []` is the strip-all posture (no entries → OS essentials only), matching
+        // the old `env: false`.
+        "vars": []
     })
 }

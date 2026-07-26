@@ -32,7 +32,7 @@ fn surface(level: u32, allowed: &str) -> Value {
     } else {
         json!(true)
     };
-    json!({ "fs": Value::Object(fs_map), "env": env, "net": net })
+    json!({ "fs": Value::Object(fs_map), "vars": env, "net": net })
 }
 
 fn compile_level(level: u32, ambient: BTreeMap<String, String>) -> SandboxPolicy {

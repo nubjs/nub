@@ -729,55 +729,99 @@ fn push_net_rule(
     Ok(())
 }
 
-// ── env ──────────────────────────────────────────────────────────────────────
+// ── env (the `vars` + `secrets` axes) ──────────────────────────────────────────
 
-/// Fold the `env` axis into an [`EnvPolicy`], building the actual child env map.
-/// Base is default-DENY (env is constructed, not inherited): a key survives only
-/// if the LAST matching entry allows it. `true` passes the whole ambient env;
-/// `false` strips everything.
-pub fn fold_env(
-    value: &Value,
+/// Fold the `vars` + `secrets` axes into ONE [`EnvPolicy`], building the child env
+/// map. The two axes are the SAME environment mechanism split by sensitivity: a
+/// `vars` entry marks `sensitive:false`, a `secrets` entry `sensitive:true`. Base is
+/// default-DENY (env is constructed, not inherited): a key survives only if the LAST
+/// matching entry allows it. Both surfaces flow into one ordered `[EnvEntry]` —
+/// vars FIRST, then secrets — so under last-match-wins a name in BOTH axes takes the
+/// later secrets rule (`sensitive:true`, fail-safe toward redaction). At least one
+/// axis is present (the caller floors/inherits when both are absent).
+pub fn fold_env_axes(
+    vars: Option<&Value>,
+    secrets: Option<&Value>,
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
-    path: &str,
     parent: Option<&EnvPolicy>,
 ) -> Result<EnvPolicy, CompileError> {
-    // An explicit env axis always enforces (constructs the child env exactly).
+    // An explicit env-family axis always enforces (constructs the child env exactly).
     let mut policy = EnvPolicy {
         resolved: true,
         enforce: true,
         ..Default::default()
     };
-    match value {
-        Value::Bool(true) => {
-            policy.constructed = ctx.ambient_env.clone();
-        }
-        Value::Bool(false) => {
-            // Explicit strip-all — same floor as an unlisted axis: withhold all
-            // user/ambient env but inject the minimal OS-startup essentials so the
-            // child spawns reliably. Single source of truth with `floor_env`.
-            return Ok(defaults::strip_all_env(&ctx.ambient_env));
-        }
-        Value::Array(items) => {
-            let entries = parse_env_array(items, parent, path)?;
-            construct_env(&entries, ctx, parent, &mut policy)?;
-        }
-        Value::Object(map) => {
-            let entries = parse_env_object(map, ctx, caps, parent, path)?;
-            construct_env(&entries, ctx, parent, &mut policy)?;
-        }
-        _ => {
-            return Err(CompileError::shape(
-                path,
-                "env must be a boolean, an array, or a pattern-keyed object",
-            ));
-        }
+    let mut entries = Vec::new();
+    if let Some(v) = vars {
+        entries.extend(parse_env_surface(v, false, "vars", ctx, caps, parent)?);
     }
-    // An array/object allowlist can legitimately omit every ambient key, but a
-    // Windows child still needs the small bootstrap set for process/AppContainer
-    // startup. POSIX receives no additions because its essential set is empty.
+    if let Some(v) = secrets {
+        entries.extend(parse_env_surface(v, true, "secrets", ctx, caps, parent)?);
+    }
+    construct_env(&entries, ctx, parent, &mut policy)?;
+    // An allowlist can legitimately omit every ambient key, but a Windows child still
+    // needs the small bootstrap set for process/AppContainer startup. POSIX receives
+    // no additions because its essential set is empty. This also floors a `vars: []`
+    // / `false` (no entries) to the strip-all posture (OS essentials only), matching
+    // the complete-statement floor and `strip_all_env`.
     defaults::add_os_essential_env(&mut policy, &ctx.ambient_env);
     Ok(policy)
+}
+
+/// Parse one env-family axis surface into ordered [`EnvEntry`]s. `default_sensitive`
+/// both marks the entries (`vars`→false, `secrets`→true) AND selects the axis's
+/// accepted shapes: `vars` takes `"*"`/`true` (pass every ambient var), `[]`/globs, or
+/// an object; `secrets` takes only an array/object/`false` — it must NAME each secret,
+/// so a catch-all `"*"`/`true` is a shape error (redacting the whole environment is
+/// never the intent). Converting `"*"`/`true` into a real `"*"` Allow entry (rather
+/// than short-circuiting) is what lets the two axes compose under one `construct_env`.
+fn parse_env_surface(
+    value: &Value,
+    default_sensitive: bool,
+    path: &str,
+    ctx: &CompileCtx,
+    caps: ScopeCapabilities,
+    parent: Option<&EnvPolicy>,
+) -> Result<Vec<EnvEntry>, CompileError> {
+    let is_secrets = default_sensitive;
+    match value {
+        // `vars: "*"` / `vars: true` → one catch-all Allow passing every ambient key.
+        Value::String(s) if s == "*" && !is_secrets => Ok(vec![env_catch_all(default_sensitive)]),
+        Value::Bool(true) if !is_secrets => Ok(vec![env_catch_all(default_sensitive)]),
+        // A `secrets` string/`true`, or a non-`"*"` `vars` string, is a shape error.
+        Value::String(_) | Value::Bool(true) => Err(CompileError::shape(
+            path,
+            if is_secrets {
+                "`secrets` must be an array, an object, or `false` — it must name each secret; a catch-all `\"*\"`/`true` is not allowed (use `vars` for non-secret pass-through)"
+            } else {
+                "the only string `vars` accepts is `\"*\"` (pass every ambient variable) — use an array or object to select variables"
+            },
+        )),
+        // Explicit strip: no entries. construct_env withholds everything and
+        // add_os_essential_env re-adds only the OS-startup essentials.
+        Value::Bool(false) => Ok(Vec::new()),
+        Value::Array(items) => parse_env_array(items, parent, path, default_sensitive),
+        Value::Object(map) => parse_env_object(map, ctx, caps, parent, path, default_sensitive),
+        _ => Err(CompileError::shape(
+            path,
+            &format!("{path} must be a boolean, an array, or a pattern-keyed object"),
+        )),
+    }
+}
+
+/// The `"*"` / back-compat `true` catch-all: one Allow entry passing every ambient
+/// key. Optional (a catch-all never demands a specific var); `sensitive` per axis.
+fn env_catch_all(sensitive: bool) -> EnvEntry {
+    EnvEntry {
+        pattern: "*".to_string(),
+        action: EnvAction::Allow(None),
+        sensitive,
+        optional: true,
+        format: None,
+        key_match: KeyMatch::User,
+        builtin: false,
+    }
 }
 
 /// One parsed env entry, in surface order.
@@ -838,6 +882,7 @@ fn parse_env_array(
     items: &[Value],
     parent: Option<&EnvPolicy>,
     path: &str,
+    default_sensitive: bool,
 ) -> Result<Vec<EnvEntry>, CompileError> {
     let mut out = Vec::new();
     for (i, item) in items.iter().enumerate() {
@@ -870,7 +915,9 @@ fn parse_env_array(
             } else {
                 EnvAction::Allow(None)
             },
-            sensitive: !deny, // an allow defaults sensitive; a deny mark is irrelevant
+            // The axis decides sensitivity (vars→false, secrets→true); a deny mark
+            // is irrelevant (denies never enter the schema).
+            sensitive: default_sensitive,
             // The array form is a concise ALLOWLIST (pass-through-if-present),
             // never a required-var declaration — an exact key here means "permit
             // it", not "demand it" (required/optional is an object-form concept
@@ -892,6 +939,7 @@ fn parse_env_object(
     caps: ScopeCapabilities,
     parent: Option<&EnvPolicy>,
     path: &str,
+    default_sensitive: bool,
 ) -> Result<Vec<EnvEntry>, CompileError> {
     let mut out = Vec::new();
     for (raw_key, val) in map {
@@ -931,7 +979,7 @@ fn parse_env_object(
         };
         reject_env_key_braces(&key, &p)?;
         let optional = optional || is_glob(&key);
-        let entry = parse_env_object_value(key, optional, val, ctx, caps, &p)?;
+        let entry = parse_env_object_value(key, optional, val, ctx, caps, &p, default_sensitive)?;
         out.push(entry);
     }
     Ok(out)
@@ -944,12 +992,13 @@ fn parse_env_object_value(
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
     path: &str,
+    default_sensitive: bool,
 ) -> Result<EnvEntry, CompileError> {
     match val {
         Value::Bool(true) => Ok(EnvEntry {
             pattern: key,
             action: EnvAction::Allow(None),
-            sensitive: true,
+            sensitive: default_sensitive,
             optional,
             format: None,
             key_match: KeyMatch::User,
@@ -958,14 +1007,18 @@ fn parse_env_object_value(
         Value::Bool(false) => Ok(EnvEntry {
             pattern: key,
             action: EnvAction::Deny,
-            sensitive: true,
+            sensitive: default_sensitive,
             optional,
             format: None,
             key_match: KeyMatch::User,
             builtin: false,
         }),
-        Value::String(s) => parse_env_string_value(key, optional, s, ctx, caps, path),
-        Value::Object(extras) => parse_env_extras(key, optional, extras, ctx, caps, path),
+        Value::String(s) => {
+            parse_env_string_value(key, optional, s, ctx, caps, path, default_sensitive)
+        }
+        Value::Object(extras) => {
+            parse_env_extras(key, optional, extras, ctx, caps, path, default_sensitive)
+        }
         _ => Err(CompileError::shape(
             path,
             "env value must be a boolean, a type string, \"$(…)\", or an object",
@@ -980,6 +1033,7 @@ fn parse_env_string_value(
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
     path: &str,
+    default_sensitive: bool,
 ) -> Result<EnvEntry, CompileError> {
     // `$(…)` resolver — the `env_substitution` capability only.
     if resolve::has_substitution(s) {
@@ -1000,7 +1054,7 @@ fn parse_env_string_value(
         return Ok(EnvEntry {
             pattern: key,
             action: EnvAction::Literal(resolved),
-            sensitive: true,
+            sensitive: default_sensitive,
             optional,
             format: None,
             key_match: KeyMatch::User,
@@ -1026,7 +1080,7 @@ fn parse_env_string_value(
     Ok(EnvEntry {
         pattern: key,
         action: EnvAction::Allow(Some(ty)),
-        sensitive: true,
+        sensitive: default_sensitive,
         optional,
         format,
         key_match: KeyMatch::User,
@@ -1034,7 +1088,9 @@ fn parse_env_string_value(
     })
 }
 
-/// The object extras form: `{ sensitive, format, value, optional }`.
+/// The object extras form: `{ format, value, optional }`. Sensitivity is NOT an
+/// extras key — it is decided by the axis the entry came from (`vars`→false,
+/// `secrets`→true), threaded in as `default_sensitive`.
 fn parse_env_extras(
     key: String,
     optional_from_key: bool,
@@ -1042,9 +1098,19 @@ fn parse_env_extras(
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
     path: &str,
+    default_sensitive: bool,
 ) -> Result<EnvEntry, CompileError> {
-    const ALLOWED: &[&str] = &["sensitive", "format", "value", "optional"];
+    const ALLOWED: &[&str] = &["format", "value", "optional"];
     for k in extras.keys() {
+        // `brokerTo` is the Phase-2 secrets-brokering key; it is NOT accepted yet.
+        // Point at the current net-axis broker form rather than a generic
+        // unknown-option error. (Phase 2 relocates brokering onto the secrets axis.)
+        if k == "brokerTo" {
+            return Err(CompileError::shape(
+                &child(path, k),
+                "`brokerTo` is not supported yet — broker a credential on the net axis: `net: { \"<host>\": { \"env\": [\"NAME\"] } }`",
+            ));
+        }
         if !ALLOWED.contains(&k.as_str()) {
             return Err(CompileError::shape(
                 &child(path, k),
@@ -1052,18 +1118,8 @@ fn parse_env_extras(
             ));
         }
     }
-    // Single `sensitive` mark (D17), default-on; `sensitive: false` opts out of
-    // redaction. Collapses the old `secret`/`public` pair.
-    let sensitive = match extras.get("sensitive") {
-        Some(Value::Bool(value)) => *value,
-        Some(_) => {
-            return Err(CompileError::shape(
-                &child(path, "sensitive"),
-                "sensitive must be a boolean",
-            ));
-        }
-        None => true,
-    };
+    // Sensitivity is set by the axis, not an extras key.
+    let sensitive = default_sensitive;
     let optional = optional_from_key
         || match extras.get("optional") {
             Some(Value::Bool(value)) => *value,
@@ -1300,19 +1356,27 @@ fn construct_env(
 
     // 4. Schema (one rule per non-deny, non-builtin entry) + withheld (source
     //    minus kept). Builtin baseline/inherited/secret entries carry no user
-    //    validation or redaction mark, so they never enter the schema.
-    let mut seen = BTreeSet::new();
+    //    validation or redaction mark, so they never enter the schema. Dedup is
+    //    LAST-wins-by-key (upsert in place, first position kept): a name in BOTH
+    //    axes (vars entries precede secrets) records the later secrets rule
+    //    (`sensitive:true`), consistent with the value's last-match-wins verdict.
+    let mut schema_index: BTreeMap<String, usize> = BTreeMap::new();
     for e in entries {
         if e.builtin || matches!(e.action, EnvAction::Deny) {
             continue;
         }
-        if seen.insert(e.pattern.clone()) {
-            policy.schema.push(EnvRule {
-                key: e.pattern.clone(),
-                sensitive: e.sensitive,
-                format: e.format,
-                optional: e.optional,
-            });
+        let rule = EnvRule {
+            key: e.pattern.clone(),
+            sensitive: e.sensitive,
+            format: e.format,
+            optional: e.optional,
+        };
+        match schema_index.get(&e.pattern) {
+            Some(&i) => policy.schema[i] = rule,
+            None => {
+                schema_index.insert(e.pattern.clone(), policy.schema.len());
+                policy.schema.push(rule);
+            }
         }
     }
     policy.withheld = source

@@ -1,6 +1,6 @@
 {
   "name": "fs-read-confine",
-  "policy": { "fs": ["./"], "env": true, "net": true },
+  "policy": { "fs": ["./"], "vars": true, "net": true },
   "relaxed": false,
   "cases": [
     { "probe": "read", "target": "proj:pub.txt", "expect": true },

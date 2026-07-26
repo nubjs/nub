@@ -1,7 +1,7 @@
 {
   "name": "fs-windows-relative-canon",
   "note": "Windows regression guard for the `\\?\\` verbatim-prefix strip (matcher/path.rs strip_verbatim_prefix). A `./`-relative project policy is compiled through the REAL compiler → std::fs::canonicalize returns a `\\?\\C:\\...\\proj` verbatim path → strip_verbatim_prefix must yield a plain `C:\\...\\proj` so the fully-literal grant lands as an inheritable ACE. If it regresses (the `?` re-reads as a glob metachar → the grant is mis-classified as an unenforceable embedded-glob and DROPPED), the AppContainer child is denied its OWN project dir and the two ALLOW cases below go red. The outside read + its relaxed negative control keep the guard from being vacuous. This is the INTENTIONAL, named guard for the never-green-leg bug; macOS/Linux exercise the same `./` compile incidentally via fs-read-confine/fs-write-confine, so this case is Windows-scoped.",
-  "policy": { "fs": ["./"], "env": true, "net": true },
+  "policy": { "fs": ["./"], "vars": true, "net": true },
   "relaxed": false,
   "cases": [
     { "probe": "read",  "target": "proj:own.txt",       "expect": true,  "platforms": ["windows"] },

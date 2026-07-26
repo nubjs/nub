@@ -36,13 +36,15 @@ pub fn detect_net(items: &[Value], path: &str, out: &mut Vec<CompileWarning>) {
     detect(&norm, path, "net", net_covers, out);
 }
 
-/// env array clobber (exact keys / prefix globs, compared as raw strings).
+/// env-family array clobber (exact keys / prefix globs, compared as raw strings).
+/// Shared by the `vars` and `secrets` axes; the axis label in the warning is the
+/// surface `path` so the message names the axis the author actually wrote.
 pub fn detect_env(items: &[Value], path: &str, out: &mut Vec<CompileWarning>) {
     let norm: Vec<Option<String>> = items
         .iter()
         .map(|v| coverable(v).map(str::to_string))
         .collect();
-    detect(&norm, path, "env", env_covers, out);
+    detect(&norm, path, path, env_covers, out);
 }
 
 /// A coverable entry: its polarity-stripped pattern, or `None` for a non-string /

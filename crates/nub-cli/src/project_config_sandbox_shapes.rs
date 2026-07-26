@@ -10,18 +10,19 @@ use super::*;
 use crate::config::ImplicitDlx;
 
 /// The five policy shapes, as (raw JSONC value, expected parse). The granular
-/// arm exercises all three axis forms (object / array / bool) so losslessness
-/// covers the raw-value retention path, not just the wrapper classification.
+/// arm exercises all four axis forms (object / array / string / bool) so
+/// losslessness covers the raw-value retention path, not just the wrapper
+/// classification.
 pub(crate) fn five_shapes() -> Vec<(String, SandboxSetting)> {
-    let granular_raw =
-        r#"{ "fs": { "./data": { "read": true, "write": false } }, "net": [], "env": false }"#;
+    let granular_raw = r#"{ "fs": { "./data": { "read": true, "write": false } }, "net": [], "vars": "*", "secrets": false }"#;
     let granular = SandboxSetting::Granular(SandboxAxes {
         fs: Some(SandboxAxis::Object(BTreeMap::from([(
             "./data".into(),
             serde_json::json!({ "read": true, "write": false }),
         )]))),
         net: Some(SandboxAxis::Array(Vec::new())),
-        env: Some(SandboxAxis::Bool(false)),
+        vars: Some(SandboxAxis::String("*".into())),
+        secrets: Some(SandboxAxis::Bool(false)),
     });
     vec![
         ("false".into(), SandboxSetting::Disabled),

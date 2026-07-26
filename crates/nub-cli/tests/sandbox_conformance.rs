@@ -424,7 +424,7 @@ fn windows_read_deny_inside_grant_fails_closed() {
     let policy_path = tree.proj.join("__policy.json");
     std::fs::write(
         &policy_path,
-        tree.render_policy(&serde_json::json!({ "fs": ["./"], "env": true, "net": true })),
+        tree.render_policy(&serde_json::json!({ "fs": ["./"], "vars": true, "net": true })),
     )
     .unwrap();
     let marker = tree.proj.join("must-not-run.txt");
@@ -569,7 +569,7 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
         )
         .unwrap();
     }
-    std::fs::write(&policy, r#"{ "env": 42 }"#).unwrap();
+    std::fs::write(&policy, r#"{ "vars": 42 }"#).unwrap();
 
     let exact = Command::new(nub_bin())
         .args(["run", "--sandbox", policy.to_str().unwrap(), "--", "true"])

@@ -130,7 +130,7 @@ fn project_dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
     // A fully-restrictive dlx sandbox must not affect env sourcing (P6 inertness).
     write_project(
         &cwd,
-        r#"{ "dlx": { "env": "./env/dlx.env", "sandbox": { "fs": false, "net": false, "env": false } } }"#,
+        r#"{ "dlx": { "env": "./env/dlx.env", "sandbox": { "fs": false, "net": false, "vars": false } } }"#,
     );
     let sourced = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
     assert_eq!(
@@ -189,7 +189,7 @@ fn nubx_node_suppresses_config_env_for_local_and_forced_fetch() {
         &cwd,
         r#"{ "dlx": {
           "env": "./env/dlx.env",
-          "sandbox": { "fs": false, "net": false, "env": false }
+          "sandbox": { "fs": false, "net": false, "vars": false }
         } }"#,
     );
 

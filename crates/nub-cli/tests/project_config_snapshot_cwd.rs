@@ -23,7 +23,7 @@ fn global_cwd_flag_initializes_one_snapshot_from_the_requested_dir() {
     std::fs::write(ambient.join("nub.jsonc"), "{ malformed").unwrap();
     std::fs::write(
         target.join("nub.jsonc"),
-        r#"{ "sandbox": { "fs": false, "net": false, "env": false } }"#,
+        r#"{ "sandbox": { "fs": false, "net": false, "vars": false } }"#,
     )
     .unwrap();
     std::fs::write(target.join("probe.js"), "console.log('probe-ok');\n").unwrap();

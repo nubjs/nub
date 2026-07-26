@@ -657,7 +657,7 @@ fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
     // unlisted axis FLOORS (deny-all), so `{ env: false }` alone would confine fs
     // and the probe could not exec — this test wants env scrub with fs RELAXED.
     let (_c, out) = f.run(
-        serde_json::json!({ "env": false, "fs": true }),
+        serde_json::json!({ "vars": false, "fs": true }),
         &[("AMBIENT_SECRET", "s")],
         SH,
         &["-c", read_environ],
@@ -691,7 +691,7 @@ fn every_sandboxed_process_gets_a_private_proc_view() {
     // fs named RELAXED explicitly (an unlisted axis now floors → the probe couldn't
     // exec); this test is about env passthrough NOT closing /proc.
     let (_c, out) = f.run(
-        serde_json::json!({ "env": true, "fs": true }),
+        serde_json::json!({ "vars": true, "fs": true }),
         &[("FOO", "bar")],
         SH,
         &["-c", &read_environ],
@@ -815,7 +815,7 @@ fn bind_mounted_procfs_at_nonstandard_path_is_masked() {
     // Exercise the coding-agent posture: broad host visibility with network/process
     // isolation forcing a Bubblewrap view. The alternate mount would be visible through
     // the root bind if the mount-table mask were absent.
-    let broad_read = serde_json::json!({ "fs": true, "net": false, "env": true });
+    let broad_read = serde_json::json!({ "fs": true, "net": false, "vars": true });
 
     // Canonical `/proc` is a fresh procfs for the child PID namespace. The alternate
     // host procfs is masked even though its regular parent is readable.
@@ -876,7 +876,7 @@ fn env_scrub_strips_secret_keeps_baseline() {
     // that axis `env: true` passthrough keeps the ambient secret.
     assert!(
         f.run(
-            serde_json::json!({ "env": true, "fs": true }),
+            serde_json::json!({ "vars": true, "fs": true }),
             env,
             SH,
             &["-c", "test -n \"$MY_SECRET_TOKEN\""]
@@ -897,7 +897,7 @@ fn withheld_environment_hardens_keyrings_without_restricting_full_network() {
     };
     let probe = s(&probe);
     let ambient = &[("MY_SECRET_TOKEN", "leaked")];
-    let protected = serde_json::json!({ "env": false, "fs": true, "net": true });
+    let protected = serde_json::json!({ "vars": false, "fs": true, "net": true });
     assert_eq!(
         f.run(protected.clone(), ambient, &probe, &["keyring"]).0,
         0,
@@ -917,7 +917,7 @@ fn withheld_environment_hardens_keyrings_without_restricting_full_network() {
     let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
     assert_eq!(
         f.run(
-            serde_json::json!({ "env": false, "fs": true, "net": true }),
+            serde_json::json!({ "vars": false, "fs": true, "net": true }),
             ambient,
             &probe,
             &["unixconnect", &s(&socket_path)],
@@ -927,7 +927,7 @@ fn withheld_environment_hardens_keyrings_without_restricting_full_network() {
         "keyring-only hardening preserves Docker/Podman-style Unix socket access"
     );
 
-    let passthrough = serde_json::json!({ "env": true, "fs": ["...", "./"], "net": true });
+    let passthrough = serde_json::json!({ "vars": true, "fs": ["...", "./"], "net": true });
     assert_eq!(
         f.run(passthrough.clone(), ambient, &probe, &["keyprocopen"])
             .0,
@@ -957,7 +957,7 @@ fn target_path_resolves_relative_to_child_cwd_and_mounts_the_entry() {
 
     let surface = serde_json::json!({
         "fs": { "./writable": "rw" },
-        "env": { "PATH": true },
+        "vars": { "PATH": true },
         "net": true
     });
     assert_eq!(
@@ -1016,7 +1016,7 @@ __attribute__((constructor)) static void mark(void) {
     let surface = serde_json::json!({
         "fs": ["...", "./"],
         "net": true,
-        "env": {
+        "vars": {
             "PATH": true,
             "LD_PRELOAD": true,
             "PRELOAD_OUTSIDE": true,
@@ -1059,7 +1059,7 @@ fn dropping_prepared_child_tears_down_the_pid_namespace() {
     }
     let f = fixture();
     let policy = compile(
-        &serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        &serde_json::json!({ "fs": ["...", "./"], "net": true, "vars": true }),
         &f.ctx(&[("PATH", "/usr/bin:/bin")]),
     )
     .unwrap();
@@ -1109,7 +1109,7 @@ fn abrupt_parent_helper_holds_pid_namespace() {
     };
     let f = fixture();
     let policy = compile(
-        &serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        &serde_json::json!({ "fs": ["...", "./"], "net": true, "vars": true }),
         &f.ctx(&[("PATH", "/usr/bin:/bin")]),
     )
     .unwrap();
@@ -1213,7 +1213,7 @@ fn retained_launch_publishes_an_authenticated_signal_callback() {
     }
     let f = fixture();
     let policy = compile(
-        &serde_json::json!({ "fs": ["...", "./writable"], "net": true, "env": true }),
+        &serde_json::json!({ "fs": ["...", "./writable"], "net": true, "vars": true }),
         &f.ctx(&[("PATH", "/usr/bin:/bin")]),
     )
     .unwrap();
@@ -1564,7 +1564,7 @@ fn direct_nested_mount_namespace_preserves_mask_when_available() {
     let probe = s(&probe);
     let secret = s(&f.proj.join(".env"));
     let (code, _) = f.run(
-        serde_json::json!({ "fs": ["...", "./"], "net": true, "env": true }),
+        serde_json::json!({ "fs": ["...", "./"], "net": true, "vars": true }),
         &[],
         &probe,
         &["unmountmask", &secret],

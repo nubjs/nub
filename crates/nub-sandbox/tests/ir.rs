@@ -40,7 +40,7 @@ fn policy_round_trips_through_serde() {
             "fs": ["...", "!~/.ssh", "./data"],
             "net": ["*.sentry.io", "10.0.0.0/8"],
             "proxy": "auto",
-            "env": { "PORT": "port", "NODE_ENV": true }
+            "vars": { "PORT": "port", "NODE_ENV": true }
         }),
         &ctx,
     )
@@ -60,7 +60,7 @@ fn broker_ir_round_trips_without_serializing_the_parent_secret() {
     let policy = compile(
         &json!({
             "net": { "api.stripe.com": { "env": ["STRIPE_TOKEN"] } },
-            "env": true
+            "vars": true
         }),
         &ctx,
     )
@@ -81,7 +81,7 @@ fn conformance_fixture_passes_when_verdicts_match() {
             "fs": ["...", "./build"],
             "net": ["github.com"],
             "proxy": "auto",
-            "env": ["KEEP", "!*_TOKEN"]
+            "vars": ["KEEP", "!*_TOKEN"]
         },
         "fs": [
             { "path": format!("{}/build/out", proj.display()), "read": true, "write": true },
@@ -122,7 +122,7 @@ fn conformance_reports_a_mismatch() {
 #[test]
 fn apply_scrubs_env_when_enforced() {
     let ctx = common::ctx(true, &[("KEEP", "1"), ("SECRET_TOKEN", "s")]);
-    let policy = compile(&json!({ "env": ["KEEP"] }), &ctx).unwrap();
+    let policy = compile(&json!({ "vars": ["KEEP"] }), &ctx).unwrap();
     let _prepared = apply(&policy, CommandSpec::new(TRUE_PROGRAM)).unwrap();
     assert_eq!(
         policy.env.constructed.get("KEEP").map(String::as_str),
@@ -144,7 +144,7 @@ fn apply_replaces_a_brokered_parent_value_with_a_fresh_marker() {
         &json!({
             "fs": true,
             "net": { "api.example.com": { "env": ["HOME"] } },
-            "env": true
+            "vars": true
         }),
         &ctx,
     )
@@ -180,7 +180,7 @@ fn apply_fails_closed_when_a_brokered_parent_value_is_missing() {
         &json!({
             "fs": true,
             "net": { "api.example.com": { "env": [MISSING] } },
-            "env": true
+            "vars": true
         }),
         &ctx,
     )

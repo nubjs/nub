@@ -45,12 +45,15 @@ fn total_shadow_warns() {
         "later * covers all hosts"
     );
     assert!(
-        warns(json!({ "env": ["VITE_URL", "VITE_*"] })),
+        warns(json!({ "vars": ["VITE_URL", "VITE_*"] })),
         "key then covering prefix glob"
     );
-    assert!(warns(json!({ "env": ["FOO", "FOO"] })), "duplicate env key");
     assert!(
-        warns(json!({ "env": ["NODE_ENV", "*"] })),
+        warns(json!({ "vars": ["FOO", "FOO"] })),
+        "duplicate env key"
+    );
+    assert!(
+        warns(json!({ "vars": ["NODE_ENV", "*"] })),
         "later * covers all keys"
     );
 }
@@ -64,7 +67,7 @@ fn partial_override_and_sentinels_stay_silent() {
         "broad allow, narrow deny"
     );
     assert!(
-        !warns(json!({ "env": ["*", "!*_TOKEN"] })),
+        !warns(json!({ "vars": ["*", "!*_TOKEN"] })),
         "allow-all then strip a class"
     );
     assert!(
@@ -77,7 +80,7 @@ fn partial_override_and_sentinels_stay_silent() {
     );
     assert!(!warns(json!({ "fs": ["./a", "./b"] })), "disjoint paths");
     assert!(
-        !warns(json!({ "env": ["FOO", "BAR", "!*_TOKEN"] })),
+        !warns(json!({ "vars": ["FOO", "BAR", "!*_TOKEN"] })),
         "disjoint keys + class deny"
     );
     // `"..."` / `"!..."` are excluded from clobber analysis (they expand to many
@@ -87,7 +90,7 @@ fn partial_override_and_sentinels_stay_silent() {
         "inherit then specific"
     );
     assert!(
-        !warns(json!({ "env": ["*", "..."] })),
+        !warns(json!({ "vars": ["*", "..."] })),
         "allow-all then inherit"
     );
     // A three-entry partial (allow block, deny sub, re-allow sub-sub) stays silent.
@@ -221,9 +224,9 @@ fn net_spread_inherits_the_resolved_parent() {
 
 #[test]
 fn env_spread_inherits_the_resolved_parent() {
-    let parent = json!({ "env": { "FOO": true } }); // parent env = {FOO}
+    let parent = json!({ "vars": { "FOO": true } }); // parent env = {FOO}
     // Object-form `"..."` key inherits the parent env, then adds BAR.
-    let p = chain(&parent, &json!({ "env": { "...": true, "BAR": true } }));
+    let p = chain(&parent, &json!({ "vars": { "...": true, "BAR": true } }));
     assert_eq!(
         p.env.constructed.get("FOO").map(String::as_str),
         Some("1"),
@@ -239,13 +242,13 @@ fn env_spread_inherits_the_resolved_parent() {
         "ambient PATH not pulled in"
     );
     // No `"..."` → floor: BAR only, parent FOO NOT inherited.
-    let f = chain(&parent, &json!({ "env": { "BAR": true } }));
+    let f = chain(&parent, &json!({ "vars": { "BAR": true } }));
     assert!(
         f.env.constructed.contains_key("BAR") && !f.env.constructed.contains_key("FOO"),
         "FOO not inherited"
     );
     // A child deny after inherit removes an inherited key (last-match).
-    let d = chain(&parent, &json!({ "env": { "...": true, "FOO": false } }));
+    let d = chain(&parent, &json!({ "vars": { "...": true, "FOO": false } }));
     assert!(
         !d.env.constructed.contains_key("FOO"),
         "child deny removes inherited FOO"
@@ -257,8 +260,7 @@ fn keyless_scope_cascades_the_parent_whole_policy() {
     // A scope with NO `sandbox` key inherits its parent's WHOLE policy (cascade —
     // it can't escape confinement by saying nothing).
     let ctx = common::ctx(true, &[("FOO", "1")]);
-    let parent =
-        json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "proxy": "auto", "env": { "FOO": true } });
+    let parent = json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "proxy": "auto", "vars": { "FOO": true } });
     let (p, _) = resolve_chain(
         &[
             ChainScope {
@@ -283,8 +285,7 @@ fn keyless_scope_cascades_the_parent_whole_policy() {
 fn object_spread_inner_inherits_parent_for_unlisted_axes() {
     // `{ "...": true, "fs": ["...", "./b"] }` at an inner scope: inherit parent
     // net+env, and inherit-then-extend parent fs.
-    let parent =
-        json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "proxy": "auto", "env": { "FOO": true } });
+    let parent = json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "proxy": "auto", "vars": { "FOO": true } });
     let p = chain(&parent, &json!({ "...": true, "fs": ["...", "./b"] }));
     let m = PathMatcher::new(&p.fs.rules);
     let proj = common::homes().project;
@@ -322,7 +323,7 @@ fn per_scope_capabilities_gate_each_scope_independently() {
     // ChainScope's caps. StubRunner resolves `$(echo hi)` → "hi".
     let ctx = common::ctx(false, &[]);
     let approved = json!({
-        "env": { "TOKEN": "$(echo hi)" },
+        "vars": { "TOKEN": "$(echo hi)" },
         "net": { "api.example.com": { "env": ["BROKER_TOKEN"] } },
     });
     let outer = approved_scope;
@@ -359,7 +360,7 @@ fn per_scope_capabilities_gate_each_scope_independently() {
 
     // (2) The inner dependency scope's OWN `$(…)` is denied even though an approved
     //     scope precedes it — env_substitution is per-scope, not chain-wide.
-    let inner_subst = json!({ "env": { "X": "$(echo hi)" } });
+    let inner_subst = json!({ "vars": { "X": "$(echo hi)" } });
     let err = resolve_chain(
         &[
             outer(&approved),

@@ -1,6 +1,6 @@
 {
   "name": "net-coarse-deny",
-  "policy": { "net": false, "fs": true, "env": true },
+  "policy": { "net": false, "fs": true, "vars": true },
   "relaxed": false,
   "cases": [
     { "probe": "env", "target": "PATH", "expect": true },

@@ -13,7 +13,7 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
         r#"{
           "$schema": "https://nubjs.com/schema/nub.json",
           "nodeCompat": false,
-          "sandbox": { "fs": false, "net": ["registry.npmjs.org"], "env": true },
+          "sandbox": { "fs": false, "net": ["registry.npmjs.org"], "vars": true },
           "install": {
             "nodeLinker": "isolated",
             "sandbox": "./install-policy.json"
@@ -128,9 +128,11 @@ fn wrong_wrapper_types_report_the_nested_path() {
             "a boolean, string (preset or \"./file.json\"), or object",
         ),
         (
-            r#"{ "dlx": { "sandbox": { "fs": "rw" } } }"#,
+            // A string is now a valid axis shape (`vars: "*"`), so use a number to
+            // exercise the axis-value type error.
+            r#"{ "dlx": { "sandbox": { "fs": 5 } } }"#,
             "dlx.sandbox.fs",
-            "a boolean, array, or object",
+            "a boolean, string, array, or object",
         ),
     ] {
         let err = parse_project_config(text).expect_err(&format!("{text} must fail loud"));

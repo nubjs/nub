@@ -480,7 +480,7 @@ mod imp {
         } else {
             json!(true)
         };
-        json!({ "fs": Value::Object(fs_map), "env": env, "net": net })
+        json!({ "fs": Value::Object(fs_map), "vars": env, "net": net })
     }
 
     // ── per-level assertions ────────────────────────────────────────────────────

@@ -90,12 +90,12 @@ fn restrictive_install_sandbox_config_is_inert_for_an_offline_lifecycle_install(
     // `install.nodeOptions` liveness probe. If any consumer activated a
     // posture, the env canary or the outside-project write would diverge.
     let restrictive = r#"{
-      "sandbox": { "fs": false, "net": false, "env": false },
+      "sandbox": { "fs": false, "net": false, "vars": false },
       "install": {
         "nodeOptions": ["--stack-trace-limit=19"],
-        "sandbox": { "fs": false, "net": false, "env": false }
+        "sandbox": { "fs": false, "net": false, "vars": false }
       },
-      "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
+      "dlx": { "sandbox": { "fs": false, "net": false, "vars": false } }
     }"#;
     let (code, observed) =
         run_offline_lifecycle_install(&temp.path().join("configured"), Some(restrictive), None);
@@ -126,12 +126,12 @@ fn restrictive_global_sandbox_config_is_inert_for_an_offline_lifecycle_install()
     );
 
     let restrictive = r#"{
-      "sandbox": { "fs": false, "net": false, "env": false },
+      "sandbox": { "fs": false, "net": false, "vars": false },
       "install": {
         "nodeOptions": ["--stack-trace-limit=29"],
-        "sandbox": { "fs": false, "net": false, "env": false }
+        "sandbox": { "fs": false, "net": false, "vars": false }
       },
-      "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
+      "dlx": { "sandbox": { "fs": false, "net": false, "vars": false } }
     }"#;
     let (code, observed) =
         run_offline_lifecycle_install(&temp.path().join("configured"), None, Some(restrictive));

@@ -263,18 +263,18 @@ pub(crate) fn compile_scope(
         Value::Object(_) => compile_object(surface, parent, ctx, caps, warnings),
         _ => Err(CompileError::shape(
             "",
-            "sandbox must be a boolean, a preset name, a file-ref, or a { fs, net, env } object",
+            "sandbox must be a boolean, a preset name, a file-ref, or a { fs, net, vars, secrets } object",
         )),
     }
 }
 
-/// Fold a granular `{ fs, net, env }` object. A present block is a COMPLETE
+/// Fold a granular `{ fs, net, vars, secrets }` object. A present block is a COMPLETE
 /// statement: an axis it does NOT list FLOORS (deny fs, deny-all-enforcing net,
 /// strip env) — least-exposure, fails closed. An object-level `"..."` key
 /// (`{ "...": true }`) opts every UNLISTED axis into inheriting the enclosing
 /// scope's base instead of flooring; a LISTED axis's own `"..."` inherits that
-/// axis. So `{}` = deny-all; `{ "fs": [...] }` floors net+env; `{ "...": true }`
-/// ≡ the enclosing base for all axes.
+/// axis. So `{}` = deny-all; `{ "fs": [...] }` floors net + env (both `vars` and
+/// `secrets`); `{ "...": true }` ≡ the enclosing base for all axes.
 fn compile_object(
     surface: &Value,
     parent: Option<&SandboxPolicy>,
@@ -284,21 +284,26 @@ fn compile_object(
 ) -> Result<SandboxPolicy, CompileError> {
     let obj = surface
         .as_object()
-        .ok_or_else(|| CompileError::shape("", "expected a { fs, net, env } object"))?;
-    fold::reject_unknown_keys(obj, &["fs", "net", "env", "proxy", "..."], "")?;
+        .ok_or_else(|| CompileError::shape("", "expected a { fs, net, vars, secrets } object"))?;
+    fold::reject_unknown_keys(obj, &["fs", "net", "vars", "secrets", "proxy", "..."], "")?;
     let inherit_base = object_spread(obj.get("..."))?;
 
     // Clobber detection runs per ARRAY axis (a total shadow between two entries of
     // the SAME array — D2b/D6); object forms have unique keys, so their granular
-    // overrides are the intended idiom.
+    // overrides are the intended idiom. `vars` and `secrets` are both env-family
+    // arrays; each is clobber-checked independently (cross-axis collision is not a
+    // clobber — a secrets entry deliberately wins over a same-named vars entry).
     if let Some(Value::Array(items)) = obj.get("fs") {
         clobber::detect_fs(items, &ctx.homes, "fs", warnings);
     }
     if let Some(Value::Array(items)) = obj.get("net") {
         clobber::detect_net(items, "net", warnings);
     }
-    if let Some(Value::Array(items)) = obj.get("env") {
-        clobber::detect_env(items, "env", warnings);
+    if let Some(Value::Array(items)) = obj.get("vars") {
+        clobber::detect_env(items, "vars", warnings);
+    }
+    if let Some(Value::Array(items)) = obj.get("secrets") {
+        clobber::detect_env(items, "secrets", warnings);
     }
 
     let fs = match obj.get("fs") {
@@ -325,10 +330,16 @@ fn compile_object(
     }
     reconcile_brokers(&mut net);
     finalize_net_inspection(&mut net, "net")?;
-    let mut env = match obj.get("env") {
-        Some(v) => fold::fold_env(v, ctx, caps, "env", parent.map(|p| &p.env))?,
-        None if inherit_base => inherit_env(parent, ctx),
-        None => floor_env(ctx),
+    // The env-family axes (`vars` + `secrets`) fold together into one EnvPolicy.
+    // Both absent: inherit (under `"..."`) or floor, exactly as the old single `env`
+    // axis did. Either present: an explicit, complete env statement — the other axis
+    // defaults to no entries.
+    let vars = obj.get("vars");
+    let secrets = obj.get("secrets");
+    let mut env = match (vars, secrets) {
+        (None, None) if inherit_base => inherit_env(parent, ctx),
+        (None, None) => floor_env(ctx),
+        _ => fold::fold_env_axes(vars, secrets, ctx, caps, parent.map(|p| &p.env))?,
     };
     withhold_brokered_env(&net, &mut env, ctx);
     Ok(SandboxPolicy {
