@@ -41,8 +41,8 @@ mod win {
     };
     use windows_sys::Win32::Storage::FileSystem::CreateFileW;
     use windows_sys::Win32::System::Threading::{
-        CreateProcessWithLogonW, GetCurrentProcess, INFINITE, OpenProcessToken, PROCESS_INFORMATION,
-        STARTUPINFOW, WaitForSingleObject,
+        CreateProcessWithLogonW, GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken,
+        PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
     };
 
     const LOGON32_LOGON_BATCH: u32 = 4;
@@ -198,13 +198,17 @@ mod win {
                 return 1;
             }
         };
-        let out = r"C:\Users\Public\childsid.out";
-        let _ = std::fs::remove_file(out);
-        // The child runs as nub-sandbox, which cannot write arbitrary host paths. Redirect its
-        // stdout to a PARENT-OWNED inheritable file handle instead: CreateProcessWithLogonW
-        // ignores bInheritHandles but honors STARTF_USESTDHANDLES, and seclogon duplicates the
-        // std handles into the child (design §10 — the mechanism bit 2 relies on; verified here).
-        let wout = to_wide(out);
+        // PRIMARY check (does the child run AS the account?): the child writes its own SID via
+        // redirection to C:\Windows\Temp, which authenticated users may write — the low-priv
+        // account cannot write arbitrary host paths.
+        let sid_out = r"C:\Windows\Temp\nub_childsid.out";
+        let _ = std::fs::remove_file(sid_out);
+        // SECONDARY check (design §10 stdio): a PARENT-OWNED inheritable handle as the child's
+        // stdout, plus a trailing `whoami` with no redirect that writes to it. Reports whether
+        // seclogon actually duplicates a parent std handle into the CreateProcessWithLogonW child.
+        let h_out = r"C:\Users\Public\childsid_h.out";
+        let _ = std::fs::remove_file(h_out);
+        let wout = to_wide(h_out);
         let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
         sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
         sa.bInheritHandle = 1;
@@ -229,7 +233,7 @@ mod win {
         let user = to_wide(&creds.account_name);
         let domain = to_wide(".");
         let pass = to_wide(&creds.password);
-        let mut cmdline = to_wide("cmd.exe /c whoami /user");
+        let mut cmdline = to_wide(&format!("cmd.exe /c whoami /user > {sid_out} 2>&1 & whoami /user"));
         let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         si.dwFlags = STARTF_USESTDHANDLES;
@@ -267,16 +271,24 @@ mod win {
             }
             return 1;
         }
+        let mut code: u32 = 0;
         unsafe {
             WaitForSingleObject(pi.hProcess, INFINITE);
+            GetExitCodeProcess(pi.hProcess, &mut code);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
-            CloseHandle(hfile); // flush + release so the parent can read the sink
+            CloseHandle(hfile);
         }
-        let child_bytes = std::fs::read(out).unwrap_or_default();
-        let child = String::from_utf8_lossy(&child_bytes);
-        println!("LAUNCH child whoami output: {}", child.trim());
-        if child.contains(&creds.account_sid) {
+        println!("LAUNCH child exit code: {code}");
+        let sid_bytes = std::fs::read(sid_out).unwrap_or_default();
+        let sid_txt = String::from_utf8_lossy(&sid_bytes);
+        println!("LAUNCH child whoami (redirect): {}", sid_txt.trim());
+        let h_bytes = std::fs::read(h_out).unwrap_or_default();
+        println!(
+            "LAUNCH seclogon-inherited-stdout delivered {} bytes (design §10)",
+            h_bytes.len()
+        );
+        if sid_txt.contains(&creds.account_sid) {
             println!("LAUNCH-OK child ran as the dedicated account (SID {})", creds.account_sid);
             0
         } else {
