@@ -227,23 +227,35 @@ fn shared_tmp_dirs() -> Vec<String> {
 }
 
 /// Emit the tmp-mode SBPL. `Shared` is a no-op (the confstr write grant that emit_fs
-/// already emitted stands). `Private`/`Deny` DENY read+write on every shared-tmp root
+/// already emitted stands). `Private`/`Deny` DENY read+write on the shared-tmp roots
 /// (last-match-wins over a generous read); `Private` additionally grants the fresh
 /// per-run dir rw (`file*` subpath). Emitted after emit_fs so the shared-tmp deny is
 /// authoritative even under a `(subpath "/")` generous read.
 ///
-/// PROVENANCE / tradeoff: the shared-tmp deny INCLUDES the confstr scratch that emit_fs
-/// otherwise write-grants for the Apple toolchain (`xcrun_db`) — so under Private/Deny a
-/// from-source native compile that needs that scratch will fail. This is the forced,
-/// documented consequence of hiding the shared tmp (you cannot both hide it and keep the
-/// grant into it); Private/Deny is opt-in, and a native-build user stays on Shared. See
-/// LIMITATIONS.md.
+/// COMPILER CARVE-OUT: under `Private` ($tmp:rw) the confstr TEMP scratch is EXCLUDED from
+/// the deny — it stays granted (emit_fs write-grants it, and a generous read covers its
+/// reads), so it is the one part of the shared tmp that remains shared. It holds the Apple
+/// toolchain's fixed `xcrun_db` lookup cache, which is not TMPDIR-redirectable, so keeping
+/// it lets a native (node-gyp) build retain the same toolchain access it has under `Shared`.
+/// Only the world-shared `/private/tmp` is hidden. `Deny` ($tmp:false = no tmp at all)
+/// carves nothing — it hides the confstr scratch too. See LIMITATIONS.md.
 fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut String) {
     use crate::policy::TmpMode;
     if policy.fs.tmp == TmpMode::Shared {
         return;
     }
+    // Private keeps the confstr TEMP scratch (the compiler carve-out); Deny carves nothing.
+    // `shared_tmp_dirs()` is the confstr scratch(es) + `/private/tmp`, so excluding the
+    // confstr set leaves exactly `/private/tmp` in the Private deny set.
+    let carve = if policy.fs.tmp == TmpMode::Private {
+        confstr_scratch_dirs()
+    } else {
+        Vec::new()
+    };
     for dir in shared_tmp_dirs() {
+        if carve.contains(&dir) {
+            continue;
+        }
         let term = format!("(subpath \"{}\")", sbpl_escape(&dir));
         out.push_str(&format!("(deny file-read* {term})\n"));
         out.push_str(&format!("(deny file-write* {term})\n"));
@@ -1618,6 +1630,52 @@ mod tests {
             assert!(
                 !prof.contains(&format!("(allow file-write* (subpath \"{cache}\"))")),
                 "the DARWIN cache dir must not be write-granted"
+            );
+        }
+    }
+
+    #[test]
+    fn private_tmp_carves_the_confstr_compiler_scratch_but_hides_private_tmp() {
+        // $tmp:rw (Private) hides the world-shared /private/tmp but KEEPS the confstr TEMP
+        // scratch (the Apple toolchain's fixed xcrun_db cache) granted so native builds work
+        // — the doc's "granting $tmp also grants Apple's fixed compiler-cache directory".
+        let mut p = fs_policy(
+            Effect::Deny,
+            vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
+        );
+        p.fs.tmp = TmpMode::Private;
+        let prof = build_profile(&p, &spec(), None, None, None);
+        assert!(
+            prof.contains("(deny file-read* (subpath \"/private/tmp\"))"),
+            "Private must hide the world-shared /private/tmp"
+        );
+        // The confstr scratch stays granted (emit_fs write-grant survives) and is never denied.
+        for dir in confstr_scratch_dirs() {
+            assert!(
+                prof.contains(&format!("(allow file-write* (subpath \"{dir}\"))")),
+                "confstr scratch write grant must remain for the compiler carve-out"
+            );
+            assert!(
+                !prof.contains(&format!("(deny file-read* (subpath \"{dir}\"))")),
+                "Private must NOT deny the confstr scratch (native-build carve-out)"
+            );
+        }
+    }
+
+    #[test]
+    fn deny_tmp_hides_the_confstr_scratch_too() {
+        // $tmp:false (Deny) = no tmp at all: BOTH /private/tmp AND the confstr scratch hidden.
+        let mut p = fs_policy(
+            Effect::Deny,
+            vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
+        );
+        p.fs.tmp = TmpMode::Deny;
+        let prof = build_profile(&p, &spec(), None, None, None);
+        assert!(prof.contains("(deny file-read* (subpath \"/private/tmp\"))"));
+        for dir in confstr_scratch_dirs() {
+            assert!(
+                prof.contains(&format!("(deny file-read* (subpath \"{dir}\"))")),
+                "Deny must hide the confstr scratch too (no carve-out)"
             );
         }
     }

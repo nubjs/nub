@@ -323,10 +323,13 @@ shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp
   under `$tmp: "rw"`/`false` and readable without, and reachable via a literal `/tmp` grant
   (`tests/macos_enforcement.rs` `private_tmp_hides_the_shared_system_tmp` /
   `deny_tmp_hides_the_shared_system_tmp_too` / `literal_tmp_path_is_the_only_way_to_the_shared_system_tmp`).
-  - **Tradeoff (forced, documented):** the shared-tmp deny INCLUDES the confstr scratch that
-    the backend otherwise write-grants for the Apple toolchain (`xcrun_db`), so a from-source
-    native compile that needs it fails under `Private`/`Deny`. You cannot both hide the shared
-    tmp and keep a grant into it; the mode is opt-in, and a native-build run stays on Shared.
+  - **Native-build carve-out (`Private` only):** under `Private` the confstr TEMP scratch
+    (`/var/folders/<uid>/T` — the Apple toolchain's fixed, non-TMPDIR-redirectable `xcrun_db`
+    lookup cache) is EXCLUDED from the shared-tmp deny, so it stays granted and a from-source
+    native compile keeps the same toolchain scratch it has under `Shared`; only the
+    world-shared `/private/tmp` is hidden. `Deny` (`<tmp>: false`, no tmp at all) carves
+    nothing — it hides the confstr scratch too, so a native compile that needs it fails under
+    `Deny` (a native-build run uses `Private`, not `Deny`).
 - **Linux — ENFORCED.** `Private` bind-mounts the fresh per-run directory at `/tmp`;
   `Deny` installs an empty traverse-only tmpfs and remounts it read-only after any
   explicitly allowed descendant mounts are layered.

@@ -445,6 +445,45 @@ fn deny_tmp_hides_the_shared_system_tmp_too() {
 }
 
 #[test]
+fn private_tmp_keeps_the_apple_compiler_scratch_writable() {
+    // $tmp:rw (Private) hides /private/tmp but CARVES OUT the confstr TEMP scratch
+    // (/var/folders/<uid>/T — the Apple toolchain's fixed, NOT-TMPDIR-redirectable xcrun_db
+    // cache) so native (node-gyp) builds keep working. A write INTO that scratch must SUCCEED
+    // under Private and be DENIED under $tmp:false (Deny), which carves nothing. The scratch
+    // is the process TMPDIR (the confstr dir), canonicalized to match the kernel's view.
+    let scratch = fs::canonicalize(std::env::temp_dir()).unwrap();
+    let target = scratch.join(format!("nub-carve-probe-{}", std::process::id()));
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _c = Cleanup(target.clone());
+    let f = fixture();
+
+    // Private: the compiler scratch stays writable (the carve-out).
+    assert!(
+        f.allowed(
+            serde_json::json!({ "fs": { "/": "r", "$tmp": "rw" } }),
+            TOUCH,
+            &[&s(&target)]
+        ),
+        "private tmp must keep the Apple compiler scratch (confstr TEMP) writable"
+    );
+    let _ = fs::remove_file(&target);
+    // NEG-CONTROL: Deny hides the scratch too — the same write is refused.
+    assert!(
+        !f.allowed(
+            serde_json::json!({ "fs": { "/": "r", "$tmp": false } }),
+            TOUCH,
+            &[&s(&target)]
+        ),
+        "deny tmp must hide the compiler scratch too (no carve-out)"
+    );
+}
+
+#[test]
 fn literal_tmp_path_is_the_only_way_to_the_shared_system_tmp() {
     // The clarified model: the `$tmp` sentinel NEVER grants the shared system tmp — the only
     // way to reach it is granting the literal path `/tmp` (canonicalizes to `/private/tmp`),
