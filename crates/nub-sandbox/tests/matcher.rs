@@ -193,9 +193,9 @@ fn net_wildcard_matches_subdomains_but_not_apex_or_sibling_domains() {
     // Property 2 — must NOT match. The apex (list it separately to allow it), plus every
     // shape that shares the substring "example.com" but is a DIFFERENT registrable domain.
     for host in [
-        "example.com",     // apex — NOT covered by `*.`
-        "EXAMPLE.COM",     // case-insensitive apex
-        "notexample.com",  // prefix glued, no label boundary
+        "example.com",    // apex — NOT covered by `*.`
+        "EXAMPLE.COM",    // case-insensitive apex
+        "notexample.com", // prefix glued, no label boundary
         "evilexample.com",
         "fooexample.com",
         "myexample.com",
