@@ -32,10 +32,9 @@ mod win {
     use nub_sandbox::{DetectError, detect, windows_setup, windows_teardown};
 
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
-    use windows_sys::Win32::Security::Authentication::Identity::LogonUserW;
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{
-        GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetTokenInformation, LogonUserW, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
