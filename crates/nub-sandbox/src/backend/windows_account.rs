@@ -31,7 +31,7 @@ pub const ACCOUNT_NAME: &str = "nub-sandbox";
 /// Bumped whenever the on-disk `setup.json` schema or the setup steps change in a way that
 /// makes an older setup insufficient — a mismatch makes `detect()` fail closed with the
 /// re-run hint rather than launching against a stale principal.
-pub const SETUP_VERSION: u32 = 1;
+pub const SETUP_VERSION: u32 = 2;
 
 /// Persistent, machine-visible setup record. Written by `windows_setup()` (elevated) with a
 /// DACL granting authenticated users READ; consumed by `detect()` (unelevated). The WFP GUID
@@ -376,40 +376,43 @@ mod imp {
         Ok(handle)
     }
 
-    /// Grant SeBatchLogonRight (required for `CreateProcessWithLogonW`/batch logon) and DENY
-    /// interactive/network/remote-interactive logon, so the account can only ever be a
-    /// sandbox launch target — never a login identity. Idempotent (LSA add is a set union).
+    /// Set the account's logon rights so it can be a sandbox launch target but NEVER a
+    /// remote-login identity. GRANT SeInteractiveLogonRight + SeBatchLogonRight; DENY only
+    /// network + remote-interactive logon.
+    ///
+    /// PROVENANCE (empirically established on nub-win, 2026-07-26): `CreateProcessWithLogonW`
+    /// (bit 2's unelevated launcher) performs an INTERACTIVE-type secondary logon, so the
+    /// account MUST hold SeInteractiveLogonRight — with it DENIED, CreateProcessWithLogonW
+    /// fails with 1385 (ERROR_LOGON_TYPE_NOT_GRANTED). The original design's blanket
+    /// deny-interactive is therefore incompatible with the chosen launcher; the real
+    /// protections are the DPAPI-only password (no one can type it) plus deny-network
+    /// (no SMB/remote) and deny-remote-interactive (no RDP). Idempotent: also REMOVES a
+    /// stale deny-interactive a prior setup version may have set (a deny overrides a grant).
     fn lsa_set_account_rights(sid: PSID) -> io::Result<()> {
         let policy = lsa_open_policy()?;
         let result = (|| {
-            let mut grant = to_wide("SeBatchLogonRight");
-            let grants = [lsa_unicode_string(&mut grant)];
-            let status =
-                unsafe { LsaAddAccountRights(policy, sid, grants.as_ptr(), grants.len() as u32) };
-            if status != 0 {
-                let win = unsafe { LsaNtStatusToWinError(status) };
-                return Err(io::Error::other(format!(
-                    "LsaAddAccountRights(SeBatchLogonRight) failed: {}",
-                    io::Error::from_raw_os_error(win as i32)
-                )));
-            }
-            let mut d1 = to_wide("SeDenyInteractiveLogonRight");
-            let mut d2 = to_wide("SeDenyNetworkLogonRight");
-            let mut d3 = to_wide("SeDenyRemoteInteractiveLogonRight");
-            let denies = [
-                lsa_unicode_string(&mut d1),
-                lsa_unicode_string(&mut d2),
-                lsa_unicode_string(&mut d3),
-            ];
-            let status =
-                unsafe { LsaAddAccountRights(policy, sid, denies.as_ptr(), denies.len() as u32) };
-            if status != 0 {
-                let win = unsafe { LsaNtStatusToWinError(status) };
-                return Err(io::Error::other(format!(
-                    "LsaAddAccountRights(deny-logons) failed: {}",
-                    io::Error::from_raw_os_error(win as i32)
-                )));
-            }
+            let add = |name: &str| -> io::Result<()> {
+                let mut w = to_wide(name);
+                let arr = [lsa_unicode_string(&mut w)];
+                let status = unsafe { LsaAddAccountRights(policy, sid, arr.as_ptr(), 1) };
+                if status != 0 {
+                    let win = unsafe { LsaNtStatusToWinError(status) };
+                    return Err(io::Error::other(format!(
+                        "LsaAddAccountRights({name}) failed: {}",
+                        io::Error::from_raw_os_error(win as i32)
+                    )));
+                }
+                Ok(())
+            };
+            add("SeInteractiveLogonRight")?;
+            add("SeBatchLogonRight")?;
+            // Converge a v1 setup that denied interactive logon (a deny would override the
+            // grant above). Ignore status — removing an absent right is benign.
+            let mut di = to_wide("SeDenyInteractiveLogonRight");
+            let di_arr = [lsa_unicode_string(&mut di)];
+            unsafe { LsaRemoveAccountRights(policy, sid, false, di_arr.as_ptr(), 1) };
+            add("SeDenyNetworkLogonRight")?;
+            add("SeDenyRemoteInteractiveLogonRight")?;
             Ok(())
         })();
         unsafe { LsaClose(policy) };
