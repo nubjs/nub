@@ -4,8 +4,8 @@
 mod common;
 
 use nub_sandbox::compiler::{CompileError, compile};
-use nub_sandbox::policy::{Effect, EnvFormat, Inspection, NetTarget, TmpMode};
-use serde_json::json;
+use nub_sandbox::policy::{Effect, EnvFormat, FsAccess, Inspection, NetTarget, TmpMode};
+use serde_json::{Value, json};
 
 // ── wrapper trichotomy ────────────────────────────────────────────────────────
 
@@ -2262,33 +2262,413 @@ fn naked_sentinel_is_rejected_on_every_axis() {
     );
 }
 
+// ── `...:#/pointer` OBJECT-KEY spread (general spread — reverses P4's OQ2) ───────
+// The `...:#/pointer` token is a GENERAL spread: as an OBJECT KEY it resolves the pointer
+// to an OBJECT and splices its key→value entries at the slot, re-folding through the
+// ordinary object-entry path (so built-in sets + the `.env*` floor compose, and a LOCAL
+// key after the spread overrides a spliced one by last-match). Uniform with the array form.
+
 #[test]
-fn reuse_object_key_is_rejected_array_only() {
-    // OQ2: `...:#/pointer` reuse is array-only — a `...:`-prefixed OBJECT key on fs/net
-    // is a shape error, never a literal path/host key.
-    let ctx = common::ctx(true, &[]);
-    for surface in [
-        json!({ "fs": { "...:#/shared/fs": "r" } }),
-        json!({ "net": { "...:#/shared/net": true } }),
-    ] {
-        match compile(&surface, &ctx).unwrap_err() {
+fn reuse_object_spread_splices_and_local_key_overrides() {
+    // The spread splices `#/shared/fs`'s entries, then the LOCAL `./dist: "rw"` AFTER the
+    // spread overrides the spliced `./dist: "r"` by last-match (JS `{...shared, "./dist": "rw"}`).
+    let doc = json!({
+        "shared": { "fs": { "./src": "r", "./dist": "r" } },
+        "sandbox": { "fs": { "...:#/shared/fs": true, "./dist": "rw" } }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
+    let src = m.decide(&common::homes().project.join("src/a.rs"));
+    assert!(
+        matches!(src.effect, Effect::Allow),
+        "spliced ./src is granted"
+    );
+    let dist = m.decide(&common::homes().project.join("dist/out.js"));
+    assert!(matches!(dist.effect, Effect::Allow), "./dist is granted");
+    assert_eq!(
+        dist.access,
+        FsAccess::ReadWrite,
+        "local ./dist:rw after the spread overrides the spliced ./dist:r (last-match)"
+    );
+}
+
+#[test]
+fn reuse_object_spread_composes_builtin_sets_and_env_floor() {
+    // A spliced object's `$tmp`/`$tooldirs` fire at the splice (the tmp MODE is set, the
+    // tooldir rules land) and the `.env*` floor is still the LAST band — the object twin of
+    // `reuse_composes_with_builtin_set_expanders_at_the_splice`.
+    let doc = json!({
+        "shared": { "fs": { "$tmp": "rw", "$tooldirs": "r", "./src": "r" } },
+        "sandbox": { "fs": { "...:#/shared/fs": true } }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    assert!(
+        matches!(p.fs.tmp, TmpMode::Private),
+        "spliced $tmp set the outer private-tmp mode"
+    );
+    assert!(
+        p.fs.rules.entries.iter().any(|r| r.effect == Effect::Allow),
+        "spliced $tooldirs + ./src expanded to allow rules"
+    );
+    let last = p.fs.rules.entries.last().expect("fs has entries");
+    assert!(
+        last.matcher.as_str().contains(".env"),
+        "the `.env*` floor is still the last band: {:?}",
+        last.matcher.as_str()
+    );
+}
+
+#[test]
+fn reuse_object_spread_net_admits_reused_and_authored_hosts() {
+    // A `...:#/pointer` object key on net splices `"<host>": bool` entries; a deny after the
+    // spread wins by last-match, and an authored host after it is still admitted.
+    let doc = json!({
+        "shared": { "net": { "registry.npmjs.org": true, "api.example.com": true } },
+        "sandbox": { "net": { "...:#/shared/net": true, "registry.npmjs.org": false, "extra.example.com": true } }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(m.admits("api.example.com"), "spliced host admitted");
+    assert!(
+        m.admits("extra.example.com"),
+        "authored host after the spread admitted"
+    );
+    assert!(
+        !m.admits("registry.npmjs.org"),
+        "a `false` after the spread overrides a spliced allow (last-match)"
+    );
+}
+
+#[test]
+fn reuse_object_spread_env_vars_and_secrets() {
+    // The spread is uniform on the env family: a `...:#/pointer` object key in vars/secrets
+    // splices the referenced object's entries. The vars-spliced key is public; the
+    // secrets-spliced key reaches the child with its real value and is marked sensitive.
+    let doc = json!({
+        "shared": {
+            "vars": { "FOO": true },
+            "secrets": { "DB_URL": true }
+        },
+        "sandbox": {
+            "vars": { "...:#/shared/vars": true, "BAR": true },
+            "secrets": { "...:#/shared/secrets": true }
+        }
+    });
+    let ctx = common::ctx_with_document(
+        true,
+        &[("FOO", "1"), ("BAR", "2"), ("DB_URL", "postgres://s")],
+        doc.clone(),
+    );
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    assert_eq!(
+        p.env.constructed.get("FOO").map(String::as_str),
+        Some("1"),
+        "spliced var"
+    );
+    assert_eq!(
+        p.env.constructed.get("BAR").map(String::as_str),
+        Some("2"),
+        "authored var"
+    );
+    assert_eq!(
+        p.env.constructed.get("DB_URL").map(String::as_str),
+        Some("postgres://s"),
+        "spliced secret reaches the child with its real value"
+    );
+    let rule = |k: &str| p.env.schema.iter().find(|r| r.key == k).unwrap();
+    assert!(!rule("FOO").sensitive, "a spliced vars entry stays public");
+    assert!(
+        rule("DB_URL").sensitive,
+        "a spliced secrets entry is redacted"
+    );
+}
+
+#[test]
+fn reuse_object_spread_multiple_spreads_compose_in_order() {
+    // Two spreads in one object splice in written order; a later spread's key overrides an
+    // earlier spread's same key by last-match.
+    let doc = json!({
+        "a": { "fs": { "./x": "r", "./shared": "r" } },
+        "b": { "fs": { "./y": "r", "./shared": "rw" } },
+        "sandbox": { "fs": { "...:#/a/fs": true, "...:#/b/fs": true } }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
+    assert!(
+        matches!(
+            m.decide(&common::homes().project.join("x/f")).effect,
+            Effect::Allow
+        ),
+        "first spread's ./x granted"
+    );
+    assert!(
+        matches!(
+            m.decide(&common::homes().project.join("y/f")).effect,
+            Effect::Allow
+        ),
+        "second spread's ./y granted"
+    );
+    assert_eq!(
+        m.decide(&common::homes().project.join("shared/f")).access,
+        FsAccess::ReadWrite,
+        "the second spread's ./shared:rw overrides the first spread's ./shared:r (last-match)"
+    );
+}
+
+#[test]
+fn reuse_object_spread_type_mismatch_is_a_shape_error() {
+    // The general resolver type-checks per context: an ARRAY pointer used as an object key,
+    // and an OBJECT pointer used as an array entry, are both fail-loud Shape errors.
+    let array_as_object_key = json!({
+        "shared": { "fs": ["./src"] },
+        "sandbox": { "fs": { "...:#/shared/fs": true } }
+    });
+    let ctx = common::ctx_with_document(true, &[], array_as_object_key.clone());
+    match compile(&array_as_object_key["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("must reference an object"), "{message}")
+        }
+        other => panic!("expected an object type-mismatch Shape error, got {other:?}"),
+    }
+
+    let object_as_array_entry = json!({
+        "shared": { "fs": { "./src": "r" } },
+        "sandbox": { "fs": ["...:#/shared/fs"] }
+    });
+    let ctx = common::ctx_with_document(true, &[], object_as_array_entry.clone());
+    match compile(&object_as_array_entry["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("must reference a list"), "{message}")
+        }
+        other => panic!("expected a list type-mismatch Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn reuse_object_spread_cycle_dangling_and_depth_are_shape_errors() {
+    // The object form threads the SAME cycle stack + depth belt as the array form.
+    let cycle = json!({
+        "a": { "fs": { "...:#/b/fs": true } },
+        "b": { "fs": { "...:#/a/fs": true } },
+        "sandbox": { "fs": { "...:#/a/fs": true } }
+    });
+    let ctx = common::ctx_with_document(true, &[], cycle.clone());
+    match compile(&cycle["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => assert!(message.contains("cycle"), "{message}"),
+        other => panic!("expected a cycle Shape error, got {other:?}"),
+    }
+
+    let dangling = json!({ "sandbox": { "fs": { "...:#/nope": true } } });
+    let ctx = common::ctx_with_document(true, &[], dangling.clone());
+    match compile(&dangling["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("does not resolve"), "{message}")
+        }
+        other => panic!("expected a dangling-pointer Shape error, got {other:?}"),
+    }
+
+    // A chain of object spreads longer than MAX_REUSE_DEPTH (64) trips the depth belt.
+    let mut root = serde_json::Map::new();
+    for i in 0..64u32 {
+        let mut inner = serde_json::Map::new();
+        inner.insert(format!("...:#/n{}/fs", i + 1), json!(true));
+        root.insert(format!("n{i}"), json!({ "fs": Value::Object(inner) }));
+    }
+    root.insert("sandbox".into(), json!({ "fs": { "...:#/n0/fs": true } }));
+    let deep = Value::Object(root);
+    let ctx = common::ctx_with_document(true, &[], deep.clone());
+    match compile(&deep["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("nested too deeply"), "{message}")
+        }
+        other => panic!("expected a depth Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn reuse_object_spread_value_must_be_the_true_placeholder() {
+    // The spread key's value is a placeholder — the spliced entries carry their own values —
+    // so only `true` is accepted; a meaningful value (a mode, `false`) is rejected fail-loud.
+    let doc = |v: Value| {
+        json!({
+            "shared": { "fs": { "./src": "r" } },
+            "sandbox": { "fs": { "...:#/shared/fs": v } }
+        })
+    };
+    for bad in [json!("rw"), json!(false), json!({ "x": 1 })] {
+        let surface = doc(bad.clone());
+        let ctx = common::ctx_with_document(true, &[], surface.clone());
+        match compile(&surface["sandbox"], &ctx).unwrap_err() {
             CompileError::Shape { message, .. } => {
                 assert!(
-                    message.contains("array"),
-                    "names the array-only rule: {message}"
+                    message.contains("placeholder value `true`"),
+                    "for {bad}: {message}"
                 )
             }
-            other => panic!("expected a Shape error for {surface}, got {other:?}"),
+            other => panic!("expected a spread-value Shape error for {bad}, got {other:?}"),
         }
     }
-    // OQ1: `!...:#/pointer` (negated reuse) is rejected too.
-    let doc = json!({ "shared": { "net": ["a.example.com"] }, "sandbox": { "net": ["!...:#/shared/net"] } });
-    let ctx = common::ctx_with_document(true, &[], doc.clone());
-    match compile(&doc["sandbox"], &ctx).unwrap_err() {
+    // `true` is accepted (the spliced entries carry their values).
+    let ok = doc(json!(true));
+    let ctx = common::ctx_with_document(true, &[], ok.clone());
+    assert!(
+        compile(&ok["sandbox"], &ctx).is_ok(),
+        "the `true` placeholder compiles"
+    );
+}
+
+#[test]
+fn reuse_object_key_spread_compiles_and_negated_object_key_is_rejected() {
+    // Regression: P4's OQ2 rejection is GONE — a `...:#/pointer` OBJECT key now compiles
+    // (fs AND net). A NEGATED object-key reuse stays rejected, consistent with the array form.
+    let fs = json!({
+        "shared": { "fs": { "./src": "r" } },
+        "sandbox": { "fs": { "...:#/shared/fs": true } }
+    });
+    let ctx = common::ctx_with_document(true, &[], fs.clone());
+    assert!(
+        compile(&fs["sandbox"], &ctx).is_ok(),
+        "fs object-key spread compiles"
+    );
+
+    let net = json!({
+        "shared": { "net": { "api.example.com": true } },
+        "sandbox": { "net": { "...:#/shared/net": true } }
+    });
+    let ctx = common::ctx_with_document(true, &[], net.clone());
+    assert!(
+        compile(&net["sandbox"], &ctx).is_ok(),
+        "net object-key spread compiles"
+    );
+
+    // Negated reuse (`!...:#/pointer`) stays rejected in BOTH container forms — the object
+    // key AND the array entry — for the same OQ1 reason (a spliced node carries its own
+    // allow/deny; negating the whole splice is ill-defined).
+    for negated in [
+        json!({ "shared": { "fs": { "./src": "r" } }, "sandbox": { "fs": { "!...:#/shared/fs": true } } }),
+        json!({ "shared": { "fs": ["./src"] }, "sandbox": { "fs": ["!...:#/shared/fs"] } }),
+    ] {
+        let ctx = common::ctx_with_document(true, &[], negated.clone());
+        match compile(&negated["sandbox"], &ctx).unwrap_err() {
+            CompileError::Shape { message, .. } => {
+                assert!(message.contains("negated reuse"), "{message}")
+            }
+            other => panic!("expected a negated-reuse Shape error for {negated}, got {other:?}"),
+        }
+    }
+}
+
+// ── `...:#/pointer` ARRAY reuse on the env family (vars/secrets) ────────────────
+// Completes spread uniformity: the array form now works on the env axes exactly as on
+// fs/net (P4 wired only fs/net arrays, leaving env-array a silent no-op). A spliced list
+// re-folds in place, and a spliced entry's sensitivity follows the SPLICE SITE's axis.
+
+#[test]
+fn reuse_env_array_splices_vars_and_secrets_in_order() {
+    let doc = json!({
+        "shared": { "vars": ["FOO"], "secrets": ["DB_URL"] },
+        "sandbox": {
+            "vars": ["...:#/shared/vars", "BAR"],
+            "secrets": ["...:#/shared/secrets", "API_TOKEN"]
+        }
+    });
+    let ctx = common::ctx_with_document(
+        true,
+        &[
+            ("FOO", "1"),
+            ("BAR", "2"),
+            ("DB_URL", "u"),
+            ("API_TOKEN", "t"),
+        ],
+        doc.clone(),
+    );
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    assert_eq!(
+        p.env.constructed.get("FOO").map(String::as_str),
+        Some("1"),
+        "spliced var"
+    );
+    assert_eq!(
+        p.env.constructed.get("BAR").map(String::as_str),
+        Some("2"),
+        "authored var after the splice"
+    );
+    assert_eq!(
+        p.env.constructed.get("DB_URL").map(String::as_str),
+        Some("u"),
+        "spliced secret"
+    );
+    assert_eq!(
+        p.env.constructed.get("API_TOKEN").map(String::as_str),
+        Some("t"),
+        "authored secret after the splice"
+    );
+    let rule = |k: &str| p.env.schema.iter().find(|r| r.key == k).unwrap();
+    assert!(
+        !rule("FOO").sensitive,
+        "a list spliced under vars stays public"
+    );
+    assert!(
+        rule("DB_URL").sensitive,
+        "a list spliced under secrets is redacted"
+    );
+}
+
+#[test]
+fn reuse_env_array_errors_match_fs_net_and_close_the_silent_hole() {
+    // A spliced env-array pointer must resolve to a LIST (matching fs/net); an object node
+    // is a fail-loud type mismatch, not a silent literal selector.
+    let mismatch = json!({
+        "shared": { "vars": { "FOO": true } },
+        "sandbox": { "vars": ["...:#/shared/vars"] }
+    });
+    let ctx = common::ctx_with_document(true, &[], mismatch.clone());
+    match compile(&mismatch["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("must reference a list"), "{message}")
+        }
+        other => panic!("expected a list type-mismatch, got {other:?}"),
+    }
+
+    // Regression: `["...:#/x"]` with a missing target was a SILENT no-op (an allowlist
+    // selector for a var literally named `...:#/x`) before env-array reuse was wired — it is
+    // now a fail-loud dangling error, proving the grant-hole is closed.
+    let dangling = json!({ "sandbox": { "vars": ["...:#/nope"] } });
+    let ctx = common::ctx_with_document(true, &[], dangling.clone());
+    match compile(&dangling["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("does not resolve"), "{message}")
+        }
+        other => panic!("expected a dangling error, got {other:?}"),
+    }
+
+    // Cycle through the env-array path (the same shared cycle stack).
+    let cycle = json!({
+        "a": { "vars": ["...:#/b/vars"] },
+        "b": { "vars": ["...:#/a/vars"] },
+        "sandbox": { "vars": ["...:#/a/vars"] }
+    });
+    let ctx = common::ctx_with_document(true, &[], cycle.clone());
+    match compile(&cycle["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => assert!(message.contains("cycle"), "{message}"),
+        other => panic!("expected a cycle error, got {other:?}"),
+    }
+
+    // Negated env-array reuse stays rejected, uniform with fs/net.
+    let negated = json!({
+        "shared": { "vars": ["FOO"] },
+        "sandbox": { "vars": ["!...:#/shared/vars"] }
+    });
+    let ctx = common::ctx_with_document(true, &[], negated.clone());
+    match compile(&negated["sandbox"], &ctx).unwrap_err() {
         CompileError::Shape { message, .. } => {
             assert!(message.contains("negated reuse"), "{message}")
         }
-        other => panic!("expected a negated-reuse Shape error, got {other:?}"),
+        other => panic!("expected a negated-reuse error, got {other:?}"),
     }
 }
 

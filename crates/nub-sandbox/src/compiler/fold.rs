@@ -1,8 +1,9 @@
 //! Per-axis fold: an axis surface value (`false | true | array | object`) →
-//! its resolved IR fragment. A `...:#/pointer` reuse entry (see [`reuse`]) and
-//! last-match-wins ORDER are discharged here into a flat ordered list; the actual
-//! last-match decision is made at evaluation time by the matcher, so the fold only has
-//! to preserve order and splice a reused list's entries at the token's position.
+//! its resolved IR fragment. A `...:#/pointer` reuse token (see [`reuse`]) — an array
+//! entry OR an object key — and last-match-wins ORDER are discharged here into a flat
+//! ordered list; the actual last-match decision is made at evaluation time by the
+//! matcher, so the fold only has to preserve order and splice a reused node's contents at
+//! the token's position.
 
 use super::builtin_sets;
 use super::defaults;
@@ -25,12 +26,10 @@ use std::collections::BTreeMap;
 /// path/host named `...`. To reuse another list, reference it with a `...:#/pointer`
 /// array entry (see [`super::reuse`]).
 const NAKED_SENTINEL_MSG: &str = "`...` inheritance was removed — a policy is a complete statement; to reuse a list, reference it with `...:#/pointer` (e.g. [\"...:#/shared/fs\", …])";
-/// `!...:#/pointer` (negated reuse) is rejected in P4 (OQ1): you cannot deny a spliced
-/// list, and expand-then-negate over a reused list is deferred.
-const NEGATED_REUSE_MSG: &str = "`!...:#/pointer` (negated reuse) is not supported — reuse a list with `...:#/pointer`, then deny specific members with `!` entries after it";
-/// `...:#/pointer` reuse is array-only (OQ2); as an OBJECT key it has no defined
-/// meaning, so it is rejected rather than folded to a literal path/host.
-const REUSE_OBJECT_KEY_MSG: &str = "`...:#/pointer` reuse is only valid as an fs/net array entry (e.g. [\"...:#/shared/fs\", …]), not as an object key";
+/// `!...:#/pointer` (negated reuse) is rejected (OQ1) in BOTH container forms — array
+/// entry and object key: a spliced list/object carries its own allow/deny entries, so
+/// negating the whole splice is ill-defined; reuse it, then deny specific members after.
+const NEGATED_REUSE_MSG: &str = "`!...:#/pointer` (negated reuse) is not supported — reuse with `...:#/pointer`, then deny specific members after the splice (`!host` array entries / `false` object values)";
 /// An empty / whitespace-only fs entry used to expand to `**` (a silent whole-fs
 /// grant, fail-OPEN); it is now a hard shape error (D3).
 const EMPTY_FS_ENTRY_MSG: &str = "an empty fs entry is not allowed (it would grant the whole filesystem) — name a path or remove it";
@@ -47,8 +46,9 @@ const TRUSTED_OBJECT_MSG: &str = "`$trusted` is a built-in host set — use it i
 /// are subtree-expanded (a bare path grants the node + `/**`); a glob-bearing
 /// pattern is emitted verbatim. Access: array grants are ReadWrite (the concise
 /// "these paths are fully usable" form); object values pick `"r"`/`"rw"`. A
-/// `...:#/pointer` array entry splices another list's raw entries at its position
-/// (see [`reuse`]); there is no implicit inheritance (naked `...` was removed).
+/// `...:#/pointer` array entry splices another list's raw entries at its position, and
+/// (uniformly) a `...:#/pointer` OBJECT KEY splices another object's entries (see
+/// [`reuse`]); there is no implicit inheritance (naked `...` was removed).
 pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, CompileError> {
     let mut set = FsRuleSet {
         entries: Vec::new(),
@@ -78,16 +78,12 @@ pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, 
             }
         }
         Value::Object(map) => {
+            // The reuse resolution stack (cycle detection) — seeded empty per axis fold,
+            // as the array branch does; an object-key `...:#/pointer` spread threads it.
+            let mut stack = Vec::new();
             for (key, val) in map {
                 let p = child(path, key);
-                if let Some(mode) = parse_tmp_mode(key, val, &p)? {
-                    tmp = mode;
-                    continue;
-                }
-                if fold_tooldirs_object_entry(key, val, ctx, &p, &mut set.entries)? {
-                    continue;
-                }
-                fold_fs_object_entry(key, val, ctx, &p, &mut set.entries)?;
+                fold_fs_object_item(key, val, ctx, &p, &mut set.entries, &mut tmp, &mut stack)?;
             }
         }
         _ => {
@@ -363,6 +359,48 @@ fn fold_fs_array_entry(
     Ok(())
 }
 
+/// One entry of the fs Object form — the per-entry body, shared by direct entries and
+/// each entry of a `...:#/pointer`-spliced OBJECT, so an object-key spread composes with
+/// `$tmp` mode, `$tooldirs`, and the `.env*` floor for free (the object twin of
+/// [`fold_fs_array_item`]). Reuse is checked FIRST; then `$tmp` mode, `$tooldirs`, and the
+/// ordinary path key. `tmp`/`out` are the OUTER accumulators (a spliced `$tmp` sets the
+/// outer mode); `stack` is the reuse resolution stack for cycle detection.
+fn fold_fs_object_item(
+    key: &str,
+    val: &Value,
+    ctx: &CompileCtx,
+    path: &str,
+    out: &mut Vec<FsRule>,
+    tmp: &mut TmpMode,
+    stack: &mut Vec<String>,
+) -> Result<(), CompileError> {
+    match reuse::parse_reuse_token(key) {
+        reuse::ReuseToken::Negated => return Err(CompileError::shape(path, NEGATED_REUSE_MSG)),
+        reuse::ReuseToken::Pointer(ptr) => {
+            reject_spread_value(val, path)?;
+            let obj = reuse::resolve_reuse_object(ctx, ptr, path, stack)?;
+            stack.push(ptr.to_string());
+            for (k, v) in obj {
+                // A spliced entry's diagnostics point at the SOURCE object, not the
+                // splice site, so a bad reused object blames the object.
+                let cp = format!("{ptr}.{k}");
+                fold_fs_object_item(k, v, ctx, &cp, out, tmp, stack)?;
+            }
+            stack.pop();
+            return Ok(());
+        }
+        reuse::ReuseToken::None => {}
+    }
+    if let Some(mode) = parse_tmp_mode(key, val, path)? {
+        *tmp = mode;
+        return Ok(());
+    }
+    if fold_tooldirs_object_entry(key, val, ctx, path, out)? {
+        return Ok(());
+    }
+    fold_fs_object_entry(key, val, ctx, path, out)
+}
+
 fn fold_fs_object_entry(
     key: &str,
     val: &Value,
@@ -371,7 +409,6 @@ fn fold_fs_object_entry(
     out: &mut Vec<FsRule>,
 ) -> Result<(), CompileError> {
     reject_naked_sentinel(key, path)?;
-    reject_reuse_object_key(key, path)?;
     if key.trim().is_empty() {
         return Err(CompileError::shape(path, EMPTY_FS_ENTRY_MSG));
     }
@@ -568,8 +605,9 @@ pub(super) fn secure_default_fs(ctx: &CompileCtx) -> FsPolicy {
 
 /// Fold the `net` axis into a [`NetPolicy`]. Entries are host globs or CIDRs;
 /// `!` denies; a `...:#/pointer` array entry splices another list's raw entries at its
-/// position (see [`reuse`]). There is no implicit inheritance (naked `...` was removed).
-/// `net: true` disables enforcement; `net: false` denies all egress.
+/// position, and (uniformly) a `...:#/pointer` OBJECT KEY splices another object's
+/// `"<host>": bool` entries (see [`reuse`]). There is no implicit inheritance (naked
+/// `...` was removed). `net: true` disables enforcement; `net: false` denies all egress.
 pub fn fold_net(value: &Value, ctx: &CompileCtx, path: &str) -> Result<NetPolicy, CompileError> {
     let mut policy = NetPolicy {
         enforce: true,
@@ -589,14 +627,11 @@ pub fn fold_net(value: &Value, ctx: &CompileCtx, path: &str) -> Result<NetPolicy
             }
         }
         Value::Object(map) => {
+            // The reuse resolution stack (cycle detection) — seeded empty per axis fold.
+            let mut stack = Vec::new();
             for (key, val) in map {
                 let p = child(path, key);
-                reject_naked_sentinel(key, &p)?;
-                reject_reuse_object_key(key, &p)?;
-                if key == "$trusted" {
-                    return Err(CompileError::shape(&p, TRUSTED_OBJECT_MSG));
-                }
-                fold_net_object_value(key, val, &p, &mut policy)?;
+                fold_net_object_item(key, val, ctx, &p, &mut policy, &mut stack)?;
             }
         }
         _ => {
@@ -651,6 +686,41 @@ fn fold_net_entry(s: &str, path: &str, policy: &mut NetPolicy) -> Result<(), Com
         return Ok(());
     }
     push_net_rule(pattern, effect, path, &mut policy.rules)
+}
+
+/// One entry of the net Object form — the per-entry body, shared by direct entries and
+/// each entry of a `...:#/pointer`-spliced OBJECT (the object twin of
+/// [`fold_net_array_item`]). Reuse first; then a naked-`...` migration error, the
+/// `$trusted`-as-object rejection, and the ordinary `"<host>": bool` path. `stack` is the
+/// reuse resolution stack for cycle detection.
+fn fold_net_object_item(
+    key: &str,
+    val: &Value,
+    ctx: &CompileCtx,
+    path: &str,
+    policy: &mut NetPolicy,
+    stack: &mut Vec<String>,
+) -> Result<(), CompileError> {
+    match reuse::parse_reuse_token(key) {
+        reuse::ReuseToken::Negated => return Err(CompileError::shape(path, NEGATED_REUSE_MSG)),
+        reuse::ReuseToken::Pointer(ptr) => {
+            reject_spread_value(val, path)?;
+            let obj = reuse::resolve_reuse_object(ctx, ptr, path, stack)?;
+            stack.push(ptr.to_string());
+            for (k, v) in obj {
+                let cp = format!("{ptr}.{k}");
+                fold_net_object_item(k, v, ctx, &cp, policy, stack)?;
+            }
+            stack.pop();
+            return Ok(());
+        }
+        reuse::ReuseToken::None => {}
+    }
+    reject_naked_sentinel(key, path)?;
+    if key == "$trusted" {
+        return Err(CompileError::shape(path, TRUSTED_OBJECT_MSG));
+    }
+    fold_net_object_value(key, val, path, policy)
 }
 
 /// One entry of the net OBJECT form: `"<host>": true | false`. A bool is a plain
@@ -993,7 +1063,7 @@ fn parse_env_surface(
         // Explicit strip: no entries. construct_env withholds everything and
         // add_os_essential_env re-adds only the OS-startup essentials.
         Value::Bool(false) => Ok(Vec::new()),
-        Value::Array(items) => parse_env_array(items, path, default_sensitive),
+        Value::Array(items) => parse_env_array(items, ctx, path, default_sensitive),
         Value::Object(map) => parse_env_object(map, ctx, caps, path, default_sensitive),
         _ => Err(CompileError::shape(
             path,
@@ -1068,51 +1138,88 @@ enum EnvAction {
 
 fn parse_env_array(
     items: &[Value],
+    ctx: &CompileCtx,
     path: &str,
     default_sensitive: bool,
 ) -> Result<Vec<EnvEntry>, CompileError> {
     let mut out = Vec::new();
+    // The reuse resolution stack (cycle detection) — seeded empty per axis fold, so a
+    // `...:#/pointer` array entry in vars/secrets threads it like fs/net.
+    let mut stack = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let p = child(path, &i.to_string());
         let s = as_str(item, &p)?;
-        reject_naked_sentinel(s, &p)?;
-        let (pattern, deny) = match s.strip_prefix('!') {
-            Some(rest) => (rest.to_string(), true),
-            None => (s.to_string(), false),
-        };
-        reject_env_key_braces(&pattern, &p)?;
-        // A `$(…)` in array form would have no key to bind to — array entries are
-        // key/glob selectors, not values. Reject to avoid silent misuse.
-        if resolve::has_substitution(&pattern) {
-            return Err(CompileError::shape(
-                &p,
-                "`$(…)` is only valid as an object-form env value, not an array entry",
-            ));
-        }
-        out.push(EnvEntry {
-            pattern,
-            action: if deny {
-                EnvAction::Deny
-            } else {
-                EnvAction::Allow(None)
-            },
-            // The axis decides sensitivity (vars→false, secrets→true); a deny mark
-            // is irrelevant (denies never enter the schema).
-            sensitive: default_sensitive,
-            // The array form is a concise ALLOWLIST (pass-through-if-present),
-            // never a required-var declaration — an exact key here means "permit
-            // it", not "demand it" (required/optional is an object-form concept
-            // via the `?` suffix). So array entries are always optional; without
-            // this the canonical `["FOO", "BAR", "!*_TOKEN"]` would hard-error
-            // whenever FOO is unset. Object plain-keys stay required.
-            optional: true,
-            format: None,
-            key_match: KeyMatch::User,
-            builtin: false,
-            broker_to: Vec::new(),
-        });
+        parse_env_array_entry(s, ctx, &p, default_sensitive, &mut out, &mut stack)?;
     }
     Ok(out)
+}
+
+/// One entry of an env-family Array form (`vars`/`secrets`), shared by direct entries and
+/// each entry of a `...:#/pointer`-spliced LIST — the array twin of the fs/net item folds,
+/// completing spread uniformity across every axis and both containers. Reuse is checked
+/// FIRST (a spliced list re-folds in place, so last-match composes at the splice); then the
+/// ordinary selector path (naked-`...` reject, `!`-deny strip, brace reject, `$(…)` reject).
+/// A spliced entry's sensitivity follows the SPLICE SITE's axis (`default_sensitive`), not
+/// the source — a list reused under `secrets` yields sensitive entries.
+fn parse_env_array_entry(
+    s: &str,
+    ctx: &CompileCtx,
+    path: &str,
+    default_sensitive: bool,
+    out: &mut Vec<EnvEntry>,
+    stack: &mut Vec<String>,
+) -> Result<(), CompileError> {
+    match reuse::parse_reuse_token(s) {
+        reuse::ReuseToken::Negated => return Err(CompileError::shape(path, NEGATED_REUSE_MSG)),
+        reuse::ReuseToken::Pointer(ptr) => {
+            let arr = reuse::resolve_reuse_array(ctx, ptr, path, stack)?;
+            stack.push(ptr.to_string());
+            for (j, item) in arr.iter().enumerate() {
+                let cp = format!("{ptr}.{j}");
+                parse_env_array_entry(as_str(item, &cp)?, ctx, &cp, default_sensitive, out, stack)?;
+            }
+            stack.pop();
+            return Ok(());
+        }
+        reuse::ReuseToken::None => {}
+    }
+    reject_naked_sentinel(s, path)?;
+    let (pattern, deny) = match s.strip_prefix('!') {
+        Some(rest) => (rest.to_string(), true),
+        None => (s.to_string(), false),
+    };
+    reject_env_key_braces(&pattern, path)?;
+    // A `$(…)` in array form would have no key to bind to — array entries are
+    // key/glob selectors, not values. Reject to avoid silent misuse.
+    if resolve::has_substitution(&pattern) {
+        return Err(CompileError::shape(
+            path,
+            "`$(…)` is only valid as an object-form env value, not an array entry",
+        ));
+    }
+    out.push(EnvEntry {
+        pattern,
+        action: if deny {
+            EnvAction::Deny
+        } else {
+            EnvAction::Allow(None)
+        },
+        // The axis decides sensitivity (vars→false, secrets→true); a deny mark
+        // is irrelevant (denies never enter the schema).
+        sensitive: default_sensitive,
+        // The array form is a concise ALLOWLIST (pass-through-if-present),
+        // never a required-var declaration — an exact key here means "permit
+        // it", not "demand it" (required/optional is an object-form concept
+        // via the `?` suffix). So array entries are always optional; without
+        // this the canonical `["FOO", "BAR", "!*_TOKEN"]` would hard-error
+        // whenever FOO is unset. Object plain-keys stay required.
+        optional: true,
+        format: None,
+        key_match: KeyMatch::User,
+        builtin: false,
+        broker_to: Vec::new(),
+    });
+    Ok(())
 }
 
 fn parse_env_object(
@@ -1123,23 +1230,70 @@ fn parse_env_object(
     default_sensitive: bool,
 ) -> Result<Vec<EnvEntry>, CompileError> {
     let mut out = Vec::new();
+    // The reuse resolution stack (cycle detection) — seeded empty per axis fold, so an
+    // object-key `...:#/pointer` spread in vars/secrets threads it like fs/net.
+    let mut stack = Vec::new();
     for (raw_key, val) in map {
         let p = child(path, raw_key);
-        // `...`/`!...` env-object inheritance was removed (v2: complete statement).
-        reject_naked_sentinel(raw_key, &p)?;
-        // A trailing `?` on the key marks it optional; a glob key is inherently
-        // optional (D9 — a glob matches however many keys, zero included), so it is
-        // never a required-var declaration and reports optional in the schema.
-        let (key, optional) = match raw_key.strip_suffix('?') {
-            Some(k) => (k.to_string(), true),
-            None => (raw_key.clone(), false),
-        };
-        reject_env_key_braces(&key, &p)?;
-        let optional = optional || is_glob(&key);
-        let entry = parse_env_object_value(key, optional, val, ctx, caps, &p, default_sensitive)?;
-        out.push(entry);
+        parse_env_object_entry(
+            raw_key,
+            val,
+            ctx,
+            caps,
+            &p,
+            default_sensitive,
+            &mut out,
+            &mut stack,
+        )?;
     }
     Ok(out)
+}
+
+/// One entry of an env-family Object form (`vars`/`secrets`), shared by direct entries and
+/// each entry of a `...:#/pointer`-spliced OBJECT — the object twin of the fs/net item
+/// folds. Reuse is checked FIRST (a spliced object's entries re-fold in place, so
+/// last-match composes at the splice); then the ordinary key path (naked-`...` reject,
+/// `?`-optional suffix, brace reject, value parse). `stack` is the reuse resolution stack.
+#[allow(clippy::too_many_arguments)]
+fn parse_env_object_entry(
+    raw_key: &str,
+    val: &Value,
+    ctx: &CompileCtx,
+    caps: ScopeCapabilities,
+    path: &str,
+    default_sensitive: bool,
+    out: &mut Vec<EnvEntry>,
+    stack: &mut Vec<String>,
+) -> Result<(), CompileError> {
+    match reuse::parse_reuse_token(raw_key) {
+        reuse::ReuseToken::Negated => return Err(CompileError::shape(path, NEGATED_REUSE_MSG)),
+        reuse::ReuseToken::Pointer(ptr) => {
+            reject_spread_value(val, path)?;
+            let obj = reuse::resolve_reuse_object(ctx, ptr, path, stack)?;
+            stack.push(ptr.to_string());
+            for (k, v) in obj {
+                let cp = format!("{ptr}.{k}");
+                parse_env_object_entry(k, v, ctx, caps, &cp, default_sensitive, out, stack)?;
+            }
+            stack.pop();
+            return Ok(());
+        }
+        reuse::ReuseToken::None => {}
+    }
+    // `...`/`!...` env-object inheritance was removed (v2: complete statement).
+    reject_naked_sentinel(raw_key, path)?;
+    // A trailing `?` on the key marks it optional; a glob key is inherently
+    // optional (D9 — a glob matches however many keys, zero included), so it is
+    // never a required-var declaration and reports optional in the schema.
+    let (key, optional) = match raw_key.strip_suffix('?') {
+        Some(k) => (k.to_string(), true),
+        None => (raw_key.to_string(), false),
+    };
+    reject_env_key_braces(&key, path)?;
+    let optional = optional || is_glob(&key);
+    let entry = parse_env_object_value(key, optional, val, ctx, caps, path, default_sensitive)?;
+    out.push(entry);
+    Ok(())
 }
 
 fn parse_env_object_value(
@@ -1585,13 +1739,20 @@ fn reject_naked_sentinel(s: &str, path: &str) -> Result<(), CompileError> {
     Ok(())
 }
 
-/// Reject a `...:`-prefixed OBJECT key (OQ2): `...:#/pointer` reuse is array-only, so an
-/// object key of that shape is a fail-loud error rather than a literal path/host key.
-fn reject_reuse_object_key(key: &str, path: &str) -> Result<(), CompileError> {
-    if reuse::is_reuse_object_key(key) {
-        return Err(CompileError::shape(path, REUSE_OBJECT_KEY_MSG));
+/// The object-key spread `"...:#/pointer": <value>` carries a PLACEHOLDER value only —
+/// the spliced object's entries bring their own values, so this value governs nothing.
+/// `true` is the canonical placeholder; anything else (a mode, a host bool, an env type,
+/// even `false`) is rejected fail-loud so a reader is never misled into thinking it
+/// applies to the spliced entries. Provenance: JS `{...shared}` has no value; JSONC needs
+/// one syntactically, so `true` stands in for "no value", and anything else is a mistake.
+fn reject_spread_value(val: &Value, path: &str) -> Result<(), CompileError> {
+    if matches!(val, Value::Bool(true)) {
+        return Ok(());
     }
-    Ok(())
+    Err(CompileError::shape(
+        path,
+        "a `...:#/pointer` spread key takes only the placeholder value `true` — the spliced entries carry their own values, so a mode/type/bool here would not apply to them",
+    ))
 }
 
 /// Ensure the map has no keys beyond `allowed`; used by callers folding an

@@ -519,6 +519,30 @@ fn reuse_pointer_resolves_against_the_whole_document() {
     );
 }
 
+/// The general spread end-to-end: a `...:#/pointer` OBJECT KEY resolves against the whole
+/// document and splices the reused object's entries, so the project subtree granted ONLY
+/// through the spliced object is reachable. Proves the object-form path compiles + enforces
+/// through the real CLI (the object twin of `reuse_pointer_resolves_against_the_whole_document`).
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn reuse_object_spread_resolves_against_the_whole_document() {
+    #[cfg(target_os = "linux")]
+    if !linux_enforceable() {
+        return;
+    }
+    let tree = Tree::new();
+    let doc = serde_json::json!({
+        "shared": { "fs": { "{PROJ}": "r" } },
+        "sandbox": { "fs": { "...:#/shared/fs": true }, "net": false, "vars": true }
+    });
+    let ambient = BTreeMap::new();
+    let target = tree.resolve("read", "proj:spread-ok.txt");
+    assert!(
+        run_case(&tree, &doc, &ambient, "read", &target),
+        "a `...:#/shared/fs` object-key spread must resolve against the whole document"
+    );
+}
+
 #[test]
 #[cfg(not(target_os = "windows"))]
 fn fs_write_confine() {

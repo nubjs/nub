@@ -190,6 +190,17 @@ There is no implicit inheritance between policies. To splice another list in, re
 }
 ```
 
+The same `...:` pointer works as an **object key**, splicing another object's entries. Its value is the placeholder `true` — the spliced entries keep their own modes. A key written after the spread overrides a spliced one, so this reuses the shared grants and upgrades `./dist` to read-write:
+
+```jsonc
+{
+  "shared": { "fs": { "./src": "r", "./dist": "r" } },
+  "sandbox": {
+    "fs": { "...:#/shared/fs": true, "./dist": "rw" }
+  }
+}
+```
+
 ### Resolve a path with a command
 
 A `$( … )` expression runs while the policy compiles, and its single-line output becomes the path. It runs the same POSIX shell on every OS — see [Nub Run](/docs/run) for the shell Nub bundles.
@@ -308,7 +319,7 @@ A `*.` deny follows the same subdomains-only rule as a `*.` allow: `!*.tracking.
 
 ### Reuse another policy's rules
 
-Splice a list in with `...:` and a JSON pointer.
+Splice a list in with `...:` and a JSON pointer, or use the same pointer as an object key to splice a `"<host>": bool` object.
 
 ```jsonc
 {
@@ -463,7 +474,7 @@ Because the child never holds the secret, a dependency that reads `GITHUB_TOKEN`
 
 ## Composition and nesting
 
-A policy is a complete, self-contained statement — there is no implicit inheritance from a global or project scope. Reuse is always explicit, through a `...:` pointer or a file reference.
+A policy is a complete, self-contained statement — there is no implicit inheritance from a global or project scope. Reuse is always explicit, through a `...:` pointer or a file reference. A `...:` pointer works the same as an array entry or an object key, on any axis.
 
 A policy names the axes it confines; an omitted axis allows nothing. Naming only `fs` denies the network and every environment variable, so the policy below is equivalent to spelling out empty `net`, `vars`, and `secrets`.
 
