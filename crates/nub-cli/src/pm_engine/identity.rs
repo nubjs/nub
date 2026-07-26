@@ -249,6 +249,11 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // token is constant-on and folds the scanner version, so a scanner-logic bump
     // invalidates a warm tree and re-links; standalone aube's `None` skips the fold.
     extra_settings_fingerprint: Some(crate::dynamic_phantom::settings_fingerprint),
+    // nub owns dependency-lifecycle-script confinement: aube's own build jail never
+    // engages (a user `jailBuilds`/`paranoid` cannot swap it back in), and nub
+    // interposes its build-jail (`nub_sandbox::compile_build_jail`) around each dep
+    // spawn via the `EngineContext::lifecycle_sandbox` hook.
+    embedder_owns_lifecycle_sandbox: true,
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's
@@ -293,4 +298,5 @@ const _: () = {
     assert!(!NUB.warm_trust_revalidate);
     assert!(matches!(NUB.trust_policy_ignore_after_default, Some(20160)));
     assert!(NUB.extra_settings_fingerprint.is_some());
+    assert!(NUB.embedder_owns_lifecycle_sandbox);
 };

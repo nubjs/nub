@@ -1,11 +1,11 @@
 {
   "name": "build-jail-preset",
-  "note": "The build-jail preset permits project work while retaining its secret floor, empty environment, and egress deny.",
+  "note": "The build-jail preset compiled standalone: project READ (not write), its secret + .env floors, strip-all env, and egress deny. The per-package WRITE grant, the provisioned-interpreter read grant, and the scrubbed lifecycle env are supplied per spawn by the lifecycle interposition (compile_build_jail), not this static preset.",
   "policy": "build-jail",
   "relaxed": false,
   "cases": [
     { "probe": "read", "target": "proj:source.txt", "expect": true, "platforms": ["linux"] },
-    { "probe": "write", "target": "proj:build/out.txt", "expect": true, "platforms": ["linux"] },
+    { "probe": "write", "target": "proj:build/out.txt", "expect": false, "platforms": ["linux"] },
     { "probe": "read", "target": "proj:.env", "expect": false, "platforms": ["linux"] },
     { "probe": "read", "target": "home:.ssh/id_rsa", "expect": false, "platforms": ["linux"] },
     { "probe": "env", "target": "PATH", "expect": false, "platforms": ["linux"] },

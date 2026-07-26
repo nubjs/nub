@@ -140,6 +140,7 @@ impl Fixture {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             document: serde_json::Value::Null,
+            interpreter: Vec::new(),
             runner: Box::new(ShellRunner),
         }
     }

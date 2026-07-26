@@ -307,6 +307,60 @@ pub fn curated_baseline_env(
         .collect()
 }
 
+/// Whether an env key is credential-shaped and must not reach a dependency's
+/// lifecycle build script. The DENYLIST twin of [`baseline_allows`]'s allowlist:
+/// the build-jail keeps the whole constructed lifecycle env (a native build needs
+/// `PATH`/`NODE`/`npm_package_*`/build hints, which a strip-all allowlist would drop)
+/// and removes only credential-shaped keys. Two tiers, both delimiter/case-aware:
+/// an `npm_config_*` key routes to the registry-credential predicate
+/// ([`is_npm_config_credential`], which also scrubs `_auth*`/`email`/`key`), and any
+/// other key is scrubbed when it CONTAINS an unambiguous credential word
+/// (`token`/`secret`/`password`/`passwd`/`credential`/`apikey`) or carries `auth` as a
+/// delimited segment (`AUTH_TOKEN`/`GITHUB_AUTH`, sparing `AUTHOR`). Best-effort by
+/// NAME (a secret named nothing like a credential is not caught here — the `.env*`
+/// file-read floor and aube's own constructed-env scrub are the other layers).
+pub fn is_credential_env_key(key: &str) -> bool {
+    if let Some(rest) = strip_prefix_ci(key, NPM_CONFIG_PREFIX) {
+        return is_npm_config_credential(rest);
+    }
+    if NPM_CRED_SUBSTR_TOKENS
+        .iter()
+        .any(|w| word_in_substr(w, key))
+    {
+        return true;
+    }
+    word_is_segment("auth", key)
+}
+
+/// The build-jail ENV posture (D1): keep the constructed lifecycle env, WITHHOLD the
+/// credential-shaped keys ([`is_credential_env_key`]). `ambient` is the effective
+/// child env the unconfined lifecycle spawn would have had; the returned policy
+/// enforces, carries the kept keys as `constructed`, and records the withheld ones
+/// (sorted — `BTreeMap` iteration order — for a stable failure hint).
+pub fn lifecycle_scrubbed_env(
+    ambient: &std::collections::BTreeMap<String, String>,
+) -> crate::policy::EnvPolicy {
+    let mut constructed = std::collections::BTreeMap::new();
+    let mut withheld = Vec::new();
+    for (key, value) in ambient {
+        if is_credential_env_key(key) {
+            withheld.push(key.clone());
+        } else {
+            constructed.insert(key.clone(), value.clone());
+        }
+    }
+    crate::policy::EnvPolicy {
+        resolved: true,
+        enforce: true,
+        constructed,
+        schema: Vec::new(),
+        withheld,
+        // Credential-shaped keys are WITHHELD entirely (above), so nothing kept in
+        // `constructed` is secret — the output redactor has nothing to scrub.
+        sensitive_keys: Vec::new(),
+    }
+}
+
 /// OS-STARTUP-mechanism env names a sandboxed child needs merely to EXIST — the
 /// spawning OS's own bootstrap essentials, per OS. Distinct from (and far narrower
 /// than) [`BASELINE_ENV_EXACT`]: the baseline is "what a build child needs to
@@ -777,6 +831,77 @@ mod tests {
             OS_ESSENTIAL_ENV.is_empty(),
             "POSIX floor is empty (macOS + Linux start from an empty environ)"
         );
+    }
+
+    #[test]
+    fn lifecycle_scrubbed_env_keeps_build_env_and_withholds_credentials() {
+        // The build-jail env posture (D1): keep the whole constructed lifecycle env
+        // (a native build needs PATH/NODE/npm_package_*/build hints), withhold only
+        // the credential-shaped keys.
+        let ambient = ambient(&[
+            ("PATH", "/bin"),
+            ("NODE", "/n/node"),
+            ("npm_package_name", "left-pad"),
+            ("npm_config_registry", "https://r/"),
+            ("npm_config_target_arch", "arm64"),
+            // Credentials — must be withheld.
+            ("NPM_TOKEN", "t"),
+            ("GITHUB_TOKEN", "t"),
+            ("AWS_SECRET_ACCESS_KEY", "t"),
+            ("MY_PASSWORD", "t"),
+            ("AUTH_HEADER", "t"),
+            ("npm_config_//registry.npmjs.org/:_authToken", "t"),
+        ]);
+        let p = lifecycle_scrubbed_env(&ambient);
+        assert!(p.enforce && p.resolved);
+        for kept in [
+            "PATH",
+            "NODE",
+            "npm_package_name",
+            "npm_config_registry",
+            "npm_config_target_arch",
+        ] {
+            assert!(p.constructed.contains_key(kept), "must keep {kept}");
+        }
+        for cred in [
+            "NPM_TOKEN",
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "MY_PASSWORD",
+            "AUTH_HEADER",
+            "npm_config_//registry.npmjs.org/:_authToken",
+        ] {
+            assert!(!p.constructed.contains_key(cred), "must withhold {cred}");
+            assert!(p.withheld.contains(&cred.to_string()));
+        }
+    }
+
+    #[test]
+    fn is_credential_env_key_spares_legit_build_vars() {
+        // False-positive guards: an npm build hint whose name embeds a credential word
+        // survives (npm_config_* routes to the registry-credential predicate), and a
+        // bare `AUTHOR`/`AUTHORS` var is not swept by the `auth`-segment rule.
+        for legit in [
+            "PATH",
+            "NODE_OPTIONS",
+            "npm_config_target",
+            "npm_config_keytar_binary_host_mirror",
+            "npm_package_author",
+            "AUTHOR",
+            "AUTHORS",
+        ] {
+            assert!(!is_credential_env_key(legit), "{legit} is not a credential");
+        }
+        for cred in [
+            "NPM_TOKEN",
+            "SECRET_VALUE",
+            "MY_PASSWORD",
+            "AUTH_TOKEN",
+            "GITHUB_AUTH",
+            "npm_config__authToken",
+        ] {
+            assert!(is_credential_env_key(cred), "{cred} is a credential");
+        }
     }
 
     #[test]

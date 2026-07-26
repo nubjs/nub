@@ -406,6 +406,20 @@ pub struct Embedder {
     /// no aube setting. Same function-pointer hook shape as
     /// [`cpu_budget`](Self::cpu_budget); embedder-fixed pluggability.
     pub extra_settings_fingerprint: Option<fn() -> String>,
+    /// When `true`, the EMBEDDER owns dependency-lifecycle-script confinement, so
+    /// aube's own build jail (`aube-scripts::ScriptJail` — Landlock/seccomp on Linux,
+    /// `sandbox-exec` on macOS) never engages: [`JailBuildPolicy::from_settings`]
+    /// forces `enabled = false` regardless of `jailBuilds`/`paranoid`, and the embedder
+    /// interposes its own sandbox around each dep spawn through the
+    /// `EngineContext::lifecycle_sandbox` hook. `false` (aube's default) keeps aube's
+    /// jail exactly as before — a user `jailBuilds=true`/`paranoid=true` engages the
+    /// built-in jail, byte-for-byte standalone behavior. Embedder-fixed: it is the
+    /// host's confinement-ownership call, not a per-project knob. An embedder that owns
+    /// confinement (nub) sets this `true` so the choice of jail can never be swapped back
+    /// to aube's by a user setting.
+    ///
+    /// [`JailBuildPolicy::from_settings`]: (aube crate) commands::install::lifecycle
+    pub embedder_owns_lifecycle_sandbox: bool,
 }
 
 /// Standalone aube's embedder profile. Reproduces every hardcoded branding
@@ -467,6 +481,9 @@ pub const AUBE: Embedder = Embedder {
     // No extra settings-fingerprint fold: standalone aube's `settings_hash` is
     // byte-for-byte unchanged (the hook block is skipped when `None`).
     extra_settings_fingerprint: None,
+    // Standalone aube owns its own build jail; `jailBuilds`/`paranoid` engage it as
+    // before. No embedder interposes, so this stays `false` — byte-for-byte behavior.
+    embedder_owns_lifecycle_sandbox: false,
 };
 
 static ACTIVE: OnceLock<&'static Embedder> = OnceLock::new();
@@ -660,6 +677,8 @@ mod tests {
         assert!(!id.rich_update_picker);
         assert_eq!(id.trust_policy_ignore_after_default, None);
         assert!(id.extra_settings_fingerprint.is_none());
+        // Standalone aube owns its own build jail — no embedder interposes.
+        assert!(!id.embedder_owns_lifecycle_sandbox);
     }
 
     /// Under the default (AUBE) profile the source-branding helpers reproduce

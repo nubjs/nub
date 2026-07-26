@@ -27,7 +27,46 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
+
+/// The data a dependency lifecycle spawn hands to an embedder's confinement hook.
+///
+/// Plain data — aube fills it from the fully-configured lifecycle command and hands
+/// it to [`LifecycleSandbox::run`], which owns the confined spawn+wait. The embedder
+/// reconstructs the effective child env from `env_delta` (the command's explicit env
+/// operations layered over the inherited aube-process env — the unconfined spawn does
+/// not clear the environment) before scrubbing and confining it, exactly as the
+/// unconfined spawn would have resolved it.
+#[derive(Debug, Clone)]
+pub struct LifecycleSandboxSpawn {
+    /// The shell program (`sh` / `cmd.exe`) the script line runs through.
+    pub program: OsString,
+    /// Its arguments (`-c <script>` / the cmd.exe raw tail).
+    pub args: Vec<OsString>,
+    /// The working directory (the package dir the script runs in).
+    pub cwd: PathBuf,
+    /// The project root, for the embedder's project-read grant + `./` anchor.
+    pub project_root: PathBuf,
+    /// The dependency's own package dir — the one subtree the build may WRITE.
+    pub package_dir: PathBuf,
+    /// The command's explicit env operations (set = `Some`, removed = `None`), read
+    /// back from the built command. Layered over the inherited aube-process env by the
+    /// embedder to reconstruct the effective child env the unconfined spawn would have.
+    pub env_delta: Vec<(OsString, Option<OsString>)>,
+}
+
+/// An embedder-supplied confiner for dependency lifecycle-script spawns. Set on the
+/// [`EngineContext`] by a host (nub) that owns lifecycle-script confinement
+/// ([`Embedder::embedder_owns_lifecycle_sandbox`](crate::identity::Embedder::embedder_owns_lifecycle_sandbox)),
+/// so aube runs the dep spawn through the host's sandbox INSTEAD of its own build jail
+/// (`aube-scripts::ScriptJail`). Aube assigns the hook no meaning beyond "confine this
+/// spawn and return its exit status"; the implementor builds the confined child. The
+/// call is synchronous (aube drives it off the async runtime via `spawn_blocking`).
+/// `None` (the default) = no interposition — aube spawns exactly as before.
+pub trait LifecycleSandbox: Send + Sync + std::fmt::Debug {
+    /// Spawn `spawn` fully confined, wait for it, and return its exit status.
+    fn run(&self, spawn: LifecycleSandboxSpawn) -> std::io::Result<std::process::ExitStatus>;
+}
 
 /// Per-invocation values an embedder computes and hands to aube.
 ///
@@ -365,6 +404,15 @@ pub struct EngineContext {
     /// kinds that carry no checksum (npm/yarn/bun): stored and computed both
     /// resolve to `None`, so the check is a no-op.
     pub enforce_package_extensions_checksum: bool,
+
+    /// Embedder-supplied confiner for dependency lifecycle-script spawns. `Some`
+    /// (set only by a host whose
+    /// [`Embedder::embedder_owns_lifecycle_sandbox`](crate::identity::Embedder::embedder_owns_lifecycle_sandbox)
+    /// is `true`) makes aube run each dep spawn through the host's sandbox instead of
+    /// its own build jail. `None` (default) = no interposition — aube spawns as before.
+    /// Same additive shape as [`env_overlay`](Self::env_overlay)/[`path_prepends`](Self::path_prepends):
+    /// default-empty is behavior-preserving.
+    pub lifecycle_sandbox: Option<Arc<dyn LifecycleSandbox>>,
 }
 
 impl Default for EngineContext {
@@ -396,6 +444,7 @@ impl Default for EngineContext {
             named_registries_enabled: false,
             embedder_package_extensions: None,
             enforce_package_extensions_checksum: false,
+            lifecycle_sandbox: None,
         }
     }
 }
@@ -468,5 +517,6 @@ mod tests {
         assert!(!ctx.named_registries_enabled);
         assert_eq!(ctx.embedder_package_extensions, None);
         assert!(!ctx.enforce_package_extensions_checksum);
+        assert!(ctx.lifecycle_sandbox.is_none());
     }
 }

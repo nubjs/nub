@@ -529,6 +529,7 @@ mod win {
             caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
             ambient_env: ambient,
             document: serde_json::Value::Null,
+            interpreter: Vec::new(),
             runner: Box::new(nub_sandbox::compiler::ShellRunner),
         };
         nub_sandbox::compile(surface, &ctx).expect("surface compiles")

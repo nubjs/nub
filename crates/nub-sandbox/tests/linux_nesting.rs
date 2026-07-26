@@ -87,6 +87,7 @@ fn set_up_host_admits_the_helper_and_a_nested_launch_succeeds() {
         caps: ScopeCapabilities::approved(),
         ambient_env: BTreeMap::new(),
         document: serde_json::Value::Null,
+        interpreter: Vec::new(),
         runner: Box::new(ShellRunner),
     };
     // A real fs-confining policy forces the confined Bubblewrap launch path.

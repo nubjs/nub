@@ -121,6 +121,15 @@ fn merge_allow_build(
     }
 }
 
+/// Whether aube's OWN build jail engages. `paranoid`/`jailBuilds` request it, but an
+/// embedder that owns lifecycle confinement (`embedder_owns_lifecycle_sandbox`)
+/// suppresses it unconditionally — it interposes its own sandbox instead, and a user
+/// setting must not be able to swap that back to aube's jail. Pure so the gate is
+/// unit-testable without a settings `ResolveCtx` or the process-global embedder.
+fn jail_enabled(embedder_owns_lifecycle_sandbox: bool, jail_builds: bool, paranoid: bool) -> bool {
+    !embedder_owns_lifecycle_sandbox && (jail_builds || paranoid)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct JailBuildPolicy {
     enabled: bool,
@@ -133,9 +142,17 @@ impl JailBuildPolicy {
         ctx: &aube_settings::ResolveCtx<'_>,
         workspace: &aube_manifest::WorkspaceConfig,
     ) -> (Self, Vec<String>) {
-        // `paranoid=true` forces the jail on regardless of `jailBuilds`.
-        let enabled =
-            aube_settings::resolved::jail_builds(ctx) || aube_settings::resolved::paranoid(ctx);
+        // `paranoid=true` forces the jail on regardless of `jailBuilds`. But when the
+        // EMBEDDER owns lifecycle-script confinement, aube's own build jail never
+        // engages — the embedder interposes its own sandbox via the
+        // `EngineContext::lifecycle_sandbox` hook — so a user `jailBuilds`/`paranoid`
+        // cannot swap the choice back to aube's jail. Default-preserving: standalone
+        // aube's flag is `false`, leaving this decision byte-for-byte unchanged.
+        let enabled = jail_enabled(
+            aube_util::embedder().embedder_owns_lifecycle_sandbox,
+            aube_settings::resolved::jail_builds(ctx),
+            aube_settings::resolved::paranoid(ctx),
+        );
         let jail_exclusions = aube_settings::resolved::jail_build_exclusions(ctx);
         let (denylist, denylist_warnings) = aube_scripts::BuildPolicy::denylist(&jail_exclusions);
         let mut warnings = denylist_warnings
@@ -1336,6 +1353,22 @@ pub(super) fn unreviewed_dep_builds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedder_owned_lifecycle_sandbox_suppresses_aubes_jail() {
+        // Standalone aube (flag false): `jailBuilds`/`paranoid` engage aube's own jail
+        // exactly as before — byte-for-byte default behavior.
+        assert!(jail_enabled(false, true, false), "jailBuilds engages the jail");
+        assert!(jail_enabled(false, false, true), "paranoid engages the jail");
+        assert!(!jail_enabled(false, false, false), "neither set → no jail");
+        // Embedder-owned confinement (flag true, nub): aube's jail NEVER engages, even
+        // when a user (or a compat project's .npmrc) sets jailBuilds/paranoid — the
+        // embedder interposes its own build-jail instead.
+        assert!(!jail_enabled(true, true, true));
+        assert!(!jail_enabled(true, true, false));
+        assert!(!jail_enabled(true, false, true));
+        assert!(!jail_enabled(true, false, false));
+    }
 
     #[test]
     fn member_allow_build_conflict_denies() {

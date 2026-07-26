@@ -35,7 +35,8 @@ pub use identity::{
 // Convenience re-exports for the runtime embedder seam (the per-invocation
 // counterpart to `Embedder`).
 pub use engine_context::{
-    EngineContext, engine_context, set_engine_context, update_engine_context,
+    EngineContext, LifecycleSandbox, LifecycleSandboxSpawn, engine_context, set_engine_context,
+    update_engine_context,
 };
 pub mod path;
 pub mod pkg;

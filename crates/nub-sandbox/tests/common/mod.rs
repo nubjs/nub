@@ -73,6 +73,7 @@ pub fn ctx_with_document(trusted: bool, env: &[(&str, &str)], document: Value) -
         caps: caps(trusted),
         ambient_env: ambient,
         document,
+        interpreter: Vec::new(),
         runner: Box::new(StubRunner),
     }
 }

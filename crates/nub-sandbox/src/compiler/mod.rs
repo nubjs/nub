@@ -19,6 +19,7 @@ mod preset;
 mod resolve;
 mod reuse;
 
+pub use preset::compile_build_jail;
 pub use resolve::{CommandRunner, ShellRunner};
 
 use crate::matcher::path::Homes;
@@ -114,6 +115,18 @@ pub struct CompileCtx {
     /// to the whole parsed file via [`CompileCtx::with_document`]. All fields on this ctx
     /// are already-parsed host data (the Boundary-B contract), so an owned `Value` fits.
     pub document: Value,
+    /// The build-jail interpreter-closure paths — the Node binaries the lifecycle
+    /// scripts run under. The build-jail preset grants each (and its bin dir) READ,
+    /// because nub provisions its OWN Node under its store rather than `/usr`, so the
+    /// Linux `RootView::Minimal` auto-mount of `ESSENTIAL_READ_DIRS` (which covers a
+    /// system-installed interpreter) does NOT reach it — the empirically-load-bearing
+    /// grant the build-jail read-set spike identified. It is a SET, not one path,
+    /// because under nub a bare `node` resolves via a PATH-prepended shim (`$NODE`)
+    /// while `npm_node_execpath` names the real provisioned binary — both must be
+    /// readable/executable. Empty (the default) for a policy with no interpreter to
+    /// grant (`--sandbox <file>`, the static `build-jail` preset). Set per-spawn by the
+    /// lifecycle interposition via [`CompileCtx::with_interpreter`].
+    pub interpreter: Vec<std::path::PathBuf>,
     /// The `$(…)` command runner (production shells out; tests inject a stub).
     pub runner: Box<dyn CommandRunner>,
 }
@@ -133,6 +146,7 @@ impl CompileCtx {
             caps,
             ambient_env,
             document: Value::Null,
+            interpreter: Vec::new(),
             runner: Box::new(ShellRunner),
         }
     }
@@ -153,6 +167,15 @@ impl CompileCtx {
     /// block) so a `#/shared/*` sibling pointer reaches its target. See [`CompileCtx::document`].
     pub fn with_document(mut self, document: Value) -> Self {
         self.document = document;
+        self
+    }
+
+    /// Attach the build-jail interpreter-closure paths (the provisioned Node + shim the
+    /// lifecycle script runs under). The `build-jail` preset then grants each path + its
+    /// bin dir READ. Empty (the default) leaves the preset with no interpreter grant.
+    /// See [`CompileCtx::interpreter`].
+    pub fn with_interpreter(mut self, interpreter: Vec<std::path::PathBuf>) -> Self {
+        self.interpreter = interpreter;
         self
     }
 }
@@ -282,8 +305,12 @@ pub(crate) fn compile_scope(
             StringKind::Preset => {
                 let expanded = preset::resolve(s)?;
                 let mut policy = compile_object(&expanded, ctx, caps, warnings)?;
-                // A preset's broad grants (build-jail's `"./"`) re-open the built-in
-                // secret floor under last-match-wins; re-assert it post-fold.
+                // build-jail read-set closure: the provisioned interpreter lives under
+                // nub's store (not `/usr`), so the tight-read base does not reach it —
+                // grant it (front-inserted so the `.env`/secret floor still wins over it).
+                preset::grant_build_jail_interpreter(s, &mut policy, ctx);
+                // A preset's grants (build-jail's `"./"`) re-open the built-in secret
+                // floor under last-match-wins; re-assert it post-fold.
                 preset::reassert_secret_floor(s, &mut policy, ctx);
                 Ok(policy)
             }

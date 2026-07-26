@@ -110,7 +110,7 @@ pub use backend::{
 };
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, ScopeCapabilities, compile,
-    compile_with_warnings,
+    compile_build_jail, compile_with_warnings,
 };
 pub use matcher::Homes;
 pub use policy::SandboxPolicy;

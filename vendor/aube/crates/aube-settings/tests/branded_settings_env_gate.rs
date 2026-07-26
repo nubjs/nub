@@ -59,6 +59,7 @@ static MYTOOL_NO_BRANDED_ENV: Embedder = Embedder {
     warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,
     extra_settings_fingerprint: None,
+    embedder_owns_lifecycle_sandbox: false,
 };
 
 fn ctx<'a>(

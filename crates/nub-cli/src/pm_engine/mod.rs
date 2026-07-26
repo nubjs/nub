@@ -51,6 +51,7 @@
 //! branding in the document body — info_family module doc) — which error
 //! with honest per-verb messages in their family dispatchers.
 
+pub mod build_jail;
 mod bun_config;
 pub mod config_scope;
 mod expo_compat;

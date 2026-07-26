@@ -80,6 +80,7 @@ impl Fixture {
             caps: ScopeCapabilities::approved(),
             ambient_env: Default::default(),
             document: serde_json::Value::Null,
+            interpreter: Vec::new(),
             runner: Box::new(ShellRunner),
         }
     }

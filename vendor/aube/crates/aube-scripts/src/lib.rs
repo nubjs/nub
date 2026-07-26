@@ -1109,6 +1109,7 @@ pub async fn run_script(
     script_cmd: &str,
     extra_bin_dirs: &[&Path],
     jail: Option<&ScriptJail>,
+    sandbox_package_dir: Option<&Path>,
 ) -> Result<(), Error> {
     // Per-script diag span. Tags the package name (when present) and the
     // script name so the analyzer can attribute postinstall / preinstall /
@@ -1198,7 +1199,28 @@ pub async fn run_script(
     apply_npm_manifest_env(&mut cmd, manifest, script_dir, script_cmd);
 
     tracing::debug!("lifecycle: {script_name} → {script_cmd}");
-    let status = run_command_killing_descendants(cmd, script_name).await?;
+    // Embedder-owned confinement: a dep spawn (`sandbox_package_dir` set, the embedder
+    // hook installed) runs through the host's sandbox INSTEAD of aube's own spawn/jail.
+    // Root scripts (trusted, user-authored) pass `None` and always run unconfined here.
+    // The two are mutually exclusive: the embedder that installs the hook also gates
+    // aube's own jail off (`embedder_owns_lifecycle_sandbox`), so `jail` is `None` on
+    // this path. `None` hook (or no dir) falls through to the normal aube spawn.
+    let status = match sandbox_package_dir.and_then(|dir| {
+        aube_util::engine_context()
+            .lifecycle_sandbox
+            .map(|hook| (dir.to_path_buf(), hook))
+    }) {
+        Some((package_dir, hook)) => {
+            let spawn = lifecycle_sandbox_spawn(&cmd, script_dir, project_root, &package_dir);
+            // The host sandbox owns a synchronous spawn+wait (nub-sandbox drives an
+            // outer bwrap / Seatbelt child), so run it off the async runtime.
+            tokio::task::spawn_blocking(move || hook.run(spawn))
+                .await
+                .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?
+                .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?
+        }
+        None => run_command_killing_descendants(cmd, script_name).await?,
+    };
 
     if !status.success() {
         return Err(Error::NonZeroExit {
@@ -1212,6 +1234,30 @@ pub async fn run_script(
     }
 
     Ok(())
+}
+
+/// Package a fully-configured lifecycle command for the embedder's confinement hook.
+/// Reads the program/args/env back off the built command so the embedder confines the
+/// SAME spawn aube would have run; the env is handed over as the command's explicit
+/// operations (the unconfined spawn inherits the aube-process env and layers these).
+fn lifecycle_sandbox_spawn(
+    cmd: &tokio::process::Command,
+    script_dir: &Path,
+    project_root: &Path,
+    package_dir: &Path,
+) -> aube_util::LifecycleSandboxSpawn {
+    let std_cmd = cmd.as_std();
+    aube_util::LifecycleSandboxSpawn {
+        program: std_cmd.get_program().to_os_string(),
+        args: std_cmd.get_args().map(|a| a.to_os_string()).collect(),
+        cwd: script_dir.to_path_buf(),
+        project_root: project_root.to_path_buf(),
+        package_dir: package_dir.to_path_buf(),
+        env_delta: std_cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+            .collect(),
+    }
 }
 
 /// Run a lifecycle hook against the root package, if a script for it is
@@ -1251,6 +1297,9 @@ pub async fn run_root_script_by_name(
         name,
         script_cmd,
         &[],
+        None,
+        // Root-package scripts are trusted (user-authored) — never confined by the
+        // embedder's dep build-jail.
         None,
     )
     .await?;
@@ -1483,6 +1532,12 @@ pub async fn run_dep_hook(
     let mut bin_dirs: Vec<&Path> = Vec::with_capacity(tool_bin_dirs.len() + 1);
     bin_dirs.push(&dep_bin_dir);
     bin_dirs.extend(tool_bin_dirs.iter().copied());
+    // When the embedder owns lifecycle confinement, every DEP build script runs under
+    // its sandbox (keyed on this package dir). Standalone aube leaves this `None` and
+    // relies on `jail` (its own build jail) exactly as before.
+    let sandbox_package_dir = aube_util::embedder()
+        .embedder_owns_lifecycle_sandbox
+        .then_some(package_dir);
     run_script(
         package_dir,
         project_root,
@@ -1492,6 +1547,7 @@ pub async fn run_dep_hook(
         script_cmd,
         &bin_dirs,
         jail,
+        sandbox_package_dir,
     )
     .await?;
     Ok(true)

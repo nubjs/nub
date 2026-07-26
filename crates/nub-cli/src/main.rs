@@ -26,7 +26,13 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> Result<()> {
     // Must be the first embedder action: Linux monitor mode is selected from a
     // private argv/descriptor handshake and never enters logging or CLI setup.
-    let sandbox_runtime = nub_sandbox::earliest_bootstrap()?;
+    // Leaked to `'static`: the capability lives for the whole process (held until
+    // `process::exit`, which skips Drop anyway), and the build-jail interposition hook
+    // — stored on the process-global engine context — must capture it beyond any stack
+    // frame. The RuntimeCapability is opaque + non-cloneable, so leaking the single
+    // instance is the clean way to give it the required lifetime.
+    let sandbox_runtime: &'static nub_sandbox::RuntimeCapability =
+        Box::leak(Box::new(nub_sandbox::earliest_bootstrap()?));
 
     if std::env::var_os("__NUB_VALIDATE_RESOURCE_BUNDLE").is_some() {
         nub_sandbox::validate_adjacent_resource_bundle()
@@ -38,6 +44,11 @@ fn main() -> Result<()> {
     // filter when set. See pm_engine::log.
     pm_engine::log::init();
 
-    let exit_code = cli::run(&sandbox_runtime)?;
+    // Interpose nub's build-jail around aube's dependency lifecycle-script spawns
+    // (aube's own build jail is neutralized under the NUB profile). Installed once,
+    // before any PM command runs; a non-install command never invokes the hook.
+    pm_engine::build_jail::install(sandbox_runtime);
+
+    let exit_code = cli::run(sandbox_runtime)?;
     std::process::exit(exit_code);
 }

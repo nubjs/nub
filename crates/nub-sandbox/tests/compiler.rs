@@ -505,6 +505,11 @@ fn keys_inside_an_axis_object_do_not_implicitly_inherit() {
 
 #[test]
 fn build_jail_preset_expands() {
+    // The STATIC `--sandbox build-jail` preset (v2): tight, default-deny read of the
+    // project + `$tooldirs` (the OS backends supply the system/toolchain closure under a
+    // minimal root), a private tmp, egress denied, strip-all env. The per-package WRITE
+    // grant + provisioned-interpreter read + scrubbed lifecycle env are the
+    // interposition's job (see `build_jail_interposition_*`), NOT this static preset.
     let ctx = common::ctx(true, &[("PATH", "/bin"), ("NPM_TOKEN", "t")]);
     let p = compile(&json!("build-jail"), &ctx).unwrap();
     assert!(
@@ -513,21 +518,22 @@ fn build_jail_preset_expands() {
     );
     assert!(
         p.env.enforce && p.env.constructed.is_empty(),
-        "build-jail strips env"
+        "static build-jail strips env"
     );
-    // The project subtree is writable...
+    assert!(
+        matches!(p.fs.tmp, nub_sandbox::policy::TmpMode::Private),
+        "build-jail gives a private per-run tmp"
+    );
     let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
     let proj = common::homes().project;
+    // The project is READ-only (NOT write) — the per-package write is per-spawn.
     let d = m.decide(&proj.join("build/out.o"));
     assert!(
         matches!(d.effect, Effect::Allow)
-            && matches!(d.access, nub_sandbox::policy::FsAccess::ReadWrite)
+            && matches!(d.access, nub_sandbox::policy::FsAccess::Read),
+        "static build-jail reads the project but does not write it"
     );
-    // ...but the secret set stays DENIED even though `"./"` grants the whole subtree.
-    // The `"./"` grant is the LAST matching entry for `<proj>/.env`, so without the
-    // post-fold secret-floor re-assertion the jail would leak the project's own
-    // `.env` to the untrusted lifecycle script it exists to confine. Guard the leaf,
-    // a nested `.env`, the `.env` DIRECTORY form, and an outside-project secret.
+    // The secret + `.env*` floors hold even under the project read.
     for secret in [".env", "packages/app/.env", ".env/keys.txt", ".envrc"] {
         assert!(
             matches!(m.decide(&proj.join(secret)).effect, Effect::Deny),
@@ -541,18 +547,138 @@ fn build_jail_preset_expands() {
         ),
         "build-jail must deny the home secret set"
     );
-    // Whole-filesystem READ is restored (regression guard): a build script must reach its
-    // interpreter, system libs/headers, and out-of-project caches. An OUT-OF-PROJECT,
-    // NON-secret path is readable — proving the base is whole-fs read (`{"/":"r"}`), not a
-    // project-anchored `{"**":"r"}` that silently narrows to project-only.
-    for readable in [
+    // D6: `/etc` is read-only via the Linux minimal root, but the two password-hash
+    // files are denied within it.
+    for shadow in ["/etc/shadow", "/etc/gshadow"] {
+        assert!(
+            matches!(m.decide(std::path::Path::new(shadow)).effect, Effect::Deny),
+            "build-jail must deny {shadow}"
+        );
+    }
+    // Tight read (NOT whole-fs): a `$tooldirs` path (the store/caches) is readable, but
+    // an out-of-project non-secret path is NOT granted at the IR level (the Linux
+    // backend auto-mounts the system essentials at runtime; the IR stays default-deny).
+    assert!(
+        matches!(
+            m.decide(&common::homes().home.join(".cargo/registry/pkg"))
+                .effect,
+            Effect::Allow
+        ),
+        "build-jail grants $tooldirs read"
+    );
+    for denied in [
         std::path::PathBuf::from("/usr/lib/libc.so"),
         common::homes().home.join("notes.txt"),
     ] {
         assert!(
-            matches!(m.decide(&readable).effect, Effect::Allow),
-            "build-jail must grant whole-fs read to {}",
-            readable.display()
+            matches!(m.decide(&denied).effect, Effect::Deny),
+            "static build-jail must NOT grant whole-fs read to {}",
+            denied.display()
+        );
+    }
+}
+
+#[test]
+fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
+    use std::collections::BTreeMap;
+    // The production path: `compile_build_jail` for one dep lifecycle spawn. Its package
+    // dir is WRITABLE, the provisioned interpreter (outside `/usr`) is readable, and the
+    // constructed lifecycle env is kept minus credential-shaped keys.
+    let homes = common::homes();
+    let proj = homes.project.clone();
+    let package_dir = proj.join("node_modules/.aube/left-pad@1.0.0/node_modules/left-pad");
+    // A provisioned Node under nub's data dir — NOT under `/usr`, so the tight-read base
+    // cannot reach it; the interpreter grant is the load-bearing addition.
+    let interpreter = homes.home.join(".local/share/nub/node/22.15.0/bin/node");
+    let ambient: BTreeMap<String, String> = [
+        ("PATH", "/bin"),
+        ("NODE", interpreter.to_str().unwrap()),
+        ("npm_node_execpath", interpreter.to_str().unwrap()),
+        ("npm_package_name", "left-pad"),
+        ("NPM_TOKEN", "super-secret"),
+        ("AWS_SECRET_ACCESS_KEY", "leak"),
+        ("npm_config_//registry.npmjs.org/:_authToken", "leak"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+
+    let p = nub_sandbox::compile_build_jail(
+        homes.clone(),
+        &package_dir,
+        vec![interpreter.clone()],
+        ambient,
+    )
+    .unwrap();
+    let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
+
+    // WRITE confined to the own package dir; the rest of the project is read-only.
+    let pkg = m.decide(&package_dir.join("build/Release/addon.node"));
+    assert!(
+        matches!(pkg.effect, Effect::Allow)
+            && matches!(pkg.access, nub_sandbox::policy::FsAccess::ReadWrite),
+        "the dep's own package dir is writable"
+    );
+    let sibling = m.decide(&proj.join("src/app.ts"));
+    assert!(
+        matches!(sibling.effect, Effect::Allow)
+            && matches!(sibling.access, nub_sandbox::policy::FsAccess::Read),
+        "the rest of the project is read-only"
+    );
+    // The provisioned interpreter (and its bin dir) is readable.
+    assert!(
+        matches!(m.decide(&interpreter).effect, Effect::Allow),
+        "the provisioned interpreter is granted read"
+    );
+    assert!(
+        matches!(
+            m.decide(&interpreter.parent().unwrap().join("npm")).effect,
+            Effect::Allow
+        ),
+        "the interpreter's bin dir is granted read"
+    );
+    // A `.env` inside the writable package dir is STILL denied (the floor wins over the
+    // package-dir grant), and the home secret set stays denied.
+    assert!(
+        matches!(m.decide(&package_dir.join(".env")).effect, Effect::Deny),
+        ".env in the package dir is denied by the floor"
+    );
+    assert!(
+        matches!(
+            m.decide(&homes.home.join(".ssh/id_rsa")).effect,
+            Effect::Deny
+        ),
+        "the home secret set stays denied"
+    );
+    // Egress denied.
+    assert!(p.net.enforce && p.net.rules.is_empty());
+    // Env: the constructed lifecycle env is KEPT minus credential-shaped keys.
+    assert!(p.env.enforce);
+    assert_eq!(
+        p.env
+            .constructed
+            .get("npm_package_name")
+            .map(String::as_str),
+        Some("left-pad"),
+        "build hints / package env are kept"
+    );
+    assert_eq!(
+        p.env.constructed.get("PATH").map(String::as_str),
+        Some("/bin"),
+        "PATH is kept (a build needs it)"
+    );
+    for cred in [
+        "NPM_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "npm_config_//registry.npmjs.org/:_authToken",
+    ] {
+        assert!(
+            !p.env.constructed.contains_key(cred),
+            "credential-shaped key {cred} must be withheld"
+        );
+        assert!(
+            p.env.withheld.contains(&cred.to_string()),
+            "withheld list records {cred}"
         );
     }
 }
@@ -1298,6 +1424,7 @@ fn unterminated_substitution_is_named_not_unknown_type() {
         caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
         document: serde_json::Value::Null,
+        interpreter: Vec::new(),
         runner: Box::new(PanicRunner),
     };
     for surface in [
@@ -1370,6 +1497,7 @@ fn glob_key_substitution_is_rejected_before_running() {
         caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
         document: serde_json::Value::Null,
+        interpreter: Vec::new(),
         runner: Box::new(PanicRunner),
     };
     for surface in [
