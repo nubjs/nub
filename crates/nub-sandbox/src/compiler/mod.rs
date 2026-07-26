@@ -9,6 +9,7 @@
 //! emit. Scope resolution and tighten-only layering live in sibling modules for
 //! the future project frontend; the `--sandbox` entry is single-block.
 
+mod builtin_sets;
 mod clobber;
 mod defaults;
 mod env_grammar;

@@ -1,0 +1,10 @@
+{
+  "name": "net-trusted-set",
+  "note": "`$trusted` expands the curated host set into a fine-grained net allow (proxy Auto). An unlisted IP target (1.1.1.1) is not a set member, so egress is denied end-to-end; the negative control proves the deny is real. The set's ADMISSION of listed hosts is proven at the compiler level (HostMatcher) — a real allowed connect would depend on live network + DNS to a third party, which this suite deliberately avoids.",
+  "policy": { "net": ["$trusted"], "fs": true, "vars": true },
+  "relaxed": false,
+  "cases": [
+    { "probe": "env", "target": "PATH", "expect": true },
+    { "probe": "connect", "target": "1.1.1.1:443", "expect": false }
+  ]
+}

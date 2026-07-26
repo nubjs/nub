@@ -1847,3 +1847,241 @@ fn fs_substitution_deny_prefix_and_unterminated() {
         other => panic!("expected an unterminated-substitution error, got {other:?}"),
     }
 }
+
+// ── built-in sets: $trusted (net) + $tooldirs (fs) ──────────────────────────────
+
+#[test]
+fn trusted_set_expands_in_place_admitting_listed_and_denying_unlisted() {
+    // `$trusted` expands the curated host set at its position; a later authored host
+    // composes with it under last-match-wins. Nothing outside either is admitted.
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "net": ["$trusted", "api.mycompany.com"] }), &ctx).unwrap();
+    assert!(p.net.enforce);
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(
+        m.admits("api.github.com"),
+        "a listed $trusted host is admitted"
+    );
+    assert!(
+        m.admits("registry.npmjs.org"),
+        "another listed host is admitted"
+    );
+    assert!(
+        m.admits("in.sentry.io"),
+        "a *.suffix member matches its subdomain"
+    );
+    assert!(
+        m.admits("api.mycompany.com"),
+        "the authored host composes with the set"
+    );
+    assert!(!m.admits("evil.test"), "an unlisted host is denied");
+    assert!(
+        !m.admits("evil.s3.amazonaws.com"),
+        "the removed object-store wildcard does not re-admit an exfil sink"
+    );
+}
+
+#[test]
+fn negated_trusted_set_denies_each_host() {
+    // `!$trusted` expands-then-negates: each member becomes a Deny. Ordered after a
+    // broad `*` allow, it re-strips the trusted set (`["*", "!$trusted"]`).
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "net": ["*", "!$trusted"] }), &ctx).unwrap();
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(
+        !m.admits("api.github.com"),
+        "!$trusted denies a listed host"
+    );
+    assert!(
+        m.admits("anything.else"),
+        "the broad allow still admits a non-member"
+    );
+}
+
+#[test]
+fn trusted_set_admits_a_brokered_host_in_the_set() {
+    // §5 broker-ordering regression: `$trusted` expands into `net.rules` BEFORE
+    // `transpose_brokers`/`validate_brokers`, so a broker whose host is a $trusted
+    // member is admitted (HostMatcher sees the expanded allow) and the tier derives.
+    let ctx = common::ctx(true, &[("GH_TOKEN", "real-token")]);
+    let p = compile(
+        &json!({
+            "net": ["$trusted"],
+            "secrets": { "GH_TOKEN": { "brokerTo": ["api.github.com"] } }
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(p.net.brokers.len(), 1);
+    assert_eq!(p.net.brokers[0].host, "api.github.com");
+    assert!(matches!(p.net.inspection, Inspection::TlsInspect));
+    assert!(
+        !p.env.constructed.contains_key("GH_TOKEN"),
+        "the brokered secret's real value is withheld"
+    );
+}
+
+#[test]
+fn brokered_host_not_in_trusted_set_is_a_compile_error() {
+    // A brokerTo host that is NOT a $trusted member is not admitted → the "brokered
+    // but not allowed" error, proving `$trusted` is the ONLY thing admitting the host.
+    let ctx = common::ctx(true, &[("API_TOKEN", "t")]);
+    let err = compile(
+        &json!({
+            "net": ["$trusted"],
+            "secrets": { "API_TOKEN": { "brokerTo": ["not-in-trusted.example"] } }
+        }),
+        &ctx,
+    )
+    .unwrap_err();
+    match err {
+        CompileError::Shape { path, message } => {
+            assert_eq!(path, "secrets.API_TOKEN.brokerTo");
+            assert!(
+                message.contains("not-in-trusted.example") && message.contains("not allowed"),
+                "names the un-admitted host: {message}"
+            );
+        }
+        other => panic!("expected a brokerTo-not-in-net Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(not(windows))]
+fn tooldirs_set_grants_the_cache_dirs_while_the_dotenv_floor_still_bites() {
+    // `$tooldirs` grants read on the package-manager / toolchain cache dirs (nub store,
+    // npm cacache), composes with an ordinary `./dist` rw grant, and the `.env*` floor
+    // is still injected (a read-granting policy). Non-Windows: the Windows read-confine
+    // limitation rejects a read-deny-inside-grant pre-launch (conformance covers that).
+    use nub_sandbox::matcher::PathMatcher;
+    use nub_sandbox::policy::FsAccess;
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "fs": { "$tooldirs": "r", "./dist": "rw" } }), &ctx).unwrap();
+    let m = PathMatcher::new(&p.fs.rules);
+    let home = common::homes().home;
+    let proj = common::homes().project;
+
+    let store = m.decide(&home.join(".local/share/nub/store/pkg/index.js"));
+    assert!(
+        matches!(store.effect, Effect::Allow) && matches!(store.access, FsAccess::Read),
+        "the nub CAS store is readable under $tooldirs"
+    );
+    let cacache = m.decide(&home.join(".npm/_cacache/content-v2/sha512/ab/cd"));
+    assert!(
+        matches!(cacache.effect, Effect::Allow) && matches!(cacache.access, FsAccess::Read),
+        "npm's cacache is readable under $tooldirs"
+    );
+    let dist = m.decide(&proj.join("dist/bundle.js"));
+    assert!(
+        matches!(dist.effect, Effect::Allow) && matches!(dist.access, FsAccess::ReadWrite),
+        "the authored ./dist grant composes with the set"
+    );
+    assert!(
+        matches!(m.decide(&proj.join(".env")).effect, Effect::Deny),
+        ".env stays denied — the floor beats a read-granting $tooldirs policy"
+    );
+    assert!(
+        matches!(m.decide(&proj.join("src/index.js")).effect, Effect::Deny),
+        "an ungranted project path stays default-denied"
+    );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn negated_tooldirs_set_denies_each_dir() {
+    // `!$tooldirs` (array form — the ORDERED surface) expands-then-negates: each member
+    // becomes a Deny. Ordered after a broad `~` grant it re-confines the tool caches
+    // while leaving the rest of home usable. (Object-key order is sorted, so re-confining
+    // after a broad grant is an array-form concern; a `{ "$tooldirs": false }` object
+    // value is the object-form deny.)
+    use nub_sandbox::matcher::PathMatcher;
+    use nub_sandbox::policy::FsAccess;
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "fs": ["~", "!$tooldirs"] }), &ctx).unwrap();
+    let m = PathMatcher::new(&p.fs.rules);
+    let home = common::homes().home;
+    assert!(
+        matches!(
+            m.decide(&home.join(".cargo/registry/x")).effect,
+            Effect::Deny
+        ),
+        "!$tooldirs denies a tool cache dir carved out of the broad ~ grant"
+    );
+    let other = m.decide(&home.join("notes.txt"));
+    assert!(
+        matches!(other.effect, Effect::Allow) && matches!(other.access, FsAccess::ReadWrite),
+        "a non-tooldir home path stays fully usable"
+    );
+
+    // Object-form deny via a `false` value also confines the set.
+    let obj = compile(
+        &json!({ "fs": { "$tooldirs": false, "./dist": "rw" } }),
+        &ctx,
+    )
+    .unwrap();
+    let mo = PathMatcher::new(&obj.fs.rules);
+    assert!(
+        matches!(
+            mo.decide(&home.join(".cargo/registry/x")).effect,
+            Effect::Deny
+        ),
+        "{{ \"$tooldirs\": false }} denies the tool caches"
+    );
+}
+
+#[test]
+fn tooldirs_array_form_grants_readwrite() {
+    // Array-form `$tooldirs` grants ReadWrite (like a bare path array entry).
+    use nub_sandbox::matcher::PathMatcher;
+    use nub_sandbox::policy::FsAccess;
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "fs": ["$tooldirs"] }), &ctx).unwrap();
+    let d = PathMatcher::new(&p.fs.rules).decide(&common::homes().home.join(".cargo/registry/x"));
+    assert!(matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::ReadWrite));
+}
+
+#[test]
+fn wrong_axis_and_unknown_sets_are_shape_errors() {
+    // A set on the wrong axis, and an unknown `$name` on either axis, are hard shape
+    // errors — never a silent nothing-matching rule.
+    let ctx = common::ctx(true, &[]);
+    let cases = [
+        json!({ "net": ["$tooldirs"] }),           // fs set on net
+        json!({ "net": { "$trusted": true } }),    // net set as an object key
+        json!({ "fs": ["$trusted"] }),             // net set on fs
+        json!({ "fs": ["$frobnicate"] }),          // unknown set on fs
+        json!({ "net": ["$frobnicate"] }),         // unknown set on net
+        json!({ "fs": { "$tooldirs/sub": "r" } }), // a set takes no subpath
+        json!({ "fs": ["$tooldirs/sub"] }),        // a set takes no subpath (array)
+    ];
+    for surface in cases {
+        assert!(
+            matches!(compile(&surface, &ctx), Err(CompileError::Shape { .. })),
+            "expected a Shape error for {surface}"
+        );
+    }
+}
+
+#[test]
+fn wrong_axis_error_messages_point_at_the_right_axis() {
+    // The diagnostics name the correct axis so the fix is obvious.
+    let ctx = common::ctx(true, &[]);
+    match compile(&json!({ "fs": ["$trusted"] }), &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(
+                message.contains("network") && message.contains("net"),
+                "{message}"
+            );
+        }
+        other => panic!("expected Shape, got {other:?}"),
+    }
+    match compile(&json!({ "net": ["$tooldirs"] }), &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(
+                message.contains("filesystem") && message.contains("fs"),
+                "{message}"
+            );
+        }
+        other => panic!("expected Shape, got {other:?}"),
+    }
+}

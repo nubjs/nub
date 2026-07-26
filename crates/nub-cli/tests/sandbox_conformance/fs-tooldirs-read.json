@@ -1,0 +1,12 @@
+{
+  "name": "fs-tooldirs-read",
+  "note": "`$tooldirs` grants read on the package-manager / toolchain cache dirs so a build can resolve deps from the store, while an ungranted project path stays denied. The nub store/cache anchors track the NUB embedder profile (data_namespace=nub, cache_namespace=nub/pm); XDG_CACHE_HOME is pointed at the fixture home by the harness, so $cache resolves under it. macOS/Linux only — the Windows AppContainer allowlist cannot carve the compiler's .env* read-deny out of the grant (covered by the other fs fixtures' fail-closed path).",
+  "policy": { "fs": { "$tooldirs": "r" }, "vars": true, "net": true },
+  "relaxed": { "fs": true },
+  "cases": [
+    { "probe": "read", "target": "home:.local/share/nub/store/v1/files/pkg/index.js", "expect": true, "platforms": ["macos", "linux"] },
+    { "probe": "read", "target": "home:.cache/nub/pm/meta/index.json", "expect": true, "platforms": ["macos", "linux"] },
+    { "probe": "read", "target": "home:.npm/_cacache/content-v2/sha512/ab/cd", "expect": true, "platforms": ["macos", "linux"] },
+    { "probe": "read", "target": "proj:secret.txt", "expect": false, "platforms": ["macos", "linux"] }
+  ]
+}

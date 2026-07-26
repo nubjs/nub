@@ -4,6 +4,7 @@
 //! made at evaluation time by the matcher, so the fold only has to preserve
 //! order and splice the defaults at the sentinel's position.
 
+use super::builtin_sets;
 use super::defaults;
 use super::env_grammar::{EnvType, parse_env_type};
 use super::resolve;
@@ -28,6 +29,12 @@ const EMPTY_FS_ENTRY_MSG: &str = "an empty fs entry is not allowed (it would gra
 /// it has no defined meaning, so it is rejected rather than silently treated as a
 /// literal path/host named `...` (fail loud, parity with env-object + the array).
 const OBJECT_SENTINEL_MSG: &str = "`\"...\"` inheritance is only valid in fs/net array form (e.g. [\"...\", …]), not as an object key";
+/// `$tooldirs` is a SET (the built-in tool-cache dirs), not a directory root, so it
+/// takes no `/subpath` — a `$tooldirs/x` would silently name nothing. Fail loud.
+const TOOLDIRS_SUBPATH_MSG: &str = "`$tooldirs` is a built-in set (the package-manager / toolchain cache dirs) and takes no subpath — use it bare (`$tooldirs`) or with a permission (`{ \"$tooldirs\": \"r\" }`)";
+/// `$trusted` is the NET host set; as a `net` OBJECT key it has no bool value to carry
+/// (a set expands to many rules), so it is only valid in the array form.
+const TRUSTED_OBJECT_MSG: &str = "`$trusted` is a built-in host set — use it in the `net` array form (e.g. [\"$trusted\", …]), not as an object key";
 
 // ── fs ───────────────────────────────────────────────────────────────────────
 
@@ -70,6 +77,9 @@ pub fn fold_fs(
                     tmp = mode;
                     continue;
                 }
+                if fold_tooldirs_array_entry(s, ctx, &p, &mut set.entries)? {
+                    continue;
+                }
                 fold_fs_array_entry(s, ctx, parent, &p, &mut set.entries)?;
             }
         }
@@ -78,6 +88,9 @@ pub fn fold_fs(
                 let p = child(path, key);
                 if let Some(mode) = parse_tmp_mode(key, val, &p)? {
                     tmp = mode;
+                    continue;
+                }
+                if fold_tooldirs_object_entry(key, val, ctx, &p, &mut set.entries)? {
                     continue;
                 }
                 fold_fs_object_entry(key, val, ctx, &p, &mut set.entries)?;
@@ -165,6 +178,74 @@ fn parse_tmp_mode_array(entry: &str, path: &str) -> Result<Option<TmpMode>, Comp
     }
 }
 
+/// Classify a trimmed key/entry against the `$tooldirs` SET sentinel, identifier-boundary
+/// aware (via [`crate::matcher::path::split_fs_sentinel`]) so `$tooldirsx` is a different
+/// `$name` (NotTooldirs — the unrecognized-sentinel path rejects it), the bare `$tooldirs`
+/// is the set, and any remainder (`$tooldirs/x`, `$tooldirs.bak`) is a subpath error — a
+/// set names no path of its own.
+enum ToolsKey {
+    Set,
+    WithSubpath,
+    NotTooldirs,
+}
+fn classify_tooldirs_key(k: &str) -> ToolsKey {
+    match crate::matcher::path::split_fs_sentinel(k) {
+        Some(("tooldirs", "")) => ToolsKey::Set,
+        Some(("tooldirs", _)) => ToolsKey::WithSubpath,
+        _ => ToolsKey::NotTooldirs,
+    }
+}
+
+/// Array-form `$tooldirs` set → its fs rules, emitted IN-PLACE (last-match order
+/// preserved). A bare `$tooldirs` grants ReadWrite (array grants are rw, like a bare
+/// path); `!$tooldirs` denies each dir (expand-then-negate, grammar-uniform with
+/// `!path`). Returns `Ok(true)` when the entry was a `$tooldirs` set (consumed),
+/// `Ok(false)` for a normal entry the caller then folds itself.
+fn fold_tooldirs_array_entry(
+    entry: &str,
+    ctx: &CompileCtx,
+    path: &str,
+    out: &mut Vec<FsRule>,
+) -> Result<bool, CompileError> {
+    let (body, deny) = match entry.trim().strip_prefix('!') {
+        Some(rest) => (rest.trim_start(), true),
+        None => (entry.trim(), false),
+    };
+    match classify_tooldirs_key(body) {
+        ToolsKey::NotTooldirs => Ok(false),
+        ToolsKey::WithSubpath => Err(CompileError::shape(path, TOOLDIRS_SUBPATH_MSG)),
+        ToolsKey::Set => {
+            let effect = if deny { Effect::Deny } else { Effect::Allow };
+            out.extend(builtin_sets::tooldirs_fs_rules(
+                &ctx.homes,
+                effect,
+                FsAccess::ReadWrite,
+            ));
+            Ok(true)
+        }
+    }
+}
+
+/// Object-form `$tooldirs` set → its fs rules. The value uses the SAME access ladder as
+/// an ordinary path key ([`parse_fs_object_access`]): `"r"`→Read, `"rw"`/`true`→ReadWrite,
+/// `false`→Deny. Returns `Ok(true)` when the key was a `$tooldirs` set (consumed).
+fn fold_tooldirs_object_entry(
+    key: &str,
+    val: &Value,
+    ctx: &CompileCtx,
+    path: &str,
+    out: &mut Vec<FsRule>,
+) -> Result<bool, CompileError> {
+    match classify_tooldirs_key(key.trim()) {
+        ToolsKey::NotTooldirs => return Ok(false),
+        ToolsKey::WithSubpath => return Err(CompileError::shape(path, TOOLDIRS_SUBPATH_MSG)),
+        ToolsKey::Set => {}
+    }
+    let (effect, access) = parse_fs_object_access(val, path)?;
+    out.extend(builtin_sets::tooldirs_fs_rules(&ctx.homes, effect, access));
+    Ok(true)
+}
+
 /// Inject the default `.env*` READ-deny as an UNCONDITIONAL floor — the highest-precedence
 /// rule on the fs axis, which no directory grant, glob, or exact path can reopen (sandbox.mdx
 /// "`.env` files are always blocked"). `.env*` files hold the exact secrets the sandbox scrubs,
@@ -240,31 +321,35 @@ fn fold_fs_object_entry(
     if key.trim().is_empty() {
         return Err(CompileError::shape(path, EMPTY_FS_ENTRY_MSG));
     }
-    let (effect, access) = match val {
-        Value::Bool(true) => (Effect::Allow, FsAccess::ReadWrite),
-        Value::Bool(false) => (Effect::Deny, FsAccess::Read),
-        Value::String(s) => match s.as_str() {
-            "r" => (Effect::Allow, FsAccess::Read),
-            "rw" => (Effect::Allow, FsAccess::ReadWrite),
-            other => {
-                return Err(CompileError::shape(
-                    path,
-                    &format!("fs value `{other}` — expected \"r\", \"rw\", true, or false"),
-                ));
-            }
-        },
-        _ => {
-            return Err(CompileError::shape(
-                path,
-                "fs value must be \"r\", \"rw\", true, or false",
-            ));
-        }
-    };
+    let (effect, access) = parse_fs_object_access(val, path)?;
     // Resolve `$(…)` in the path key AFTER validating the access value, so an
     // invalid `val` errors before any command runs (no wasted exec side effect).
     let pattern = resolve_fs_path(key, ctx, path)?;
     push_fs_rules(&pattern, effect, access, ctx, out);
     Ok(())
+}
+
+/// The fs object-value access ladder, shared by an ordinary path key and the
+/// `$tooldirs` set: `"r"`→Read allow, `"rw"`/`true`→ReadWrite allow, `false`→Deny.
+/// (`push_fs_rules`/`tooldirs_fs_rules` later normalize a Deny's access to the inert
+/// `FsAccess::DENY`; the `Read` here is the pre-normalization placeholder.)
+fn parse_fs_object_access(val: &Value, path: &str) -> Result<(Effect, FsAccess), CompileError> {
+    match val {
+        Value::Bool(true) => Ok((Effect::Allow, FsAccess::ReadWrite)),
+        Value::Bool(false) => Ok((Effect::Deny, FsAccess::Read)),
+        Value::String(s) => match s.as_str() {
+            "r" => Ok((Effect::Allow, FsAccess::Read)),
+            "rw" => Ok((Effect::Allow, FsAccess::ReadWrite)),
+            other => Err(CompileError::shape(
+                path,
+                &format!("fs value `{other}` — expected \"r\", \"rw\", true, or false"),
+            )),
+        },
+        _ => Err(CompileError::shape(
+            path,
+            "fs value must be \"r\", \"rw\", true, or false",
+        )),
+    }
 }
 
 /// Expand a surface fs pattern into its canonical subtree globs and push a rule
@@ -363,6 +448,14 @@ fn reject_unknown_fs_sentinel(raw: &str, path: &str) -> Result<(), CompileError>
         if crate::matcher::path::FS_SENTINEL_NAMES.contains(&name) {
             return Ok(());
         }
+        // `$trusted` is the NET host set, not an fs sentinel — point the author at the
+        // right axis rather than reporting it as a generic unknown fs name.
+        if name == "trusted" {
+            return Err(CompileError::shape(
+                path,
+                "`$trusted` is a network host set — use it on the `net` axis; the filesystem sentinels are `$cache` and `$tmp`",
+            ));
+        }
         return Err(CompileError::shape(
             path,
             &format!(
@@ -448,6 +541,9 @@ pub fn fold_net(
                 if key == "..." {
                     return Err(CompileError::shape(&p, OBJECT_SENTINEL_MSG));
                 }
+                if key == "$trusted" {
+                    return Err(CompileError::shape(&p, TRUSTED_OBJECT_MSG));
+                }
                 fold_net_object_value(key, val, &p, &mut policy)?;
             }
         }
@@ -484,6 +580,13 @@ fn fold_net_entry(
         Some(rest) => (rest, Effect::Deny),
         None => (s, Effect::Allow),
     };
+    // `$trusted` expands the curated trusted-host set IN-PLACE (last-match order
+    // preserved), mirroring the `"..."` splice above. `!$trusted` denies each host
+    // (expand-then-negate — grammar-uniform with `!host`, enables `["*", "!$trusted"]`).
+    if pattern == "$trusted" {
+        policy.rules.extend(builtin_sets::trusted_net_rules(effect));
+        return Ok(());
+    }
     push_net_rule(pattern, effect, path, &mut policy.rules)
 }
 
@@ -653,6 +756,20 @@ fn push_net_rule(
             path,
             &format!(
                 "`{target}` is not a recognized net target — the only symbolic net target is `<private>` (alias `<local>`), which re-permits the RFC1918 / IPv6-ULA private ranges"
+            ),
+        ));
+    }
+    // MANDATORY `$`-guard (fail-open closer): `$trusted` is the only `$`-token net
+    // accepts and it is consumed in `fold_net_entry` before reaching here; net has no
+    // other `$name` set and no `$(…)` command substitution. A leading `$` that survived
+    // is unrecognized — reject it loudly rather than fold it to a `NetTarget::Host` that
+    // matches NOTHING (the footgun: `net: ["$tooldirs"]` or `["!$foo"]` would otherwise
+    // compile to an inert rule that silently does nothing). Mirrors the `<...>` reject.
+    if target.starts_with('$') {
+        return Err(CompileError::shape(
+            path,
+            &format!(
+                "`{target}` is not a valid net target — the only built-in net set is `$trusted` (the curated trusted-host allowlist); `$tooldirs` is a filesystem set (use it on the `fs` axis), and `$( … )` command substitution is not supported on `net`"
             ),
         ));
     }

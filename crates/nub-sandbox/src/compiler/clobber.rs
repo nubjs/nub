@@ -55,9 +55,12 @@ fn coverable(v: &Value) -> Option<&str> {
         return None;
     }
     let body = s.strip_prefix('!').unwrap_or(s);
-    // Any `$tmp`-named entry is a tmp-MODE sentinel (or a malformed one the fold rejects),
-    // never an fs path — excluded from path shadow analysis (it emits no rule).
-    if body.trim_start().starts_with("$tmp") {
+    // Multi-rule sentinels are not a single comparable path/host: `$tmp` is a tmp-MODE
+    // (emits no ordinary rule), and `$tooldirs`/`$trusted` are SETS that expand to many
+    // rules. Exclude them from shadow analysis (same reasoning as `"..."`) so the
+    // analyzer never compares a set's opaque literal name as if it were one entry.
+    let head = body.trim_start();
+    if head.starts_with("$tmp") || head.starts_with("$tooldirs") || head.starts_with("$trusted") {
         return None;
     }
     Some(body)

@@ -523,6 +523,22 @@ fn net_coarse_egress_deny() {
     drive("net-coarse-deny");
 }
 
+/// `$trusted` (built-in net host set, Phase 3) expands into a fine-grained allow that
+/// starts the egress proxy; an unlisted IP target is denied end-to-end.
+#[test]
+fn net_trusted_set() {
+    drive("net-trusted-set");
+}
+
+/// `$tooldirs` (built-in fs cache/store set, Phase 3) grants read on the tool caches so
+/// a build resolves deps from the store. Windows-gated: the AppContainer allowlist cannot
+/// carve the compiler's `.env*` read-deny out of the grant (see the other fs fixtures).
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn fs_tooldirs_read() {
+    drive("fs-tooldirs-read");
+}
+
 /// Linux's real Bubblewrap backend is the conformance target for the deny-all
 /// empty object, ordered fs re-open, and the named lifecycle baseline.
 #[test]
