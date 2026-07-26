@@ -40,6 +40,20 @@ fn build_jail_confines_writes_and_hides_secrets() {
     std::fs::write(home.join(".ssh/id_rsa"), b"PRIVATE-KEY-DO-NOT-LEAK").unwrap();
     // A source file in the package dir the build legitimately reads.
     std::fs::write(package_dir.join("binding.gyp"), b"{}").unwrap();
+    // Project-local `.npmrc` with a hardcoded token — at the root AND nested. Both sit
+    // inside the project `./` READ grant, so only the secret-file floor keeps them hidden.
+    std::fs::write(
+        project.join(".npmrc"),
+        b"//registry.npmjs.org/:_authToken=NPMRC-TOKEN-DO-NOT-LEAK",
+    )
+    .unwrap();
+    let nested_npmrc = project.join("packages/api");
+    std::fs::create_dir_all(&nested_npmrc).unwrap();
+    std::fs::write(
+        nested_npmrc.join(".npmrc"),
+        b"//registry.npmjs.org/:_authToken=NESTED-NPMRC-TOKEN",
+    )
+    .unwrap();
 
     // The interpreter path is only granted-read; the script doesn't run it here, so a
     // placeholder under the (real) home cache keeps the compile honest without needing
@@ -65,15 +79,21 @@ fn build_jail_confines_writes_and_hides_secrets() {
     // stdout rather than on file side effects alone.
     let secret = home.join(".ssh/id_rsa");
     let secret_write = home.join(".ssh/planted.txt");
+    let npmrc = project.join(".npmrc");
+    let npmrc_nested = nested_npmrc.join(".npmrc");
     let script = format!(
         r#"
         cat binding.gyp >/dev/null 2>&1 && echo READ_OK || echo READ_FAIL
         echo built > build_out.txt 2>/dev/null && echo WRITE_PKG_OK || echo WRITE_PKG_FAIL
         cat '{secret}' >/dev/null 2>&1 && echo SECRET_LEAK || echo SECRET_HIDDEN
         echo evil > '{secret_write}' 2>/dev/null && echo SECRET_WRITE_WROTE || echo SECRET_WRITE_BLOCKED
+        cat '{npmrc}' >/dev/null 2>&1 && echo NPMRC_LEAK || echo NPMRC_HIDDEN
+        cat '{npmrc_nested}' >/dev/null 2>&1 && echo NPMRC_NESTED_LEAK || echo NPMRC_NESTED_HIDDEN
         "#,
         secret = secret.display(),
         secret_write = secret_write.display(),
+        npmrc = npmrc.display(),
+        npmrc_nested = npmrc_nested.display(),
     );
 
     let spec = nub_sandbox::CommandSpec::new("/bin/sh")
@@ -102,6 +122,14 @@ fn build_jail_confines_writes_and_hides_secrets() {
     assert!(
         stdout.contains("SECRET_WRITE_BLOCKED") && !stdout.contains("SECRET_WRITE_WROTE"),
         "a write into the home secret dir must be blocked:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("NPMRC_HIDDEN") && !stdout.contains("NPMRC_LEAK"),
+        "a project-local .npmrc must be unreadable:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("NPMRC_NESTED_HIDDEN") && !stdout.contains("NPMRC_NESTED_LEAK"),
+        "a nested project .npmrc must be unreadable:\n{stdout}"
     );
     // Belt-and-suspenders: the planted file must not exist; the secret is untouched.
     assert!(

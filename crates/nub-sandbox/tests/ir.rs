@@ -85,7 +85,11 @@ fn conformance_fixture_passes_when_verdicts_match() {
         },
         "fs": [
             { "path": format!("{}/build/out", proj.display()), "read": true, "write": true },
-            { "path": format!("{}/.env", proj.display()), "read": false, "write": false }
+            { "path": format!("{}/.env", proj.display()), "read": false, "write": false },
+            // The secret-file floor denies a project-local `.npmrc` (hardcoded registry
+            // token) at the root AND nested, even inside the `**` read grant.
+            { "path": format!("{}/.npmrc", proj.display()), "read": false, "write": false },
+            { "path": format!("{}/packages/api/.npmrc", proj.display()), "read": false, "write": false }
         ],
         "net": [
             { "host": "github.com", "admit": true },

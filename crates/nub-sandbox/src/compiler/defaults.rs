@@ -54,30 +54,44 @@ const SECRET_READ_RELPATHS: &[&str] = &[
     ".config/microsoft-edge",
 ];
 
-/// The default `.env*` READ-deny globs: any file whose BASENAME starts with `.env`
-/// (`.env`, `.env.local`, `.env.production`, `.envrc`, …), at any depth. These files
-/// hold the exact secrets the sandbox scrubs from the env, so reading them is denied
-/// by DEFAULT on every read-granting fs policy (an unconditional floor) —
-/// see [`env_deny_leaf_rules`]/[`env_deny_subtree_rules`] and the injection in
-/// `fold::finalize_env_deny`. Denying reads is near-zero-breakage: legit code reads
-/// secrets via the injected process env, not by `fs.read()`-ing the file.
+/// The default secret-FILE READ-deny globs: any file whose BASENAME starts with `.env`
+/// (`.env`, `.env.local`, `.env.production`, `.envrc`, …) OR is `.npmrc`, at any depth.
+/// `.env*` holds the exact secrets the sandbox scrubs from the env; a project-local
+/// `.npmrc` (`./.npmrc`, `packages/x/.npmrc`) can hardcode a registry token and would
+/// otherwise fall inside the project `./` read grant (the home-anchored `~/.npmrc` deny
+/// does not cover it). Both are denied by DEFAULT on every read-granting fs policy (an
+/// unconditional floor) — see [`env_deny_leaf_rules`]/[`env_deny_subtree_rules`] and the
+/// injection in `fold::finalize_env_deny`. Denying reads is near-zero-breakage: legit
+/// code reads secrets via the injected process env / the PM's constructed registry
+/// config, not by `fs.read()`-ing the file inside a lifecycle script.
 ///
-/// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — `**/.env*`, the file
-/// itself) and a SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`, covering a
-/// `.env.d/`-style DIRECTORY of per-target secret files). Both are appended as the LAST
-/// entries so the block is UNCONDITIONAL — no directory grant, glob, or exact allow can
-/// reopen a `.env*` file or a `.env*/` directory's contents (sandbox.mdx "`.env` files
-/// are always blocked"). See `fold::finalize_env_deny`. The rootless twins (`.env*`)
-/// mirror each band for a depth-0 match; canonical candidates are absolute, so `**/…`
-/// is the form that bites.
+/// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — `**/.env*` / `**/.npmrc`,
+/// the file itself) and a SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`,
+/// covering a `.env.d/`-style DIRECTORY of per-target secret files; `.npmrc` is always a
+/// file, so it has no subtree twin). Both are appended as the LAST entries so the block
+/// is UNCONDITIONAL — no directory grant, glob, or exact allow can reopen a `.env*` /
+/// `.npmrc` file or a `.env*/` directory's contents (sandbox.mdx "`.env` files are
+/// always blocked"). See `fold::finalize_env_deny`. The rootless twins (`.env*`,
+/// `.npmrc`) mirror the leaf band for a depth-0 match; canonical candidates are
+/// absolute, so `**/…` is the form that bites.
 ///
-/// The test-only union below guards that the two bands never drift.
-pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &["**/.env*", ".env*"];
+/// COUPLED to the Linux backend's `builtin_env_band_start`/`is_builtin_env_glob`, which
+/// recognize these globs positionally — the leaf then subtree emission order and count
+/// here must stay in lockstep with that recognizer. The test-only union below guards
+/// that the two bands never drift.
+pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &["**/.env*", ".env*", "**/.npmrc", ".npmrc"];
 pub(crate) const ENV_DENY_SUBTREE_GLOBS: &[&str] = &["**/.env*/**", ".env*/**"];
 /// The union — the drift-guard the Linux grant derivation recognizes as builtin. Gated to
 /// its consumer's cfg (linux/test) so a macOS/Windows non-test build doesn't warn unused.
 #[cfg(test)]
-pub(crate) const ENV_DENY_GLOBS: &[&str] = &["**/.env*", "**/.env*/**", ".env*", ".env*/**"];
+pub(crate) const ENV_DENY_GLOBS: &[&str] = &[
+    "**/.env*",
+    "**/.env*/**",
+    ".env*",
+    ".env*/**",
+    "**/.npmrc",
+    ".npmrc",
+];
 
 /// Case-insensitive substring test for a secret name-word anywhere in a key. Used by
 /// [`is_npm_config_credential`] for the registry-credential family.
@@ -118,10 +132,11 @@ pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
     out
 }
 
-/// The LEAF `.env*` READ-deny entries ([`ENV_DENY_LEAF_GLOBS`]) — the `.env*` file
-/// itself. Depth-independent (matched by basename anywhere), NOT anchored under any
-/// root. Appended as a trailing band so it beats every prior allow — a broad dir-allow,
-/// a glob, OR an exact-file allow — and cannot be reopened (the unconditional floor).
+/// The LEAF secret-file READ-deny entries ([`ENV_DENY_LEAF_GLOBS`]) — the `.env*` /
+/// `.npmrc` file itself. Depth-independent (matched by basename anywhere), NOT anchored
+/// under any root. Appended as a trailing band so it beats every prior allow — a broad
+/// dir-allow, a glob, OR an exact-file allow — and cannot be reopened (the unconditional
+/// floor).
 pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
     ENV_DENY_LEAF_GLOBS
         .iter()
@@ -209,8 +224,12 @@ fn deny(glob: String) -> FsRule {
 /// omits `SystemRoot` fails `ERROR_ENVVAR_NOT_FOUND` (the loader resolves system
 /// DLLs relative to it), and a normal Windows exe (node.exe) needs the
 /// `USERPROFILE`/`APPDATA`/`LOCALAPPDATA` family to resolve its home/temp/config.
-/// These names never appear on unix (the filter is over the ambient env, so the
-/// baseline stays OS-appropriate without a `cfg`).
+/// The `ProgramFiles`/`ProgramFiles(x86)`/`ProgramW6432`/`ProgramData` OS-location
+/// vars are non-secret and load-bearing for native builds: node-gyp's Python and
+/// toolchain discovery reads them (`find-python.js`), falling back to a wrong path on
+/// a non-C: / relocated install when they are absent. These names never appear on unix
+/// (the filter is over the ambient env, so the baseline stays OS-appropriate without a
+/// `cfg`).
 const BASELINE_ENV_EXACT: &[&str] = &[
     "PATH",
     "HOME",
@@ -236,6 +255,11 @@ const BASELINE_ENV_EXACT: &[&str] = &[
     "APPDATA",
     "NUMBER_OF_PROCESSORS",
     "PROCESSOR_ARCHITECTURE",
+    // Windows OS-location vars for native-build toolchain discovery (see doc note).
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "ProgramData",
 ];
 const BASELINE_ENV_PREFIXES: &[&str] = &["LC_", "npm_config_"];
 
@@ -307,18 +331,19 @@ pub fn curated_baseline_env(
         .collect()
 }
 
-/// Whether an env key is credential-shaped and must not reach a dependency's
-/// lifecycle build script. The DENYLIST twin of [`baseline_allows`]'s allowlist:
-/// the build-jail keeps the whole constructed lifecycle env (a native build needs
-/// `PATH`/`NODE`/`npm_package_*`/build hints, which a strip-all allowlist would drop)
-/// and removes only credential-shaped keys. Two tiers, both delimiter/case-aware:
-/// an `npm_config_*` key routes to the registry-credential predicate
-/// ([`is_npm_config_credential`], which also scrubs `_auth*`/`email`/`key`), and any
-/// other key is scrubbed when it CONTAINS an unambiguous credential word
+/// Whether an env key is credential-shaped. Under the build-jail's default-deny
+/// allowlist ([`build_jail_env_allowed`]) this is a BELT-AND-SUSPENDERS reject, not
+/// the primary control: the allowlist already admits only known-safe namespaces, and
+/// this rejects any credential-shaped name that somehow rides an allowed prefix in. It
+/// also backs [`baseline_allows`]'s `npm_config_*` carve-out. Two tiers, both
+/// delimiter/case-aware: an `npm_config_*` key routes to the registry-credential
+/// predicate ([`is_npm_config_credential`], which also scrubs `_auth*`/`email`/`key`),
+/// and any other key is scrubbed when it CONTAINS an unambiguous credential word
 /// (`token`/`secret`/`password`/`passwd`/`credential`/`apikey`) or carries `auth` as a
 /// delimited segment (`AUTH_TOKEN`/`GITHUB_AUTH`, sparing `AUTHOR`). Best-effort by
-/// NAME (a secret named nothing like a credential is not caught here — the `.env*`
-/// file-read floor and aube's own constructed-env scrub are the other layers).
+/// NAME — what actually keeps the general credential family (`*_API_KEY`,
+/// `AWS_ACCESS_KEY_ID`, `PRIVATE_KEY`, `DATABASE_URL`, …) out is the allowlist NOT
+/// admitting them, since a denylist structurally misses names with no credential word.
 pub fn is_credential_env_key(key: &str) -> bool {
     if let Some(rest) = strip_prefix_ci(key, NPM_CONFIG_PREFIX) {
         return is_npm_config_credential(rest);
@@ -332,21 +357,116 @@ pub fn is_credential_env_key(key: &str) -> bool {
     word_is_segment("auth", key)
 }
 
-/// The build-jail ENV posture (D1): keep the constructed lifecycle env, WITHHOLD the
-/// credential-shaped keys ([`is_credential_env_key`]). `ambient` is the effective
-/// child env the unconfined lifecycle spawn would have had; the returned policy
-/// enforces, carries the kept keys as `constructed`, and records the withheld ones
-/// (sorted — `BTreeMap` iteration order — for a stable failure hint).
+/// Env-name PREFIXES admitted into the build-jail lifecycle env on top of
+/// [`baseline_allows`]: the package-metadata and lifecycle namespaces npm/aube set for
+/// a dependency's build script. `npm_config_*` (with its credential carve-out) and
+/// `LC_*` already come through [`baseline_allows`]; these are the build-jail additions.
+const BUILD_JAIL_EXTRA_PREFIXES: &[&str] = &["npm_package_", "npm_lifecycle_"];
+
+/// Exact env names admitted into the build-jail lifecycle env on top of
+/// [`baseline_allows`]. Three groups:
+///  - Lifecycle re-invocation / install-root discovery: `NODE` + `npm_node_execpath`
+///    (a build script re-runs the SAME node), `INIT_CWD` (npm's invocation dir).
+///  - Proxy config for prebuilt-binary fetchers (node-pre-gyp / prebuild-install),
+///    both cases — POSIX tools split by convention (curl reads lowercase, others upper).
+///  - Non-secret native-toolchain config a real addon linking a system library needs
+///    (node-gyp/gyp/make/cc/ld honor these). The runtime-linker-injection family
+///    (`LD_LIBRARY_PATH`/`DYLD_*`) is DELIBERATELY EXCLUDED: link-time lib dirs ride
+///    `LDFLAGS`, and `*_LIBRARY_PATH` is a runtime-injection surface, not a build need.
+///
+/// PATH/HOME/TMPDIR/TEMP/TMP + the OS-essential + locale/operational set come through
+/// [`baseline_allows`]; of those, only PATH/HOME/TMPDIR were EMPIRICALLY load-bearing
+/// for a from-source node-gyp compile (HOME anchors the header cache on a clean host).
+const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
+    "NODE",
+    "npm_node_execpath",
+    "INIT_CWD",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "CC",
+    "CXX",
+    "CPP",
+    "LD",
+    "AR",
+    "AS",
+    "NM",
+    "RANLIB",
+    "STRIP",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "LIBRARY_PATH",
+    "PKG_CONFIG",
+    "PKG_CONFIG_PATH",
+    "MAKE",
+    "MAKEFLAGS",
+    "PYTHON",
+    "GYP_DEFINES",
+    // macOS SDK / deployment-target overrides a real native build sets (non-secret;
+    // absent → the toolchain's default SDK/min-OS, so a package pinning either needs them).
+    "SDKROOT",
+    "MACOSX_DEPLOYMENT_TARGET",
+];
+
+/// Whether an env key is admitted into the build-jail's lifecycle env — the
+/// DEFAULT-DENY allowlist that replaced the old credential denylist. A denylist
+/// structurally missed the general credential family (`OPENAI_API_KEY`,
+/// `AWS_ACCESS_KEY_ID`, `PRIVATE_KEY`, `SSH_KEY`, `GH_PAT`, `DATABASE_URL`, …) — none
+/// carry a credential WORD, so all passed straight through. This admits the curated
+/// baseline ([`baseline_allows`] — OS/startup essentials, locale/operational vars,
+/// `npm_config_*` minus registry credentials) plus the build-jail additions
+/// ([`BUILD_JAIL_EXTRA_PREFIXES`]/[`BUILD_JAIL_EXTRA_EXACT`]); everything else is
+/// DENIED. [`is_credential_env_key`] is applied first as a belt-and-suspenders reject
+/// so a credential-shaped name can never ride an allowed prefix in. Case-sensitive on
+/// POSIX, case-insensitive on Windows (the env-name contract).
+pub fn build_jail_env_allowed(key: &str) -> bool {
+    if is_credential_env_key(key) {
+        return false;
+    }
+    if baseline_allows(key) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        BUILD_JAIL_EXTRA_EXACT
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(key))
+            || BUILD_JAIL_EXTRA_PREFIXES.iter().any(|p| {
+                key.get(..p.len())
+                    .is_some_and(|s| s.eq_ignore_ascii_case(p))
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        BUILD_JAIL_EXTRA_EXACT.contains(&key)
+            || BUILD_JAIL_EXTRA_PREFIXES.iter().any(|p| key.starts_with(p))
+    }
+}
+
+/// The build-jail ENV posture (D1): a DEFAULT-DENY allowlist over the effective child
+/// env the unconfined lifecycle spawn would have had. Only the known build namespace
+/// ([`build_jail_env_allowed`]) is admitted; every other key — including the whole
+/// general credential family a denylist structurally missed — is WITHHELD. The
+/// returned policy enforces, carries the admitted keys as `constructed`, and records
+/// the withheld ones (sorted — `BTreeMap` iteration order — for a stable failure hint).
 pub fn lifecycle_scrubbed_env(
     ambient: &std::collections::BTreeMap<String, String>,
 ) -> crate::policy::EnvPolicy {
     let mut constructed = std::collections::BTreeMap::new();
     let mut withheld = Vec::new();
     for (key, value) in ambient {
-        if is_credential_env_key(key) {
-            withheld.push(key.clone());
-        } else {
+        if build_jail_env_allowed(key) {
             constructed.insert(key.clone(), value.clone());
+        } else {
+            withheld.push(key.clone());
         }
     }
     crate::policy::EnvPolicy {
@@ -355,8 +475,9 @@ pub fn lifecycle_scrubbed_env(
         constructed,
         schema: Vec::new(),
         withheld,
-        // Credential-shaped keys are WITHHELD entirely (above), so nothing kept in
-        // `constructed` is secret — the output redactor has nothing to scrub.
+        // The allowlist admits only known-safe namespaces (a credential-shaped name is
+        // rejected by is_credential_env_key), so nothing kept in `constructed` is a
+        // secret — the output redactor has nothing to scrub.
         sensitive_keys: Vec::new(),
     }
 }
@@ -610,6 +731,10 @@ mod tests {
             ("NUMBER_OF_PROCESSORS", "8"),
             ("PROCESSOR_ARCHITECTURE", "AMD64"),
             ("SystemRoot", "C:/Windows"),
+            ("ProgramFiles", "C:/Program Files"),
+            ("ProgramFiles(x86)", "C:/Program Files (x86)"),
+            ("ProgramW6432", "C:/Program Files"),
+            ("ProgramData", "C:/ProgramData"),
             ("MY_SECRET_TOKEN", "leak"),
             ("AWS_SECRET_ACCESS_KEY", "leak"),
         ]
@@ -625,6 +750,11 @@ mod tests {
             "NUMBER_OF_PROCESSORS",
             "PROCESSOR_ARCHITECTURE",
             "SystemRoot",
+            // OS-location vars native-build toolchain discovery reads (F1 regression fix).
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "ProgramData",
         ] {
             assert!(out.contains_key(k), "baseline must keep {k}");
         }
@@ -834,45 +964,89 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_scrubbed_env_keeps_build_env_and_withholds_credentials() {
-        // The build-jail env posture (D1): keep the whole constructed lifecycle env
-        // (a native build needs PATH/NODE/npm_package_*/build hints), withhold only
-        // the credential-shaped keys.
+    fn lifecycle_scrubbed_env_is_a_default_deny_allowlist() {
+        // The build-jail env posture (D1) is a DEFAULT-DENY allowlist: admit the known
+        // build namespace (PATH/HOME/TMPDIR floor, NODE re-invocation, npm_package_*/
+        // npm_lifecycle_*/npm_config_* build env, proxy, non-secret toolchain config),
+        // WITHHOLD everything else — crucially the general credential family a denylist
+        // structurally missed (no credential WORD → passed straight through before).
         let ambient = ambient(&[
+            // Lifecycle essentials — must be ADMITTED.
             ("PATH", "/bin"),
+            ("HOME", "/home/u"),
+            ("TMPDIR", "/tmp"),
             ("NODE", "/n/node"),
+            ("npm_node_execpath", "/n/node"),
+            ("INIT_CWD", "/proj"),
             ("npm_package_name", "left-pad"),
+            ("npm_lifecycle_event", "install"),
             ("npm_config_registry", "https://r/"),
             ("npm_config_target_arch", "arm64"),
-            // Credentials — must be withheld.
+            ("https_proxy", "http://proxy:8080"),
+            ("CFLAGS", "-O2"),
+            ("PKG_CONFIG_PATH", "/opt/lib/pkgconfig"),
+            ("SDKROOT", "/sdk"),
+            ("MACOSX_DEPLOYMENT_TARGET", "11.0"),
+            ("ProgramFiles(x86)", "C:/Program Files (x86)"),
+            // The *_KEY / *_API_KEY family the OLD denylist let through — must be WITHHELD.
+            ("OPENAI_API_KEY", "sk-x"),
+            ("AWS_ACCESS_KEY_ID", "AKIA"),
+            ("PRIVATE_KEY", "-----BEGIN"),
+            ("SSH_KEY", "ssh-rsa"),
+            ("GH_PAT", "ghp_x"),
+            ("DATABASE_URL", "postgres://u:p@h/db"),
+            // Credential-word / registry-auth family — must be WITHHELD.
             ("NPM_TOKEN", "t"),
             ("GITHUB_TOKEN", "t"),
             ("AWS_SECRET_ACCESS_KEY", "t"),
             ("MY_PASSWORD", "t"),
             ("AUTH_HEADER", "t"),
             ("npm_config_//registry.npmjs.org/:_authToken", "t"),
+            // An unrelated ambient var with no build role — DENIED by default-deny.
+            ("EDITOR", "vim"),
         ]);
         let p = lifecycle_scrubbed_env(&ambient);
         assert!(p.enforce && p.resolved);
         for kept in [
             "PATH",
+            "HOME",
+            "TMPDIR",
             "NODE",
+            "npm_node_execpath",
+            "INIT_CWD",
             "npm_package_name",
+            "npm_lifecycle_event",
             "npm_config_registry",
             "npm_config_target_arch",
+            "https_proxy",
+            "CFLAGS",
+            "PKG_CONFIG_PATH",
+            "SDKROOT",
+            "MACOSX_DEPLOYMENT_TARGET",
+            "ProgramFiles(x86)",
         ] {
-            assert!(p.constructed.contains_key(kept), "must keep {kept}");
+            assert!(p.constructed.contains_key(kept), "must admit {kept}");
         }
-        for cred in [
+        for denied in [
+            "OPENAI_API_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "PRIVATE_KEY",
+            "SSH_KEY",
+            "GH_PAT",
+            "DATABASE_URL",
             "NPM_TOKEN",
             "GITHUB_TOKEN",
             "AWS_SECRET_ACCESS_KEY",
             "MY_PASSWORD",
             "AUTH_HEADER",
             "npm_config_//registry.npmjs.org/:_authToken",
+            "EDITOR",
         ] {
-            assert!(!p.constructed.contains_key(cred), "must withhold {cred}");
-            assert!(p.withheld.contains(&cred.to_string()));
+            assert!(
+                !p.constructed.contains_key(denied),
+                "must withhold {denied}"
+            );
+            assert!(p.withheld.contains(&denied.to_string()));
         }
     }
 
@@ -938,10 +1112,11 @@ mod tests {
         );
         let leaf_globs: Vec<&str> = leaf.iter().map(|r| r.matcher.as_str()).collect();
         let subtree_globs: Vec<&str> = subtree.iter().map(|r| r.matcher.as_str()).collect();
-        // The LEAF band denies the `.env*` file itself; the SUBTREE band denies a
-        // `.env*/`-directory's contents. The split is what lets an exact-file allow sit
-        // between them (leaf-deny → allow → subtree-deny-last).
-        for g in ["**/.env*", ".env*"] {
+        // The LEAF band denies the `.env*` / `.npmrc` file itself; the SUBTREE band denies
+        // a `.env*/`-directory's contents. The split is what lets an exact-file allow sit
+        // between them (leaf-deny → allow → subtree-deny-last). `.npmrc` is a file with no
+        // subtree twin, so it appears only in the leaf band.
+        for g in ["**/.env*", ".env*", "**/.npmrc", ".npmrc"] {
             assert!(leaf_globs.contains(&g), "leaf band missing {g}");
             assert!(!leaf_globs.contains(&format!("{g}/**").as_str()));
         }

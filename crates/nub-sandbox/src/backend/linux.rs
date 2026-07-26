@@ -928,6 +928,15 @@ fn collect_masks(
             continue;
         }
         let pattern = rule.matcher.as_str();
+        // Builtin secret-file floor globs (`.env*`/`.npmrc`, rootless + `**/` twins) are
+        // ALWAYS enforced via the recursive snapshot — never as an exact path. The rootless
+        // twins have no anchor and no glob metachar (`.npmrc`), so `exact_rule_root` would
+        // otherwise resolve them against the HOST cwd; the `**/` twin is what masks every
+        // match under the deny-search roots at any depth.
+        if is_builtin_env_glob(pattern) {
+            needs_bounded_snapshot = true;
+            continue;
+        }
         if let Some(path) = exact_rule_root(pattern) {
             candidates.push((
                 path.clone(),
@@ -1006,6 +1015,17 @@ fn reject_denied_hardlink(
     }
 }
 
+/// Directory names never descended during the recursive deny snapshot. `node_modules`
+/// is skipped for COST — a monorepo's tree is enormous and this snapshot runs per
+/// lifecycle spawn — and correctness does not need it: a dep-internal `.env`/`.npmrc`
+/// there is the dependency's OWN shipped file, not a USER secret, and the confined dep
+/// runs as the same uid so it can read its own files regardless. The USER's secrets live
+/// in project SOURCE (`apps/*/.env`, `packages/*/.env`, a project `.npmrc` at any depth),
+/// which the walk covers fully. `.git` is skipped for cost with no secret-file matches to
+/// lose. (Single-`*` user globs still bind only at their own depth — the matcher, not the
+/// walk, decides each candidate — so the recursion never over-masks.)
+const DENY_WALK_SKIP_DIRS: &[&str] = &["node_modules", ".git"];
+
 fn collect_direct_denied_candidates(
     policy: &SandboxPolicy,
     roots: &[PathBuf],
@@ -1013,52 +1033,123 @@ fn collect_direct_denied_candidates(
     out: &mut Vec<(PathBuf, PathBuf, MaskKind, bool)>,
 ) -> Result<(), String> {
     let roots = strict_search_roots(roots)?;
+    let band_start = builtin_env_band_start(policy);
     for root in roots {
-        let entries = fs::read_dir(&root)
-            .map_err(|e| format!("enumerating deny-search root {}: {e}", root.display()))?;
-        for entry in entries {
-            let entry = entry
-                .map_err(|e| format!("enumerating deny-search root {}: {e}", root.display()))?;
-            let logical = root.join(entry.file_name());
-            let path = entry.path();
-            match fs::metadata(&path) {
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(format!(
-                        "statting deny candidate {}: {error}",
-                        path.display()
-                    ));
-                }
+        walk_deny_candidates(&root, matcher, band_start, out)?;
+    }
+    Ok(())
+}
+
+/// Recursively enumerate `dir`, masking every existing file the deny rules block at ANY
+/// depth. The project subtree is bind-mounted read-only as ONE tree, so a NESTED secret
+/// file (`apps/web/.env`, `packages/api/.npmrc`) would otherwise be readable in-jail even
+/// though the `**/.env*`/`**/.npmrc` floor denies it — this walk is what makes stock
+/// Bubblewrap enforce the depth-independent deny. Directory SYMLINKS are never followed
+/// (no subtree escape, no cycle); a symlinked secret FILE is still masked via its resolved
+/// target. A directory that ITSELF matches a deny rule (a `.env*`-named dir) is masked as a
+/// whole and NOT descended. A subdir the host cannot enumerate is skipped, not fatal: the
+/// confined child runs as the same uid, so a dir the host can't read the child can't either.
+fn walk_deny_candidates(
+    dir: &Path,
+    matcher: &PathMatcher,
+    band_start: Option<usize>,
+    out: &mut Vec<(PathBuf, PathBuf, MaskKind, bool)>,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(format!(
+                "enumerating deny-search dir {}: {e}",
+                dir.display()
+            ));
+        }
+    };
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| format!("enumerating deny-search dir {}: {e}", dir.display()))?;
+        let name = entry.file_name();
+        let logical = dir.join(&name);
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "statting deny candidate {}: {error}",
+                    logical.display()
+                ));
             }
-            let resolved = fs::canonicalize(&path)
-                .map_err(|e| format!("resolving deny candidate {}: {e}", path.display()))?;
-            if !matcher.matches_deny_entry(&logical, &resolved) {
-                continue;
-            }
-            if matcher
-                .decide_logical_or_resolved(&logical, &resolved)
-                .effect
-                != Effect::Deny
-            {
-                continue;
-            }
-            let dotenv_name = entry
-                .file_name()
+        };
+        // Mask the entry itself if a deny rule matches it (a `.env*`/`.npmrc` FILE, or a
+        // `.env*`-named DIRECTORY masked as a whole). Only a REAL, non-matching directory
+        // is descended — a directory symlink (`file_type.is_dir() == false`) is treated as
+        // a leaf candidate, never followed.
+        let masked = consider_deny_candidate(&logical, &name, matcher, band_start, out)?;
+        if file_type.is_dir()
+            && !masked
+            && !name
                 .to_str()
-                .is_some_and(|name| name.starts_with(".env"));
-            let explicit_user_deny = builtin_env_band_start(policy).is_some_and(|end| {
-                matcher.last_matching_effect_before(&logical, &resolved, end) == Some(Effect::Deny)
-            });
-            let kind = if dotenv_name && !explicit_user_deny {
-                MaskKind::EmptyReadable
-            } else {
-                MaskKind::Unreadable
-            };
-            out.push((logical, resolved, kind, false));
+                .is_some_and(|n| DENY_WALK_SKIP_DIRS.contains(&n))
+        {
+            walk_deny_candidates(&logical, matcher, band_start, out)?;
         }
     }
     Ok(())
+}
+
+/// Decide whether `logical` is masked by a deny rule and, if so, push its mask candidate.
+/// Returns whether a mask was pushed (so the caller skips descending a masked directory).
+/// The `.env*` dotenv basename maps to `EmptyReadable` (present-but-empty, so a dotenv
+/// reader sees no secret rather than a hard error) UNLESS an explicit USER deny (in band 1,
+/// before the builtin floor at `band_start`) upgrades it to `Unreadable`; every other
+/// denied file — including `.npmrc` — is `Unreadable`.
+fn consider_deny_candidate(
+    logical: &Path,
+    name: &OsStr,
+    matcher: &PathMatcher,
+    band_start: Option<usize>,
+    out: &mut Vec<(PathBuf, PathBuf, MaskKind, bool)>,
+) -> Result<bool, String> {
+    match fs::metadata(logical) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "statting deny candidate {}: {error}",
+                logical.display()
+            ));
+        }
+    }
+    let resolved = fs::canonicalize(logical)
+        .map_err(|e| format!("resolving deny candidate {}: {e}", logical.display()))?;
+    if !matcher.matches_deny_entry(logical, &resolved) {
+        return Ok(false);
+    }
+    if matcher
+        .decide_logical_or_resolved(logical, &resolved)
+        .effect
+        != Effect::Deny
+    {
+        return Ok(false);
+    }
+    let dotenv_name = name.to_str().is_some_and(|name| name.starts_with(".env"));
+    let explicit_user_deny = band_start.is_some_and(|end| {
+        matcher.last_matching_effect_before(logical, &resolved, end) == Some(Effect::Deny)
+    });
+    let kind = if dotenv_name && !explicit_user_deny {
+        MaskKind::EmptyReadable
+    } else {
+        MaskKind::Unreadable
+    };
+    out.push((logical.to_path_buf(), resolved, kind, false));
+    Ok(true)
 }
 
 fn strict_search_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
@@ -1108,16 +1199,23 @@ fn merge_masks(masks: Vec<Mask>) -> Vec<Mask> {
         .collect()
 }
 
-/// The index where the builtin `.env*` deny floor begins — the boundary between the
+/// The index where the builtin secret-file deny floor begins — the boundary between the
 /// user/default band-1 entries and the floor. COUPLED to `fold::finalize_env_deny`,
-/// which appends the floor as the last FOUR entries in a fixed order (LEAF deny
-/// `**/.env*`, `.env*` then SUBTREE deny `**/.env*/**`, `.env*/**`); this recognizes
-/// them positionally, so if that emission's glob strings, order, or count change this
-/// must change with it. `None` when the floor was not emitted (a fully-relaxed or
-/// no-read policy). Used to distinguish an explicit USER `.env` deny (in band 1) from
-/// the builtin floor when planning the Linux dotenv mask kind.
+/// which appends the floor as the last SIX entries in a fixed order (LEAF deny
+/// `**/.env*`, `.env*`, `**/.npmrc`, `.npmrc` then SUBTREE deny `**/.env*/**`,
+/// `.env*/**`); this recognizes them positionally, so if that emission's glob strings,
+/// order, or count change this must change with it. `None` when the floor was not
+/// emitted (a fully-relaxed or no-read policy). Used to distinguish an explicit USER
+/// `.env` deny (in band 1) from the builtin floor when planning the Linux dotenv mask kind.
 fn builtin_env_band_start(policy: &SandboxPolicy) -> Option<usize> {
-    const FLOOR: [&str; 4] = ["**/.env*", ".env*", "**/.env*/**", ".env*/**"];
+    const FLOOR: [&str; 6] = [
+        "**/.env*",
+        ".env*",
+        "**/.npmrc",
+        ".npmrc",
+        "**/.env*/**",
+        ".env*/**",
+    ];
     let entries = &policy.fs.rules.entries;
     let start = entries.len().checked_sub(FLOOR.len())?;
     FLOOR
@@ -1437,10 +1535,14 @@ fn unescape_mountinfo_path(encoded: &str) -> Result<OsString, String> {
     Ok(OsString::from_vec(decoded))
 }
 
-/// The four builtin `.env*` floor globs. COUPLED to `fold::finalize_env_deny` (and the
-/// `defaults::ENV_DENY_*_GLOBS` it emits): these strings must stay in sync with the floor.
+/// The six builtin secret-file floor globs (`.env*` bands + the `.npmrc` leaf twin).
+/// COUPLED to `fold::finalize_env_deny` (and the `defaults::ENV_DENY_*_GLOBS` it emits):
+/// these strings must stay in sync with the floor.
 fn is_builtin_env_glob(pattern: &str) -> bool {
-    matches!(pattern, "**/.env*" | "**/.env*/**" | ".env*" | ".env*/**")
+    matches!(
+        pattern,
+        "**/.env*" | "**/.env*/**" | ".env*" | ".env*/**" | "**/.npmrc" | ".npmrc"
+    )
 }
 
 fn is_direct_snapshot_glob(pattern: &str, roots: &[PathBuf]) -> bool {
@@ -3183,6 +3285,60 @@ mod tests {
     }
 
     #[test]
+    fn nested_secret_files_are_masked_at_any_depth_but_node_modules_is_skipped() {
+        // The project subtree is bind-mounted read-only as one tree, so a NESTED `.env`
+        // (`apps/web/.env`) and a nested `.npmrc` (`packages/api/.npmrc`) would be readable
+        // in-jail if the snapshot only checked immediate children — the H2 leak. The
+        // recursive walk masks them at any depth: `.env` empty-readable, `.npmrc` unreadable.
+        // A dep-internal `node_modules/.env` is deliberately NOT masked (cost skip — it is
+        // the dependency's own shipped file, not a user secret).
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(project.join("apps/web")).unwrap();
+        fs::create_dir_all(project.join("packages/api")).unwrap();
+        fs::create_dir_all(project.join("node_modules/dep")).unwrap();
+        fs::write(project.join(".env"), "ROOT_SECRET").unwrap();
+        fs::write(project.join(".npmrc"), "//r/:_authToken=root").unwrap();
+        fs::write(project.join("apps/web/.env"), "NESTED_SECRET").unwrap();
+        fs::write(project.join("packages/api/.npmrc"), "//r/:_authToken=t").unwrap();
+        fs::write(project.join("node_modules/dep/.env"), "DEP_OWN").unwrap();
+        fs::write(project.join("apps/web/index.js"), "ok").unwrap();
+
+        let p = policy(root.path(), json!({"fs": ["**", "./"]}));
+        let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
+
+        let mask_for = |rel: &str| {
+            let abs = fs::canonicalize(project.join(rel)).unwrap();
+            masks.iter().find(|m| m.path == abs).cloned()
+        };
+        // `.env` (root + nested) → empty-readable; `.npmrc` (root + nested) → unreadable.
+        assert_eq!(
+            mask_for(".env").map(|m| m.kind),
+            Some(MaskKind::EmptyReadable),
+            "root .env must be masked empty-readable"
+        );
+        assert_eq!(
+            mask_for("apps/web/.env").map(|m| m.kind),
+            Some(MaskKind::EmptyReadable),
+            "nested .env must be masked empty-readable"
+        );
+        assert_eq!(
+            mask_for(".npmrc").map(|m| m.kind),
+            Some(MaskKind::Unreadable),
+            "root .npmrc must be masked unreadable"
+        );
+        assert_eq!(
+            mask_for("packages/api/.npmrc").map(|m| m.kind),
+            Some(MaskKind::Unreadable),
+            "nested .npmrc must be masked unreadable"
+        );
+        assert!(
+            mask_for("node_modules/dep/.env").is_none(),
+            "a dep-internal node_modules/.env is not masked (cost skip)"
+        );
+    }
+
+    #[test]
     fn inaccessible_network_socket_masks_its_narrow_parent() {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixListener;
@@ -3430,25 +3586,29 @@ mod tests {
     }
 
     #[test]
-    fn direct_sandbox_config_glob_is_unreadable_without_recursive_scan() {
+    fn direct_sandbox_config_glob_is_unreadable_at_any_depth() {
+        // A `**/`-prefixed deny glob is depth-INDEPENDENT, so the recursive snapshot masks
+        // every match — at the root AND nested — matching the policy intent. (Before the
+        // recursive walk a nested match was silently left readable, an under-enforcement.)
         let root = tempdir().unwrap();
         let project = root.path().join("project");
         fs::create_dir_all(project.join("nested")).unwrap();
         fs::write(project.join("tool.sandbox.json"), "SECRET").unwrap();
-        fs::write(project.join("nested/ignored.sandbox.json"), "OUT-OF-SCOPE").unwrap();
+        fs::write(project.join("nested/ignored.sandbox.json"), "ALSO-SECRET").unwrap();
         let p = policy(
             root.path(),
             json!({"fs": ["**", "./", "!**/*.sandbox.json"]}),
         );
         let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
-        assert_eq!(
-            masks,
-            vec![Mask {
-                path: project.join("tool.sandbox.json"),
-                kind: MaskKind::Unreadable,
-                directory: false,
-            }]
-        );
+        assert_eq!(masks.len(), 2, "both the root and nested match are masked");
+        for rel in ["tool.sandbox.json", "nested/ignored.sandbox.json"] {
+            assert!(
+                masks.iter().any(|m| m.path == project.join(rel)
+                    && m.kind == MaskKind::Unreadable
+                    && !m.directory),
+                "{rel} must be masked unreadable"
+            );
+        }
     }
 
     #[test]

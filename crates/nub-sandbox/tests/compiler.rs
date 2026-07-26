@@ -816,10 +816,18 @@ fn inline_policy_with_no_source_file_is_not_self_excluded() {
 
 #[test]
 fn policy_file_deny_is_injected_before_the_env_floor() {
-    // The Linux backend recognizes the `.env*` floor POSITIONALLY as the LAST four fs
-    // entries (`builtin_env_band_start`). The policy-file deny must land BEFORE that floor
-    // so the invariant survives self-exclusion.
-    const FLOOR: [&str; 4] = ["**/.env*", ".env*", "**/.env*/**", ".env*/**"];
+    // The Linux backend recognizes the secret-file floor POSITIONALLY as the LAST six fs
+    // entries (`builtin_env_band_start`): the LEAF band (`.env*` + `.npmrc`) then the
+    // `.env*` SUBTREE band. The policy-file deny must land BEFORE that floor so the
+    // invariant survives self-exclusion.
+    const FLOOR: [&str; 6] = [
+        "**/.env*",
+        ".env*",
+        "**/.npmrc",
+        ".npmrc",
+        "**/.env*/**",
+        ".env*/**",
+    ];
     let proj = common::homes().project;
     let ctx = common::ctx(true, &[]).with_policy_file(Some(proj.join("policy.jsonc")));
     let p = compile(&json!({ "fs": ["."] }), &ctx).unwrap();

@@ -267,19 +267,21 @@ fn fold_tooldirs_object_entry(
     Ok(true)
 }
 
-/// Inject the default `.env*` READ-deny as an UNCONDITIONAL floor — the highest-precedence
-/// rule on the fs axis, which no directory grant, glob, or exact path can reopen (sandbox.mdx
-/// "`.env` files are always blocked"). `.env*` files hold the exact secrets the sandbox scrubs,
-/// so reading them is denied by default on any read-granting fs policy — including the OBJECT
-/// form. The rule composes with the last-match-wins fs algebra as two trailing DENY bands
-/// appended after all user + default entries (backends stay pure IR replicators — every one
-/// evaluates last-match-wins over these entries):
+/// Inject the default secret-FILE READ-deny (`.env*` + `.npmrc`) as an UNCONDITIONAL floor
+/// — the highest-precedence rule on the fs axis, which no directory grant, glob, or exact
+/// path can reopen (sandbox.mdx "`.env` files are always blocked"). `.env*` files hold the
+/// exact secrets the sandbox scrubs; a project-local `.npmrc` can hardcode a registry token
+/// inside the project `./` read grant. Both are denied by default on any read-granting fs
+/// policy — including the OBJECT form. The rule composes with the last-match-wins fs algebra
+/// as two trailing DENY bands appended after all user + default entries (backends stay pure
+/// IR replicators — every one evaluates last-match-wins over these entries):
 ///   band 1  — the folded user + default entries, unchanged;
-///   band 2a — the `.env*` LEAF deny (`**/.env*`, `.env*`), so it beats every band-1
-///             broad/glob/exact allow (the `["**", "./"]` footgun where a trailing dir-allow
-///             re-exposed `<proj>/.env`, AND a `{ "./.env": "r" }` exact allow, are BOTH closed);
+///   band 2a — the secret-file LEAF deny (`**/.env*`, `.env*`, `**/.npmrc`, `.npmrc`), so it
+///             beats every band-1 broad/glob/exact allow (the `["**", "./"]` footgun where a
+///             trailing dir-allow re-exposed `<proj>/.env`, AND a `{ "./.env": "r" }` exact
+///             allow, are BOTH closed; the same closes a project-local `.npmrc`);
 ///   band 2c — the `.env*` SUBTREE deny (`**/.env*/**`, `.env*/**`), so a `.env*`-NAMED
-///             DIRECTORY's CONTENTS are denied too.
+///             DIRECTORY's CONTENTS are denied too (`.npmrc` is always a file — no subtree).
 /// The two bands are always the LAST entries in that fixed order — the Linux backend's
 /// `builtin_env_band_start`/`is_builtin_env_glob` recognize them positionally, so this
 /// emission and that matcher are COUPLED and must change together.
