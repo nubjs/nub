@@ -116,7 +116,9 @@ pub use matcher::Homes;
 /// Windows agent-sandbox one-time setup / teardown / unelevated detection (B3 bit 1). The
 /// `nub sandbox setup` verb wires to [`windows_setup`]; the launcher (bit 2) uses [`detect`].
 #[cfg(target_os = "windows")]
-pub use backend::windows_account::{detect, windows_setup, windows_teardown};
+pub use backend::windows_account::{
+    AccountCreds, DetectError, SetupInfo, detect, windows_setup, windows_teardown,
+};
 pub use policy::SandboxPolicy;
 pub use proxy::{Decision, EgressProxy, GrantDecider, Host, StaticDecider};
 
