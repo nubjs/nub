@@ -34,16 +34,26 @@ mod win {
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
     };
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+        GetSecurityInfo, NO_MULTIPLE_TRUSTEE, SE_WINDOW_OBJECT, SetEntriesInAclW, SetSecurityInfo,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
     use windows_sys::Win32::Security::{
-        GetTokenInformation, LogonUserW, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-        TokenUser,
+        ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, GetTokenInformation, LogonUserW,
+        OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::Storage::FileSystem::CreateFileW;
-    use windows_sys::Win32::System::Threading::{
-        CreateProcessWithLogonW, GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken,
-        PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        GetProcessWindowStation, GetThreadDesktop,
     };
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessWithLogonW, GetCurrentProcess, GetCurrentThreadId, GetExitCodeProcess, INFINITE,
+        OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
+    };
+
+    const GENERIC_ALL: u32 = 0x1000_0000;
 
     const LOGON32_LOGON_BATCH: u32 = 4;
     const LOGON32_PROVIDER_DEFAULT: u32 = 0;
@@ -201,6 +211,14 @@ mod win {
         // PRIMARY check (does the child run AS the account?): the child writes its own SID via
         // redirection to C:\Windows\Temp, which authenticated users may write — the low-priv
         // account cannot write arbitrary host paths.
+        // Grant the account access to the caller's window station + desktop, else the
+        // CreateProcessWithLogonW child fails at init with 0xC0000142 (STATUS_DLL_INIT_FAILED):
+        // a different-user child cannot attach to the launching user's winsta0/desktop without
+        // an explicit grant. This is a REQUIRED step of bit 2's run_as_account launcher.
+        if let Err(e) = grant_winsta_desktop(&creds.account_sid) {
+            eprintln!("LAUNCH-FAIL grant winsta/desktop: {e}");
+            return 1;
+        }
         let sid_out = r"C:\Windows\Temp\nub_childsid.out";
         let _ = std::fs::remove_file(sid_out);
         // SECONDARY check (design §10 stdio): a PARENT-OWNED inheritable handle as the child's
@@ -294,6 +312,87 @@ mod win {
         } else {
             eprintln!("LAUNCH-FAIL: child SID does not match the account SID");
             1
+        }
+    }
+
+    /// Grant the account (string SID) access to the calling process's window station and its
+    /// current desktop. Required before a CreateProcessWithLogonW launch as a different user
+    /// (else the child aborts at init, 0xC0000142). Additive DACL merge via SE_WINDOW_OBJECT.
+    fn grant_winsta_desktop(sid_str: &str) -> std::io::Result<()> {
+        let wsid = to_wide(sid_str);
+        let mut psid: PSID = std::ptr::null_mut();
+        if unsafe { ConvertStringSidToSidW(wsid.as_ptr(), &mut psid) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _free = LocalFreeGuard(psid);
+        let hwinsta = unsafe { GetProcessWindowStation() };
+        let hdesk = unsafe { GetThreadDesktop(GetCurrentThreadId()) };
+        grant_object_all(hwinsta.cast(), psid)?;
+        grant_object_all(hdesk.cast(), psid)?;
+        Ok(())
+    }
+
+    /// Add an inheritable GENERIC_ALL allow-ACE for `sid` to a user object (window station /
+    /// desktop) via GetSecurityInfo/SetEntriesInAclW/SetSecurityInfo (SE_WINDOW_OBJECT).
+    fn grant_object_all(handle: HANDLE, sid: PSID) -> std::io::Result<()> {
+        let mut old_dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_WINDOW_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut old_dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        let _sd = LocalFreeGuard(sd);
+        let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
+        ea.grfAccessPermissions = GENERIC_ALL;
+        ea.grfAccessMode = GRANT_ACCESS;
+        ea.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+        ea.Trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: sid.cast(),
+        };
+        let mut new_dacl: *mut ACL = std::ptr::null_mut();
+        let rc = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
+        if rc != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        let _new = LocalFreeGuard(new_dacl.cast());
+        let rc = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_WINDOW_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                new_dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(())
+    }
+
+    struct LocalFreeGuard(*mut std::ffi::c_void);
+    impl Drop for LocalFreeGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { LocalFree(self.0) };
+            }
         }
     }
 
