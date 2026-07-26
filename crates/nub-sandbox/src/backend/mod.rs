@@ -75,6 +75,14 @@ pub fn earliest_bootstrap() -> std::io::Result<RuntimeCapability> {
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 
+// The Windows agent-sandbox dedicated-account principal (B3 bit 1): account lifecycle,
+// DPAPI credential store, setup.json, setup-vs-run detection. Compiled on Windows (its
+// real consumer) and under `test` on any host so the pure-data pieces (setup.json
+// round-trip, password encoding, store paths) are unit-tested without a Windows machine
+// (the account/LSA/DPAPI FFI itself stays `#[cfg(target_os = "windows")]`).
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod windows_account;
+
 // The OS-agnostic Linux mount-plan derivation. Compiled on Linux (its real consumer)
 // and under `test` on any host so authored-order and rejection invariants are tested
 // without a Linux kernel.
