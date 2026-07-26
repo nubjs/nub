@@ -5,19 +5,19 @@
 //! canonicalize fs paths (a filesystem read, not a config read).
 //!
 //! Pipeline (design.md §2.2): wrapper trichotomy → preset expansion → per-axis
-//! fold (with `"..."` spread + last-match-wins order) → env grammar + `$(…)` →
-//! emit. Scope resolution and tighten-only layering live in sibling modules for
-//! the future project frontend; the `--sandbox` entry is single-block.
+//! fold (with `...:#/pointer` list reuse + last-match-wins order) → env grammar +
+//! `$(…)` → emit. A policy is a COMPLETE, self-contained statement — there is no
+//! implicit inheritance; reuse of another list is explicit, through a `...:#/pointer`
+//! reference into the same document (see [`reuse`]). The `--sandbox` entry is single-block.
 
 mod builtin_sets;
 mod clobber;
 mod defaults;
 mod env_grammar;
 mod fold;
-pub mod layering;
 mod preset;
 mod resolve;
-pub mod scope;
+mod reuse;
 
 pub use resolve::{CommandRunner, ShellRunner};
 
@@ -100,15 +100,20 @@ pub struct CompileCtx {
     /// read nor tamper with the policy that confines it, even under a broad
     /// `fs: ["."]`/`["/"]`. See `fold::finalize_policy_file_deny`.
     pub policy_file: Option<std::path::PathBuf>,
-    /// The capabilities of a SINGLE-BLOCK compile — the `compile`/`compile_with_warnings`
+    /// The capabilities of this single-block compile — the `compile`/`compile_with_warnings`
     /// entry, whose one scope IS this whole ctx (the `--sandbox <file>` / `run_sandboxed`
-    /// path, always approved user config). The chain resolver ([`scope::resolve_chain`])
-    /// assigns each scope its OWN capabilities via [`scope::ChainScope::caps`] and NEVER
-    /// reads this field — capability is decided per scope, so the fold gates read the
-    /// threaded per-scope `caps`, not the ctx.
+    /// path, always approved user config). The fold gates (`$(…)` substitution, credential
+    /// brokering) read this.
     pub caps: ScopeCapabilities,
     /// The ambient env snapshot the child env is constructed from.
     pub ambient_env: BTreeMap<String, String>,
+    /// The whole parsed policy DOCUMENT (root), for resolving `...:#/pointer` list reuse.
+    /// `#` in a reuse pointer is this value's root, NOT the compiled `sandbox` block —
+    /// a reused list is typically a sibling of `sandbox` (see sandbox.mdx "Reuse …").
+    /// `Value::Null` (the default) when the compile has no reuse; `run_sandboxed` sets it
+    /// to the whole parsed file via [`CompileCtx::with_document`]. All fields on this ctx
+    /// are already-parsed host data (the Boundary-B contract), so an owned `Value` fits.
+    pub document: Value,
     /// The `$(…)` command runner (production shells out; tests inject a stub).
     pub runner: Box<dyn CommandRunner>,
 }
@@ -127,6 +132,7 @@ impl CompileCtx {
             policy_file: None,
             caps,
             ambient_env,
+            document: Value::Null,
             runner: Box::new(ShellRunner),
         }
     }
@@ -137,6 +143,16 @@ impl CompileCtx {
     /// source file to hide. See [`CompileCtx::policy_file`].
     pub fn with_policy_file(mut self, policy_file: Option<std::path::PathBuf>) -> Self {
         self.policy_file = policy_file;
+        self
+    }
+
+    /// Attach the whole parsed policy DOCUMENT so `...:#/pointer` reuse can resolve a
+    /// `#`-rooted pointer against it. `Value::Null` (the default) leaves reuse with no
+    /// document — any `...:#/pointer` then fails loud as a dangling pointer. The
+    /// `run_sandboxed` path passes the WHOLE parsed file (not the extracted `sandbox`
+    /// block) so a `#/shared/*` sibling pointer reaches its target. See [`CompileCtx::document`].
+    pub fn with_document(mut self, document: Value) -> Self {
+        self.document = document;
         self
     }
 }
@@ -235,26 +251,23 @@ pub fn compile(surface: &Value, ctx: &CompileCtx) -> Result<SandboxPolicy, Compi
 }
 
 /// Compile a `sandbox` surface block, returning the resolved policy AND any
-/// non-fatal warnings (the clobber smell). Single-term entry: the `"..."` payload
-/// resolves against the built-in base (there is no parent scope).
+/// non-fatal warnings (the clobber smell). Single-block entry: a policy is a
+/// complete statement; there is no parent scope. List reuse is explicit via
+/// `...:#/pointer` (resolved against [`CompileCtx::document`]).
 pub fn compile_with_warnings(
     surface: &Value,
     ctx: &CompileCtx,
 ) -> Result<(SandboxPolicy, Vec<CompileWarning>), CompileError> {
     let mut warnings = Vec::new();
-    // A single-block compile is one scope; its capability is the ctx's (the entry
-    // owns the only scope). The chain path instead assigns each scope its own.
-    let policy = compile_scope(surface, None, ctx, ctx.caps, &mut warnings)?;
+    let policy = compile_scope(surface, ctx, ctx.caps, &mut warnings)?;
     Ok((policy, warnings))
 }
 
-/// Resolve ONE scope's surface against its resolved `parent` (the enclosing
-/// scope's policy; `None` at the outermost scope → the built-in base). The
-/// wrapper trichotomy; a granular object goes to [`compile_object`]. This is the
-/// per-scope primitive the chain resolver ([`scope::resolve_chain`]) drives.
+/// Resolve one block's surface into a policy — the wrapper trichotomy; a granular
+/// object goes to [`compile_object`]. An unlisted axis FLOORS (complete statement);
+/// list reuse is explicit via `...:#/pointer`.
 pub(crate) fn compile_scope(
     surface: &Value,
-    parent: Option<&SandboxPolicy>,
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
     warnings: &mut Vec<CompileWarning>,
@@ -268,7 +281,7 @@ pub(crate) fn compile_scope(
         Value::String(s) => match classify_string(s) {
             StringKind::Preset => {
                 let expanded = preset::resolve(s)?;
-                let mut policy = compile_object(&expanded, parent, ctx, caps, warnings)?;
+                let mut policy = compile_object(&expanded, ctx, caps, warnings)?;
                 // A preset's broad grants (build-jail's `"./"`) re-open the built-in
                 // secret floor under last-match-wins; re-assert it post-fold.
                 preset::reassert_secret_floor(s, &mut policy, ctx);
@@ -279,7 +292,7 @@ pub(crate) fn compile_scope(
                 reference: s.clone(),
             }),
         },
-        Value::Object(_) => compile_object(surface, parent, ctx, caps, warnings),
+        Value::Object(_) => compile_object(surface, ctx, caps, warnings),
         _ => Err(CompileError::shape(
             "",
             "sandbox must be a boolean, a preset name, a file-ref, or a { fs, net, vars, secrets } object",
@@ -289,14 +302,11 @@ pub(crate) fn compile_scope(
 
 /// Fold a granular `{ fs, net, vars, secrets }` object. A present block is a COMPLETE
 /// statement: an axis it does NOT list FLOORS (deny fs, deny-all-enforcing net,
-/// strip env) — least-exposure, fails closed. An object-level `"..."` key
-/// (`{ "...": true }`) opts every UNLISTED axis into inheriting the enclosing
-/// scope's base instead of flooring; a LISTED axis's own `"..."` inherits that
-/// axis. So `{}` = deny-all; `{ "fs": [...] }` floors net + env (both `vars` and
-/// `secrets`); `{ "...": true }` ≡ the enclosing base for all axes.
+/// strip env) — least-exposure, fails closed. There is NO implicit inheritance: `{}`
+/// = deny-all; `{ "fs": [...] }` floors net + env (both `vars` and `secrets`). To
+/// reuse another list, reference it explicitly with a `...:#/pointer` array entry.
 fn compile_object(
     surface: &Value,
-    parent: Option<&SandboxPolicy>,
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
     warnings: &mut Vec<CompileWarning>,
@@ -313,8 +323,15 @@ fn compile_object(
             "`proxy` is no longer authored — the sandbox derives the proxy tier from the `net` allowlist and any brokered secrets; remove it",
         ));
     }
-    fold::reject_unknown_keys(obj, &["fs", "net", "vars", "secrets", "..."], "")?;
-    let inherit_base = object_spread(obj.get("..."))?;
+    // Object-level `"..."` inheritance was removed (v2: a policy is a complete statement).
+    // Give it a targeted migration error rather than a generic unknown-key one.
+    if obj.contains_key("...") {
+        return Err(CompileError::shape(
+            "...",
+            "object-level `...` inheritance was removed — a policy is a complete statement; to reuse a list, reference it with a `...:#/pointer` array entry (e.g. `\"fs\": [\"...:#/shared/fs\", …]`)",
+        ));
+    }
+    fold::reject_unknown_keys(obj, &["fs", "net", "vars", "secrets"], "")?;
 
     // Clobber detection runs per ARRAY axis (a total shadow between two entries of
     // the SAME array — D2b/D6); object forms have unique keys, so their granular
@@ -335,26 +352,22 @@ fn compile_object(
     }
 
     let fs = match obj.get("fs") {
-        Some(v) => fold::fold_fs(v, ctx, "fs", parent.map(|p| &p.fs))?,
-        None if inherit_base => inherit_fs(parent, ctx),
+        Some(v) => fold::fold_fs(v, ctx, "fs")?,
         None => floor_fs(),
     };
     let mut net = match obj.get("net") {
-        Some(v) => fold::fold_net(v, "net", parent.map(|p| &p.net))?,
-        None if inherit_base => inherit_net(parent),
+        Some(v) => fold::fold_net(v, ctx, "net")?,
         None => floor_net(),
     };
     // The env-family axes (`vars` + `secrets`) fold together into one EnvPolicy plus
-    // the broker intents harvested from `secrets.<name>.brokerTo`. Both absent:
-    // inherit (under `"..."`) or floor, exactly as the old single `env` axis did (no
-    // intents). Either present: an explicit, complete env statement — the other axis
+    // the broker intents harvested from `secrets.<name>.brokerTo`. Both absent: floor
+    // (strip). Either present: an explicit, complete env statement — the other axis
     // defaults to no entries.
     let vars = obj.get("vars");
     let secrets = obj.get("secrets");
     let (mut env, broker_intents) = match (vars, secrets) {
-        (None, None) if inherit_base => (inherit_env(parent, ctx), Vec::new()),
         (None, None) => (floor_env(ctx), Vec::new()),
-        _ => fold::fold_env_axes(vars, secrets, ctx, caps, parent.map(|p| &p.env))?,
+        _ => fold::fold_env_axes(vars, secrets, ctx, caps)?,
     };
     // Cross-axis transpose: brokered secrets become per-host credential brokers on the
     // net axis (coalesced by host). This runs AFTER fold_net so inherited brokers and
@@ -479,44 +492,6 @@ fn finalize_net_inspection(net: &mut NetPolicy) {
     };
 }
 
-/// Parse a top-level object `"..."` key. `true` = inherit the enclosing base for
-/// unlisted axes; a string = a file-extends (frontend-resolved — deferred here);
-/// anything else is a shape error. Absent = complete statement (floor unlisted).
-fn object_spread(v: Option<&Value>) -> Result<bool, CompileError> {
-    match v {
-        None => Ok(false),
-        Some(Value::Bool(true)) => Ok(true),
-        // Only a path-like string is a (frontend-deferred) file-ref; a bare scalar
-        // (`{"...": "r"}`) is a malformed sentinel value, not a file to resolve.
-        Some(Value::String(reference)) if is_file_ref_value(reference) => {
-            Err(CompileError::FileRefUnresolved {
-                path: "...".to_string(),
-                reference: reference.clone(),
-            })
-        }
-        Some(v) => Err(CompileError::shape("...", &sentinel_value_error(v))),
-    }
-}
-
-/// An unlisted axis under an object-level `"..."`: inherit the resolved parent's
-/// axis at an inner scope, or the built-in base (≡ `sandbox: true`'s axis) at the
-/// outermost scope.
-fn inherit_fs(parent: Option<&SandboxPolicy>, ctx: &CompileCtx) -> FsPolicy {
-    parent
-        .map(|p| p.fs.clone())
-        .unwrap_or_else(|| secure_default_fs(ctx))
-}
-fn inherit_net(parent: Option<&SandboxPolicy>) -> NetPolicy {
-    parent
-        .map(|p| p.net.clone())
-        .unwrap_or_else(secure_default_net)
-}
-fn inherit_env(parent: Option<&SandboxPolicy>, ctx: &CompileCtx) -> EnvPolicy {
-    parent
-        .map(|p| p.env.clone())
-        .unwrap_or_else(|| secure_default_env(ctx))
-}
-
 /// The complete-statement FLOOR for an unlisted axis — the security inversion.
 /// fs: deny-all (`FsRuleSet::default` is a deny base with no entries). net:
 /// deny-all, ENFORCING. env: strip-all (enforce, empty constructed, everything
@@ -602,15 +577,12 @@ fn secure_default_env(ctx: &CompileCtx) -> crate::policy::EnvPolicy {
 }
 
 fn secure_default_fs(ctx: &CompileCtx) -> FsPolicy {
-    // Equivalent to `fs: ["..."]` — the generous-read + secret-deny defaults, no
-    // write grant. Outermost scope → `parent = None`.
-    fold::fold_fs(
-        &Value::Array(vec![Value::String("...".into())]),
-        ctx,
-        "fs",
-        None,
-    )
-    .expect("`[\"...\"]` fs default always folds")
+    // `sandbox: true`'s fs base — the generous-read allow + home-secret read denies, no
+    // write grant. P4 removed the naked-`...` splice that used to assemble this; the fold
+    // now builds it DIRECTLY (behavior-preserving). The home-secret denies remain part of
+    // the `sandbox: true` posture here — relocating them to a preset-only model is decision
+    // (a), deferred to Phase 7 (build-jail v2). See `fold::secure_default_fs`.
+    fold::secure_default_fs(ctx)
 }
 
 fn secure_default_net() -> NetPolicy {
@@ -644,33 +616,4 @@ fn classify_string(s: &str) -> StringKind {
     } else {
         StringKind::Preset
     }
-}
-
-/// Whether a `"..."` sentinel's STRING value is a file-ref (a `"./policy.json"`
-/// file-extends, frontend-deferred) rather than a malformed scalar. The `"..."`
-/// value grammar is `true | "<file-ref>" | [list]`; a non-path-like scalar
-/// (`"r"`, `"port"`) is NOT a file-ref and must be a clear shape error, never
-/// silently admitted into the file-extends branch (which the frontend would then
-/// try to resolve as a file named `port`). Path-likeness is defined identically to
-/// [`classify_string`]'s file-ref arm so the two never disagree.
-pub(super) fn is_file_ref_value(s: &str) -> bool {
-    matches!(classify_string(s), StringKind::FileRef)
-}
-
-/// The self-debugging shape message for a `"..."` sentinel carrying a value outside
-/// its `true | "<file-ref>"` grammar — names the offending construct so the author
-/// sees exactly what was rejected.
-pub(super) fn sentinel_value_error(offending: &Value) -> String {
-    let got = match offending {
-        Value::String(s) => format!("the string `{s}`"),
-        Value::Bool(false) => "`false`".to_string(),
-        Value::Number(n) => format!("the number `{n}`"),
-        Value::Array(_) => "an array".to_string(),
-        Value::Object(_) => "an object".to_string(),
-        Value::Null => "null".to_string(),
-        Value::Bool(true) => "`true`".to_string(),
-    };
-    format!(
-        "`\"...\"` value must be true (inherit the enclosing scope) or a file-ref (e.g. \"./policy.json\") — got {got}"
-    )
 }

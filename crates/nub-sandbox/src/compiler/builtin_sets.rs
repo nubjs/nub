@@ -2,7 +2,7 @@
 //! network host allowlist, net axis) and `$tooldirs` (the per-OS package-manager /
 //! toolchain cache+store dirs, fs axis). Both are ORDINARY last-match-wins entries —
 //! a set expands at its authored position and a later rule can override any member,
-//! exactly like the `"..."` splice (defaults.rs).
+//! like a `...:#/pointer`-reused list's entries.
 //!
 //! Provenance / curation:
 //! - `$trusted` is the Claude Code default-allowed-domains list MINUS blanket

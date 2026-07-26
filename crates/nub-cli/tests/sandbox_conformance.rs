@@ -252,7 +252,7 @@ impl Tree {
     /// (`{ROOT}`/`{PROJ}`/`{HOME}`/`{OUT}`) with real forward-slash paths. Forward
     /// slashes are cross-OS safe: the matcher normalizes `\`→`/` before matching, and a
     /// JSON string can't carry a raw `\`. `{ROOT}` lets the generous-read fixture scope
-    /// its broad allow to the bounded fixture tree instead of a whole-fs `["..."]` — the
+    /// its broad allow to the bounded fixture tree instead of a whole-fs `sandbox: true` — the
     /// Linux generous-`**` grant walks every top-level under a MAX_GRANTS budget, so on a
     /// busy host (a large `/home` checkout in CI) it can overflow before reaching a
     /// deeply-nested file and fail-closed-deny it; a bounded root keeps the walk
@@ -489,6 +489,34 @@ fn fixture_read_deny_fails_closed(name: &str, writable_marker: &str) {
 #[test]
 fn fs_generous_read_secret_denyset() {
     drive("fs-generous-read-secrets");
+}
+
+/// §6.12 — the CLI threads the WHOLE parsed document (not the extracted `sandbox`
+/// block) as `CompileCtx::document`, so a `...:#/shared/fs` reuse pointing at a SIBLING
+/// of `sandbox` resolves. The project subtree is granted ONLY through the reused list,
+/// so a successful read proves the wiring end-to-end; if `run_sandboxed` passed the
+/// block instead of the whole value, `#/shared/fs` would dangle and nub would fail to
+/// compile (run_case asserts loudly on a compile failure).
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn reuse_pointer_resolves_against_the_whole_document() {
+    #[cfg(target_os = "linux")]
+    if !linux_enforceable() {
+        return;
+    }
+    let tree = Tree::new();
+    let doc = serde_json::json!({
+        "shared": { "fs": ["{PROJ}"] },
+        "sandbox": { "fs": ["...:#/shared/fs"], "net": false, "vars": true }
+    });
+    let ambient = BTreeMap::new();
+    // `resolve` materializes the read target and returns its absolute path (as `drive`
+    // does); the project subtree is granted ONLY through the reused `#/shared/fs` list.
+    let target = tree.resolve("read", "proj:reused-ok.txt");
+    assert!(
+        run_case(&tree, &doc, &ambient, "read", &target),
+        "a `...:#/shared/fs` reuse must resolve against the whole document"
+    );
 }
 
 #[test]

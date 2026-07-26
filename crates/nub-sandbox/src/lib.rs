@@ -18,8 +18,8 @@
 //!   - [`compile`]`(surface: &Value, ctx: &`[`CompileCtx`]`) -> Result<`[`SandboxPolicy`]`, `[`CompileError`]`>`
 //!     — **Boundary A**: the surface `sandbox` JSON (a parsed `serde_json::Value`)
 //!     plus host context (homes/cwd/trust/ambient-env) resolve to the flat policy
-//!     IR. This is the ONLY code that understands surface syntax (presets, `"..."`
-//!     spread, glob ordering, the env grammar); a backend never sees any of it.
+//!     IR. This is the ONLY code that understands surface syntax (presets, `...:#/pointer`
+//!     list reuse, glob ordering, the env grammar); a backend never sees any of it.
 //!     Use [`compile_with_warnings`] to also surface non-fatal [`CompileWarning`]s.
 //!   - [`apply_with_runtime`]`(policy: &`[`SandboxPolicy`]`, spec: `[`CommandSpec`]`, runtime: &`[`RuntimeCapability`]`) -> Result<`[`Prepared`]`, `[`Degradation`]`>`
 //!     — **Boundary B**: a resolved policy plus a host-provided command produce a
@@ -65,9 +65,8 @@
 //!   - **Per-host proxy wiring** — the launcher provisions/exempts the loopback
 //!     proxy path per OS as above.
 //!   - **Untrusted-config trust boundary** — the engine CANNOT detect trust; the
-//!     CALLER assigns each scope its [`ScopeCapabilities`] (via [`CompileCtx::caps`]
-//!     for a single block, or per [`compiler::scope::ChainScope`] in a chain) — the
-//!     `env_substitution` / `credential_broker` gates — and secures untrusted-config
+//!     CALLER assigns the compile its [`ScopeCapabilities`] (via [`CompileCtx::caps`])
+//!     — the `env_substitution` / `credential_broker` gates — and secures untrusted-config
 //!     usage (e.g. PR-CI). A `dependenciesMeta` scope compiles with no capabilities.
 //!
 //! # Net axis — the per-host egress proxy and the MITM tier

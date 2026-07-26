@@ -79,6 +79,7 @@ impl Fixture {
             policy_file: None,
             caps: ScopeCapabilities::approved(),
             ambient_env: Default::default(),
+            document: serde_json::Value::Null,
             runner: Box::new(ShellRunner),
         }
     }

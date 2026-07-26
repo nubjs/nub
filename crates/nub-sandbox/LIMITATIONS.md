@@ -231,12 +231,13 @@ under `%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`). nub ne
 
 For the granular object form an omitted axis **FLOORS** (fs deny-all, net deny-all *enforcing*,
 env strip-all) — a present block is a COMPLETE STATEMENT, so `{}` is deny-all and
-`{ "fs": [...] }` also denies net and strips env. An object-level `{ "...": true }` is the
-opt-out that makes every UNLISTED axis inherit the enclosing scope instead. (Corrected
+`{ "fs": [...] }` also denies net and strips env. There is NO implicit inheritance: the
+object-level `{ "...": true }` opt-out was removed in Phase 4 (a policy is a complete
+statement; reuse another list explicitly with a `...:#/pointer` array entry). (Corrected
 2026-07-24: this paragraph previously said an omitted axis was *relaxed*, which contradicted the
-shipped compiler — see `compiler/mod.rs:271-277` and `floor_fs`/`floor_net`/`floor_env` at
-`:539-555`, the unit test `empty_object_is_deny_all` in `tests/compiler.rs:171`, and the e2e
-fixture `empty-object-default-deny.json`.)
+shipped compiler — see `floor_fs`/`floor_net`/`floor_env` in `compiler/mod.rs`, the unit test
+`empty_object_is_deny_all` in `tests/compiler.rs`, and the e2e fixture
+`empty-object-default-deny.json`.)
 
 Flooring is what makes a partial block from a less-trusted source fail closed rather than widen,
 which was the original concern here. The engine still does **not** detect trust — it applies

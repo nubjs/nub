@@ -1,7 +1,8 @@
-//! The built-in default ENTRIES — the secret deny-set and trusted-host allows
-//! that `"..."` spreads into an ordered list at its position. Per .fray/sandbox.md
-//! "Built-in defaults are just default ENTRIES, not a floor": these are ordinary
-//! last-match-wins entries, so a later user rule can override any of them.
+//! The built-in default ENTRIES — the secret deny-set and trusted-host allows the
+//! compiler emits into an ordered list (for `sandbox: true`'s base, the build-jail
+//! preset, and the `$trusted`/`$tooldirs` sets). Per .fray/sandbox.md "Built-in
+//! defaults are just default ENTRIES, not a floor": these are ordinary last-match-wins
+//! entries, so a later user rule can override any of them.
 //!
 //! The data (secret paths/globs, browser/wallet dirs) is ported verbatim from the
 //! reviewed `secrets.rs` in the salvage branches — the §8.5 attack→capability
@@ -56,7 +57,7 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// The default `.env*` READ-deny globs: any file whose BASENAME starts with `.env`
 /// (`.env`, `.env.local`, `.env.production`, `.envrc`, …), at any depth. These files
 /// hold the exact secrets the sandbox scrubs from the env, so reading them is denied
-/// by DEFAULT on every read-granting fs policy (not only via the `"..."` splice) —
+/// by DEFAULT on every read-granting fs policy (an unconditional floor) —
 /// see [`env_deny_leaf_rules`]/[`env_deny_subtree_rules`] and the injection in
 /// `fold::finalize_env_deny`. Denying reads is near-zero-breakage: legit code reads
 /// secrets via the injected process env, not by `fs.read()`-ing the file.
@@ -78,46 +79,16 @@ pub(crate) const ENV_DENY_SUBTREE_GLOBS: &[&str] = &["**/.env*/**", ".env*/**"];
 #[cfg(test)]
 pub(crate) const ENV_DENY_GLOBS: &[&str] = &["**/.env*", "**/.env*/**", ".env*", ".env*/**"];
 
-/// Secret name-word tokens matched as a case-insensitive SUBSTRING anywhere in a
-/// key (via [`word_in_substr`]). These are long/specific enough that a substring
-/// rule has no realistic false positive, so it catches the forms an exact-segment
-/// rule misses — plurals (`SESSION_TOKENS`, `DB_PASSWORDS`, `CREDENTIALS`),
-/// undelimited/camelCase (`MYTOKEN`, `myToken`), and fused names
-/// (`GOOGLE_APPLICATION_CREDENTIALS`). Ported from the §8.5 env posture.
-pub const SECRET_SUBSTR_TOKENS: &[&str] = &[
-    "token",
-    "secret",
-    "password",
-    "passwd",
-    "credential",
-    "apikey",
-    "api_key",
-];
-
-/// Short/ambiguous secret tokens matched ONLY as a whole `_`/`-`/`.` segment (via
-/// [`word_is_segment`]). A substring rule on these would over-match wildly
-/// (`pat`→PATH, `auth`→AUTHOR, `pwd`→PWD-as-substring); segment matching still
-/// catches `MYSQL_PWD`, `X_AUTH_TOKEN`, `GITHUB_PAT` while sparing PATH/AUTHOR.
-/// Bare `PWD` (the CWD var, a whole segment) IS denied under `"..."` — a benign
-/// false positive (the working directory is re-derivable). A superstring like
-/// `AUTHORIZATION` is NOT caught (segment ≠ `auth`); `["*","..."]` is a
-/// best-effort denylist, not a guarantee — real confinement is an allowlist.
-pub const SECRET_SEGMENT_TOKENS: &[&str] = &["pat", "pwd", "auth"];
-
-/// Secret-name env prefixes/exact keys denied by default. Matched as
-/// case-insensitive globs (a trailing `_` becomes a `*` prefix); no boundary
-/// logic needed since these are already anchored names, not bare words.
-pub const SECRET_ENV_KEYS: &[&str] = &["AWS_", "NPM_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
-
-/// Case-insensitive substring test — the match rule for [`SECRET_SUBSTR_TOKENS`].
+/// Case-insensitive substring test for a secret name-word anywhere in a key. Used by
+/// [`is_npm_config_credential`] for the registry-credential family.
 pub fn word_in_substr(word: &str, key: &str) -> bool {
     key.to_ascii_uppercase()
         .contains(&word.to_ascii_uppercase())
 }
 
-/// Whole-segment (case-insensitive) test — the match rule for
-/// [`SECRET_SEGMENT_TOKENS`]. The key is split on `_`/`-`/`.` and the word must
-/// EQUAL one segment, so `pwd` hits `MYSQL_PWD` but `pat` misses `PATH`.
+/// Whole-segment (case-insensitive) test. The key is split on `_`/`-`/`.` and the word
+/// must EQUAL one segment, so `key` hits `NPM_CONFIG_KEY` but misses `KEYTAR`. Used by
+/// [`is_npm_config_credential`] for the registry-credential family.
 pub fn word_is_segment(word: &str, key: &str) -> bool {
     let w = word.to_ascii_uppercase();
     segments(key).contains(&w)
@@ -132,10 +103,10 @@ fn segments(s: &str) -> Vec<String> {
 }
 
 /// Build the default secret-PATH read DENY entries (`~/.ssh`, `~/.aws`, wallets, …).
-/// These are what `"..."` splices into a read ruleset. Deny access is neutral (Read).
-/// The depth-independent `.env*` denies are handled SEPARATELY (the env-deny bands,
-/// injected unconditionally as the last entries on every read-granting policy) — see
-/// `fold::fold_fs`.
+/// Emitted into `sandbox: true`'s fs base (`fold::secure_default_fs`) and re-asserted by
+/// the build-jail preset. Deny access is neutral (Read). The depth-independent `.env*`
+/// denies are handled SEPARATELY (the env-deny bands, injected unconditionally as the
+/// last entries on every read-granting policy) — see `fold::fold_fs`.
 pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
     let mut out = Vec::new();
     for rel in SECRET_READ_RELPATHS {
@@ -274,8 +245,8 @@ const NPM_CONFIG_PREFIX: &str = "npm_config_";
 
 /// Unambiguous credential words in an `npm_config_*` key — long/specific enough that
 /// a case-insensitive SUBSTRING hit has no realistic collision with a node-gyp /
-/// node-pre-gyp build hint (none of which embed these). Mirrors the env-name
-/// [`SECRET_SUBSTR_TOKENS`] discipline, scoped to the registry-credential family.
+/// node-pre-gyp build hint (none of which embed these). Case-insensitive substring
+/// discipline (via [`word_in_substr`]), scoped to the registry-credential family.
 const NPM_CRED_SUBSTR_TOKENS: &[&str] = &[
     "token",
     "secret",
@@ -527,10 +498,9 @@ fn strip_prefix_ci<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
 /// exact-case miss would drop a container-essential var and re-open the
 /// `ERROR_ENVVAR_NOT_FOUND` spawn failure the baseline exists to prevent.
 ///
-/// Public because the env `"..."` fold reuses it as the match predicate for the
-/// curated-baseline allow entry — so `env: ["..."]` and `sandbox: true`'s env are
-/// the SAME allowlist by construction (single source of truth), never a drifting
-/// reimplementation.
+/// Public because [`curated_baseline_env`] uses it as the match predicate for
+/// `sandbox: true`'s env — the single source of truth for the curated allowlist,
+/// never a drifting reimplementation.
 pub fn baseline_allows(key: &str) -> bool {
     // Registry credential keys ride the build-hint `npm_config_*` prefix; scrub them
     // before the prefix pass would admit them. Case-insensitive prefix match so a

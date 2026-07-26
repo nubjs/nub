@@ -1,13 +1,14 @@
 //! Per-axis fold: an axis surface value (`false | true | array | object`) →
-//! its resolved IR fragment. The `"..."` spread and last-match-wins ORDER are
-//! discharged here into a flat ordered list; the actual last-match decision is
-//! made at evaluation time by the matcher, so the fold only has to preserve
-//! order and splice the defaults at the sentinel's position.
+//! its resolved IR fragment. A `...:#/pointer` reuse entry (see [`reuse`]) and
+//! last-match-wins ORDER are discharged here into a flat ordered list; the actual
+//! last-match decision is made at evaluation time by the matcher, so the fold only has
+//! to preserve order and splice a reused list's entries at the token's position.
 
 use super::builtin_sets;
 use super::defaults;
 use super::env_grammar::{EnvType, parse_env_type};
 use super::resolve;
+use super::reuse;
 use super::{CompileCtx, CompileError, ScopeCapabilities};
 use crate::matcher::path::expand_symbolic;
 use crate::policy::{
@@ -16,19 +17,23 @@ use crate::policy::{
 };
 use globset::{GlobBuilder, GlobMatcher};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-/// A `"!..."` entry — a negated inheritance sentinel — is meaningless (you cannot
-/// deny "the inherited scope") and is a shape error on every axis (D-list).
-const SENTINEL_NEGATE_MSG: &str =
-    "`!...` is invalid — `\"...\"` is the inheritance sentinel and cannot be negated";
+/// Naked `...` / `!...` inheritance was REMOVED in v2 (a policy is a complete
+/// statement). Any surviving `...`/`!...` — array entry OR object key, on any axis — is
+/// a HARD shape error carrying the migration hint, never silently folded to a literal
+/// path/host named `...`. To reuse another list, reference it with a `...:#/pointer`
+/// array entry (see [`super::reuse`]).
+const NAKED_SENTINEL_MSG: &str = "`...` inheritance was removed — a policy is a complete statement; to reuse a list, reference it with `...:#/pointer` (e.g. [\"...:#/shared/fs\", …])";
+/// `!...:#/pointer` (negated reuse) is rejected in P4 (OQ1): you cannot deny a spliced
+/// list, and expand-then-negate over a reused list is deferred.
+const NEGATED_REUSE_MSG: &str = "`!...:#/pointer` (negated reuse) is not supported — reuse a list with `...:#/pointer`, then deny specific members with `!` entries after it";
+/// `...:#/pointer` reuse is array-only (OQ2); as an OBJECT key it has no defined
+/// meaning, so it is rejected rather than folded to a literal path/host.
+const REUSE_OBJECT_KEY_MSG: &str = "`...:#/pointer` reuse is only valid as an fs/net array entry (e.g. [\"...:#/shared/fs\", …]), not as an object key";
 /// An empty / whitespace-only fs entry used to expand to `**` (a silent whole-fs
 /// grant, fail-OPEN); it is now a hard shape error (D3).
 const EMPTY_FS_ENTRY_MSG: &str = "an empty fs entry is not allowed (it would grant the whole filesystem) — name a path or remove it";
-/// `"..."` inheritance in fs/net is positional in the ARRAY form; as an OBJECT key
-/// it has no defined meaning, so it is rejected rather than silently treated as a
-/// literal path/host named `...` (fail loud, parity with env-object + the array).
-const OBJECT_SENTINEL_MSG: &str = "`\"...\"` inheritance is only valid in fs/net array form (e.g. [\"...\", …]), not as an object key";
 /// `$tooldirs` is a SET (the built-in tool-cache dirs), not a directory root, so it
 /// takes no `/subpath` — a `$tooldirs/x` would silently name nothing. Fail loud.
 const TOOLDIRS_SUBPATH_MSG: &str = "`$tooldirs` is a built-in set (the package-manager / toolchain cache dirs) and takes no subpath — use it bare (`$tooldirs`) or with a permission (`{ \"$tooldirs\": \"r\" }`)";
@@ -42,15 +47,9 @@ const TRUSTED_OBJECT_MSG: &str = "`$trusted` is a built-in host set — use it i
 /// are subtree-expanded (a bare path grants the node + `/**`); a glob-bearing
 /// pattern is emitted verbatim. Access: array grants are ReadWrite (the concise
 /// "these paths are fully usable" form); object values pick `"r"`/`"rw"`. A
-/// `"..."` inherits the enclosing scope's fs at its position: the resolved
-/// `parent` when present (cross-scope inheritance), else the built-in generous-
-/// read + secret-deny base (outermost scope).
-pub fn fold_fs(
-    value: &Value,
-    ctx: &CompileCtx,
-    path: &str,
-    parent: Option<&FsPolicy>,
-) -> Result<FsPolicy, CompileError> {
+/// `...:#/pointer` array entry splices another list's raw entries at its position
+/// (see [`reuse`]); there is no implicit inheritance (naked `...` was removed).
+pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, CompileError> {
     let mut set = FsRuleSet {
         entries: Vec::new(),
         default_effect: Effect::Deny,
@@ -70,17 +69,12 @@ pub fn fold_fs(
         Value::Bool(true) => set.default_effect = Effect::Allow,
         Value::Bool(false) => set.default_effect = Effect::Deny,
         Value::Array(items) => {
+            // The reuse resolution stack (cycle detection) — seeded empty per axis fold.
+            let mut stack = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 let p = child(path, &i.to_string());
                 let s = as_str(item, &p)?;
-                if let Some(mode) = parse_tmp_mode_array(s, &p)? {
-                    tmp = mode;
-                    continue;
-                }
-                if fold_tooldirs_array_entry(s, ctx, &p, &mut set.entries)? {
-                    continue;
-                }
-                fold_fs_array_entry(s, ctx, parent, &p, &mut set.entries)?;
+                fold_fs_array_item(s, ctx, &p, &mut set.entries, &mut tmp, &mut stack)?;
             }
         }
         Value::Object(map) => {
@@ -281,12 +275,12 @@ fn fold_tooldirs_object_entry(
 /// rule on the fs axis, which no directory grant, glob, or exact path can reopen (sandbox.mdx
 /// "`.env` files are always blocked"). `.env*` files hold the exact secrets the sandbox scrubs,
 /// so reading them is denied by default on any read-granting fs policy — including the OBJECT
-/// form, which never spliced the `"..."` secret set. The rule composes with the last-match-wins
-/// fs algebra as two trailing DENY bands appended after all user + default entries (backends
-/// stay pure IR replicators — every one evaluates last-match-wins over these entries):
+/// form. The rule composes with the last-match-wins fs algebra as two trailing DENY bands
+/// appended after all user + default entries (backends stay pure IR replicators — every one
+/// evaluates last-match-wins over these entries):
 ///   band 1  — the folded user + default entries, unchanged;
 ///   band 2a — the `.env*` LEAF deny (`**/.env*`, `.env*`), so it beats every band-1
-///             broad/glob/exact allow (the `["...", "./"]` footgun where a trailing dir-allow
+///             broad/glob/exact allow (the `["**", "./"]` footgun where a trailing dir-allow
 ///             re-exposed `<proj>/.env`, AND a `{ "./.env": "r" }` exact allow, are BOTH closed);
 ///   band 2c — the `.env*` SUBTREE deny (`**/.env*/**`, `.env*/**`), so a `.env*`-NAMED
 ///             DIRECTORY's CONTENTS are denied too.
@@ -308,20 +302,53 @@ fn finalize_env_deny(set: &mut FsRuleSet) {
     set.entries.extend(defaults::env_deny_subtree_rules()); // band 2c: subtree deny (LAST)
 }
 
+/// One entry of the fs Array form — the per-item body, shared by direct entries and
+/// each entry of a `...:#/pointer`-spliced list so reuse composes with `$tmp` mode,
+/// `$tooldirs`, and the `.env*` floor for free (the P3↔P4 seam). Reuse is checked
+/// FIRST; a naked `...`/`!...` is a migration error; then `$tmp` mode, `$tooldirs`, and
+/// the ordinary path. `tmp`/`out` are the OUTER accumulators (a spliced `$tmp` sets the
+/// outer mode); `stack` is the reuse resolution stack for cycle detection.
+fn fold_fs_array_item(
+    s: &str,
+    ctx: &CompileCtx,
+    path: &str,
+    out: &mut Vec<FsRule>,
+    tmp: &mut TmpMode,
+    stack: &mut Vec<String>,
+) -> Result<(), CompileError> {
+    match reuse::parse_reuse_token(s) {
+        reuse::ReuseToken::Negated => return Err(CompileError::shape(path, NEGATED_REUSE_MSG)),
+        reuse::ReuseToken::Pointer(ptr) => {
+            let arr = reuse::resolve_reuse_array(ctx, ptr, path, stack)?;
+            stack.push(ptr.to_string());
+            for (j, item) in arr.iter().enumerate() {
+                // A reused entry's diagnostics point at the SOURCE list, not the splice
+                // site, so a bad reused list blames the list.
+                let cp = format!("{ptr}.{j}");
+                fold_fs_array_item(as_str(item, &cp)?, ctx, &cp, out, tmp, stack)?;
+            }
+            stack.pop();
+            return Ok(());
+        }
+        reuse::ReuseToken::None => {}
+    }
+    reject_naked_sentinel(s, path)?;
+    if let Some(mode) = parse_tmp_mode_array(s, path)? {
+        *tmp = mode;
+        return Ok(());
+    }
+    if fold_tooldirs_array_entry(s, ctx, path, out)? {
+        return Ok(());
+    }
+    fold_fs_array_entry(s, ctx, path, out)
+}
+
 fn fold_fs_array_entry(
     s: &str,
     ctx: &CompileCtx,
-    parent: Option<&FsPolicy>,
     path: &str,
     out: &mut Vec<FsRule>,
 ) -> Result<(), CompileError> {
-    if s == "!..." {
-        return Err(CompileError::shape(path, SENTINEL_NEGATE_MSG));
-    }
-    if s == "..." {
-        splice_fs_inherit(ctx, parent, out);
-        return Ok(());
-    }
     if s.trim().is_empty() {
         return Err(CompileError::shape(path, EMPTY_FS_ENTRY_MSG));
     }
@@ -343,12 +370,8 @@ fn fold_fs_object_entry(
     path: &str,
     out: &mut Vec<FsRule>,
 ) -> Result<(), CompileError> {
-    if key == "!..." {
-        return Err(CompileError::shape(path, SENTINEL_NEGATE_MSG));
-    }
-    if key == "..." {
-        return Err(CompileError::shape(path, OBJECT_SENTINEL_MSG));
-    }
+    reject_naked_sentinel(key, path)?;
+    reject_reuse_object_key(key, path)?;
     if key.trim().is_empty() {
         return Err(CompileError::shape(path, EMPTY_FS_ENTRY_MSG));
     }
@@ -520,34 +543,34 @@ fn deprecated_angle_sentinel_msg(p: &str) -> String {
     )
 }
 
-/// The fs `"..."` payload: at an inner scope splice the resolved parent's fs
-/// entries (cross-scope inheritance); at the outermost scope (no parent) splice
-/// the built-in generous-read + secret-deny base — the degenerate outermost case.
-fn splice_fs_inherit(ctx: &CompileCtx, parent: Option<&FsPolicy>, out: &mut Vec<FsRule>) {
-    match parent {
-        Some(p) => out.extend(p.rules.entries.iter().cloned()),
-        None => splice_fs_defaults(ctx, out),
+/// `sandbox: true`'s fs base, built DIRECTLY: the generous-read allow + the home-secret
+/// read denies, then the policy-file self-exclusion and the unconditional `.env*` floor
+/// — byte-identical to what `fold_fs(["..."])` produced before P4 removed the naked-`...`
+/// splice. The home-secret denies live HERE (part of the `sandbox: true` posture), NOT
+/// as an unconditional floor on every read-granting policy — relocating them to a
+/// preset-only model is decision (a), deferred to Phase 7.
+pub(super) fn secure_default_fs(ctx: &CompileCtx) -> FsPolicy {
+    let mut set = FsRuleSet {
+        entries: Vec::new(),
+        default_effect: Effect::Deny,
+    };
+    set.entries.push(defaults::generous_read_allow());
+    set.entries.extend(defaults::secret_read_denies(&ctx.homes));
+    finalize_policy_file_deny(&mut set, ctx);
+    finalize_env_deny(&mut set);
+    FsPolicy {
+        rules: set,
+        tmp: TmpMode::Shared,
     }
-}
-
-/// Splice the generous-read base + secret-deny defaults (the built-in fs base).
-fn splice_fs_defaults(ctx: &CompileCtx, out: &mut Vec<FsRule>) {
-    out.push(defaults::generous_read_allow());
-    out.extend(defaults::secret_read_denies(&ctx.homes));
 }
 
 // ── net ──────────────────────────────────────────────────────────────────────
 
 /// Fold the `net` axis into a [`NetPolicy`]. Entries are host globs or CIDRs;
-/// `!` denies; `"..."` inherits the enclosing scope's net (the resolved `parent`
-/// when present; nothing at the outermost scope — the built-in net base is
-/// deny-all with no committed allowlist). `net: true` disables enforcement;
-/// `net: false` denies all egress.
-pub fn fold_net(
-    value: &Value,
-    path: &str,
-    parent: Option<&NetPolicy>,
-) -> Result<NetPolicy, CompileError> {
+/// `!` denies; a `...:#/pointer` array entry splices another list's raw entries at its
+/// position (see [`reuse`]). There is no implicit inheritance (naked `...` was removed).
+/// `net: true` disables enforcement; `net: false` denies all egress.
+pub fn fold_net(value: &Value, ctx: &CompileCtx, path: &str) -> Result<NetPolicy, CompileError> {
     let mut policy = NetPolicy {
         enforce: true,
         default_effect: Effect::Deny,
@@ -557,21 +580,19 @@ pub fn fold_net(
         Value::Bool(true) => policy.enforce = false,
         Value::Bool(false) => {} // enforce, deny-all base, no rules
         Value::Array(items) => {
+            // The reuse resolution stack (cycle detection) — seeded empty per axis fold.
+            let mut stack = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 let p = child(path, &i.to_string());
                 let s = as_str(item, &p)?;
-                fold_net_entry(s, parent, &p, &mut policy)?;
+                fold_net_array_item(s, ctx, &p, &mut policy, &mut stack)?;
             }
         }
         Value::Object(map) => {
             for (key, val) in map {
                 let p = child(path, key);
-                if key == "!..." {
-                    return Err(CompileError::shape(&p, SENTINEL_NEGATE_MSG));
-                }
-                if key == "..." {
-                    return Err(CompileError::shape(&p, OBJECT_SENTINEL_MSG));
-                }
+                reject_naked_sentinel(key, &p)?;
+                reject_reuse_object_key(key, &p)?;
                 if key == "$trusted" {
                     return Err(CompileError::shape(&p, TRUSTED_OBJECT_MSG));
                 }
@@ -588,31 +609,42 @@ pub fn fold_net(
     Ok(policy)
 }
 
-fn fold_net_entry(
+/// One entry of the net Array form — shared by direct entries and each entry of a
+/// `...:#/pointer`-spliced list, so a reused net list's hosts / `$trusted` land in
+/// `net.rules` at the splice position (before broker validation runs). Reuse first; a
+/// naked `...`/`!...` is a migration error; then the ordinary host/CIDR/`$trusted` path.
+fn fold_net_array_item(
     s: &str,
-    parent: Option<&NetPolicy>,
+    ctx: &CompileCtx,
     path: &str,
     policy: &mut NetPolicy,
+    stack: &mut Vec<String>,
 ) -> Result<(), CompileError> {
-    if s == "!..." {
-        return Err(CompileError::shape(path, SENTINEL_NEGATE_MSG));
-    }
-    if s == "..." {
-        // Inner scope: inherit the resolved parent's rules. Outermost (no parent):
-        // the built-in net base is deny-all with no committed allowlist (the
-        // build-jail baseline owns trusted-host allows), so splice nothing.
-        if let Some(p) = parent {
-            policy.rules.extend(p.rules.iter().cloned());
-            policy.brokers.extend(p.brokers.iter().cloned());
+    match reuse::parse_reuse_token(s) {
+        reuse::ReuseToken::Negated => return Err(CompileError::shape(path, NEGATED_REUSE_MSG)),
+        reuse::ReuseToken::Pointer(ptr) => {
+            let arr = reuse::resolve_reuse_array(ctx, ptr, path, stack)?;
+            stack.push(ptr.to_string());
+            for (j, item) in arr.iter().enumerate() {
+                let cp = format!("{ptr}.{j}");
+                fold_net_array_item(as_str(item, &cp)?, ctx, &cp, policy, stack)?;
+            }
+            stack.pop();
+            return Ok(());
         }
-        return Ok(());
+        reuse::ReuseToken::None => {}
     }
+    reject_naked_sentinel(s, path)?;
+    fold_net_entry(s, path, policy)
+}
+
+fn fold_net_entry(s: &str, path: &str, policy: &mut NetPolicy) -> Result<(), CompileError> {
     let (pattern, effect) = match s.strip_prefix('!') {
         Some(rest) => (rest, Effect::Deny),
         None => (s, Effect::Allow),
     };
     // `$trusted` expands the curated trusted-host set IN-PLACE (last-match order
-    // preserved), mirroring the `"..."` splice above. `!$trusted` denies each host
+    // preserved), like a reused list's entries. `!$trusted` denies each host
     // (expand-then-negate — grammar-uniform with `!host`, enables `["*", "!$trusted"]`).
     if pattern == "$trusted" {
         policy.rules.extend(builtin_sets::trusted_net_rules(effect));
@@ -857,7 +889,6 @@ pub fn fold_env_axes(
     secrets: Option<&Value>,
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
-    parent: Option<&EnvPolicy>,
 ) -> Result<(EnvPolicy, Vec<BrokerIntent>), CompileError> {
     // An explicit env-family axis always enforces (constructs the child env exactly).
     let mut policy = EnvPolicy {
@@ -867,12 +898,12 @@ pub fn fold_env_axes(
     };
     let mut entries = Vec::new();
     if let Some(v) = vars {
-        entries.extend(parse_env_surface(v, false, "vars", ctx, caps, parent)?);
+        entries.extend(parse_env_surface(v, false, "vars", ctx, caps)?);
     }
     if let Some(v) = secrets {
-        entries.extend(parse_env_surface(v, true, "secrets", ctx, caps, parent)?);
+        entries.extend(parse_env_surface(v, true, "secrets", ctx, caps)?);
     }
-    construct_env(&entries, ctx, parent, &mut policy)?;
+    construct_env(&entries, ctx, &mut policy)?;
     // An allowlist can legitimately omit every ambient key, but a Windows child still
     // needs the small bootstrap set for process/AppContainer startup. POSIX receives
     // no additions because its essential set is empty. This also floors a `vars: []`
@@ -944,7 +975,6 @@ fn parse_env_surface(
     path: &str,
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
-    parent: Option<&EnvPolicy>,
 ) -> Result<Vec<EnvEntry>, CompileError> {
     let is_secrets = default_sensitive;
     match value {
@@ -963,8 +993,8 @@ fn parse_env_surface(
         // Explicit strip: no entries. construct_env withholds everything and
         // add_os_essential_env re-adds only the OS-startup essentials.
         Value::Bool(false) => Ok(Vec::new()),
-        Value::Array(items) => parse_env_array(items, parent, path, default_sensitive),
-        Value::Object(map) => parse_env_object(map, ctx, caps, parent, path, default_sensitive),
+        Value::Array(items) => parse_env_array(items, path, default_sensitive),
+        Value::Object(map) => parse_env_object(map, ctx, caps, path, default_sensitive),
         _ => Err(CompileError::shape(
             path,
             &format!("{path} must be a boolean, an array, or a pattern-keyed object"),
@@ -999,9 +1029,11 @@ struct EnvEntry {
     /// globs; the built-in secret defaults are case-insensitive (glob or
     /// boundary-token) so an uppercase `MY_TOKEN` cannot slip past them.
     key_match: KeyMatch,
-    /// A compiler-spliced default entry (the `"..."` curated baseline / inherited
-    /// keys / secret denies), NOT user-authored: excluded from the emitted
-    /// `schema` (which carries user validation + redaction marks only).
+    /// A compiler-spliced default entry (NOT user-authored): excluded from the
+    /// emitted `schema` (which carries user validation + redaction marks only). The
+    /// producers of `builtin: true` were the `"..."` curated-baseline / inherited-keys
+    /// splices, removed in P4; the field + its schema-exclusion seam are retained for
+    /// any future compiler-spliced default (all current entries are user-authored).
     builtin: bool,
     /// The brokerTo hosts a `secrets` entry may cross (empty on every other entry).
     /// `fold_env_axes` harvests a non-empty list into a [`BrokerIntent`] and the
@@ -1010,7 +1042,11 @@ struct EnvEntry {
     broker_to: Vec<String>,
 }
 
-/// How an [`EnvEntry`]'s pattern is matched against an ambient env key.
+/// How an [`EnvEntry`]'s pattern is matched against an ambient env key. Every entry is
+/// now a user-authored key — the built-in secret-KEY / -substr / -segment matchers were
+/// produced ONLY by the `"..."` env splice, removed in P4 (`sandbox: true`'s secret
+/// filtering lives in `defaults::curated_baseline_env`, not here). Retained as the
+/// classifier seam should a future phase re-introduce a compiler-spliced matcher.
 #[derive(Clone, Copy)]
 enum KeyMatch {
     /// A user-authored glob/exact key. Matched OS-mirrored (D16): case-SENSITIVE
@@ -1018,22 +1054,6 @@ enum KeyMatch {
     /// var regardless of case by OS contract — a `PATH` rule must catch an ambient
     /// `Path`). Toggled by [`ENV_KEYS_CASE_INSENSITIVE`].
     User,
-    /// A built-in secret-KEY guard (`AWS_*`, `NPM_TOKEN`), matched as a
-    /// case-INsensitive glob.
-    SecretGlob,
-    /// A built-in unambiguous secret token (`token`, `credential`), matched
-    /// case-insensitively as a SUBSTRING (via `defaults::word_in_substr`).
-    SecretSubstr,
-    /// A built-in short/ambiguous secret token (`pat`, `pwd`, `auth`), matched
-    /// case-insensitively as a whole SEGMENT (via `defaults::word_is_segment`).
-    SecretSegment,
-    /// The built-in curated baseline (the env `"..."` payload at the OUTERMOST
-    /// scope): matches a key iff `defaults::baseline_allows` admits it. One such
-    /// allow entry reproduces `sandbox: true`'s curated env exactly.
-    CuratedBaseline,
-    /// Cross-scope inheritance (the env `"..."` payload at an INNER scope):
-    /// matches a key iff it is in the resolved parent's constructed env.
-    InheritedKeys,
 }
 
 enum EnvAction {
@@ -1048,7 +1068,6 @@ enum EnvAction {
 
 fn parse_env_array(
     items: &[Value],
-    parent: Option<&EnvPolicy>,
     path: &str,
     default_sensitive: bool,
 ) -> Result<Vec<EnvEntry>, CompileError> {
@@ -1056,13 +1075,7 @@ fn parse_env_array(
     for (i, item) in items.iter().enumerate() {
         let p = child(path, &i.to_string());
         let s = as_str(item, &p)?;
-        if s == "!..." {
-            return Err(CompileError::shape(&p, SENTINEL_NEGATE_MSG));
-        }
-        if s == "..." {
-            splice_env_inherit(parent, &mut out);
-            continue;
-        }
+        reject_naked_sentinel(s, &p)?;
         let (pattern, deny) = match s.strip_prefix('!') {
             Some(rest) => (rest.to_string(), true),
             None => (s.to_string(), false),
@@ -1106,39 +1119,14 @@ fn parse_env_object(
     map: &serde_json::Map<String, Value>,
     ctx: &CompileCtx,
     caps: ScopeCapabilities,
-    parent: Option<&EnvPolicy>,
     path: &str,
     default_sensitive: bool,
 ) -> Result<Vec<EnvEntry>, CompileError> {
     let mut out = Vec::new();
     for (raw_key, val) in map {
         let p = child(path, raw_key);
-        if raw_key == "!..." {
-            return Err(CompileError::shape(&p, SENTINEL_NEGATE_MSG));
-        }
-        // `"..."` as an env-object key inherits the enclosing scope's env keys at
-        // this position (positional last-match). `true` = inherit; a string is a
-        // file-extends (frontend-resolved — deferred here, as elsewhere).
-        if raw_key == "..." {
-            match val {
-                Value::Bool(true) => {
-                    splice_env_inherit(parent, &mut out);
-                    continue;
-                }
-                // Only a path-like string is a (frontend-deferred) file-ref; a bare
-                // scalar (`{"...": "port"}`) is a malformed sentinel value, not a
-                // file to resolve — reject it with the same message as every axis.
-                Value::String(reference) if super::is_file_ref_value(reference) => {
-                    return Err(CompileError::FileRefUnresolved {
-                        path: p,
-                        reference: reference.clone(),
-                    });
-                }
-                other => {
-                    return Err(CompileError::shape(&p, &super::sentinel_value_error(other)));
-                }
-            }
-        }
+        // `...`/`!...` env-object inheritance was removed (v2: complete statement).
+        reject_naked_sentinel(raw_key, &p)?;
         // A trailing `?` on the key marks it optional; a glob key is inherently
         // optional (D9 — a glob matches however many keys, zero included), so it is
         // never a required-var declaration and reports optional in the schema.
@@ -1411,112 +1399,21 @@ fn parse_env_extras(
     })
 }
 
-/// The env `"..."` payload: inherit the enclosing scope's env at this position.
-/// At an INNER scope (`parent = Some`) splice one `InheritedKeys` allow so the
-/// child inherits exactly the resolved parent's keys (already secret-filtered by
-/// the parent). At the OUTERMOST scope (`parent = None`) splice the built-in
-/// curated baseline — the degenerate outermost case, ≡ `sandbox: true`'s env.
-fn splice_env_inherit(parent: Option<&EnvPolicy>, out: &mut Vec<EnvEntry>) {
-    match parent {
-        Some(_) => out.push(EnvEntry {
-            pattern: "...".to_string(),
-            action: EnvAction::Allow(None),
-            sensitive: false,
-            optional: true,
-            format: None,
-            key_match: KeyMatch::InheritedKeys,
-            builtin: true,
-            broker_to: Vec::new(),
-        }),
-        None => splice_env_defaults(out),
-    }
-}
-
-/// The built-in env base (outermost `"..."`): the secret DENIES followed by the
-/// curated-baseline ALLOW. Ordered so the baseline allow is LAST — its verdict is
-/// authoritative for baseline keys (so a bare `["..."]` ≡ the curated baseline,
-/// i.e. `sandbox: true`'s env), while the secret denies bind only when a LATER
-/// user entry re-broadens (e.g. `["*", "..."]`, which allows all then re-strips
-/// secrets). All are `builtin` → excluded from the emitted user schema.
-fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
-    let secret_deny = |pattern: String, key_match: KeyMatch| EnvEntry {
-        pattern,
-        action: EnvAction::Deny,
-        sensitive: true,
-        optional: false,
-        format: None,
-        key_match,
-        builtin: true,
-        broker_to: Vec::new(),
-    };
-    for tok in defaults::SECRET_SUBSTR_TOKENS {
-        out.push(secret_deny(tok.to_string(), KeyMatch::SecretSubstr));
-    }
-    for tok in defaults::SECRET_SEGMENT_TOKENS {
-        out.push(secret_deny(tok.to_string(), KeyMatch::SecretSegment));
-    }
-    for key in defaults::SECRET_ENV_KEYS {
-        let pat = if key.ends_with('_') {
-            format!("{key}*")
-        } else {
-            key.to_string()
-        };
-        out.push(secret_deny(pat, KeyMatch::SecretGlob));
-    }
-    // The curated allowlist as ONE allow entry (matches iff `baseline_allows`),
-    // placed LAST so it is the authoritative verdict for the keys it admits.
-    out.push(EnvEntry {
-        pattern: "...".to_string(),
-        action: EnvAction::Allow(None),
-        sensitive: false,
-        optional: true,
-        format: None,
-        key_match: KeyMatch::CuratedBaseline,
-        builtin: true,
-        broker_to: Vec::new(),
-    });
-}
-
 /// Build the child env map + schema + withheld list from ordered entries.
 /// Source keys are filtered last-match-wins; explicit-value entries are set
-/// directly. A required exact key with no source value and no literal errors.
-///
-/// `parent` (an inner scope's resolved parent env) contributes two things: its
-/// keys become candidate SOURCE keys (with the parent's resolved value winning
-/// over ambient), and an `InheritedKeys` entry (spliced by `"..."`) admits
-/// exactly those keys. At the outermost scope `parent` is `None` and the source
-/// is the ambient env verbatim — behavior-identical to the single-term path.
+/// directly. A required exact key with no source value and no literal errors. The
+/// value source is the ambient env verbatim (a single-block compile has no parent
+/// scope — cross-scope env inheritance was removed in P4).
 fn construct_env(
     entries: &[EnvEntry],
     ctx: &CompileCtx,
-    parent: Option<&EnvPolicy>,
     policy: &mut EnvPolicy,
 ) -> Result<(), CompileError> {
-    // The value source: ambient, overlaid with the resolved parent's keys (parent
-    // value wins — it is the already-resolved truth for an inherited key). Owned
-    // only when a parent actually contributes keys, else the ambient env verbatim.
-    let source_owned;
-    let source: &BTreeMap<String, String> = match parent.filter(|p| !p.constructed.is_empty()) {
-        Some(p) => {
-            let mut m = ctx.ambient_env.clone();
-            for (k, v) in &p.constructed {
-                defaults::insert_env(&mut m, k.clone(), v.clone());
-            }
-            source_owned = m;
-            &source_owned
-        }
-        None => &ctx.ambient_env,
-    };
-    let parent_keys: BTreeSet<String> = parent
-        .map(|p| p.constructed.keys().cloned().collect())
-        .unwrap_or_default();
+    let source: &BTreeMap<String, String> = &ctx.ambient_env;
 
     // Compile a matcher per entry, honoring its `key_match`: user patterns are
-    // case-sensitive globs, the built-in defaults case-insensitive / predicate.
-    let matchers: Vec<KeyMatcher> = entries
-        .iter()
-        .map(|e| compile_key_matcher(e, &parent_keys))
-        .collect();
+    // case-sensitive globs, the built-in secret defaults case-insensitive / predicate.
+    let matchers: Vec<KeyMatcher> = entries.iter().map(compile_key_matcher).collect();
 
     // 1. Literal-value entries: set directly + validate + schema. (Exact keys
     //    only; a glob key has no single value to bind.)
@@ -1636,19 +1533,11 @@ const ENV_KEYS_CASE_INSENSITIVE: bool = cfg!(windows);
 
 /// A compiled env-key matcher — the runtime form of an entry's [`KeyMatch`].
 enum KeyMatcher {
-    /// A compiled glob (user OS-mirrored, or a secret-KEY case-insensitive).
+    /// A compiled glob (user key, OS-mirrored case-sensitivity).
     Glob(GlobMatcher),
     /// Exact fallback when a pattern fails to compile as a glob; `bool` carries the
-    /// same case-insensitivity the glob would have (OS-mirrored user / secret-KEY).
+    /// same OS-mirrored case-insensitivity the glob would have.
     Exact(String, bool),
-    /// A secret token matched as a case-insensitive substring.
-    SecretSubstr(String),
-    /// A secret token matched as a case-insensitive whole segment.
-    SecretSegment(String),
-    /// The curated-baseline predicate (`defaults::baseline_allows`).
-    Baseline,
-    /// Cross-scope inheritance: the key is in the resolved parent's env.
-    InheritedKeys(BTreeSet<String>),
 }
 
 impl KeyMatcher {
@@ -1662,37 +1551,48 @@ impl KeyMatcher {
                     s == name
                 }
             }
-            KeyMatcher::SecretSubstr(word) => defaults::word_in_substr(word, name),
-            KeyMatcher::SecretSegment(word) => defaults::word_is_segment(word, name),
-            KeyMatcher::Baseline => defaults::baseline_allows(name),
-            KeyMatcher::InheritedKeys(keys) => keys.contains(name),
         }
     }
 }
 
-/// Compile an entry's pattern into a [`KeyMatcher`] per its [`KeyMatch`] kind.
-/// `parent_keys` is the resolved parent's env key set (empty at the outermost
-/// scope), the match set for an `InheritedKeys` entry.
-fn compile_key_matcher(e: &EnvEntry, parent_keys: &BTreeSet<String>) -> KeyMatcher {
-    match e.key_match {
-        KeyMatch::SecretSubstr => KeyMatcher::SecretSubstr(e.pattern.clone()),
-        KeyMatch::SecretSegment => KeyMatcher::SecretSegment(e.pattern.clone()),
-        KeyMatch::CuratedBaseline => KeyMatcher::Baseline,
-        KeyMatch::InheritedKeys => KeyMatcher::InheritedKeys(parent_keys.clone()),
-        KeyMatch::User | KeyMatch::SecretGlob => {
-            // SecretGlob is always case-insensitive; a user key mirrors the OS.
-            let case_insensitive =
-                matches!(e.key_match, KeyMatch::SecretGlob) || ENV_KEYS_CASE_INSENSITIVE;
-            GlobBuilder::new(&e.pattern)
-                .case_insensitive(case_insensitive)
-                .build()
-                .map(|g| KeyMatcher::Glob(g.compile_matcher()))
-                .unwrap_or_else(|_| KeyMatcher::Exact(e.pattern.clone(), case_insensitive))
-        }
-    }
+/// Compile an entry's pattern into a [`KeyMatcher`]. Every entry is a user-authored key
+/// ([`KeyMatch::User`]) — the built-in secret-key matchers were removed with the `"..."`
+/// env splice in P4 — matched as an OS-mirrored glob with an exact fallback.
+fn compile_key_matcher(e: &EnvEntry) -> KeyMatcher {
+    let KeyMatch::User = e.key_match;
+    GlobBuilder::new(&e.pattern)
+        .case_insensitive(ENV_KEYS_CASE_INSENSITIVE)
+        .build()
+        .map(|g| KeyMatcher::Glob(g.compile_matcher()))
+        .unwrap_or_else(|_| KeyMatcher::Exact(e.pattern.clone(), ENV_KEYS_CASE_INSENSITIVE))
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────────
+
+/// Reject a naked `...` / `!...` inheritance sentinel (array entry OR object key, any
+/// axis). v2 removed implicit inheritance — a policy is a complete statement — so a
+/// surviving `...`/`!...` is a HARD migration error, never silently folded to a literal
+/// path/host named `...`. The one supported reuse form is a `...:#/pointer` reference
+/// (see [`reuse`]), matched separately by [`reuse::parse_reuse_token`] before this runs.
+fn reject_naked_sentinel(s: &str, path: &str) -> Result<(), CompileError> {
+    // Trim to agree with `reuse::parse_reuse_token`'s trimming, so a whitespace-padded
+    // `"  ...  "` (array entry OR object key) still fails loud rather than folding to a
+    // literal `<proj>/...` grant.
+    let s = s.trim();
+    if s == "..." || s == "!..." {
+        return Err(CompileError::shape(path, NAKED_SENTINEL_MSG));
+    }
+    Ok(())
+}
+
+/// Reject a `...:`-prefixed OBJECT key (OQ2): `...:#/pointer` reuse is array-only, so an
+/// object key of that shape is a fail-loud error rather than a literal path/host key.
+fn reject_reuse_object_key(key: &str, path: &str) -> Result<(), CompileError> {
+    if reuse::is_reuse_object_key(key) {
+        return Err(CompileError::shape(path, REUSE_OBJECT_KEY_MSG));
+    }
+    Ok(())
+}
 
 /// Ensure the map has no keys beyond `allowed`; used by callers folding an
 /// axis-bearing object. Exposed for the pipeline's granular-object validation.

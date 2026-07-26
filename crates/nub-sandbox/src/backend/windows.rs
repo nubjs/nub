@@ -92,7 +92,7 @@ pub(crate) struct WindowsLaunch {
 #[derive(Debug, Default, PartialEq)]
 struct FsDegrade {
     /// A generous-read base (`default_effect == Allow`, OR a whole-fs `**` Allow entry
-    /// — the shape the compiler actually emits for `"..."`/`sandbox: true`). The
+    /// — the shape the compiler actually emits for `sandbox: true`). The
     /// allowlist can't express read-all-minus-secrets; reads are confined to the
     /// explicit allow-set instead.
     generous_read: bool,
@@ -135,7 +135,7 @@ fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
                 }
             }
             // A whole-fs `**` Allow is the generous-read base (what the compiler emits
-            // for `"..."`/`sandbox: true` alongside a Deny base) — the allowlist can't
+            // for `sandbox: true` alongside a Deny base) — the allowlist can't
             // express it, so degrade and confine to the explicit allow-set. A NON-whole-
             // fs embedded glob is a distinct over-confinement (skipped, not widened).
             None if is_whole_fs(rule.matcher.as_str()) => degrade.generous_read = true,
@@ -1387,7 +1387,7 @@ mod tests {
 
     #[test]
     fn whole_fs_allow_entry_degrades_generous_read() {
-        // The shape the compiler ACTUALLY emits for `"..."` / `sandbox: true`: a Deny
+        // The shape the compiler ACTUALLY emits for `sandbox: true`: a Deny
         // base + a whole-fs `**` Allow ENTRY (+ secret denies). It must degrade, not be
         // silently dropped as a no-op grant.
         let p = fs(

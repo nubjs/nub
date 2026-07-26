@@ -81,6 +81,7 @@ impl Fixture {
             policy_file: None,
             caps: ScopeCapabilities::approved(),
             ambient_env: ambient,
+            document: serde_json::Value::Null,
             runner: Box::new(ShellRunner),
         }
     }
@@ -248,7 +249,9 @@ fn read_confine_allows_project_denies_outside() {
 #[test]
 fn env_files_denied_under_generous_read() {
     let f = fixture();
-    let generous = serde_json::json!({ "fs": ["..."] });
+    // `sandbox: true` = the secure fs base (generous read + the home-secret denies + the
+    // `.env*` floor) — the v2 replacement for the removed naked-`...` base.
+    let generous = serde_json::json!(true);
     assert!(
         f.allowed(generous.clone(), CAT, &[&s(&f.proj.join("pub.txt"))]),
         "pub readable"
@@ -532,7 +535,8 @@ fn new_secret_paths_denied_under_generous_read() {
     fs::write(f.proj.join("nested/.env.local/prod"), "ENVLOCALDIRSECRET").unwrap();
     fs::write(f.proj.join(".envrc"), "export SECRET=x").unwrap();
 
-    let generous = serde_json::json!({ "fs": ["..."] });
+    // `sandbox: true` = the secure fs base (generous read + the home-secret denies).
+    let generous = serde_json::json!(true);
     for (path, label) in [
         (f.home.join(".pgpass"), ".pgpass"),
         (f.home.join(".pypirc"), ".pypirc"),
@@ -584,7 +588,7 @@ fn brace_deny_denies_every_expanded_path_not_the_literal() {
         fs::write(secrets.join(name), "SECRET").unwrap();
     }
     let deny = format!("!{}/{{a,b}}.key", s(&secrets));
-    let pol = serde_json::json!({ "fs": ["...", deny] });
+    let pol = serde_json::json!({ "fs": ["**", deny] });
     assert!(
         !f.allowed(pol.clone(), CAT, &[&s(&secrets.join("a.key"))]),
         "brace-expanded a.key denied"
@@ -625,7 +629,7 @@ fn nested_brace_deny_denies_all_alternatives() {
         fs::write(secrets.join(name), "SECRET").unwrap();
     }
     let deny = format!("!{}/{{a,{{b,c}}}}.key", s(&secrets));
-    let pol = serde_json::json!({ "fs": ["...", deny] });
+    let pol = serde_json::json!({ "fs": ["**", deny] });
     for name in ["a.key", "b.key", "c.key"] {
         assert!(
             !f.allowed(pol.clone(), CAT, &[&s(&secrets.join(name))]),
@@ -643,7 +647,9 @@ fn nested_brace_deny_denies_all_alternatives() {
 #[test]
 fn write_confine_allows_target_denies_rest() {
     let f = fixture();
-    let wc = serde_json::json!({ "fs": ["...", "./writable"] });
+    // Generous whole-fs READ (`"/": "r"`) + a scoped project write — the v2 read-only
+    // base replaces the removed naked-`...`; only `./writable` is writable.
+    let wc = serde_json::json!({ "fs": { "/": "r", "./writable": "rw" } });
     assert!(
         f.allowed(wc.clone(), TOUCH, &[&s(&f.proj.join("writable/ok.txt"))]),
         "write inside grant"
@@ -763,8 +769,9 @@ fn confstr_scratch_writable_under_generous_write_confine() {
     let f = fixture();
     let src = f.proj.join("hello.c");
     fs::write(&src, "int main(void){return 0;}\n").unwrap();
-    // generous read + write only to the project: cc must still reach confstr temp.
-    let wc = serde_json::json!({ "fs": ["...", "./"] });
+    // generous whole-fs read (`"/": "r"`, so cc reaches its system toolchain) + write
+    // only to the project: cc must still reach confstr temp.
+    let wc = serde_json::json!({ "fs": { "/": "r", "./": "rw" } });
     let obj = f.proj.join("hello.o");
     assert!(
         f.allowed(wc, "/usr/bin/cc", &["-c", &s(&src), "-o", &s(&obj)]),
@@ -779,7 +786,7 @@ fn confstr_scratch_writable_under_generous_write_confine() {
 #[test]
 fn deny_not_dodgeable_via_dotdot_or_symlink() {
     let f = fixture();
-    let generous = serde_json::json!({ "fs": ["..."] });
+    let generous = serde_json::json!({ "fs": ["**"] });
     // `..` traversal to the denied .env resolves to the same canonical path.
     let dotdot = f.proj.join("sub/../.env");
     assert!(

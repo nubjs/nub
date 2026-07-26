@@ -255,72 +255,10 @@ fn empty_object_is_deny_all() {
     );
 }
 
-// ── complete-statement floor + `"..."` scope inheritance (U1) ──────────────────
-
-#[test]
-fn env_spread_alone_is_the_curated_baseline_equals_sandbox_true() {
-    // THE env-base fix (D2): `env: ["..."]` inherits the curated baseline — the
-    // SAME env `sandbox: true` produces, secret-free — NOT strip-all (the old
-    // denies-only bug) and NOT axis `env: true` passthrough (which keeps secrets).
-    let env = &[
-        ("PATH", "/usr/bin"),
-        ("HOME", "/home/u"),
-        ("PWD", "/proj"),
-        ("npm_config_target", "22"),
-        ("npm_config_email", "me@x.com"), // credential-shaped npm_config → dropped
-        ("AWS_SECRET_ACCESS_KEY", "sk"),
-        ("MY_TOKEN", "t"),
-        ("RANDOM_VAR", "v"), // non-baseline, non-secret → not in the curated allowlist
-    ];
-    let ctx = common::ctx(true, env);
-    let spread = compile(&json!({ "vars": ["..."] }), &ctx).unwrap();
-    let truth = compile(&json!(true), &ctx).unwrap();
-    // The whole env axis is identical to `sandbox: true`'s — the single source of
-    // truth (`baseline_allows`) guarantees no drift.
-    assert_eq!(
-        spread.env, truth.env,
-        "env: [\"...\"] must equal sandbox: true's curated env exactly"
-    );
-    let c = &spread.env.constructed;
-    assert!(
-        c.contains_key("PATH") && c.contains_key("HOME"),
-        "baseline kept"
-    );
-    assert!(
-        c.contains_key("PWD"),
-        "PWD is a baseline key, kept (not stripped)"
-    );
-    assert!(c.contains_key("npm_config_target"), "build hint kept");
-    assert!(
-        !c.contains_key("npm_config_email"),
-        "npm credential dropped"
-    );
-    assert!(
-        !c.contains_key("AWS_SECRET_ACCESS_KEY") && !c.contains_key("MY_TOKEN"),
-        "secrets dropped"
-    );
-    assert!(
-        !c.contains_key("RANDOM_VAR"),
-        "non-baseline var not granted"
-    );
-}
-
-#[test]
-fn env_spread_is_not_axis_true_passthrough() {
-    // Guard the two DIFFERENT `true`s: axis `env: true` = passthrough (keeps the
-    // secret); `env: ["..."]` = curated baseline (strips it).
-    let ctx = common::ctx(true, &[("PATH", "/bin"), ("MY_TOKEN", "leak")]);
-    let passthrough = compile(&json!({ "vars": true }), &ctx).unwrap();
-    let baseline = compile(&json!({ "vars": ["..."] }), &ctx).unwrap();
-    assert!(
-        passthrough.env.constructed.contains_key("MY_TOKEN"),
-        "axis env:true passes the secret through"
-    );
-    assert!(
-        !baseline.env.constructed.contains_key("MY_TOKEN"),
-        "env:[\"...\"] strips the secret (curated baseline)"
-    );
-}
+// ── naked-`...` rejection (v2: no implicit inheritance) ────────────────────────
+// The env-base / scope-inheritance tests that used `["..."]` were removed with the
+// mechanism itself in P4; naked `...`/`!...` rejection is covered here + by
+// `naked_sentinel_is_rejected_on_every_axis` below (the migration regression).
 
 #[test]
 fn sentinel_negation_is_a_shape_error_on_every_axis() {
@@ -346,54 +284,6 @@ fn sentinel_negation_is_a_shape_error_on_every_axis() {
             "`!...`/`...` object key must be a shape error for {surface}"
         );
     }
-}
-
-#[test]
-fn sentinel_scalar_value_is_a_shape_error_but_file_ref_defers() {
-    // The `"..."` value grammar is `true | "<file-ref>" | [list]`. A bare scalar
-    // (`{"...": "port"}`, `{"...": 5}`, `{"...": false}`) is NOT a file-ref and must
-    // be a clear shape error — never silently admitted into the file-extends branch
-    // (which would later try to resolve a file literally named `port`). A path-like
-    // string is a legit frontend-deferred file-ref and stays FileRefUnresolved.
-    let ctx = common::ctx(true, &[("PORT", "80")]);
-
-    // Malformed `"..."` values → shape error: bare scalars and arrays at the
-    // wrapper level and in env, plus the fs/net array-only-sentinel object keys.
-    for surface in [
-        json!({ "...": "r" }),
-        json!({ "...": "port" }),
-        json!({ "...": 5 }),
-        json!({ "...": false }),
-        json!({ "...": ["./a.json"] }),
-        json!({ "vars": { "...": "port" } }),
-        json!({ "vars": { "...": 5 } }),
-        // fs/net reject a `"..."` OBJECT key outright (array-only sentinel).
-        json!({ "fs": { "...": "r" } }),
-        json!({ "net": { "...": "r" } }),
-    ] {
-        assert!(
-            matches!(compile(&surface, &ctx), Err(CompileError::Shape { .. })),
-            "malformed `\"...\"` value must be a shape error for {surface}"
-        );
-    }
-
-    // A genuine file-ref still defers to the frontend (unchanged) — no over-trigger.
-    for surface in [
-        json!({ "...": "./policy.json" }),
-        json!({ "vars": { "...": "./p.json" } }),
-    ] {
-        assert!(
-            matches!(
-                compile(&surface, &ctx),
-                Err(CompileError::FileRefUnresolved { .. })
-            ),
-            "a path-like `\"...\"` value is a deferred file-ref for {surface}"
-        );
-    }
-
-    // `{"...": true}` still inherits (compiles clean) — the strictness must not
-    // reject the one valid inline form.
-    assert!(compile(&json!({ "...": true }), &ctx).is_ok());
 }
 
 #[test]
@@ -561,6 +451,20 @@ fn build_jail_preset_expands() {
         ),
         "build-jail must deny the home secret set"
     );
+    // Whole-filesystem READ is restored (regression guard): a build script must reach its
+    // interpreter, system libs/headers, and out-of-project caches. An OUT-OF-PROJECT,
+    // NON-secret path is readable — proving the base is whole-fs read (`{"/":"r"}`), not a
+    // project-anchored `{"**":"r"}` that silently narrows to project-only.
+    for readable in [
+        std::path::PathBuf::from("/usr/lib/libc.so"),
+        common::homes().home.join("notes.txt"),
+    ] {
+        assert!(
+            matches!(m.decide(&readable).effect, Effect::Allow),
+            "build-jail must grant whole-fs read to {}",
+            readable.display()
+        );
+    }
 }
 
 #[test]
@@ -749,64 +653,6 @@ fn env_array_allowlist_and_deny_last_match_wins() {
         "not allowlisted → excluded (default-deny)"
     );
     assert!(p.env.withheld.contains(&"OTHER".to_string()));
-}
-
-#[test]
-fn env_spread_defaults_deny_secrets_but_ordering_can_reallow() {
-    let ctx = common::ctx(true, &[("GITHUB_TOKEN", "gh"), ("NORMAL", "n")]);
-    // `["*", "..."]` — allow all, then secret defaults deny → GITHUB_TOKEN gone.
-    let denied = compile(&json!({ "vars": ["*", "..."] }), &ctx).unwrap();
-    assert!(!denied.env.constructed.contains_key("GITHUB_TOKEN"));
-    assert!(denied.env.constructed.contains_key("NORMAL"));
-    // `["...", "*"]` — defaults first, then allow-all wins by ordering.
-    let allowed = compile(&json!({ "vars": ["...", "*"] }), &ctx).unwrap();
-    assert!(
-        allowed.env.constructed.contains_key("GITHUB_TOKEN"),
-        "later allow wins"
-    );
-}
-
-#[test]
-fn env_secret_defaults_deny_uppercase_secrets_without_overmatching() {
-    // The security regression that motivated Phase R: the `"..."` secret guards
-    // were case-sensitive lowercase substrings, so real UPPERCASE secrets leaked.
-    // Unambiguous tokens now match case-insensitively as SUBSTRINGS (catching
-    // plurals, undelimited, and fused names); short/ambiguous tokens (pat/pwd/auth)
-    // match only as whole SEGMENTS so look-alikes (`PATH`⊃`pat`, `AUTHOR`⊃`auth`)
-    // survive.
-    let secrets = [
-        "MY_TOKEN",
-        "MY_PASSWORD",
-        "DATABASE_SECRET",
-        "MY_API_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "my_token",                       // lowercase → case-insensitive
-        "SESSION_TOKENS",                 // plural — substring rule catches it
-        "DB_PASSWORDS",                   // plural
-        "CREDENTIALS",                    // plural, bare
-        "GOOGLE_APPLICATION_CREDENTIALS", // fused/plural
-        "MYTOKEN",                        // undelimited
-        "MYSQL_PWD",                      // short token as a whole segment
-    ];
-    let benign = ["PATH", "AUTHOR", "COMPATIBILITY", "HOME", "LANG"];
-    let mut env: Vec<(&str, &str)> = secrets.iter().map(|k| (*k, "s")).collect();
-    env.extend(benign.iter().map(|k| (*k, "ok")));
-
-    let ctx = common::ctx(true, &env);
-    let p = compile(&json!({ "vars": ["*", "..."] }), &ctx).unwrap();
-    let c = &p.env.constructed;
-    for leaked in secrets {
-        assert!(
-            !c.contains_key(leaked),
-            "{leaked} must be denied by default"
-        );
-    }
-    for kept in benign {
-        assert!(
-            c.contains_key(kept),
-            "{kept} must survive — the guards must not over-match"
-        );
-    }
 }
 
 #[test]
@@ -1361,6 +1207,7 @@ fn unterminated_substitution_is_named_not_unknown_type() {
         policy_file: None,
         caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
+        document: serde_json::Value::Null,
         runner: Box::new(PanicRunner),
     };
     for surface in [
@@ -1432,6 +1279,7 @@ fn glob_key_substitution_is_rejected_before_running() {
         policy_file: None,
         caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
+        document: serde_json::Value::Null,
         runner: Box::new(PanicRunner),
     };
     for surface in [
@@ -2206,4 +2054,287 @@ fn wrong_axis_error_messages_point_at_the_right_axis() {
         }
         other => panic!("expected Shape, got {other:?}"),
     }
+}
+
+// ── `...:#/pointer` list reuse (Phase 4) ───────────────────────────────────────
+// A `...:#/pointer` fs/net array entry splices the referenced same-document list's RAW
+// entries at its position (they re-fold through the ordinary per-entry path, so every
+// in-place expander + the `.env*` floor compose for free). `#` is the DOCUMENT root, so
+// the surface passed to `compile` is `document["sandbox"]` and the ctx carries the whole
+// document.
+
+#[test]
+fn reuse_fs_pointer_splices_the_referenced_list_in_order() {
+    // §6.1: `./src` (from the reused list) precedes `./dist` — splice position + order.
+    let doc = json!({
+        "shared": { "fs": ["./src"] },
+        "sandbox": { "fs": ["...:#/shared/fs", "./dist"] }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    let allows: Vec<String> =
+        p.fs.rules
+            .entries
+            .iter()
+            .filter(|r| r.effect == Effect::Allow)
+            .map(|r| r.matcher.as_str().to_string())
+            .collect();
+    let src = allows
+        .iter()
+        .position(|m| m.contains("/src"))
+        .expect("reused ./src rule present");
+    let dist = allows
+        .iter()
+        .position(|m| m.contains("/dist"))
+        .expect("./dist rule present");
+    assert!(
+        src < dist,
+        "the reused ./src rules precede ./dist: {allows:?}"
+    );
+}
+
+#[test]
+fn reuse_net_pointer_admits_reused_and_authored_hosts() {
+    // §6.2: a reused net list + a directly-authored host both land in the allowlist.
+    let doc = json!({
+        "shared": { "net": ["registry.npmjs.org"] },
+        "sandbox": { "net": ["...:#/shared/net", "api.example.com"] }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(m.admits("registry.npmjs.org"), "reused host admitted");
+    assert!(m.admits("api.example.com"), "authored host admitted");
+    assert!(!m.admits("evil.com"));
+}
+
+#[test]
+fn reuse_composes_with_builtin_set_expanders_at_the_splice() {
+    // §6.3 / the P3↔P4 seam: a reused net list's `$trusted` expands at the splice, and a
+    // reused fs list's `$tooldirs` + `$tmp` yield the tooldir rules AND set the tmp MODE,
+    // with the `.env*` floor still LAST.
+    let doc = json!({
+        "shared": { "net": ["$trusted"], "fs": ["$tooldirs", "$tmp", "./src"] },
+        "sandbox": {
+            "net": ["...:#/shared/net", "api.example.com"],
+            "fs": ["...:#/shared/fs"]
+        }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(
+        m.admits("api.example.com"),
+        "authored host after the reused set"
+    );
+    assert!(
+        p.net.rules.iter().any(|r| r.effect == Effect::Allow),
+        "reused $trusted expanded to allow rules at the splice"
+    );
+    assert!(
+        matches!(p.fs.tmp, TmpMode::Private),
+        "reused $tmp set the outer private-tmp mode"
+    );
+    let last = p.fs.rules.entries.last().expect("fs has entries");
+    assert!(
+        last.matcher.as_str().contains(".env"),
+        "the `.env*` floor is still the last band: {:?}",
+        last.matcher.as_str()
+    );
+}
+
+#[test]
+fn reuse_deny_after_splice_overrides_a_reused_allow() {
+    // §6.4: last-match-wins across the splice — a `!host` after the reuse token denies a
+    // host the reused list allowed.
+    let doc = json!({
+        "shared": { "net": ["registry.npmjs.org", "api.example.com"] },
+        "sandbox": { "net": ["...:#/shared/net", "!registry.npmjs.org"] }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    let p = compile(&doc["sandbox"], &ctx).unwrap();
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(
+        !m.admits("registry.npmjs.org"),
+        "deny after the splice wins"
+    );
+    assert!(
+        m.admits("api.example.com"),
+        "other reused host still admitted"
+    );
+}
+
+#[test]
+fn reuse_cycle_is_a_shape_error_naming_the_chain() {
+    // §6.5: #/a/net reuses #/b/net which reuses #/a/net → a Shape error naming the cycle.
+    let doc = json!({
+        "a": { "net": ["...:#/b/net"] },
+        "b": { "net": ["...:#/a/net"] },
+        "sandbox": { "net": ["...:#/a/net"] }
+    });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    match compile(&doc["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("cycle"), "names the cycle: {message}")
+        }
+        other => panic!("expected a cycle Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn reuse_dangling_pointer_is_a_shape_error_naming_the_pointer() {
+    // §6.6: a pointer resolving to no node → a Shape error naming it.
+    let doc = json!({ "sandbox": { "fs": ["...:#/nope"] } });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    match compile(&doc["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => assert!(
+            message.contains("#/nope") && message.contains("does not resolve"),
+            "{message}"
+        ),
+        other => panic!("expected a dangling-pointer Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn reuse_non_array_target_is_a_shape_error() {
+    // §6.7: a pointer to a non-array node → "must reference a list".
+    let doc = json!({ "shared": { "fs": true }, "sandbox": { "fs": ["...:#/shared"] } });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    match compile(&doc["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("must reference a list"), "{message}")
+        }
+        other => panic!("expected a non-array Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn reuse_bad_pointer_syntax_is_a_shape_error() {
+    // §6.8: a pointer missing the leading `#`, and a bare `#` (the whole document).
+    for (surface, needle) in [
+        (
+            json!({ "sandbox": { "fs": ["...:/shared/fs"] } }),
+            "beginning with `#`",
+        ),
+        (
+            json!({ "sandbox": { "fs": ["...:#"] } }),
+            "must name a list",
+        ),
+    ] {
+        let ctx = common::ctx_with_document(true, &[], surface.clone());
+        match compile(&surface["sandbox"], &ctx).unwrap_err() {
+            CompileError::Shape { message, .. } => assert!(message.contains(needle), "{message}"),
+            other => panic!("expected a Shape error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn naked_sentinel_is_rejected_on_every_axis() {
+    // §6.9: naked `...`/`!...` (array + object key, every axis) and a top-level
+    // `{ "...": ... }` are migration Shape errors; the array form carries the reuse hint.
+    let ctx = common::ctx(true, &[]);
+    for surface in [
+        json!({ "fs": ["..."] }),
+        json!({ "net": ["..."] }),
+        json!({ "vars": ["..."] }),
+        json!({ "fs": ["!..."] }),
+        json!({ "fs": { "...": true } }),
+        json!({ "net": { "...": true } }),
+        json!({ "vars": { "...": true } }),
+        json!({ "...": true }),
+        // Whitespace-padded forms must NOT slip past the reject into a literal grant
+        // (the reject trims, agreeing with the reuse parser).
+        json!({ "fs": ["  ...  "] }),
+        json!({ "fs": { "  ...  ": true } }),
+    ] {
+        assert!(
+            matches!(compile(&surface, &ctx), Err(CompileError::Shape { .. })),
+            "naked `...` must be a Shape error for {surface}"
+        );
+    }
+    let hint = compile(&json!({ "fs": ["..."] }), &ctx)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        hint.contains("...:#/pointer"),
+        "migration hint present: {hint}"
+    );
+}
+
+#[test]
+fn reuse_object_key_is_rejected_array_only() {
+    // OQ2: `...:#/pointer` reuse is array-only — a `...:`-prefixed OBJECT key on fs/net
+    // is a shape error, never a literal path/host key.
+    let ctx = common::ctx(true, &[]);
+    for surface in [
+        json!({ "fs": { "...:#/shared/fs": "r" } }),
+        json!({ "net": { "...:#/shared/net": true } }),
+    ] {
+        match compile(&surface, &ctx).unwrap_err() {
+            CompileError::Shape { message, .. } => {
+                assert!(
+                    message.contains("array"),
+                    "names the array-only rule: {message}"
+                )
+            }
+            other => panic!("expected a Shape error for {surface}, got {other:?}"),
+        }
+    }
+    // OQ1: `!...:#/pointer` (negated reuse) is rejected too.
+    let doc = json!({ "shared": { "net": ["a.example.com"] }, "sandbox": { "net": ["!...:#/shared/net"] } });
+    let ctx = common::ctx_with_document(true, &[], doc.clone());
+    match compile(&doc["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("negated reuse"), "{message}")
+        }
+        other => panic!("expected a negated-reuse Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn broker_validates_against_the_post_reuse_net_set() {
+    // §6.10 / §5: a reused net list supplying the brokerTo host compiles (the broker
+    // validates against the fully-expanded net set); a brokerTo host absent post-reuse errors.
+    let ok = json!({
+        "shared": { "net": ["api.github.com"] },
+        "sandbox": {
+            "net": ["...:#/shared/net"],
+            "secrets": { "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] } }
+        }
+    });
+    let ctx = common::ctx_with_document(true, &[("GITHUB_TOKEN", "t")], ok.clone());
+    let p = compile(&ok["sandbox"], &ctx).unwrap();
+    assert_eq!(p.net.brokers.len(), 1);
+    assert_eq!(p.net.brokers[0].host, "api.github.com");
+
+    let bad = json!({
+        "shared": { "net": ["registry.npmjs.org"] },
+        "sandbox": {
+            "net": ["...:#/shared/net"],
+            "secrets": { "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] } }
+        }
+    });
+    let ctx = common::ctx_with_document(true, &[("GITHUB_TOKEN", "t")], bad.clone());
+    match compile(&bad["sandbox"], &ctx).unwrap_err() {
+        CompileError::Shape { message, .. } => {
+            assert!(message.contains("brokered but not allowed"), "{message}")
+        }
+        other => panic!("expected a broker Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn sandbox_true_fs_still_denies_home_secrets() {
+    // §6.11 / decision-(a) guard: P4 is behavior-preserving — `sandbox: true` fs still
+    // denies `~/.ssh` (via `secure_default_fs`'s direct home-secret denies, not a `...`
+    // splice). If decision (a) later relocates those denies to a preset, this flips.
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!(true), &ctx).unwrap();
+    let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
+    let ssh = common::homes().home.join(".ssh/id_rsa");
+    assert!(
+        matches!(m.decide(&ssh).effect, Effect::Deny),
+        "`sandbox: true` fs denies ~/.ssh/id_rsa"
+    );
 }

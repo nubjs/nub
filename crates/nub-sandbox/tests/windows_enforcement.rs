@@ -528,6 +528,7 @@ mod win {
             policy_file: None,
             caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
             ambient_env: ambient,
+            document: serde_json::Value::Null,
             runner: Box::new(nub_sandbox::compiler::ShellRunner),
         };
         nub_sandbox::compile(surface, &ctx).expect("surface compiles")

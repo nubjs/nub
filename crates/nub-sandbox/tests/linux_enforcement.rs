@@ -139,6 +139,7 @@ impl Fixture {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            document: serde_json::Value::Null,
             runner: Box::new(ShellRunner),
         }
     }
@@ -321,7 +322,7 @@ fn existing_sandbox_config_files_are_unreadable_and_pinned() {
     std::fs::write(&root_policy, "ROOTSECRET").unwrap();
     std::fs::write(&package_policy, "PACKAGESECRET").unwrap();
     let surface = serde_json::json!({
-        "fs": ["...", "./", "!**/*.sandbox.json"]
+        "fs": { "/": "r", "./": "rw", "**/*.sandbox.json": false }
     });
 
     for path in [&root_policy, &package_policy] {
@@ -351,7 +352,7 @@ fn sandbox_config_created_after_start_is_out_of_scope() {
     let f = fixture();
     let future = f.proj.join("future.sandbox.json");
     let surface = serde_json::json!({
-        "fs": ["...", "./", "!**/*.sandbox.json"]
+        "fs": { "/": "r", "./": "rw", "**/*.sandbox.json": false }
     });
     let script = format!(
         "printf CREATED > '{}' && test \"$(cat '{}')\" = CREATED",
@@ -440,7 +441,8 @@ fn new_secret_paths_denied_under_generous_read() {
     std::fs::write(f.proj.join("nested/.env.local/prod"), "ENVLOCALDIRSECRET").unwrap();
     std::fs::write(f.proj.join(".envrc"), "export SECRET=x").unwrap();
 
-    let generous = serde_json::json!({ "fs": ["..."] });
+    // `sandbox: true` = the secure fs base (generous read + the home-secret denies).
+    let generous = serde_json::json!(true);
     for (path, label) in [
         (f.home.join(".pgpass"), ".pgpass"),
         (f.home.join(".pypirc"), ".pypirc"),
@@ -485,7 +487,7 @@ fn write_confine_allows_target_denies_rest() {
         return;
     }
     let f = fixture();
-    let wc = serde_json::json!({ "fs": ["...", "./writable"] });
+    let wc = serde_json::json!({ "fs": { "/": "r", "./writable": "rw" } });
     assert!(
         f.ok(wc.clone(), TOUCH, &[&s(&f.proj.join("writable/ok.txt"))]),
         "write inside grant"
@@ -547,9 +549,12 @@ fn dangerous_write_root_grant_is_rejected() {
     }
     let f = fixture();
     for surface in [
-        serde_json::json!({ "fs": ["...", "/"] }),
+        // A whole-filesystem RW grant (`"/"`) — and a `..`-traversal that collapses to
+        // it — must be rejected at apply. The read base is irrelevant; the RW whole-fs
+        // grant is what trips the guard.
+        serde_json::json!({ "fs": ["/"] }),
         serde_json::json!({
-            "fs": ["...", format!("{}/../../../../../../../../../../..", s(&f.proj))]
+            "fs": [format!("{}/../../../../../../../../../../..", s(&f.proj))]
         }),
     ] {
         let policy = compile(&surface, &f.ctx(&[])).unwrap();
@@ -573,7 +578,7 @@ fn dangerous_write_root_grant_is_rejected() {
 
     // POSITIVE CONTROL — the guard drops ONLY dangerous roots: a legitimate scoped
     // rw grant still writes inside the project.
-    let scoped = serde_json::json!({ "fs": ["...", "./writable"] });
+    let scoped = serde_json::json!({ "fs": { "/": "r", "./writable": "rw" } });
     assert!(
         f.ok(scoped, TOUCH, &[&s(&f.proj.join("writable/ok.txt"))]),
         "positive control: scoped rw grant still writes inside the project"
@@ -711,7 +716,7 @@ fn explicit_denies_win_below_fresh_proc_and_dev_mounts() {
     let f = fixture();
     assert!(
         !f.ok(
-            serde_json::json!({ "fs": ["...", "./", "!/proc/1/status"] }),
+            serde_json::json!({ "fs": { "/": "r", "./": "rw", "/proc/1/status": false } }),
             CAT,
             &["/proc/1/status"]
         ),
@@ -719,7 +724,7 @@ fn explicit_denies_win_below_fresh_proc_and_dev_mounts() {
     );
     assert!(
         !f.ok(
-            serde_json::json!({ "fs": ["...", "./", "!/dev/null"] }),
+            serde_json::json!({ "fs": { "/": "r", "./": "rw", "/dev/null": false } }),
             CAT,
             &["/dev/null"]
         ),
@@ -744,7 +749,11 @@ fn inherited_secret_file_descriptors_are_closed_before_bubblewrap_exec() {
         0
     );
 
-    let policy = compile(&serde_json::json!({ "fs": ["...", "./"] }), &f.ctx(&[])).unwrap();
+    let policy = compile(
+        &serde_json::json!({ "fs": { "/": "r", "./": "rw" } }),
+        &f.ctx(&[]),
+    )
+    .unwrap();
     let script = format!("cat /proc/self/fd/{fd} 2>/dev/null || true");
     let prepared = apply(
         &policy,
@@ -928,7 +937,8 @@ fn withheld_environment_hardens_keyrings_without_restricting_full_network() {
         "keyring-only hardening preserves Docker/Podman-style Unix socket access"
     );
 
-    let passthrough = serde_json::json!({ "vars": true, "fs": ["...", "./"], "net": true });
+    let passthrough =
+        serde_json::json!({ "vars": true, "fs": { "/": "r", "./": "rw" }, "net": true });
     assert_eq!(
         f.run(passthrough.clone(), ambient, &probe, &["keyprocopen"])
             .0,
@@ -1015,7 +1025,7 @@ __attribute__((constructor)) static void mark(void) {
         ("LAUNCH_SECRET", "not-in-bwrap-argv"),
     ];
     let surface = serde_json::json!({
-        "fs": ["...", "./"],
+        "fs": { "/": "r", "./": "rw" },
         "net": true,
         "vars": {
             "PATH": true,
@@ -1060,7 +1070,7 @@ fn dropping_prepared_child_tears_down_the_pid_namespace() {
     }
     let f = fixture();
     let policy = compile(
-        &serde_json::json!({ "fs": ["...", "./"], "net": true, "vars": true }),
+        &serde_json::json!({ "fs": { "/": "r", "./": "rw" }, "net": true, "vars": true }),
         &f.ctx(&[("PATH", "/usr/bin:/bin")]),
     )
     .unwrap();
@@ -1110,7 +1120,7 @@ fn abrupt_parent_helper_holds_pid_namespace() {
     };
     let f = fixture();
     let policy = compile(
-        &serde_json::json!({ "fs": ["...", "./"], "net": true, "vars": true }),
+        &serde_json::json!({ "fs": { "/": "r", "./": "rw" }, "net": true, "vars": true }),
         &f.ctx(&[("PATH", "/usr/bin:/bin")]),
     )
     .unwrap();
@@ -1214,7 +1224,7 @@ fn retained_launch_publishes_an_authenticated_signal_callback() {
     }
     let f = fixture();
     let policy = compile(
-        &serde_json::json!({ "fs": ["...", "./writable"], "net": true, "vars": true }),
+        &serde_json::json!({ "fs": { "/": "r", "./writable": "rw" }, "net": true, "vars": true }),
         &f.ctx(&[("PATH", "/usr/bin:/bin")]),
     )
     .unwrap();
@@ -1248,8 +1258,11 @@ fn delayed_wait_preserves_authenticated_target_status() {
         return;
     }
     let f = fixture();
-    let policy =
-        compile(&serde_json::json!({ "fs": ["...", "./"] }), &f.ctx(&[])).expect("compiles");
+    let policy = compile(
+        &serde_json::json!({ "fs": { "/": "r", "./": "rw" } }),
+        &f.ctx(&[]),
+    )
+    .expect("compiles");
     let mut child = apply(
         &policy,
         CommandSpec::new("/bin/sh")
@@ -1565,7 +1578,7 @@ fn direct_nested_mount_namespace_preserves_mask_when_available() {
     let probe = s(&probe);
     let secret = s(&f.proj.join(".env"));
     let (code, _) = f.run(
-        serde_json::json!({ "fs": ["...", "./"], "net": true, "vars": true }),
+        serde_json::json!({ "fs": { "/": "r", "./": "rw" }, "net": true, "vars": true }),
         &[],
         &probe,
         &["unmountmask", &secret],
@@ -1585,8 +1598,11 @@ fn sandboxed_execution_accepts_uid_zero_only_after_zero_capability_probe() {
         return;
     }
     let f = fixture();
-    let policy =
-        compile(&serde_json::json!({ "fs": ["...", "./"] }), &f.ctx(&[])).expect("compiles");
+    let policy = compile(
+        &serde_json::json!({ "fs": { "/": "r", "./": "rw" } }),
+        &f.ctx(&[]),
+    )
+    .expect("compiles");
     let output = apply(
         &policy,
         CommandSpec::new("/bin/sh")
@@ -1811,7 +1827,9 @@ fn missing_write_grant_is_rejected_without_creating_the_path() {
     }
     let f = fixture();
     let target = f.proj.join("writable/newfile.txt");
-    let surface = serde_json::json!({ "fs": ["...", s(&target)] });
+    // A RW grant to a non-existent path must fail setup ("does not exist") without
+    // creating it — the missing write grant is the point, so no read base is needed.
+    let surface = serde_json::json!({ "fs": [s(&target)] });
     let policy = compile(&surface, &f.ctx(&[])).unwrap();
     let error = apply(
         &policy,
@@ -1850,7 +1868,8 @@ fn exact_etc_user_deny_is_masked_without_hiding_other_config() {
         return; // not root — the portable unit test covers the derivation
     }
     let f = fixture();
-    let surface = serde_json::json!({ "fs": ["...", "!/etc/nub_sandbox_etc_carve_secret"] });
+    let surface =
+        serde_json::json!({ "fs": { "/": "r", "/etc/nub_sandbox_etc_carve_secret": false } });
     let leaked = f.run(
         surface.clone(),
         &[],

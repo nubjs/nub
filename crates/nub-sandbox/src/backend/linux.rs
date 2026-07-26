@@ -3166,7 +3166,7 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join(".env"), "SECRET").unwrap();
         fs::write(project.join("ok.txt"), "OK").unwrap();
-        let p = policy(root.path(), json!({"fs": ["...", "./"]}));
+        let p = policy(root.path(), json!({"fs": ["**", "./"]}));
         let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
         assert_eq!(
             masks,
@@ -3210,7 +3210,7 @@ mod tests {
         fs::write(&denied, "SECRET").unwrap();
         let p = policy(
             root.path(),
-            json!({"fs": ["...", "./", format!("!{}", denied.display())]}),
+            json!({"fs": ["**", "./", format!("!{}", denied.display())]}),
         );
         let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
         assert!(
@@ -3229,7 +3229,7 @@ mod tests {
         fs::write(&denied, "SECRET").unwrap();
         let p = policy(
             root.path(),
-            json!({"fs": ["...", "./", format!("!{}", denied.display())]}),
+            json!({"fs": ["**", "./", format!("!{}", denied.display())]}),
         );
         let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
         assert_eq!(masks.len(), 1);
@@ -3248,7 +3248,7 @@ mod tests {
         fs::write(&target, "SECRET").unwrap();
         symlink(&target, project.join(".env")).unwrap();
 
-        let default_policy = policy(root.path(), json!({"fs": ["...", "./"]}));
+        let default_policy = policy(root.path(), json!({"fs": ["**", "./"]}));
         let masks = collect_masks(&default_policy, std::slice::from_ref(&project)).unwrap();
         assert_eq!(masks.len(), 1);
         assert_eq!(masks[0].path, fs::canonicalize(&target).unwrap());
@@ -3256,7 +3256,7 @@ mod tests {
 
         let explicit = policy(
             root.path(),
-            json!({"fs": ["...", "./", format!("!{}", target.display())]}),
+            json!({"fs": ["**", "./", format!("!{}", target.display())]}),
         );
         let masks = collect_masks(&explicit, std::slice::from_ref(&project)).unwrap();
         assert_eq!(masks.len(), 1);
@@ -3274,7 +3274,7 @@ mod tests {
         fs::hard_link(&denied, project.join("alias.txt")).unwrap();
         let p = policy(
             root.path(),
-            json!({"fs": ["...", "./", format!("!{}", denied.display())]}),
+            json!({"fs": ["**", "./", format!("!{}", denied.display())]}),
         );
 
         let error = collect_masks(&p, std::slice::from_ref(&project)).unwrap_err();
@@ -3295,7 +3295,7 @@ mod tests {
         fs::hard_link(&target, project.join("shared-secret-alias")).unwrap();
         let logical = project.join(".env");
         symlink(&target, &logical).unwrap();
-        let p = policy(root.path(), json!({"fs": ["...", "./"]}));
+        let p = policy(root.path(), json!({"fs": ["**", "./"]}));
 
         let error = collect_masks(&p, std::slice::from_ref(&project)).unwrap_err();
         assert!(error.contains(&logical.display().to_string()), "{error}");
@@ -3315,7 +3315,7 @@ mod tests {
         fs::write(&denied, "SECRET").unwrap();
         let p = policy(
             root.path(),
-            json!({"fs": ["...", "./", format!("!{}", denied.display())]}),
+            json!({"fs": ["**", "./", format!("!{}", denied.display())]}),
         );
 
         let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
@@ -3347,7 +3347,7 @@ mod tests {
         let root = tempdir().unwrap();
         let project = root.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        let p = policy(root.path(), json!({"fs": ["...", "./"]}));
+        let p = policy(root.path(), json!({"fs": ["**", "./"]}));
         let missing = project.join("missing-root");
         let error = collect_masks(&p, &[missing]).unwrap_err();
         assert!(error.contains("deny-search root"), "{error}");
@@ -3396,7 +3396,7 @@ mod tests {
         let p = policy(
             root.path(),
             json!({"fs": [
-                "...",
+                "**",
                 format!("!{}", denied.display()),
                 child.to_string_lossy().to_string()
             ]}),
@@ -3416,7 +3416,7 @@ mod tests {
         let p = policy(
             root.path(),
             json!({"fs": [
-                "...",
+                "**",
                 format!("!{}/**", denied.display()),
                 denied.to_string_lossy().to_string()
             ]}),
@@ -3434,7 +3434,7 @@ mod tests {
         fs::write(project.join("nested/ignored.sandbox.json"), "OUT-OF-SCOPE").unwrap();
         let p = policy(
             root.path(),
-            json!({"fs": ["...", "./", "!**/*.sandbox.json"]}),
+            json!({"fs": ["**", "./", "!**/*.sandbox.json"]}),
         );
         let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
         assert_eq!(
@@ -3455,7 +3455,7 @@ mod tests {
         fs::write(project.join("nested/tool.sandbox.json"), "SECRET").unwrap();
         let p = policy(
             root.path(),
-            json!({"fs": ["...", "./", "!nested/*.sandbox.json"]}),
+            json!({"fs": ["**", "./", "!nested/*.sandbox.json"]}),
         );
         let error = collect_masks(&p, std::slice::from_ref(&project)).unwrap_err();
         assert!(error.contains("cannot be enforced"), "{error}");

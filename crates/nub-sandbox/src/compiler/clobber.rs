@@ -56,11 +56,16 @@ fn coverable(v: &Value) -> Option<&str> {
     }
     let body = s.strip_prefix('!').unwrap_or(s);
     // Multi-rule sentinels are not a single comparable path/host: `$tmp` is a tmp-MODE
-    // (emits no ordinary rule), and `$tooldirs`/`$trusted` are SETS that expand to many
-    // rules. Exclude them from shadow analysis (same reasoning as `"..."`) so the
-    // analyzer never compares a set's opaque literal name as if it were one entry.
+    // (emits no ordinary rule), `$tooldirs`/`$trusted` are SETS that expand to many
+    // rules, and a `...:#/pointer` reuse token splices another list's entries. Exclude
+    // them from shadow analysis (same reasoning as `"..."`) so the analyzer never
+    // compares a multi-rule token's opaque literal as if it were one entry.
     let head = body.trim_start();
-    if head.starts_with("$tmp") || head.starts_with("$tooldirs") || head.starts_with("$trusted") {
+    if head.starts_with("$tmp")
+        || head.starts_with("$tooldirs")
+        || head.starts_with("$trusted")
+        || head.starts_with("...:")
+    {
         return None;
     }
     Some(body)

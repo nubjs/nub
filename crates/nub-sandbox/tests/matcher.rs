@@ -80,10 +80,16 @@ fn canonicalize_collapses_parent_dir_in_nonexistent_tail() {
 fn path_matcher_last_match_wins_over_default() {
     use nub_sandbox::compiler::compile;
     use serde_json::json;
-    // `["...", "!~/.ssh", "~/.ssh/config"]`: generous read, deny the ssh subtree,
-    // then re-allow one file — the LAST match wins, so config is readable.
+    // `{ "/": "r", "~/.ssh": false, "~/.ssh/config": "r" }`: generous whole-fs read,
+    // deny the ssh subtree, then re-allow one file — the LAST match wins, so config is
+    // readable. (`"/": "r"` is the whole-fs read base; a bare `**` array entry would
+    // anchor to the project, not the whole fs.)
     let ctx = common::ctx(true, &[]);
-    let policy = compile(&json!({ "fs": ["...", "!~/.ssh", "~/.ssh/config"] }), &ctx).unwrap();
+    let policy = compile(
+        &json!({ "fs": { "/": "r", "~/.ssh": false, "~/.ssh/config": "r" } }),
+        &ctx,
+    )
+    .unwrap();
     let m = PathMatcher::new(&policy.fs.rules);
 
     let home = common::homes().home;
@@ -136,9 +142,11 @@ fn deny_is_not_dodged_by_parent_dir_traversal() {
     use nub_sandbox::compiler::compile;
     use serde_json::json;
     // A `..` bounce back into a denied subtree must still hit the deny — the
-    // candidate is canonicalized (incl. non-existent tail) before matching.
+    // candidate is canonicalized (incl. non-existent tail) before matching. The base is
+    // whole-fs read (`"/": "r"`) so the deny genuinely beats a broad read (a bare `**`
+    // array entry would anchor to the project, leaving `~/.ssh` default-deny anyway).
     let ctx = common::ctx(true, &[]);
-    let policy = compile(&json!({ "fs": ["...", "!~/.ssh"] }), &ctx).unwrap();
+    let policy = compile(&json!({ "fs": { "/": "r", "~/.ssh": false } }), &ctx).unwrap();
     let m = PathMatcher::new(&policy.fs.rules);
     let dodge = common::homes().home.join(".ssh/../.ssh/id_rsa");
     assert!(
@@ -372,10 +380,10 @@ fn generous_read_still_denies_dotenv_and_ssh() {
 
 // ── the `.env*` unconditional deny ────────────────────────────────────────────
 // Reads of any `.env*`-basename file are denied on every read-granting fs policy —
-// including the OBJECT form (which never spliced `"..."`) — and the deny is the
-// highest-precedence fs rule: no broad dir-allow, glob, or EXPLICIT exact-file allow
-// reopens it (sandbox.mdx "`.env` files are always blocked"). Verified at the
-// compiler+matcher (engine-pure) layer, the shared cross-backend contract.
+// array OR object form — and the deny is the highest-precedence fs rule: no broad
+// dir-allow, glob, or EXPLICIT exact-file allow reopens it (sandbox.mdx "`.env` files
+// are always blocked"). Verified at the compiler+matcher (engine-pure) layer, the
+// shared cross-backend contract.
 
 fn read_denied(surface: serde_json::Value, path: &str) -> bool {
     use nub_sandbox::compiler::compile;
@@ -392,8 +400,8 @@ fn read_denied(surface: serde_json::Value, path: &str) -> bool {
 fn object_form_dir_allow_still_denies_dotenv() {
     use serde_json::json;
     // The core gap: an object-form `{ "./": "r" }` grants the project but must NOT
-    // expose `<proj>/.env` — the object form never spliced the secret set, so before
-    // Feature 2 this leaked. `src/index.ts` stays readable.
+    // expose `<proj>/.env` — the `.env*` deny is an unconditional floor on every
+    // read-granting policy, not something a base splice provided. `src/index.ts` stays readable.
     assert!(read_denied(json!({ "fs": { "./": "r" } }), ".env"));
     assert!(read_denied(
         json!({ "fs": { "./": "r" } }),
@@ -407,11 +415,11 @@ fn object_form_dir_allow_still_denies_dotenv() {
 #[test]
 fn dotenv_deny_beats_a_trailing_broad_allow() {
     use serde_json::json;
-    // The `["...", "./"]` footgun: a trailing dir-allow re-matches `<proj>/.env` last,
+    // The `["**", "./"]` footgun: a trailing dir-allow re-matches `<proj>/.env` last,
     // so under pure last-match it would re-expose it. The `.env*` deny is injected AFTER
     // every band-1 rule, so it wins regardless of authored order.
-    assert!(read_denied(json!({ "fs": ["...", "./"] }), ".env"));
-    assert!(read_denied(json!({ "fs": ["./", "..."] }), ".env"));
+    assert!(read_denied(json!({ "fs": ["**", "./"] }), ".env"));
+    assert!(read_denied(json!({ "fs": ["./", "**"] }), ".env"));
 }
 
 #[test]

@@ -4,6 +4,7 @@
 use nub_sandbox::CommandRunner;
 use nub_sandbox::compiler::{CompileCtx, ScopeCapabilities};
 use nub_sandbox::matcher::Homes;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// A `$(…)` runner that echoes a deterministic marker so substitution is testable
@@ -51,7 +52,16 @@ pub fn homes() -> Homes {
 
 /// Build a ctx with the given trust + ambient env pairs. `trusted` maps to the
 /// single-block scope capabilities: approved (full) vs dependency-controlled (none).
+/// `document` is `Null` — a policy with no `...:#/pointer` reuse; use
+/// [`ctx_with_document`] to supply the whole document for a reuse test.
 pub fn ctx(trusted: bool, env: &[(&str, &str)]) -> CompileCtx {
+    ctx_with_document(trusted, env, Value::Null)
+}
+
+/// Build a ctx whose `document` is the whole policy document — required to resolve a
+/// `...:#/pointer` reuse token (`#` = document root). The surface passed to `compile`
+/// is typically `document["sandbox"]` (or a sub-node).
+pub fn ctx_with_document(trusted: bool, env: &[(&str, &str)], document: Value) -> CompileCtx {
     let ambient: BTreeMap<String, String> = env
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -62,6 +72,7 @@ pub fn ctx(trusted: bool, env: &[(&str, &str)]) -> CompileCtx {
         policy_file: None,
         caps: caps(trusted),
         ambient_env: ambient,
+        document,
         runner: Box::new(StubRunner),
     }
 }

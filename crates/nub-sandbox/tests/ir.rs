@@ -38,7 +38,7 @@ fn policy_round_trips_through_serde() {
     let ctx = common::ctx(true, &[("PORT", "3000"), ("NODE_ENV", "prod")]);
     let policy = compile(
         &json!({
-            "fs": ["...", "!~/.ssh", "./data"],
+            "fs": ["**", "!~/.ssh", "./data"],
             "net": ["*.sentry.io", "10.0.0.0/8"],
             "vars": { "PORT": "port", "NODE_ENV": true }
         }),
@@ -79,7 +79,7 @@ fn conformance_fixture_passes_when_verdicts_match() {
     let fixture: Fixture = serde_json::from_value(json!({
         "name": "basic",
         "sandbox": {
-            "fs": ["...", "./build"],
+            "fs": ["**", "./build"],
             "net": ["github.com"],
             "vars": ["KEEP", "!*_TOKEN"]
         },

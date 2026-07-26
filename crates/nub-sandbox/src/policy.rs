@@ -1,8 +1,8 @@
 //! The resolved sandbox policy IR (`SandboxPolicy`).
 //!
 //! This is the compile target (Boundary A): fully RESOLVED plain data with NO
-//! residual surface syntax — no presets, no `"..."` spread, no glob-of-globs, no
-//! inheritance tokens. The compiler discharges all of that; a backend consumes
+//! residual surface syntax — no presets, no `...:#/pointer` reuse, no glob-of-globs,
+//! no sentinels. The compiler discharges all of that; a backend consumes
 //! ONLY the IR and is a pure `IR → OS-primitive` translator.
 //!
 //! Every type is `serde`-round-trippable. That is a hard requirement: the
@@ -45,7 +45,7 @@ pub enum Effect {
 ///
 /// Provenance: design.md §2.1 sketches parallel `read`/`write` rulesets, but a
 /// single ruleset with per-Allow access is strictly more faithful to last-match-
-/// wins and removes the "which list does `"..."` splice into" ambiguity. The
+/// wins (one ordered list, no "which list does an entry land in" ambiguity). The
 /// read-generous/write-tight posture falls out naturally: secure defaults are
 /// `[Allow ** access=read, Deny <secrets>]` (everything readable but the secret
 /// set, nothing writable), and a `"./data": "rw"` grant appends

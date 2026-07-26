@@ -3208,8 +3208,12 @@ fn run_sandboxed(
     let value = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
         .map_err(|e| anyhow::anyhow!("parsing sandbox policy {policy_file}: {e}"))?
         .unwrap_or(serde_json::Value::Null);
-    // Accept either a bare surface block or a `{ "sandbox": … }` wrapper.
-    let block = value.get("sandbox").cloned().unwrap_or(value);
+    // Accept either a bare surface block or a `{ "sandbox": … }` wrapper. `value` (the
+    // whole document) is retained for `...:#/pointer` reuse resolution below.
+    let block = value
+        .get("sandbox")
+        .cloned()
+        .unwrap_or_else(|| value.clone());
 
     let cwd = std::env::current_dir().context("resolving cwd")?;
     // Self-exclusion: the policy file is auto-denied (read + write) from every fs grant,
@@ -3225,7 +3229,11 @@ fn run_sandboxed(
         nub_sandbox::ScopeCapabilities::approved(),
         ambient_env().context("capturing the sandbox target environment")?,
     )
-    .with_policy_file(Some(policy_path));
+    .with_policy_file(Some(policy_path))
+    // A `...:#/pointer` reuse token resolves against the WHOLE parsed document (`#` =
+    // document root), not the extracted `block` — so a `#/shared/*` sibling of the
+    // `sandbox` wrapper reaches its target. Pass `value`, never `block`.
+    .with_document(value);
     let (policy, warnings) = nub_sandbox::compile_with_warnings(&block, &ctx)
         .map_err(|e| anyhow::anyhow!("sandbox policy did not compile: {e}"))?;
     for w in &warnings {
