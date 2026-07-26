@@ -549,10 +549,10 @@ impl Prepared {
 }
 
 /// Whether the policy needs the egress proxy. Coarse `net: true` / `net: false`
-/// never start one. An ordinary per-host allow reaches this point only after the
-/// compiler saw an explicit proxy mode; a credential broker automatically requires a
-/// terminating proxy even when `proxy` was omitted. Startup failure is a hard
-/// fail-closed apply error: a required proxy is never represented as "not needed."
+/// never start one. An ordinary per-host allow needs it — the compiler auto-derives
+/// the proxy tier from the policy — and a credential broker additionally requires a
+/// terminating (TLS-inspecting) proxy. Startup failure is a hard fail-closed apply
+/// error: a required proxy is never represented as "not needed."
 fn proxy_needed(policy: &SandboxPolicy) -> bool {
     policy.net.enforce
         && (!policy.net.brokers.is_empty()
@@ -643,7 +643,7 @@ fn insert_ca_env(env: &mut BTreeMap<OsString, OsString>, bundle: &std::path::Pat
 /// nub never silently decrypts, even when the user's own config demanded it.
 fn emit_mitm_notice(policy: &SandboxPolicy) {
     let scope = if policy.net.brokers.is_empty() {
-        "all allowed hosts (proxy: \"terminate\")".to_string()
+        "all allowed hosts".to_string()
     } else {
         policy
             .net
@@ -883,7 +883,7 @@ fn validate_apply_inputs(policy: &SandboxPolicy, spec: &CommandSpec) -> Result<(
         return Err(Degradation {
             lost: vec!["net-per-host".to_string()],
             reason: Some(
-                "fine-grained net allow has no explicit proxy; compile the policy with `proxy: \"auto\"`, `\"passthrough\"`, or `\"terminate\"`"
+                "fine-grained net allow did not derive an egress proxy tier (internal invariant)"
                     .to_string(),
             ),
         });
