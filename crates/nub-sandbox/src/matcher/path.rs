@@ -24,18 +24,20 @@ const CASE_INSENSITIVE: bool = cfg!(any(target_os = "windows", target_os = "maco
 /// Expand a surface path pattern's symbolic roots and normalize its separators to
 /// forward slashes. Does NOT canonicalize (globs may contain `*`/`**` that a path
 /// canonicalizer would mangle); canonicalization is applied to the CANDIDATE path
-/// at match time. Recognized roots, longest-first so `<home>` beats `~`:
-///   `<tmp>` `<home>` `<cache>` → the corresponding home; `~` / `~/` → home;
-///   `./` `../` / a bare relative → resolved under the project root.
+/// at match time. Recognized roots:
+///   `$tmp` `$cache` → the corresponding home (the closed `$name` sentinel set);
+///   `~` / `~/` → home; `./` `../` / a bare relative → under the project root.
 /// A literal absolute path (`/x`, `C:\x`) passes through (only slash-normalized).
+/// An unrecognized `$name` is NOT rejected here (the fold rejects it before match
+/// time); it passes through so this stays a pure transform.
 pub fn expand_symbolic(pattern: &str, homes: &Homes) -> String {
     let p = pattern.trim();
-    let expanded = if let Some(rest) = p.strip_prefix("<tmp>") {
-        join_root(&homes.tmp, rest)
-    } else if let Some(rest) = p.strip_prefix("<home>") {
-        join_root(&homes.home, rest)
-    } else if let Some(rest) = p.strip_prefix("<cache>") {
-        join_root(&homes.cache, rest)
+    let expanded = if let Some((name, rest)) = split_fs_sentinel(p) {
+        match name {
+            "tmp" => join_root(&homes.tmp, rest),
+            "cache" => join_root(&homes.cache, rest),
+            _ => p.to_string(),
+        }
     } else if p == "~" {
         homes.home.to_string_lossy().into_owned()
     } else if let Some(rest) = p.strip_prefix("~/") {
@@ -50,6 +52,33 @@ pub fn expand_symbolic(pattern: &str, homes: &Homes) -> String {
     normalize_slashes(&expanded)
 }
 
+/// The closed set of `$name` filesystem sentinels. `$tmp` (the private per-run tmp
+/// dir) is consumed by the fold as a MODE before it ever reaches `expand_symbolic`;
+/// `$cache` expands to the platform cache dir. Any other `$name` is rejected by the
+/// fold (see `reject_unknown_fs_sentinel`).
+pub const FS_SENTINEL_NAMES: &[&str] = &["cache", "tmp"];
+
+/// Split a leading `$name` sentinel into `(name, remainder)`, or `None` when `p` is
+/// not a `$`-sentinel. `$(` is command substitution (resolved by the fold BEFORE any
+/// `$name` check — the paren disambiguation), so it returns `None`. The name is a
+/// shell-style identifier (`[A-Za-z0-9_]+` after the `$`); the remainder is the rest,
+/// so `$cache/x` → `("cache", "/x")` and `$cache` → `("cache", "")`. A bare `$`, `$(`,
+/// or `$` followed by a non-identifier returns `None`.
+pub fn split_fs_sentinel(p: &str) -> Option<(&str, &str)> {
+    let rest = p.strip_prefix('$')?;
+    if rest.starts_with('(') {
+        return None;
+    }
+    let name_len = rest
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    if name_len == 0 {
+        return None;
+    }
+    Some((&rest[..name_len], &rest[name_len..]))
+}
+
 /// True for a pattern with no leading root marker and no absolute anchor — a bare
 /// relative like `data/**` that resolves under the project root.
 fn is_bare_relative(p: &str) -> bool {
@@ -57,12 +86,13 @@ fn is_bare_relative(p: &str) -> bool {
         return false;
     }
     // Absolute POSIX (`/x`), Windows drive (`C:\`), UNC (`\\`), or a symbolic
-    // root already handled by the caller — none are bare-relative.
+    // root already handled by the caller — none are bare-relative. `$` covers both
+    // a `$name` sentinel and `$(…)`; neither is ever project-joined here.
     let b = p.as_bytes();
     let posix_abs = b[0] == b'/';
     let win_drive = p.len() >= 2 && b[1] == b':';
     let unc = p.starts_with("\\\\");
-    !(posix_abs || win_drive || unc || p.starts_with('<') || p.starts_with('~'))
+    !(posix_abs || win_drive || unc || p.starts_with(['<', '~', '$']))
 }
 
 /// Join a symbolic root's remainder onto the resolved base directory, tolerating

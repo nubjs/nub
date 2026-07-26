@@ -57,15 +57,14 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// `fold::finalize_env_deny`. Denying reads is near-zero-breakage: legit code reads
 /// secrets via the injected process env, not by `fs.read()`-ing the file.
 ///
-/// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — `**/.env*`) and a
-/// SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`, covering a `.env.d/`-style
-/// DIRECTORY of per-target secret files). The split is LOAD-BEARING for the exact-file
-/// override precedence: the exact-file allow re-emission is sandwiched BETWEEN the two
-/// (leaf-deny → exact-file allow → subtree-deny-LAST), so naming a `.env*` FILE grants
-/// that leaf while naming a `.env*`-prefixed DIRECTORY can never re-expose its denied
-/// CONTENTS (the subtree deny is unconditionally last). See `fold::finalize_env_deny`.
-/// The rootless twins (`.env*`) mirror each band for a depth-0 match; canonical
-/// candidates are absolute, so `**/…` is the form that bites.
+/// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — `**/.env*`, the file
+/// itself) and a SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`, covering a
+/// `.env.d/`-style DIRECTORY of per-target secret files). Both are appended as the LAST
+/// entries so the block is UNCONDITIONAL — no directory grant, glob, or exact allow can
+/// reopen a `.env*` file or a `.env*/` directory's contents (sandbox.mdx "`.env` files
+/// are always blocked"). See `fold::finalize_env_deny`. The rootless twins (`.env*`)
+/// mirror each band for a depth-0 match; canonical candidates are absolute, so `**/…`
+/// is the form that bites.
 ///
 /// The test-only union below guards that the two bands never drift.
 pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &["**/.env*", ".env*"];
@@ -131,8 +130,8 @@ fn segments(s: &str) -> Vec<String> {
 /// Build the default secret-PATH read DENY entries (`~/.ssh`, `~/.aws`, wallets, …).
 /// These are what `"..."` splices into a read ruleset. Deny access is neutral (Read).
 /// The depth-independent `.env*` denies are handled SEPARATELY (the env-deny bands,
-/// injected unconditionally on every read-granting policy) so they get the exact-file
-/// override precedence — see `fold::fold_fs`.
+/// injected unconditionally as the last entries on every read-granting policy) — see
+/// `fold::fold_fs`.
 pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
     let mut out = Vec::new();
     for rel in SECRET_READ_RELPATHS {
@@ -146,8 +145,8 @@ pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
 
 /// The LEAF `.env*` READ-deny entries ([`ENV_DENY_LEAF_GLOBS`]) — the `.env*` file
 /// itself. Depth-independent (matched by basename anywhere), NOT anchored under any
-/// root. Injected BEFORE the exact-file allow band so a broad dir-allow can't expose a
-/// `.env*` file, yet an explicit exact-file allow can still re-grant that one leaf.
+/// root. Appended as a trailing band so it beats every prior allow — a broad dir-allow,
+/// a glob, OR an exact-file allow — and cannot be reopened (the unconditional floor).
 pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
     ENV_DENY_LEAF_GLOBS
         .iter()
@@ -156,9 +155,8 @@ pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
 }
 
 /// The SUBTREE `.env*` READ-deny entries ([`ENV_DENY_SUBTREE_GLOBS`]) — the CONTENTS of
-/// a `.env*`-named directory. Injected as the LAST band (after the exact-file allows),
-/// so it is unconditionally authoritative for a `.env.d/`-style secret directory: an
-/// exact-file allow re-grants only the leaf, never a directory's denied children.
+/// a `.env*`-named directory. Injected as the LAST band, so it is unconditionally
+/// authoritative for a `.env.d/`-style secret directory: nothing reopens its children.
 pub(crate) fn env_deny_subtree_rules() -> Vec<FsRule> {
     ENV_DENY_SUBTREE_GLOBS
         .iter()

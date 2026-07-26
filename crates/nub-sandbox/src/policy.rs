@@ -291,9 +291,9 @@ pub(crate) fn broker_host_is_legacy_ipv4_literal(host: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetTarget {
-    /// A hostname pattern. `*.example.com` matches the apex AND any-depth
-    /// subdomains (a deliberate divergence from TLS's one-label wildcard, chosen
-    /// for fewer footguns — see .fray/sandbox.md matcher spec).
+    /// A hostname pattern. `*.example.com` matches any-depth subdomains but NOT the
+    /// apex `example.com` (subdomains-only — list the apex separately to allow it;
+    /// sandbox.mdx `net` grammar).
     Host(String),
     /// A CIDR block for IP-literal egress.
     Cidr(ipnet::IpNet),
@@ -382,7 +382,7 @@ pub struct PidPolicy {
 
 // ── canonical glob ───────────────────────────────────────────────────────────
 
-/// A fully-resolved fs glob: symbolic roots (`~`/`<tmp>`/`<home>`/`<cache>`/`./`)
+/// A fully-resolved fs glob: symbolic roots (`~`/`$tmp`/`$cache`/`./`)
 /// already expanded and slashes normalized to `/`. Case-insensitivity is applied
 /// at MATCH time (via globset's flag on Windows/macOS), NOT baked here, so the
 /// serialized IR is byte-identical across OSes and snapshots stay stable.

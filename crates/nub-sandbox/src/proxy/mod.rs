@@ -645,7 +645,7 @@ mod tests {
         );
         assert_eq!(
             d.decide(&Host::Name("allowed.example".into())),
-            Decision::Allow // apex matches *.allowed.example
+            Decision::Deny // `*.` is subdomains-only — the apex is NOT matched
         );
         assert_eq!(d.decide(&Host::Name("evil.example".into())), Decision::Deny);
         assert_eq!(

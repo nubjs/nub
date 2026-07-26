@@ -1,9 +1,10 @@
 //! Network host matching: host-glob vs CIDR dispatch and last-match-wins
 //! evaluation of a [`NetPolicy`]'s ordered rules.
 //!
-//! Host wildcard semantics diverge from TLS deliberately: `*.example.com`
-//! matches the apex `example.com` AND any-depth subdomain (`a.b.example.com`) —
-//! fewer footguns than TLS's single-label wildcard (.fray/sandbox.md matcher spec).
+//! Host wildcard semantics: `*.example.com` matches any-depth subdomain
+//! (`a.b.example.com`) but NOT the apex `example.com` — list the apex separately
+//! to allow it too. This is subdomains-only, unlike TLS's single-label wildcard
+//! but tighter than an apex-inclusive match (sandbox.mdx `net` grammar).
 
 use crate::policy::{Effect, NetPolicy, NetRule, NetTarget};
 use std::net::{IpAddr, Ipv4Addr};
@@ -48,7 +49,7 @@ impl<'a> HostMatcher<'a> {
 }
 
 /// Match a host pattern against a concrete host. Two forms:
-///   `*.example.com` → apex + any-depth subdomain (case-insensitive);
+///   `*.example.com` → any-depth subdomain, NOT the apex (case-insensitive);
 ///   a literal `example.com` → exact (case-insensitive).
 /// A bare `*` matches any host. A single FQDN trailing dot on either side
 /// (`example.com.`) is stripped first — the same host per DNS (D12), so a
@@ -60,8 +61,9 @@ pub fn host_glob_matches(pattern: &str, host: &str) -> bool {
         return true;
     }
     if let Some(suffix) = pat.strip_prefix("*.") {
-        // apex match, or any-depth subdomain (must end with `.<suffix>`).
-        return host == suffix || host.ends_with(&format!(".{suffix}"));
+        // Subdomains only (must end with `.<suffix>`); the apex is NOT matched —
+        // list `example.com` separately to allow it (sandbox.mdx `net`).
+        return host.ends_with(&format!(".{suffix}"));
     }
     pat == host
 }

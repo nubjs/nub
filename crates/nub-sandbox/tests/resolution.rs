@@ -71,6 +71,10 @@ fn partial_override_and_sentinels_stay_silent() {
         !warns(json!({ "net": ["*", "!*.evil.com"], "proxy": "auto" })),
         "best-effort denylist"
     );
+    assert!(
+        !warns(json!({ "net": ["example.com", "*.example.com"], "proxy": "auto" })),
+        "apex + subdomains-wildcard are disjoint (the `*.` does not cover the apex)"
+    );
     assert!(!warns(json!({ "fs": ["./a", "./b"] })), "disjoint paths");
     assert!(
         !warns(json!({ "env": ["FOO", "BAR", "!*_TOKEN"] })),

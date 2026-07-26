@@ -74,13 +74,13 @@ fn absent_granular_axis_floors_complete_statement() {
 #[test]
 fn tmp_mode_folds_from_the_tmp_key() {
     let ctx = common::ctx(true, &[]);
-    // `<tmp>` is the private-dir sentinel: a truthy permission → Private (fresh per-run dir),
+    // `$tmp` is the private-dir sentinel: a truthy permission → Private (fresh per-run dir),
     // `false` → Deny. Either sets the TmpMode and emits NO ordinary fs rule (the backend owns
     // the per-run dir + shared-tmp denial). The rest of the fs axis folds normally alongside.
-    let p = compile(&json!({ "fs": { "./": "r", "<tmp>": "rw" } }), &ctx).unwrap();
+    let p = compile(&json!({ "fs": { "./": "r", "$tmp": "rw" } }), &ctx).unwrap();
     assert_eq!(p.fs.tmp, TmpMode::Private);
     assert_eq!(
-        compile(&json!({ "fs": { "<tmp>": true } }), &ctx)
+        compile(&json!({ "fs": { "$tmp": true } }), &ctx)
             .unwrap()
             .fs
             .tmp,
@@ -88,33 +88,33 @@ fn tmp_mode_folds_from_the_tmp_key() {
     );
     // `"r"` on a fresh empty dir is degenerate, so it too maps to Private (rw).
     assert_eq!(
-        compile(&json!({ "fs": { "<tmp>": "r" } }), &ctx)
+        compile(&json!({ "fs": { "$tmp": "r" } }), &ctx)
             .unwrap()
             .fs
             .tmp,
         TmpMode::Private
     );
     assert_eq!(
-        compile(&json!({ "fs": { "<tmp>": false } }), &ctx)
+        compile(&json!({ "fs": { "$tmp": false } }), &ctx)
             .unwrap()
             .fs
             .tmp,
         TmpMode::Deny
     );
-    // Absent `<tmp>` stays Shared (no tmp confinement); Shared is unreachable via the sentinel.
+    // Absent `$tmp` stays Shared (no tmp confinement); Shared is unreachable via the sentinel.
     assert_eq!(
         compile(&json!({ "fs": ["./"] }), &ctx).unwrap().fs.tmp,
         TmpMode::Shared
     );
-    // A bogus value on `<tmp>` (including the dropped `"private"`/`"deny"` keywords) is rejected.
+    // A bogus value on `$tmp` (including the dropped `"private"`/`"deny"` keywords) is rejected.
     assert!(matches!(
-        compile(&json!({ "fs": { "<tmp>": "private" } }), &ctx),
+        compile(&json!({ "fs": { "$tmp": "private" } }), &ctx),
         Err(CompileError::Shape { .. })
     ));
 
-    // A `<tmp>/subpath` key maps INTO the private dir (→ Private mode), and — the fix — emits
+    // A `$tmp/subpath` key maps INTO the private dir (→ Private mode), and — the fix — emits
     // NO ordinary fs rule pointing at the shared host tmp (`/tmp`).
-    let sub = compile(&json!({ "fs": { "./": "r", "<tmp>/scratch": "rw" } }), &ctx).unwrap();
+    let sub = compile(&json!({ "fs": { "./": "r", "$tmp/scratch": "rw" } }), &ctx).unwrap();
     assert_eq!(sub.fs.tmp, TmpMode::Private);
     assert!(
         sub.fs
@@ -122,18 +122,18 @@ fn tmp_mode_folds_from_the_tmp_key() {
             .entries
             .iter()
             .all(|e| !e.matcher.as_str().contains("/tmp")),
-        "`<tmp>/scratch` must not leak an fs rule into the shared host tmp"
+        "`$tmp/scratch` must not leak an fs rule into the shared host tmp"
     );
-    // Array form: a `<tmp>` / `<tmp>/…` entry sets Private; a `!`-negated one sets Deny.
+    // Array form: a `$tmp` / `$tmp/…` entry sets Private; a `!`-negated one sets Deny.
     assert_eq!(
-        compile(&json!({ "fs": ["./", "<tmp>/scratch"] }), &ctx)
+        compile(&json!({ "fs": ["./", "$tmp/scratch"] }), &ctx)
             .unwrap()
             .fs
             .tmp,
         TmpMode::Private
     );
     assert_eq!(
-        compile(&json!({ "fs": ["./", "!<tmp>"] }), &ctx)
+        compile(&json!({ "fs": ["./", "!$tmp"] }), &ctx)
             .unwrap()
             .fs
             .tmp,
@@ -141,30 +141,71 @@ fn tmp_mode_folds_from_the_tmp_key() {
     );
     // A backslash subpath is a subpath too (path-separator), → Private.
     assert_eq!(
-        compile(&json!({ "fs": { "<tmp>\\scratch": "rw" } }), &ctx)
+        compile(&json!({ "fs": { "$tmp\\scratch": "rw" } }), &ctx)
             .unwrap()
             .fs
             .tmp,
         TmpMode::Private
     );
-    // A `<tmp>` prefix with a NON-separator suffix (`<tmp>*`, `<tmp>x`) would otherwise leak
+    // A `$tmp` name with a NON-separator suffix (`$tmp*`, `$tmp.bak`) would otherwise leak
     // into the shared host tmp via `expand_symbolic`, so it is a hard shape error — object AND
-    // array form. (`<tmpx>`, having no `<tmp>` prefix, stays a normal literal path.)
+    // array form.
     for bad in [
-        json!({ "fs": { "<tmp>*": "rw" } }),
-        json!({ "fs": { "<tmp>x": "r" } }),
+        json!({ "fs": { "$tmp*": "rw" } }),
+        json!({ "fs": { "$tmp.bak": "r" } }),
     ] {
         assert!(
             matches!(compile(&bad, &ctx), Err(CompileError::Shape { .. })),
-            "malformed `<tmp>` suffix must be a shape error, not a shared-tmp leak"
+            "malformed `$tmp` suffix must be a shape error, not a shared-tmp leak"
         );
     }
     assert!(matches!(
-        compile(&json!({ "fs": ["<tmp>*"] }), &ctx),
+        compile(&json!({ "fs": ["$tmp*"] }), &ctx),
         Err(CompileError::Shape { .. })
     ));
-    // `<tmpx>` is NOT a `<tmp>` sentinel — a normal path, folds without error.
-    assert!(compile(&json!({ "fs": { "<tmpx>": "r" } }), &ctx).is_ok());
+    // `$tmpx` is a DIFFERENT `$name` (`tmpx`), not the `$tmp` sentinel — an unrecognized
+    // sentinel, which is a hard error under the v2 grammar (not a silent literal path).
+    assert!(matches!(
+        compile(&json!({ "fs": { "$tmpx": "r" } }), &ctx),
+        Err(CompileError::Shape { .. })
+    ));
+}
+
+#[test]
+fn fs_dollar_sentinel_cache_ok_unknown_errors() {
+    let ctx = common::ctx(true, &[]);
+    // `$cache` is a recognized sentinel — expanded to the platform cache dir, never left
+    // as a literal `$cache` path.
+    let p = compile(&json!({ "fs": { "$cache/tool": "r" } }), &ctx).unwrap();
+    assert!(
+        p.fs.rules
+            .entries
+            .iter()
+            .all(|e| !e.matcher.as_str().contains('$')),
+        "$cache must be expanded, not carried as a literal"
+    );
+    assert!(
+        p.fs.rules
+            .entries
+            .iter()
+            .any(|e| e.matcher.as_str().contains("tool")),
+        "the $cache subpath survives expansion"
+    );
+    // An unrecognized `$name` is a hard error (v2 grammar) — not a silent literal path.
+    // `$home` in particular is dropped: home is `~` now.
+    for bad in [
+        json!({ "fs": { "$data": "r" } }),
+        json!({ "fs": ["$home/x"] }),
+    ] {
+        assert!(
+            matches!(compile(&bad, &ctx), Err(CompileError::Shape { .. })),
+            "unrecognized $name must be a shape error, got {:?}",
+            compile(&bad, &ctx)
+        );
+    }
+    // `$( … )` command substitution is recognized BEFORE `$name` (the paren disambiguation),
+    // so it still resolves at load time (StubRunner: `store path` → an absolute path).
+    assert!(compile(&json!({ "fs": { "$(store path)": "r" } }), &ctx).is_ok());
 }
 
 #[test]
@@ -778,10 +819,10 @@ fn env_number_rejects_non_finite() {
 }
 
 #[test]
-fn env_regex_and_literal_union() {
+fn env_regex_and_enum_union() {
     let ctx = common::ctx(true, &[("MODE", "dev"), ("SHA", "abc123")]);
     let p = compile(
-        &json!({ "env": { "MODE": "'dev' | 'prod'", "SHA": "/^[a-f0-9]+$/" } }),
+        &json!({ "env": { "MODE": "enum:dev|prod", "SHA": "/^[a-f0-9]+$/" } }),
         &ctx,
     )
     .unwrap();
@@ -795,7 +836,10 @@ fn env_regex_and_literal_union() {
     );
 
     let bad = common::ctx(true, &[("MODE", "staging")]);
-    assert!(compile(&json!({ "env": { "MODE": "'dev' | 'prod'" } }), &bad).is_err());
+    assert!(compile(&json!({ "env": { "MODE": "enum:dev|prod" } }), &bad).is_err());
+    // An empty `enum:` member is a shape error, not a silently-accepted type.
+    let empty = common::ctx(true, &[("MODE", "dev")]);
+    assert!(compile(&json!({ "env": { "MODE": "enum:dev||prod" } }), &empty).is_err());
 }
 
 #[test]

@@ -379,7 +379,7 @@ fn private_tmp_hides_shared_tmp_and_remains_writable() {
     );
     assert!(
         f.ok(
-            serde_json::json!({ "fs": { "./": "rw", "<tmp>": "rw" } }),
+            serde_json::json!({ "fs": { "./": "rw", "$tmp": "rw" } }),
             SH,
             &["-c", &script],
         ),
@@ -402,7 +402,7 @@ fn denied_tmp_still_allows_an_explicit_project_under_tmp() {
     );
     assert!(
         f.ok(
-            serde_json::json!({ "fs": { "./": "rw", "<tmp>": false } }),
+            serde_json::json!({ "fs": { "./": "rw", "$tmp": false } }),
             SH,
             &["-c", &script],
         ),

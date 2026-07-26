@@ -312,20 +312,19 @@ fn env_files_denied_under_object_form_allowlist() {
 }
 
 #[test]
-fn exact_file_allow_grants_that_dotenv_but_siblings_stay_denied() {
+fn dotenv_deny_is_unconditional_even_when_named_exactly() {
     let f = fixture();
     fs::write(f.proj.join(".env.production"), "PRODVALUE").unwrap();
-    // Informed consent: naming the exact file grants reading it, while a sibling `.env`
-    // the user did NOT name stays denied — the kernel enforces both, proving the
-    // band-3 exact-file re-emission beats the `.env*` deny and nothing else does.
+    // The `.env*` block is unconditional (sandbox.mdx): naming the exact file no longer
+    // reopens it, and a sibling `.env` is denied too — the kernel enforces both.
     let confine = serde_json::json!({ "fs": { "./": "r", "./.env.production": "r" } });
     assert!(
-        f.allowed(confine.clone(), CAT, &[&s(&f.proj.join(".env.production"))]),
-        "the explicitly-allowed .env.production is readable"
+        !f.allowed(confine.clone(), CAT, &[&s(&f.proj.join(".env.production"))]),
+        "an explicit exact-file .env.production allow does NOT reopen it"
     );
     assert!(
         !f.allowed(confine, CAT, &[&s(&f.proj.join(".env"))]),
-        "a sibling .env the user did not name stays denied"
+        "a sibling .env stays denied"
     );
 }
 
@@ -334,10 +333,9 @@ fn env_prefixed_directory_allow_does_not_expose_its_secret_contents() {
     // THE SUB-DIRECTORY BYPASS regression guard (real kernel). A `.env*`-NAMED directory
     // is a secret container (`.env.d/` per-target secret files); the `.env*/**` subtree
     // deny covers its contents. Naming the DIRECTORY (`{ "./.env.d": "r" }`) must NOT
-    // re-expose those contents — an exact-file allow re-grants only a `.env*` LEAF, never
-    // a directory's denied children (the subtree deny is ordered LAST). On macOS a bare
-    // path becomes a `(subpath …)` grant covering descendants, so a naive re-emission of
-    // the directory's subtree twin WOULD leak here — this asserts the kernel denies it.
+    // re-expose those contents — the `.env*` floor is unconditional (nothing reopens it).
+    // On macOS a bare path becomes a `(subpath …)` grant covering descendants, so a naive
+    // emission of the directory's subtree twin WOULD leak here — this asserts it is denied.
     let f = fixture();
     fs::create_dir_all(f.proj.join(".env.d")).unwrap();
     fs::write(f.proj.join(".env.d/prod"), "DIRSECRET").unwrap();
@@ -372,16 +370,16 @@ fn private_tmp_hides_the_shared_system_tmp() {
     let _c = Cleanup(shared.clone());
     let f = fixture();
 
-    // A generous read that WOULD expose the shared-tmp file, plus `<tmp>: "rw"` (private). The
+    // A generous read that WOULD expose the shared-tmp file, plus `$tmp: "rw"` (private). The
     // private-tmp deny is emitted after the generous read (last-match-wins), so the kernel
     // must DENY the shared-tmp file even though `/` is otherwise readable.
-    let private = serde_json::json!({ "fs": { "/": "r", "<tmp>": "rw" } });
+    let private = serde_json::json!({ "fs": { "/": "r", "$tmp": "rw" } });
     assert!(
         !f.allowed(private, CAT, &[&s(&shared)]),
         "private tmp must hide the shared /private/tmp"
     );
     // NEG-CONTROL: the SAME generous read WITHOUT the private tmp reads the shared-tmp file —
-    // proving the deny is the `<tmp>: "rw"` private confinement, not the fixture.
+    // proving the deny is the `$tmp: "rw"` private confinement, not the fixture.
     assert!(
         f.allowed(
             serde_json::json!({ "fs": { "/": "r" } }),
@@ -394,8 +392,8 @@ fn private_tmp_hides_the_shared_system_tmp() {
 
 #[test]
 fn tmp_subpath_maps_into_the_private_dir_not_the_shared_tmp() {
-    // A `<tmp>/scratch` key is the private-dir sentinel too (maps INTO the private dir), so it
-    // sets Private and hides the shared system tmp exactly like a bare `<tmp>: "rw"` — it must
+    // A `$tmp/scratch` key is the private-dir sentinel too (maps INTO the private dir), so it
+    // sets Private and hides the shared system tmp exactly like a bare `$tmp: "rw"` — it must
     // NOT resolve to a grant on the shared host tmp.
     let shared = PathBuf::from(format!(
         "/private/tmp/nub-tmptest-sub-{}.secret",
@@ -412,11 +410,11 @@ fn tmp_subpath_maps_into_the_private_dir_not_the_shared_tmp() {
     let f = fixture();
     assert!(
         !f.allowed(
-            serde_json::json!({ "fs": { "/": "r", "<tmp>/scratch": "rw" } }),
+            serde_json::json!({ "fs": { "/": "r", "$tmp/scratch": "rw" } }),
             CAT,
             &[&s(&shared)]
         ),
-        "`<tmp>/scratch` must map into the private dir and hide the shared /private/tmp"
+        "`$tmp/scratch` must map into the private dir and hide the shared /private/tmp"
     );
 }
 
@@ -435,10 +433,10 @@ fn deny_tmp_hides_the_shared_system_tmp_too() {
     }
     let _c = Cleanup(shared.clone());
     let f = fixture();
-    // `<tmp>: false` also hides the shared system tmp (no private dir is minted).
+    // `$tmp: false` also hides the shared system tmp (no private dir is minted).
     assert!(
         !f.allowed(
-            serde_json::json!({ "fs": { "/": "r", "<tmp>": false } }),
+            serde_json::json!({ "fs": { "/": "r", "$tmp": false } }),
             CAT,
             &[&s(&shared)]
         ),
@@ -448,7 +446,7 @@ fn deny_tmp_hides_the_shared_system_tmp_too() {
 
 #[test]
 fn literal_tmp_path_is_the_only_way_to_the_shared_system_tmp() {
-    // The clarified model: the `<tmp>` sentinel NEVER grants the shared system tmp — the only
+    // The clarified model: the `$tmp` sentinel NEVER grants the shared system tmp — the only
     // way to reach it is granting the literal path `/tmp` (canonicalizes to `/private/tmp`),
     // which leaves the tmp mode Shared (no confinement).
     let shared = PathBuf::from(format!(

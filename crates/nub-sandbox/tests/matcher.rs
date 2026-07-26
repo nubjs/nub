@@ -20,11 +20,11 @@ fn expands_home_and_symbolic_roots() {
     );
     assert_eq!(expand_symbolic("~", &h), h.home.to_string_lossy());
     assert_eq!(
-        expand_symbolic("<tmp>/x", &h),
+        expand_symbolic("$tmp/x", &h),
         format!("{}/x", h.tmp.display())
     );
     assert_eq!(
-        expand_symbolic("<cache>/y", &h),
+        expand_symbolic("$cache/y", &h),
         format!("{}/y", h.cache.display())
     );
 }
@@ -150,8 +150,12 @@ fn deny_is_not_dodged_by_parent_dir_traversal() {
 // ── host glob + CIDR ──────────────────────────────────────────────────────────
 
 #[test]
-fn host_wildcard_matches_apex_and_any_depth() {
-    assert!(host_glob_matches("*.example.com", "example.com"), "apex");
+fn host_wildcard_matches_subdomains_but_not_apex() {
+    // `*.example.com` is subdomains-only — the apex must be listed separately (sandbox.mdx).
+    assert!(
+        !host_glob_matches("*.example.com", "example.com"),
+        "apex NOT matched by `*.`"
+    );
     assert!(
         host_glob_matches("*.example.com", "api.example.com"),
         "one label"
@@ -166,32 +170,32 @@ fn host_wildcard_matches_apex_and_any_depth() {
 }
 
 #[test]
-fn net_wildcard_matches_any_depth_but_not_sibling_domains() {
-    // Security-critical wildcard contract (ratified): `*.example.com` admits the apex
-    // and EVERY subdomain at any depth, and admits NOTHING that merely shares the
-    // string "example.com" without a label boundary. The negative set is the real
-    // vulnerability surface — a sibling/suffix-confusion host slipping past an allow
-    // rule is an egress breakout. Enumerated exhaustively so a regression fails loudly.
+fn net_wildcard_matches_subdomains_but_not_apex_or_sibling_domains() {
+    // Security-critical wildcard contract: `*.example.com` admits EVERY subdomain at any
+    // depth but NOT the apex (subdomains-only, sandbox.mdx), and admits NOTHING that
+    // merely shares the string "example.com" without a leading label boundary. The
+    // negative set is the real vulnerability surface — a sibling/suffix-confusion host
+    // slipping past an allow rule is an egress breakout. Enumerated exhaustively.
     let pat = "*.example.com";
 
-    // Property 1 — matches at every depth (apex counts as depth 0).
+    // Property 1 — matches at every subdomain depth (one label or more).
     for host in [
-        "example.com",              // apex
         "a.example.com",            // one label
         "a.b.example.com",          // two labels
         "evil.deep.example.com",    // three labels
         "w.x.y.z.deep.example.com", // arbitrarily deep
-        "API.Example.COM",          // case-insensitive apex
         "Api.Example.Com",          // case-insensitive subdomain
         "api.example.com.",         // FQDN trailing dot (D12)
     ] {
         assert!(host_glob_matches(pat, host), "must match: {host}");
     }
 
-    // Property 2 — must NOT over-match. Every shape shares the substring "example.com"
-    // (or a near-miss of it) but is a DIFFERENT registrable domain an attacker controls.
+    // Property 2 — must NOT match. The apex (list it separately to allow it), plus every
+    // shape that shares the substring "example.com" but is a DIFFERENT registrable domain.
     for host in [
-        "notexample.com", // prefix glued, no label boundary
+        "example.com",     // apex — NOT covered by `*.`
+        "EXAMPLE.COM",     // case-insensitive apex
+        "notexample.com",  // prefix glued, no label boundary
         "evilexample.com",
         "fooexample.com",
         "myexample.com",
@@ -230,7 +234,10 @@ fn net_wildcard_holds_on_enforced_proxy_decider() {
     });
     let allowed = |h: &str| matches!(decider.decide(&Host::Name(h.into())), Decision::Allow);
 
-    assert!(allowed("example.com"), "apex admitted at the proxy seam");
+    assert!(
+        !allowed("example.com"),
+        "apex NOT admitted at the proxy seam (subdomains-only)"
+    );
     assert!(
         allowed("a.b.example.com"),
         "any-depth admitted at the proxy seam"
@@ -363,12 +370,12 @@ fn generous_read_still_denies_dotenv_and_ssh() {
     );
 }
 
-// ── the `.env*` default-deny (Feature 2) ──────────────────────────────────────
-// Reads of any `.env*`-basename file are denied by DEFAULT on every read-granting
-// fs policy — including the OBJECT form (which never spliced `"..."`) — and the deny
-// beats a broad dir-allow regardless of order, yet yields to an EXPLICIT exact-file
-// allow (informed consent). Verified at the compiler+matcher (engine-pure) layer,
-// the shared cross-backend contract.
+// ── the `.env*` unconditional deny ────────────────────────────────────────────
+// Reads of any `.env*`-basename file are denied on every read-granting fs policy —
+// including the OBJECT form (which never spliced `"..."`) — and the deny is the
+// highest-precedence fs rule: no broad dir-allow, glob, or EXPLICIT exact-file allow
+// reopens it (sandbox.mdx "`.env` files are always blocked"). Verified at the
+// compiler+matcher (engine-pure) layer, the shared cross-backend contract.
 
 fn read_denied(surface: serde_json::Value, path: &str) -> bool {
     use nub_sandbox::compiler::compile;
@@ -408,34 +415,26 @@ fn dotenv_deny_beats_a_trailing_broad_allow() {
 }
 
 #[test]
-fn exact_file_allow_overrides_the_dotenv_deny_but_a_dir_allow_does_not() {
-    use nub_sandbox::compiler::compile;
-    use nub_sandbox::policy::FsAccess;
+fn dotenv_deny_is_unconditional_even_for_an_exact_file_allow() {
     use serde_json::json;
-    // Naming the exact file grants it (informed consent); a sibling `.env` stays denied.
-    let ctx = common::ctx(true, &[]);
-    let policy = compile(
-        &json!({ "fs": { "./": "r", "./.env.production": "r" } }),
-        &ctx,
-    )
-    .unwrap();
-    let m = PathMatcher::new(&policy.fs.rules);
-    let proj = common::homes().project;
-    let d = m.decide(&proj.join(".env.production"));
-    assert!(
-        matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::Read),
-        "the exact-file allow grants <proj>/.env.production"
-    );
-    assert!(
-        matches!(m.decide(&proj.join(".env")).effect, Effect::Deny),
-        "a sibling .env the user did NOT name stays denied"
-    );
-    // A GLOB allow of the same shape is NOT an exact-file allow and does NOT override.
+    // The `.env*` block is the highest-precedence fs rule — no directory grant, glob, or
+    // EXACT-FILE allow can reopen it (sandbox.mdx "`.env` files are always blocked").
+    // Naming the exact file no longer grants it.
+    assert!(read_denied(
+        json!({ "fs": { "./": "r", "./.env.production": "r" } }),
+        ".env.production"
+    ));
+    // A sibling `.env` the user did not name is denied too.
+    assert!(read_denied(
+        json!({ "fs": { "./": "r", "./.env.production": "r" } }),
+        ".env"
+    ));
+    // A GLOB allow of the same shape is likewise denied.
     assert!(read_denied(
         json!({ "fs": { "./": "r", "./.env*": "r" } }),
         ".env"
     ));
-    // An explicit exact-path DENY after an exact allow stays denied (user's last word).
+    // An explicit exact-path DENY after an exact allow stays denied (belt and braces).
     assert!(read_denied(
         json!({ "fs": ["./", "./.env", "!./.env"] }),
         ".env"
@@ -485,11 +484,10 @@ fn dotenv_deny_matches_the_env_basename_prefix_at_any_depth() {
 #[test]
 fn env_prefixed_directory_allow_does_not_reexpose_its_contents() {
     use serde_json::json;
-    // THE SUB-DIRECTORY BYPASS: a `.env*`-NAMED directory is a secret container, and its
-    // contents are covered by the `.env*/**` subtree deny. An exact allow of the DIRECTORY
-    // (or its glob subtree) must NOT re-expose those contents — only a `.env*` LEAF file is
-    // re-grantable (the subtree deny is ordered after the exact-file allows). This is the
-    // regression guard for the band-3 subtree-twin over-grant.
+    // A `.env*`-NAMED directory is a secret container, and its contents are covered by the
+    // `.env*/**` subtree deny. Neither an exact allow of the DIRECTORY, its glob subtree,
+    // nor an exact-file allow of a leaf inside it re-exposes any of it — the `.env*` floor
+    // is unconditional (sandbox.mdx). Every case below stays denied.
     for (surface, leaked) in [
         (json!({ "fs": { "./.env.d": "r" } }), ".env.d/prod"),
         (json!({ "fs": { "./.env.d": "r" } }), ".env.d/nested/deep"),
@@ -497,24 +495,21 @@ fn env_prefixed_directory_allow_does_not_reexpose_its_contents() {
             json!({ "fs": { "./.environments": "r" } }),
             ".environments/prod.env",
         ),
-        // A glob subtree allow of a `.env*` dir is a glob (not an exact FILE) → no override.
         (json!({ "fs": { "./.env.d/**": "r" } }), ".env.d/prod"),
-        // array (rw) directory allow — same guarantee.
         (json!({ "fs": ["./.env.d"] }), ".env.d/prod"),
+        // An exact-file allow of a `.env*` LEAF is denied too (the floor is unconditional).
+        (
+            json!({ "fs": { "./": "r", "./sub/.env.local": "r" } }),
+            "sub/.env.local",
+        ),
+        (
+            json!({ "fs": { "./": "r", "./sub/.env.local": "r" } }),
+            "sub/.env",
+        ),
     ] {
         assert!(
             read_denied(surface.clone(), leaked),
             "{leaked} must stay denied under {surface}"
         );
     }
-    // An exact-file allow of a `.env*` FILE inside a subdir still grants THAT one file.
-    assert!(!read_denied(
-        json!({ "fs": { "./": "r", "./sub/.env.local": "r" } }),
-        "sub/.env.local"
-    ));
-    // …but a sibling `.env` in the same subdir stays denied.
-    assert!(read_denied(
-        json!({ "fs": { "./": "r", "./sub/.env.local": "r" } }),
-        "sub/.env"
-    ));
 }

@@ -1,8 +1,8 @@
-//! The closed env value-type grammar (Rust-parsed, NOT ArkType). Per
-//! .fray/sandbox-config-spec.md:
+//! The closed env value-type grammar (Rust-parsed, NOT ArkType). Per sandbox.mdx
+//! `format`:
 //!
-//!   value  := "string" | FORMAT | /regex/ | 'a' | 'b' | …   (literal union)
-//!   FORMAT := integer | number | port                        (trimmed 2026-07-08)
+//!   value  := "string" | FORMAT | /regex/ | enum:a|b|c   (enum = literal union)
+//!   FORMAT := integer | number | port                     (trimmed 2026-07-08)
 //!
 //! No comparison/intersection operators. String formats (email/url/…) deliberately
 //! do NOT ship — `/regex/` covers them. Unrecognized → hard error naming the set
@@ -24,7 +24,7 @@ pub enum EnvType {
     Format(EnvFormat),
     /// A `/regex/` pattern (syntax-checked while compiling the config).
     Regex(String),
-    /// A literal union — the value must be one of these exact strings.
+    /// An `enum:a|b|c` literal union — the value must be one of these exact strings.
     Union(Vec<String>),
 }
 
@@ -39,9 +39,9 @@ pub fn parse_env_type(spec: &str) -> Result<EnvType, String> {
         regex::Regex::new(inner).map_err(|e| format!("invalid regex `{inner}`: {e}"))?;
         return Ok(EnvType::Regex(inner.to_string()));
     }
-    // Literal union: `'a' | 'b' | …` (single-quoted members joined by `|`).
-    if s.contains('\'') {
-        let members = parse_literal_union(s)?;
+    // Literal union: `enum:a|b|c` (unquoted members joined by `|`).
+    if let Some(list) = s.strip_prefix("enum:") {
+        let members = parse_enum_list(list)?;
         return Ok(EnvType::Union(members));
     }
     match s {
@@ -50,24 +50,22 @@ pub fn parse_env_type(spec: &str) -> Result<EnvType, String> {
         "number" => Ok(EnvType::Format(EnvFormat::Number)),
         "port" => Ok(EnvType::Format(EnvFormat::Port)),
         other => Err(format!(
-            "unknown env type `{other}` — supported: string, integer, number, port, /regex/, or a 'a'|'b' literal union"
+            "unknown env type `{other}` — supported: string, integer, number, port, /regex/, or an enum:a|b|c list"
         )),
     }
 }
 
-/// Parse a `'a' | 'b' | 'c'` literal union into its member strings.
-fn parse_literal_union(s: &str) -> Result<Vec<String>, String> {
+/// Parse an `enum:a|b|c` list body (the text after the `enum:` prefix) into its member
+/// strings — unquoted, `|`-separated, each trimmed. An empty member (`enum:`, `enum:a||b`)
+/// is an error.
+fn parse_enum_list(list: &str) -> Result<Vec<String>, String> {
     let mut members = Vec::new();
-    for part in s.split('|') {
+    for part in list.split('|') {
         let p = part.trim();
-        let inner = p
-            .strip_prefix('\'')
-            .and_then(|r| r.strip_suffix('\''))
-            .ok_or_else(|| format!("malformed literal-union member `{p}` (expected 'quoted')"))?;
-        members.push(inner.to_string());
-    }
-    if members.is_empty() {
-        return Err("empty literal union in env type".to_string());
+        if p.is_empty() {
+            return Err("empty value in an enum:a|b|c list".to_string());
+        }
+        members.push(p.to_string());
     }
     Ok(members)
 }

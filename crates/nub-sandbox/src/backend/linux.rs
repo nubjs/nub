@@ -1104,21 +1104,26 @@ fn merge_masks(masks: Vec<Mask>) -> Vec<Mask> {
         .collect()
 }
 
+/// The index where the builtin `.env*` deny floor begins — the boundary between the
+/// user/default band-1 entries and the floor. COUPLED to `fold::finalize_env_deny`,
+/// which appends the floor as the last FOUR entries in a fixed order (LEAF deny
+/// `**/.env*`, `.env*` then SUBTREE deny `**/.env*/**`, `.env*/**`); this recognizes
+/// them positionally, so if that emission's glob strings, order, or count change this
+/// must change with it. `None` when the floor was not emitted (a fully-relaxed or
+/// no-read policy). Used to distinguish an explicit USER `.env` deny (in band 1) from
+/// the builtin floor when planning the Linux dotenv mask kind.
 fn builtin_env_band_start(policy: &SandboxPolicy) -> Option<usize> {
+    const FLOOR: [&str; 4] = ["**/.env*", ".env*", "**/.env*/**", ".env*/**"];
     let entries = &policy.fs.rules.entries;
-    if entries.len() < 4
-        || entries[entries.len() - 2].matcher.as_str() != "**/.env*/**"
-        || entries[entries.len() - 1].matcher.as_str() != ".env*/**"
-    {
-        return None;
-    }
-    (0..entries.len() - 2).rev().find(|&index| {
-        index + 1 < entries.len() - 2
-            && entries[index].effect == Effect::Deny
-            && entries[index].matcher.as_str() == "**/.env*"
-            && entries[index + 1].effect == Effect::Deny
-            && entries[index + 1].matcher.as_str() == ".env*"
-    })
+    let start = entries.len().checked_sub(FLOOR.len())?;
+    FLOOR
+        .iter()
+        .enumerate()
+        .all(|(offset, glob)| {
+            let rule = &entries[start + offset];
+            rule.effect == Effect::Deny && rule.matcher.as_str() == *glob
+        })
+        .then_some(start)
 }
 
 fn validate_masks_against_mount_plan(
@@ -1428,6 +1433,8 @@ fn unescape_mountinfo_path(encoded: &str) -> Result<OsString, String> {
     Ok(OsString::from_vec(decoded))
 }
 
+/// The four builtin `.env*` floor globs. COUPLED to `fold::finalize_env_deny` (and the
+/// `defaults::ENV_DENY_*_GLOBS` it emits): these strings must stay in sync with the floor.
 fn is_builtin_env_glob(pattern: &str) -> bool {
     matches!(pattern, "**/.env*" | "**/.env*/**" | ".env*" | ".env*/**")
 }
