@@ -133,6 +133,7 @@ impl Fixture {
         CompileCtx {
             homes: self.homes(),
             cwd: self.proj.clone(),
+            policy_file: None,
             caps: ScopeCapabilities::approved(),
             ambient_env: env
                 .iter()

@@ -92,6 +92,14 @@ pub struct CompileCtx {
     pub homes: Homes,
     /// The current working directory (for diagnostics / relative anchoring).
     pub cwd: std::path::PathBuf,
+    /// The policy SOURCE-FILE path (absolute, canonicalized) when the policy was
+    /// loaded from a distinct file — `nub run --sandbox <file>`, or a file-ref
+    /// `sandbox: "./policy.jsonc"` once the nub.jsonc bridge is wired. `None` for an
+    /// inline policy with no distinct source file. A `Some` path is injected as a
+    /// high-precedence fs DENY (read AND write) so a sandboxed process can neither
+    /// read nor tamper with the policy that confines it, even under a broad
+    /// `fs: ["."]`/`["/"]`. See `fold::finalize_policy_file_deny`.
+    pub policy_file: Option<std::path::PathBuf>,
     /// The capabilities of a SINGLE-BLOCK compile — the `compile`/`compile_with_warnings`
     /// entry, whose one scope IS this whole ctx (the `--sandbox <file>` / `run_sandboxed`
     /// path, always approved user config). The chain resolver ([`scope::resolve_chain`])
@@ -116,10 +124,20 @@ impl CompileCtx {
         Self {
             homes,
             cwd,
+            policy_file: None,
             caps,
             ambient_env,
             runner: Box::new(ShellRunner),
         }
+    }
+
+    /// Attach the policy SOURCE-FILE path (absolute, canonicalized) so the compiler
+    /// self-excludes it from every fs grant. `None` (the default) leaves the policy
+    /// with no self-exclusion — the inline-policy case, where there is no distinct
+    /// source file to hide. See [`CompileCtx::policy_file`].
+    pub fn with_policy_file(mut self, policy_file: Option<std::path::PathBuf>) -> Self {
+        self.policy_file = policy_file;
+        self
     }
 }
 

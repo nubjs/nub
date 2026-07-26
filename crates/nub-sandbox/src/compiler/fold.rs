@@ -103,8 +103,39 @@ pub fn fold_fs(
             ));
         }
     }
+    // Order is load-bearing: the policy-file deny goes in BEFORE the `.env*` floor so
+    // the four env bands stay the LAST entries — the Linux backend recognizes that floor
+    // POSITIONALLY (`builtin_env_band_start`). The policy-file deny and the env bands are
+    // disjoint (a policy path is never a `.env*` basename), so their relative order does
+    // not affect either verdict; only the env-bands-last invariant matters.
+    finalize_policy_file_deny(&mut set, ctx);
     finalize_env_deny(&mut set);
     Ok(FsPolicy { rules: set, tmp })
+}
+
+/// Self-exclude the policy SOURCE FILE (`ctx.policy_file`) from every fs grant: append
+/// an exact-path DENY (read AND write) so a sandboxed process can neither read nor tamper
+/// with the policy that confines it, even under a broad `fs: ["."]`/`["/"]`. Mirrors
+/// [`finalize_env_deny`]: appended AFTER all user + default entries, so last-match-wins
+/// makes it authoritative over any earlier allow of that exact path.
+///
+/// Skipped in the same two cases the `.env*` floor is (and for the same reason — the deny
+/// would be inert noise): a FULLY-relaxed axis (`fs: true` — the explicit escape hatch),
+/// and a no-read policy (a deny of an already-unreadable file; and since fs has no
+/// write-without-read, no read ⇒ no write ⇒ the file is already fully denied). `None`
+/// `policy_file` (an inline policy with no distinct source file) is a no-op.
+fn finalize_policy_file_deny(set: &mut FsRuleSet, ctx: &CompileCtx) {
+    let Some(policy_file) = ctx.policy_file.as_deref() else {
+        return;
+    };
+    let fully_relaxed = set.default_effect == Effect::Allow && set.entries.is_empty();
+    let grants_read = set.default_effect == Effect::Allow
+        || set.entries.iter().any(|e| e.effect == Effect::Allow);
+    if fully_relaxed || !grants_read {
+        return;
+    }
+    set.entries
+        .push(defaults::policy_file_deny_rule(policy_file));
 }
 
 /// A `$tmp` sentinel malformed by a suffix that is neither empty nor a path separator

@@ -605,6 +605,126 @@ fn unknown_axis_key_fails() {
     assert!(matches!(err, CompileError::Shape { .. }));
 }
 
+// ── policy-file self-exclusion (Phase 5) ───────────────────────────────────────
+
+#[test]
+fn policy_file_is_denied_under_a_broad_grant_while_a_sibling_stays_usable() {
+    // The policy source file is auto-excluded (read AND write) from every fs grant, so a
+    // sandboxed process can neither read nor tamper with the policy that confines it —
+    // even under a whole-project (`.`) or whole-fs (`/`) grant. A sibling under the SAME
+    // grant stays read+write (the negative control), proving the deny is exact-path, not
+    // a broad shadow.
+    use nub_sandbox::matcher::PathMatcher;
+    use nub_sandbox::policy::FsAccess;
+    let proj = common::homes().project;
+    let policy = proj.join("policy.jsonc");
+    let ctx = common::ctx(true, &[]).with_policy_file(Some(policy.clone()));
+    for surface in [json!({ "fs": ["."] }), json!({ "fs": ["/"] })] {
+        let p = compile(&surface, &ctx).unwrap();
+        let m = PathMatcher::new(&p.fs.rules);
+        assert_eq!(
+            m.decide(&policy).effect,
+            Effect::Deny,
+            "policy file denied (read+write) under {surface}"
+        );
+        let sib = m.decide(&proj.join("sibling.txt"));
+        assert_eq!(
+            sib.effect,
+            Effect::Allow,
+            "sibling readable under {surface}"
+        );
+        assert_eq!(
+            sib.access,
+            FsAccess::ReadWrite,
+            "sibling writable under {surface}"
+        );
+    }
+}
+
+#[test]
+fn policy_file_deny_survives_an_explicit_allow_later_in_the_list() {
+    // Floor precedence, not last-match-loses: an explicit allow of the exact policy path
+    // AFTER the broad grant still loses to the self-exclusion, which is appended after
+    // every user entry.
+    use nub_sandbox::matcher::PathMatcher;
+    let proj = common::homes().project;
+    let policy = proj.join("policy.jsonc");
+    let ctx = common::ctx(true, &[]).with_policy_file(Some(policy.clone()));
+    let p = compile(&json!({ "fs": [".", "./policy.jsonc"] }), &ctx).unwrap();
+    let m = PathMatcher::new(&p.fs.rules);
+    assert_eq!(m.decide(&policy).effect, Effect::Deny);
+}
+
+#[test]
+fn policy_file_deny_escapes_glob_metachars_in_the_path() {
+    // A policy path traversing a glob-metachar segment (Next.js App Router `[id]`, or a
+    // brace `{a,b}`) must STILL be denied under a broad grant. The candidate is a literal
+    // subject string, so without escaping the deny pattern the `[id]`/`{a,b}` would be read
+    // as a glob (a char class / alternation) that does NOT match the literal path — a silent
+    // fail-open leaving the policy file read+write.
+    use nub_sandbox::matcher::PathMatcher;
+    let proj = common::homes().project;
+    for seg in ["[id]", "{a,b}"] {
+        let policy = proj.join(seg).join("policy.jsonc");
+        let ctx = common::ctx(true, &[]).with_policy_file(Some(policy.clone()));
+        let p = compile(&json!({ "fs": ["."] }), &ctx).unwrap();
+        let m = PathMatcher::new(&p.fs.rules);
+        assert_eq!(
+            m.decide(&policy).effect,
+            Effect::Deny,
+            "policy file under a `{seg}` segment must stay denied"
+        );
+    }
+}
+
+#[test]
+fn inline_policy_with_no_source_file_is_not_self_excluded() {
+    // An inline policy has no distinct source file (`policy_file: None`), so nothing is
+    // auto-excluded — a broad grant reads/writes every non-secret path. Pins the
+    // inline-case decision (self-exclusion is opt-in via a `Some` source path).
+    use nub_sandbox::matcher::PathMatcher;
+    let proj = common::homes().project;
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "fs": ["."] }), &ctx).unwrap();
+    let m = PathMatcher::new(&p.fs.rules);
+    assert_eq!(
+        m.decide(&proj.join("policy.jsonc")).effect,
+        Effect::Allow,
+        "no self-exclusion without a policy_file"
+    );
+}
+
+#[test]
+fn policy_file_deny_is_injected_before_the_env_floor() {
+    // The Linux backend recognizes the `.env*` floor POSITIONALLY as the LAST four fs
+    // entries (`builtin_env_band_start`). The policy-file deny must land BEFORE that floor
+    // so the invariant survives self-exclusion.
+    const FLOOR: [&str; 4] = ["**/.env*", ".env*", "**/.env*/**", ".env*/**"];
+    let proj = common::homes().project;
+    let ctx = common::ctx(true, &[]).with_policy_file(Some(proj.join("policy.jsonc")));
+    let p = compile(&json!({ "fs": ["."] }), &ctx).unwrap();
+    let entries = &p.fs.rules.entries;
+    let start = entries.len() - FLOOR.len();
+    for (i, glob) in FLOOR.iter().enumerate() {
+        assert_eq!(
+            entries[start + i].matcher.as_str(),
+            *glob,
+            "floor position {i}"
+        );
+        assert_eq!(
+            entries[start + i].effect,
+            Effect::Deny,
+            "floor is deny at {i}"
+        );
+    }
+    assert!(
+        entries[..start]
+            .iter()
+            .any(|r| r.effect == Effect::Deny && r.matcher.as_str().ends_with("policy.jsonc")),
+        "policy-file deny sits before the env floor"
+    );
+}
+
 // ── env grammar ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -1238,6 +1358,7 @@ fn unterminated_substitution_is_named_not_unknown_type() {
     let ctx = nub_sandbox::compiler::CompileCtx {
         homes: common::homes(),
         cwd: common::homes().project,
+        policy_file: None,
         caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
         runner: Box::new(PanicRunner),
@@ -1308,6 +1429,7 @@ fn glob_key_substitution_is_rejected_before_running() {
     let ctx = nub_sandbox::compiler::CompileCtx {
         homes: common::homes(),
         cwd: common::homes().project,
+        policy_file: None,
         caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
         runner: Box::new(PanicRunner),

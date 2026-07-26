@@ -7,8 +7,12 @@
 //! reviewed `secrets.rs` in the salvage branches — the §8.5 attack→capability
 //! mapping. It is DATA, re-homed under the fresh policy model.
 
-use crate::matcher::path::{Homes, canonicalize_glob_prefix, expand_symbolic};
+use crate::matcher::path::{
+    Homes, canonicalize_glob_prefix, canonicalize_including_nonexistent, expand_symbolic,
+    normalize_slashes,
+};
 use crate::policy::{CanonGlob, Effect, FsAccess, FsRule};
+use std::path::Path;
 
 /// Secret-bearing paths to DENY-READ, resolved under the home anchors. Classic
 /// creds, VCS/cloud tokens, the 2024–26 crypto-wallet wave, browser profiles, and
@@ -162,6 +166,35 @@ pub(crate) fn env_deny_subtree_rules() -> Vec<FsRule> {
         .iter()
         .map(|g| deny(g.to_string()))
         .collect()
+}
+
+/// The policy SOURCE-FILE self-exclusion DENY — an EXACT-path deny (read AND write) on
+/// the single file the sandbox rules were read from, so a sandboxed process can neither
+/// read nor tamper with the policy that confines it. Canonicalized through the EXACT same
+/// path the matcher runs a candidate through (`canonicalize_including_nonexistent` — resolve
+/// symlinks / firmlinks, strip the Windows `\\?\` verbatim prefix, survive a non-existent
+/// tail) then slash-normalized, so (a) a grant reaching the file via a different spelling
+/// still hits this deny, and (b) the rule string is byte-identical to the candidate string
+/// the matcher builds — a plain literal, never the verbatim prefix whose `?` would read as a
+/// glob metachar and break the match. Deny access is the inert canonical [`FsAccess::DENY`].
+/// Injected as the last user/default entry BEFORE the `.env*` floor (see
+/// `fold::finalize_policy_file_deny`), so last-match-wins beats any prior allow — including a
+/// broad `fs: ["."]`.
+///
+/// The literal path is glob-ESCAPED ([`globset::escape`]) before it becomes the pattern: a
+/// real path may contain glob metachars (`[id]`/`[...slug]` Next.js segments, a `{a,b}`
+/// directory), and an unescaped `[`/`{`/`*`/`?` would be read as a pattern that does NOT
+/// match the literal candidate — a silent fail-OPEN leaving the policy file readable. The
+/// candidate side is a literal subject string, so escaping ONLY the deny pattern matches it
+/// exactly with no sibling over-match.
+pub(crate) fn policy_file_deny_rule(policy_file: &Path) -> FsRule {
+    let canon = canonicalize_including_nonexistent(policy_file);
+    let normalized = normalize_slashes(&canon.to_string_lossy());
+    FsRule {
+        matcher: CanonGlob(globset::escape(&normalized)),
+        effect: Effect::Deny,
+        access: FsAccess::DENY,
+    }
 }
 
 /// The generous read base entry: allow everything, then the secret denies (added

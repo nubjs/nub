@@ -83,6 +83,7 @@ fn set_up_host_admits_the_helper_and_a_nested_launch_succeeds() {
             project: proj.clone(),
         },
         cwd: proj.clone(),
+        policy_file: None,
         caps: ScopeCapabilities::approved(),
         ambient_env: BTreeMap::new(),
         runner: Box::new(ShellRunner),

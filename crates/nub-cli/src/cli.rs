@@ -3212,13 +3212,20 @@ fn run_sandboxed(
     let block = value.get("sandbox").cloned().unwrap_or(value);
 
     let cwd = std::env::current_dir().context("resolving cwd")?;
+    // Self-exclusion: the policy file is auto-denied (read + write) from every fs grant,
+    // so the sandboxed process can neither read nor tamper with the policy that confines
+    // it. Canonicalized here (the file was just read, so it exists) to the absolute path
+    // the compiler injects as a high-precedence deny.
+    let policy_path = std::fs::canonicalize(policy_file)
+        .with_context(|| format!("canonicalizing sandbox policy path {policy_file}"))?;
     let ctx = nub_sandbox::CompileCtx::new(
         sandbox_homes(&cwd),
         cwd.clone(),
         // `--sandbox <file>` is the user's own approved config (one scope) — full caps.
         nub_sandbox::ScopeCapabilities::approved(),
         ambient_env().context("capturing the sandbox target environment")?,
-    );
+    )
+    .with_policy_file(Some(policy_path));
     let (policy, warnings) = nub_sandbox::compile_with_warnings(&block, &ctx)
         .map_err(|e| anyhow::anyhow!("sandbox policy did not compile: {e}"))?;
     for w in &warnings {

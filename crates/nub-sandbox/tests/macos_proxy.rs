@@ -76,6 +76,7 @@ impl Fixture {
                 project: self.proj.clone(),
             },
             cwd: self.proj.clone(),
+            policy_file: None,
             caps: ScopeCapabilities::approved(),
             ambient_env: Default::default(),
             runner: Box::new(ShellRunner),

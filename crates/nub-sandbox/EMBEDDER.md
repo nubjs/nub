@@ -129,7 +129,7 @@ Two rules the sketch encodes:
 | Type | Role |
 | --- | --- |
 | `&serde_json::Value` | the surface `sandbox` block, already parsed by the embedder |
-| `CompileCtx { homes, cwd, caps, ambient_env, runner }` | host context — symbolic-root anchors, cwd, the single-block `ScopeCapabilities`, the ambient env snapshot, the command runner (production shells out; tests inject a stub via `CommandRunner`) |
+| `CompileCtx { homes, cwd, policy_file, caps, ambient_env, runner }` | host context — symbolic-root anchors, cwd, the policy source-file path (`Option`, absolute+canonicalized; auto-denied read+write so a sandboxed process cannot read or tamper with its own policy — `None` for an inline policy), the single-block `ScopeCapabilities`, the ambient env snapshot, the command runner (production shells out; tests inject a stub via `CommandRunner`) |
 | `ScopeCapabilities { env_substitution, credential_broker }` | the dynamic capabilities a config SCOPE holds — approved user config (`nub.jsonc`/`scriptsMeta`) gets both, dependency-controlled config (`dependenciesMeta`) neither; fs `$(…)` is unconditional and not gated |
 | `Homes { home, tmp, cache, project }` | per-OS anchors `~` / `$tmp` / `$cache` / `./` expand against |
 

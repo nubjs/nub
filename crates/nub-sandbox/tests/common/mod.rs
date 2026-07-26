@@ -59,6 +59,7 @@ pub fn ctx(trusted: bool, env: &[(&str, &str)]) -> CompileCtx {
     CompileCtx {
         homes: homes(),
         cwd: homes().project,
+        policy_file: None,
         caps: caps(trusted),
         ambient_env: ambient,
         runner: Box::new(StubRunner),
