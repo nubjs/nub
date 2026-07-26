@@ -31,11 +31,15 @@ fn main() {
 mod win {
     use nub_sandbox::{DetectError, detect, windows_setup, windows_teardown};
 
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    };
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{
-        GetTokenInformation, LogonUserW, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetTokenInformation, LogonUserW, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+        TokenUser,
     };
+    use windows_sys::Win32::Storage::FileSystem::CreateFileW;
     use windows_sys::Win32::System::Threading::{
         CreateProcessWithLogonW, GetCurrentProcess, INFINITE, OpenProcessToken, PROCESS_INFORMATION,
         STARTUPINFOW, WaitForSingleObject,
@@ -44,6 +48,12 @@ mod win {
     const LOGON32_LOGON_BATCH: u32 = 4;
     const LOGON32_PROVIDER_DEFAULT: u32 = 0;
     const LOGON_WITH_PROFILE: u32 = 0x1;
+    // File/startup constants defined locally (stable Win32 values; avoids extra feature deps).
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const CREATE_ALWAYS: u32 = 2;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const STARTF_USESTDHANDLES: u32 = 0x100;
 
     pub fn run(role: &str) -> i32 {
         match role {
@@ -190,12 +200,41 @@ mod win {
         };
         let out = r"C:\Users\Public\childsid.out";
         let _ = std::fs::remove_file(out);
+        // The child runs as nub-sandbox, which cannot write arbitrary host paths. Redirect its
+        // stdout to a PARENT-OWNED inheritable file handle instead: CreateProcessWithLogonW
+        // ignores bInheritHandles but honors STARTF_USESTDHANDLES, and seclogon duplicates the
+        // std handles into the child (design §10 — the mechanism bit 2 relies on; verified here).
+        let wout = to_wide(out);
+        let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.bInheritHandle = 1;
+        let hfile = unsafe {
+            CreateFileW(
+                wout.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ,
+                &sa,
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if hfile == INVALID_HANDLE_VALUE {
+            eprintln!(
+                "LAUNCH-FAIL CreateFileW: {}",
+                std::io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
+            );
+            return 1;
+        }
         let user = to_wide(&creds.account_name);
         let domain = to_wide(".");
         let pass = to_wide(&creds.password);
-        let mut cmdline = to_wide(&format!("cmd.exe /c whoami /user > {out} 2>&1"));
+        let mut cmdline = to_wide("cmd.exe /c whoami /user");
         let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = hfile;
+        si.hStdError = hfile;
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: NUL-terminated wide inputs; cmdline is a writable buffer; env/appname/cwd NULL.
         let ok = unsafe {
@@ -214,6 +253,7 @@ mod win {
             )
         };
         if ok == 0 {
+            unsafe { CloseHandle(hfile) };
             let err = unsafe { GetLastError() };
             eprintln!(
                 "LAUNCH-FAIL CreateProcessWithLogonW: err={err} ({})",
@@ -231,8 +271,10 @@ mod win {
             WaitForSingleObject(pi.hProcess, INFINITE);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
+            CloseHandle(hfile); // flush + release so the parent can read the sink
         }
-        let child = std::fs::read_to_string(out).unwrap_or_default();
+        let child_bytes = std::fs::read(out).unwrap_or_default();
+        let child = String::from_utf8_lossy(&child_bytes);
         println!("LAUNCH child whoami output: {}", child.trim());
         if child.contains(&creds.account_sid) {
             println!("LAUNCH-OK child ran as the dedicated account (SID {})", creds.account_sid);
