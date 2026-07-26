@@ -154,7 +154,6 @@ mod imp {
         encode_password, setup_json_path, store_dir,
     };
     use std::io;
-    use std::os::windows::ffi::OsStrExt;
 
     use windows_sys::Win32::Foundation::{GetLastError, LocalFree};
     use windows_sys::Win32::NetworkManagement::NetManagement::{
@@ -357,7 +356,8 @@ mod imp {
     fn lsa_open_policy() -> io::Result<LSA_HANDLE> {
         let mut oa: LSA_OBJECT_ATTRIBUTES = unsafe { std::mem::zeroed() };
         oa.Length = std::mem::size_of::<LSA_OBJECT_ATTRIBUTES>() as u32;
-        let mut handle: LSA_HANDLE = std::ptr::null_mut();
+        // LSA_HANDLE is an opaque isize handle in windows-sys (not a pointer).
+        let mut handle: LSA_HANDLE = 0;
         let status = unsafe {
             LsaOpenPolicy(
                 std::ptr::null(),
@@ -420,7 +420,7 @@ mod imp {
     fn lsa_remove_all_rights(sid: PSID) -> io::Result<()> {
         let policy = lsa_open_policy()?;
         let status =
-            unsafe { LsaRemoveAccountRights(policy, sid, 1, std::ptr::null(), 0) };
+            unsafe { LsaRemoveAccountRights(policy, sid, true, std::ptr::null(), 0) };
         unsafe { LsaClose(policy) };
         if status != 0 {
             let win = unsafe { LsaNtStatusToWinError(status) };
