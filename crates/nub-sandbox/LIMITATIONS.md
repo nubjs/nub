@@ -33,6 +33,15 @@ Two kinds of residual appear here:
 
 ### Egress SSRF: cloud-metadata / link-local AND RFC1918 blocked by default; `<private>` opt-in
 
+> **macOS and Linux only.** Every guarantee in this section lives in the egress proxy, and the
+> proxy starts only for a fine-grained (per-host/CIDR) policy — which Windows rejects before
+> launch (`backend/windows.rs:301-310`, `:350-364`). A Windows child therefore runs under one of
+> two coarse postures: no network capability at all, or `internetClient` with **raw egress and
+> none of the hardening below** — no IMDS/link-local block, no RFC1918 default-deny, no
+> DNS-rebinding pin. Worse, under `internetClient` the reachable range is *machine-dependent*: a
+> Public network profile permits RFC1918 and `169.254.169.254`, a Private/Domain profile does
+> not. Do not read this section as a cross-platform guarantee.
+
 The loopback egress proxy resolves an allowed host and connects to the resolved IP, so an
 allowed hostname whose DNS points at an internal address — or an attacker DNS-*rebinding*
 an allowed domain to one between validation and connect — could reach an off-limits
@@ -220,11 +229,19 @@ under `%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`). nub ne
 
 ### Untrusted-tier tighten-only layering — by design, the caller's responsibility
 
-For the granular object form an omitted axis is **relaxed** (the "boolean is the de-nesting
-mechanism" contract — you confine what you name). An *untrusted* tier would want the opposite
-default (omitted axis fail-closed / tighten-only), but the engine does **not** detect trust —
-it applies whatever config it is given. Securing an untrusted-config run is the caller's
-responsibility, not an engine mechanism nub supplies.
+For the granular object form an omitted axis **FLOORS** (fs deny-all, net deny-all *enforcing*,
+env strip-all) — a present block is a COMPLETE STATEMENT, so `{}` is deny-all and
+`{ "fs": [...] }` also denies net and strips env. An object-level `{ "...": true }` is the
+opt-out that makes every UNLISTED axis inherit the enclosing scope instead. (Corrected
+2026-07-24: this paragraph previously said an omitted axis was *relaxed*, which contradicted the
+shipped compiler — see `compiler/mod.rs:271-277` and `floor_fs`/`floor_net`/`floor_env` at
+`:539-555`, the unit test `empty_object_is_deny_all` in `tests/compiler.rs:171`, and the e2e
+fixture `empty-object-default-deny.json`.)
+
+Flooring is what makes a partial block from a less-trusted source fail closed rather than widen,
+which was the original concern here. The engine still does **not** detect trust — it applies
+whatever config it is given. Securing an untrusted-config run is the caller's responsibility, not
+an engine mechanism nub supplies.
 
 - **Status:** decided — nub does not detect untrusted config; the caller owns that trust
   boundary (the standalone "untrusted-tier tighten-only launcher" item is dropped). Distinct
@@ -289,10 +306,10 @@ responsibility, not an engine mechanism nub supplies.
   toolchain (`node.exe`) needs nothing more. (`backend/windows.rs` `apply`.)
 - **Windows `.env*` read-deny inside a granted read subtree — REJECTED before launch.** The compiler injects a default `.env*` read deny into every read-granting filesystem policy (`compiler::fold::finalize_env_deny`). The AppContainer allowlist cannot carve that deny from an inheritable read grant, so the backend returns an `fs-read-deny` `Degradation` error before producing a launchable `Prepared` (`deny_shadows_grant` in `backend/windows.rs`). Direct embedders and the Nub CLI fail closed identically. The macOS Seatbelt and Linux Bubblewrap backends enforce the deny. A future DACL inheritance-break mechanism could make the policy enforceable on Windows; until then, Windows read confinement works only when no deny is nested inside a granted subtree.
 
-### Private tmp (`<tmp>: "rw"`/`false`) — macOS/Linux enforced; Windows reported
+### Private tmp (`$tmp: "rw"`/`false`) — macOS/Linux enforced; Windows reported
 
-`<tmp>` is a SENTINEL that always denotes a specially-provisioned per-run PRIVATE dir — never
-the shared system tmp — so its value is a plain fs permission on that dir. `{ "fs": { "<tmp>":
+`$tmp` is a SENTINEL that always denotes a specially-provisioned per-run PRIVATE dir — never
+the shared system tmp — so its value is a plain fs permission on that dir. `{ "fs": { "$tmp":
 "rw" } }` (or `true`) gives the child a fresh per-run temp dir (its `TMPDIR`/`TMP`/`TEMP` point
 there) with the SHARED system tmp hidden; `false` hides the shared tmp with no private dir. The
 shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp` (`{ "fs": {
@@ -303,7 +320,7 @@ shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp
   world-shared `/private/tmp`) after the fs grants, and — for `Private` — grants the fresh
   per-run dir `(allow file* (subpath …))`. The deny is last-match-wins, so it hides the shared
   tmp even under a generous `(subpath "/")` read. Verified: a file in `/private/tmp` is DENIED
-  under `<tmp>: "rw"`/`false` and readable without, and reachable via a literal `/tmp` grant
+  under `$tmp: "rw"`/`false` and readable without, and reachable via a literal `/tmp` grant
   (`tests/macos_enforcement.rs` `private_tmp_hides_the_shared_system_tmp` /
   `deny_tmp_hides_the_shared_system_tmp_too` / `literal_tmp_path_is_the_only_way_to_the_shared_system_tmp`).
   - **Tradeoff (forced, documented):** the shared-tmp deny INCLUDES the confstr scratch that
@@ -313,9 +330,19 @@ shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp
 - **Linux — ENFORCED.** `Private` bind-mounts the fresh per-run directory at `/tmp`;
   `Deny` installs an empty traverse-only tmpfs and remounts it read-only after any
   explicitly allowed descendant mounts are layered.
-- **Windows — REPORTED, not enforced (fail-safe).** The child's temp env is pointed at
-  the fresh dir best-effort, but the shared temp path is not yet hidden, so the backend
-  reports `tmp-private`/`tmp-deny` instead of silently claiming the axis.
+- **Windows — REPORTED, not enforced (fail-safe).** The backend reports `tmp-private`/`tmp-deny`
+  instead of silently claiming the axis. Two corrections to what this file previously claimed
+  (both verified in source 2026-07-24):
+  - The child's temp env is **NOT** pointed at the fresh dir. `set_tmp_env` is called only on the
+    non-confining fast path (`backend/windows.rs:401-420`, guarded by
+    `!sandboxing && tmp_lost.is_none()`); the enforcing path builds
+    `WindowsLaunch { env: Some(policy.env.constructed.clone()) }` (`:512-522`) with no tmp
+    injection. The per-run private dir is created, never handed to the child, then deleted at
+    drop. The earlier "pointed at the fresh dir best-effort" wording was true only of the fast path.
+  - Under `$tmp: false` (Deny) the child is actively pointed at the SHARED temp, because
+    `OS_ESSENTIAL_ENV` unconditionally injects the ambient `TEMP`/`TMP` (`compiler/defaults.rs:351`)
+    — the inverse of what was requested. The keys cannot simply be dropped: `CreateProcessW` into
+    an AppContainer fails without them, so `Deny` must point at an empty granted dir instead.
 
 ## Linux namespace and syscall boundary
 

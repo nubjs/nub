@@ -575,7 +575,7 @@ fn resolve_program(program: &std::ffi::OsStr, child_cwd: Option<&Path>) -> Optio
 
 #[cfg(target_os = "windows")]
 mod launch {
-    use super::WindowsLaunch;
+    use super::{WindowsLaunch, dedupe_windows_env_pairs};
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;

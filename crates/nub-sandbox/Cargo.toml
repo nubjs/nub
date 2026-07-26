@@ -93,9 +93,12 @@ base64 = "0.22"
 
 # The Windows enforcement probe is BOTH the runner and the AppContainer child, so it
 # needs a little FFI (token-query + process-liveness) beyond what the lib exposes.
+# Win32_Security_Authorization is the residual probe's own ACL surface (it places and
+# inspects deny-ACEs the backend never emits); declared here rather than inherited from
+# the lib target's feature set, which unification would otherwise supply invisibly.
 [target.'cfg(target_os = "windows")'.dev-dependencies.windows-sys]
 version = "0.61"
-features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem"]
+features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem"]
 
 # The Windows enforcement probe self-reexecs as the AppContainer child, so it owns
 # `main` (dispatch on argv) rather than the libtest harness. windows-latest CI only; a

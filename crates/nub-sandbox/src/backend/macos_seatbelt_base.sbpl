@@ -136,6 +136,12 @@
   (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")
   (subpath "/System/iOSSupport/System/Library/SubFrameworks")
   (subpath "/usr/lib"))
+; Node aborts at init without openssl.cnf — `BIO_new_file` EPERM before any user
+; code runs, so EVERY Node fails under a read-confine that omits this, on every
+; installation (macOS ships no system Node, so there is no configuration that
+; escapes it). World-readable system config; granting read costs nothing.
+(allow file-read* file-test-existence
+  (subpath "/System/Library/OpenSSL"))
 (allow file-read* file-test-existence
   (subpath "/Library/Apple")
   (subpath "/Library/Filesystems/NetFSPlugins")
