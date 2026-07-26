@@ -168,7 +168,7 @@ fn ip(a: SocketAddr) -> String {
 /// Per-host policy: admit the loopback CIDR (so the proxy admits the loopback echo target)
 /// + an SNI host glob. Relaxed fs so the NET axis is isolated.
 fn net_policy() -> Value {
-    json!({ "fs": true, "net": ["127.0.0.0/8", "*.allowed.example"], "proxy": "auto" })
+    json!({ "fs": true, "net": ["127.0.0.0/8", "*.allowed.example"] })
 }
 
 #[test]

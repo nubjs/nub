@@ -7,6 +7,7 @@ use nub_sandbox::CommandSpec;
 #[cfg(not(target_os = "linux"))]
 use nub_sandbox::apply;
 use nub_sandbox::compiler::compile;
+use nub_sandbox::compiler::CompileError;
 use nub_sandbox::conformance::{Fixture, run_fixture};
 use nub_sandbox::policy::SandboxPolicy;
 use serde_json::json;
@@ -39,7 +40,6 @@ fn policy_round_trips_through_serde() {
         &json!({
             "fs": ["...", "!~/.ssh", "./data"],
             "net": ["*.sentry.io", "10.0.0.0/8"],
-            "proxy": "auto",
             "vars": { "PORT": "port", "NODE_ENV": true }
         }),
         &ctx,
@@ -59,7 +59,8 @@ fn broker_ir_round_trips_without_serializing_the_parent_secret() {
     let ctx = common::ctx(true, &[("STRIPE_TOKEN", "real-parent-secret")]);
     let policy = compile(
         &json!({
-            "net": { "api.stripe.com": { "env": ["STRIPE_TOKEN"] } },
+            "net": ["api.stripe.com"],
+            "secrets": { "STRIPE_TOKEN": { "brokerTo": ["api.stripe.com"] } },
             "vars": true
         }),
         &ctx,
@@ -80,7 +81,6 @@ fn conformance_fixture_passes_when_verdicts_match() {
         "sandbox": {
             "fs": ["...", "./build"],
             "net": ["github.com"],
-            "proxy": "auto",
             "vars": ["KEEP", "!*_TOKEN"]
         },
         "fs": [
@@ -143,7 +143,8 @@ fn apply_replaces_a_brokered_parent_value_with_a_fresh_marker() {
     let policy = compile(
         &json!({
             "fs": true,
-            "net": { "api.example.com": { "env": ["HOME"] } },
+            "net": ["api.example.com"],
+            "secrets": { "HOME": { "brokerTo": ["api.example.com"] } },
             "vars": true
         }),
         &ctx,
@@ -172,29 +173,28 @@ fn apply_replaces_a_brokered_parent_value_with_a_fresh_marker() {
 }
 
 #[test]
-fn apply_fails_closed_when_a_brokered_parent_value_is_missing() {
+fn brokered_secret_missing_from_the_environment_fails_at_compile() {
+    // A brokered secret is a REQUIRED env entry (a broker must hold a real value to
+    // swap), so a value absent from the compile-time ambient fails CLOSED at compile
+    // — earlier than the old net-axis form, which deferred the check to apply. (The
+    // apply-time fail-closed path still exists in the backend/proxy and is covered by
+    // the mitm `from_policy` unit tests.)
     const MISSING: &str = "NUB_TEST_DEFINITELY_MISSING_BROKER_CREDENTIAL_7B1D";
     assert!(std::env::var_os(MISSING).is_none());
     let ctx = common::ctx(true, &[]);
-    let policy = compile(
+    let err = compile(
         &json!({
             "fs": true,
-            "net": { "api.example.com": { "env": [MISSING] } },
+            "net": ["api.example.com"],
+            "secrets": { MISSING: { "brokerTo": ["api.example.com"] } },
             "vars": true
         }),
         &ctx,
     )
-    .unwrap();
-    let degradation = match apply(&policy, CommandSpec::new(TRUE_PROGRAM)) {
-        Ok(_) => panic!("missing broker credential unexpectedly produced a launchable child"),
-        Err(degradation) => degradation,
-    };
-    assert_eq!(degradation.lost, vec!["credential-broker"]);
+    .unwrap_err();
     assert!(
-        degradation
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains(MISSING) && !reason.contains("secret"))
+        matches!(err, CompileError::MissingRequired { ref key } if key == MISSING),
+        "a brokered secret absent from the environment must fail at compile: {err:?}"
     );
 }
 

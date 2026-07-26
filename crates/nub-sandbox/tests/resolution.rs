@@ -37,11 +37,11 @@ fn total_shadow_warns() {
         "later ** covers everything"
     );
     assert!(
-        warns(json!({ "net": ["in.sentry.io", "*.sentry.io"], "proxy": "auto" })),
+        warns(json!({ "net": ["in.sentry.io", "*.sentry.io"] })),
         "host then covering wildcard"
     );
     assert!(
-        warns(json!({ "net": ["a.com", "*"], "proxy": "auto" })),
+        warns(json!({ "net": ["a.com", "*"] })),
         "later * covers all hosts"
     );
     assert!(
@@ -71,11 +71,11 @@ fn partial_override_and_sentinels_stay_silent() {
         "allow-all then strip a class"
     );
     assert!(
-        !warns(json!({ "net": ["*", "!*.evil.com"], "proxy": "auto" })),
+        !warns(json!({ "net": ["*", "!*.evil.com"] })),
         "best-effort denylist"
     );
     assert!(
-        !warns(json!({ "net": ["example.com", "*.example.com"], "proxy": "auto" })),
+        !warns(json!({ "net": ["example.com", "*.example.com"] })),
         "apex + subdomains-wildcard are disjoint (the `*.` does not cover the apex)"
     );
     assert!(!warns(json!({ "fs": ["./a", "./b"] })), "disjoint paths");
@@ -180,45 +180,71 @@ fn fs_spread_inherits_the_resolved_parent() {
 
 #[test]
 fn net_spread_inherits_the_resolved_parent() {
-    let parent = json!({ "net": ["a.com"], "proxy": "auto" });
-    let p = chain(
-        &parent,
-        &json!({ "net": ["...", "b.com"], "proxy": "auto" }),
-    );
+    let parent = json!({ "net": ["a.com"] });
+    let p = chain(&parent, &json!({ "net": ["...", "b.com"] }));
     let m = HostMatcher::new(&p.net);
     assert!(m.admits("a.com") && m.admits("b.com"), "inherit + extend");
     // No `"..."` → floor: only b.com.
-    let f = chain(&parent, &json!({ "net": ["b.com"], "proxy": "auto" }));
+    let f = chain(&parent, &json!({ "net": ["b.com"] }));
     let mf = HostMatcher::new(&f.net);
     assert!(
         mf.admits("b.com") && !mf.admits("a.com"),
         "parent host NOT inherited"
     );
 
+    // A brokered secret on the parent inherits onto a child that splices net: the
+    // broker rides on `net.brokers`, and the `"..."` splice copies it across.
+    let bctx = common::ctx(true, &[("API_TOKEN", "t")]);
     let broker_parent = json!({
-        "net": { "api.example.com": { "env": ["API_TOKEN"] } }
+        "net": ["api.example.com"],
+        "secrets": { "API_TOKEN": { "brokerTo": ["api.example.com"] } }
     });
-    let broker_child = chain(&broker_parent, &json!({ "net": ["..."] }));
-    assert_eq!(
-        broker_child.net.brokers,
-        chain(&broker_parent, &json!({ "...": true })).net.brokers
-    );
+    let broker_child = resolve_chain(
+        &[
+            ChainScope {
+                label: "project",
+                surface: Some(&broker_parent),
+                caps: common::caps(true),
+            },
+            ChainScope {
+                label: "script",
+                surface: Some(&json!({ "net": ["..."] })),
+                caps: common::caps(true),
+            },
+        ],
+        &bctx,
+    )
+    .unwrap()
+    .0;
+    assert_eq!(broker_child.net.brokers.len(), 1);
+    assert_eq!(broker_child.net.brokers[0].host, "api.example.com");
+    assert_eq!(broker_child.net.brokers[0].env, vec!["API_TOKEN"]);
     assert!(matches!(
         broker_child.net.inspection,
         nub_sandbox::policy::Inspection::TlsInspect
     ));
 
-    let denied_broker = chain(
-        &broker_parent,
-        &json!({ "net": ["...", "!api.example.com"] }),
+    // A child that inherits the broker but DENIES its host is now a HARD ERROR — the
+    // merged-list admit-check replaces Phase-1's silent broker drop (the inherited
+    // broker's host is no longer admitted, so it could never be served).
+    let denied = resolve_chain(
+        &[
+            ChainScope {
+                label: "project",
+                surface: Some(&broker_parent),
+                caps: common::caps(true),
+            },
+            ChainScope {
+                label: "script",
+                surface: Some(&json!({ "net": ["...", "!api.example.com"] })),
+                caps: common::caps(true),
+            },
+        ],
+        &bctx,
     );
     assert!(
-        denied_broker.net.brokers.is_empty(),
-        "a later inherited-host deny removes the broker capability"
-    );
-    assert!(
-        !denied_broker.env.constructed.contains_key("API_TOKEN"),
-        "the complete child statement floors env independently"
+        matches!(&denied, Err(CompileError::Shape { path, .. }) if path == "secrets.API_TOKEN.brokerTo"),
+        "denying an inherited broker's host must hard-error: {denied:?}"
     );
 }
 
@@ -260,7 +286,7 @@ fn keyless_scope_cascades_the_parent_whole_policy() {
     // A scope with NO `sandbox` key inherits its parent's WHOLE policy (cascade —
     // it can't escape confinement by saying nothing).
     let ctx = common::ctx(true, &[("FOO", "1")]);
-    let parent = json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "proxy": "auto", "vars": { "FOO": true } });
+    let parent = json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "vars": { "FOO": true } });
     let (p, _) = resolve_chain(
         &[
             ChainScope {
@@ -285,7 +311,7 @@ fn keyless_scope_cascades_the_parent_whole_policy() {
 fn object_spread_inner_inherits_parent_for_unlisted_axes() {
     // `{ "...": true, "fs": ["...", "./b"] }` at an inner scope: inherit parent
     // net+env, and inherit-then-extend parent fs.
-    let parent = json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "proxy": "auto", "vars": { "FOO": true } });
+    let parent = json!({ "fs": { "./a": "rw" }, "net": ["a.com"], "vars": { "FOO": true } });
     let p = chain(&parent, &json!({ "...": true, "fs": ["...", "./b"] }));
     let m = PathMatcher::new(&p.fs.rules);
     let proj = common::homes().project;
@@ -320,11 +346,13 @@ fn approved_scope(surface: &Value) -> ChainScope<'_> {
 #[test]
 fn per_scope_capabilities_gate_each_scope_independently() {
     // ctx.caps is deliberately DEPENDENCY: the chain must ignore it and read each
-    // ChainScope's caps. StubRunner resolves `$(echo hi)` → "hi".
-    let ctx = common::ctx(false, &[]);
+    // ChainScope's caps. StubRunner resolves `$(echo hi)` → "hi". BROKER_TOKEN is in
+    // the ambient so the approved scope's brokered secret resolves at compile.
+    let ctx = common::ctx(false, &[("BROKER_TOKEN", "secret")]);
     let approved = json!({
         "vars": { "TOKEN": "$(echo hi)" },
-        "net": { "api.example.com": { "env": ["BROKER_TOKEN"] } },
+        "net": ["api.example.com"],
+        "secrets": { "BROKER_TOKEN": { "brokerTo": ["api.example.com"] } },
     });
     let outer = approved_scope;
 
@@ -379,7 +407,10 @@ fn per_scope_capabilities_gate_each_scope_independently() {
     );
 
     // (3) The inner dependency scope's OWN broker is denied (credential_broker).
-    let inner_broker = json!({ "net": { "api.example.com": { "env": ["BROKER_TOKEN"] } } });
+    let inner_broker = json!({
+        "net": ["api.example.com"],
+        "secrets": { "BROKER_TOKEN": { "brokerTo": ["api.example.com"] } }
+    });
     let err = resolve_chain(
         &[
             outer(&approved),

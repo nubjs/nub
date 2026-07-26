@@ -398,14 +398,15 @@ fn sentinel_scalar_value_is_a_shape_error_but_file_ref_defers() {
 
 #[test]
 fn net_bare_string_host_value_is_a_shape_error() {
-    // A net OBJECT value is `true | false | { rule }` only. A bare string
-    // (`{"example.com": "r"}`) is not a recognized net value and must fail loud,
-    // never be silently treated as anything. A bool value stays valid.
+    // A net OBJECT value is `true | false` only (brokering moved to the secrets axis).
+    // A bare string (`{"example.com": "r"}`) or the old `{ "env": [...] }` broker
+    // object must fail loud, never be silently treated as anything. A bool stays valid.
     let ctx = common::ctx(true, &[]);
     for surface in [
         json!({ "net": { "example.com": "r" } }),
         json!({ "net": { "example.com": "rw" } }),
         json!({ "net": { "*.example.com": "allow" } }),
+        json!({ "net": { "example.com": { "env": ["TOKEN"] } } }),
     ] {
         match compile(&surface, &ctx).unwrap_err() {
             CompileError::Shape { message, .. } => assert!(
@@ -415,13 +416,7 @@ fn net_bare_string_host_value_is_a_shape_error() {
             other => panic!("expected Shape for {surface}, got {other:?}"),
         }
     }
-    assert!(
-        compile(
-            &json!({ "net": { "example.com": true }, "proxy": "auto" }),
-            &ctx
-        )
-        .is_ok()
-    );
+    assert!(compile(&json!({ "net": { "example.com": true } }), &ctx).is_ok());
 }
 
 #[test]
@@ -447,7 +442,7 @@ fn net_malformed_cidr_and_slash_host_are_shape_errors() {
         }
     }
     // A well-formed CIDR still compiles.
-    assert!(compile(&json!({ "net": ["10.0.0.0/8"], "proxy": "auto" }), &ctx).is_ok());
+    assert!(compile(&json!({ "net": ["10.0.0.0/8"] }), &ctx).is_ok());
 }
 
 #[test]
@@ -1063,25 +1058,29 @@ fn secrets_rejects_catch_all_and_string_shapes() {
 }
 
 #[test]
-fn secrets_brokerto_is_deferred_to_the_net_axis() {
-    // Phase 1 keeps brokering on the net axis; `brokerTo` on a secret is not accepted
-    // yet, and its error points at the current net-axis form (Phase 2 relocates it).
-    let ctx = common::ctx(true, &[("GITHUB_TOKEN", "t")]);
-    let err = compile(
-        &json!({ "secrets": { "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] } } }),
+fn secrets_brokerto_transposes_onto_the_net_broker_and_engages_tls_inspect() {
+    // `secrets.<name>.brokerTo` is the Phase-2 broker surface: it transposes onto
+    // net.brokers (one broker per host, env = the secret), withholds the real value,
+    // and derives the TlsInspect tier — provided the host is also named in `net`.
+    let ctx = common::ctx(true, &[("GITHUB_TOKEN", "real-token")]);
+    let p = compile(
+        &json!({
+            "net": ["api.github.com"],
+            "secrets": { "GITHUB_TOKEN": { "brokerTo": ["api.github.com"] } }
+        }),
         &ctx,
     )
-    .unwrap_err();
-    match err {
-        CompileError::Shape { path, message } => {
-            assert_eq!(path, "secrets.GITHUB_TOKEN.brokerTo");
-            assert!(
-                message.contains("brokerTo") && message.contains("net"),
-                "the message must point at the net-axis broker form: {message}"
-            );
-        }
-        other => panic!("expected a brokerTo shape error, got {other:?}"),
-    }
+    .unwrap();
+    assert_eq!(p.net.brokers.len(), 1);
+    assert_eq!(p.net.brokers[0].host, "api.github.com");
+    assert_eq!(p.net.brokers[0].env, vec!["GITHUB_TOKEN"]);
+    assert!(
+        !p.env.constructed.contains_key("GITHUB_TOKEN"),
+        "the brokered secret's real value is withheld from the child"
+    );
+    assert!(matches!(p.net.inspection, Inspection::TlsInspect));
+    let serialized = serde_json::to_string(&p).unwrap();
+    assert!(serialized.contains("GITHUB_TOKEN") && !serialized.contains("real-token"));
 }
 
 #[test]
@@ -1330,7 +1329,7 @@ fn glob_key_substitution_is_rejected_before_running() {
 fn net_array_hosts_and_cidr_classify() {
     let ctx = common::ctx(true, &[]);
     let p = compile(
-        &json!({ "net": ["*.sentry.io", "10.0.0.0/8", "!evil.com"], "proxy": "auto" }),
+        &json!({ "net": ["*.sentry.io", "10.0.0.0/8", "!evil.com"] }),
         &ctx,
     )
     .unwrap();
@@ -1454,7 +1453,7 @@ fn net_private_symbolic_target_folds_and_gates_the_opt_in() {
 
     // `<private>` (and its `<local>` alias) fold to NetTarget::Private and set the opt-in.
     for tok in ["<private>", "<local>"] {
-        let p = compile(&json!({ "net": [tok], "proxy": "auto" }), &ctx).unwrap();
+        let p = compile(&json!({ "net": [tok] }), &ctx).unwrap();
         assert_eq!(p.net.rules.len(), 1);
         assert!(matches!(p.net.rules[0].target, NetTarget::Private), "{tok}");
         assert!(
@@ -1464,18 +1463,14 @@ fn net_private_symbolic_target_folds_and_gates_the_opt_in() {
     }
 
     // A bare `*` allow-all does NOT set the opt-in — the private ranges stay blocked.
-    let p = compile(&json!({ "net": ["*"], "proxy": "auto" }), &ctx).unwrap();
+    let p = compile(&json!({ "net": ["*"] }), &ctx).unwrap();
     assert!(
         !net_allows_private(&p.net),
         "`*` must NOT re-open the private ranges"
     );
 
     // `!<private>` after an opt-in reclose it (last-match-wins on the token).
-    let p = compile(
-        &json!({ "net": ["<private>", "!<private>"], "proxy": "auto" }),
-        &ctx,
-    )
-    .unwrap();
+    let p = compile(&json!({ "net": ["<private>", "!<private>"] }), &ctx).unwrap();
     assert!(
         !net_allows_private(&p.net),
         "a later `!<private>` must reclose the opt-in"
@@ -1495,11 +1490,7 @@ fn net_private_symbolic_target_folds_and_gates_the_opt_in() {
 fn net_leading_wildcard_and_bare_star_still_accepted() {
     // D11 must not over-reject: the two valid wildcard forms compile.
     let ctx = common::ctx(true, &[]);
-    let p = compile(
-        &json!({ "net": ["*.example.com", "*"], "proxy": "auto" }),
-        &ctx,
-    )
-    .unwrap();
+    let p = compile(&json!({ "net": ["*.example.com", "*"] }), &ctx).unwrap();
     let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
     assert!(m.admits("a.b.example.com"));
     assert!(m.admits("anything.at.all"));
@@ -1510,11 +1501,7 @@ fn net_trailing_dot_is_stripped_so_it_cannot_dodge_a_deny() {
     // D12: `evil.com.` in config normalizes to `evil.com`, and a connect to the
     // dotted form matches a dotless rule.
     let ctx = common::ctx(true, &[]);
-    let p = compile(
-        &json!({ "net": ["ok.example.", "!evil.com."], "proxy": "auto" }),
-        &ctx,
-    )
-    .unwrap();
+    let p = compile(&json!({ "net": ["ok.example.", "!evil.com."] }), &ctx).unwrap();
     match &p.net.rules[0].target {
         nub_sandbox::policy::NetTarget::Host(h) => {
             assert_eq!(h, "ok.example", "dot stripped in IR")
@@ -1531,68 +1518,155 @@ fn net_trailing_dot_is_stripped_so_it_cannot_dodge_a_deny() {
 // ── credential brokering (the capability-derived MITM tier) ───────────────────
 
 #[test]
-fn broker_compiles_to_an_allow_rule_plus_a_broker_and_engages_tls_inspect() {
+fn broker_compiles_to_a_broker_and_engages_tls_inspect() {
     let ctx = common::ctx(true, &[("STRIPE_TOKEN", "real-parent-secret")]);
     let p = compile(
         &json!({
-            "net": { "api.stripe.com": { "env": ["STRIPE_TOKEN"] } },
-            "vars": true
+            "net": ["api.stripe.com"],
+            "secrets": { "STRIPE_TOKEN": { "brokerTo": ["api.stripe.com"] } }
         }),
         &ctx,
     )
     .unwrap();
-    // The brokered host is implicitly ALLOWED.
+    // The brokered host is allowed by the net axis (brokering does NOT open it itself).
     assert!(
         p.net.rules.iter().any(
             |r| matches!(&r.target, NetTarget::Host(h) if h == "api.stripe.com")
                 && matches!(r.effect, Effect::Allow)
         ),
-        "brokered host must be allowed"
+        "brokered host must be allowed in net"
     );
     assert_eq!(p.net.brokers.len(), 1);
     assert_eq!(p.net.brokers[0].host, "api.stripe.com");
     assert_eq!(p.net.brokers[0].env, vec!["STRIPE_TOKEN"]);
     assert!(
         !p.env.constructed.contains_key("STRIPE_TOKEN"),
-        "the serializable IR must withhold brokered real values even under env:true"
+        "the serializable IR must withhold the brokered real value"
     );
     let serialized = serde_json::to_string(&p).unwrap();
     assert!(serialized.contains("STRIPE_TOKEN"));
     assert!(!serialized.contains("real-parent-secret"));
-    // The tier auto-derives to TlsInspect even though no wrapper proxy was requested:
-    // credential injection cannot work without a terminating proxy.
+    // The proxy auto-starts (Auto) and derives the TlsInspect tier: credential
+    // injection cannot work without a terminating proxy.
     assert!(matches!(
         p.net.mode,
-        nub_sandbox::policy::ProxyMode::Disabled
+        nub_sandbox::policy::ProxyMode::Auto
     ));
     assert!(matches!(p.net.inspection, Inspection::TlsInspect));
 }
 
 #[test]
-fn host_only_allow_without_proxy_is_a_compile_error() {
-    let ctx = common::ctx(true, &[]);
-    let err = compile(&json!({ "net": { "api.example.com": true } }), &ctx).unwrap_err();
-    assert!(matches!(err, CompileError::Shape { path, .. } if path == "net"));
-}
-
-#[test]
-fn host_only_policy_with_explicit_auto_stays_connection_tier_no_mitm() {
-    let ctx = common::ctx(true, &[]);
+fn two_secrets_to_one_host_coalesce_into_a_single_broker() {
+    // The transpose keys brokers by host: two secrets brokered to the same host merge
+    // into ONE CredentialBroker with both env names (the shape every consumer relies
+    // on — a per-secret push would duplicate the host and drop all but the first).
+    let ctx = common::ctx(true, &[("GH_TOKEN", "a"), ("GH_APP_KEY", "b")]);
     let p = compile(
-        &json!({ "net": { "api.example.com": true }, "proxy": "auto" }),
+        &json!({
+            "net": ["api.github.com"],
+            "secrets": {
+                "GH_TOKEN": { "brokerTo": ["api.github.com"] },
+                "GH_APP_KEY": { "brokerTo": ["api.github.com"] }
+            }
+        }),
         &ctx,
     )
     .unwrap();
+    assert_eq!(p.net.brokers.len(), 1, "one broker per host");
+    assert_eq!(p.net.brokers[0].host, "api.github.com");
+    assert_eq!(p.net.brokers[0].env, vec!["GH_TOKEN", "GH_APP_KEY"]);
+}
+
+#[test]
+fn fine_grained_allow_auto_starts_the_proxy_at_connection_tier() {
+    // A fine-grained net allow with no brokered secret AUTO-STARTS the egress proxy
+    // (Auto) at the Connection tier — no authored `proxy`, no TLS termination. This
+    // was a compile error before Phase 2 (it demanded an authored proxy).
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "net": ["api.example.com"] }), &ctx).unwrap();
     assert!(p.net.brokers.is_empty());
+    assert!(matches!(
+        p.net.mode,
+        nub_sandbox::policy::ProxyMode::Auto
+    ));
     assert!(
         matches!(p.net.inspection, Inspection::Connection),
-        "host-only config must not engage TLS termination"
+        "a host-only allow must not engage TLS termination"
     );
 }
 
 #[test]
-fn broker_requires_an_exact_literal_hostname() {
+fn authored_proxy_is_a_targeted_migration_error() {
+    // `proxy` is no longer an authored knob (the tier is derived). A stray `proxy`
+    // gets a targeted error pointing that out, not a generic unknown-key one.
     let ctx = common::ctx(true, &[]);
+    for surface in [
+        json!({ "net": ["api.example.com"], "proxy": "auto" }),
+        json!({ "net": ["api.example.com"], "proxy": "terminate" }),
+        json!({ "net": true, "proxy": "auto" }),
+    ] {
+        match compile(&surface, &ctx).unwrap_err() {
+            CompileError::Shape { path, message } => {
+                assert_eq!(path, "proxy");
+                assert!(
+                    message.contains("derives") && message.contains("remove"),
+                    "names the migration: {message}"
+                );
+            }
+            other => panic!("expected a targeted proxy Shape error for {surface}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn brokerto_host_not_in_net_is_a_compile_error() {
+    let ctx = common::ctx(true, &[("API_TOKEN", "t")]);
+    // The brokered host is not admitted by the net allowlist → hard error naming it.
+    let err = compile(
+        &json!({
+            "net": ["other.example"],
+            "secrets": { "API_TOKEN": { "brokerTo": ["api.example.com"] } }
+        }),
+        &ctx,
+    )
+    .unwrap_err();
+    match err {
+        CompileError::Shape { path, message } => {
+            assert_eq!(path, "secrets.API_TOKEN.brokerTo");
+            assert!(
+                message.contains("api.example.com") && message.contains("not allowed"),
+                "names the un-admitted host: {message}"
+            );
+        }
+        other => panic!("expected a brokerTo-not-in-net Shape error, got {other:?}"),
+    }
+}
+
+#[test]
+fn brokerto_with_coarse_net_is_a_compile_error() {
+    // A broker needs a fine-grained proxy to serve it: coarse `net: true` (admits the
+    // host but starts no proxy) and an all-deny `net` both error rather than silently
+    // shipping an inert broker.
+    let ctx = common::ctx(true, &[("API_TOKEN", "t")]);
+    for net in [json!(true), json!(false), json!(["!api.example.com"])] {
+        let err = compile(
+            &json!({
+                "net": net,
+                "secrets": { "API_TOKEN": { "brokerTo": ["api.example.com"] } }
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CompileError::Shape { path, .. } if path == "secrets.API_TOKEN.brokerTo"),
+            "coarse/all-deny net + brokerTo must error at the brokerTo path (net={net})"
+        );
+    }
+}
+
+#[test]
+fn brokerto_requires_an_exact_literal_hostname() {
+    let ctx = common::ctx(true, &[("API_TOKEN", "t")]);
     for host in [
         "*",
         "*.example.com",
@@ -1605,7 +1679,10 @@ fn broker_requires_an_exact_literal_hostname() {
         "0177.0.0.1",
     ] {
         let err = compile(
-            &json!({ "net": { (host): { "env": ["API_TOKEN"] } } }),
+            &json!({
+                "net": ["api.example.com"],
+                "secrets": { "API_TOKEN": { "brokerTo": [host] } }
+            }),
             &ctx,
         )
         .unwrap_err();
@@ -1617,78 +1694,85 @@ fn broker_requires_an_exact_literal_hostname() {
 }
 
 #[test]
-fn broker_env_is_a_trusted_only_capability() {
-    let ctx = common::ctx(false, &[]);
-    let err = compile(
-        &json!({ "net": { "api.example.com": { "env": ["API_TOKEN"] } } }),
-        &ctx,
-    )
-    .unwrap_err();
-    assert!(matches!(err, CompileError::Shape { .. }));
-}
-
-#[test]
-fn passthrough_with_a_broker_rule_is_a_compile_error() {
-    // The `proxy: "passthrough"` block-MITM posture contradicts a rule that requires
-    // termination — a hard error, never a silent drop.
-    let ctx = common::ctx(true, &[]);
+fn brokerto_is_a_trusted_only_capability() {
+    let ctx = common::ctx(false, &[("API_TOKEN", "t")]);
     let err = compile(
         &json!({
-            "net": { "api.example.com": { "env": ["API_TOKEN"] } },
-            "proxy": "passthrough"
+            "net": ["api.example.com"],
+            "secrets": { "API_TOKEN": { "brokerTo": ["api.example.com"] } }
         }),
         &ctx,
     )
     .unwrap_err();
-    assert!(matches!(err, CompileError::Shape { .. }));
+    match err {
+        CompileError::Shape { message, .. } => assert!(
+            message.contains("credential brokering"),
+            "names the trusted-only capability: {message}"
+        ),
+        other => panic!("expected the trusted-only Shape error, got {other:?}"),
+    }
 }
 
 #[test]
-fn terminate_mode_engages_tls_inspect_without_a_broker() {
-    let ctx = common::ctx(true, &[]);
-    let p = compile(
-        &json!({ "net": { "api.example.com": true }, "proxy": "terminate" }),
-        &ctx,
-    )
-    .unwrap();
-    assert!(matches!(p.net.inspection, Inspection::TlsInspect));
-    assert!(p.net.brokers.is_empty());
-}
-
-#[test]
-fn old_inject_syntax_is_rejected() {
-    let ctx = common::ctx(true, &[]);
+fn brokerto_on_a_vars_entry_is_a_shape_error() {
+    // Brokering protects a sensitive value; it is a secrets-only knob.
+    let ctx = common::ctx(true, &[("API_TOKEN", "t")]);
     let err = compile(
-        &json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer x" } } } }),
+        &json!({
+            "net": ["api.example.com"],
+            "vars": { "API_TOKEN": { "brokerTo": ["api.example.com"] } }
+        }),
         &ctx,
     )
     .unwrap_err();
-    match err {
-        CompileError::Shape { message, .. } => assert!(message.contains("old `inject`")),
-        other => panic!("expected old-inject shape error, got {other:?}"),
-    }
+    assert!(
+        matches!(err, CompileError::Shape { path, .. } if path == "vars.API_TOKEN.brokerTo"),
+        "brokerTo on a vars entry must error at its path"
+    );
 }
 
 #[test]
-fn broker_env_list_rejects_empty_duplicates_and_patterns() {
-    let ctx = common::ctx(true, &[]);
-    for env in [
-        json!([]),
-        json!(["TOKEN", "TOKEN"]),
-        json!(["*_TOKEN"]),
-        json!(["TOKEN?"]),
-        json!(["HTTPS_PROXY"]),
-        json!(["NODE_EXTRA_CA_CERTS"]),
-        json!(["TMPDIR"]),
+fn brokerto_rejects_bad_secret_keys_hosts_and_value_combo() {
+    let ctx = common::ctx(true, &[("API_TOKEN", "t")]);
+    // Bad secret KEY: glob, optional (`?`), and a reserved plumbing name.
+    for secrets in [
+        json!({ "*_TOKEN": { "brokerTo": ["api.example.com"] } }),
+        json!({ "API_TOKEN?": { "brokerTo": ["api.example.com"] } }),
+        json!({ "HTTPS_PROXY": { "brokerTo": ["api.example.com"] } }),
+        json!({ "NODE_EXTRA_CA_CERTS": { "brokerTo": ["api.example.com"] } }),
+        json!({ "TMPDIR": { "brokerTo": ["api.example.com"] } }),
     ] {
         assert!(
-            compile(
-                &json!({ "net": { "api.example.com": { "env": env } } }),
-                &ctx
-            )
-            .is_err()
+            compile(&json!({ "net": ["api.example.com"], "secrets": secrets }), &ctx).is_err(),
+            "bad brokered secret key must be rejected: {secrets}"
         );
     }
+    // Bad brokerTo host list: empty, and duplicate hosts.
+    for hosts in [json!([]), json!(["api.example.com", "api.example.com"])] {
+        assert!(
+            compile(
+                &json!({
+                    "net": ["api.example.com"],
+                    "secrets": { "API_TOKEN": { "brokerTo": hosts } }
+                }),
+                &ctx
+            )
+            .is_err(),
+            "bad brokerTo host list must be rejected: {hosts}"
+        );
+    }
+    // brokerTo cannot combine with a literal `value`.
+    assert!(
+        compile(
+            &json!({
+                "net": ["api.example.com"],
+                "secrets": { "API_TOKEN": { "brokerTo": ["api.example.com"], "value": "x" } }
+            }),
+            &ctx
+        )
+        .is_err(),
+        "brokerTo + value must be rejected"
+    );
 }
 
 // ── fs $(…) command substitution ───────────────────────────────────────────────
