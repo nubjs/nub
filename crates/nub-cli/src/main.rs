@@ -12,6 +12,7 @@ mod nubx_consent;
 mod phantom_scan;
 mod pm_engine;
 mod project_config;
+mod sandbox_bridge;
 mod sandbox_redact;
 mod self_shim;
 mod verify_deps;

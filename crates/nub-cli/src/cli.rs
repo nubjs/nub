@@ -737,10 +737,10 @@ pub enum Command {
         no_check: bool,
 
         /// INTERNAL, UNDOCUMENTED: run the target under the OS-enforced sandbox
-        /// engine using an explicit external sandbox config file. The test
-        /// entry for `nub-sandbox` (Stage 1: compile→apply). Does NOT read the
-        /// project nub.jsonc; takes an explicit `<file.json>`. Not a user surface.
-        #[arg(long = "sandbox", value_name = "FILE", hide = true)]
+        /// engine, using an explicit shape — `true`/`false`, a preset name
+        /// (`build-jail`), or a path to a policy file (`./policy.jsonc`). Does NOT
+        /// read the project nub.jsonc (no auto-activation). Not a user surface.
+        #[arg(long = "sandbox", value_name = "SHAPE", hide = true)]
         sandbox: Option<String>,
 
         /// Remaining arguments forwarded to the script.
@@ -3173,24 +3173,24 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     Ok(nub_core::node::spawn::exit_code(&result))
 }
 
-/// INTERNAL, UNDOCUMENTED test entry for the `nub-sandbox` engine (design.md
-/// §2.6). Loads a SURFACE `sandbox` block from an explicit file (NOT the project
-/// nub.jsonc), compiles it to a resolved policy, and launches `<program> [args]`
-/// under it via the engine's `apply`. A non-full [`Degradation`] is surfaced to
-/// stderr, never silent.
+/// INTERNAL, UNDOCUMENTED entry for the `nub-sandbox` engine (design.md §2.6),
+/// reached from the hidden `--sandbox <SHAPE>` flag. The shape string is
+/// classified by [`crate::sandbox_bridge::setting_from_flag`] into one of four
+/// forms — `false` (Disabled: spawn plain, no enforcement), `true` (Enabled:
+/// secure defaults), a bare identifier (a preset, e.g. `build-jail`), or a
+/// path-like string (a policy FILE) — then compiled + applied via the bridge.
+/// It never reads the project nub.jsonc (no auto-activation). A non-full
+/// [`Degradation`] is surfaced to stderr, never silent.
 ///
-/// The file may be either a bare surface block (`{ "fs": … }`) or a document with
-/// a top-level `"sandbox"` key. Trusted (an explicit user-supplied external
-/// sandbox config file),
-/// so `$(…)` substitution is permitted.
+/// A referenced policy file may be a bare surface block (`{ "fs": … }`) or a
+/// document with a top-level `"sandbox"` key. The `--sandbox` value is trusted
+/// (the user's own explicit request), so `$(…)` substitution is permitted.
 fn run_sandboxed(
     runtime: &nub_sandbox::RuntimeCapability,
     policy_file: &str,
     program: Option<&str>,
     args: &[String],
 ) -> Result<i32> {
-    use jsonc_parser::ParseOptions;
-
     // clap's `trailing_var_arg` on `args` captures the whole command when no
     // package.json script name precedes it, so the program may arrive as the
     // `script` positional OR as the first trailing arg. Accept either.
@@ -3203,40 +3203,26 @@ fn run_sandboxed(
             ),
         },
     };
-    let text = std::fs::read_to_string(policy_file)
-        .with_context(|| format!("reading external sandbox config file {policy_file}"))?;
-    let value = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
-        .map_err(|e| anyhow::anyhow!("parsing sandbox policy {policy_file}: {e}"))?
-        .unwrap_or(serde_json::Value::Null);
-    // Accept either a bare surface block or a `{ "sandbox": … }` wrapper. `value` (the
-    // whole document) is retained for `...:#/pointer` reuse resolution below.
-    let block = value
-        .get("sandbox")
-        .cloned()
-        .unwrap_or_else(|| value.clone());
 
     let cwd = std::env::current_dir().context("resolving cwd")?;
-    // Self-exclusion: the policy file is auto-denied (read + write) from every fs grant,
-    // so the sandboxed process can neither read nor tamper with the policy that confines
-    // it. Canonicalized here (the file was just read, so it exists) to the absolute path
-    // the compiler injects as a high-precedence deny.
-    let policy_path = std::fs::canonicalize(policy_file)
-        .with_context(|| format!("canonicalizing sandbox policy path {policy_file}"))?;
-    let ctx = nub_sandbox::CompileCtx::new(
+    // Shape-polymorphic flag: `true`/`false`/preset/file-ref all classify + compile
+    // through the bridge. `None` is the `Disabled` shape — spawn plain (no enforcement
+    // overhead, no self-exclusion), NOT an `unjailed` policy through the backend.
+    let setting = crate::sandbox_bridge::setting_from_flag(policy_file);
+    let resolved = match crate::sandbox_bridge::resolve(
+        &setting,
+        &crate::sandbox_bridge::SandboxSource::Flag,
+        &cwd,
         sandbox_homes(&cwd),
-        cwd.clone(),
-        // `--sandbox <file>` is the user's own approved config (one scope) — full caps.
-        nub_sandbox::ScopeCapabilities::approved(),
         ambient_env().context("capturing the sandbox target environment")?,
-    )
-    .with_policy_file(Some(policy_path))
-    // A `...:#/pointer` reuse token resolves against the WHOLE parsed document (`#` =
-    // document root), not the extracted `block` — so a `#/shared/*` sibling of the
-    // `sandbox` wrapper reaches its target. Pass `value`, never `block`.
-    .with_document(value);
-    let (policy, warnings) = nub_sandbox::compile_with_warnings(&block, &ctx)
-        .map_err(|e| anyhow::anyhow!("sandbox policy did not compile: {e}"))?;
-    for w in &warnings {
+        // The `--sandbox` flag is the user's own approved config (one scope) — full caps.
+        nub_sandbox::ScopeCapabilities::approved(),
+    )? {
+        Some(r) => r,
+        None => return crate::sandbox_bridge::spawn_plain(program, prog_args, &cwd),
+    };
+    let policy = resolved.policy;
+    for w in &resolved.warnings {
         eprintln!("warning: {w}");
     }
 

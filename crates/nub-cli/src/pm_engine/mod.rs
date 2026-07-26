@@ -3233,7 +3233,7 @@ mod tests {
         // Every policy shape (not just `false`) must lower identically to the
         // no-sandbox baseline until the sandbox execution slice lands.
         let baseline = lower_native_install_settings(&InstallConfig::default(), &[]).unwrap();
-        for (raw, shape) in crate::project_config::sandbox_shapes::five_shapes() {
+        for (raw, shape) in crate::project_config::sandbox_shapes::four_shapes() {
             let configured = lower_native_install_settings(
                 &InstallConfig {
                     sandbox: Some(shape),

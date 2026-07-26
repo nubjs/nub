@@ -86,16 +86,16 @@ fn restrictive_install_sandbox_config_is_inert_for_an_offline_lifecycle_install(
         "baseline outside-root write"
     );
 
-    // Fully-restrictive values at every sandbox position, alongside the
+    // A restrictive (secure-default) sandbox at every position, alongside the
     // `install.nodeOptions` liveness probe. If any consumer activated a
     // posture, the env canary or the outside-project write would diverge.
     let restrictive = r#"{
-      "sandbox": { "fs": false, "net": false, "vars": false },
+      "sandbox": true,
       "install": {
         "nodeOptions": ["--stack-trace-limit=19"],
-        "sandbox": { "fs": false, "net": false, "vars": false }
+        "sandbox": true
       },
-      "dlx": { "sandbox": { "fs": false, "net": false, "vars": false } }
+      "dlx": { "sandbox": true }
     }"#;
     let (code, observed) =
         run_offline_lifecycle_install(&temp.path().join("configured"), Some(restrictive), None);
@@ -107,11 +107,11 @@ fn restrictive_install_sandbox_config_is_inert_for_an_offline_lifecycle_install(
     );
     assert_eq!(
         observed["canary"], baseline["canary"],
-        "a restrictive env axis must not strip the lifecycle environment"
+        "a restrictive sandbox must not strip the lifecycle environment"
     );
     assert_eq!(
         observed["outsideWrite"], baseline["outsideWrite"],
-        "a restrictive fs axis must not block writes outside the project root"
+        "a restrictive sandbox must not block writes outside the project root"
     );
 }
 
@@ -126,12 +126,12 @@ fn restrictive_global_sandbox_config_is_inert_for_an_offline_lifecycle_install()
     );
 
     let restrictive = r#"{
-      "sandbox": { "fs": false, "net": false, "vars": false },
+      "sandbox": true,
       "install": {
         "nodeOptions": ["--stack-trace-limit=29"],
-        "sandbox": { "fs": false, "net": false, "vars": false }
+        "sandbox": true
       },
-      "dlx": { "sandbox": { "fs": false, "net": false, "vars": false } }
+      "dlx": { "sandbox": true }
     }"#;
     let (code, observed) =
         run_offline_lifecycle_install(&temp.path().join("configured"), None, Some(restrictive));

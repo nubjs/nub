@@ -1,29 +1,18 @@
 //! P6 — sandbox config values are LOSSLESS through parse and INERT in every
-//! Phase-0 consumer projection. One five-shape table (the trichotomy's full
-//! value space) is shared across the top-level, `install.sandbox`, and
+//! Phase-0 consumer projection. One four-shape table (the wrapper's full value
+//! space: `false | true | preset | file-ref`) is shared across the top-level, `install.sandbox`, and
 //! `dlx.sandbox` positions, and reused by pm_engine's install-lowering test.
 //! Top-level parse + snapshot retention is covered by the sibling
-//! `sandbox_five_shapes_are_lossless_and_inert_in_the_snapshot`; this module
+//! `sandbox_four_shapes_are_lossless_and_inert_in_the_snapshot`; this module
 //! owns the nested positions and the projection-equality (inertness) proofs.
 
 use super::*;
 use crate::config::ImplicitDlx;
 
-/// The five policy shapes, as (raw JSONC value, expected parse). The granular
-/// arm exercises all four axis forms (object / array / string / bool) so
-/// losslessness covers the raw-value retention path, not just the wrapper
-/// classification.
-pub(crate) fn five_shapes() -> Vec<(String, SandboxSetting)> {
-    let granular_raw = r#"{ "fs": { "./data": { "read": true, "write": false } }, "net": [], "vars": "*", "secrets": false }"#;
-    let granular = SandboxSetting::Granular(SandboxAxes {
-        fs: Some(SandboxAxis::Object(BTreeMap::from([(
-            "./data".into(),
-            serde_json::json!({ "read": true, "write": false }),
-        )]))),
-        net: Some(SandboxAxis::Array(Vec::new())),
-        vars: Some(SandboxAxis::String("*".into())),
-        secrets: Some(SandboxAxis::Bool(false)),
-    });
+/// The four policy shapes, as (raw JSONC value, expected parse). An inline
+/// granular object is no longer a shape (rejected by `validate_sandbox`); a
+/// granular policy lives in a file, covered by the `FileRef` shape.
+pub(crate) fn four_shapes() -> Vec<(String, SandboxSetting)> {
     vec![
         ("false".into(), SandboxSetting::Disabled),
         ("true".into(), SandboxSetting::Enabled),
@@ -35,7 +24,6 @@ pub(crate) fn five_shapes() -> Vec<(String, SandboxSetting)> {
             r#""./team.json""#.into(),
             SandboxSetting::FileRef("./team.json".into()),
         ),
-        (granular_raw.into(), granular),
     ]
 }
 
@@ -47,8 +35,8 @@ fn project_layer(values: ProjectConfig) -> Option<LoadedConfig> {
 }
 
 #[test]
-fn five_shapes_round_trip_losslessly_at_the_nested_positions() {
-    for (raw, expected) in five_shapes() {
+fn four_shapes_round_trip_losslessly_at_the_nested_positions() {
+    for (raw, expected) in four_shapes() {
         let install = parse_project_config(&format!(r#"{{ "install": {{ "sandbox": {raw} }} }}"#))
             .expect("install.sandbox shape parses");
         assert_eq!(
@@ -80,7 +68,7 @@ fn runtime_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
     .runtime_config()
     .expect("baseline runtime projection");
 
-    for (raw, shape) in five_shapes() {
+    for (raw, shape) in four_shapes() {
         let mut values = base_values.clone();
         values.sandbox = Some(shape.clone());
         values.install.sandbox = Some(shape.clone());
@@ -123,7 +111,7 @@ fn dlx_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
     assert_eq!(baseline_env, Some(BTreeMap::new()), "baseline is live");
     assert_eq!(baseline_consent, ImplicitDlx::Never, "baseline is live");
 
-    for (raw, shape) in five_shapes() {
+    for (raw, shape) in four_shapes() {
         let mut dlx = base_dlx.clone();
         dlx.sandbox = Some(shape);
         let snapshot = resolve_effective_config(

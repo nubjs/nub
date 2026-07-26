@@ -6492,11 +6492,7 @@ fn node_argv0_initializes_one_project_config_snapshot() {
     let shim_dir = dir.join("nub-node-shim-test");
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::create_dir_all(&shim_dir).unwrap();
-    std::fs::write(
-        proj.join("nub.jsonc"),
-        r#"{ "sandbox": { "fs": false, "net": false, "vars": false } }"#,
-    )
-    .unwrap();
+    std::fs::write(proj.join("nub.jsonc"), r#"{ "sandbox": true }"#).unwrap();
     let node_shim = shim_dir.join("node");
     std::os::unix::fs::symlink(nub_binary(), &node_shim).expect("symlink nub to node");
     let log = dir.join("snapshot.log");

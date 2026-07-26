@@ -201,11 +201,7 @@ fn argv0_pm_shim_initializes_one_project_config_snapshot() {
     let work = tmp("config-snapshot");
     let proj = work.join("proj");
     std::fs::create_dir_all(&proj).unwrap();
-    std::fs::write(
-        proj.join("nub.jsonc"),
-        r#"{ "sandbox": { "fs": false, "net": false, "vars": false } }"#,
-    )
-    .unwrap();
+    std::fs::write(proj.join("nub.jsonc"), r#"{ "sandbox": true }"#).unwrap();
     let sys = work.join("sys");
     std::fs::create_dir_all(&sys).unwrap();
     let fake = fake_pm(&sys, "pnpm");

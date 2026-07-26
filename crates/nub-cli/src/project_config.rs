@@ -56,7 +56,6 @@ const INSTALL_KEYS: &[&str] = &[
     "sandbox",
 ];
 const DLX_KEYS: &[&str] = &["consent", "sandbox", "env"];
-const SANDBOX_AXIS_KEYS: &[&str] = &["fs", "net", "vars", "secrets"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -353,10 +352,14 @@ impl Default for RuntimeConfig {
 
 // ── sandbox skeleton ─────────────────────────────────────────────────────────
 
-/// The `sandbox` wrapper trichotomy (skeleton). Shape-validated here; the Phase-1
-/// compiler owns resolution (presets → policy, spread, layering, env grammar).
-/// Preset vs file-ref disambiguation: a path-like string (leading `./`/`../`/`/`/
-/// `~`, or carrying an extension) is a file-ref; a bare identifier is a preset.
+/// The `sandbox` wrapper shapes (skeleton). Shape-validated here; the sandbox
+/// compiler (`nub-sandbox`) owns resolution (presets → policy, `...:#/pointer`
+/// reuse, env grammar). Preset vs file-ref disambiguation: a path-like string
+/// (leading `./`/`../`/`/`/`~`, or carrying an extension) is a file-ref; a bare
+/// identifier is a preset. An inline `{ fs, net, … }` object is NOT a shape here —
+/// a granular policy lives in a dedicated file referenced by `FileRef`, so its
+/// `...:#/pointer` reuse resolves against the policy file (not arbitrary nub.jsonc
+/// siblings); `validate_sandbox` rejects an object with a migration error.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SandboxSetting {
     /// `false` — fully unjail.
@@ -367,35 +370,6 @@ pub enum SandboxSetting {
     Preset(String),
     /// A `"./file.json"` external sandbox config reference.
     FileRef(String),
-    /// The granular `{ fs, net, vars, secrets }` object form.
-    Granular(SandboxAxes),
-}
-
-/// The sandbox axes. Each is independently optional; the Phase-1 compiler assigns
-/// the decided floor/inheritance semantics. The environment is split by sensitivity
-/// into `vars` (non-secret) and `secrets` (redacted/brokered) — the same mechanism,
-/// different protection.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct SandboxAxes {
-    pub fs: Option<SandboxAxis>,
-    pub net: Option<SandboxAxis>,
-    pub vars: Option<SandboxAxis>,
-    pub secrets: Option<SandboxAxis>,
-}
-
-/// One axis value. Surface forms accepted here shape-only: `false | true | "*" |
-/// array | pattern-keyed object`. Entry semantics (polarity, per-axis value ladder,
-/// env grammar, and which axes actually accept `"*"`/`true`) are the Phase-1
-/// compiler's job — the object form keeps its raw values so nothing is lost before then.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SandboxAxis {
-    Bool(bool),
-    /// String form: the `vars: "*"` catch-all (the compiler owns the vars-only rule).
-    String(String),
-    /// Array form: ordered glob entries (validated all-strings).
-    Array(Vec<String>),
-    /// Pattern-keyed object form: `{ "<pattern>": <value> }`, values kept raw.
-    Object(BTreeMap<String, Value>),
 }
 
 /// Walk up from `start` (inclusive) to the filesystem root, returning the first
@@ -1213,18 +1187,26 @@ fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
     Ok(dlx)
 }
 
-/// The `sandbox` trichotomy skeleton. Shape only — the Phase-1 compiler resolves
-/// presets/spread/grammar; here we just classify the wrapper and validate axis
-/// forms so the schema is right.
+/// Classify the `sandbox` wrapper into one of the four shapes. Shape only — the
+/// sandbox compiler resolves presets/reuse/grammar; here we only classify the
+/// wrapper. An inline object is rejected (granular policies live in a file).
 fn validate_sandbox(v: &Value, path: &str) -> Result<SandboxSetting> {
     match v {
         Value::Bool(true) => Ok(SandboxSetting::Enabled),
         Value::Bool(false) => Ok(SandboxSetting::Disabled),
         Value::String(s) => Ok(classify_sandbox_string(s)),
-        Value::Object(_) => Ok(SandboxSetting::Granular(validate_sandbox_axes(v, path)?)),
+        // Inline granular objects are not a nub.jsonc shape (a granular policy's
+        // `...:#/pointer` reuse must resolve against a dedicated policy file, never
+        // arbitrary nub.jsonc siblings). Point the author at a file reference.
+        Value::Object(_) => Err(ConfigError::Type {
+            path: path.into(),
+            expected: "a boolean or string — a preset name or a \"./file.jsonc\" \
+                       reference (inline sandbox objects are not accepted; move the \
+                       policy into a file)",
+        }),
         _ => Err(ConfigError::Type {
             path: path.into(),
-            expected: "a boolean, string (preset or \"./file.json\"), or object",
+            expected: "a boolean or string (preset or \"./file.json\")",
         }),
     }
 }
@@ -1232,7 +1214,10 @@ fn validate_sandbox(v: &Value, path: &str) -> Result<SandboxSetting> {
 /// Preset (bare identifier) vs file-ref (path-like) — the disambiguation rule
 /// from the config spec. Unknown-preset validation is the compiler's job (it owns
 /// the closed preset vocabulary), so the skeleton only classifies the string.
-fn classify_sandbox_string(s: &str) -> SandboxSetting {
+///
+/// `pub(crate)` so the sandbox bridge reuses ONE classifier for the `--sandbox`
+/// flag string (the flag and a nub.jsonc value must classify identically).
+pub(crate) fn classify_sandbox_string(s: &str) -> SandboxSetting {
     let path_like = s.starts_with("./")
         || s.starts_with("../")
         || s.starts_with('/')
@@ -1242,45 +1227,6 @@ fn classify_sandbox_string(s: &str) -> SandboxSetting {
         SandboxSetting::FileRef(s.to_string())
     } else {
         SandboxSetting::Preset(s.to_string())
-    }
-}
-
-fn validate_sandbox_axes(v: &Value, path: &str) -> Result<SandboxAxes> {
-    let obj = as_object(v, path)?;
-    reject_unknown_keys(obj, path, SANDBOX_AXIS_KEYS)?;
-
-    let mut axes = SandboxAxes::default();
-    if let Some(v) = obj.get("fs") {
-        axes.fs = Some(validate_sandbox_axis(v, &child(path, "fs"))?);
-    }
-    if let Some(v) = obj.get("net") {
-        axes.net = Some(validate_sandbox_axis(v, &child(path, "net"))?);
-    }
-    if let Some(v) = obj.get("vars") {
-        axes.vars = Some(validate_sandbox_axis(v, &child(path, "vars"))?);
-    }
-    if let Some(v) = obj.get("secrets") {
-        axes.secrets = Some(validate_sandbox_axis(v, &child(path, "secrets"))?);
-    }
-    Ok(axes)
-}
-
-fn validate_sandbox_axis(v: &Value, path: &str) -> Result<SandboxAxis> {
-    match v {
-        Value::Bool(b) => Ok(SandboxAxis::Bool(*b)),
-        // Shape-only: the `vars: "*"` catch-all. The compiler enforces the vars-only
-        // rule (a `secrets` string is a shape error there).
-        Value::String(s) => Ok(SandboxAxis::String(s.clone())),
-        Value::Array(_) => Ok(SandboxAxis::Array(as_string_array(v, path)?)),
-        Value::Object(obj) => Ok(SandboxAxis::Object(
-            obj.iter()
-                .map(|(k, val)| (k.clone(), val.clone()))
-                .collect(),
-        )),
-        _ => Err(ConfigError::Type {
-            path: path.into(),
-            expected: "a boolean, string, array, or object",
-        }),
     }
 }
 
@@ -1657,14 +1603,17 @@ mod tests {
             r#"{
               "dlx": {
                 "consent": "never",
-                "sandbox": { "net": ["registry.npmjs.org"] },
+                "sandbox": "publish-jail",
                 "env": false
               }
             }"#,
         );
         assert_eq!(cfg.dlx.consent, Some(ImplicitDlx::Never));
         assert_eq!(cfg.dlx.env, Some(EnvSetting::Disabled));
-        assert!(matches!(cfg.dlx.sandbox, Some(SandboxSetting::Granular(_))));
+        assert_eq!(
+            cfg.dlx.sandbox,
+            Some(SandboxSetting::Preset("publish-jail".into()))
+        );
     }
 
     #[test]
@@ -1676,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_trichotomy_classifies_every_form() {
+    fn sandbox_shapes_classify_every_form() {
         assert_eq!(
             parse(r#"{ "sandbox": false }"#).sandbox,
             Some(SandboxSetting::Disabled)
@@ -1693,20 +1642,15 @@ mod tests {
             parse(r#"{ "sandbox": "./policy.json" }"#).sandbox,
             Some(SandboxSetting::FileRef("./policy.json".into()))
         );
+        // An inline object is no longer a shape — it is a migration error.
         assert!(matches!(
-            parse(r#"{ "sandbox": { "fs": {} } }"#).sandbox,
-            Some(SandboxSetting::Granular(_))
+            parse_project_config(r#"{ "sandbox": { "fs": {} } }"#),
+            Err(ConfigError::Type { .. })
         ));
     }
 
     #[test]
-    fn sandbox_five_shapes_are_lossless_and_inert_in_the_snapshot() {
-        let granular = serde_json::json!({
-            "fs": { "./data": { "read": true, "write": false } },
-            "net": [],
-            "vars": "*",
-            "secrets": false
-        });
+    fn sandbox_four_shapes_are_lossless_and_inert_in_the_snapshot() {
         let cases = vec![
             ("false".to_string(), SandboxSetting::Disabled),
             ("true".to_string(), SandboxSetting::Enabled),
@@ -1717,18 +1661,6 @@ mod tests {
             (
                 r#""./team.json""#.to_string(),
                 SandboxSetting::FileRef("./team.json".into()),
-            ),
-            (
-                granular.to_string(),
-                SandboxSetting::Granular(SandboxAxes {
-                    fs: Some(SandboxAxis::Object(BTreeMap::from([(
-                        "./data".into(),
-                        serde_json::json!({ "read": true, "write": false }),
-                    )]))),
-                    net: Some(SandboxAxis::Array(Vec::new())),
-                    vars: Some(SandboxAxis::String("*".into())),
-                    secrets: Some(SandboxAxis::Bool(false)),
-                }),
             ),
         ];
 
@@ -1752,58 +1684,31 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_axes_accept_string_array_and_object_forms() {
-        let cfg = parse(
-            r#"{
-              "sandbox": {
-                "vars": ["NODE_ENV", "VITE_*", "!*_TOKEN"],
-                "secrets": ["DB_URL"],
-                "fs": { "./data": "rw", "~/.ssh": false },
-                "net": { "*.sentry.io": true, "*": false }
-              }
-            }"#,
-        );
-        let Some(SandboxSetting::Granular(axes)) = cfg.sandbox else {
-            panic!("expected granular sandbox");
-        };
-        assert_eq!(
-            axes.vars,
-            Some(SandboxAxis::Array(vec![
-                "NODE_ENV".into(),
-                "VITE_*".into(),
-                "!*_TOKEN".into()
-            ]))
-        );
-        assert_eq!(
-            axes.secrets,
-            Some(SandboxAxis::Array(vec!["DB_URL".into()]))
-        );
-        assert!(matches!(axes.fs, Some(SandboxAxis::Object(_))));
-        assert!(matches!(axes.net, Some(SandboxAxis::Object(_))));
-        // The `vars: "*"` string catch-all passes the shape gate (the compiler owns
-        // the vars-only rule and the secrets-string rejection).
-        let star = parse(r#"{ "sandbox": { "vars": "*" } }"#);
-        let Some(SandboxSetting::Granular(axes)) = star.sandbox else {
-            panic!("expected granular sandbox");
-        };
-        assert_eq!(axes.vars, Some(SandboxAxis::String("*".into())));
-    }
-
-    #[test]
-    fn sandbox_axis_array_rejects_non_strings() {
-        let err = parse_project_config(r#"{ "sandbox": { "vars": ["OK", 5] } }"#).unwrap_err();
-        assert!(matches!(err, ConfigError::Type { .. }));
-    }
-
-    #[test]
-    fn unknown_sandbox_axis_fails_loud() {
-        let err = parse_project_config(r#"{ "sandbox": { "disk": true } }"#).unwrap_err();
-        match err {
-            ConfigError::UnknownKey { path, key } => {
-                assert_eq!(path, "sandbox");
-                assert_eq!(key, "disk");
+    fn inline_sandbox_object_is_rejected_with_a_migration_error() {
+        // An inline `{ … }` at any sandbox position is a Type error pointing the
+        // author at a file reference — a granular policy belongs in a dedicated
+        // file so its reuse pointers cannot reach arbitrary nub.jsonc siblings.
+        for (text, path) in [
+            (r#"{ "sandbox": { "fs": false } }"#, "sandbox"),
+            (
+                r#"{ "install": { "sandbox": { "net": false } } }"#,
+                "install.sandbox",
+            ),
+            (r#"{ "dlx": { "sandbox": { "vars": [] } } }"#, "dlx.sandbox"),
+        ] {
+            match parse_project_config(text).unwrap_err() {
+                ConfigError::Type {
+                    path: got,
+                    expected,
+                } => {
+                    assert_eq!(got, path, "{text}");
+                    assert!(
+                        expected.contains("inline sandbox objects are not accepted"),
+                        "{text}: {expected}"
+                    );
+                }
+                other => panic!("{text}: expected a Type migration error, got {other:?}"),
             }
-            other => panic!("expected UnknownKey, got {other:?}"),
         }
     }
 

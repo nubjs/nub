@@ -2,8 +2,8 @@
 //! per-field tests in the sibling `tests` module (unknown root/install keys,
 //! type errors, duration grammar, loader vocabulary): this matrix owns the
 //! `$schema` typing rule, unknown-key rejection at every REMAINING object level
-//! (`dlx`, `install.sandbox` axes, `dlx.sandbox` axes), wrapper-type errors at
-//! the nested positions, and one full-surface golden shape.
+//! (`dlx`), wrapper-type errors at the nested positions (including the inline-object
+//! migration error at every sandbox position), and one full-surface golden shape.
 
 use super::*;
 
@@ -13,7 +13,7 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
         r#"{
           "$schema": "https://nubjs.com/schema/nub.json",
           "nodeCompat": false,
-          "sandbox": { "fs": false, "net": ["registry.npmjs.org"], "vars": true },
+          "sandbox": true,
           "install": {
             "nodeLinker": "isolated",
             "sandbox": "./install-policy.json"
@@ -27,11 +27,7 @@ fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
     )
     .expect("the full-surface golden shape is valid");
     assert_eq!(cfg.node_compat, Some(false));
-    assert!(
-        matches!(cfg.sandbox, Some(SandboxSetting::Granular(_))),
-        "top-level sandbox: {:?}",
-        cfg.sandbox
-    );
+    assert_eq!(cfg.sandbox, Some(SandboxSetting::Enabled));
     assert_eq!(
         cfg.install.sandbox,
         Some(SandboxSetting::FileRef("./install-policy.json".into()))
@@ -63,10 +59,11 @@ fn schema_field_must_be_a_string() {
 
 #[test]
 fn schema_key_is_blessed_at_the_root_only() {
+    // `sandbox` is no longer an object level (an inline object is a migration
+    // error), so `install` and `dlx` are the nested object levels that carry keys.
     for (text, path) in [
         (r#"{ "install": { "$schema": "x" } }"#, "install"),
         (r#"{ "dlx": { "$schema": "x" } }"#, "dlx"),
-        (r#"{ "sandbox": { "$schema": "x" } }"#, "sandbox"),
     ] {
         let err = parse_project_config(text).expect_err("nested $schema must fail loud");
         match err {
@@ -84,32 +81,17 @@ fn schema_key_is_blessed_at_the_root_only() {
 
 #[test]
 fn unknown_keys_fail_loud_at_every_nested_object_level() {
-    // Root, `install`, and top-level `sandbox` axes are covered by the sibling
-    // tests module; these are the remaining object levels.
-    for (text, path, key) in [
-        (r#"{ "dlx": { "consnt": "never" } }"#, "dlx", "consnt"),
-        (
-            r#"{ "install": { "sandbox": { "disk": true } } }"#,
-            "install.sandbox",
-            "disk",
-        ),
-        (
-            r#"{ "dlx": { "sandbox": { "network": [] } } }"#,
-            "dlx.sandbox",
-            "network",
-        ),
-    ] {
-        let err = parse_project_config(text).expect_err(&format!("{text} must fail loud"));
-        match err {
-            ConfigError::UnknownKey {
-                path: got_path,
-                key: got_key,
-            } => {
-                assert_eq!(got_path, path, "{text}");
-                assert_eq!(got_key, key, "{text}");
-            }
-            other => panic!("{text}: expected UnknownKey, got {other:?}"),
+    // Root and `install` are covered by the sibling tests module; `dlx` is the
+    // remaining object level. (A sandbox value is never an object anymore, so its
+    // keys are not an unknown-key surface — the inline-object migration error is
+    // asserted in `wrong_wrapper_types_report_the_nested_path`.)
+    let text = r#"{ "dlx": { "consnt": "never" } }"#;
+    match parse_project_config(text).expect_err("dlx unknown key must fail loud") {
+        ConfigError::UnknownKey { path, key } => {
+            assert_eq!(path, "dlx");
+            assert_eq!(key, "consnt");
         }
+        other => panic!("{text}: expected UnknownKey, got {other:?}"),
     }
 }
 
@@ -120,19 +102,21 @@ fn wrong_wrapper_types_report_the_nested_path() {
         (
             r#"{ "install": { "sandbox": 5 } }"#,
             "install.sandbox",
-            "a boolean, string (preset or \"./file.json\"), or object",
+            "a boolean or string (preset or \"./file.json\")",
         ),
         (
             r#"{ "dlx": { "sandbox": 5 } }"#,
             "dlx.sandbox",
-            "a boolean, string (preset or \"./file.json\"), or object",
+            "a boolean or string (preset or \"./file.json\")",
         ),
         (
-            // A string is now a valid axis shape (`vars: "*"`), so use a number to
-            // exercise the axis-value type error.
+            // An inline object at any sandbox position is rejected with the
+            // migration error (granular policies belong in a file).
             r#"{ "dlx": { "sandbox": { "fs": 5 } } }"#,
-            "dlx.sandbox.fs",
-            "a boolean, string, array, or object",
+            "dlx.sandbox",
+            "a boolean or string — a preset name or a \"./file.jsonc\" \
+             reference (inline sandbox objects are not accepted; move the \
+             policy into a file)",
         ),
     ] {
         let err = parse_project_config(text).expect_err(&format!("{text} must fail loud"));
