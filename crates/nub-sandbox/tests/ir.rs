@@ -6,8 +6,8 @@ mod common;
 use nub_sandbox::CommandSpec;
 #[cfg(not(target_os = "linux"))]
 use nub_sandbox::apply;
-use nub_sandbox::compiler::compile;
 use nub_sandbox::compiler::CompileError;
+use nub_sandbox::compiler::compile;
 use nub_sandbox::conformance::{Fixture, run_fixture};
 use nub_sandbox::policy::SandboxPolicy;
 use serde_json::json;

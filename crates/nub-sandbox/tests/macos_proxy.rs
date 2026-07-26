@@ -402,7 +402,8 @@ fn ssrf_metadata_target_dropped_even_when_policy_admits_it() {
     let echo = echo_server();
     let port = echo.port().to_string();
     // Admit BOTH the link-local range (so gate 1 passes for the metadata IP) and loopback.
-    let policy = json!({ "fs": true, "net": ["169.254.0.0/16", "127.0.0.0/8", "*.allowed.example"] });
+    let policy =
+        json!({ "fs": true, "net": ["169.254.0.0/16", "127.0.0.0/8", "*.allowed.example"] });
 
     assert_eq!(
         f.run(

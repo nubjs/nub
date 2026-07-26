@@ -592,10 +592,9 @@ fn parse_broker_hosts(value: &Value, path: &str) -> Result<Vec<String>, CompileE
         let host = as_str(item, &p)?;
         validate_broker_host(host, &p)?;
         let normalized = crate::matcher::host::strip_trailing_dot(host);
-        if out
-            .iter()
-            .any(|existing| crate::matcher::host::strip_trailing_dot(existing).eq_ignore_ascii_case(normalized))
-        {
+        if out.iter().any(|existing| {
+            crate::matcher::host::strip_trailing_dot(existing).eq_ignore_ascii_case(normalized)
+        }) {
             return Err(CompileError::shape(
                 &p,
                 &format!("duplicate brokered host `{host}`"),
@@ -767,7 +766,11 @@ pub(super) fn transpose_brokers(net: &mut NetPolicy, intents: &[BrokerIntent]) {
                 crate::matcher::host::strip_trailing_dot(&b.host).eq_ignore_ascii_case(&host)
             }) {
                 Some(existing) => {
-                    if !existing.env.iter().any(|e| broker_env_key_eq(e, &intent.secret)) {
+                    if !existing
+                        .env
+                        .iter()
+                        .any(|e| broker_env_key_eq(e, &intent.secret))
+                    {
                         existing.env.push(intent.secret.clone());
                     }
                 }

@@ -1548,10 +1548,7 @@ fn broker_compiles_to_a_broker_and_engages_tls_inspect() {
     assert!(!serialized.contains("real-parent-secret"));
     // The proxy auto-starts (Auto) and derives the TlsInspect tier: credential
     // injection cannot work without a terminating proxy.
-    assert!(matches!(
-        p.net.mode,
-        nub_sandbox::policy::ProxyMode::Auto
-    ));
+    assert!(matches!(p.net.mode, nub_sandbox::policy::ProxyMode::Auto));
     assert!(matches!(p.net.inspection, Inspection::TlsInspect));
 }
 
@@ -1585,10 +1582,7 @@ fn fine_grained_allow_auto_starts_the_proxy_at_connection_tier() {
     let ctx = common::ctx(true, &[]);
     let p = compile(&json!({ "net": ["api.example.com"] }), &ctx).unwrap();
     assert!(p.net.brokers.is_empty());
-    assert!(matches!(
-        p.net.mode,
-        nub_sandbox::policy::ProxyMode::Auto
-    ));
+    assert!(matches!(p.net.mode, nub_sandbox::policy::ProxyMode::Auto));
     assert!(
         matches!(p.net.inspection, Inspection::Connection),
         "a host-only allow must not engage TLS termination"
@@ -1743,7 +1737,11 @@ fn brokerto_rejects_bad_secret_keys_hosts_and_value_combo() {
         json!({ "TMPDIR": { "brokerTo": ["api.example.com"] } }),
     ] {
         assert!(
-            compile(&json!({ "net": ["api.example.com"], "secrets": secrets }), &ctx).is_err(),
+            compile(
+                &json!({ "net": ["api.example.com"], "secrets": secrets }),
+                &ctx
+            )
+            .is_err(),
             "bad brokered secret key must be rejected: {secrets}"
         );
     }
