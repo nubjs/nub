@@ -129,31 +129,49 @@ fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathB
 /// stay in agreement.
 const NUB_PM_CACHE_PATTERN: &str = "$cache/nub/pm";
 
-/// Grant the build jail's two narrowed READ roots: the consumer's DEPENDENCY TREE and
-/// nub's own PM cache. Together these replace what were once two much broader grants —
-/// `"./"` (the entire consuming project) and `$tooldirs` (16 ecosystem cache patterns).
+/// Grant the build jail's narrowed READ set: the consumer's DEPENDENCY TREE, the
+/// consumer's top-level MANIFEST, and nub's own PM cache. Together these replace what
+/// were once two much broader grants — `"./"` (the entire consuming project) and
+/// `$tooldirs` (16 ecosystem cache patterns).
 ///
-/// Measured, not reasoned: a 34-package real-postinstall corpus run under bubblewrap
-/// (`.fray/sandbox-minimum-readset.md`) passes 34/34 with exactly this pair substituted
-/// for the broad two — identical to the baseline. What the narrowing buys is the whole
-/// credential surface those grants carried: under `"./"` a dependency's install script
-/// could read the consumer's source, its config, `.git/hooks/`, and `.github/workflows/`.
+/// Measured, not reasoned. A 34-package read-ladder study
+/// (`.fray/sandbox-minimum-readset.md`) isolated which grants are load-bearing, and a
+/// 311-package trust-list corpus (`.fray/sandbox-readset-fullcorpus.md`) then ran the
+/// whole set at scale: of the 219 packages that pass today, 217 are unaffected and the
+/// 2 that regressed drove the manifest grant below. What the narrowing buys is the
+/// credential surface those broad grants carried — under `"./"` a dependency's install
+/// script could read the consumer's source, config, `.git/hooks/`, and
+/// `.github/workflows/`.
 ///
-/// Why neither can shrink further:
+/// Why each is irreducible:
 /// - a lifecycle script's OWN dependencies are HOISTED to the consumer's `node_modules`,
 ///   so `node-gyp-build` and `prebuild-install` resolve out of `<project>/node_modules/.bin`
 ///   rather than the package's own directory. Dropping the project read outright fails 27
 ///   of 33 packages; keeping only `node_modules` costs nothing.
+/// - `package.json` is granted as ONE FILE, never the directory that holds it. Two
+///   packages at scale read the consumer's top-level manifest and crash with an uncaught
+///   `ENOENT` without it: `@sentry/capacitor` cross-checks its version against sibling
+///   `@sentry/*` entries, and `simple-git-hooks` looks for its own config field. It is a
+///   non-secret manifest the package is already declared in, so the exposure is
+///   negligible — and confining it to the file is what keeps the rest of the project out.
 /// - nub bootstraps its OWN node-gyp into `<cache>/nub/pm/tools/node-gyp`
 ///   (`node_gyp_bootstrap.rs`) — a TOOLCHAIN grant wearing a cache-directory name.
-///   Removing it fails the entire 16-package node-gyp cohort. The other 15 `$tooldirs`
-///   patterns (`~/.cargo/registry`, `~/.m2/repository`, the pnpm/yarn/bun stores, …)
-///   were reached by no package in the corpus.
+///   Under nub a confined script skips the ambient-PATH probe entirely, so this subtree
+///   (including the `lazy-bin` shim) is the ONLY node-gyp a native build can reach. The
+///   other 15 `$tooldirs` patterns (`~/.cargo/registry`, `~/.m2/repository`, the
+///   pnpm/yarn/bun stores, …) were reached by no package in either corpus.
 ///
-/// SPECULATIVE origin is load-bearing, not incidental: both roots are legitimately absent
-/// on a real host — a project whose dependencies are not installed, a machine where nub
-/// has never bootstrapped node-gyp — and `compile_mount_plan` REFUSES a missing AUTHORED
-/// source, which would abort every confined script there.
+/// SPECULATIVE origin is load-bearing, not incidental: every root here is legitimately
+/// absent on a real host — a project whose dependencies are not installed, a manifest-less
+/// directory, a machine where nub has never bootstrapped node-gyp — and
+/// `compile_mount_plan` REFUSES a missing AUTHORED source, which would abort every
+/// confined script there.
+///
+/// ORDER: outermost path first, so each later grant nests INSIDE the one before it in
+/// bwrap's argv. The project root is deliberately absent today (nothing needs it), which
+/// leaves bwrap to auto-create it as writable scaffolding; if that has to become an empty
+/// read-only bind to restore a loud `EROFS`, it slots in at the head of this list and the
+/// nested grants keep working unchanged.
 ///
 /// Front-inserted so the surface's `package_dir` rw entry stays later and keeps winning.
 pub fn grant_build_jail_dependency_reads(name: &str, policy: &mut SandboxPolicy, ctx: &CompileCtx) {
@@ -162,6 +180,7 @@ pub fn grant_build_jail_dependency_reads(name: &str, policy: &mut SandboxPolicy,
     }
     let mut grants = Vec::new();
     for root in [
+        ctx.homes.project.join("package.json"),
         ctx.homes.project.join("node_modules"),
         PathBuf::from(crate::matcher::path::expand_symbolic(
             NUB_PM_CACHE_PATTERN,

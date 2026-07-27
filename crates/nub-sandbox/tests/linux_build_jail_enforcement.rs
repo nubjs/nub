@@ -142,8 +142,22 @@ fn assert_no_leak(stdout: &str, sentinel: &str, what: &str) {
 
 /// The production shape: a native build/postinstall reads its own source and writes its
 /// own package dir, while every secret class the jail promises to withhold stays
-/// withheld — the home secret (read AND write), the project `.env` floor at root and
-/// nested depth, the `.npmrc` floor at both depths, and `/etc/shadow`.
+/// withheld — the home secret (read AND write), the `.env` floor at root and nested
+/// depth, the `.npmrc` floor at both depths, and `/etc/shadow`.
+///
+/// The `.env*`/`.npmrc` fixture sits in the PACKAGE DIR, the one writable subtree, which
+/// is where the floor is now the only thing standing between a secret and an
+/// attacker-authored postinstall. The consumer's own `.env` needs no floor any more: the
+/// narrowed read set withholds the whole project outside `node_modules` and `package.json`
+/// outright, which this test also pins.
+///
+/// KNOWN GAP, pre-existing and unchanged by the narrowing: the Linux deny-walk skips any
+/// directory named `node_modules` (`DENY_WALK_SKIP_DIRS`, a cost decision), so a `.env`
+/// VENDORED inside some other dependency is not masked. It was equally readable under the
+/// old whole-project grant, so nothing regressed — but it is not covered here, and a test
+/// asserting otherwise would fail. Those files ship inside a public npm tarball; the
+/// consumer's own secrets are the ones this jail protects, and they are now out of reach
+/// entirely.
 #[test]
 fn build_jail_confines_writes_and_withholds_every_secret_class() {
     if skip_without_bwrap() {
@@ -158,38 +172,53 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
     let package_dir = project.join("node_modules/.aube/native@1.0.0/node_modules/native");
     std::fs::create_dir_all(&package_dir).unwrap();
     std::fs::create_dir_all(home.join(".ssh")).unwrap();
-    std::fs::create_dir_all(project.join("apps/web")).unwrap();
-    std::fs::create_dir_all(project.join("packages/api")).unwrap();
+    let deps = project.join("node_modules");
+    std::fs::create_dir_all(deps.join("vendored")).unwrap();
+    // Project source OUTSIDE `node_modules` — no longer in the read set at all.
+    std::fs::create_dir_all(project.join(".git/hooks")).unwrap();
 
     std::fs::write(home.join(".ssh/id_rsa"), b"HOME-SECRET-DO-NOT-LEAK").unwrap();
     std::fs::write(package_dir.join("binding.gyp"), b"{}").unwrap();
-    // The `.env*` floor, at the project root and nested in real source. Both sit inside
-    // the build-jail's `"./"` project READ grant, so only the reasserted secret floor
-    // (Linux: the recursive deny-snapshot's per-file mask) keeps their bytes out.
-    std::fs::write(project.join(".env"), b"ROOT-ENV-SECRET").unwrap();
-    std::fs::write(project.join("apps/web/.env"), b"NESTED-ENV-SECRET").unwrap();
+    // The `.env*`/`.npmrc` floor inside the PACKAGE DIR — the writable subtree, where the
+    // floor is the only thing withholding a secret — at its root and nested inside it.
+    std::fs::create_dir_all(package_dir.join("src")).unwrap();
+    std::fs::write(package_dir.join(".env"), b"ROOT-ENV-SECRET").unwrap();
+    std::fs::write(package_dir.join("src/.env"), b"NESTED-ENV-SECRET").unwrap();
     std::fs::write(
-        project.join(".npmrc"),
+        package_dir.join(".npmrc"),
         b"//registry.npmjs.org/:_authToken=ROOT-NPMRC-SECRET",
     )
     .unwrap();
     std::fs::write(
-        project.join("packages/api/.npmrc"),
+        package_dir.join("src/.npmrc"),
         b"//registry.npmjs.org/:_authToken=NESTED-NPMRC-SECRET",
     )
     .unwrap();
     // Readable sentinels at the SAME DEPTH as each denied file. If the floor were
     // enforced by blanking a directory — or if the child simply never started — these
     // would be missing too, and the denials above would be worthless.
-    std::fs::write(project.join("README.md"), b"ROOT-SIBLING-VISIBLE").unwrap();
+    std::fs::write(package_dir.join("README.md"), b"ROOT-SIBLING-VISIBLE").unwrap();
     std::fs::write(
-        project.join("apps/web/index.js"),
+        package_dir.join("src/index.js"),
         b"NESTED-ENV-SIBLING-VISIBLE",
     )
     .unwrap();
     std::fs::write(
-        project.join("packages/api/index.js"),
+        package_dir.join("src/binding.cc"),
         b"NESTED-NPMRC-SIBLING-VISIBLE",
+    )
+    .unwrap();
+    // A SIBLING dependency: readable, because a lifecycle script's own deps and their
+    // `.bin` shims are hoisted here. This is the grant that replaced the whole-project one.
+    std::fs::write(deps.join("vendored/index.js"), b"SIBLING-DEP-VISIBLE").unwrap();
+    // The consumer's top-level manifest — granted as ONE FILE, because two packages at
+    // corpus scale crash with an uncaught ENOENT without it.
+    std::fs::write(project.join("package.json"), b"CONSUMER-MANIFEST-VISIBLE").unwrap();
+    // The REST of the consumer's tree, which the narrowed read set withholds outright.
+    std::fs::write(project.join("secrets.ts"), b"CONSUMER-SOURCE-DO-NOT-LEAK").unwrap();
+    std::fs::write(
+        project.join(".git/hooks/pre-commit"),
+        b"CONSUMER-GIT-HOOK-DO-NOT-LEAK",
     )
     .unwrap();
 
@@ -204,16 +233,21 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
          echo built > build_out.txt 2>/dev/null && echo PKG_WRITE_OK || echo PKG_WRITE_FAIL\n\
          echo evil > '{secret_write}' 2>/dev/null && echo SECRET_WROTE || echo SECRET_WRITE_BLOCKED\n\
          {home_secret}{root_env}{nested_env}{root_npmrc}{nested_npmrc}\
-         {root_sibling}{env_sibling}{npmrc_sibling}{passwd}{shadow}",
+         {root_sibling}{env_sibling}{npmrc_sibling}{dep_sibling}{manifest}{source}{githook}\
+         {passwd}{shadow}",
         secret_write = secret_write.display(),
         home_secret = probe("HOME_SECRET", &home.join(".ssh/id_rsa")),
-        root_env = probe("ROOT_ENV", &project.join(".env")),
-        nested_env = probe("NESTED_ENV", &project.join("apps/web/.env")),
-        root_npmrc = probe("ROOT_NPMRC", &project.join(".npmrc")),
-        nested_npmrc = probe("NESTED_NPMRC", &project.join("packages/api/.npmrc")),
-        root_sibling = probe("ROOT_SIBLING", &project.join("README.md")),
-        env_sibling = probe("ENV_SIBLING", &project.join("apps/web/index.js")),
-        npmrc_sibling = probe("NPMRC_SIBLING", &project.join("packages/api/index.js")),
+        root_env = probe("ROOT_ENV", &package_dir.join(".env")),
+        nested_env = probe("NESTED_ENV", &package_dir.join("src/.env")),
+        root_npmrc = probe("ROOT_NPMRC", &package_dir.join(".npmrc")),
+        nested_npmrc = probe("NESTED_NPMRC", &package_dir.join("src/.npmrc")),
+        root_sibling = probe("ROOT_SIBLING", &package_dir.join("README.md")),
+        env_sibling = probe("ENV_SIBLING", &package_dir.join("src/index.js")),
+        npmrc_sibling = probe("NPMRC_SIBLING", &package_dir.join("src/binding.cc")),
+        dep_sibling = probe("DEP_SIBLING", &deps.join("vendored/index.js")),
+        manifest = probe("CONSUMER_MANIFEST", &project.join("package.json")),
+        source = probe("CONSUMER_SOURCE", &project.join("secrets.ts")),
+        githook = probe("CONSUMER_GITHOOK", &project.join(".git/hooks/pre-commit")),
         passwd = probe("PASSWD", Path::new("/etc/passwd")),
         shadow = probe("SHADOW", Path::new("/etc/shadow")),
     );
@@ -255,18 +289,46 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
         "the home secret file is untouched"
     );
 
+    // The dependency tree is readable — the grant that replaced the whole-project one.
+    assert!(
+        stdout.contains("SIBLING-DEP-VISIBLE") && stdout.contains("DEP_SIBLING_READ_OK"),
+        "a sibling dependency must stay readable — the hoisted `.bin` shims live there:\n{stdout}"
+    );
+    // The consumer's top-level manifest is readable as ONE FILE; the REST of its tree is
+    // not. That pairing is the tightening the read-set measurement bought, and it is what
+    // stops a dependency's install script reading the repo it is being installed into.
+    assert!(
+        stdout.contains("CONSUMER-MANIFEST-VISIBLE")
+            && stdout.contains("CONSUMER_MANIFEST_READ_OK"),
+        "the consumer's top-level package.json must be readable:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("CONSUMER_SOURCE_DENIED") && stdout.contains("CONSUMER_GITHOOK_DENIED"),
+        "the consuming project beyond package.json + node_modules must be unreadable:\n{stdout}"
+    );
+    assert_no_leak(&stdout, "CONSUMER-SOURCE-DO-NOT-LEAK", "consumer source");
+    assert_no_leak(
+        &stdout,
+        "CONSUMER-GIT-HOOK-DO-NOT-LEAK",
+        "a consumer git hook",
+    );
+
     // The `.env*` floor. Deliberately NOT asserted as a denial: the dotenv mask is
     // present-but-empty by design, so the contract is that no BYTE of either file
     // reaches the child.
-    assert_no_leak(&stdout, "ROOT-ENV-SECRET", "the project root .env");
-    assert_no_leak(&stdout, "NESTED-ENV-SECRET", "a nested project .env");
+    assert_no_leak(&stdout, "ROOT-ENV-SECRET", "a package-dir root .env");
+    assert_no_leak(&stdout, "NESTED-ENV-SECRET", "a nested package-dir .env");
     // `.npmrc` has no compatibility mask — it is a hard denial at both depths.
     assert!(
         stdout.contains("ROOT_NPMRC_DENIED") && stdout.contains("NESTED_NPMRC_DENIED"),
-        "a project .npmrc must be unreadable at any depth:\n{stdout}"
+        "a package-dir .npmrc must be unreadable at any depth:\n{stdout}"
     );
-    assert_no_leak(&stdout, "ROOT-NPMRC-SECRET", "the project root .npmrc");
-    assert_no_leak(&stdout, "NESTED-NPMRC-SECRET", "a nested project .npmrc");
+    assert_no_leak(&stdout, "ROOT-NPMRC-SECRET", "a package-dir root .npmrc");
+    assert_no_leak(
+        &stdout,
+        "NESTED-NPMRC-SECRET",
+        "a nested package-dir .npmrc",
+    );
 
     // The minimal root mounts a NARROWED `/etc` — the measured loader/NSS/DNS/TLS floor,
     // not the directory. `/etc/passwd` is in that floor and is the readable control: it
@@ -360,6 +422,10 @@ fn build_jail_denies_egress_to_a_reachable_listener() {
 /// `workspaces: ["../**"]`. Re-running the identical script with ONE variable changed —
 /// the anchor moved to the sibling — makes the sibling readable, which is what turns the
 /// anchored run's denial into evidence rather than a hollow pass.
+///
+/// The control's probe sits in the sibling's `node_modules` because a project anchor now
+/// reaches only the dependency tree, not the project. A probe outside it would be denied
+/// in both runs and the control would prove nothing.
 #[test]
 fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steered_anchor() {
     if skip_without_bwrap() {
@@ -372,9 +438,13 @@ fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steere
     let sibling = root.join("sibling-scratch");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(checkout.join("src")).unwrap();
-    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::create_dir_all(sibling.join("node_modules")).unwrap();
     std::fs::write(home.join(".nub-secret"), b"HOME-SECRET-DO-NOT-LEAK").unwrap();
-    std::fs::write(sibling.join("scratch.txt"), b"SIBLING-SCRATCH-DO-NOT-LEAK").unwrap();
+    std::fs::write(
+        sibling.join("node_modules/scratch.txt"),
+        b"SIBLING-SCRATCH-DO-NOT-LEAK",
+    )
+    .unwrap();
     std::fs::write(checkout.join("src/own.txt"), b"CHECKOUT-OWN-FILE").unwrap();
     std::os::unix::fs::symlink(&home, checkout.join("evil")).unwrap();
 
@@ -383,7 +453,7 @@ fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steere
          echo built > out.txt 2>/dev/null && echo OWN_WRITE_OK || echo OWN_WRITE_FAIL\n\
          {symlinked}{sibling_file}",
         symlinked = probe("SYMLINK", &checkout.join("evil/.nub-secret")),
-        sibling_file = probe("SIBLING", &sibling.join("scratch.txt")),
+        sibling_file = probe("SIBLING", &sibling.join("node_modules/scratch.txt")),
     );
     let run = |project: &Path| -> String {
         Jail {

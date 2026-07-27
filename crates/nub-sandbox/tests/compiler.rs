@@ -545,18 +545,25 @@ fn build_jail_preset_expands() {
             && matches!(d.access, nub_sandbox::policy::FsAccess::Read),
         "static build-jail reads the dependency tree but does not write it"
     );
-    // The CONSUMING PROJECT outside `node_modules` is not in the read set at all. This is
-    // the tightening the read-set measurement bought: a dependency's install script cannot
-    // read the consumer's source, its config, its `.git/hooks/`, or its CI workflows.
+    // The consumer's top-level manifest is readable as ONE FILE — two packages at corpus
+    // scale crash with an uncaught ENOENT without it — while the directory holding it is
+    // not. That pairing is the tightening the read-set measurement bought: a dependency's
+    // install script cannot read the consumer's source, its config, its `.git/hooks/`, or
+    // its CI workflows.
+    assert!(
+        matches!(m.decide(&proj.join("package.json")).effect, Effect::Allow),
+        "build-jail reads the consumer's top-level package.json"
+    );
     for outside in [
         "src/app.ts",
-        "package.json",
+        "tsconfig.json",
         ".git/hooks/pre-commit",
         ".github/workflows/ci.yml",
     ] {
         assert!(
             matches!(m.decide(&proj.join(outside)).effect, Effect::Deny),
-            "build-jail must not read <proj>/{outside} — only the dependency tree"
+            "build-jail must not read <proj>/{outside} — only the dependency tree \
+             and the top-level manifest"
         );
     }
     // The secret + `.env*` floors hold even under the dependency-tree read. A vendored
@@ -590,18 +597,22 @@ fn build_jail_preset_expands() {
     // The toolchain read is nub's OWN PM cache — where it bootstraps node-gyp — and NOT
     // the broad `$tooldirs` set the jail used to take. The other ecosystems' caches carry
     // no part of a Node build closure and are out of the read set.
-    assert!(
-        matches!(
-            m.decide(
-                &common::homes()
-                    .cache
-                    .join("nub/pm/tools/node-gyp/bin/node-gyp.js")
-            )
-            .effect,
-            Effect::Allow
-        ),
-        "build-jail grants nub's own PM cache (its node-gyp) read"
-    );
+    //
+    // Both real entry points are pinned, because a confined script now resolves node-gyp
+    // ONLY from here: the interposition skips the ambient-PATH probe outright, so a host's
+    // global node-gyp is never reachable and these two paths are the whole toolchain.
+    for gyp in [
+        "nub/pm/tools/node-gyp/v12/node_modules/.bin/node-gyp",
+        "nub/pm/tools/node-gyp/lazy-bin/node-gyp",
+    ] {
+        assert!(
+            matches!(
+                m.decide(&common::homes().cache.join(gyp)).effect,
+                Effect::Allow
+            ),
+            "build-jail must grant nub's bootstrapped node-gyp: {gyp}"
+        );
+    }
     for tooldir in [
         ".cargo/registry/pkg",
         ".m2/repository/x",
