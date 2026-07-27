@@ -11,11 +11,17 @@
 //
 // All polyfills feature-detect and bow out if the global is already present.
 //
-// Node 22.15+ (our floor) already has: navigator, navigator.locks,
-// navigator.hardwareConcurrency, WebSocket. No polyfills needed.
+// nub's SUPPORT floor is Node 18.19; 22.15 is the FAST-TIER boundary, NOT the
+// floor. Judging "do we need a polyfill?" against 22.15 silently skips the
+// 18.19–21.x compat tier — which is how Promise.withResolvers (native since Node
+// 22.0) went unpolyfilled here until 2026-07, on a "native on our floor" verdict
+// that was written when the floor really was 22.15.
 //
-// Node 24+ adds: URLPattern, RegExp.escape, Error.isError, Promise.try.
-// We polyfill those on Node 22.x only.
+// Node 22.15+ already has: navigator, navigator.locks,
+// navigator.hardwareConcurrency, WebSocket.
+//
+// Node 22+ adds: Promise.withResolvers. Node 24+ adds: URLPattern,
+// RegExp.escape, Error.isError, Promise.try. Each is polyfilled below its line.
 //
 // No Node version ships: Temporal, reportError, browser-shape Worker,
 // Promise.allKeyed / Promise.allSettledKeyed.
@@ -268,6 +274,7 @@ function installSyncPolyfills(preloaded) {
   installUint8ArrayBase64();
   installDisposableStacks();
   installKeyedPromiseCombinators();
+  installPromiseWithResolvers();
 }
 
 // ── Uint8Array base64/hex (TC39 Stage 3; native Node 25+, absent below) ──
@@ -823,27 +830,49 @@ function installDisposableStacks() {
 //
 // Both are installed non-enumerable to match how the engine will define them
 // (and this file's additive contract: invisible to enumeration).
+// NewPromiseCapability(C), shared by the keyed combinators and withResolvers.
+// Every caller reaches it through a spec step marked `?`, so a non-constructor
+// `this` throws SYNCHRONOUSLY — there is no promise yet to reject.
+function newPromiseCapability(C, name) {
+  if (typeof C !== "function") {
+    throw new TypeError(`Promise.${name} called on a non-constructor`);
+  }
+  let resolve;
+  let reject;
+  const promise = new C((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  if (typeof resolve !== "function" || typeof reject !== "function") {
+    throw new TypeError("promise capability functions are not callable");
+  }
+  return { promise, resolve, reject };
+}
+
+// ── Promise.withResolvers (TC39 Stage 4 / ES2024; native on Node 22+) ──
+// Absent on the whole 18.19–21.x compat tier with no polyfill until now. The
+// 2026-05 candidates survey marked it "No action — native on Nub's floor", which
+// was true when the floor WAS 22.15; the verdict was never revisited after the
+// floor moved down to 18.19, so the gap survived silently. Spec: a capability
+// plus a %Object.prototype% record of {promise, resolve, reject}, generic on
+// `this` so a Promise subclass drives the promise.
+function installPromiseWithResolvers() {
+  if (typeof Promise.withResolvers === "function") return;
+  Object.defineProperty(Promise, "withResolvers", {
+    value: function withResolvers() {
+      const { promise, resolve, reject } = newPromiseCapability(this, "withResolvers");
+      return { promise, resolve, reject };
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
 function installKeyedPromiseCombinators() {
   const needAll = typeof Promise.allKeyed !== "function";
   const needAllSettled = typeof Promise.allSettledKeyed !== "function";
   if (!needAll && !needAllSettled) return;
-
-  // NewPromiseCapability(C).
-  const newCapability = (C, name) => {
-    if (typeof C !== "function") {
-      throw new TypeError(`Promise.${name} called on a non-constructor`);
-    }
-    let resolve;
-    let reject;
-    const promise = new C((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
-    if (typeof resolve !== "function" || typeof reject !== "function") {
-      throw new TypeError("promise capability functions are not callable");
-    }
-    return { promise, resolve, reject };
-  };
 
   // CreateKeyedPromiseCombinatorResultObject. Plain assignment IS
   // CreateDataPropertyOrThrow here: with no prototype there is no inherited
@@ -893,7 +922,7 @@ function installKeyedPromiseCombinators() {
   const install = (name, isSettled) => {
     const fn = function (promises) {
       const ctor = this;
-      const capability = newCapability(ctor, name);
+      const capability = newPromiseCapability(ctor, name);
       try {
         const promiseResolve = ctor.resolve;
         if (typeof promiseResolve !== "function") {
