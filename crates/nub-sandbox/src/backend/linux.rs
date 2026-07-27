@@ -2231,6 +2231,8 @@ const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 struct SandboxSyscalls {
     socket: i64,
     io_uring_setup: i64,
+    io_uring_enter: i64,
+    io_uring_register: i64,
     keyctl: i64,
     add_key: i64,
     request_key: i64,
@@ -2256,6 +2258,8 @@ pub(super) fn build_seccomp(
         SandboxSyscalls {
             socket: libc::SYS_socket,
             io_uring_setup: libc::SYS_io_uring_setup,
+            io_uring_enter: libc::SYS_io_uring_enter,
+            io_uring_register: libc::SYS_io_uring_register,
             keyctl: libc::SYS_keyctl,
             add_key: libc::SYS_add_key,
             request_key: libc::SYS_request_key,
@@ -2330,8 +2334,20 @@ fn build_seccomp_for(
         }
         rules.insert(syscalls.socket, socket_rules);
 
-        // io_uring can create sockets without issuing socket(2).
-        rules.insert(syscalls.io_uring_setup, Vec::new());
+        // io_uring can create sockets without issuing socket(2). Blocking only
+        // io_uring_setup would leave the ring's SECOND entry point open: a process
+        // holding an already-created ring fd submits through io_uring_enter, and
+        // registers buffers/files through io_uring_register, without ever calling
+        // setup itself. That matters most for AF_VSOCK, which the network namespace
+        // does not confine (see the family carve-out above) — there this filter is
+        // the only boundary, so all three entry points are denied as one set.
+        for syscall in [
+            syscalls.io_uring_setup,
+            syscalls.io_uring_enter,
+            syscalls.io_uring_register,
+        ] {
+            rules.insert(syscall, Vec::new());
+        }
     }
 
     if deny_keyring {
@@ -2752,6 +2768,8 @@ mod tests {
         const GENERIC_REQUEST_KEY: u32 = 218;
         const GENERIC_KEYCTL: u32 = 219;
         const IO_URING_SETUP: u32 = 425;
+        const IO_URING_ENTER: u32 = 426;
+        const IO_URING_REGISTER: u32 = 427;
 
         let denied = u32::from(SeccompAction::Errno(libc::EPERM as u32));
         let allowed = u32::from(SeccompAction::Allow);
@@ -2765,6 +2783,8 @@ mod tests {
             SandboxSyscalls {
                 socket: i64::from(X86_64_SOCKET),
                 io_uring_setup: i64::from(IO_URING_SETUP),
+                io_uring_enter: i64::from(IO_URING_ENTER),
+                io_uring_register: i64::from(IO_URING_REGISTER),
                 keyctl: i64::from(X86_64_KEYCTL),
                 add_key: i64::from(X86_64_ADD_KEY),
                 request_key: i64::from(X86_64_REQUEST_KEY),
@@ -2774,12 +2794,16 @@ mod tests {
         for (syscall, family) in [
             (X86_64_SOCKET, libc::AF_INET),
             (IO_URING_SETUP, 0),
+            (IO_URING_ENTER, 0),
+            (IO_URING_REGISTER, 0),
             (X86_64_KEYCTL, 0),
             (X86_64_ADD_KEY, 0),
             (X86_64_REQUEST_KEY, 0),
             (X86_64_SOCKET | X32_SYSCALL_BIT, libc::AF_INET),
             (X86_64_SOCKET | X32_SYSCALL_BIT, libc::AF_NETLINK),
             (IO_URING_SETUP | X32_SYSCALL_BIT, 0),
+            (IO_URING_ENTER | X32_SYSCALL_BIT, 0),
+            (IO_URING_REGISTER | X32_SYSCALL_BIT, 0),
             (X86_64_GETPID | X32_SYSCALL_BIT, 0),
             (u32::MAX, 0),
         ] {
@@ -2831,6 +2855,8 @@ mod tests {
                 SandboxSyscalls {
                     socket: i64::from(GENERIC_SOCKET),
                     io_uring_setup: i64::from(IO_URING_SETUP),
+                    io_uring_enter: i64::from(IO_URING_ENTER),
+                    io_uring_register: i64::from(IO_URING_REGISTER),
                     keyctl: i64::from(GENERIC_KEYCTL),
                     add_key: i64::from(GENERIC_ADD_KEY),
                     request_key: i64::from(GENERIC_REQUEST_KEY),
@@ -2844,10 +2870,13 @@ mod tests {
                 ),
                 denied,
             );
-            assert_eq!(
-                evaluate_bpf(&program, &seccomp_data(IO_URING_SETUP, audit_arch, 0)),
-                denied,
-            );
+            for syscall in [IO_URING_SETUP, IO_URING_ENTER, IO_URING_REGISTER] {
+                assert_eq!(
+                    evaluate_bpf(&program, &seccomp_data(syscall, audit_arch, 0)),
+                    denied,
+                    "io_uring entry point {syscall} escaped the filter",
+                );
+            }
             for syscall in [GENERIC_KEYCTL, GENERIC_ADD_KEY, GENERIC_REQUEST_KEY] {
                 assert_eq!(
                     evaluate_bpf(&program, &seccomp_data(syscall, audit_arch, 0)),
@@ -2875,6 +2904,8 @@ mod tests {
     fn seccomp_dimensions_are_optional_and_union_without_overreach() {
         const SOCKET: i64 = 41;
         const IO_URING_SETUP: i64 = 425;
+        const IO_URING_ENTER: i64 = 426;
+        const IO_URING_REGISTER: i64 = 427;
         const KEYCTL: i64 = 250;
         const ADD_KEY: i64 = 248;
         const REQUEST_KEY: i64 = 249;
@@ -2894,6 +2925,8 @@ mod tests {
                 SandboxSyscalls {
                     socket: SOCKET,
                     io_uring_setup: IO_URING_SETUP,
+                    io_uring_enter: IO_URING_ENTER,
+                    io_uring_register: IO_URING_REGISTER,
                     keyctl: KEYCTL,
                     add_key: ADD_KEY,
                     request_key: REQUEST_KEY,
@@ -3016,11 +3049,15 @@ mod tests {
         // strict weakening of coarse-deny.
         const SOCKET: i64 = 41; // x86-64 socket(2)
         const IO_URING_SETUP: i64 = 425;
+        const IO_URING_ENTER: i64 = 426;
+        const IO_URING_REGISTER: i64 = 427;
         let denied = u32::from(SeccompAction::Errno(libc::EPERM as u32));
         let allowed = u32::from(SeccompAction::Allow);
         let syscalls = || SandboxSyscalls {
             socket: SOCKET,
             io_uring_setup: IO_URING_SETUP,
+            io_uring_enter: IO_URING_ENTER,
+            io_uring_register: IO_URING_REGISTER,
             keyctl: 250,
             add_key: 248,
             request_key: 249,
@@ -3063,16 +3100,24 @@ mod tests {
                 "per-host must still deny netns-unconfined family {family}"
             );
         }
-        // io_uring_setup stays blocked under per-host so a socket cannot be created off the
-        // family filter.
-        assert_eq!(
-            evaluate_bpf(
-                &per_host,
-                &seccomp_data(IO_URING_SETUP as u32, AUDIT_ARCH_X86_64, 0)
-            ),
-            denied,
-            "per-host must block io_uring_setup (it can create any-family sockets)"
-        );
+        // Every io_uring entry point stays blocked under per-host so a socket cannot be
+        // created off the family filter. Blocking setup alone is not enough: an
+        // already-created ring is driven by io_uring_enter, which is the path that
+        // reaches AF_VSOCK — the family the empty netns above does not confine.
+        for (name, syscall) in [
+            ("io_uring_setup", IO_URING_SETUP),
+            ("io_uring_enter", IO_URING_ENTER),
+            ("io_uring_register", IO_URING_REGISTER),
+        ] {
+            assert_eq!(
+                evaluate_bpf(
+                    &per_host,
+                    &seccomp_data(syscall as u32, AUDIT_ARCH_X86_64, 0)
+                ),
+                denied,
+                "per-host must block {name} (io_uring can create any-family sockets)"
+            );
+        }
     }
 
     #[cfg(target_arch = "x86_64")]

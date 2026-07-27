@@ -1337,6 +1337,12 @@ const PROBE_C: &str = r#"
 #ifndef SYS_io_uring_setup
 #define SYS_io_uring_setup 425
 #endif
+#ifndef SYS_io_uring_enter
+#define SYS_io_uring_enter 426
+#endif
+#ifndef SYS_io_uring_register
+#define SYS_io_uring_register 427
+#endif
 #define P_X32_SYSCALL_BIT 0x40000000UL
 #define P_CLONE_NEWNS   0x00020000
 #define P_CLONE_NEWUSER 0x10000000
@@ -1365,6 +1371,18 @@ int main(int argc, char** argv) {
         addr.sun_family = AF_UNIX;
         strcpy(addr.sun_path, argv[2]);
         return connect(fd, (struct sockaddr*)&addr, sizeof addr) == 0 ? 0 : 44;
+    }
+    if (!strcmp(argv[1], "iouring")) {
+        // Deliberately BOGUS ring fd. EPERM proves seccomp intercepted before the
+        // kernel looked at the descriptor; EBADF would mean the call reached fd
+        // validation, i.e. the filter did NOT cover this entry point.
+        errno = 0;
+        if (syscall(SYS_io_uring_setup, 1, 0) != -1 || errno != EPERM) return 43;
+        errno = 0;
+        if (syscall(SYS_io_uring_enter, -1, 0, 0, 0, 0, 0) != -1 || errno != EPERM) return 44;
+        errno = 0;
+        if (syscall(SYS_io_uring_register, -1, 0, 0, 0) != -1 || errno != EPERM) return 45;
+        return 0;
     }
     if (!strcmp(argv[1], "keyring")) {
         errno = 0;
@@ -1512,6 +1530,16 @@ fn network_namespace_and_filter_block_host_egress() {
         f.run(net_deny.clone(), &[], &probe, &["socket"]).0,
         42,
         "AF_INET socket creation is denied"
+    );
+    // Every io_uring entry point, not just setup: a ring the target did not create
+    // itself is still driven through io_uring_enter, and that path can produce a
+    // socket of any family — including AF_VSOCK, which the empty netns does not
+    // confine. The probe passes a bogus ring fd, so EPERM (not EBADF) is what
+    // proves the filter intercepted rather than the kernel rejecting the fd.
+    assert_eq!(
+        f.run(net_deny.clone(), &[], &probe, &["iouring"]).0,
+        0,
+        "all three io_uring entry points are denied with EPERM, not EBADF"
     );
     #[cfg(target_arch = "x86_64")]
     assert_eq!(
