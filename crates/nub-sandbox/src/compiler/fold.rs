@@ -1133,8 +1133,7 @@ enum EnvAction {
     Allow(Option<EnvType>),
     /// Construct the key out of the child env.
     Deny,
-    /// A literal value (object `value:` or a resolved `$(…)`) — set directly,
-    /// independent of the ambient env.
+    /// A resolved `$(…)` substitution — set directly, independent of the ambient env.
     Literal(String),
 }
 
@@ -1332,7 +1331,7 @@ fn parse_env_object_value(
             parse_env_string_value(key, optional, s, ctx, caps, path, default_sensitive)
         }
         Value::Object(extras) => {
-            parse_env_extras(key, optional, extras, ctx, caps, path, default_sensitive)
+            parse_env_extras(key, optional, extras, caps, path, default_sensitive)
         }
         _ => Err(CompileError::shape(
             path,
@@ -1405,19 +1404,18 @@ fn parse_env_string_value(
     })
 }
 
-/// The object extras form: `{ format, value, optional }`. Sensitivity is NOT an
+/// The object extras form: `{ format, optional, brokerTo }`. Sensitivity is NOT an
 /// extras key — it is decided by the axis the entry came from (`vars`→false,
 /// `secrets`→true), threaded in as `default_sensitive`.
 fn parse_env_extras(
     key: String,
     optional_from_key: bool,
     extras: &serde_json::Map<String, Value>,
-    ctx: &CompileCtx,
     caps: ScopeCapabilities,
     path: &str,
     default_sensitive: bool,
 ) -> Result<EnvEntry, CompileError> {
-    const ALLOWED: &[&str] = &["format", "value", "optional", "brokerTo"];
+    const ALLOWED: &[&str] = &["format", "optional", "brokerTo"];
     for k in extras.keys() {
         if !ALLOWED.contains(&k.as_str()) {
             return Err(CompileError::shape(
@@ -1475,14 +1473,6 @@ fn parse_env_extras(
                     "`brokerTo` is only valid on a `secrets` entry — move the entry to `secrets` to broker it",
                 ));
             }
-            // A broker reads ONE real value and swaps it for a marker, so a fixed
-            // literal `value` has nothing to broker.
-            if extras.contains_key("value") {
-                return Err(CompileError::shape(
-                    &bp,
-                    "`brokerTo` cannot be combined with a literal `value` — a brokered secret's value is read from the environment at startup",
-                ));
-            }
             // The secret key is the brokered env name: a glob binds no single
             // credential, and an optional secret can be absent with nothing to broker.
             if is_glob(&key) {
@@ -1501,54 +1491,6 @@ fn parse_env_extras(
             parse_broker_hosts(hosts, &bp)?
         }
     };
-    // An explicit `value:` (optionally `$(…)`) overrides the ambient source.
-    if let Some(v) = extras.get("value") {
-        // A literal value has no single key to bind to under a glob — reject
-        // before any `$(…)` runs.
-        if is_glob(&key) {
-            return Err(CompileError::shape(
-                &child(path, "value"),
-                "a literal `value` cannot be bound to a glob key",
-            ));
-        }
-        let raw = as_str(v, &child(path, "value"))?;
-        let resolved = if resolve::has_substitution(raw) {
-            if !caps.env_substitution {
-                return Err(CompileError::untrusted_substitution(&child(path, "value")));
-            }
-            resolve::resolve_with(raw, ctx.runner.as_ref())
-                .map_err(|e| CompileError::substitution(&child(path, "value"), &e))?
-        } else if resolve::has_open_substitution(raw) {
-            // An unterminated `$(` — do NOT pass it through as a literal value
-            // (silently shipping shell-looking text is the footgun); name it.
-            return Err(CompileError::substitution(
-                &child(path, "value"),
-                resolve::UNTERMINATED_SUBST_MSG,
-            ));
-        } else {
-            raw.to_string()
-        };
-        if let Some(t) = &ty {
-            // A sensitive literal must not echo its value in a validation error.
-            let display = if sensitive {
-                "<redacted>"
-            } else {
-                resolved.as_str()
-            };
-            t.validate_display(&resolved, display)
-                .map_err(|e| CompileError::validation(&child(path, "value"), &e))?;
-        }
-        return Ok(EnvEntry {
-            pattern: key,
-            action: EnvAction::Literal(resolved),
-            sensitive,
-            optional,
-            format,
-            key_match: KeyMatch::User,
-            builtin: false,
-            broker_to: Vec::new(),
-        });
-    }
     Ok(EnvEntry {
         pattern: key,
         action: EnvAction::Allow(ty),

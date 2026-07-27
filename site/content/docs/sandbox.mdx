@@ -368,13 +368,13 @@ You can also deny specific variables. A denylist is convenient but leaky — sec
 
 ### The object form
 
-Switch to the object form to validate, default, require, or strip a variable. Each key is a variable name; its value is `true` (pass it, any value), `false` (strip it, the array `!name` form), a validation string like `"port"` (see [`format`](#format)), or an extras object. A plain key is required, `?` makes it optional, and a glob key is always optional. This is the same syntax `secrets` uses — the only difference is that credential brokering (`brokerTo`) is secrets-only.
+Switch to the object form to validate, require, or strip a variable. Each key is a variable name; its value is `true` (pass it, any value), `false` (strip it, the array `!name` form), a validation string like `"port"` (see [`format`](#format)), or an extras object. A plain key is required, `?` makes it optional, and a glob key is always optional. This is the same syntax `secrets` uses — the only difference is that credential brokering (`brokerTo`) is secrets-only.
 
 ```jsonc
 {
   "vars": {
     "DATABASE_HOST": true,
-    "NODE_ENV": { "value": "production" },
+    "PORT": { "format": "port" },
     "DEBUG": false,
     "VITE_*": true
   }
@@ -410,18 +410,6 @@ A plain key is required and fails compilation if the variable is absent. Make it
 }
 ```
 
-### `value`
-
-Set a literal value instead of passing one through from the ambient environment.
-
-```jsonc
-{
-  "vars": {
-    "NODE_ENV": { "value": "production" }
-  }
-}
-```
-
 ## `secrets`
 
 The `secrets` axis carries sensitive environment variables. The child receives the real value, but Nub scrubs that value from the command's stdout and stderr before forwarding them — so a leaked secret does not persist in a terminal or CI log — and never prints a secret's value in its own errors. A secret can also be brokered so the child never holds the real value at all. Like `vars`, each entry becomes an environment variable in the child; the only difference is protection.
@@ -440,7 +428,7 @@ The array form lists the secrets to pass through. The child receives the real va
 
 ### Validate or require a secret
 
-The object form takes the same `format` and `optional` keys as `vars`, plus `value` to set a literal.
+The object form takes the same `format` and `optional` keys as `vars`.
 
 ```jsonc
 {
@@ -522,7 +510,7 @@ When one sandboxed process launches another, the operating system confines the c
   },
   "net": ["api.example.com", "*.sentry.io", "localhost"],
   "vars": {
-    "NODE_ENV": { "value": "development" },
+    "NODE_ENV": "enum:development|production",
     "PORT?": "port"
   },
   "secrets": {

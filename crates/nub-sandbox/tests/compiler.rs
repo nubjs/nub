@@ -372,8 +372,7 @@ fn glob_env_type_validates_every_matching_var() {
 #[test]
 fn a_secrets_validation_error_redacts_the_value_but_names_the_key() {
     // L1: a `secrets` value that fails format validation must NOT echo the secret — the
-    // key is still named (via the error path) so the failure stays actionable. Both the
-    // source-value path and the literal-`value:` path are covered.
+    // key is still named (via the error path) so the failure stays actionable.
     let ctx = common::ctx(true, &[("STRIPE_KEY", "super-secret")]);
     match compile(&json!({ "secrets": { "STRIPE_KEY": "port" } }), &ctx).unwrap_err() {
         CompileError::Validation { path, message } => {
@@ -388,26 +387,6 @@ fn a_secrets_validation_error_redacts_the_value_but_names_the_key() {
             );
         }
         other => panic!("expected Validation redacting the value, got {other:?}"),
-    }
-    // Literal-`value:` path (a resolved secret literal validated against a format).
-    let ctx = common::ctx(true, &[]);
-    match compile(
-        &json!({ "secrets": { "STRIPE_KEY": { "value": "super-secret", "format": "port" } } }),
-        &ctx,
-    )
-    .unwrap_err()
-    {
-        CompileError::Validation { message, .. } => {
-            assert!(
-                !message.contains("super-secret"),
-                "literal value must not leak: {message}"
-            );
-            assert!(
-                message.contains("<redacted>"),
-                "literal value redacted: {message}"
-            );
-        }
-        other => panic!("expected Validation on the literal, got {other:?}"),
     }
     // Companion: a NON-secret `vars` value DOES show — seeing the bad PORT is the useful,
     // common case.
@@ -1217,6 +1196,27 @@ fn env_extras_reject_removed_sensitivity_keys() {
 }
 
 #[test]
+fn env_extras_reject_literal_value_injection() {
+    // A sandbox controls WHICH env vars pass, not what they are set to — literal
+    // `value:` injection was removed, so `{ "value": … }` is now an unknown option
+    // on both axes, like any other unrecognized key.
+    let ctx = common::ctx(true, &[("NAME", "1")]);
+    for axis in ["vars", "secrets"] {
+        let err = compile(&json!({ axis: { "NAME": { "value": "x" } } }), &ctx).unwrap_err();
+        match err {
+            CompileError::Shape { path, message } => {
+                assert_eq!(path, format!("{axis}.NAME.value"));
+                assert!(
+                    message.contains("value") && message.contains("unknown env option"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected an unknown-option shape error naming `value`, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn vars_and_secrets_construct_the_child_env_together() {
     // Both axes are the same env mechanism: each named key reaches the child with its
     // real value; only the schema's `sensitive` mark (redaction) differs by axis.
@@ -1438,7 +1438,7 @@ fn substitution_resolves_in_trusted_home() {
 fn substitution_embedded_in_a_larger_value() {
     let ctx = common::ctx(true, &[]);
     let p = compile(
-        &json!({ "vars": { "URL": { "value": "https://$(echo hi)/path" } } }),
+        &json!({ "vars": { "URL": "https://$(echo hi)/path" } }),
         &ctx,
     )
     .unwrap();
@@ -1464,9 +1464,9 @@ fn substitution_failure_surfaces() {
 
 #[test]
 fn unterminated_substitution_is_named_not_unknown_type() {
-    // D18: a `$(` with no balanced close is a substitution-shaped error at BOTH the
-    // type position and the `value:` position — never a silent literal or a
-    // confusing "unknown env type". The runner must NOT fire (nothing to run).
+    // D18: a `$(` with no balanced close is a substitution-shaped error at the string
+    // value position, whether bare or embedded in a larger value — never a silent
+    // literal or a confusing "unknown env type". The runner must NOT fire (nothing to run).
     struct PanicRunner;
     impl nub_sandbox::CommandRunner for PanicRunner {
         fn run(&self, _: &str) -> Result<String, String> {
@@ -1485,7 +1485,7 @@ fn unterminated_substitution_is_named_not_unknown_type() {
     };
     for surface in [
         json!({ "vars": { "X": "$(op read" } }),
-        json!({ "vars": { "X": { "value": "postgres://$(op read@h" } } }),
+        json!({ "vars": { "X": "postgres://$(op read@h" } }),
         // The command text carries a single quote — must NOT fall through to a
         // union-parse / "unknown env type" error (the coarse-guard gap).
         json!({ "vars": { "X": "$(op read 'op://vault/db/pw'" } }),
@@ -1512,7 +1512,7 @@ fn mixed_balanced_then_unterminated_substitution_errors() {
     let ctx = common::ctx(true, &[]);
     for surface in [
         json!({ "vars": { "X": "$(echo hi) $(oops" } }),
-        json!({ "vars": { "X": { "value": "$(echo hi)$(oops" } } }),
+        json!({ "vars": { "X": "$(echo hi)$(oops" } }),
     ] {
         match compile(&surface, &ctx).unwrap_err() {
             CompileError::Substitution { message, .. } => {
@@ -1556,15 +1556,11 @@ fn glob_key_substitution_is_rejected_before_running() {
         interpreter: Vec::new(),
         runner: Box::new(PanicRunner),
     };
-    for surface in [
-        json!({ "vars": { "FOO_*": "$(echo hi)" } }),
-        json!({ "vars": { "FOO_*": { "value": "$(echo hi)" } } }),
-    ] {
-        assert!(matches!(
-            compile(&surface, &ctx).unwrap_err(),
-            CompileError::Shape { .. }
-        ));
-    }
+    let surface = json!({ "vars": { "FOO_*": "$(echo hi)" } });
+    assert!(matches!(
+        compile(&surface, &ctx).unwrap_err(),
+        CompileError::Shape { .. }
+    ));
 }
 
 // ── net fold ──────────────────────────────────────────────────────────────────
@@ -2003,18 +1999,6 @@ fn brokerto_rejects_bad_secret_keys_hosts_and_value_combo() {
             "bad brokerTo host list must be rejected: {hosts}"
         );
     }
-    // brokerTo cannot combine with a literal `value`.
-    assert!(
-        compile(
-            &json!({
-                "net": ["api.example.com"],
-                "secrets": { "API_TOKEN": { "brokerTo": ["api.example.com"], "value": "x" } }
-            }),
-            &ctx
-        )
-        .is_err(),
-        "brokerTo + value must be rejected"
-    );
 }
 
 // ── fs $(…) command substitution ───────────────────────────────────────────────
