@@ -78,6 +78,25 @@ pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx:
     policy.fs.rules.entries.splice(0..0, grants);
 }
 
+/// Grant the build-jail's per-spawn extra READ subtrees that the interpreter grant misses.
+/// Today this is the provisioned Node's C/C++ header dir (`<node-root>/include/node`):
+/// node-gyp compiles an addon against the headers under `npm_config_nodedir/include/node`,
+/// and nub provisions Node under its version store (`~/.cache/nub/node/<ver>`) — a path in
+/// neither `$tooldirs` nor the interpreter grant (which covers only `bin/node` + the bin
+/// dir). Without this grant node-gyp finds no local headers and falls back to a network
+/// header download the egress-denied jail blocks, so the entire native-compile ecosystem
+/// fails offline. The embedder supplies the concrete paths — it owns where nub puts Node.
+/// A nonexistent path (a system Node shipping no headers) yields an inert allow.
+/// Front-inserted as base allows so the reasserted secret/`.env` floor stays authoritative;
+/// these paths never overlap a secret.
+fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathBuf]) {
+    let mut grants = Vec::new();
+    for dir in extra_reads {
+        push_read_path(&mut grants, dir);
+    }
+    policy.fs.rules.entries.splice(0..0, grants);
+}
+
 /// Push a READ-allow rule per subtree glob for `path` (the node itself + `/**`).
 fn push_read_path(out: &mut Vec<FsRule>, path: &Path) {
     for g in defaults::subtree_globs(&path.to_string_lossy()) {
@@ -143,11 +162,14 @@ fn build_jail_surface(package_dir: Option<&Path>) -> Value {
 /// `ambient_env` is the effective child env the UNCONFINED spawn would have had (the
 /// aube-process env plus the command's overlay), already reconstructed by the caller.
 /// `interpreter` is the closure to grant read (the provisioned Node + shim); each
-/// path and its bin dir become read grants.
+/// path and its bin dir become read grants. `extra_reads` are additional per-spawn read
+/// subtrees the embedder derives (the provisioned Node's `include/node` headers so node-gyp
+/// compiles offline) — see [`grant_build_jail_extra_reads`].
 pub fn compile_build_jail(
     homes: Homes,
     package_dir: &Path,
     interpreter: Vec<PathBuf>,
+    extra_reads: Vec<PathBuf>,
     ambient_env: BTreeMap<String, String>,
 ) -> Result<SandboxPolicy, CompileError> {
     let surface = build_jail_surface(Some(package_dir));
@@ -167,6 +189,7 @@ pub fn compile_build_jail(
     // `compile_scope`'s preset branch.
     let mut policy = compile(&surface, &ctx)?;
     grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
+    grant_build_jail_extra_reads(&mut policy, &extra_reads);
     reassert_secret_floor("build-jail", &mut policy, &ctx);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
     Ok(policy)
