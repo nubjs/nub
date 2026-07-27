@@ -22,8 +22,8 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{ChildStderr, Command};
+use std::time::{Duration, Instant};
 
 const ESSENTIAL_READ_DIRS: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt",
@@ -717,10 +717,10 @@ fn admit_bwrap_candidate(
         match retained_monitor.run_candidate_probe(outer, Duration::from_secs(5)) {
             Ok(()) => return Ok((candidate, probe_ca)),
             Err(error) => {
-                let mut diagnostic_bytes = Vec::new();
-                if let Some(stderr) = stderr.as_mut() {
-                    let _ = stderr.read_to_end(&mut diagnostic_bytes);
-                }
+                let diagnostic_bytes = stderr
+                    .as_mut()
+                    .map(drain_probe_diagnostic)
+                    .unwrap_or_default();
                 let stderr = String::from_utf8_lossy(&diagnostic_bytes);
                 let diagnostic = if stderr.trim().is_empty() {
                     String::new()
@@ -739,6 +739,47 @@ fn admit_bwrap_candidate(
         lost: vec!["fs".to_string()],
         reason: Some(reason),
     })
+}
+
+const PROBE_DIAGNOSTIC_LIMIT: usize = 64 * 1024;
+const PROBE_DIAGNOSTIC_DEADLINE: Duration = Duration::from_millis(250);
+
+/// Collect a failed candidate probe's stderr for the failure message.
+///
+/// The read is bounded on both axes because the probe's stderr write end is
+/// inheritable: a descendant that outlives the probe keeps the pipe open, so
+/// waiting for EOF would block `apply()` for as long as that descendant lives.
+/// The payload is a diagnostic fragment only, so truncating it is always
+/// preferable to stalling sandbox setup.
+fn drain_probe_diagnostic(stderr: &mut ChildStderr) -> Vec<u8> {
+    // SAFETY: the descriptor is owned by `stderr` and stays open for the call.
+    let flags = unsafe { libc::fcntl(stderr.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(stderr.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + PROBE_DIAGNOSTIC_DEADLINE;
+    let mut collected = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while collected.len() < PROBE_DIAGNOSTIC_LIMIT {
+        match stderr.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                let room = PROBE_DIAGNOSTIC_LIMIT - collected.len();
+                collected.extend_from_slice(&chunk[..read.min(room)]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => break,
+        }
+    }
+    collected
 }
 
 fn target_environment(
@@ -3983,18 +4024,31 @@ mod tests {
 
     #[test]
     fn nesting_inventory_admits_only_the_dedicated_helper() {
-        // Without a set-up host the require-nesting inventory yields no candidate
-        // and never falls through to a stock bwrap — the fail-closed guarantee.
+        // The require-nesting inventory considers exactly one path on every host,
+        // so both outcomes are assertable: an unprovisioned host (every CI runner)
+        // must yield no candidate and record the helper's rejection rather than
+        // widening to a stock bwrap, and a provisioned one must admit only the
+        // helper itself.
         let inventory = open_bwrap_candidate_inventory(true);
         if inventory.candidates.is_empty() {
-            return; // CI/dev host: helper absent or unverifiable → fail closed.
-        }
-        for candidate in &inventory.candidates {
-            assert_eq!(
-                candidate.source_path,
-                Path::new(DEDICATED_HELPER_PATH),
-                "a non-helper candidate entered the nesting inventory"
+            assert!(
+                !inventory.failures.is_empty(),
+                "an empty require-nesting inventory recorded no reason for rejecting {DEDICATED_HELPER_PATH}"
             );
+            for failure in &inventory.failures {
+                assert!(
+                    failure.starts_with(DEDICATED_HELPER_PATH),
+                    "require-nesting consulted a non-helper candidate: {failure}"
+                );
+            }
+        } else {
+            for candidate in &inventory.candidates {
+                assert_eq!(
+                    candidate.source_path,
+                    Path::new(DEDICATED_HELPER_PATH),
+                    "a non-helper candidate entered the nesting inventory"
+                );
+            }
         }
     }
 }
