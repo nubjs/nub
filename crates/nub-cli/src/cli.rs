@@ -3213,8 +3213,8 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
 /// `nub sandbox {setup,status,teardown}` — the one-time host-setup group. On Linux, `setup`
 /// installs the fixed-path bwrap helper + AppArmor profile the agent-sandbox needs on Ubuntu
 /// 23.10+/24.04 (epic C1 + B2). It NEVER self-elevates: run unprivileged it prints the exact
-/// `sudo` command. macOS needs no setup; Windows setup is the account/WFP backend reached via
-/// `nub run --sandbox-admin setup` (PR #561) until that integrates here.
+/// `sudo` command. macOS needs no setup; Windows setup is the account/WFP backend, reached via
+/// the hidden `nub run --sandbox-admin setup` rather than through this group.
 fn run_sandbox_admin(args: &[String]) -> Result<i32> {
     let usage = "nub sandbox — manage the one-time host setup the agent-sandbox needs\n\n\
                  \x20 setup       install the sandbox helper + profile (needs root on Linux)\n\
