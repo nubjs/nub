@@ -509,14 +509,24 @@ fn keys_inside_an_axis_object_do_not_implicitly_inherit() {
 fn build_jail_preset_expands() {
     // The STATIC `--sandbox build-jail` preset (v2): tight, default-deny read of the
     // project + `$tooldirs` (the OS backends supply the system/toolchain closure under a
-    // minimal root), a private tmp, egress denied, strip-all env. The per-package WRITE
-    // grant + provisioned-interpreter read + scrubbed lifecycle env are the
-    // interposition's job (see `build_jail_interposition_*`), NOT this static preset.
+    // minimal root), a private tmp, egress curated to `$downloads`, strip-all env. The
+    // per-package WRITE grant + provisioned-interpreter read + scrubbed lifecycle env are
+    // the interposition's job (see `build_jail_interposition_*`), NOT this static preset.
     let ctx = common::ctx(true, &[("PATH", "/bin"), ("NPM_TOKEN", "t")]);
     let p = compile(&json!("build-jail"), &ctx).unwrap();
+    assert!(p.net.enforce, "build-jail enforces the net axis");
+    let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    // Windows cannot enforce a per-host policy (its backend refuses one outright), so the
+    // jail keeps the strictly-tighter deny-all there; everywhere else a lifecycle script
+    // reaches the install-time artifact hosts and nothing else.
+    assert_eq!(
+        hosts.admits("nodejs.org"),
+        !cfg!(windows),
+        "build-jail admits a $downloads host off Windows, and nothing on Windows"
+    );
     assert!(
-        p.net.enforce && p.net.rules.is_empty(),
-        "build-jail denies egress"
+        !hosts.admits("api.github.com") && !hosts.admits("storage.googleapis.com"),
+        "build-jail must not admit a write-capable or multi-tenant host"
     );
     assert!(
         p.env.enforce && p.env.constructed.is_empty(),
@@ -2162,6 +2172,28 @@ fn trusted_set_expands_in_place_admitting_listed_and_denying_unlisted() {
 }
 
 #[test]
+fn downloads_set_expands_to_the_install_time_hosts_only() {
+    // `$downloads` is its own set, not an alias of `$trusted`: it admits the install-time
+    // artifact hosts and NOT the far broader agent surface `$trusted` carries — most
+    // pointedly `registry.npmjs.org`, whose publish route answers on the same hostname.
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "net": ["$downloads"] }), &ctx).unwrap();
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(m.admits("nodejs.org"), "a listed $downloads host is admitted");
+    assert!(m.admits("cdn.cypress.io"), "another listed host is admitted");
+    assert!(
+        !m.admits("registry.npmjs.org"),
+        "$downloads must not inherit $trusted's write-capable retentions"
+    );
+    assert!(!m.admits("evil.test"), "an unlisted host is denied");
+    assert!(
+        !m.admits("secret.cdn.cypress.io"),
+        "wildcard-free: a subdomain of a listed host is NOT admitted, so a DNS label \
+         cannot carry exfiltrated bytes"
+    );
+}
+
+#[test]
 fn negated_trusted_set_denies_each_host() {
     // `!$trusted` expands-then-negates: each member becomes a Deny. Ordered after a
     // broad `*` allow, it re-strips the trusted set (`["*", "!$trusted"]`).
@@ -2325,7 +2357,9 @@ fn wrong_axis_and_unknown_sets_are_shape_errors() {
     let cases = [
         json!({ "net": ["$tooldirs"] }),           // fs set on net
         json!({ "net": { "$trusted": true } }),    // net set as an object key
+        json!({ "net": { "$downloads": true } }),  // the other net set, same rejection
         json!({ "fs": ["$trusted"] }),             // net set on fs
+        json!({ "fs": ["$downloads"] }),           // net set on fs
         json!({ "fs": ["$frobnicate"] }),          // unknown set on fs
         json!({ "net": ["$frobnicate"] }),         // unknown set on net
         json!({ "fs": { "$tooldirs/sub": "r" } }), // a set takes no subpath

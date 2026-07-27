@@ -1,8 +1,8 @@
-//! The two built-in `$`-sets the compiler expands in place: `$trusted` (a curated
-//! network host allowlist, net axis) and `$tooldirs` (the per-OS package-manager /
-//! toolchain cache+store dirs, fs axis). Both are ORDINARY last-match-wins entries —
-//! a set expands at its authored position and a later rule can override any member,
-//! like a `...:#/pointer`-reused list's entries.
+//! The built-in `$`-sets the compiler expands in place: `$trusted` (a curated network
+//! host allowlist) and `$downloads` (the install-time artifact hosts) on the net axis,
+//! `$tooldirs` (the per-OS package-manager / toolchain cache+store dirs) on the fs axis.
+//! All are ORDINARY last-match-wins entries — a set expands at its authored position and
+//! a later rule can override any member, like a `...:#/pointer`-reused list's entries.
 //!
 //! Provenance / curation:
 //! - `$trusted` derives from the Claude Code default-allowed-domains list, filtered to
@@ -29,6 +29,11 @@
 //!   three, credential scoping is the control, not the host list. Metadata/link-local +
 //!   RFC1918 are a SEPARATE always-on hard floor, never part of this set. Any host added
 //!   later must clear that same publish-route probe first; absent the probe, leave it out.
+//! - `$downloads` is the narrower, install-scoped sibling of `$trusted`, and the two are
+//!   kept strictly apart: `$trusted` serves an agent working with the user's own
+//!   credentials, `$downloads` serves attacker-authored dependency code, so it inherits
+//!   none of `$trusted`'s load-bearing write-capable retentions. It is also wildcard-free
+//!   by construction (see [`DOWNLOAD_HOSTS`]).
 //! - `$tooldirs` is per-OS because a tool's cache home differs across OSes (macOS
 //!   `~/Library/Caches`, Linux `~/.cache`, Windows `%LOCALAPPDATA%`). Host OS ==
 //!   target OS (the fold runs on the machine it enforces on), so the set is
@@ -170,6 +175,61 @@ pub const TRUSTED_HOSTS: &[&str] = &[
 /// host rule for the same name produce byte-identical IR.
 pub fn trusted_net_rules(effect: Effect) -> Vec<NetRule> {
     TRUSTED_HOSTS
+        .iter()
+        .map(|h| NetRule {
+            target: NetTarget::Host(crate::matcher::host::strip_trailing_dot(h).to_string()),
+            effect,
+        })
+        .collect()
+}
+
+// ── $downloads (net host set) ──────────────────────────────────────────────────
+
+/// The curated install-time artifact hosts — the build-jail's egress allowlist, and the
+/// `$downloads` net token. Membership is derived from what a dependency lifecycle script
+/// actually fetches DURING an install (a real install-lifecycle script, or npm's implicit
+/// `node-gyp rebuild` for a package that ships a root `binding.gyp` and no install
+/// script), then filtered by the exfiltration rule below. A download a user triggers by
+/// hand afterwards (`playwright install`) is not an install-lifecycle fetch and does not
+/// earn an entry.
+///
+/// DISQUALIFYING (the threat model is bytes LEAVING the machine): a host that accepts an
+/// authenticated write — a forge API, a registry publish route, a container blob push, a
+/// telemetry ingest whose POST body is the product — and a multi-tenant object store where
+/// an attacker can register a namespace under the same hostname and read back what the
+/// confined script wrote. NOT disqualifying: serving attacker-authored bytes INTO the
+/// jail. Every entry here is a delivery surface for third-party binaries by definition;
+/// that exposure is inherent to running the postinstall at all, and the fs/env/write
+/// confinement is what bounds it.
+///
+/// WILDCARD-FREE is a security property, not a style choice. The proxy resolves the
+/// upstream name itself and gates both the CONNECT authority and the TLS SNI, so an exact
+/// host pins every DNS label. A `*.suffix` entry would hand the confined script the label
+/// positions, and `<secret>.cdn.example.com` exfiltrates through the resolver without a
+/// byte of payload ever being sent. The unit below enforces it.
+///
+/// Deliberately NOT `$trusted`, and never merged with it: that set is the AGENT sandbox's
+/// far broader read-only surface, and it retains three write-capable hosts on
+/// credential-scoping grounds. This jail confines attacker-authored dependency code, so it
+/// inherits none of those exceptions — `registry.npmjs.org` is absent precisely because
+/// `npm publish` is a PUT to the host that serves the read.
+pub const DOWNLOAD_HOSTS: &[&str] = &[
+    // Node headers + libs for a native compile. node-gyp's default dist URL, reached
+    // whenever the header cache is cold — including for a package with no install script
+    // at all, since npm runs an implicit `node-gyp rebuild` for a root `binding.gyp`.
+    "nodejs.org",
+    // Prisma's query/schema engine binaries (`@prisma/engines` postinstall).
+    "binaries.prisma.sh",
+    // The Cypress binary: `download.cypress.io` 302s to the CDN, so both are needed.
+    "download.cypress.io",
+    "cdn.cypress.io",
+];
+
+/// Expand `$downloads` into one [`NetRule`] per host with the given effect (Allow for a
+/// bare `$downloads`, Deny for `!$downloads`). Mirrors [`trusted_net_rules`], including
+/// its trailing-dot normalization, so the two sets produce byte-comparable IR.
+pub fn download_net_rules(effect: Effect) -> Vec<NetRule> {
+    DOWNLOAD_HOSTS
         .iter()
         .map(|h| NetRule {
             target: NetTarget::Host(crate::matcher::host::strip_trailing_dot(h).to_string()),
@@ -380,6 +440,54 @@ mod tests {
             assert!(
                 !TRUSTED_HOSTS.contains(&banned),
                 "`{banned}` is an exfiltration sink and must not be in $trusted"
+            );
+        }
+    }
+
+    #[test]
+    fn every_download_host_is_a_valid_wildcard_free_pattern() {
+        // Wildcard-freedom is the set's structural anti-exfiltration property, not a
+        // formatting preference: the proxy resolves the name, so a `*.suffix` member would
+        // let a confined script put chosen bytes in a DNS label and leak them to an
+        // attacker-run nameserver without sending a payload at all.
+        for h in DOWNLOAD_HOSTS {
+            assert!(
+                host_pattern_is_valid(h),
+                "`{h}` is not a valid host pattern for $downloads"
+            );
+            assert!(
+                !h.contains('*'),
+                "`{h}` — $downloads must stay wildcard-free: a subdomain wildcard admits \
+                 DNS-label exfiltration under the same hostname"
+            );
+        }
+    }
+
+    #[test]
+    fn no_write_capable_or_multi_tenant_host_leaked_into_downloads() {
+        // The set is meant to grow by PR as more install-time downloaders are covered.
+        // These are the shapes such a PR must never add: a host the confined script can
+        // upload to, and a namespace an attacker can rent under the same hostname and read
+        // back. The GitHub-release and object-store families are UNSOLVED here on purpose —
+        // they need pre-download brokering, not an allowlist entry.
+        for banned in [
+            "storage.googleapis.com",
+            "*.googleapis.com",
+            "*.amazonaws.com",
+            "*.blob.core.windows.net",
+            "github.com",
+            "api.github.com",
+            "codeload.github.com",
+            "objects.githubusercontent.com",
+            "raw.githubusercontent.com",
+            "*.github.io",
+            "registry.npmjs.org",
+            "ghcr.io",
+            "sentry.io",
+        ] {
+            assert!(
+                !DOWNLOAD_HOSTS.contains(&banned),
+                "`{banned}` accepts a write or is multi-tenant — it must not be in $downloads"
             );
         }
     }

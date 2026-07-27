@@ -92,8 +92,10 @@ pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx:
 /// nub provisions Node under its version store (`~/.cache/nub/node/<ver>`) — a path in
 /// neither `$tooldirs` nor the interpreter grant (which covers only `bin/node` + the bin
 /// dir). Without these grants node-gyp finds no local headers and falls back to a network
-/// header download the egress-denied jail blocks, so the entire native-compile ecosystem
-/// fails offline. The embedder supplies the concrete paths — it owns where nub puts Node,
+/// header download — reachable now that `nodejs.org` is allowed, but it re-fetches the
+/// headers on a cold cache for every native build the jail runs, and on an offline or
+/// air-gapped host the whole native-compile ecosystem fails outright. The grant is what
+/// keeps the offline path working. The embedder supplies the concrete paths — it owns where nub puts Node,
 /// and keeps the grant on SUBTREES rather than the bare root, which for a system Node is
 /// a shared prefix. A nonexistent path (a system Node shipping no headers) yields an
 /// inert allow.
@@ -128,7 +130,8 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
 /// The build-jail baseline surface. Tight, default-deny read (project + `$tooldirs`
 /// plus the toolchain closure the OS backends supply under a minimal root) with WRITE
 /// confined to a private per-run tmp and — via [`compile_build_jail`] — the script's
-/// own package dir. Egress denied. `/etc` is granted read-only by the Linux minimal
+/// own package dir. Egress curated down to the install-time artifact hosts (see
+/// [`build_jail_net`]). `/etc` is granted read-only by the Linux minimal
 /// root (it is in `ESSENTIAL_READ_DIRS`); `/etc/shadow` + `/etc/gshadow` are denied
 /// within it (grant-directory-then-deny) so a lifecycle script can read the benign
 /// `/etc` files it may legitimately need (`resolv.conf`, `localtime`, `ssl/`) without
@@ -162,11 +165,32 @@ fn build_jail_surface(package_dir: Option<&Path>) -> Value {
     fs.insert("/etc/gshadow".to_string(), json!(false));
     json!({
         "fs": Value::Object(fs),
-        // Deny all egress (prefetch / curated-egress is deferred).
-        "net": false,
+        "net": build_jail_net(),
         // Strip-all here; the interposition supplies the scrubbed lifecycle env.
         "vars": []
     })
+}
+
+/// The build-jail's net axis: the curated install-time artifact hosts (`$downloads`),
+/// everything else denied. A lifecycle script that legitimately fetches its own binary —
+/// Node headers for a native compile, the Prisma engines, the Cypress binary — reaches
+/// exactly those hosts and nothing more; the set is wildcard-free and carries no host that
+/// accepts a write, so an attacker-authored postinstall gains no way to send bytes out.
+///
+/// WINDOWS keeps the deny-all. Its backend refuses a per-host policy outright
+/// (`WinNetPlan::PerHostUnsupported`) because the available AppContainer exemption exposes
+/// every loopback listener, so a local forwarder could bypass the hostname gate — and an
+/// unappliable jail fails the install rather than degrading. Deny-all is the STRICTER
+/// posture, so the divergence loses a capability, never enforcement.
+fn build_jail_net() -> Value {
+    #[cfg(not(windows))]
+    {
+        json!(["$downloads"])
+    }
+    #[cfg(windows)]
+    {
+        json!(false)
+    }
 }
 
 /// Compile the build-jail policy for ONE dependency lifecycle spawn — the production
