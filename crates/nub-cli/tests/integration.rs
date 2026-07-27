@@ -4238,6 +4238,60 @@ fn watch_loads_auto_env_file_from_ancestor_project_root() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Deliberately UNGATED on the Node version — that gate is exactly what let this
+/// regression ship. Every other watch env-file test skips below 20.6, so no CI
+/// leg exercised the auto-discovered cascade on the compat tier, where nub was
+/// handing the watched Node a `--env-file` it does not understand: Node aborted
+/// with `bad option` before executing a line. Assert only that the value ARRIVES,
+/// not how — forwarding above the floor, injection below it — so the test pins
+/// the user-visible contract without freezing the delivery mechanism.
+#[test]
+fn watch_delivers_auto_env_values_on_every_supported_node() {
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"watch-env-floor"}"#).unwrap();
+    // A plain value and an expansion-dependent one: below the floor both travel
+    // by injection, above it the plain one rides Node's `--env-file` while the
+    // expanded one is injected. Both must land either way.
+    std::fs::write(
+        dir.join(".env"),
+        "PLAIN=plain\nEXPANDED=${PLAIN}-expanded\n",
+    )
+    .unwrap();
+    let snapshot = dir.join("snapshot.txt");
+    let stderr = dir.join("stderr.txt");
+    std::fs::write(
+        dir.join("probe.cjs"),
+        format!(
+            "require('fs').writeFileSync({path:?}, \
+             `${{process.env.PLAIN || 'missing'}}|${{process.env.EXPANDED || 'missing'}}`);\n",
+            path = snapshot.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let stderr_file = std::fs::File::create(&stderr).unwrap();
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(["--watch", "probe.cjs"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file));
+    remove_ambient_watch_control_vars(&mut cmd);
+    let mut child = spawn_watch_probe(&mut cmd);
+
+    let snapshot_text =
+        wait_for_watch_snapshot(&snapshot, "plain|plain-expanded", &mut child, &stderr);
+    finish_watch_probe(&mut child);
+    assert_eq!(
+        snapshot_text, "plain|plain-expanded",
+        "auto-discovered .env values must reach the watched child on every supported Node"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Unix permits a mixed-case ambient key alongside the canonical spelling Node
 /// consumes at startup. The mixed-case value must survive, while a canonical raw
 /// env-file value is occupied in the supervisor and then removed in the child.
