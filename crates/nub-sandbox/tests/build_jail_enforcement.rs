@@ -41,20 +41,27 @@ fn build_jail_confines_writes_and_hides_secrets() {
     std::fs::write(home.join(".ssh/id_rsa"), b"PRIVATE-KEY-DO-NOT-LEAK").unwrap();
     // A source file in the package dir the build legitimately reads.
     std::fs::write(package_dir.join("binding.gyp"), b"{}").unwrap();
-    // Project-local `.npmrc` with a hardcoded token — at the root AND nested. Both sit
-    // inside the project `./` READ grant, so only the secret-file floor keeps them hidden.
+    // `.npmrc` with a hardcoded token, at the PACKAGE DIR's root AND nested inside it.
+    // The package dir is the writable subtree the jail grants outright, so the secret-file
+    // floor is the only thing keeping these hidden — which is what makes probing them
+    // meaningful. A project-local `.npmrc` outside `node_modules` is no longer in the read
+    // set at all, so probing there would pass without the floor doing anything.
     std::fs::write(
-        project.join(".npmrc"),
+        package_dir.join(".npmrc"),
         b"//registry.npmjs.org/:_authToken=NPMRC-TOKEN-DO-NOT-LEAK",
     )
     .unwrap();
-    let nested_npmrc = project.join("packages/api");
+    let nested_npmrc = package_dir.join("src");
     std::fs::create_dir_all(&nested_npmrc).unwrap();
     std::fs::write(
         nested_npmrc.join(".npmrc"),
         b"//registry.npmjs.org/:_authToken=NESTED-NPMRC-TOKEN",
     )
     .unwrap();
+    // The consumer's top-level manifest is granted as ONE FILE; the rest of its tree is
+    // not. Both halves are probed below — the narrowing is only real if the second holds.
+    std::fs::write(project.join("package.json"), b"CONSUMER-MANIFEST-VISIBLE").unwrap();
+    std::fs::write(project.join("secrets.ts"), b"CONSUMER-SOURCE-DO-NOT-LEAK").unwrap();
 
     // The interpreter path is only granted-read; the script doesn't run it here, so a
     // placeholder under the (real) home cache keeps the compile honest without needing
@@ -81,7 +88,7 @@ fn build_jail_confines_writes_and_hides_secrets() {
     // stdout rather than on file side effects alone.
     let secret = home.join(".ssh/id_rsa");
     let secret_write = home.join(".ssh/planted.txt");
-    let npmrc = project.join(".npmrc");
+    let npmrc = package_dir.join(".npmrc");
     let npmrc_nested = nested_npmrc.join(".npmrc");
     let script = format!(
         r#"
@@ -91,11 +98,15 @@ fn build_jail_confines_writes_and_hides_secrets() {
         echo evil > '{secret_write}' 2>/dev/null && echo SECRET_WRITE_WROTE || echo SECRET_WRITE_BLOCKED
         cat '{npmrc}' >/dev/null 2>&1 && echo NPMRC_LEAK || echo NPMRC_HIDDEN
         cat '{npmrc_nested}' >/dev/null 2>&1 && echo NPMRC_NESTED_LEAK || echo NPMRC_NESTED_HIDDEN
+        cat '{manifest}' 2>/dev/null && echo MANIFEST_READ_OK || echo MANIFEST_DENIED
+        cat '{consumer_src}' 2>/dev/null && echo SOURCE_READ_OK || echo SOURCE_DENIED
         "#,
         secret = secret.display(),
         secret_write = secret_write.display(),
         npmrc = npmrc.display(),
         npmrc_nested = npmrc_nested.display(),
+        manifest = project.join("package.json").display(),
+        consumer_src = project.join("secrets.ts").display(),
     );
 
     let spec = nub_sandbox::CommandSpec::new("/bin/sh")
@@ -127,11 +138,21 @@ fn build_jail_confines_writes_and_hides_secrets() {
     );
     assert!(
         stdout.contains("NPMRC_HIDDEN") && !stdout.contains("NPMRC_LEAK"),
-        "a project-local .npmrc must be unreadable:\n{stdout}"
+        "an .npmrc in the writable package dir must be unreadable:\n{stdout}"
     );
     assert!(
         stdout.contains("NPMRC_NESTED_HIDDEN") && !stdout.contains("NPMRC_NESTED_LEAK"),
-        "a nested project .npmrc must be unreadable:\n{stdout}"
+        "a nested .npmrc must be unreadable:\n{stdout}"
+    );
+    // The narrowed project read: the top-level manifest is readable, everything else in
+    // the consumer's tree is not.
+    assert!(
+        stdout.contains("MANIFEST_READ_OK") && stdout.contains("CONSUMER-MANIFEST-VISIBLE"),
+        "the consumer's top-level package.json must be readable:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("SOURCE_DENIED") && !stdout.contains("CONSUMER-SOURCE-DO-NOT-LEAK"),
+        "the consumer's source must be outside the jail's read set:\n{stdout}"
     );
     // Belt-and-suspenders: the planted file must not exist; the secret is untouched.
     assert!(
