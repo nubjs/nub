@@ -869,8 +869,8 @@ mod tests {
     #[test]
     fn alphabet_excludes_every_shell_hostile_character() {
         assert_eq!(ALPHA.len(), 85, "the rejection bound assumes this size");
-        for c in [b'"', b'\\', b'`', b'\'', b' ', b'&', b'|', b'<', b'>', b'^'] {
-            assert!(!ALPHA.contains(&c), "ALPHA contains {}", c as char);
+        for c in b"\"\\`' &|<>^" {
+            assert!(!ALPHA.contains(c), "ALPHA contains {}", *c as char);
         }
         assert!(ALPHA.iter().all(u8::is_ascii_graphic));
         // Every class must be drawable from ALPHA, or the floor below writes a character the

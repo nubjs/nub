@@ -1056,9 +1056,10 @@ mod win {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(event) };
         }
 
-        // Per-host cannot be made precise with AppContainer's package-wide loopback
-        // exemption. Reject it on every privilege tier before a child can run.
-        per_host_reject(&mut fails, &f, &child);
+        // Per-host rides nub's loopback egress proxy, and an AppContainer child reaches
+        // loopback ONLY through the admin-only exemption — so the tier is elevation-gated:
+        // Tier 1 enforcement when elevated, fail-CLOSED before any child runs when not.
+        per_host_tiered(&mut fails, &f, &child);
 
         // ── process-reap (Job Object KILL_ON_JOB_CLOSE) ──────────────────────────
         job_reap(&mut fails, &f);
@@ -1093,21 +1094,60 @@ mod win {
         policy
     }
 
-    fn per_host_reject(fails: &mut u32, f: &Fixture, child: &Path) {
+    /// Whether THIS process is elevated. Deliberately a second implementation rather than a
+    /// widened `windows::launch::is_elevated`: that one is the input to the very branch under
+    /// test, so reusing it would make the expectation agree with the backend by construction
+    /// and pass even if the elevation probe itself were wrong. An independent oracle is the
+    /// point. (`windows_account_enforcement.rs` carries the same helper for the same reason.)
+    fn is_elevated() -> bool {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: standard token-query sequence; the buffer is exactly a TOKEN_ELEVATION.
+        unsafe {
+            let mut tok = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
+                return false;
+            }
+            let mut elev = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let mut ret = 0u32;
+            let ok = GetTokenInformation(
+                tok,
+                TokenElevation,
+                std::ptr::from_mut(&mut elev).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret,
+            );
+            CloseHandle(tok);
+            ok != 0 && elev.TokenIsElevated != 0
+        }
+    }
+
+    fn per_host_tiered(fails: &mut u32, f: &Fixture, child: &Path) {
         let policy = per_host_policy(f);
         let marker = f.work.join("per-host-must-not-run.txt");
         let marker_arg = marker.to_string_lossy().into_owned();
         let spec = CommandSpec::new(child.as_os_str())
             .args(["__sbxchild__", "write", marker_arg.as_str()])
             .cwd(&f.root);
+        let elevated = is_elevated();
         match apply(&policy, spec) {
             // Asserted on `lost`, not on the wording — pinning the platform reason string
             // made this fail on a correct rejection. `net-per-host` plus the un-run child
             // is the contract; `per_host_policy` is what steers the rejection to the
             // Windows loopback-forwarder guard rather than a generic pre-apply invariant.
             Err(d) => {
-                if d.lost.iter().any(|s| s == "net-per-host") && d.reason.is_some() {
-                    println!("PASS per-host policy fails closed before launch");
+                if elevated {
+                    *fails += 1;
+                    eprintln!(
+                        "FAIL elevated per-host must reach Tier 1, not fail closed: \
+                         lost={:?} reason={:?}",
+                        d.lost, d.reason
+                    );
+                } else if d.lost.iter().any(|s| s == "net-per-host") && d.reason.is_some() {
+                    println!("PASS unelevated per-host policy fails closed before launch");
                 } else {
                     *fails += 1;
                     eprintln!(
@@ -1115,15 +1155,30 @@ mod win {
                         d.lost, d.reason
                     );
                 }
+                // Only the rejected policy owes this: nothing may have run before the refusal.
+                if marker.exists() {
+                    *fails += 1;
+                    eprintln!("FAIL rejected per-host policy still ran the child");
+                }
             }
-            Ok(_) => {
-                *fails += 1;
-                eprintln!("FAIL per-host policy was accepted");
+            // Elevated ⇒ Tier 1. Accepting is not enough: per-host must be genuinely ENFORCED,
+            // so the absence of `net-per-host` in `lost` is the real assertion — a silent
+            // coarse-degrade of an allow-list into a deny-all would otherwise pass as `Ok`.
+            // The child is never spawned (`status()` is not called), so no marker can appear.
+            Ok(p) => {
+                if !elevated {
+                    *fails += 1;
+                    eprintln!("FAIL unelevated per-host policy was accepted");
+                } else if p.degradation.lost.iter().any(|s| s == "net-per-host") {
+                    *fails += 1;
+                    eprintln!(
+                        "FAIL Tier 1 must enforce per-host, not degrade it: lost={:?}",
+                        p.degradation.lost
+                    );
+                } else {
+                    println!("PASS elevated per-host policy reaches Tier 1 enforcement");
+                }
             }
-        }
-        if marker.exists() {
-            *fails += 1;
-            eprintln!("FAIL rejected per-host policy still ran the child");
         }
     }
 

@@ -519,6 +519,9 @@ pub(crate) fn apply(
         degradation: deg,
         proxy: None,
         launch: Some(WindowsLaunch::Account(launch)),
+        _private_tmp: None,
+        redact_stdout: false,
+        redact_stderr: false,
     })
 }
 

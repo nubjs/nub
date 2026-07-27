@@ -392,6 +392,9 @@ fn apply_degradation_reflects_backend_capability() {
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         Err(degradation) => panic!("backend setup failed unexpectedly: {degradation:?}"),
     };
+    // Windows reaches here only on the success path, and every assertion below is cfg'd to
+    // another target — the binding is genuinely unused there, not accidentally dropped.
+    #[cfg_attr(target_os = "windows", allow(unused_variables))]
     let d = &prepared.degradation;
     // macOS (Seatbelt) and Linux (Bubblewrap+seccomp) have real backends: fs +
     // deny-all net are genuinely enforced, so nothing is degraded. Other OSes still

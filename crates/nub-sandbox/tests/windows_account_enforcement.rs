@@ -39,8 +39,8 @@ fn main() {
 #[cfg(target_os = "windows")]
 mod win {
     use nub_sandbox::policy::{
-        CanonGlob, Effect, EnvPolicy, FsAccess, FsPolicy, FsRule, FsRuleSet, NetPolicy, PidPolicy,
-        SandboxPolicy, TmpMode,
+        CanonGlob, Effect, EnvPolicy, FsAccess, FsOrigin, FsPolicy, FsRule, FsRuleSet, NetPolicy,
+        PidPolicy, SandboxPolicy, TmpMode,
     };
     use nub_sandbox::{CommandSpec, apply, windows_admin};
     use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -183,6 +183,7 @@ mod win {
             matcher: CanonGlob(p.to_string_lossy().replace('\\', "/")),
             effect,
             access,
+            origin: FsOrigin::Authored,
         }
     }
 
@@ -202,7 +203,12 @@ mod win {
                 tmp: TmpMode::Shared,
             },
             net: NetPolicy::default(),
-            env: EnvPolicy::default(),
+            // Direct-IR policies must carry an explicit target-environment snapshot: `apply`
+            // refuses an unresolved env rather than guess between inheritance and an empty
+            // environment, so a defaulted `EnvPolicy` fails every case before a child runs.
+            // Inert for this backend's launch (`build_child_env` keys off `enforce`, which
+            // stays false, so seclogon still builds the account's own profile environment).
+            env: EnvPolicy::resolved(std::env::vars().collect()),
             pid: PidPolicy::default(),
         }
     }
@@ -231,6 +237,7 @@ mod win {
                 },
                 tmp: TmpMode::Shared,
             },
+            env: EnvPolicy::resolved(std::env::vars().collect()),
             ..Default::default()
         }
     }
