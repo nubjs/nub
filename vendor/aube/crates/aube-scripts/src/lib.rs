@@ -1328,9 +1328,10 @@ pub async fn run_root_script_by_name(
     };
     // The root exemption from the embedder's build-jail covers USER-AUTHORED code
     // only. A fetched checkout occupying the root slot (`RootProvenance::Fetched`)
-    // is third-party, so it is confined exactly like a dependency, keyed on its own
-    // directory. Default-preserving: standalone aube leaves
-    // `embedder_owns_lifecycle_sandbox` false, so this stays `None` either way.
+    // is third-party, so it is confined like a dependency — keyed on the checkout
+    // root, which for a workspace git dep is NOT the importer's own directory.
+    // Default-preserving: standalone aube leaves `embedder_owns_lifecycle_sandbox`
+    // false, so this stays `None` either way.
     let sandbox_package_dir = match provenance {
         RootProvenance::UserAuthored => None,
         RootProvenance::Fetched { checkout_root } => aube_util::embedder()
