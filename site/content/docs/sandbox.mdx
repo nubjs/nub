@@ -477,7 +477,7 @@ A policy names the axes it confines; an omitted axis allows nothing. Naming only
 { "fs": ["./dist"] }
 ```
 
-When one sandboxed process launches another, the operating system confines the child inside its parent — it can only tighten what the parent already allows, never widen it, regardless of what the child's own policy requests.
+When one sandboxed process launches another, the child runs inside its parent's confinement — whatever the child's own policy requests, it never widens what the parent already allows.
 
 ## Complete examples
 
