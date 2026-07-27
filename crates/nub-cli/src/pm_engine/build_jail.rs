@@ -116,9 +116,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                     .reason
                     .clone()
                     .unwrap_or_else(|| format!("could not enforce {}", d.lost.join(", ")));
-                std::io::Error::other(format!(
-                    "build-jail could not be applied (fail-closed): {detail}"
-                ))
+                std::io::Error::other(refusal(&detail))
             })?;
         if let Some(warning) = prepared.degradation.warning() {
             eprintln!("warning: {warning}");
@@ -126,6 +124,171 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // `status()` spawns, waits, and (Linux) reaps the whole process tree via the
         // retained monitor on drop — descendant reaping without aube's job object.
         prepared.status()
+    }
+}
+
+/// The message a user sees when an install refuses because the build jail cannot be applied.
+///
+/// THE REFUSAL IS THE PRODUCT HERE. The build jail is opted into per project, so a refusal only
+/// ever reaches someone whose repository asked for it — which makes fail-closed correct, and
+/// makes the message the entire remaining surface. A raw Bubblewrap error at this point is a
+/// design failure: the reader has to learn, without leaving the terminal, that the requirement
+/// comes from the project rather than from nub, what their own machine is missing, and the one
+/// command that fixes it.
+///
+/// The cause comes from [`nub_sandbox::preflight::diagnose`], which asks the host directly. The
+/// launcher's own `detail` is kept as the last line rather than being the whole message: it is
+/// the ground truth when the preflight has no opinion, and the thing to paste into a bug report
+/// when it does.
+fn refusal(detail: &str) -> String {
+    let mut out = headline();
+    match nub_sandbox::preflight::diagnose() {
+        Some(missing) => {
+            out.push_str(&remedy(&missing));
+            out.push_str("\nThen run `nub install` again.\n");
+        }
+        // No prerequisite is missing, so this is not a machine-setup problem and offering a
+        // setup command would send the reader somewhere that cannot help. The launcher's
+        // reason is the only real information available.
+        None => {
+            out.push_str("  The sandbox could not be applied on this host.\n\n");
+        }
+    }
+    out.push_str(&format!("\n{detail}\n"));
+    out
+}
+
+/// The first line, which has to be TRUE about where the requirement came from.
+///
+/// A reader whose install just refused needs to know whether their own repository asked for
+/// this or whether nub decided it — those lead to completely different next actions (talk to
+/// the team vs. file a bug). So the project is named only when `nub.jsonc` actually carries the
+/// opt-in; otherwise the line says nothing about a project that did not ask.
+///
+/// The config is READ here, not consumed: `install.sandbox` remains inert as a policy input,
+/// and this is attribution for a message, not a gate. When the opt-in becomes the thing that
+/// arms the jail, this function is already asking the right question.
+fn headline() -> String {
+    let opted_in = crate::project_config::effective_config()
+        .and_then(|config| config.values.install.sandbox.as_ref())
+        .is_some();
+    if opted_in {
+        return String::from(
+            "nub install: this project requires the build sandbox (nub.jsonc → install.sandbox)\n\n",
+        );
+    }
+    String::from(
+        "nub install: the build sandbox could not confine a dependency's install script\n\n",
+    )
+}
+
+/// The per-cause remedy block. Each cause gets the command that actually fixes IT — a package
+/// install, a one-time host setup, or a fresh login — because the three are not
+/// interchangeable and offering the wrong one costs the reader a round trip.
+fn remedy(missing: &nub_sandbox::preflight::Missing) -> String {
+    use nub_sandbox::preflight::Missing;
+    match missing {
+        Missing::Bubblewrap => format!(
+            "  Missing: bubblewrap\n\n{}\n",
+            bubblewrap_install_hint(host_distro())
+        ),
+        // PLACEHOLDER REMEDY, pending the apt-route investigation: whether Ubuntu 24.04 can be
+        // satisfied by a package alone is still open, so this points at nub's own setup, which
+        // is known to work. If an apt-only route lands, it replaces this arm and nothing else.
+        Missing::NamespacePermission => format!(
+            "  Missing: permission to create user namespaces\n\n  This kernel restricts \
+             unprivileged user namespaces. Nub grants that one capability to its own bundled \
+             bubblewrap, and to nothing else:\n\n    {}\n",
+            nub_sandbox::preflight::LINUX_SETUP_COMMAND
+        ),
+        Missing::SessionGroup => format!(
+            "  Missing: the {} group in this shell\n\n  The host is set up. This shell's group \
+             set was fixed when it started, so it does not carry the group and neither will \
+             anything it launches. Start a fresh login, or run the install through:\n\n    sg {} \
+             -c 'nub install'\n",
+            nub_sandbox::preflight::LINUX_HELPER_GROUP,
+            nub_sandbox::preflight::LINUX_HELPER_GROUP
+        ),
+        Missing::SeatbeltUnavailable => String::from(
+            "  Missing: /usr/bin/sandbox-exec\n\n  Nub confines a build script through the stock \
+             macOS Seatbelt entry point, which is missing or not executable here. No setup \
+             command installs it — restore it from a stock macOS system volume.\n",
+        ),
+    }
+}
+
+/// The distro family, for the package line. `ID_LIKE` is checked after `ID` so a derivative
+/// (Linux Mint, Pop!_OS, Manjaro) gets its parent's package manager rather than falling through
+/// to the generic list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Distro {
+    Debian,
+    Fedora,
+    Arch,
+    Suse,
+    Alpine,
+    Unknown,
+}
+
+/// Read the host's distro identity. Not Linux-gated: the file simply does not exist elsewhere,
+/// which lands on `Unknown` — and a `cfg` here would make the classifier dead code on macOS and
+/// leave the one platform that needs it the only one that compiles it.
+fn host_distro() -> Distro {
+    std::fs::read_to_string("/etc/os-release")
+        .map(|release| classify_distro(&release))
+        .unwrap_or(Distro::Unknown)
+}
+
+fn classify_distro(os_release: &str) -> Distro {
+    let field = |key: &str| -> String {
+        os_release
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .map(|value| value.trim_matches('"').to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    // ID is one token; ID_LIKE is a space-separated list, so both are matched by word.
+    let words: Vec<String> = format!("{} {}", field("ID="), field("ID_LIKE="))
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let has = |name: &str| words.iter().any(|word| word == name);
+    if has("debian") || has("ubuntu") {
+        return Distro::Debian;
+    }
+    if has("fedora") || has("rhel") || has("centos") {
+        return Distro::Fedora;
+    }
+    if has("arch") {
+        return Distro::Arch;
+    }
+    if has("suse") || has("opensuse") {
+        return Distro::Suse;
+    }
+    if has("alpine") {
+        return Distro::Alpine;
+    }
+    Distro::Unknown
+}
+
+/// One line when the distro is known, the full table only when it is not. Printing three
+/// package managers to a reader who is demonstrably on one of them is noise they have to filter
+/// before they can act.
+fn bubblewrap_install_hint(distro: Distro) -> String {
+    let one = |command: &str| format!("    {command}");
+    match distro {
+        Distro::Debian => one("sudo apt install bubblewrap"),
+        Distro::Fedora => one("sudo dnf install bubblewrap"),
+        Distro::Arch => one("sudo pacman -S bubblewrap"),
+        Distro::Suse => one("sudo zypper install bubblewrap"),
+        Distro::Alpine => one("sudo apk add bubblewrap"),
+        Distro::Unknown => String::from(
+            "    Debian/Ubuntu   sudo apt install bubblewrap\n\
+             \x20   Fedora/RHEL     sudo dnf install bubblewrap\n\
+             \x20   Arch            sudo pacman -S bubblewrap\n\
+             \x20   openSUSE        sudo zypper install bubblewrap\n\
+             \x20   Alpine          sudo apk add bubblewrap",
+        ),
     }
 }
 
@@ -271,5 +434,87 @@ mod tests {
             .into_iter()
             .collect();
         assert!(node_toolchain_grant(&ambient).is_none());
+    }
+
+    #[test]
+    fn a_derivative_distro_gets_its_parent_package_manager() {
+        // ID_LIKE is the whole reason this is not a lookup on ID: Mint, Pop!_OS and Manjaro
+        // ship their own ID and would otherwise fall through to the five-line generic table.
+        let cases = [
+            ("ID=ubuntu\nID_LIKE=debian\n", Distro::Debian),
+            ("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n", Distro::Debian),
+            ("ID=manjaro\nID_LIKE=arch\n", Distro::Arch),
+            ("ID=fedora\n", Distro::Fedora),
+            ("ID=\"rhel\"\nID_LIKE=\"fedora\"\n", Distro::Fedora),
+            ("ID=alpine\n", Distro::Alpine),
+            ("ID=plan9\n", Distro::Unknown),
+        ];
+        for (release, expected) in cases {
+            assert_eq!(classify_distro(release), expected, "{release:?}");
+        }
+    }
+
+    #[test]
+    fn a_known_distro_gets_exactly_one_install_line() {
+        // Printing five package managers to someone demonstrably on one of them is noise they
+        // have to filter before they can act, so the table is the UNKNOWN fallback only.
+        let debian = bubblewrap_install_hint(Distro::Debian);
+        assert_eq!(debian.lines().count(), 1, "{debian}");
+        assert!(debian.contains("apt install bubblewrap"), "{debian}");
+        assert!(
+            bubblewrap_install_hint(Distro::Unknown).lines().count() > 1,
+            "an unidentified host still needs the full table"
+        );
+    }
+
+    #[test]
+    fn each_cause_offers_only_the_remedy_that_fixes_it() {
+        use nub_sandbox::preflight::Missing;
+
+        // The three Linux causes are NOT interchangeable, and offering the wrong command is a
+        // wasted round trip: no package install grants a namespace, no host setup reaches a
+        // shell whose group set is already fixed.
+        let package = remedy(&Missing::Bubblewrap);
+        assert!(package.contains("bubblewrap"), "{package}");
+        assert!(
+            !package.contains(nub_sandbox::preflight::LINUX_SETUP_COMMAND),
+            "an absent bubblewrap is not fixed by the host setup: {package}"
+        );
+
+        let namespace = remedy(&Missing::NamespacePermission);
+        assert!(
+            namespace.contains(nub_sandbox::preflight::LINUX_SETUP_COMMAND),
+            "{namespace}"
+        );
+
+        let session = remedy(&Missing::SessionGroup);
+        assert!(session.contains("sg "), "{session}");
+        assert!(
+            !session.contains(nub_sandbox::preflight::LINUX_SETUP_COMMAND),
+            "re-running setup cannot change a live shell's group set: {session}"
+        );
+    }
+
+    #[test]
+    fn the_refusal_keeps_the_launchers_own_reason() {
+        // The preflight names a cause and a remedy; the launcher's raw reason is what goes in a
+        // bug report when the two disagree, so it must survive rather than being replaced.
+        let message = refusal("bwrap: setting up uid map: Permission denied");
+        assert!(
+            message.contains("bwrap: setting up uid map: Permission denied"),
+            "{message}"
+        );
+        assert!(message.starts_with("nub install:"), "{message}");
+    }
+
+    #[test]
+    fn the_headline_blames_the_project_only_when_the_project_opted_in() {
+        // No snapshot is initialized in a unit test, so nothing opted in — and the line must
+        // NOT claim a `nub.jsonc` requirement that the reader's repository never wrote.
+        let line = headline();
+        assert!(
+            !line.contains("nub.jsonc"),
+            "an un-opted-in project must not be told it requires the sandbox: {line}"
+        );
     }
 }

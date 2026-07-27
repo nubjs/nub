@@ -85,7 +85,7 @@ const DESKTOP_GRANT: u32 = DESKTOP_READOBJECTS
 /// Strips every ace this run applied, on drop. Ordering matters: declared before the child is
 /// spawned but dropped after the wait returns, so a granted path is never revoked out from
 /// under a live child. Best-effort — a failed strip leaves an over-permissive ace for a
-/// confined account, which the ledger sweep (`nub run --sandbox-admin clean`) collects later.
+/// confined account, which the ledger sweep (`nub setup-sandbox --clean`) collects later.
 struct AceGuard {
     paths: Vec<std::path::PathBuf>,
     sid: String,
@@ -132,7 +132,7 @@ impl AccountLaunch {
             Some(_) => {
                 return Err(io::Error::other(
                     "the nub sandbox account exists but its SID no longer matches the recorded \
-                     setup — re-run `nub run --sandbox-admin setup` from an elevated prompt",
+                     setup — re-run `nub setup-sandbox` from an elevated prompt",
                 ));
             }
             None => return Err(not_provisioned()),
@@ -460,7 +460,7 @@ fn not_provisioned() -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
         "this policy needs nub's dedicated Windows sandbox account, which has not been set up \
-         on this machine. Run `nub run --sandbox-admin setup` once from an elevated (Run as \
+         on this machine. Run `nub setup-sandbox` once from an elevated (Run as \
          administrator) prompt.",
     )
 }
@@ -470,8 +470,8 @@ fn map_spawn_error(e: io::Error) -> io::Error {
     match e.raw_os_error() {
         Some(ERROR_LOGON_FAILURE) => io::Error::other(format!(
             "sandbox: the stored credential for `{SANDBOX_ACCOUNT}` was rejected — the \
-             account's password was changed or the account was disabled. Re-run `nub run \
-             --sandbox-admin setup` from an elevated prompt to reprovision it."
+             account's password was changed or the account was disabled. Re-run \
+             `nub setup-sandbox` from an elevated prompt to reprovision it."
         )),
         Some(ERROR_SERVICE_DISABLED) => io::Error::other(
             "sandbox: the Windows Secondary Logon service is disabled, so nub cannot start the \

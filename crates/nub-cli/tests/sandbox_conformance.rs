@@ -86,7 +86,7 @@ fn probe_bin() -> PathBuf {
 /// Exercise the Bubblewrap operations the backend needs, rather than trusting a version
 /// string. The candidates come from the engine's own resolver, not `bwrap` on PATH: on
 /// an AppArmor-restricted host PATH resolves to the distro binary the kernel denies,
-/// while the dedicated helper `nub sandbox setup` installs is the one that works — so a
+/// while the dedicated helper `nub setup-sandbox` installs is the one that works — so a
 /// PATH probe declared a correctly set-up host unenforceable and skipped the suite.
 ///
 /// The required CI leg turns an unavailable primitive into a hard failure; local hosts

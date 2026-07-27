@@ -1820,7 +1820,7 @@ fn open_bwrap_candidate_inventory(require_nesting: bool) -> PinnedCandidateInven
 /// it is the ONLY candidate that can create the userns — a stock system/bundled bwrap at an
 /// unprofiled path is denied. When the helper is absent (no setup, or an unrestricted host
 /// like 22.04 / sysctl=0) its open fails and the resolver falls through to system/bundled, so
-/// the no-setup path is unchanged where setup isn't needed. `nub sandbox setup` installs it.
+/// the no-setup path is unchanged where setup isn't needed. `nub setup-sandbox` installs it.
 ///
 /// Split out so [`crate::backend::linux_probe`] can ask the SAME question the resolver
 /// asks; a probe that enumerates its own paths drifts out of step with production and
@@ -2346,13 +2346,24 @@ fn apparmor_restricts_unprivileged_userns() -> bool {
 /// tokens rather than whole sentences. `RTM_NEWADDR` is the netns-loopback
 /// bring-up: on a restricted Ubuntu host `--unshare-all` dies THERE first, before
 /// reaching any uid-map step, which is why the errno alone is not enough to key on.
+///
+/// A BARE errno is deliberately not a match. Matching "permission denied" on its own also
+/// caught an ordinary bind-mount EACCES — an unreadable path, a mode the caller does not hold
+/// — and sent that caller to `sudo nub setup-sandbox`, which cannot help: no AppArmor grant
+/// makes an unreadable path readable. The errno has to sit alongside a named namespace or
+/// credential operation to mean what the setup hint claims it means.
 fn is_namespace_denial(lower: &str) -> bool {
-    lower.contains("uid map")
-        || lower.contains("gid map")
-        || lower.contains("new namespace")
-        || lower.contains("rtm_newaddr")
-        || lower.contains("permission denied")
-        || lower.contains("operation not permitted")
+    const NAMESPACE_OPERATIONS: [&str; 6] = [
+        "uid map",
+        "gid map",
+        "namespace",
+        "userns",
+        "unshare",
+        "rtm_newaddr",
+    ];
+    NAMESPACE_OPERATIONS
+        .iter()
+        .any(|operation| lower.contains(operation))
 }
 
 fn executable(path: &Path) -> bool {
@@ -4319,6 +4330,23 @@ mod tests {
             !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_plain_eacces_is_not_read_as_a_namespace_denial() {
+        // A bind-mount EACCES carries the same errno as a userns denial and nothing else. It
+        // used to match, so an unreadable path on a restricted host told the caller to run the
+        // setup — a remedy that cannot fix a file mode. The generic message is the honest one.
+        for detail in [
+            "bwrap: Can't create file at /newroot/etc/hosts: Permission denied",
+            "bwrap: Can't read /var/lib/secret: Operation not permitted",
+        ] {
+            let message = classify_bwrap_failures_under(&[detail.to_string()], false, true, false);
+            assert!(
+                !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+                "a plain EACCES must not be blamed on the AppArmor userns grant: {message}"
+            );
+        }
     }
 
     #[test]

@@ -35,8 +35,21 @@ use std::ffi::OsString;
 use std::process::Command;
 use std::sync::Arc;
 
+/// What `nub setup-sandbox --check` found: the report a human reads, plus the single fact a script
+/// needs. `ready` answers exactly one question — can the sandbox enforce for THIS caller, right
+/// now — which is narrower than "is the host set up": a Linux host can be fully installed while
+/// the calling shell still lacks the group. Carrying it as a field is what lets every platform
+/// map the same question onto the same exit status instead of a caller parsing prose.
+pub struct StatusReport {
+    pub text: String,
+    pub ready: bool,
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
+
+#[cfg(target_os = "macos")]
+pub mod macos_setup;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -47,6 +60,15 @@ pub use linux::validate_adjacent_resource_bundle;
 #[cfg(not(target_os = "linux"))]
 pub fn validate_adjacent_resource_bundle() -> Result<(), String> {
     Ok(())
+}
+
+/// Every path the single-level resolver will try, in its order. Surfaced so the preflight
+/// probe asks about the SAME candidates production launches, rather than a second hardcoded
+/// list that can drift out of step with the resolver.
+#[cfg(target_os = "linux")]
+pub(crate) fn bwrap_candidate_paths() -> Vec<std::path::PathBuf> {
+    let (dedicated, system, bundled) = linux::single_level_bwrap_candidate_paths();
+    dedicated.into_iter().chain(system).chain(bundled).collect()
 }
 
 #[cfg(target_os = "linux")]

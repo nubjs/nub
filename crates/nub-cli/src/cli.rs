@@ -1292,8 +1292,22 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "sandbox", "install", "i",
-    "ci", "init",
+    "run",
+    "watch",
+    "exec",
+    "upgrade",
+    "help",
+    "node",
+    "pm",
+    "agent",
+    "setup-sandbox",
+    // Not a live verb: `run_nub`'s dispatch rejects it with a pointer at `setup-sandbox`. It
+    // stays listed so it reaches that message instead of being taken for a file to run.
+    "sandbox",
+    "install",
+    "i",
+    "ci",
+    "init",
 ];
 
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
@@ -2197,14 +2211,24 @@ fn dispatch_subcommand(
         return crate::agent::run(&rest[1..]);
     }
 
-    // `sandbox` is the one-time host-setup group for the agent-sandbox
-    // (`setup`/`status`/`teardown`). Like `node`/`pm`/`agent`, a non-forwarding
-    // manual sub-verb match. Setup is privileged (installs a root-owned bwrap
-    // helper + AppArmor profile on Linux) — the verb never self-elevates; it
-    // prints the `sudo` command when run unprivileged. Design: .fray/sandbox-escalation-ux.md.
-    if subcommand == "sandbox" {
+    // `setup-sandbox` is the one-time host-setup verb for the agent-sandbox. Like
+    // `node`/`pm`/`agent`, a non-forwarding manual match. Setup is privileged (a root-owned
+    // bwrap helper + AppArmor profile on Linux, a local account + WFP filters on Windows) — it
+    // never self-elevates; it prints the exact elevated command instead. The hyphenated verb
+    // keeps the bare `sandbox` name free for the sandbox RUN surface; see `run_setup_sandbox`
+    // for the full rationale. Design: .fray/sandbox-escalation-ux.md.
+    if subcommand == "setup-sandbox" {
         initialize_config_snapshot(false, false)?;
-        return run_sandbox_admin(&rest[1..]);
+        return run_setup_sandbox(&rest[1..]);
+    }
+    // The preview spelling, which shipped in no release. Redirecting beats letting it fall
+    // through to clap, where a bare `sandbox` reads as a file to run and the error names the
+    // wrong problem entirely.
+    if subcommand == "sandbox" {
+        anyhow::bail!(
+            "the sandbox host setup is `nub setup-sandbox` (it takes flags, not an action word). \
+             Run `nub setup-sandbox --help` for the modes."
+        );
     }
 
     // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
@@ -3210,98 +3234,220 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     Ok(nub_core::node::spawn::exit_code(&result))
 }
 
-/// `nub sandbox {setup,status,teardown}` — the one-time host-setup group. On Linux, `setup`
-/// installs the fixed-path bwrap helper + AppArmor profile the agent-sandbox needs on Ubuntu
-/// 23.10+/24.04 (epic C1 + B2). It NEVER self-elevates: run unprivileged it prints the exact
-/// `sudo` command. macOS needs no setup; Windows setup is the account/WFP backend, reached via
-/// the hidden `nub run --sandbox-admin setup` rather than through this group.
-fn run_sandbox_admin(args: &[String]) -> Result<i32> {
-    let usage = "nub sandbox — manage the one-time host setup the agent-sandbox needs\n\n\
-                 \x20 setup       install the sandbox helper + profile (needs root on Linux)\n\
-                 \x20 status      report what is and isn't set up\n\
-                 \x20 teardown    remove the sandbox helper + profile\n\n\
-                 setup options\n\
-                 \x20 --all-users  let any local user execute the helper, so no fresh login is\n\
-                 \x20              needed afterwards (for CI runners and single-user machines)";
-    let Some(action) = args.first().map(String::as_str) else {
-        println!("{usage}");
-        return Ok(0);
-    };
-    #[cfg(target_os = "linux")]
-    {
-        use nub_sandbox::linux_admin::HelperAccess;
+/// A setup that installed correctly but that the CALLER cannot use yet is neither a success nor
+/// a failure — it exits distinctly so a CI step cannot read it as either. Linux-only because
+/// only Linux gates on a group, which is fixed at login: a group added moments ago is absent
+/// from the very shell that added it.
+#[cfg(target_os = "linux")]
+const EXIT_SETUP_NEEDS_FRESH_SESSION: i32 = 3;
 
-        // A setup that installed correctly but that the CALLER cannot use yet is neither a
-        // success nor a failure — it exits distinctly so a CI step cannot read it as either.
-        const EXIT_SETUP_NEEDS_FRESH_SESSION: i32 = 3;
+/// The sandbox cannot enforce for this caller right now. Distinct from the anyhow error path so
+/// `nub setup-sandbox --check && <command>` is a usable gate.
+const EXIT_SANDBOX_NOT_READY: i32 = 1;
 
-        let flags: Vec<&str> = args[1..].iter().map(String::as_str).collect();
-        let mut access = HelperAccess::Group;
-        for flag in &flags {
-            match *flag {
-                "--all-users" => access = HelperAccess::AllUsers,
-                other => {
-                    anyhow::bail!("unknown `nub sandbox {action}` option `{other}`\n\n{usage}")
-                }
-            }
-        }
-        if action != "setup" && !flags.is_empty() {
-            anyhow::bail!("`nub sandbox {action}` takes no options\n\n{usage}");
-        }
+/// `nub setup-sandbox` — make the sandbox able to enforce on this host. One surface on all
+/// three platforms, with the per-platform work behind it.
+///
+/// WHY THIS IS ONE HYPHENATED VERB WITH FLAGS, AND NOT `nub sandbox <action>`. The bare
+/// `sandbox` name is reserved for the sandbox RUN surface — the shape `nub run --sandbox
+/// <SHAPE>` already takes today, and the natural home for a future `nub sandbox <policy> --
+/// <cmd>`. An action word in that position (`nub sandbox setup`) is indistinguishable at a
+/// glance from a policy positional, and the two would compete for the same slot the moment the
+/// run surface is promoted out of the hidden flag. Administration therefore lives on its own
+/// verb that takes NO positionals at all, so nothing can collide with it. The three actions are
+/// the lifecycle of one installation, so they are modes of that verb rather than four
+/// hyphenated siblings — `--check` reports without changing anything (the `cargo fmt --check`
+/// convention), `--undo` removes what setup installed.
+///
+/// THE MODES MEAN THE SAME THING EVERYWHERE. Setup makes the sandbox able to enforce, `--check`
+/// says whether it can right now, `--undo` reverses setup. What differs is the work: Linux
+/// installs a root-owned bubblewrap helper plus a path-keyed AppArmor profile, Windows
+/// provisions a local account plus SID-keyed WFP filters, and macOS does nothing at all because
+/// Seatbelt is unprivileged. Only the last is a no-op, and it says so rather than exiting
+/// silently.
+///
+/// NEITHER PRIVILEGED PLATFORM SELF-ELEVATES. Linux prints the `sudo` line; Windows prints the
+/// Run-as-administrator instruction. Elevating on nub's own initiative is a posture decision
+/// about the tool, not a per-platform convenience call, so both answer it the same way — and
+/// the passwordless-sudo probe stays REPORT-ONLY for the same reason: a developer's `NOPASSWD`
+/// laptop is not consent to modify their machine. Design: `.fray/sandbox-escalation-ux.md`.
+fn run_setup_sandbox(args: &[String]) -> Result<i32> {
+    let usage = format!(
+        "nub setup-sandbox — make the sandbox able to enforce on this host\n\n\
+         \x20 (no flags)   prepare this host to enforce the sandbox\n\
+         \x20 --check      report whether the sandbox can enforce right now, changing nothing\n\
+         \x20 --undo       remove what the setup installed\n{SETUP_SANDBOX_USAGE_PLATFORM_NOTE}"
+    );
 
-        let result = match action {
-            "setup" => match nub_sandbox::linux_admin::setup(access) {
-                Ok(report) => {
-                    println!("{}", report.text);
-                    return Ok(if report.usable_now {
-                        0
-                    } else {
-                        EXIT_SETUP_NEEDS_FRESH_SESSION
-                    });
-                }
-                Err(message) => Err(message),
-            },
-            "status" => nub_sandbox::linux_admin::status(),
-            "teardown" => nub_sandbox::linux_admin::teardown(),
+    let mut mode = SetupSandboxMode::Setup;
+    let mut all_users = false;
+    for arg in args {
+        match arg.as_str() {
+            "--check" | "--status" => mode = SetupSandboxMode::Check,
+            "--undo" | "--teardown" => mode = SetupSandboxMode::Undo,
+            "--clean" => mode = SetupSandboxMode::Clean,
+            "--all-users" => all_users = true,
             "-h" | "--help" | "help" => {
                 println!("{usage}");
                 return Ok(0);
             }
-            other => anyhow::bail!("unknown `nub sandbox` action `{other}`\n\n{usage}"),
+            // A leftover `nub setup-sandbox setup` from the earlier spelling reads as a typo
+            // for the default action; naming it beats a bare "unknown option".
+            "setup" | "status" | "teardown" | "clean" => anyhow::bail!(
+                "`nub setup-sandbox` takes flags, not an action word. Use `nub setup-sandbox` \
+                 on its own, or one of --check / --undo.\n\n{usage}"
+            ),
+            other => anyhow::bail!("unknown `nub setup-sandbox` option `{other}`\n\n{usage}"),
+        }
+    }
+    let _ = all_users;
+
+    #[cfg(target_os = "linux")]
+    {
+        use nub_sandbox::linux_admin::HelperAccess;
+
+        if all_users && mode != SetupSandboxMode::Setup {
+            anyhow::bail!("`--all-users` only applies to the setup itself\n\n{usage}");
+        }
+        let access = if all_users {
+            HelperAccess::AllUsers
+        } else {
+            HelperAccess::Group
         };
-        match result {
-            Ok(report) => {
-                println!("{report}");
-                Ok(0)
+        match mode {
+            SetupSandboxMode::Setup => match nub_sandbox::linux_admin::setup(access) {
+                Ok(report) => {
+                    println!("{}", report.text);
+                    Ok(if report.usable_now {
+                        0
+                    } else {
+                        EXIT_SETUP_NEEDS_FRESH_SESSION
+                    })
+                }
+                // The setup functions embed the actionable remedy (the sudo command) in their
+                // error text, so surface it verbatim rather than wrapping it.
+                Err(message) => anyhow::bail!("{message}"),
+            },
+            SetupSandboxMode::Check => match nub_sandbox::linux_admin::status() {
+                Ok(report) => {
+                    print!("{}", report.text);
+                    Ok(if report.ready {
+                        0
+                    } else {
+                        EXIT_SANDBOX_NOT_READY
+                    })
+                }
+                Err(message) => anyhow::bail!("{message}"),
+            },
+            SetupSandboxMode::Undo => match nub_sandbox::linux_admin::teardown() {
+                Ok(report) => {
+                    println!("{report}");
+                    Ok(0)
+                }
+                Err(message) => anyhow::bail!("{message}"),
+            },
+            SetupSandboxMode::Clean => {
+                anyhow::bail!("`--clean` is Windows-only; Linux leaves no residue to sweep")
             }
-            // The setup functions embed the actionable remedy (e.g. the sudo command) in their
-            // error text, so surface it verbatim rather than wrapping it.
-            Err(message) => anyhow::bail!("{message}"),
         }
     }
     #[cfg(target_os = "macos")]
     {
-        match action {
-            "setup" | "status" => {
-                println!("the sandbox needs no host setup on macOS (Seatbelt is unprivileged).");
+        if all_users {
+            anyhow::bail!("`--all-users` is Linux-only\n\n{usage}");
+        }
+        match mode {
+            SetupSandboxMode::Setup => {
+                print!("{}", nub_sandbox::macos_admin::setup());
                 Ok(0)
             }
-            "teardown" => Ok(0),
-            "-h" | "--help" | "help" => {
-                println!("{usage}");
+            SetupSandboxMode::Check => {
+                let report = nub_sandbox::macos_admin::status();
+                print!("{}", report.text);
+                Ok(if report.ready {
+                    0
+                } else {
+                    EXIT_SANDBOX_NOT_READY
+                })
+            }
+            SetupSandboxMode::Undo => {
+                print!("{}", nub_sandbox::macos_admin::teardown());
                 Ok(0)
             }
-            other => anyhow::bail!("unknown `nub sandbox` action `{other}`\n\n{usage}"),
+            SetupSandboxMode::Clean => {
+                anyhow::bail!("`--clean` is Windows-only; macOS leaves no residue to sweep")
+            }
         }
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = action;
-        anyhow::bail!(
-            "on Windows the sandbox host setup is the dedicated-account backend: run `nub run --sandbox-admin setup` from an elevated prompt"
-        )
+        if all_users {
+            anyhow::bail!("`--all-users` is Linux-only\n\n{usage}");
+        }
+        match mode {
+            // Setup and teardown check elevation themselves, and their errors already carry the
+            // Run-as-administrator instruction, so there is nothing to add here.
+            SetupSandboxMode::Setup => {
+                let sid = nub_sandbox::windows_admin::setup(None)?;
+                println!("Sandbox account provisioned ({sid}).");
+                println!("The sandbox can enforce on this host.");
+                Ok(0)
+            }
+            SetupSandboxMode::Check => {
+                let report = nub_sandbox::windows_admin::status()?;
+                print!("{}", report.text);
+                Ok(if report.ready {
+                    0
+                } else {
+                    EXIT_SANDBOX_NOT_READY
+                })
+            }
+            SetupSandboxMode::Undo => {
+                nub_sandbox::windows_admin::teardown()?;
+                println!("Removed the sandbox account and its network filters.");
+                Ok(0)
+            }
+            SetupSandboxMode::Clean => {
+                let swept = nub_sandbox::windows_admin::clean()?;
+                println!("Swept {swept} recorded path(s).");
+                Ok(0)
+            }
+        }
     }
 }
+
+/// The lifecycle action selected by the flags. One installation, three things you can do to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupSandboxMode {
+    Setup,
+    Check,
+    Undo,
+    /// Windows-only: strip permission grants a killed run left behind. Only Windows grants a
+    /// persistent ACE that can outlive the run that made it; Linux and macOS confine by
+    /// re-homing the process, which leaves nothing on disk.
+    Clean,
+}
+
+/// The platform-specific tail of the usage text. Only the running platform's options are
+/// listed: a Linux reader has no use for the Windows sweep, and a macOS reader has none at all.
+#[cfg(target_os = "linux")]
+const SETUP_SANDBOX_USAGE_PLATFORM_NOTE: &str = concat!(
+    "\x20 --all-users  let any local user execute the helper, so no fresh login is needed\n",
+    "\x20              afterwards (for CI runners and single-user machines)\n\n",
+    "The setup installs a root-owned bubblewrap helper and an AppArmor profile keyed to it, so\n",
+    "it needs root. Nub never elevates on its own — run it under sudo."
+);
+
+#[cfg(target_os = "macos")]
+const SETUP_SANDBOX_USAGE_PLATFORM_NOTE: &str = "\nSeatbelt is unprivileged on macOS, so there is no host setup to perform and these modes\n\
+     only report. The check is the useful one.";
+
+#[cfg(target_os = "windows")]
+const SETUP_SANDBOX_USAGE_PLATFORM_NOTE: &str = concat!(
+    "\x20 --clean      strip sandbox permissions a killed run left behind\n\n",
+    "The setup creates a local account and installs network filters, so it needs\n",
+    "administrator. Nub never elevates on its own — run it from an elevated prompt."
+);
 
 /// INTERNAL, UNDOCUMENTED entry for the `nub-sandbox` engine (design.md §2.6),
 /// reached from the hidden `--sandbox <SHAPE>` flag. The shape string is
@@ -3462,32 +3608,27 @@ fn run_sandboxed(
     }
 }
 
-/// INTERNAL, UNDOCUMENTED: the Windows agent-sandbox backend's machine administration.
+/// INTERNAL, UNDOCUMENTED: the pre-`nub sandbox` spelling of the same Windows administration,
+/// kept as an alias so an existing probe or script that learned this flag keeps working.
 ///
-/// This is the one-time-elevated half of that backend and the reason the per-run launch is
-/// NOT elevated: `setup` creates the dedicated local account and installs the SID-keyed WFP
-/// egress filters once, after which every sandboxed run is an ordinary unelevated process.
-/// `clean` is unelevated and exists for crash residue (aces left behind by a run that died
-/// between grant and teardown).
+/// It DELEGATES rather than reimplementing. The two spellings printing different text for the
+/// same operation is exactly how the Windows messages came to name a flag no documentation
+/// mentions, so there is one implementation and this is a thin forward to it.
 #[cfg(target_os = "windows")]
 fn sandbox_admin_action(action: &str) -> Result<i32> {
-    match action {
-        "setup" => {
-            let sid = nub_sandbox::windows_admin::setup(None)?;
-            println!("nub sandbox account ready ({sid})");
-        }
-        "teardown" => {
-            nub_sandbox::windows_admin::teardown()?;
-            println!("nub sandbox account and network filters removed");
-        }
-        "status" => print!("{}", nub_sandbox::windows_admin::status()?),
-        "clean" => {
-            let n = nub_sandbox::windows_admin::clean()?;
-            println!("swept {n} recorded path(s)");
-        }
+    let flag = match action {
+        "setup" => String::new(),
+        "status" => "--check".to_string(),
+        "teardown" => "--undo".to_string(),
+        "clean" => "--clean".to_string(),
         other => anyhow::bail!("unknown --sandbox-admin action `{other}`"),
-    }
-    Ok(0)
+    };
+    let args: Vec<String> = if flag.is_empty() {
+        Vec::new()
+    } else {
+        vec![flag]
+    };
+    run_setup_sandbox(&args)
 }
 
 /// The sandbox account backend is Windows-only — no other OS needs a second principal to

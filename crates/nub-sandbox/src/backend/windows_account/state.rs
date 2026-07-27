@@ -89,7 +89,7 @@ impl Marker {
                 io::ErrorKind::InvalidData,
                 format!(
                     "sandbox marker is version {version}, this nub understands {MARKER_VERSION} \
-                     — re-run `nub run --sandbox-admin setup` from an elevated prompt"
+                     — re-run `nub setup-sandbox` from an elevated prompt"
                 ),
             ));
         }
@@ -280,7 +280,7 @@ mod tests {
         );
         let err = Marker::from_json(&json).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("--sandbox-admin setup"));
+        assert!(err.to_string().contains("nub setup-sandbox"));
     }
 
     /// The v1 marker carried the account NAME, and the launch logged on as it. Anyone able to
