@@ -67,12 +67,12 @@ pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx:
     let mut seen = std::collections::BTreeSet::new();
     for interpreter in &ctx.interpreter {
         if seen.insert(interpreter.clone()) {
-            push_read_path(&mut grants, interpreter);
+            push_read_path(&mut grants, interpreter, FsOrigin::Authored);
         }
         if let Some(bin_dir) = interpreter.parent()
             && seen.insert(bin_dir.to_path_buf())
         {
-            push_read_path(&mut grants, bin_dir);
+            push_read_path(&mut grants, bin_dir, FsOrigin::Authored);
         }
     }
     policy.fs.rules.entries.splice(0..0, grants);
@@ -92,19 +92,25 @@ pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx:
 fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathBuf]) {
     let mut grants = Vec::new();
     for dir in extra_reads {
-        push_read_path(&mut grants, dir);
+        push_read_path(&mut grants, dir, FsOrigin::Speculative);
     }
     policy.fs.rules.entries.splice(0..0, grants);
 }
 
 /// Push a READ-allow rule per subtree glob for `path` (the node itself + `/**`).
-fn push_read_path(out: &mut Vec<FsRule>, path: &Path) {
+///
+/// `origin` decides what an ABSENT path means. The interpreter was resolved from the
+/// spawn, so its disappearance is a real error; the extra reads are derived from the
+/// interpreter's location without ever being looked up, so a Node laid out differently
+/// (distro headers in a separate package, no bundled npm) must leave them inert rather
+/// than fail the jail closed.
+fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
     for g in defaults::subtree_globs(&path.to_string_lossy()) {
         out.push(FsRule {
             matcher: CanonGlob(canonicalize_glob_prefix(&g)),
             effect: Effect::Allow,
             access: FsAccess::Read,
-            origin: FsOrigin::Authored,
+            origin,
         });
     }
 }

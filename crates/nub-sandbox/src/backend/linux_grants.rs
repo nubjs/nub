@@ -77,16 +77,17 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
             }
         };
         if !path.exists() {
-            // A built-in set enumerates every ecosystem it supports, so most of its
-            // members are absent on any given machine — refusing there would abort every
-            // confined run on a clean host over caches the policy never depended on.
-            // Absence is not a hole either: no source means no bind, which can only
-            // narrow the child's view. An AUTHORED path is the opposite — the author
-            // named a specific location, so a missing one is a mistake worth refusing
-            // rather than silently downgrading to a grant that is not there. Skipping
-            // leaves `previous_grant` alone deliberately: a rule that emitted no bind
-            // cannot have changed which operation the next twin would duplicate.
-            if rule.origin == FsOrigin::BuiltinSet {
+            // A speculated grant covers every ecosystem it knows of, so most are absent
+            // on any given machine — refusing there would abort every confined run on a
+            // clean host over caches the policy never depended on. Absence is not a hole
+            // either: the bind is src==dest, so a missing source has an equally missing
+            // destination under any ancestor bind, and no existing content becomes
+            // reachable. An AUTHORED path is the opposite — the author named a specific
+            // location, so a missing one is a mistake worth refusing rather than silently
+            // downgrading to a grant that is not there. Skipping leaves `previous_grant`
+            // alone deliberately: a rule that emitted no bind cannot have changed which
+            // operation the next twin would duplicate.
+            if rule.origin == FsOrigin::Speculative {
                 continue;
             }
             return Err(format!(
@@ -185,9 +186,9 @@ mod tests {
         }
     }
 
-    fn builtin_set_allow(path: impl Into<String>, access: FsAccess) -> FsRule {
+    fn speculative_allow(path: impl Into<String>, access: FsAccess) -> FsRule {
         FsRule {
-            origin: FsOrigin::BuiltinSet,
+            origin: FsOrigin::Speculative,
             ..allow(path, access)
         }
     }
@@ -271,8 +272,8 @@ mod tests {
             allow("/proc/self", FsAccess::Read),
             allow("/etc", FsAccess::ReadWrite),
             allow("/definitely/not/a/current/nub/path", FsAccess::ReadWrite),
-            // Set membership excuses an ABSENT source, never an unsafe one.
-            builtin_set_allow("/proc/self", FsAccess::Read),
+            // Speculation excuses an ABSENT source, never an unsafe one.
+            speculative_allow("/proc/self", FsAccess::Read),
         ];
         for rule in cases {
             let matcher = rule.matcher.as_str().to_string();
@@ -288,18 +289,18 @@ mod tests {
     /// run; a member that is present still binds, and an authored path — one the policy
     /// author named specifically — gets no such tolerance.
     #[test]
-    fn absent_builtin_set_sources_drop_out_while_authored_ones_still_refuse() {
+    fn absent_speculative_sources_drop_out_while_authored_ones_still_refuse() {
         let dir = tempdir().unwrap();
         let present = dir.path().join("pnpm-store");
         let absent = dir.path().join("gradle-caches");
         std::fs::create_dir_all(&present).unwrap();
 
         let plan = compile_mount_plan(&policy(vec![
-            builtin_set_allow(absent.to_string_lossy(), FsAccess::Read),
-            builtin_set_allow(present.to_string_lossy(), FsAccess::Read),
+            speculative_allow(absent.to_string_lossy(), FsAccess::Read),
+            speculative_allow(present.to_string_lossy(), FsAccess::Read),
         ]))
         .unwrap_or_else(|error| {
-            panic!("an absent built-in-set source must not abort the mount plan: {error}")
+            panic!("an absent speculated source must not abort the mount plan: {error}")
         });
         assert_eq!(
             plan,
@@ -307,7 +308,7 @@ mod tests {
                 path: present,
                 access: MountAccess::ReadOnly,
             }],
-            "only the present set member binds; {} is not on this machine",
+            "only the present speculated path binds; {} is not on this machine",
             absent.display()
         );
 
@@ -338,12 +339,13 @@ mod tests {
         assert!(fs_confines(&policy(Vec::new()).fs));
     }
 
-    /// The build jail grants `$tooldirs` — a set naming a dozen ecosystems' cache dirs.
-    /// A clean machine (fresh container, CI runner, a developer without Go or Gradle)
-    /// has almost none of them, and before this was origin-aware the FIRST absent one
-    /// aborted every confined lifecycle script. The jail must still compile there, and
-    /// still compile to the same confinement: the project readable, only the package
-    /// dir writable.
+    /// The build jail speculates twice: `$tooldirs` names a dozen ecosystems' cache dirs,
+    /// and the per-spawn extra reads name a toolchain layout (`<node-root>/include/node`)
+    /// derived without ever looking it up. A clean machine (fresh container, CI runner, a
+    /// distro Node whose headers ship separately) has almost none of them, and before this
+    /// was origin-aware the FIRST absent one aborted every confined lifecycle script. The
+    /// jail must still compile there, and still compile to the same confinement: the
+    /// project readable, only the package dir writable.
     #[test]
     fn build_jail_survives_a_machine_with_no_tool_caches() {
         let dir = tempdir().unwrap();
@@ -361,7 +363,8 @@ mod tests {
             },
             &package_dir,
             Vec::new(),
-            Vec::new(),
+            // The header dir a distro Node without its `-dev` package does not ship.
+            vec![dir.path().join("node-root/include/node")],
             BTreeMap::new(),
         )
         .expect("the build-jail preset compiles");

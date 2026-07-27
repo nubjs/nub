@@ -287,7 +287,7 @@ pub fn tooldirs_fs_rules(homes: &Homes, effect: Effect, access: FsAccess) -> Vec
                 matcher: CanonGlob(canonicalize_glob_prefix(&g)),
                 effect,
                 access,
-                origin: FsOrigin::BuiltinSet,
+                origin: FsOrigin::Speculative,
             });
         }
     }

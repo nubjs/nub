@@ -97,30 +97,32 @@ pub struct FsRule {
     pub matcher: CanonGlob,
     pub effect: Effect,
     pub access: FsAccess,
-    /// Whether an author named this path or a built-in set enumerated it. Only the
-    /// mount-plan layer consults it, so it defaults to [`FsOrigin::Authored`] and stays
-    /// out of the serialized IR unless a built-in set produced the rule.
+    /// Whether an author named this path or something speculated it. Only the mount-plan
+    /// layer consults it, so it defaults to [`FsOrigin::Authored`] and stays out of the
+    /// serialized IR unless a speculated grant produced the rule.
     #[serde(default, skip_serializing_if = "FsOrigin::is_authored")]
     pub origin: FsOrigin,
 }
 
-/// Who named the path an [`FsRule`] covers.
+/// Whether a path was named or guessed.
 ///
-/// A built-in set enumerates every ecosystem it supports — `$tooldirs` alone names a
-/// dozen package-manager and toolchain cache dirs — so most of its members exist on no
-/// given machine. That makes "the source is missing" mean opposite things by origin: an
-/// authored path that is not there is an authoring mistake worth refusing, while an
-/// absent set member is simply a machine without that toolchain and grants nothing
-/// either way. Backends that must materialize a grant (the Bubblewrap bind plan) need
-/// the distinction; matchers, which only ever narrow, do not.
+/// Some grants are speculated rather than authored: `$tooldirs` enumerates a dozen
+/// ecosystems' cache dirs, and the build jail grants a provisioned toolchain's header
+/// and module dirs sight-unseen. Most of those exist on no given machine. That makes
+/// "the source is missing" mean opposite things by origin — an authored path that is
+/// not there is an authoring mistake worth refusing, while an absent speculated one is
+/// simply a machine without that toolchain and grants nothing either way. Backends that
+/// must materialize a grant (the Bubblewrap bind plan) need the distinction; matchers,
+/// which only ever narrow, do not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FsOrigin {
     /// A path the policy author (or a preset acting for them) named directly.
     #[default]
     Authored,
-    /// One member of a built-in set expansion (`$tooldirs`).
-    BuiltinSet,
+    /// A path guessed at — a built-in set member (`$tooldirs`) or a toolchain subtree
+    /// derived from the interpreter's location. Absent means "not on this machine".
+    Speculative,
 }
 
 impl FsOrigin {
