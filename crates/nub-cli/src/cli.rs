@@ -3241,8 +3241,11 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
 #[cfg(target_os = "linux")]
 const EXIT_SETUP_NEEDS_FRESH_SESSION: i32 = 3;
 
-/// The sandbox cannot enforce for this caller right now. Distinct from the anyhow error path so
-/// `nub setup-sandbox --check && <command>` is a usable gate.
+/// The sandbox cannot enforce for this caller right now, so `nub setup-sandbox --check &&
+/// <command>` gates correctly. Deliberately the ordinary failure code rather than a distinct
+/// one: a caller that only needs "may I proceed" is served by any non-zero, and `main` already
+/// exits 1 for a usage error, so a separate value here would imply a precision the process exit
+/// cannot carry.
 const EXIT_SANDBOX_NOT_READY: i32 = 1;
 
 /// `nub setup-sandbox` — make the sandbox able to enforce on this host. One surface on all
@@ -3261,7 +3264,7 @@ const EXIT_SANDBOX_NOT_READY: i32 = 1;
 ///
 /// THE MODES MEAN THE SAME THING EVERYWHERE. Setup makes the sandbox able to enforce, `--check`
 /// says whether it can right now, `--undo` reverses setup. What differs is the work: Linux
-/// installs a root-owned bubblewrap helper plus a path-keyed AppArmor profile, Windows
+/// installs a root-owned Bubblewrap helper plus a path-keyed AppArmor profile, Windows
 /// provisions a local account plus SID-keyed WFP filters, and macOS does nothing at all because
 /// Seatbelt is unprivileged. Only the last is a no-op, and it says so rather than exiting
 /// silently.
@@ -3434,13 +3437,13 @@ enum SetupSandboxMode {
 const SETUP_SANDBOX_USAGE_PLATFORM_NOTE: &str = concat!(
     "\x20 --all-users  let any local user execute the helper, so no fresh login is needed\n",
     "\x20              afterwards (for CI runners and single-user machines)\n\n",
-    "The setup installs a root-owned bubblewrap helper and an AppArmor profile keyed to it, so\n",
+    "The setup installs a root-owned Bubblewrap helper and an AppArmor profile keyed to it, so\n",
     "it needs root. Nub never elevates on its own — run it under sudo."
 );
 
 #[cfg(target_os = "macos")]
-const SETUP_SANDBOX_USAGE_PLATFORM_NOTE: &str = "\nSeatbelt is unprivileged on macOS, so there is no host setup to perform and these modes\n\
-     only report. The check is the useful one.";
+const SETUP_SANDBOX_USAGE_PLATFORM_NOTE: &str = "\nSeatbelt is unprivileged on macOS, so there is nothing to prepare and nothing to remove.\n\
+     Every mode reports.";
 
 #[cfg(target_os = "windows")]
 const SETUP_SANDBOX_USAGE_PLATFORM_NOTE: &str = concat!(
@@ -7195,8 +7198,11 @@ const CLAP_HELP_COMMANDS: &[&str] = &[
 /// (canonical or alias). Unknown words fall through to the top-level page instead
 /// of exiting silently — the routing inconsistency the help-router fix addresses.
 fn is_help_routable(word: &str) -> bool {
+    // `sandbox` is deliberately ABSENT: it is no longer a command, and clap has no subcommand
+    // by that name, so routing it here reached the clap fallback below — which does not error
+    // and printed nothing at all. It falls through to the top-level page instead.
     CLAP_HELP_COMMANDS.contains(&word)
-        || matches!(word, "node" | "pm" | "agent" | "sandbox")
+        || matches!(word, "node" | "pm" | "agent" | "setup-sandbox")
         || crate::pm_engine::lookup_verb(word).is_some()
 }
 
@@ -7232,6 +7238,12 @@ fn run_help(command: Option<&str>, verbose: bool) {
         }
         "agent" => {
             let _ = crate::agent::run(&["--help".to_string()]);
+            return;
+        }
+        // Not a clap subcommand, so the fallback below would parse without erroring and print
+        // nothing — the same silent exit the engine-verb arm above exists to prevent.
+        "setup-sandbox" => {
+            let _ = run_setup_sandbox(&["--help".to_string()]);
             return;
         }
         _ => {}

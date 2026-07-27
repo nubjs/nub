@@ -138,7 +138,7 @@ pub use compiler::{
 pub use matcher::Homes;
 
 /// One-time privileged host setup for the Linux agent-sandbox — the implementation behind
-/// `nub sandbox {setup,status,teardown}`. See `.fray/sandbox-escalation-ux.md`.
+/// `nub setup-sandbox`. See `.fray/sandbox-escalation-ux.md`.
 #[cfg(target_os = "linux")]
 pub mod linux_admin {
     pub use crate::backend::linux_setup::{
@@ -146,10 +146,10 @@ pub mod linux_admin {
     };
 }
 
-/// The macOS half of `nub sandbox {setup,status,teardown}`.
+/// The macOS half of `nub setup-sandbox`.
 ///
 /// Seatbelt is unprivileged, so there is no host setup to perform and these carry no privileged
-/// operation at all — the module exists so the CLI can answer the same three verbs everywhere
+/// operation at all — the module exists so the CLI can answer the same three modes everywhere
 /// with a real per-platform readiness answer rather than a hardcoded "nothing to do".
 #[cfg(target_os = "macos")]
 pub mod macos_admin {

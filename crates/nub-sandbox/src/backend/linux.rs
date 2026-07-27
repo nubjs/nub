@@ -2353,13 +2353,18 @@ fn apparmor_restricts_unprivileged_userns() -> bool {
 /// makes an unreadable path readable. The errno has to sit alongside a named namespace or
 /// credential operation to mean what the setup hint claims it means.
 fn is_namespace_denial(lower: &str) -> bool {
-    const NAMESPACE_OPERATIONS: [&str; 6] = [
+    // `rtm_new` rather than `rtm_newaddr`: the netns loopback bring-up emits RTM_NEWADDR first
+    // and RTM_NEWLINK right behind it, and both are the same denial with the same remedy.
+    // `setgroups` is the credential half — bubblewrap's "error writing to setgroups" names no
+    // namespace and would otherwise miss.
+    const NAMESPACE_OPERATIONS: [&str; 7] = [
         "uid map",
         "gid map",
         "namespace",
         "userns",
         "unshare",
-        "rtm_newaddr",
+        "rtm_new",
+        "setgroups",
     ];
     NAMESPACE_OPERATIONS
         .iter()
@@ -4345,6 +4350,31 @@ mod tests {
             assert!(
                 !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
                 "a plain EACCES must not be blamed on the AppArmor userns grant: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_bubblewrap_userns_denial_still_reaches_the_setup_hint() {
+        // Enumerated from bubblewrap's own `die`/`die_with_error` sites on the namespace and
+        // credential paths. Narrowing the match to named operations must not drop any of them —
+        // RTM_NEWLINK and the setgroups write have no "namespace" in their text and were the
+        // two the first narrowing lost.
+        for detail in [
+            "bwrap: setting up uid map: Permission denied",
+            "bwrap: setting up gid map in child: Permission denied",
+            "bwrap: Creating new namespace failed: Operation not permitted",
+            "bwrap: No permissions to creating new namespace, likely because the kernel does \
+             not allow non-privileged user namespaces",
+            "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+            "bwrap: loopback: Failed RTM_NEWLINK: Operation not permitted",
+            "bwrap: error writing to setgroups: Permission denied",
+            "bwrap: sysctl user.max_user_namespaces = 1",
+        ] {
+            let message = classify_bwrap_failures_under(&[detail.to_string()], false, true, false);
+            assert!(
+                message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+                "a userns denial must reach the setup hint: {detail}\n{message}"
             );
         }
     }

@@ -1,4 +1,4 @@
-//! Host-setup reporting for the macOS agent-sandbox — `nub sandbox {setup,status,teardown}`.
+//! Host-setup reporting for the macOS agent-sandbox — `nub setup-sandbox`.
 //!
 //! THERE IS NOTHING TO INSTALL, AND THAT IS THE WHOLE DESIGN. Seatbelt is a kernel primitive any
 //! process may ask for, reached through `/usr/bin/sandbox-exec`, which ships with macOS and needs
@@ -34,10 +34,9 @@ pub fn status() -> StatusReport {
     } else {
         format!(
             "seatbelt: NOT available ({SANDBOX_EXEC_PATH} is missing or not executable)\n\
-             host setup: not required on macOS\n\nThe sandbox cannot enforce on this host, and \
-             no setup command can fix it. Nub confines a command by re-homing it under the stock \
-             {SANDBOX_EXEC_PATH}, which ships with macOS — a host missing it has no sandbox to \
-             reach. Restore it from a stock macOS system volume.\n"
+             host setup: not required on macOS\n\nThe sandbox cannot enforce on this host. Nub \
+             confines a command through the stock {SANDBOX_EXEC_PATH}; restore it from a stock \
+             macOS system volume.\n"
         )
     };
     StatusReport { text, ready }
@@ -54,10 +53,9 @@ pub fn setup() -> String {
         );
     }
     format!(
-        "Nothing to set up, and nothing this command can repair. Seatbelt is unprivileged on \
-         macOS, so the sandbox needs no installation — but it reaches the kernel through the \
-         stock {SANDBOX_EXEC_PATH}, which is missing or not executable here. Restore it from a \
-         stock macOS system volume.\n"
+        "Nothing to set up. Seatbelt is unprivileged on macOS, so the sandbox needs no \
+         installation — but it reaches the kernel through the stock {SANDBOX_EXEC_PATH}, which \
+         is missing or not executable here. Restore it from a stock macOS system volume.\n"
     )
 }
 

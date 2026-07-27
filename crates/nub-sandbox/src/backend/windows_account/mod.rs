@@ -573,6 +573,12 @@ pub(crate) fn apply(
         degradation: deg,
         proxy: None,
         launch: Some(WindowsLaunch::Account(launch)),
+        // The three fields the AppContainer backend also defaults. This backend does not own a
+        // private tmp (the account's own profile provides the isolation) and does not redact,
+        // matching `windows::apply`'s account-free path exactly.
+        _private_tmp: None,
+        redact_stdout: false,
+        redact_stderr: false,
     })
 }
 

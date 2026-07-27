@@ -272,8 +272,17 @@ pub enum HelperReadiness {
 /// credentials, never from `/etc/group`. An `Unknown` session reading is reported as usable:
 /// the launcher's own failure is a better diagnosis than a guess, and claiming a group problem
 /// nobody has is the failure mode this whole module exists to avoid.
+///
+/// THE THREE "RE-RUN SETUP" CONDITIONS ARE ONE ANSWER HERE, because they have one remedy. A
+/// helper that is absent, one whose digest no longer matches this nub build (what an upgrade
+/// produces), and a missing profile file are all repaired by the same command — and reporting
+/// only the first left the other two with NO remedy at all in the install refusal, while
+/// `--check` was telling the same user to re-run setup. The two readings must not disagree.
 pub fn helper_readiness() -> HelperReadiness {
-    if helper_mode().is_none() {
+    let Some(_) = helper_mode() else {
+        return HelperReadiness::NotInstalled;
+    };
+    if !Path::new(PROFILE_PATH).exists() || helper_digest_mismatched() {
         return HelperReadiness::NotInstalled;
     }
     match session_access() {
@@ -282,6 +291,15 @@ pub fn helper_readiness() -> HelperReadiness {
         }
         SessionAccess::NeedsFreshSession => HelperReadiness::SessionCannotExecute,
     }
+}
+
+/// Whether the installed helper's bytes differ from the ones this nub build pins. A build with
+/// no pinned digest (a dev build) has nothing to compare, so it never reports a mismatch.
+fn helper_digest_mismatched() -> bool {
+    let Some(expected) = option_env!("NUB_BWRAP_SHA256") else {
+        return false;
+    };
+    sha256_hex(Path::new(DEDICATED_HELPER_PATH)).is_ok_and(|actual| actual != expected)
 }
 
 /// Locate nub's packaged bubblewrap next to the running binary, matching the runtime resolver's
