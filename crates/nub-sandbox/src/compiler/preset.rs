@@ -270,8 +270,34 @@ fn build_jail_surface(package_dir: Option<&Path>) -> Value {
     fs.insert("$tmp".to_string(), json!("rw"));
     if let Some(dir) = package_dir {
         // Own-package-dir READ-WRITE: the one subtree a dep build may write (its
-        // `build/`, the compiled `.node`). No wider write grant changes any outcome —
-        // the corpus measured `node_modules` rw and `./` rw as identical to this.
+        // `build/`, the compiled `.node`).
+        //
+        // The write ladder found no outcome changed by widening this to `node_modules` rw
+        // or `./` rw — but it installed only the LATEST version of every package, so that
+        // is a result about the versions measured, NOT a general equivalence. Known
+        // counterexample: `@prisma/client` 3.x initializes `node_modules/.prisma/client`
+        // from its postinstall (`path.join(__dirname, '../../../.prisma/client')`), a
+        // SIBLING of the package dir, which this grant denies. Older versions can need
+        // writes the corpus never exercised; read the ladder as evidence about a version
+        // sample, not about the ecosystem.
+        //
+        // DO NOT "fix" that by allowing writes to dot-directories at the `node_modules`
+        // root. That generalization is strictly WORSE than the whole-project write grant
+        // it looks like a tightening of, because the dot-entries there are not scratch
+        // space — they are the install itself:
+        //   - `.aube/<dep_path>/node_modules/<name>` is nub's own virtual store, where
+        //     EVERY materialized package in the dependency tree lives (`.pnpm/` likewise).
+        //     Write access there is write access to every dependency's source, before that
+        //     source is executed.
+        //   - `.bin/` is the shim directory later tooling executes UNCONFINED — the exact
+        //     persistence vector the jail exists to close.
+        // Covering the codegen case therefore needs an ENUMERATED namespace (`.prisma`),
+        // never a pattern over dot-entries. Such a grant is a pure positive rw nested in
+        // the dependency-tree read — the same shape this `package_dir` entry already is —
+        // so it costs nothing on Windows: `deny_shadows_grant` rejects a DENY that overlaps
+        // a grant, and an allow-list introduces no deny. The deny-inside-allow form (grant
+        // the dot-entries, refuse `.bin`) is what Windows cannot express and would fail
+        // closed on every install there.
         fs.insert(dir.to_string_lossy().into_owned(), json!("rw"));
     }
     // D6, and now a CROSS-PLATFORM floor rather than a Linux carve-out: the Linux minimal
