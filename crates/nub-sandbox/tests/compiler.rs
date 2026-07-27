@@ -1017,6 +1017,54 @@ fn env_object_types_validate() {
 }
 
 #[test]
+fn vars_object_form_mirrors_the_array_form_and_forbids_broker() {
+    // `vars` shares `parse_env_surface` with `secrets`: the object form is identical
+    // except `brokerTo` is secrets-only. Object values carry the per-var access — `true`
+    // passes the ambient value (like an array entry), `false` strips it (like `!key`).
+    let ctx = common::ctx(
+        true,
+        &[("NODE_ENV", "prod"), ("PATH", "/bin"), ("EXTRA", "x")],
+    );
+    let array = compile(&json!({ "vars": ["NODE_ENV", "PATH"] }), &ctx).unwrap();
+    let object = compile(
+        &json!({ "vars": { "NODE_ENV": true, "PATH": true, "EXTRA": false } }),
+        &ctx,
+    )
+    .unwrap();
+    // Same resolved env either way: the two named vars pass, EXTRA is withheld.
+    assert_eq!(object.env.constructed, array.env.constructed);
+    assert_eq!(
+        object.env.constructed.get("NODE_ENV").map(String::as_str),
+        Some("prod")
+    );
+    assert_eq!(
+        object.env.constructed.get("PATH").map(String::as_str),
+        Some("/bin")
+    );
+    assert!(
+        !object.env.constructed.contains_key("EXTRA"),
+        "`false` strips the var"
+    );
+    // `vars` entries are never sensitive (that is the axis distinction, not a per-var knob).
+    assert!(object.env.sensitive_keys.is_empty(), "vars are non-secret");
+
+    // `brokerTo` is a secrets-only capability — rejected on a `vars` entry even in a
+    // trusted scope (so the rejection is the axis check, not the credential-broker gate).
+    match compile(
+        &json!({ "vars": { "API_KEY": { "brokerTo": ["api.example.com"] } } }),
+        &ctx,
+    )
+    .unwrap_err()
+    {
+        CompileError::Shape { message, .. } => assert!(
+            message.contains("secrets"),
+            "brokerTo on vars names the secrets axis: {message}"
+        ),
+        other => panic!("expected a Shape error rejecting brokerTo on vars, got {other:?}"),
+    }
+}
+
+#[test]
 fn env_number_rejects_non_finite() {
     // `number` means a finite numeric string — `inf`/`nan` are not values.
     let ok = common::ctx(true, &[("RATIO", "1.5")]);

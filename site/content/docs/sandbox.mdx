@@ -368,13 +368,14 @@ You can also deny specific variables. A denylist is convenient but leaky — sec
 
 ### The object form
 
-Switch to the object form to validate, default, or require a variable. Each key is a variable name, and its value is one of: `true` (require it, any value), a validation string like `"port"` (see [`format`](#format)), or an extras object. A plain key is required, `?` makes it optional, and a glob key is always optional.
+Switch to the object form to validate, default, require, or strip a variable. Each key is a variable name; its value is `true` (pass it, any value), `false` (strip it, the array `!name` form), a validation string like `"port"` (see [`format`](#format)), or an extras object. A plain key is required, `?` makes it optional, and a glob key is always optional. This is the same syntax `secrets` uses — the only difference is that credential brokering (`brokerTo`) is secrets-only.
 
 ```jsonc
 {
   "vars": {
     "DATABASE_HOST": true,
-    "LOG_LEVEL?": true,
+    "NODE_ENV": { "value": "production" },
+    "DEBUG": false,
     "VITE_*": true
   }
 }
