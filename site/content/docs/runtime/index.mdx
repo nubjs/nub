@@ -78,6 +78,7 @@ const route = new URLPattern({ pathname: "/u/:id" });
 const ws = new WebSocket("wss://api.example.com");
 const stream = new EventSource("https://api/stream");
 const { DatabaseSync } = require("node:sqlite");
+const { me, feed } = await Promise.allKeyed({ me: getMe(), feed: getFeed() });
 ```
 
 Two mechanisms do the work, picked per API: Nub either preloads a JS polyfill (feature-detected, so it steps aside the moment the native global appears) or injects the `--experimental-*` flag that an older Node hides the API behind. Once Node stabilizes an API, it's native and Nub does nothing.
@@ -91,6 +92,8 @@ The **minimum version** column is the lowest Node where the API works under Nub.
 | [`RegExp.escape`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/escape) | — | polyfilled below Node 24, native above |
 | [`Error.isError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/isError) | — | polyfilled below Node 24, native above |
 | [`Promise.try`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/try) | — | polyfilled below Node 24, native above |
+| [`Promise.allKeyed`](https://github.com/tc39/proposal-await-dictionary) | — | polyfilled |
+| [`Promise.allSettledKeyed`](https://github.com/tc39/proposal-await-dictionary) | — | polyfilled |
 | [`Float16Array`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float16Array) | — | polyfilled below Node 24, native above |
 | [`navigator`](https://developer.mozilla.org/en-US/docs/Web/API/Navigator) | — | backfilled below Node 21, native above |
 | [`navigator.locks`](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) | — | polyfilled below Node 24.5, native above |

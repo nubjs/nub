@@ -494,6 +494,33 @@ static FEATURES: &[Feature] = &[
         ],
         evidence: "native on Node 24+",
     },
+    // ── Promise.allKeyed / Promise.allSettledKeyed ──────────────────────────
+    // TC39 "await dictionary", Stage 3. Shipped by NO engine, so unlike the rows
+    // above there is no Native band to fall through to — the whole supported range
+    // is polyfilled, the same shape as reportError. The runtime feature-detect is
+    // what steps aside once V8 lands it, so this row needs no revision then.
+    Feature {
+        name: "Promise.allKeyed",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Promise.allKeyed",
+            },
+        )],
+        evidence: "TC39 Stage 3 (proposal-await-dictionary); absent on every Node through 26.5",
+    },
+    Feature {
+        name: "Promise.allSettledKeyed",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Promise.allSettledKeyed",
+            },
+        )],
+        evidence: "TC39 Stage 3 (proposal-await-dictionary); absent on every Node through 26.5",
+    },
     // ── Float16Array ────────────────────────────────────────────────────────
     // TC39 Stage 4; native on Node 24+, absent on the 22.x floor, polyfilled from
     // the vendored `@petamoriken/float16` package. See

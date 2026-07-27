@@ -1244,6 +1244,74 @@ console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, a
     );
 }
 
+#[test]
+fn keyed_promise_combinator_polyfills() {
+    // Promise.allKeyed / Promise.allSettledKeyed (TC39 "await dictionary", Stage 3)
+    // ship in no engine, so this exercises the polyfill on every Node — there is no
+    // native branch to fall through to. Spec fidelity is verified separately by the
+    // differential battery (18.19 through 26.5); this asserts the API is reachable
+    // and correct through nub's real preload chain, on the three semantics a naive
+    // implementation gets wrong: the result object's NULL prototype, own-enumerable
+    // keys INCLUDING symbols, and non-enumerable installation on `Promise`.
+    // Isolated tmpdir + cache for the same hermeticity reasons as
+    // `polyfills_available`.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_keyed_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const sym = Symbol("s");
+const src = Object.create(
+  { inherited: Promise.resolve("leaked") },
+  {
+    shape: { value: Promise.resolve("square"), enumerable: true },
+    mass: { value: 12, enumerable: true },
+    hidden: { value: Promise.resolve("leaked"), enumerable: false },
+    [sym]: { value: Promise.resolve("sym"), enumerable: true },
+  },
+);
+const dict = await Promise.allKeyed(src);
+const { shape, mass } = dict;
+const keyed = shape === "square" && mass === 12 && dict[sym] === "sym";
+const scoped = !("hidden" in dict) && !("inherited" in dict);
+const nullProto = Object.getPrototypeOf(dict) === null;
+const settled = await Promise.allSettledKeyed({
+  ok: Promise.resolve(1),
+  bad: Promise.reject(new Error("nope")),
+});
+const statuses = settled.ok.status + "/" + settled.bad.status + "/" + settled.bad.reason.message;
+let rejected = "";
+try {
+  await Promise.allKeyed({ a: Promise.reject(new Error("first")), b: Promise.resolve(2) });
+} catch (e) {
+  rejected = e.message;
+}
+// The additive contract: nub's additions stay invisible to enumeration.
+const hidden = Object.keys(Promise).filter((k) => k.endsWith("Keyed")).length;
+console.log(JSON.stringify({ keyed, scoped, nullProto, statuses, rejected, hidden }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"keyed":true,"scoped":true,"nullProto":true,"statuses":"fulfilled/rejected/nope","rejected":"first","hidden":0}"#,
+        "stderr: {stderr}"
+    );
+}
+
 /// Child processes spawned via `execSync("node ...")` inside a Nub-run
 /// script should inherit Nub's TypeScript augmentation through the PATH
 /// shim — `node` resolves to the shim symlink which points back to `nub`.
