@@ -679,8 +679,15 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
         ),
         "the home secret set stays denied"
     );
-    // Egress denied.
-    assert!(p.net.enforce && p.net.rules.is_empty());
+    // Egress curated: the install-time artifact hosts, nothing else. Windows cannot
+    // enforce a per-host policy, so its jail keeps the tighter deny-all.
+    assert!(p.net.enforce);
+    let hosts = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert_eq!(hosts.admits("nodejs.org"), !cfg!(windows));
+    assert!(
+        !hosts.admits("api.github.com"),
+        "a write-capable host is never admitted"
+    );
     // Env: the constructed lifecycle env is KEPT minus credential-shaped keys.
     assert!(p.env.enforce);
     assert_eq!(
