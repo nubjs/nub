@@ -91,6 +91,11 @@ const ESSENTIAL_READ_PATHS: &[&str] = &[
     "/etc/pki/tls/certs",
     "/etc/pki/tls/openssl.cnf",
     "/etc/pki/ca-trust",
+    // RHEL's openssl.cnf `.include`s `/etc/crypto-policies/back-ends/opensslcnf.config`,
+    // and OpenSSL treats the missing include as a fatal config error rather than skipping
+    // it — so without this every `openssl` invocation dies at startup even with the trust
+    // material above already bound.
+    "/etc/crypto-policies",
 ];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootView {
