@@ -2117,7 +2117,7 @@ fn trusted_set_expands_in_place_admitting_listed_and_denying_unlisted() {
         "another listed host is admitted"
     );
     assert!(
-        m.admits("in.sentry.io"),
+        m.admits("cache.nixos.org"),
         "a *.suffix member matches its subdomain"
     );
     assert!(
