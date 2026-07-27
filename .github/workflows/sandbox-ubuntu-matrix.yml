@@ -1,0 +1,158 @@
+# Branch-scoped probe: does GitHub's `ubuntu-latest` runner enforce nub's sandbox,
+# and if not, WHICH of the three candidate causes is dispositive?
+#
+#   A1  as-is                      — no bwrap binary, AppArmor restriction on, no setup
+#   A2  + apt install bubblewrap   — isolates "no bwrap" from "AppArmor restriction"
+#   A3  + the real setup()         — the path-keyed helper + profile, restriction still on
+#   A4  teardown, sysctl=0         — the documented ephemeral-CI escape hatch, stock bwrap
+#
+# Each arm runs the same probe (agent tier + build-jail tier, confined + control), so a
+# denial is always paired with a control showing the secret is reachable when the axis is
+# lifted. Delete this branch when the matrix is recorded.
+name: sandbox-ubuntu-matrix
+on:
+  push:
+    branches: [sandbox-ubuntu-matrix]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  matrix:
+    name: ubuntu-latest enforcement matrix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: A0 baseline
+        shell: bash
+        run: |
+          set +e
+          . /etc/os-release; echo "OS=$PRETTY_NAME"
+          echo "KERNEL=$(uname -r) ARCH=$(uname -m)"
+          echo "user=$(id -un) uid=$(id -u) groups=$(id -Gn)"
+          echo "sysctl_apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo ABSENT)"
+          echo "unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo ABSENT)"
+          echo "bwrap_on_path=$(command -v bwrap || echo NONE)"
+          echo "helper=$(ls -l /usr/libexec/nub/nub-bwrap 2>&1 | head -1)"
+          echo "apparmor_profile=$(test -e /etc/apparmor.d/nub-bwrap-userns && echo present || echo absent)"
+          echo "in_container=$(test -e /.dockerenv && echo yes || echo no)"
+          unshare --user --map-root-user true && echo "unpriv-userns=OK" || echo "unpriv-userns=DENIED"
+          exit 0
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: sandbox-ubuntu-matrix
+          save-if: false
+
+      - name: Build probe
+        run: cargo build -p nub-sandbox --example matrix_probe
+
+      - name: A1 — as-is (no bwrap, restriction on, no setup)
+        shell: bash
+        run: |
+          set +e
+          P=target/debug/examples/matrix_probe
+          for t in agent buildjail; do
+            echo "### A1 tier=$t arm=confined"
+            NUBMX_BASE="$RUNNER_TEMP/a1-$t" "$P" "$t" confined 2>&1
+          done
+          exit 0
+
+      - name: A2 — + stock bubblewrap installed
+        shell: bash
+        run: |
+          set +e
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          echo "bwrap=$(command -v bwrap) version=$(bwrap --version)"
+          echo "sysctl=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          bwrap --unshare-user --ro-bind / / -- /bin/true && echo "direct-bwrap=OK" || echo "direct-bwrap=DENIED"
+          P=target/debug/examples/matrix_probe
+          for t in agent buildjail; do
+            echo "### A2 tier=$t arm=confined"
+            NUBMX_BASE="$RUNNER_TEMP/a2-$t" "$P" "$t" confined 2>&1
+          done
+          exit 0
+
+      - name: A3 — + the real one-time setup (restriction STILL on)
+        shell: bash
+        run: |
+          set +e
+          sudo apt-get install -y -qq meson ninja-build libcap-dev
+          BWRAP_VERSION=0.11.2
+          BWRAP_SHA256=69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o "bubblewrap-$BWRAP_VERSION.tar.xz" \
+            "https://github.com/containers/bubblewrap/releases/download/v$BWRAP_VERSION/bubblewrap-$BWRAP_VERSION.tar.xz"
+          echo "$BWRAP_SHA256  bubblewrap-$BWRAP_VERSION.tar.xz" | sha256sum -c - || exit 1
+          tar -xf "bubblewrap-$BWRAP_VERSION.tar.xz"
+          meson setup "bubblewrap-$BWRAP_VERSION/build" "bubblewrap-$BWRAP_VERSION" \
+            --buildtype=release -Dselinux=disabled -Dman=disabled -Dtests=false \
+            -Dc_args=-Wno-error=format-overflow >/dev/null
+          meson compile -C "bubblewrap-$BWRAP_VERSION/build" >/dev/null 2>&1
+          PACKAGED="$RUNNER_TEMP/bubblewrap-$BWRAP_VERSION/build/bwrap"
+          "$PACKAGED" --version
+          DIGEST=$(sha256sum "$PACKAGED" | awk '{print $1}')
+          echo "PACKAGED_BWRAP_SHA256=$DIGEST"
+
+          cd "$GITHUB_WORKSPACE"
+          cargo clean -p nub-sandbox
+          NUB_BWRAP_VERSION=0.11.2 NUB_BWRAP_SHA256="$DIGEST" \
+            cargo build -p nub-sandbox --example matrix_probe || exit 1
+          mkdir -p target/debug/examples/nub-resources
+          install -m 0755 "$PACKAGED" target/debug/examples/nub-resources/bwrap
+
+          echo "### A3 setup (production nub_sandbox::linux_admin::setup)"
+          sudo -E target/debug/examples/matrix_probe setup 2>&1
+          echo "### A3 post-setup host state"
+          ls -l /usr/libexec/nub/nub-bwrap
+          echo "sysctl=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          getent group nub-sandbox
+          unshare --user --map-root-user true && echo "generic-unpriv-userns=OK" || echo "generic-unpriv-userns=DENIED"
+
+          P="$GITHUB_WORKSPACE/target/debug/examples/matrix_probe"
+          for t in agent buildjail; do for a in confined control; do
+            echo "### A3 tier=$t arm=$a"
+            sg nub-sandbox -c "NUBMX_BASE=$RUNNER_TEMP/a3-$t-$a $P $t $a" 2>&1
+          done; done
+          exit 0
+
+      - name: A3b — does the committed enforcement suite RUN in the A3 state?
+        shell: bash
+        run: |
+          set +e
+          sg nub-sandbox -c "cargo test -p nub-sandbox --test linux_enforcement" 2>&1 | tail -5
+          exit 0
+
+      - name: A4 — teardown, then the documented CI escape hatch (sysctl=0)
+        shell: bash
+        run: |
+          set +e
+          sudo -E target/debug/examples/matrix_probe teardown 2>&1
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo "sysctl=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          echo "helper=$(ls -l /usr/libexec/nub/nub-bwrap 2>&1 | head -1)"
+          unshare --user --map-root-user true && echo "generic-unpriv-userns=OK" || echo "generic-unpriv-userns=DENIED"
+          P=target/debug/examples/matrix_probe
+          for t in agent buildjail; do for a in confined control; do
+            echo "### A4 tier=$t arm=$a"
+            NUBMX_BASE="$RUNNER_TEMP/a4-$t-$a" "$P" "$t" "$a" 2>&1
+          done; done
+          exit 0
+
+      - name: A4b — the committed enforcement suite under the escape hatch
+        shell: bash
+        run: |
+          set +e
+          NUB_SANDBOX_REQUIRE_BWRAP=1 cargo test -p nub-sandbox --test linux_enforcement 2>&1 | tail -5
+          exit 0
