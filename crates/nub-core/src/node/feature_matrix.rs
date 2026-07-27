@@ -494,6 +494,25 @@ static FEATURES: &[Feature] = &[
         ],
         evidence: "native on Node 24+",
     },
+    // ── Promise.withResolvers ───────────────────────────────────────────────
+    // TC39 Stage 4 / ES2024; native on Node 22+, absent on the 18.19–21.x compat
+    // tier. It went unpolyfilled until 2026-07 because the candidates survey
+    // judged it "native on Nub's floor" while the floor was still 22.15; the
+    // verdict was never revisited when the floor moved to 18.19.
+    Feature {
+        name: "Promise.withResolvers",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Promise.withResolvers",
+                },
+            ),
+            (band((22, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 Stage 4 / ES2024; native on Node 22.0+ (V8 12.4)",
+    },
     // ── Promise.allKeyed / Promise.allSettledKeyed ──────────────────────────
     // TC39 "await dictionary", Stage 3. Shipped by NO engine, so unlike the rows
     // above there is no Native band to fall through to — the whole supported range

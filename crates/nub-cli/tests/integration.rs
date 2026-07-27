@@ -1287,9 +1287,21 @@ try {
 } catch (e) {
   rejected = e.message;
 }
+// Promise.withResolvers: native on Node 22+, polyfilled on the 18.19-21.x compat
+// tier where it was previously missing entirely.
+const wr = Promise.withResolvers();
+wr.resolve("wr-ok");
+const withResolvers =
+  Object.getPrototypeOf(wr) === Object.prototype &&
+  Object.keys(wr).join(",") === "promise,resolve,reject" &&
+  (await wr.promise) === "wr-ok";
 // The additive contract: nub's additions stay invisible to enumeration.
-const hidden = Object.keys(Promise).filter((k) => k.endsWith("Keyed")).length;
-console.log(JSON.stringify({ keyed, scoped, nullProto, statuses, rejected, hidden }));
+const hidden = Object.keys(Promise).filter(
+  (k) => k.endsWith("Keyed") || k === "withResolvers",
+).length;
+console.log(
+  JSON.stringify({ keyed, scoped, nullProto, statuses, rejected, withResolvers, hidden }),
+);
 "#,
     )
     .unwrap();
@@ -1307,7 +1319,7 @@ console.log(JSON.stringify({ keyed, scoped, nullProto, statuses, rejected, hidde
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         stdout,
-        r#"{"keyed":true,"scoped":true,"nullProto":true,"statuses":"fulfilled/rejected/nope","rejected":"first","hidden":0}"#,
+        r#"{"keyed":true,"scoped":true,"nullProto":true,"statuses":"fulfilled/rejected/nope","rejected":"first","withResolvers":true,"hidden":0}"#,
         "stderr: {stderr}"
     );
 }
