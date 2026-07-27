@@ -408,8 +408,7 @@ pub(crate) fn read_global_config_at(path: &Path) -> Result<LoadedConfig> {
 /// Parse + validate from raw JSONC text. Split out so tests can hit the validator
 /// without touching the filesystem.
 pub fn parse_project_config(text: &str) -> Result<ProjectConfig> {
-    let value = jsonc_parser::parse_to_serde_value(text, &ParseOptions::default())
-        .map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let value = crate::jsonc::parse_to_value(text).map_err(ConfigError::Parse)?;
     let Some(value) = value else {
         // An empty / comment-only file is a valid empty config.
         return Ok(ProjectConfig::default());
@@ -419,8 +418,7 @@ pub fn parse_project_config(text: &str) -> Result<ProjectConfig> {
 }
 
 fn parse_global_config(text: &str) -> Result<ProjectConfig> {
-    let value = jsonc_parser::parse_to_serde_value(text, &ParseOptions::default())
-        .map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let value = crate::jsonc::parse_to_value(text).map_err(ConfigError::Parse)?;
     let Some(value) = value else {
         return Ok(ProjectConfig::default());
     };
