@@ -466,9 +466,14 @@ impl InstallOptions {
     /// precisely because the install it is constructing has a fetched git checkout as
     /// its root, so the depth counter already carries the provenance fact. Root
     /// lifecycle hooks read this to decide whether the trusted-root exemption applies.
-    pub(crate) fn root_provenance(&self) -> aube_scripts::RootProvenance {
+    pub(crate) fn root_provenance<'a>(
+        &self,
+        install_root: &'a std::path::Path,
+    ) -> aube_scripts::RootProvenance<'a> {
         if self.git_prepare_depth > 0 {
-            aube_scripts::RootProvenance::Fetched
+            aube_scripts::RootProvenance::Fetched {
+                checkout_root: install_root,
+            }
         } else {
             aube_scripts::RootProvenance::UserAuthored
         }
@@ -538,9 +543,10 @@ mod root_provenance_tests {
     /// confine a user's own root scripts.
     #[test]
     fn only_a_raised_git_prepare_depth_marks_the_root_as_fetched() {
+        let root = std::path::Path::new("/tmp/some-checkout");
         let mut opts = InstallOptions::with_mode(FrozenMode::Prefer);
         assert_eq!(
-            opts.root_provenance(),
+            opts.root_provenance(root),
             aube_scripts::RootProvenance::UserAuthored,
             "an ordinary install's root is the user's own project; treating it as fetched \
              would confine their own lifecycle scripts"
@@ -548,8 +554,10 @@ mod root_provenance_tests {
 
         opts.git_prepare_depth = 1;
         assert_eq!(
-            opts.root_provenance(),
-            aube_scripts::RootProvenance::Fetched,
+            opts.root_provenance(root),
+            aube_scripts::RootProvenance::Fetched {
+                checkout_root: root
+            },
             "a nested git-dep prepare install's root is third-party code and must lose \
              the trusted-root exemption"
         );

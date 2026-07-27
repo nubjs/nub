@@ -919,12 +919,20 @@ pub const DEP_LIFECYCLE_HOOKS: [LifecycleHook; 3] = [
 /// for the user's project while being third-party code. Callers state the provenance
 /// so that distinction is made where it is known, never inferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RootProvenance {
+pub enum RootProvenance<'a> {
     /// The user's own project — the directory they ran the package manager in.
     UserAuthored,
     /// A checkout the package manager fetched on the user's behalf: a git
     /// dependency being prepared. Same threat model as a registry dependency.
-    Fetched,
+    ///
+    /// `checkout_root` is the whole fetched tree, which is the unit of
+    /// third-party code here and so the unit of confinement — NOT the importer
+    /// whose script is running. A git dep may be a workspace, and a member's
+    /// `prepare` legitimately reaches the checkout root for shared config and
+    /// tooling; scoping to the member instead breaks such a dep outright. The
+    /// tree is a throwaway scratch copy that is packed and deleted, so granting
+    /// the checkout to code that already owns all of it concedes nothing.
+    Fetched { checkout_root: &'a Path },
 }
 
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
@@ -1290,7 +1298,7 @@ pub async fn run_root_hook(
     modules_dir_name: &str,
     manifest: &PackageJson,
     hook: LifecycleHook,
-    provenance: RootProvenance,
+    provenance: RootProvenance<'_>,
 ) -> Result<bool, Error> {
     run_root_script_by_name(
         project_dir,
@@ -1313,7 +1321,7 @@ pub async fn run_root_script_by_name(
     modules_dir_name: &str,
     manifest: &PackageJson,
     name: &str,
-    provenance: RootProvenance,
+    provenance: RootProvenance<'_>,
 ) -> Result<bool, Error> {
     let Some(script_cmd) = manifest.scripts.get(name) else {
         return Ok(false);
@@ -1325,9 +1333,9 @@ pub async fn run_root_script_by_name(
     // `embedder_owns_lifecycle_sandbox` false, so this stays `None` either way.
     let sandbox_package_dir = match provenance {
         RootProvenance::UserAuthored => None,
-        RootProvenance::Fetched => aube_util::embedder()
+        RootProvenance::Fetched { checkout_root } => aube_util::embedder()
             .embedder_owns_lifecycle_sandbox
-            .then_some(project_dir),
+            .then_some(checkout_root),
     };
     run_script(
         project_dir,

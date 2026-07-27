@@ -15,18 +15,33 @@
 
 use std::sync::{Arc, Mutex};
 
-/// Stands in for the confiner: records the phase it was handed and reports success
-/// WITHOUT spawning. The fetched-checkout fixture's scripts are all `exit 1`, so a phase
+/// Stands in for the confiner: records the phase and confinement dir it was handed, and
+/// reports success WITHOUT spawning. The fetched-checkout fixture's scripts are all `exit 1`, so a phase
 /// that bypasses the hook runs for real, exits non-zero, and fails the call — the bypass
 /// is caught even if the recorder somehow missed it.
 #[derive(Debug, Default)]
 struct Recorder {
-    phases: Mutex<Vec<String>>,
+    spawns: Mutex<Vec<(String, std::path::PathBuf)>>,
 }
 
 impl Recorder {
-    fn seen(&self) -> Vec<String> {
-        self.phases.lock().expect("recorder lock").clone()
+    fn phases(&self) -> Vec<String> {
+        self.spawns
+            .lock()
+            .expect("recorder lock")
+            .iter()
+            .map(|(phase, _)| phase.clone())
+            .collect()
+    }
+
+    /// The directory each spawn was confined to — the build-jail's write grant.
+    fn confined_to(&self) -> Vec<std::path::PathBuf> {
+        self.spawns
+            .lock()
+            .expect("recorder lock")
+            .iter()
+            .map(|(_, dir)| dir.clone())
+            .collect()
     }
 }
 
@@ -42,7 +57,10 @@ impl aube_util::LifecycleSandbox for Recorder {
             .and_then(|(_, v)| v.clone())
             .and_then(|v| v.into_string().ok())
             .unwrap_or_else(|| "<unstamped>".to_string());
-        self.phases.lock().expect("recorder lock").push(phase);
+        self.spawns
+            .lock()
+            .expect("recorder lock")
+            .push((phase, spawn.package_dir));
         Ok(success())
     }
 }
@@ -154,7 +172,9 @@ fn a_fetched_checkouts_root_scripts_are_confined_and_a_user_authored_roots_are_n
                 "node_modules",
                 &fetched_manifest,
                 phase,
-                aube_scripts::RootProvenance::Fetched,
+                aube_scripts::RootProvenance::Fetched {
+                    checkout_root: fetched.path(),
+                },
             ))
             .unwrap_or_else(|e| match e {
                 aube_scripts::Error::NonZeroExit { .. } => panic!(
@@ -166,7 +186,7 @@ fn a_fetched_checkouts_root_scripts_are_confined_and_a_user_authored_roots_are_n
         assert!(ran, "`{phase}` is declared in the fixture but did not run");
     }
     assert_eq!(
-        recorder.seen(),
+        recorder.phases(),
         vec!["preinstall", "install", "postinstall", "prepare"],
         "every root lifecycle phase of a FETCHED checkout must be handed to the \
          build-jail, in order; a missing entry is a phase running with the user's full \
@@ -193,10 +213,35 @@ fn a_fetched_checkouts_root_scripts_are_confined_and_a_user_authored_roots_are_n
         assert!(ran, "`{phase}` is declared in the fixture but did not run");
     }
     assert_eq!(
-        recorder.seen(),
+        recorder.phases(),
         vec!["preinstall", "install", "postinstall", "prepare"],
         "a user-authored root script must NOT be routed to the dependency build-jail; \
          the recorder gained an entry, so the fix over-widened and is now confining the \
          user's own project scripts"
+    );
+
+    // A git dep may be a workspace, and then the script's own importer dir is a
+    // SUBDIRECTORY of the checkout. Confinement must still be the whole checkout: a
+    // member's `prepare` legitimately reads shared config and tooling at the checkout
+    // root, and scoping to the member makes such a dep fail to install outright.
+    let member = fetched.path().join("packages/member");
+    std::fs::create_dir_all(&member).expect("create member dir");
+    let member_manifest = manifest_with(&member, "member", "exit 1");
+    rt.block_on(aube_scripts::run_root_script_by_name(
+        &member,
+        "node_modules",
+        &member_manifest,
+        "prepare",
+        aube_scripts::RootProvenance::Fetched {
+            checkout_root: fetched.path(),
+        },
+    ))
+    .expect("workspace member's prepare should be confined, not spawned");
+    assert_eq!(
+        recorder.confined_to().last().expect("a spawn was recorded"),
+        fetched.path(),
+        "a workspace member's root script must be confined to the whole fetched \
+         checkout, not to its own importer directory; scoping to the member denies the \
+         shared config and tooling at the checkout root and breaks the dependency"
     );
 }

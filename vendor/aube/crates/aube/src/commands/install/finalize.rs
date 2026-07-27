@@ -52,7 +52,7 @@ pub(super) struct FinalizePhaseInput<'a> {
     /// Whether this install's root package is the user's own project or a git
     /// checkout aube fetched. Decides whether root lifecycle scripts keep the
     /// trusted-root exemption from the embedder's build-jail.
-    pub(super) root_provenance: aube_scripts::RootProvenance,
+    pub(super) root_provenance: aube_scripts::RootProvenance<'a>,
     pub(super) workspace_filter_empty: bool,
     pub(super) dep_selection: DepSelection,
     pub(super) cli_flags: &'a [(String, String)],

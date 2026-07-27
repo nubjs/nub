@@ -963,7 +963,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 &modules_dir_name,
                 importer_manifest,
                 aube_scripts::LifecycleHook::PreInstall,
-                opts.root_provenance(),
+                opts.root_provenance(&cwd),
             )
             .await?;
         }
@@ -3041,7 +3041,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         strict_dep_builds_setting,
         ignore_scripts: opts.ignore_scripts,
         skip_root_lifecycle: opts.skip_root_lifecycle,
-        root_provenance: opts.root_provenance(),
+        root_provenance: opts.root_provenance(&cwd),
         workspace_filter_empty: opts.workspace_filter.is_empty(),
         dep_selection: opts.dep_selection,
         cli_flags: &opts.cli_flags,

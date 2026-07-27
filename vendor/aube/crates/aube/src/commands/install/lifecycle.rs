@@ -14,7 +14,7 @@ pub(super) async fn run_root_lifecycle(
     modules_dir_name: &str,
     manifest: &aube_manifest::PackageJson,
     hook: aube_scripts::LifecycleHook,
-    provenance: aube_scripts::RootProvenance,
+    provenance: aube_scripts::RootProvenance<'_>,
 ) -> miette::Result<()> {
     // Only announce when the hook is actually defined, so projects without
     // lifecycle scripts don't get noise in their install output.
