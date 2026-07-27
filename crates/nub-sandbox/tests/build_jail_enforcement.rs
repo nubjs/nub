@@ -145,6 +145,106 @@ fn build_jail_confines_writes_and_hides_secrets() {
     );
 }
 
+/// A FETCHED git checkout is confined as a whole, and every byte of it is attacker-authored:
+/// `prepare_scratch_copy` uses `cp -a`, so a symlink committed in the repo survives into the
+/// scratch tree the jail grants. Seatbelt matches the CANONICAL path, so a read through
+/// `evil -> $HOME` is checked as the home path, misses the checkout's subpath allow, and
+/// falls to default-deny.
+///
+/// The second escape is the jail's PROJECT anchor. The scratch lives in the system temp dir
+/// alongside every other git dep's scratch, and the anchor used to follow the importer
+/// directory — which a checkout picks itself via `workspaces: ["../**"]`. Anchoring on the
+/// sibling is compiled here as the negative control: the same script, one variable changed,
+/// reads the sibling's file. That contrast is what makes the denial evidence rather than a
+/// hollow pass, together with the checkout's own read + write succeeding in both runs.
+#[test]
+fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steered_anchor() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let checkout = root.path().join("checkout");
+    // Another package's scratch copy, sibling to this one — what `../**` reaches for.
+    let sibling = root.path().join("sibling-scratch");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(home.join(".nub-secret"), b"HOME-SECRET-DO-NOT-LEAK").unwrap();
+    std::fs::write(sibling.join("scratch.txt"), b"SIBLING-SCRATCH-DO-NOT-LEAK").unwrap();
+    std::fs::write(checkout.join("src/own.txt"), b"CHECKOUT-OWN-FILE").unwrap();
+    // The committed symlink. `cp -a` reproduces it verbatim into the scratch copy.
+    std::os::unix::fs::symlink(&home, checkout.join("evil")).unwrap();
+
+    let ambient: BTreeMap<String, String> = [("PATH", "/usr/bin:/bin")]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let script = format!(
+        r#"
+        cat src/own.txt 2>/dev/null && echo OWN_READ_OK || echo OWN_READ_FAIL
+        echo built > out.txt 2>/dev/null && echo OWN_WRITE_OK || echo OWN_WRITE_FAIL
+        cat '{symlinked}' 2>&1 | sed 's/^/SYMLINK: /'
+        cat '{sibling_file}' 2>&1 | sed 's/^/SIBLING: /'
+        "#,
+        symlinked = checkout.join("evil/.nub-secret").display(),
+        sibling_file = sibling.join("scratch.txt").display(),
+    );
+
+    let run = |project: &std::path::Path| -> String {
+        let policy = nub_sandbox::compile_build_jail(
+            homes(&home, project),
+            &checkout,
+            Vec::new(),
+            Vec::new(),
+            ambient.clone(),
+        )
+        .expect("compile build-jail");
+        let spec = nub_sandbox::CommandSpec::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .cwd(&checkout)
+            .deny_search_roots([project.to_path_buf(), checkout.clone()]);
+        let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+        let prepared = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+            .expect("apply build-jail (fail-closed on error)");
+        let out = prepared.output().expect("run confined script");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let anchored = run(&checkout);
+    assert!(
+        anchored.contains("CHECKOUT-OWN-FILE") && anchored.contains("OWN_READ_OK"),
+        "the checkout must be readable — without this the denials below prove nothing:\n{anchored}"
+    );
+    assert!(
+        anchored.contains("OWN_WRITE_OK"),
+        "the checkout must be writable:\n{anchored}"
+    );
+    assert!(
+        !anchored.contains("HOME-SECRET-DO-NOT-LEAK"),
+        "a symlink committed in the checkout reached the home secret:\n{anchored}"
+    );
+    assert!(
+        anchored.contains("SYMLINK: cat:") && anchored.contains("Operation not permitted"),
+        "the read through the symlink must be denied EPERM, not merely empty:\n{anchored}"
+    );
+    assert!(
+        !anchored.contains("SIBLING-SCRATCH-DO-NOT-LEAK"),
+        "the checkout read a sibling scratch directory:\n{anchored}"
+    );
+
+    // One variable changed: the project anchor moves to the sibling, as a
+    // `workspaces: ["../**"]` importer used to make it. The sibling now reads.
+    let steered = run(&sibling);
+    assert!(
+        steered.contains("SIBLING-SCRATCH-DO-NOT-LEAK"),
+        "control failed: anchoring the project on the sibling must expose it, otherwise \
+         the anchored run's denial is not evidence that the anchor is what withheld it:\n{steered}"
+    );
+    assert!(
+        steered.contains("OWN_READ_OK") && steered.contains("OWN_WRITE_OK"),
+        "control sanity: the checkout's own grants are unaffected by the anchor:\n{steered}"
+    );
+}
+
 /// The header read-grant that makes node-gyp compile offline: a confined script READS the
 /// provisioned Node's `include/node` tree (passed as the per-spawn extra read), while an
 /// ungranted sibling under the same store stays hidden. Models the real defect — nub's
