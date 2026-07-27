@@ -8843,6 +8843,31 @@ fn wait_for_child_status_until(child: &mut Child, deadline: Instant) -> io::Resu
 mod tests {
     use super::*;
 
+    /// A program name that would otherwise be read as a Bubblewrap option is the
+    /// case bubblewrap's own suite covers with `--`. Nub never passes a
+    /// caller-supplied program here, so this pins the separator rather than a
+    /// live exposure — but the separator is what keeps that a second line of
+    /// defence instead of the only one.
+    #[test]
+    fn command_position_is_closed_by_a_separator() {
+        let mut command = Command::new("bwrap");
+        append_command_position(
+            &mut command,
+            OsStr::new("--not-a-security-boundary"),
+            &[OsString::from("--inhibit-cache")],
+        );
+        let argv: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            argv,
+            [
+                OsStr::new("--"),
+                OsStr::new("--not-a-security-boundary"),
+                OsStr::new("--inhibit-cache"),
+                OsStr::new(MONITOR_SENTINEL),
+            ]
+        );
+    }
+
     fn owned_pair(kind: libc::c_int) -> (OwnedFd, OwnedFd) {
         let mut descriptors = [-1; 2];
         assert_eq!(
