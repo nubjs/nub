@@ -124,11 +124,22 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
             .map(str::to_owned)
             .collect();
         assert_eq!(
-            lines,
-            vec![format!(
-                "cwd={} project=loaded",
-                target.canonicalize().unwrap().display()
-            )]
+            lines.len(),
+            1,
+            "exactly one snapshot initialization: {lines:?}"
+        );
+        let (cwd, loaded) = lines[0]
+            .strip_prefix("cwd=")
+            .and_then(|line| line.rsplit_once(' '))
+            .unwrap_or_else(|| panic!("unexpected snapshot line: {}", lines[0]));
+        assert_eq!(loaded, "project=loaded");
+        // Both sides are canonicalized rather than string-compared: nub reports the
+        // cwd as `env::current_dir` spells it, which on Windows keeps any 8.3 short
+        // components it was handed and carries no `\\?\` prefix, while `canonicalize`
+        // expands and prefixes both. The directory identity is the contract here.
+        assert_eq!(
+            Path::new(cwd).canonicalize().unwrap(),
+            target.canonicalize().unwrap(),
         );
     }
 }
