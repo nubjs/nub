@@ -116,7 +116,10 @@ mod tests {
 
         let over = parse_to_value(&nest(MAX_NESTING_DEPTH + 1)).unwrap_err();
         assert!(over.contains("deeper than"), "{over}");
-        assert!(parse_to_value(&nest(2000)).is_err(), "the CI-crashing input");
+        assert!(
+            parse_to_value(&nest(2000)).is_err(),
+            "the CI-crashing input"
+        );
     }
 
     #[test]
