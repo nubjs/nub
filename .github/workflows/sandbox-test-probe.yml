@@ -14,13 +14,15 @@ on:
   workflow_dispatch:
   push:
     branches: [nub-jsonc-sandbox-pr]
+    # Only this file. Several lanes push to the branch minutes apart; a `crates/**`
+    # trigger meant every sibling commit started a run that cancelled the one already
+    # collecting results. Touch this file to request a run.
     paths:
-      - "crates/**"
       - ".github/workflows/sandbox-test-probe.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -131,3 +133,37 @@ jobs:
             cp target/debug/libnub_native.so runtime/addons/nub-native.node
           fi
       - run: cargo test
+
+  # POSITIVE CONTROL for the two Bubblewrap gates. `ubuntu-latest` is 24.04 with
+  # apparmor_restrict_unprivileged_userns=1 and no bwrap at all, so every Linux
+  # enforcement test there can only skip — a green `test` job above proves the
+  # skips are clean, NOT that the enforcement paths work. ubuntu-22.04 still
+  # permits unprivileged user namespaces (the same reason sandbox-conformance.yml
+  # pins it), so with stock Bubblewrap installed and NUB_SANDBOX_REQUIRE_BWRAP=1
+  # the gates cannot skip: green here means the paths genuinely ran and passed.
+  enforcement:
+    name: Enforcement positive control (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      NUB_SANDBOX_REQUIRE_BWRAP: "1"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Install and probe stock Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          uname -a
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          bwrap --die-with-parent --new-session --unshare-user --cap-drop ALL \
+            --unshare-pid --unshare-ipc --ro-bind / / --dev /dev --proc /proc -- true
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: sandbox-probe-enforcement
+          save-if: false
+      - run: cargo test -p nub-sandbox --test ir
+      - run: cargo test -p nub-cli --test sandbox_conformance

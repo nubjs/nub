@@ -365,19 +365,27 @@ fn run_case(
 /// the relaxed policy as its negative control.
 fn drive(name: &str) {
     #[cfg(target_os = "linux")]
-    let fs_net_enforceable = linux_enforceable();
+    let enforceable = linux_enforceable();
     #[cfg(not(target_os = "linux"))]
-    let fs_net_enforceable = true;
+    let enforceable = true;
 
     let fx = load_fixture(name);
     assert_eq!(fx.name, name, "fixture name mismatch in {name}.json");
 
+    // Every confined launch on Linux goes through Bubblewrap — including an env-only
+    // policy, because the backend enforces `env` by namespacing the process view (so a
+    // sibling cannot read the pre-scrub values back out of /proc), not by handing the
+    // child a filtered environment. With the primitive missing the ENV axis is no more
+    // reachable than fs/net, so carving `env` out of this gate made the harness demand a
+    // launch it could not get and report a HARNESS ERROR. `linux_enforceable` still hard-
+    // fails under NUB_SANDBOX_REQUIRE_BWRAP, which is what keeps a prepared conformance
+    // runner from reporting a hollow green.
+    if !enforceable {
+        return;
+    }
+
     for case in &fx.cases {
         if !applies_here(case) {
-            continue;
-        }
-        // Skip fs/net enforcement assertions when stock Bubblewrap cannot run.
-        if !fs_net_enforceable && case.probe != "env" {
             continue;
         }
 

@@ -9,7 +9,7 @@ use nub_sandbox::apply;
 use nub_sandbox::compiler::CompileError;
 use nub_sandbox::compiler::compile;
 use nub_sandbox::conformance::{Fixture, run_fixture};
-use nub_sandbox::policy::SandboxPolicy;
+use nub_sandbox::policy::{FsOrigin, SandboxPolicy};
 use serde_json::json;
 
 #[cfg(target_os = "linux")]
@@ -33,24 +33,99 @@ fn apply(
     nub_sandbox::apply_with_runtime(policy, spec, runtime)
 }
 
+/// Returns true when the caller must skip the `apply()` leg of a test.
+///
+/// Linux `apply()` launches through a real Bubblewrap, which needs a working
+/// unprivileged user namespace. The hosted `ubuntu-latest` image ships no `bwrap`
+/// AND sets `apparmor_restrict_unprivileged_userns=1`, so no amount of staging the
+/// packaged fallback makes enforcement reachable there — the primitive is simply
+/// absent. Skip rather than fail, and let a prepared conformance runner set
+/// `NUB_SANDBOX_REQUIRE_BWRAP` to turn the same call into a hard admission, so an
+/// unconfigured host can never report a hollow green. Same gate as
+/// `linux_enforcement.rs`; every assertion that does NOT need a launched child stays
+/// outside it.
+#[cfg(target_os = "linux")]
+fn skip_without_bwrap() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let available = *AVAILABLE.get_or_init(|| {
+        ["/usr/bin/bwrap", "/bin/bwrap"].iter().any(|program| {
+            std::process::Command::new(program)
+                .args([
+                    "--die-with-parent",
+                    "--unshare-user",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--",
+                    "/bin/true",
+                ])
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    });
+    if available {
+        return false;
+    }
+    let required = matches!(
+        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    );
+    assert!(
+        !required,
+        "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
+    );
+    eprintln!("skipping the apply() leg: no Bubblewrap that can create a user namespace");
+    true
+}
+
+#[cfg(not(target_os = "linux"))]
+fn skip_without_bwrap() -> bool {
+    false
+}
+
 #[test]
 fn policy_round_trips_through_serde() {
     let ctx = common::ctx(true, &[("PORT", "3000"), ("NODE_ENV", "prod")]);
     let policy = compile(
         &json!({
-            "fs": ["**", "!~/.ssh", "./data"],
+            // `$tooldirs` expands to built-in-set rules, so this one surface covers both
+            // `FsOrigin` arms: the authored globs must keep serializing without an
+            // `origin` key (older fixtures round-trip unchanged), while a set member must
+            // carry its origin across the wire — the mount plan reads it to decide whether
+            // an absent bind source is an authoring mistake or just a missing toolchain.
+            "fs": ["**", "!~/.ssh", "./data", "$tooldirs"],
             "net": ["*.sentry.io", "10.0.0.0/8"],
             "vars": { "PORT": "port", "NODE_ENV": true }
         }),
         &ctx,
     )
     .unwrap();
+    assert!(
+        policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .any(|rule| rule.origin == FsOrigin::BuiltinSet),
+        "the $tooldirs expansion must mark its rules as built-in-set members"
+    );
 
     let text = serde_json::to_string(&policy).unwrap();
     let back: SandboxPolicy = serde_json::from_str(&text).unwrap();
     assert_eq!(
         policy, back,
         "IR must round-trip byte-for-byte through serde"
+    );
+    assert_eq!(
+        text.matches("\"origin\"").count(),
+        policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|rule| rule.origin == FsOrigin::BuiltinSet)
+            .count(),
+        "only built-in-set rules may put an origin key on the wire"
     );
 }
 
@@ -126,8 +201,11 @@ fn conformance_reports_a_mismatch() {
 #[test]
 fn apply_scrubs_env_when_enforced() {
     let ctx = common::ctx(true, &[("KEEP", "1"), ("SECRET_TOKEN", "s")]);
-    let policy = compile(&json!({ "vars": ["KEEP"] }), &ctx).unwrap();
-    let _prepared = apply(&policy, CommandSpec::new(TRUE_PROGRAM)).unwrap();
+    // `fs: true` keeps the ENV axis the only thing under test. Under the default
+    // deny-all fs the Linux backend refuses the launch because the inherited working
+    // directory is outside the resulting filesystem view, so apply() would fail for a
+    // reason this test is not about — and never reach env construction at all.
+    let policy = compile(&json!({ "fs": true, "vars": ["KEEP"] }), &ctx).unwrap();
     assert_eq!(
         policy.env.constructed.get("KEEP").map(String::as_str),
         Some("1")
@@ -136,6 +214,11 @@ fn apply_scrubs_env_when_enforced() {
         !policy.env.constructed.contains_key("SECRET_TOKEN"),
         "secret withheld from child env"
     );
+    if skip_without_bwrap() {
+        return;
+    }
+    apply(&policy, CommandSpec::new(TRUE_PROGRAM))
+        .expect("an enforced env policy must still prepare a launchable command");
 }
 
 #[cfg(unix)]
@@ -155,6 +238,11 @@ fn apply_replaces_a_brokered_parent_value_with_a_fresh_marker() {
     )
     .unwrap();
     assert!(!policy.env.constructed.contains_key("HOME"));
+    // Everything below reads the LAUNCHED child's environment, so unlike the scrub test
+    // above there is no assertion left to make without a working backend.
+    if skip_without_bwrap() {
+        return;
+    }
 
     let run = || {
         let output = apply(&policy, CommandSpec::new("/usr/bin/env"))

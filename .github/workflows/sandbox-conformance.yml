@@ -68,6 +68,10 @@ jobs:
         run: |
           cargo test -p nub-sandbox --test linux_enforcement --test linux_proxy
           cargo test -p nub-sandbox --test linux_monitor_states
+          # ir.rs is otherwise host-independent, but its two apply() tests launch a real
+          # child. ubuntu-latest (ci.yml) has no Bubblewrap and no unprivileged user
+          # namespace, so they can only skip there; this is the leg that proves them.
+          cargo test -p nub-sandbox --test ir
       - name: Linux CLI-seam conformance matrix and inert project config
         env:
           NUB_SANDBOX_REQUIRE_BWRAP: "1"
