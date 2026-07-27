@@ -10,7 +10,8 @@
 //! - WRITE confined to a private per-run tmp + the script's own package dir.
 //! - READ confined to the project, `$tooldirs`, and the provisioned interpreter (the
 //!   OS backends supply the system/toolchain closure under a minimal root).
-//! - egress denied; the home-secret + `.env*` floors applied; `/etc/shadow` denied.
+//! - egress curated to the install-time artifact hosts (`$downloads`) and denied
+//!   everywhere else; the home-secret + `.env*` floors applied; `/etc/shadow` denied.
 //! - the constructed lifecycle env minus credential-shaped keys.
 //!
 //! The user's OWN root-package scripts are NOT routed here — aube passes them no

@@ -39,6 +39,8 @@ const TOOLDIRS_SUBPATH_MSG: &str = "`$tooldirs` is a built-in set (the package-m
 /// `$trusted` is the NET host set; as a `net` OBJECT key it has no bool value to carry
 /// (a set expands to many rules), so it is only valid in the array form.
 const TRUSTED_OBJECT_MSG: &str = "`$trusted` is a built-in host set — use it in the `net` array form (e.g. [\"$trusted\", …]), not as an object key";
+/// Same rule as [`TRUSTED_OBJECT_MSG`] for the other net set.
+const DOWNLOADS_OBJECT_MSG: &str = "`$downloads` is a built-in host set — use it in the `net` array form (e.g. [\"$downloads\", …]), not as an object key";
 
 // ── fs ───────────────────────────────────────────────────────────────────────
 
@@ -542,12 +544,14 @@ fn reject_unknown_fs_sentinel(raw: &str, path: &str) -> Result<(), CompileError>
         if crate::matcher::path::FS_SENTINEL_NAMES.contains(&name) {
             return Ok(());
         }
-        // `$trusted` is the NET host set, not an fs sentinel — point the author at the
-        // right axis rather than reporting it as a generic unknown fs name.
-        if name == "trusted" {
+        // Both net host sets are misuses HERE, not generic unknown fs names — point the
+        // author at the right axis.
+        if name == "trusted" || name == "downloads" {
             return Err(CompileError::shape(
                 path,
-                "`$trusted` is a network host set — use it on the `net` axis; the filesystem sentinels are `$cache` and `$tmp`",
+                &format!(
+                    "`${name}` is a network host set — use it on the `net` axis; the filesystem sentinels are `$cache` and `$tmp`"
+                ),
             ));
         }
         return Err(CompileError::shape(
@@ -688,6 +692,12 @@ fn fold_net_entry(s: &str, path: &str, policy: &mut NetPolicy) -> Result<(), Com
         policy.rules.extend(builtin_sets::trusted_net_rules(effect));
         return Ok(());
     }
+    // `$downloads` is the build jail's install-time artifact set — same expansion
+    // contract, a deliberately separate membership (see `builtin_sets`).
+    if pattern == "$downloads" {
+        policy.rules.extend(builtin_sets::download_net_rules(effect));
+        return Ok(());
+    }
     push_net_rule(pattern, effect, path, &mut policy.rules)
 }
 
@@ -722,6 +732,9 @@ fn fold_net_object_item(
     reject_naked_sentinel(key, path)?;
     if key == "$trusted" {
         return Err(CompileError::shape(path, TRUSTED_OBJECT_MSG));
+    }
+    if key == "$downloads" {
+        return Err(CompileError::shape(path, DOWNLOADS_OBJECT_MSG));
     }
     fold_net_object_value(key, val, path, policy)
 }
@@ -895,17 +908,18 @@ fn push_net_rule(
             ),
         ));
     }
-    // MANDATORY `$`-guard (fail-open closer): `$trusted` is the only `$`-token net
-    // accepts and it is consumed in `fold_net_entry` before reaching here; net has no
-    // other `$name` set and no `$(…)` command substitution. A leading `$` that survived
-    // is unrecognized — reject it loudly rather than fold it to a `NetTarget::Host` that
-    // matches NOTHING (the footgun: `net: ["$tooldirs"]` or `["!$foo"]` would otherwise
-    // compile to an inert rule that silently does nothing). Mirrors the `<...>` reject.
+    // MANDATORY `$`-guard (fail-open closer): `$trusted` and `$downloads` are the only
+    // `$`-tokens net accepts and both are consumed in `fold_net_entry` before reaching
+    // here; net has no other `$name` set and no `$(…)` command substitution. A leading `$`
+    // that survived is unrecognized — reject it loudly rather than fold it to a
+    // `NetTarget::Host` that matches NOTHING (the footgun: `net: ["$tooldirs"]` or
+    // `["!$foo"]` would otherwise compile to an inert rule that silently does nothing).
+    // Mirrors the `<...>` reject.
     if target.starts_with('$') {
         return Err(CompileError::shape(
             path,
             &format!(
-                "`{target}` is not a valid net target — the only built-in net set is `$trusted` (the curated trusted-host allowlist); `$tooldirs` is a filesystem set (use it on the `fs` axis), and `$( … )` command substitution is not supported on `net`"
+                "`{target}` is not a valid net target — the built-in net sets are `$trusted` (the curated trusted-host allowlist) and `$downloads` (the install-time artifact hosts); `$tooldirs` is a filesystem set (use it on the `fs` axis), and `$( … )` command substitution is not supported on `net`"
             ),
         ));
     }
