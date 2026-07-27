@@ -105,7 +105,6 @@ pub(crate) fn resolve(
     ambient_env: BTreeMap<String, String>,
     caps: nub_sandbox::ScopeCapabilities,
 ) -> anyhow::Result<Option<ResolvedSandbox>> {
-    use jsonc_parser::ParseOptions;
     use serde_json::Value;
 
     // `block` is the surface handed to the compiler; `document` is the reuse root a
@@ -124,7 +123,7 @@ pub(crate) fn resolve(
             let text = std::fs::read_to_string(&path).with_context(|| {
                 format!("reading external sandbox config file {}", path.display())
             })?;
-            let value = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
+            let value = crate::jsonc::parse_to_value(&text)
                 .map_err(|e| anyhow!("parsing sandbox policy {}: {e}", path.display()))?
                 .unwrap_or(Value::Null);
             // Accept either a bare surface block or a `{ "sandbox": … }` wrapper. The

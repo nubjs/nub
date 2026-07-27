@@ -137,6 +137,45 @@ mod tests {
         assert!(parse_to_value(&siblings).is_ok());
     }
 
+    /// The guard is only worth as much as its coverage: a single direct call to
+    /// `jsonc_parser` re-opens the abort on a different door, and that door would
+    /// be invisible to a test asserting the guarded path. Bypasses are therefore
+    /// caught here rather than by reviewer vigilance.
+    #[test]
+    fn no_module_parses_jsonc_outside_this_one() {
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable source dir") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&src, &mut files);
+        assert!(files.len() > 1, "source walk found nothing at {src:?}");
+
+        let offenders: Vec<_> = files
+            .iter()
+            .filter(|path| path.file_name().is_some_and(|n| n != "jsonc.rs"))
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .expect("readable source file")
+                    .contains("parse_to_serde_value")
+            })
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "these call jsonc_parser directly and so skip MAX_NESTING_DEPTH; \
+             route them through jsonc::parse_to_value: {offenders:#?}"
+        );
+    }
+
     #[test]
     fn truncated_input_passes_through_to_the_parser_verdict() {
         // A file truncated mid-string or mid-comment leaves the scanner in a

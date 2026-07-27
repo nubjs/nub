@@ -13,7 +13,7 @@
 //! where exec/dlx are tools and run is scripts.)
 //!
 //! The file is JSONC (JSON + comments + trailing commas). Reads go through
-//! `jsonc_parser::parse_to_serde_value` (best-effort — a malformed or absent file
+//! [`crate::jsonc`] (best-effort — a malformed, over-nested, or absent file
 //! yields the default, never a hard failure, because the read sits on nubx's hot
 //! consent path). Writes go through the `jsonc_parser::cst` module — a
 //! comment/whitespace/key-order-preserving CST edit — so a `set` that touches one
@@ -89,8 +89,7 @@ pub fn implicit_dlx() -> ImplicitDlx {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return ImplicitDlx::Prompt;
     };
-    let Ok(Some(value)) = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
-    else {
+    let Ok(Some(value)) = crate::jsonc::parse_to_value(&text) else {
         return ImplicitDlx::Prompt;
     };
     value

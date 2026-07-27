@@ -7,8 +7,8 @@
 //! silent-no-op lesson — [`.fray/nub-config-spec.md`]).
 //!
 //! Dialect: JSONC (JSON + comments + trailing commas), the tsconfig dialect,
-//! parsed through `jsonc_parser::parse_to_serde_value` — the same reader the
-//! global file uses. camelCase keys. `$schema` is the one blessed non-field key
+//! parsed through [`crate::jsonc`] — the same depth-guarded reader the global
+//! file uses. camelCase keys. `$schema` is the one blessed non-field key
 //! (accepted + ignored). Every other unrecognized key fails loud.
 //!
 //! Project files are discovered from the invocation's final working directory.
@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use jsonc_parser::ParseOptions;
 use serde_json::Value;
 
 use crate::config::ImplicitDlx;
@@ -682,8 +681,8 @@ impl EffectiveConfig {
                 path: "tsconfig".into(),
                 message: format!("cannot read `{path}`: {error}"),
             })?;
-            let parsed = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
-                .map_err(|error| ConfigError::Value {
+            let parsed =
+                crate::jsonc::parse_to_value(&text).map_err(|error| ConfigError::Value {
                     path: "tsconfig".into(),
                     message: format!("cannot parse `{path}`: {error}"),
                 })?;
