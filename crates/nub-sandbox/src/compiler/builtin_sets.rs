@@ -5,30 +5,55 @@
 //! a later rule can override any member, like a `...:#/pointer`-reused list's entries.
 //!
 //! Provenance / curation:
-//! - `$trusted` derives from the Claude Code default-allowed-domains list, filtered to
-//!   hosts that are READ-ONLY to the confined process. Two shapes are excluded, both
-//!   because reaching them is indistinguishable from uploading to them: a write-back
-//!   route (an authenticated API that can publish a package, create a repo, or post a
-//!   paste — the Shai-Hulud propagation primitive) and rentable path/subdomain tenancy
-//!   (multi-tenant object stores, forge user pages). Membership was settled by probing
-//!   each ecosystem's *documented* publish route against a same-host bogus-path control,
-//!   which is what distinguishes "route exists, auth-gated" from "host denies this
-//!   method wholesale"; that is how `index.rubygems.org` was caught fronting the same
-//!   Rails app as `rubygems.org`. Three caveats bound what this set can promise. An
-//!   entry is NOT protocol-scoped — the egress proxy tunnels arbitrary TCP via
-//!   CONNECT/SOCKS5, so allowing a host admits non-HTTP upload transports too (why the
-//!   `dput` PPA target is absent). A CNAME onto a shared CDN is opaque to any host
-//!   allowlist, since the tenant-selecting `Host` header travels inside TLS
-//!   (`index.crates.io` / `static.crates.io` are kept as single-tenant buckets on that
-//!   basis, not because the hostname proves it). And three entries are retained despite
-//!   failing the rule — `registry.npmjs.org`, `api.anthropic.com`, `claude.ai` — because
-//!   each is load-bearing and its write route answers on the same hostname the legitimate
-//!   read uses (`npm publish` is a PUT to the registry that installs read; a model API
-//!   call carries its payload in the request body). The proxy gates only the CONNECT
-//!   authority and TLS SNI before blind-forwarding, so it cannot separate them; for these
-//!   three, credential scoping is the control, not the host list. Metadata/link-local +
-//!   RFC1918 are a SEPARATE always-on hard floor, never part of this set. Any host added
-//!   later must clear that same publish-route probe first; absent the probe, leave it out.
+//! - `$trusted` derives from the Claude Code default-allowed-domains list, filtered by a
+//!   SINGLE criterion: EXFILTRATION. A host is excluded only if the confined process can
+//!   make bytes of its own choosing retrievable by someone outside the sandbox. Three
+//!   mechanisms qualify: an authenticated write-back route (publish a package, create a
+//!   repo, post a paste, push an image, POST a telemetry event — the Shai-Hulud
+//!   propagation primitive), rentable path/subdomain tenancy the attacker reads back
+//!   (multi-tenant object stores), and a host the attacker operates, where the request
+//!   itself is the signal.
+//!
+//!   DELIVERY is deliberately NOT disqualifying, and the distinction is the whole point of
+//!   the set. A host that only serves attacker-authored bytes INTO the sandbox is not an
+//!   exfiltration channel: the malicious code is already executing here by construction, so
+//!   denying it one CDN only moves it to the next one — and `registry.npmjs.org`, retained
+//!   because nothing installs without it, is itself an arbitrary-payload delivery channel.
+//!   That is why the read-only GitHub content hosts are IN the set while `api.github.com`
+//!   is not. "A worm fetched its payload from this host" is an argument about delivery and
+//!   carries no weight here; so does "a worm read data from here that it had exfiltrated
+//!   somewhere else" — that names the OTHER host as the sink.
+//!
+//!   Membership was settled by probing each ecosystem's *documented* write route against a
+//!   same-host bogus-path control. A live auth-gated route answers differently from the
+//!   bogus path (`api.github.com` POST /user/repos -> 401 "Requires authentication", bogus
+//!   -> 404); a host that denies the method wholesale answers identically (`codeload`
+//!   POST -> 403 on both the real tarball path and a bogus one). That control is what
+//!   caught `index.rubygems.org` fronting the same Rails app as `rubygems.org` — POST
+//!   /api/v1/gems -> 401 and bogus -> 404 on both names, `server: RubyGems.org` throughout —
+//!   so a stolen `RUBYGEMS_API_KEY` publishes through the name that looks like a read index.
+//!
+//!   Four caveats bound what this set can promise. An entry is NOT protocol-scoped — the
+//!   egress proxy tunnels arbitrary TCP via CONNECT/SOCKS5, so allowing a host admits
+//!   non-HTTP upload transports too (why the `dput` PPA target is absent). A CNAME onto a
+//!   shared CDN is opaque to any host allowlist, since the tenant-selecting `Host` header
+//!   travels inside TLS (`index.crates.io` / `static.crates.io` are kept as single-tenant
+//!   buckets on that basis, not because the hostname proves it). A `*.suffix` wildcard
+//!   cannot satisfy the criterion by inspection at all, because it admits whatever the
+//!   operator ever hosts under that suffix: the retained `*.ubuntu.com` already covers
+//!   `login.ubuntu.com`, whose POST /api/v2/tokens/oauth answers 400 against a 404 bogus
+//!   control. The four retained wildcards are a standing exception pending a decision on
+//!   the shape as a whole. And three entries are retained despite failing the rule outright
+//!   — `registry.npmjs.org`, `api.anthropic.com`, `claude.ai` — because each is load-bearing
+//!   and its write route answers on the same hostname the legitimate read uses (`npm
+//!   publish` is a PUT to the registry that installs read; a model API call carries its
+//!   payload in the request body). The proxy gates only the CONNECT authority and TLS SNI
+//!   before blind-forwarding, so it cannot separate them; for these three, credential
+//!   scoping is the control, not the host list. Metadata/link-local + RFC1918 are a SEPARATE
+//!   always-on hard floor, never part of this set. This set is the AGENT-SANDBOX net axis
+//!   and is unrelated to the build jail's download allowlist, which is a separate constant
+//!   over a surface whose net axis is off. Any host added later must clear the same
+//!   write-route probe; absent the probe, leave it out.
 //! - `$downloads` is the narrower, install-scoped sibling of `$trusted`, and the two are
 //!   kept strictly apart: `$trusted` serves an agent working with the user's own
 //!   credentials, `$downloads` serves attacker-authored dependency code, so it inherits
@@ -63,13 +88,29 @@ pub const TRUSTED_HOSTS: &[&str] = &[
     "code.claude.com",
     "docs.claude.com",
     "platform.claude.com",
-    // npm
+    // GitHub content delivery. These SERVE bytes and cannot store them — every one denies
+    // writes wholesale, unlike the github write surface (see the module doc's third bullet).
+    "codeload.github.com",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "avatars.githubusercontent.com",
+    "camo.githubusercontent.com",
+    // npm / yarn. `registry.yarnpkg.com` is an alias of the retained `registry.npmjs.org`,
+    // so it grants no capability that host does not already grant.
     "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "npmjs.com",
+    "www.npmjs.com",
+    "npmjs.org",
+    "www.npmjs.org",
+    "yarnpkg.com",
     // Node / JS
     "nodejs.org",
     "www.nodejs.org",
     "binaries.prisma.sh",
     "downloads.sentry-cdn.com",
+    "pkg.stainless.com",
     // Python
     "files.pythonhosted.org",
     "pypi.org",
@@ -109,7 +150,14 @@ pub const TRUSTED_HOSTS: &[&str] = &[
     "dot.net",
     "dotnet.microsoft.com",
     "packages.microsoft.com",
-    // Ruby / Perl / PHP / Swift / Haskell / CocoaPods
+    // Ruby / Perl / PHP / Swift / Haskell / CocoaPods. The rubygems publish app is out
+    // under all three of its names; these are its docs/marketing siblings.
+    "ruby-lang.org",
+    "www.ruby-lang.org",
+    "rubyforge.org",
+    "www.rubyforge.org",
+    "rubyonrails.org",
+    "www.rubyonrails.org",
     "rvm.io",
     "get.rvm.io",
     "cpan.org",
@@ -125,7 +173,10 @@ pub const TRUSTED_HOSTS: &[&str] = &[
     "cocoapods.org",
     "www.cocoapods.org",
     "cdn.cocoapods.org",
-    // Containers / Kubernetes
+    // Containers / Kubernetes. Every registry that answers `docker push` is out;
+    // `auth.docker.io` only issues tokens and stores nothing.
+    "www.docker.com",
+    "auth.docker.io",
     "download.docker.com",
     "production.cloudflare.docker.com",
     "mcr.microsoft.com",
@@ -158,6 +209,30 @@ pub const TRUSTED_HOSTS: &[&str] = &[
     "eclipse.org",
     "www.eclipse.org",
     "download.eclipse.org",
+    // Vendor docs / marketing. These serve pages and store nothing; the write surfaces
+    // that share their brand (dev.azure.com, portal.azure.com, anaconda.org,
+    // api.statsig.com, the googleapis control planes) are each out on their own name.
+    "oracle.com",
+    "www.oracle.com",
+    "java.com",
+    "www.java.com",
+    "java.net",
+    "www.java.net",
+    "microsoft.com",
+    "www.microsoft.com",
+    "azure.com",
+    "visualstudio.com",
+    "cloud.google.com",
+    "gcloud.google.com",
+    "anaconda.com",
+    "www.anaconda.com",
+    "continuum.io",
+    "statsig.com",
+    "www.statsig.com",
+    // Identity endpoints. A token exchange returns a credential to the caller; it does
+    // not retain caller-chosen bytes for a third party to read back.
+    "accounts.google.com",
+    "*.microsoftonline.com",
     // Schemas / fonts / vendor docs
     "json-schema.org",
     "www.json-schema.org",
@@ -392,14 +467,17 @@ mod tests {
             "*.googleapis.com",
             "*.blob.core.windows.net",
             // Write-back APIs and per-account tenancy (the Shai-Hulud exfil channel).
+            // Only the WRITE surface belongs here: the read-only content CDNs on the same
+            // brand are trusted, and `delivery_hosts_are_trusted` below pins that split.
             "github.com",
             "www.github.com",
             "api.github.com",
             "gist.github.com",
-            "codeload.github.com",
-            "raw.githubusercontent.com",
-            "objects.githubusercontent.com",
             "*.github.io",
+            // Serves package tarballs, but is a bare Azure Blob account: PUT of a blob
+            // path answers 409 PublicAccessNotPermitted where PUT / answers 400, so the
+            // storage write API — not a CDN — is what terminates this hostname.
+            "pkg-npm.githubusercontent.com",
             // Package registries whose publish route shares the listed hostname.
             // `index.rubygems.org` is the trap: it looks like a read-only index and
             // fronts the same Rails app that serves `gem push`.
@@ -413,22 +491,35 @@ mod tests {
             "packagist.org",
             "plugins.gradle.org",
             "upload.pypi.org",
+            "anaconda.org",
+            "repo.spring.io",
+            // A wildcard cannot be shown read-only by inspection: the docs site at the
+            // apex is inert, but `registry.` under the same suffix answers /v0/publish.
+            "*.modelcontextprotocol.io",
             // Container registries — every one of these is a `docker push` target. The
             // retained Docker entries are artifact CDNs (`download.docker.com`), not
             // registries; that is the whole distinction, and it is easy to lose.
             "ghcr.io",
             "registry-1.docker.io",
             "public.ecr.aws",
+            // Not a push target, but its API creates repositories carrying an
+            // attacker-authored description.
+            "hub.docker.com",
             // Telemetry ingest — an attacker-shaped event payload is exfiltration with a
             // vendor SDK in front of it. `downloads.sentry-cdn.com` is retained because it
             // serves artifacts; the ingest hostnames are a different surface.
             "sentry.io",
             "*.datadoghq.com",
+            "api.statsig.com",
             // Non-GitHub forges and cloud control planes — the same per-account write
             // surface that disqualifies `github.com`, minus the name that makes it obvious.
+            // A control plane exfiltrates by storing the secret in a resource field the
+            // attacker reads back, so it needs no object store of its own.
             "gitlab.com",
             "bitbucket.org",
             "dev.azure.com",
+            "sourceforge.net",
+            "compute.googleapis.com",
             // Siblings and `www.` twins of RETAINED hosts. The likeliest re-sync mistake:
             // each of these reads as a host already on the list, but fronts its own upload
             // route (`pypi.org` is trusted, `test.pypi.org` is not).
@@ -440,6 +531,30 @@ mod tests {
             assert!(
                 !TRUSTED_HOSTS.contains(&banned),
                 "`{banned}` is an exfiltration sink and must not be in $trusted"
+            );
+        }
+    }
+
+    #[test]
+    fn delivery_only_hosts_stay_trusted() {
+        // The counterweight to the banned list: each of these serves attacker-authorable
+        // bytes INTO the sandbox and accepts none back, so an audit that cuts them has
+        // silently swapped the exfiltration criterion for an integrity one. They were cut
+        // on exactly that mistake once. Every entry answers a write with the same status
+        // on a real path as on a bogus one, which is a host refusing the method rather
+        // than an auth-gated route declining a caller.
+        for delivery in [
+            "codeload.github.com",
+            "raw.githubusercontent.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "avatars.githubusercontent.com",
+            "camo.githubusercontent.com",
+        ] {
+            assert!(
+                TRUSTED_HOSTS.contains(&delivery),
+                "`{delivery}` only DELIVERS bytes and cannot store them — cutting it \
+                 confuses supply-chain integrity with exfiltration (see the module doc)"
             );
         }
     }
