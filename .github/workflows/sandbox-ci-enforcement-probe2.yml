@@ -1,0 +1,256 @@
+# Probe 2. Run 1 established, on a real hosted ubuntu-latest runner:
+#   - bundling alone is INSUFFICIENT (unprofiled path denied; sudo control passes)
+#   - `apt-get install bubblewrap` is INSUFFICIENT on 24.04 (ships no AppArmor profile)
+#   - a path-keyed profile RESTORES enforcement (E2/E3 pass, E4 path-control denied,
+#     E5 canary withheld while the package dir reads+writes)
+#   - BUT nub's helper is 0750 root:nub-sandbox and a CI step never picks up the new
+#     group: F3/G1 exit 126 "Permission denied" in the same job and in a later step.
+#
+# So the open question is no longer "does the mechanism work" but "does it work through
+# an invocation a CI job can actually issue". Two candidates, both measured here:
+#   J1  wrap the workload in `sg nub-sandbox -c ...`      (keeps nub's security model)
+#   J2  key the profile to a user-writable path            (drops the model; measure the cost)
+# plus J3, the real `nub sandbox setup` + a real `nub install`, end to end.
+name: sandbox-ci-enforcement-probe2
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/sandbox-ci-enforcement]
+    paths:
+      - ".github/workflows/sandbox-ci-enforcement-probe2.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  invocation:
+    name: "J1/J2 invocation shapes (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Stage a bwrap binary and the seeded secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          cd "$HOME" && apt-get download bubblewrap
+          dpkg-deb -x ./bubblewrap*.deb "$HOME/unpacked"
+          mkdir -p "$HOME/nub-resources" "$HOME/other" /tmp/pkgdir
+          install -m 0755 "$HOME/unpacked/usr/bin/bwrap" "$HOME/nub-resources/bwrap"
+          install -m 0755 "$HOME/unpacked/usr/bin/bwrap" "$HOME/other/bwrap"
+          # The secret must live somewhere the jail does NOT grant. $HOME is the
+          # realistic place (npm tokens, cloud creds) and is outside the package dir.
+          echo "SECRET-CANARY-PROBE2" > "$HOME/.probe2-secret"
+          chmod 600 "$HOME/.probe2-secret"
+          echo staged
+
+      - name: "J1. nub's real shape (0750 root:nub-sandbox helper) invoked via sg"
+        shell: bash
+        run: |
+          set +e
+          echo "### J1"
+          sudo groupadd --system nub-sandbox
+          sudo install -d -m 0755 /usr/libexec/nub
+          sudo install -o root -g nub-sandbox -m 0750 "$HOME/nub-resources/bwrap" /usr/libexec/nub/nub-bwrap
+          sudo usermod -aG nub-sandbox "$(id -un)"
+          sudo tee /etc/apparmor.d/nub-bwrap-userns >/dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile nub_bwrap /usr/libexec/nub/nub-bwrap flags=(unconfined) {
+            userns,
+            include if exists <local/nub-bwrap-userns>
+          }
+          PROFILE
+          sudo apparmor_parser --replace /etc/apparmor.d/nub-bwrap-userns
+          echo "parser_exit=$?"
+
+          jail() {
+            # The build-jail shape: minimal root, package dir bound rw, nothing else.
+            "$1" --die-with-parent --new-session --unshare-user --cap-drop ALL \
+                 --unshare-pid --unshare-ipc \
+                 --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+                 --symlink usr/lib64 /lib64 --proc /proc --dev /dev \
+                 --bind /tmp/pkgdir /pkg \
+                 -- /bin/sh -c 'echo PKG_WRITE_OK > /pkg/w.txt; cat /pkg/w.txt; cat '"$HOME"'/.probe2-secret 2>&1'
+          }
+
+          echo "-- J1a: NEGATIVE CONTROL, direct invocation (no sg) --"
+          out_a=$(jail /usr/libexec/nub/nub-bwrap 2>&1); rc_a=$?
+          echo "J1a_rc=$rc_a out=<<$out_a>>"
+
+          echo "-- J1b: THE MEASUREMENT, same helper through sg nub-sandbox --"
+          export HOME
+          out_b=$(sg nub-sandbox -c "$(declare -f jail); jail /usr/libexec/nub/nub-bwrap" 2>&1); rc_b=$?
+          echo "J1b_rc=$rc_b out=<<$out_b>>"
+          case "$out_b" in
+            *SECRET-CANARY-PROBE2*) echo "J1b=LEAKED";;
+            *PKG_WRITE_OK*)         echo "J1b=CONFINED (package dir rw succeeded, home secret withheld)";;
+            *)                      echo "J1b=NOT_ENFORCING (the package-dir control never ran)";;
+          esac
+
+          echo "-- J1c: POSITIVE CONTROL that the canary is readable when NOT jailed --"
+          cat "$HOME/.probe2-secret"; echo "J1c_rc=$?"
+          exit 0
+
+      - name: "J2. Profile keyed to a USER-WRITABLE path (no root-owned copy, no group)"
+        shell: bash
+        run: |
+          set +e
+          echo "### J2 — cheaper to operate, but measure what it gives away"
+          sudo tee /etc/apparmor.d/nub-home-bwrap >/dev/null <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile nub_home_bwrap $HOME/nub-resources/bwrap flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser --replace /etc/apparmor.d/nub-home-bwrap
+          echo "parser_exit=$?"
+
+          jail() {
+            "$1" --die-with-parent --new-session --unshare-user --cap-drop ALL \
+                 --unshare-pid --unshare-ipc \
+                 --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+                 --symlink usr/lib64 /lib64 --proc /proc --dev /dev \
+                 --bind /tmp/pkgdir /pkg \
+                 -- /bin/sh -c 'echo PKG_WRITE_OK > /pkg/w.txt; cat /pkg/w.txt; cat '"$HOME"'/.probe2-secret 2>&1'
+          }
+
+          echo "-- J2a: THE MEASUREMENT, no sudo, no group, no /usr/libexec --"
+          out=$(jail "$HOME/nub-resources/bwrap" 2>&1); rc=$?
+          echo "J2a_rc=$rc out=<<$out>>"
+          case "$out" in
+            *SECRET-CANARY-PROBE2*) echo "J2a=LEAKED";;
+            *PKG_WRITE_OK*)         echo "J2a=CONFINED";;
+            *)                      echo "J2a=NOT_ENFORCING";;
+          esac
+
+          echo "-- J2b: PATH CONTROL, byte-identical copy one directory over --"
+          "$HOME/other/bwrap" --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "J2b_rc=$?  (nonzero proves the grant is path-keyed, not global)"
+
+          echo "-- J2c: THE SECURITY COST. Replace the profiled file's BYTES and re-run. --"
+          echo "   A user-writable profiled path means anything that can write there"
+          echo "   inherits the userns grant. Demonstrate, don't assert."
+          cp "$HOME/nub-resources/bwrap" /tmp/orig-bwrap
+          printf '#!/bin/sh\necho ARBITRARY_PROGRAM_GOT_THE_GRANT\nunshare --user --map-root-user -- grep ^CapEff /proc/self/status\n' \
+            > "$HOME/nub-resources/bwrap"
+          chmod 0755 "$HOME/nub-resources/bwrap"
+          "$HOME/nub-resources/bwrap"
+          echo "J2c_rc=$?"
+          cp /tmp/orig-bwrap "$HOME/nub-resources/bwrap"
+          exit 0
+
+  endtoend:
+    name: "J3 real nub sandbox setup + real install (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-test-Linux
+          save-if: false
+
+      - name: Build the packaged Bubblewrap resource exactly as release.yml does
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/build-bwrap-resource.sh "$RUNNER_TEMP/bwrap-resource"
+          ls -l "$RUNNER_TEMP/bwrap-resource"
+          file "$RUNNER_TEMP/bwrap-resource/bwrap"
+          echo "NUB_BWRAP_VERSION=0.11.2" >> "$GITHUB_ENV"
+          echo "NUB_BWRAP_SHA256=$(awk '{print $1}' "$RUNNER_TEMP/bwrap-resource/bwrap.sha256")" >> "$GITHUB_ENV"
+
+      - name: Build nub with the digest compiled in
+        shell: bash
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Lay the binary out the way the npm package does
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nubdist/bin/nub-resources"
+          cp target/fast/nub "$RUNNER_TEMP/nubdist/bin/nub"
+          cp "$RUNNER_TEMP/bwrap-resource/bwrap" "$RUNNER_TEMP/nubdist/bin/nub-resources/bwrap"
+          chmod +x "$RUNNER_TEMP/nubdist/bin/nub-resources/bwrap"
+          ls -lR "$RUNNER_TEMP/nubdist"
+
+      - name: "J3a. sudo nub sandbox setup — the real command"
+        shell: bash
+        run: |
+          set +e
+          NUB="$RUNNER_TEMP/nubdist/bin/nub"
+          echo "-- status BEFORE --"
+          "$NUB" sandbox status; echo "status_rc=$?"
+          echo "-- setup --"
+          sudo -E "$NUB" sandbox setup; echo "SETUP_RC=$?"
+          echo "-- what landed --"
+          ls -l /usr/libexec/nub/ 2>&1
+          ls -l /etc/apparmor.d/nub-bwrap-userns 2>&1
+          sudo aa-status 2>&1 | grep -i nub || echo "(no nub profile in aa-status)"
+          echo "-- groups in THIS shell vs the database --"
+          echo "shell=$(id -nG)"
+          echo "db=$(id -nG "$(id -un)")"
+          echo "-- status AFTER --"
+          "$NUB" sandbox status; echo "status_rc=$?"
+          exit 0
+
+      - name: "J3b. A real install whose postinstall tries to steal a secret"
+        shell: bash
+        run: |
+          set +e
+          NUB="$RUNNER_TEMP/nubdist/bin/nub"
+          echo "SECRET-CANARY-J3" > "$HOME/.j3-secret"; chmod 600 "$HOME/.j3-secret"
+
+          FIX="$RUNNER_TEMP/fixture"
+          mkdir -p "$FIX/node_modules/.bin" "$FIX/dep"
+          cat > "$FIX/package.json" <<'JSON'
+          { "name": "probe-host", "version": "1.0.0", "private": true,
+            "dependencies": { "probe-dep": "file:./dep" } }
+          JSON
+          cat > "$FIX/dep/package.json" <<JSON
+          { "name": "probe-dep", "version": "1.0.0",
+            "scripts": { "postinstall": "sh -c 'echo POSTINSTALL_RAN; echo PKG_WRITE_OK > ./w.txt; cat ./w.txt; cat $HOME/.j3-secret 2>&1'" } }
+          JSON
+
+          run_install() {
+            cd "$FIX" && rm -rf node_modules nub.lock package-lock.json 2>/dev/null
+            "$NUB" install --ignore-scripts=false 2>&1
+          }
+
+          echo "-- J3b-direct: install WITHOUT sg (expect the group gate to bite) --"
+          out1=$(run_install); rc1=$?
+          echo "J3b_direct_rc=$rc1"
+          echo "J3b_direct_out<<$out1>>"
+
+          echo "-- J3b-sg: install THROUGH sg nub-sandbox --"
+          export HOME NUB FIX
+          out2=$(sg nub-sandbox -c "cd $FIX && rm -rf node_modules nub.lock package-lock.json; $NUB install --ignore-scripts=false" 2>&1); rc2=$?
+          echo "J3b_sg_rc=$rc2"
+          echo "J3b_sg_out<<$out2>>"
+
+          verdict() {
+            case "$1" in
+              *SECRET-CANARY-J3*) echo "$2=LEAKED (jail did not withhold the secret)";;
+              *POSTINSTALL_RAN*)  echo "$2=RAN_AND_CONFINED (script executed, secret withheld)";;
+              *"fail-closed"*)    echo "$2=FAILED_CLOSED (install refused; jail could not apply)";;
+              *)                  echo "$2=INCONCLUSIVE (postinstall never ran; not a jail result)";;
+            esac
+          }
+          verdict "$out1" J3b_direct
+          verdict "$out2" J3b_sg
+
+          echo "-- POSITIVE CONTROL: the canary is readable outside the jail --"
+          cat "$HOME/.j3-secret"; echo "control_rc=$?"
+          exit 0
