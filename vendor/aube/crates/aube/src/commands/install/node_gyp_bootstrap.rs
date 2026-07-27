@@ -15,7 +15,9 @@
 //! copy wins. Otherwise node-gyp is installed under
 //! `<cache_dir>/tools/node-gyp/<bucket>/` and the returned `.bin`
 //! dir is prepended to the lifecycle script's `PATH` *after* the
-//! dep's own `.bin`.
+//! dep's own `.bin`. User precedence holds only for a lifecycle
+//! script that can actually reach the ambient `PATH` — see
+//! [`ScriptReach`].
 //!
 //! The install is performed by recursively invoking the current aube
 //! binary with `install --ignore-scripts` inside a freshly-written
@@ -29,6 +31,7 @@
 //! processes; the fast-path existence check short-circuits every
 //! subsequent invocation.
 use miette::{IntoDiagnostic, WrapErr, miette};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// Major-version pin. Bumping the bucket invalidates the cache and
@@ -42,16 +45,57 @@ const BINARY_NAMES: &[&str] = &["node-gyp.cmd", "node-gyp.exe", "node-gyp"];
 #[cfg(not(windows))]
 const BINARY_NAMES: &[&str] = &["node-gyp"];
 
-fn node_gyp_on_path() -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    for dir in std::env::split_paths(&path) {
-        if node_gyp_bin_exists(&dir) {
-            return true;
+/// Whether the lifecycle scripts this bootstrap feeds can reach the ambient
+/// `PATH` at all.
+///
+/// The user-precedence rule is only sound when the script that consumes
+/// node-gyp inherits the caller's `PATH` *and* can read what it points at.
+/// Under an embedder that confines dependency lifecycle scripts, neither
+/// holds: the probe runs unconfined while the script runs confined, so
+/// deferring to an ambient node-gyp hands the script a path its sandbox never
+/// granted — the script sees `node-gyp: command not found` (or a denial) and
+/// every native compile fails. A confinement decision made by probing state
+/// the confined child cannot observe is incoherent, so confined callers always
+/// take aube's own copy, which lands under the cache dir the sandbox does
+/// grant. Widening the sandbox to admit whichever node-gyp happened to be on
+/// the host's `PATH` was the alternative and is strictly worse: it makes the
+/// read set a function of arbitrary host state, where this is deterministic on
+/// a clean machine, a dev box, and CI alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptReach {
+    /// The spawn inherits the caller's `PATH` unconfined, so a node-gyp found
+    /// there is genuinely usable and the user's copy wins.
+    AmbientPath,
+    /// The spawn is confined by the embedder's sandbox.
+    Confined,
+}
+
+impl ScriptReach {
+    /// Read off the same embedder flag that routes dependency lifecycle spawns
+    /// through the embedder's sandbox, so the two can never disagree.
+    /// Standalone aube leaves it false and keeps user precedence unchanged.
+    pub fn for_active_embedder() -> Self {
+        if aube_util::embedder().embedder_owns_lifecycle_sandbox {
+            Self::Confined
+        } else {
+            Self::AmbientPath
         }
     }
-    false
+}
+
+/// Split out from the `PATH` lookup so the reach gate is testable without
+/// mutating the process environment — a global whose mutation makes a
+/// parallel test suite order-dependent.
+fn ambient_node_gyp_wins(reach: ScriptReach, path: Option<&OsStr>) -> bool {
+    reach == ScriptReach::AmbientPath && path.is_some_and(node_gyp_in_path)
+}
+
+fn node_gyp_in_path(path: &OsStr) -> bool {
+    std::env::split_paths(path).any(|dir| node_gyp_bin_exists(&dir))
+}
+
+fn node_gyp_on_path() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| node_gyp_in_path(&path))
 }
 
 /// True if `bin_dir` contains any of the platform's accepted
@@ -75,13 +119,14 @@ fn tool_root() -> miette::Result<PathBuf> {
 /// Returns `Some(bin_dir)` containing a freshly-bootstrapped `node-gyp`
 /// when the ambient `PATH` doesn't already provide one, or `None` when
 /// the user already has a copy on `PATH` — in which case we don't
-/// touch their setup.
+/// touch their setup. A [`ScriptReach::Confined`] caller never defers to
+/// the ambient copy, since its scripts cannot reach it.
 ///
 /// `project_dir` is the outer install's project root; its `.npmrc`
 /// (if any) is propagated to the tool dir so the bootstrap inherits
 /// the same registry/auth configuration.
-pub async fn ensure(project_dir: &Path) -> miette::Result<Option<PathBuf>> {
-    if node_gyp_on_path() {
+pub async fn ensure(project_dir: &Path, reach: ScriptReach) -> miette::Result<Option<PathBuf>> {
+    if ambient_node_gyp_wins(reach, std::env::var_os("PATH").as_deref()) {
         return Ok(None);
     }
     ensure_cached(project_dir).await.map(Some)
@@ -309,4 +354,59 @@ fn bootstrap_blocking(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory holding a file named like a real `node-gyp` shim, so the
+    /// probe resolves it exactly as it would a user's install.
+    fn dir_with_node_gyp() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(primary_binary_name()), b"").expect("write shim");
+        dir
+    }
+
+    #[test]
+    fn an_ambient_node_gyp_wins_for_an_unconfined_script() {
+        let dir = dir_with_node_gyp();
+        assert!(ambient_node_gyp_wins(
+            ScriptReach::AmbientPath,
+            Some(dir.path().as_os_str())
+        ));
+    }
+
+    /// The defect this gate exists for: the probe runs unconfined, the script
+    /// runs confined, so an ambient hit must NOT suppress the bootstrap — the
+    /// script would resolve nothing and every native compile would fail.
+    #[test]
+    fn an_ambient_node_gyp_is_ignored_for_a_confined_script() {
+        let dir = dir_with_node_gyp();
+        assert!(!ambient_node_gyp_wins(
+            ScriptReach::Confined,
+            Some(dir.path().as_os_str())
+        ));
+    }
+
+    #[test]
+    fn an_empty_path_never_suppresses_the_bootstrap() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert!(!ambient_node_gyp_wins(
+            ScriptReach::AmbientPath,
+            Some(empty.path().as_os_str())
+        ));
+        assert!(!ambient_node_gyp_wins(ScriptReach::AmbientPath, None));
+    }
+
+    /// Standalone aube registers no embedder profile, so it resolves to the
+    /// unconfined reach and keeps user precedence byte-for-byte.
+    #[test]
+    fn the_default_embedder_reaches_the_ambient_path() {
+        assert_eq!(
+            ScriptReach::for_active_embedder(),
+            ScriptReach::AmbientPath,
+            "standalone aube must keep deferring to a user's node-gyp"
+        );
+    }
 }

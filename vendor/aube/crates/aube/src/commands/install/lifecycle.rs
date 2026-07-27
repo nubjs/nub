@@ -611,8 +611,17 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // ones will end up shelling out to `node-gyp` (explicit,
     // implicit via binding.gyp, or transitive via node-gyp-build).
     // If the user already has node-gyp (system install, nvm, a test
-    // shim), `ensure` returns `None` and we leave their copy alone.
-    let node_gyp_bin_dir = std::sync::Arc::new(node_gyp_bootstrap::ensure(project_dir).await?);
+    // shim), `ensure` returns `None` and we leave their copy alone —
+    // except under an embedder that confines these spawns, where an
+    // ambient copy is unreachable from inside the sandbox and the
+    // bootstrapped one is what the script can actually resolve.
+    let node_gyp_bin_dir = std::sync::Arc::new(
+        node_gyp_bootstrap::ensure(
+            project_dir,
+            node_gyp_bootstrap::ScriptReach::for_active_embedder(),
+        )
+        .await?,
+    );
 
     // Pass 2 (parallel, bounded): fan out across `child_concurrency`
     // concurrent workers. Inside one job the three hooks
