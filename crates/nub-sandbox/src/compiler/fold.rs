@@ -695,7 +695,9 @@ fn fold_net_entry(s: &str, path: &str, policy: &mut NetPolicy) -> Result<(), Com
     // `$downloads` is the build jail's install-time artifact set — same expansion
     // contract, a deliberately separate membership (see `builtin_sets`).
     if pattern == "$downloads" {
-        policy.rules.extend(builtin_sets::download_net_rules(effect));
+        policy
+            .rules
+            .extend(builtin_sets::download_net_rules(effect));
         return Ok(());
     }
     push_net_rule(pattern, effect, path, &mut policy.rules)

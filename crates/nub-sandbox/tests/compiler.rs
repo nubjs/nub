@@ -2179,8 +2179,14 @@ fn downloads_set_expands_to_the_install_time_hosts_only() {
     let ctx = common::ctx(true, &[]);
     let p = compile(&json!({ "net": ["$downloads"] }), &ctx).unwrap();
     let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
-    assert!(m.admits("nodejs.org"), "a listed $downloads host is admitted");
-    assert!(m.admits("cdn.cypress.io"), "another listed host is admitted");
+    assert!(
+        m.admits("nodejs.org"),
+        "a listed $downloads host is admitted"
+    );
+    assert!(
+        m.admits("cdn.cypress.io"),
+        "another listed host is admitted"
+    );
     assert!(
         !m.admits("registry.npmjs.org"),
         "$downloads must not inherit $trusted's write-capable retentions"
