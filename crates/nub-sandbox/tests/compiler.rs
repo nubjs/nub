@@ -892,7 +892,7 @@ fn policy_file_is_denied_under_a_broad_grant_while_a_sibling_stays_usable() {
     use nub_sandbox::policy::FsAccess;
     let proj = common::homes().project;
     let policy = proj.join("policy.jsonc");
-    let ctx = common::ctx(true, &[]).with_policy_file(Some(policy.clone()));
+    let ctx = common::ctx(true, &[]).with_policy_files(vec![policy.clone()]);
     for surface in [json!({ "fs": ["."] }), json!({ "fs": ["/"] })] {
         let p = compile(&surface, &ctx).unwrap();
         let m = PathMatcher::new(&p.fs.rules);
@@ -923,7 +923,7 @@ fn policy_file_deny_survives_an_explicit_allow_later_in_the_list() {
     use nub_sandbox::matcher::PathMatcher;
     let proj = common::homes().project;
     let policy = proj.join("policy.jsonc");
-    let ctx = common::ctx(true, &[]).with_policy_file(Some(policy.clone()));
+    let ctx = common::ctx(true, &[]).with_policy_files(vec![policy.clone()]);
     let p = compile(&json!({ "fs": [".", "./policy.jsonc"] }), &ctx).unwrap();
     let m = PathMatcher::new(&p.fs.rules);
     assert_eq!(m.decide(&policy).effect, Effect::Deny);
@@ -940,7 +940,7 @@ fn policy_file_deny_escapes_glob_metachars_in_the_path() {
     let proj = common::homes().project;
     for seg in ["[id]", "{a,b}"] {
         let policy = proj.join(seg).join("policy.jsonc");
-        let ctx = common::ctx(true, &[]).with_policy_file(Some(policy.clone()));
+        let ctx = common::ctx(true, &[]).with_policy_files(vec![policy.clone()]);
         let p = compile(&json!({ "fs": ["."] }), &ctx).unwrap();
         let m = PathMatcher::new(&p.fs.rules);
         assert_eq!(
@@ -953,9 +953,9 @@ fn policy_file_deny_escapes_glob_metachars_in_the_path() {
 
 #[test]
 fn inline_policy_with_no_source_file_is_not_self_excluded() {
-    // An inline policy has no distinct source file (`policy_file: None`), so nothing is
+    // An inline policy has no distinct source file (an empty `policy_files`), so nothing is
     // auto-excluded — a broad grant reads/writes every non-secret path. Pins the
-    // inline-case decision (self-exclusion is opt-in via a `Some` source path).
+    // inline-case decision (self-exclusion is opt-in via a non-empty source-path set).
     use nub_sandbox::matcher::PathMatcher;
     let proj = common::homes().project;
     let ctx = common::ctx(true, &[]);
@@ -964,7 +964,7 @@ fn inline_policy_with_no_source_file_is_not_self_excluded() {
     assert_eq!(
         m.decide(&proj.join("policy.jsonc")).effect,
         Effect::Allow,
-        "no self-exclusion without a policy_file"
+        "no self-exclusion without a policy source file"
     );
 }
 
@@ -990,7 +990,7 @@ fn policy_file_deny_is_injected_before_the_env_floor() {
         ".env*/**",
     ];
     let proj = common::homes().project;
-    let ctx = common::ctx(true, &[]).with_policy_file(Some(proj.join("policy.jsonc")));
+    let ctx = common::ctx(true, &[]).with_policy_files(vec![proj.join("policy.jsonc")]);
     let p = compile(&json!({ "fs": ["."] }), &ctx).unwrap();
     let entries = &p.fs.rules.entries;
     // Anchor the floor at the policy-file deny, NOT at `len - FLOOR.len()`: a window
@@ -1658,7 +1658,7 @@ fn unterminated_substitution_is_named_not_unknown_type() {
     let ctx = nub_sandbox::compiler::CompileCtx {
         homes: common::homes(),
         cwd: common::homes().project,
-        policy_file: None,
+        policy_files: Vec::new(),
         caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
         document: serde_json::Value::Null,
@@ -1731,7 +1731,7 @@ fn glob_key_substitution_is_rejected_before_running() {
     let ctx = nub_sandbox::compiler::CompileCtx {
         homes: common::homes(),
         cwd: common::homes().project,
-        policy_file: None,
+        policy_files: Vec::new(),
         caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
         ambient_env: std::collections::BTreeMap::new(),
         document: serde_json::Value::Null,

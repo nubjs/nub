@@ -526,7 +526,7 @@ mod win {
         let ctx = nub_sandbox::CompileCtx {
             homes,
             cwd: f.work.clone(),
-            policy_file: None,
+            policy_files: Vec::new(),
             caps: nub_sandbox::compiler::ScopeCapabilities::approved(),
             ambient_env: ambient,
             document: serde_json::Value::Null,

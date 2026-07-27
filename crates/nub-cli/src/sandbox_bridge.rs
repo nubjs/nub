@@ -25,7 +25,7 @@ pub(crate) struct ResolvedSandbox {
     pub warnings: Vec<nub_sandbox::CompileWarning>,
 }
 
-/// Where a setting was authored — drives `policy_file` self-exclusion (P5) and
+/// Where a setting was authored — drives `policy_files` self-exclusion (P5) and
 /// relative file-ref anchoring. `Flag` (argv) is the only source WIRED in P6;
 /// `ProjectFile` is built for a later nub.jsonc-activation frontend (DEC-2 = B
 /// ships no auto-sourcing), hence never constructed outside tests today.
@@ -95,7 +95,7 @@ pub(crate) fn select_effective<'a>(
 }
 
 /// Map a [`SandboxSetting`] to a compiled policy. `Ok(None)` is the `Disabled`
-/// shape (spawn plain). `source` drives `policy_file` self-exclusion and relative
+/// shape (spawn plain). `source` drives `policy_files` self-exclusion and relative
 /// file-ref anchoring; `caps` is the scope's capability set.
 pub(crate) fn resolve(
     setting: &SandboxSetting,
@@ -110,13 +110,13 @@ pub(crate) fn resolve(
     // `block` is the surface handed to the compiler; `document` is the reuse root a
     // `...:#/pointer` resolves against (only a file-ref carries reuse — a bool/preset
     // expand to a fixed object with no pointer tokens, so `Null` is correct there).
-    let (block, document, policy_file): (Value, Value, Option<PathBuf>) = match setting {
+    let (block, document, policy_files): (Value, Value, Vec<PathBuf>) = match setting {
         SandboxSetting::Disabled => return Ok(None),
-        SandboxSetting::Enabled => (Value::Bool(true), Value::Null, inline_policy_file(source)?),
+        SandboxSetting::Enabled => (Value::Bool(true), Value::Null, config_source_file(source)?),
         SandboxSetting::Preset(name) => (
             Value::String(name.clone()),
             Value::Null,
-            inline_policy_file(source)?,
+            config_source_file(source)?,
         ),
         SandboxSetting::FileRef(p) => {
             let path = anchor(source, cwd, p);
@@ -133,33 +133,36 @@ pub(crate) fn resolve(
                 .get("sandbox")
                 .cloned()
                 .unwrap_or_else(|| value.clone());
-            // Self-exclusion: canonicalize the just-read policy file so the compiler
-            // injects it as a high-precedence fs deny (read + write).
-            let canon = std::fs::canonicalize(&path).with_context(|| {
+            // Self-exclusion covers the WHOLE source chain, not just the document the rules
+            // were read from: the config that NAMED this file confines the run just as much,
+            // so a sandboxed process that can rewrite `sandbox: "./policy.jsonc"` to point at
+            // a permissive file it also writes escapes on the next run.
+            let mut files = config_source_file(source)?;
+            files.push(std::fs::canonicalize(&path).with_context(|| {
                 format!("canonicalizing sandbox policy path {}", path.display())
-            })?;
-            (block, value, Some(canon))
+            })?);
+            (block, value, files)
         }
     };
 
     let ctx = nub_sandbox::CompileCtx::new(homes, cwd.to_path_buf(), caps, ambient_env)
-        .with_policy_file(policy_file)
+        .with_policy_files(policy_files)
         .with_document(document);
     let (policy, warnings) = nub_sandbox::compile_with_warnings(&block, &ctx)
         .map_err(|e| anyhow!("sandbox policy did not compile: {e}"))?;
     Ok(Some(ResolvedSandbox { policy, warnings }))
 }
 
-/// The `policy_file` self-exclusion path for an INLINE policy (bool/preset). `Flag`
-/// has no source file to hide (the policy came from argv). A `ProjectFile` source
-/// self-excludes the nub.jsonc itself.
-fn inline_policy_file(source: &SandboxSource) -> anyhow::Result<Option<PathBuf>> {
+/// The self-exclusion path for the config that AUTHORED the setting, for every shape.
+/// `Flag` has nothing to hide (the setting came from argv); a `ProjectFile` source
+/// self-excludes the nub.jsonc itself. A file-ref appends the referenced policy on top.
+fn config_source_file(source: &SandboxSource) -> anyhow::Result<Vec<PathBuf>> {
     match source {
-        SandboxSource::Flag => Ok(None),
+        SandboxSource::Flag => Ok(Vec::new()),
         SandboxSource::ProjectFile { path, .. } => {
             let canon = std::fs::canonicalize(path)
                 .with_context(|| format!("canonicalizing nub.jsonc path {}", path.display()))?;
-            Ok(Some(canon))
+            Ok(vec![canon])
         }
     }
 }
@@ -327,5 +330,50 @@ mod tests {
         .expect("file-ref must produce a policy");
         // The reuse resolved against the whole document; a non-empty compile proves it.
         let _ = resolved.policy;
+    }
+
+    #[test]
+    fn a_file_ref_self_excludes_both_the_referencing_config_and_the_referenced_policy() {
+        // The confining policy is the WHOLE chain. Denying only the referenced file leaves
+        // the nub.jsonc writable, and rewriting its `sandbox` value to name a permissive
+        // file the process also writes escapes the sandbox on the next run.
+        use nub_sandbox::matcher::PathMatcher;
+        use nub_sandbox::policy::Effect;
+
+        let dir = tempfile::tempdir().unwrap();
+        let nub_jsonc = dir.path().join("nub.jsonc");
+        let policy = dir.path().join("policy.jsonc");
+        std::fs::write(&nub_jsonc, r#"{ "sandbox": "./policy.jsonc" }"#).unwrap();
+        std::fs::write(&policy, r#"{ "fs": ["."] }"#).unwrap();
+
+        let (homes, env) = test_ctx_inputs(dir.path());
+        let resolved = resolve(
+            &SandboxSetting::FileRef("./policy.jsonc".into()),
+            &SandboxSource::ProjectFile {
+                path: nub_jsonc.clone(),
+                root: dir.path().to_path_buf(),
+            },
+            dir.path(),
+            homes,
+            env,
+            nub_sandbox::ScopeCapabilities::approved(),
+        )
+        .expect("file-ref from a project config must compile")
+        .expect("file-ref must produce a policy");
+
+        let m = PathMatcher::new(&resolved.policy.fs.rules);
+        for f in [&nub_jsonc, &policy] {
+            assert_eq!(
+                m.decide(f).effect,
+                Effect::Deny,
+                "{} must be denied under the `fs: [\".\"]` grant it authorizes",
+                f.display()
+            );
+        }
+        assert_eq!(
+            m.decide(&dir.path().join("src/app.ts")).effect,
+            Effect::Allow,
+            "the self-exclusion is exact-path — a sibling under the same grant stays usable"
+        );
     }
 }

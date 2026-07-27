@@ -195,9 +195,10 @@ pub(crate) fn env_deny_subtree_rules() -> Vec<FsRule> {
         .collect()
 }
 
-/// The policy SOURCE-FILE self-exclusion DENY — an EXACT-path deny (read AND write) on
-/// the single file the sandbox rules were read from, so a sandboxed process can neither
-/// read nor tamper with the policy that confines it. Canonicalized through the EXACT same
+/// The policy SOURCE-FILE self-exclusion DENY — an EXACT-path deny (read AND write) on ONE
+/// file the sandbox rules were sourced from (the caller emits one per `ctx.policy_files`
+/// entry), so a sandboxed process can neither read nor tamper with the policy that confines
+/// it. Canonicalized through the EXACT same
 /// path the matcher runs a candidate through (`canonicalize_including_nonexistent` — resolve
 /// symlinks / firmlinks, strip the Windows `\\?\` verbatim prefix, survive a non-existent
 /// tail) then slash-normalized, so (a) a grant reaching the file via a different spelling

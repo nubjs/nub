@@ -78,7 +78,7 @@ impl Fixture {
         CompileCtx {
             homes: self.homes(),
             cwd: self.proj.clone(),
-            policy_file: None,
+            policy_files: Vec::new(),
             caps: ScopeCapabilities::approved(),
             ambient_env: ambient,
             document: serde_json::Value::Null,

@@ -105,29 +105,32 @@ pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, 
     Ok(FsPolicy { rules: set, tmp })
 }
 
-/// Self-exclude the policy SOURCE FILE (`ctx.policy_file`) from every fs grant: append
-/// an exact-path DENY (read AND write) so a sandboxed process can neither read nor tamper
-/// with the policy that confines it, even under a broad `fs: ["."]`/`["/"]`. Mirrors
+/// Self-exclude EVERY policy source file (`ctx.policy_files`) from every fs grant: append
+/// an exact-path DENY (read AND write) per file so a sandboxed process can neither read nor
+/// tamper with the policy that confines it, even under a broad `fs: ["."]`/`["/"]`. Mirrors
 /// [`finalize_env_deny`]: appended AFTER all user + default entries, so last-match-wins
-/// makes it authoritative over any earlier allow of that exact path.
+/// makes it authoritative over any earlier allow of those exact paths.
 ///
 /// Skipped in the same two cases the `.env*` floor is (and for the same reason — the deny
 /// would be inert noise): a FULLY-relaxed axis (`fs: true` — the explicit escape hatch),
 /// and a no-read policy (a deny of an already-unreadable file; and since fs has no
-/// write-without-read, no read ⇒ no write ⇒ the file is already fully denied). `None`
-/// `policy_file` (an inline policy with no distinct source file) is a no-op.
+/// write-without-read, no read ⇒ no write ⇒ the file is already fully denied). An empty
+/// `policy_files` (an inline policy with no distinct source file) is a no-op.
 fn finalize_policy_file_deny(set: &mut FsRuleSet, ctx: &CompileCtx) {
-    let Some(policy_file) = ctx.policy_file.as_deref() else {
+    if ctx.policy_files.is_empty() {
         return;
-    };
+    }
     let fully_relaxed = set.default_effect == Effect::Allow && set.entries.is_empty();
     let grants_read = set.default_effect == Effect::Allow
         || set.entries.iter().any(|e| e.effect == Effect::Allow);
     if fully_relaxed || !grants_read {
         return;
     }
-    set.entries
-        .push(defaults::policy_file_deny_rule(policy_file));
+    set.entries.extend(
+        ctx.policy_files
+            .iter()
+            .map(|f| defaults::policy_file_deny_rule(f)),
+    );
 }
 
 /// A `$tmp` sentinel malformed by a suffix that is neither empty nor a path separator

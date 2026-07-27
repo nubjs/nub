@@ -102,14 +102,17 @@ pub struct CompileCtx {
     pub homes: Homes,
     /// The current working directory (for diagnostics / relative anchoring).
     pub cwd: std::path::PathBuf,
-    /// The policy SOURCE-FILE path (absolute, canonicalized) when the policy was
-    /// loaded from a distinct file — `nub run --sandbox <file>`, or a file-ref
-    /// `sandbox: "./policy.jsonc"` once the nub.jsonc bridge is wired. `None` for an
-    /// inline policy with no distinct source file. A `Some` path is injected as a
-    /// high-precedence fs DENY (read AND write) so a sandboxed process can neither
+    /// EVERY file the policy was sourced from (absolute, canonicalized). Each is injected
+    /// as a high-precedence fs DENY (read AND write) so a sandboxed process can neither
     /// read nor tamper with the policy that confines it, even under a broad
     /// `fs: ["."]`/`["/"]`. See `fold::finalize_policy_file_deny`.
-    pub policy_file: Option<std::path::PathBuf>,
+    ///
+    /// A SET, not one path, because the source chain can be longer than one hop: a
+    /// nub.jsonc `sandbox: "./policy.jsonc"` is confined by BOTH files, and denying only
+    /// the referenced one leaves the referencing config writable — rewrite it to name a
+    /// permissive policy and the next run is unconfined. Empty for an inline policy with
+    /// no distinct source file (`--sandbox true|<preset>`, nub's own build-jail).
+    pub policy_files: Vec<std::path::PathBuf>,
     /// The capabilities of this single-block compile — the `compile`/`compile_with_warnings`
     /// entry, whose one scope IS this whole ctx (the `--sandbox <file>` / `run_sandboxed`
     /// path, always approved user config). The fold gates (`$(…)` substitution, credential
@@ -163,7 +166,7 @@ impl CompileCtx {
         Self {
             homes,
             cwd,
-            policy_file: None,
+            policy_files: Vec::new(),
             caps,
             ambient_env,
             document: Value::Null,
@@ -172,12 +175,14 @@ impl CompileCtx {
         }
     }
 
-    /// Attach the policy SOURCE-FILE path (absolute, canonicalized) so the compiler
-    /// self-excludes it from every fs grant. `None` (the default) leaves the policy
-    /// with no self-exclusion — the inline-policy case, where there is no distinct
-    /// source file to hide. See [`CompileCtx::policy_file`].
-    pub fn with_policy_file(mut self, policy_file: Option<std::path::PathBuf>) -> Self {
-        self.policy_file = policy_file;
+    /// Attach the policy SOURCE-FILE paths (absolute, canonicalized) so the compiler
+    /// self-excludes each from every fs grant. The caller passes the WHOLE chain — the
+    /// referencing config as well as the file it references — not just the document the
+    /// rules were literally read from. Empty (the default) leaves the policy with no
+    /// self-exclusion: the inline-policy case, where there is no source file to hide.
+    /// See [`CompileCtx::policy_files`].
+    pub fn with_policy_files(mut self, policy_files: Vec<std::path::PathBuf>) -> Self {
+        self.policy_files = policy_files;
         self
     }
 

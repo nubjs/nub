@@ -63,7 +63,7 @@ pub fn reassert_secret_floor(name: &str, policy: &mut SandboxPolicy, ctx: &Compi
     // configures this jail outside its own self-exclusion. Not reachable today — the
     // config sits at the project root, outside every post-fold grant — but "any read grant
     // implies the policy file is denied" must not be conditional on which finalizer ran.
-    if let Some(policy_file) = ctx.policy_file.as_deref() {
+    for policy_file in &ctx.policy_files {
         let rule = defaults::policy_file_deny_rule(policy_file);
         if !entries.contains(&rule) {
             entries.push(rule);

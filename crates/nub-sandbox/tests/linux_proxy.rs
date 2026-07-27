@@ -98,7 +98,7 @@ impl Fixture {
                 project: self.proj.clone(),
             },
             cwd: self.proj.clone(),
-            policy_file: None,
+            policy_files: Vec::new(),
             caps: ScopeCapabilities::approved(),
             ambient_env: Default::default(),
             document: serde_json::Value::Null,
