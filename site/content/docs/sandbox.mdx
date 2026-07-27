@@ -283,6 +283,26 @@ Membership is decided by one rule: a host in `$trusted` must be read-only to the
 
 Three entries are kept despite failing that rule, because each is load-bearing: `registry.npmjs.org` (reading it is how packages install at all), `api.anthropic.com`, and `claude.ai`. A write to each of these is a request to the same hostname the legitimate use reads from — `npm publish` is a PUT to the registry, and a model API call carries its payload in the request body — and a host allowlist cannot separate the two. So treat `$trusted` as protection against a script reaching an *unexpected* destination, not as a guarantee that a script holding a valid token cannot use it. Scope credentials with [secrets](#secrets) rather than relying on the host list alone. The always-blocked metadata floor still applies, and the full list is versioned with the engine.
 
+### `$downloads` (built-in host set)
+
+`$downloads` expands to the hosts that dependency install scripts download their own binaries from. It is what the `build-jail` preset puts on the network axis, and it is available to any policy that runs installs.
+
+```jsonc
+{ "net": ["$downloads"] }
+```
+
+The set is small and stays that way. A host earns a place only if an install-lifecycle script actually fetches from it — a real `preinstall`/`install`/`postinstall`, or the implicit `node-gyp rebuild` npm runs for a package that ships a `binding.gyp` and no install script. Today that is Node's own download server (headers for native compiles), `binaries.prisma.sh`, and the two Cypress hosts. A download you trigger by hand afterwards, such as `playwright install`, is not part of an install and does not earn an entry.
+
+Membership follows the same exfiltration rule as `$trusted`, applied more strictly. No host that accepts an authenticated write, and no multi-tenant object store where an attacker can register a namespace and read back what a script left there. `$trusted` keeps three write-capable hosts because they are load-bearing for an agent using your credentials; `$downloads` inherits none of them, because the code it confines is your dependencies' rather than your own. `registry.npmjs.org` is the sharpest case: `npm publish` is a PUT to the host that serves the read, so it is deliberately absent.
+
+Every entry is an exact hostname. `$downloads` has no wildcards, and that is a security property rather than a formatting choice: the proxy resolves the hostname itself, so a subdomain wildcard would let a confined script put chosen bytes in a DNS label and leak them through the resolver without sending a request at all.
+
+<Callout>
+Some install scripts still cannot be covered by any allowlist. `puppeteer`, `electron`, `@tensorflow/tfjs-node`, and everything built on `prebuild-install` or `node-pre-gyp` fetch from Google Cloud Storage buckets or GitHub release assets — a multi-tenant store and a write-capable forge. Allowing either would reopen the exfiltration route the set exists to close, so those downloads stay blocked until Nub can fetch them on the script's behalf.
+</Callout>
+
+The list ships with the engine and grows by pull request. If a package you depend on downloads from a host that is missing, open one with the package name, the file in its install script that builds the URL, and confirmation that the host takes no authenticated write.
+
 ### Allow a domain and its subdomains
 
 A leading `*.` matches subdomains at any depth, but not the apex domain. List the apex separately to allow it too.
