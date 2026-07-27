@@ -526,3 +526,32 @@ impl From<FrozenMode> for InstallOptions {
         Self::with_mode(mode)
     }
 }
+
+#[cfg(test)]
+mod root_provenance_tests {
+    use super::*;
+
+    /// Pins the mapping the git-dep confinement rests on. `root_provenance` reads the
+    /// nesting counter rather than a dedicated flag, which is only sound while
+    /// `git_prepare_depth` is raised exclusively by git-dep preparation — so a future
+    /// caller that raises it for any other reason must fail here rather than silently
+    /// confine a user's own root scripts.
+    #[test]
+    fn only_a_raised_git_prepare_depth_marks_the_root_as_fetched() {
+        let mut opts = InstallOptions::with_mode(FrozenMode::Prefer);
+        assert_eq!(
+            opts.root_provenance(),
+            aube_scripts::RootProvenance::UserAuthored,
+            "an ordinary install's root is the user's own project; treating it as fetched \
+             would confine their own lifecycle scripts"
+        );
+
+        opts.git_prepare_depth = 1;
+        assert_eq!(
+            opts.root_provenance(),
+            aube_scripts::RootProvenance::Fetched,
+            "a nested git-dep prepare install's root is third-party code and must lose \
+             the trusted-root exemption"
+        );
+    }
+}
