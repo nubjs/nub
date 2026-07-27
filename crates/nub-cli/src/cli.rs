@@ -296,7 +296,9 @@ fn watch_inject_vars<'a>(
 
 /// Node's `--env-file` floor (landed 20.6.0). Below it Node aborts on the unknown
 /// option before executing anything, so a watch child handed the flag dies with no
-/// output — every env-file source falls back to whole-map injection instead.
+/// output — every env-file source falls back to whole-map injection instead. Gates
+/// both the auto/config cascade and the explicit flags; nub supports Node from
+/// 18.19, so this range is live, not dead code.
 fn node_accepts_env_file(version: &nub_core::node::version::NodeVersion) -> bool {
     *version >= nub_core::node::version::NodeVersion::new(20, 6, 0)
 }
