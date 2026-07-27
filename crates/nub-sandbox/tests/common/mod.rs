@@ -66,16 +66,12 @@ pub fn ctx_with_document(trusted: bool, env: &[(&str, &str)], document: Value) -
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    CompileCtx {
-        homes: homes(),
-        cwd: homes().project,
-        policy_file: None,
-        caps: caps(trusted),
-        ambient_env: ambient,
-        document,
-        interpreter: Vec::new(),
-        runner: Box::new(StubRunner),
-    }
+    // Built through `CompileCtx::new` rather than a struct literal so every compiler
+    // test runs the same Boundary-B ambient-env ingestion production does.
+    let mut ctx =
+        CompileCtx::new(homes(), homes().project, caps(trusted), ambient).with_document(document);
+    ctx.runner = Box::new(StubRunner);
+    ctx
 }
 
 /// The `ScopeCapabilities` for a trusted/untrusted scope — approved user config gets

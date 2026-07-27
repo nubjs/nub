@@ -137,8 +137,15 @@ impl CompileCtx {
         homes: Homes,
         cwd: std::path::PathBuf,
         caps: ScopeCapabilities,
-        ambient_env: BTreeMap<String, String>,
+        mut ambient_env: BTreeMap<String, String>,
     ) -> Self {
+        // Boundary B ingestion. Filtering cmd.exe's shell-positional entries HERE, once,
+        // is what keeps every downstream posture safe: `sandbox: false` clones the ambient
+        // map wholesale and a `vars: ["*"]` glob matches any name, so either would carry a
+        // `=`-named key into `constructed` and fail the spawn under any cmd.exe ancestor.
+        // Filtering at ingestion also keeps them out of `withheld`, where they would read
+        // as policy decisions about variables that were never variables.
+        ambient_env.retain(|key, _| !crate::policy::is_shell_positional_env_key(key));
         Self {
             homes,
             cwd,

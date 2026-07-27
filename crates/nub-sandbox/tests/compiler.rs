@@ -26,6 +26,29 @@ fn false_fully_unjails() {
     );
 }
 
+/// A cmd.exe ancestor puts hidden `=C:`-style per-drive entries in the ambient snapshot
+/// (Rust's `env::vars()` surfaces them verbatim). The backend rejects a `=`-bearing key
+/// as un-encodable, so a spawn under cmd.exe would fail closed on the two postures that
+/// take ambient names wholesale: `sandbox: false` clones the map, and a `vars: ["*"]`
+/// glob matches every name. Ingestion drops them, so neither can.
+#[test]
+fn ambient_ingestion_drops_cmd_exe_shell_positional_keys() {
+    let ctx = common::ctx(true, &[("=C:", "C:\\work"), ("KEEP", "1")]);
+    for surface in [json!(false), json!({ "vars": ["*"] })] {
+        let p = compile(&surface, &ctx).unwrap();
+        assert!(
+            !p.env.constructed.keys().any(|k| k.contains('=')),
+            "{surface} constructed a `=`-named key: {:?}",
+            p.env.constructed
+        );
+        assert!(
+            !p.env.withheld.iter().any(|k| k.contains('=')),
+            "a shell-positional entry is not a policy decision, so it is not `withheld`"
+        );
+        assert!(p.env.constructed.contains_key("KEEP"), "{surface}");
+    }
+}
+
 #[test]
 fn true_is_secure_default_per_axis() {
     let ctx = common::ctx(

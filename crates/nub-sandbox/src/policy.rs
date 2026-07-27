@@ -257,6 +257,26 @@ pub struct CredentialBroker {
     pub env: Vec<String>,
 }
 
+/// Whether a name is Windows shell-positional state rather than an environment
+/// variable. `cmd.exe` writes hidden per-drive current-directory entries into the
+/// environment block — `=C:`, `=D:`, and `=ExitCode` — whose NAME begins with `=`,
+/// and Rust's `env::vars()` surfaces them verbatim, so ANY nub spawn under a
+/// cmd.exe ancestor snapshots them. That matters here because nub runs npm
+/// lifecycle scripts through cmd.exe on Windows.
+///
+/// They are shell state, not configuration: cmd regenerates its own set at startup
+/// and a child spawned from any other parent never had them, so dropping them costs
+/// a confined child nothing. Dropping is also the only option — a name containing
+/// `=` cannot round-trip a `KEY=VALUE` block, which is why the backend rejects one
+/// outright. That reject is the injection guard and stays; these are filtered where
+/// the ambient env ENTERS the policy so a legitimate cmd.exe ancestor cannot fail
+/// the launch. Only a LEADING `=` is legitimate — an interior `=` cannot come from
+/// a real environment block (the OS splits at the first `=` past position 0), so it
+/// still reaches the reject.
+pub fn is_shell_positional_env_key(key: &str) -> bool {
+    key.starts_with('=')
+}
+
 /// Environment names the backend owns after the policy env has been constructed.
 ///
 /// A broker marker written under one of these keys would be overwritten before
@@ -373,8 +393,12 @@ pub struct EnvPolicy {
 
 impl EnvPolicy {
     /// Resolve a non-confining policy to an explicit target-environment snapshot.
-    /// Direct IR callers use this instead of relying on apply-time ambient reads.
-    pub fn resolved(constructed: BTreeMap<String, String>) -> Self {
+    /// Direct IR callers use this instead of relying on apply-time ambient reads —
+    /// typically over a raw `env::vars()`, so this is one of the two points where an
+    /// ambient snapshot enters the policy and is filtered accordingly (see
+    /// [`is_shell_positional_env_key`]; the other is `CompileCtx::new`).
+    pub fn resolved(mut constructed: BTreeMap<String, String>) -> Self {
+        constructed.retain(|key, _| !is_shell_positional_env_key(key));
         Self {
             resolved: true,
             constructed,

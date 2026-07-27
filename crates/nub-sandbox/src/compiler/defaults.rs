@@ -1069,6 +1069,40 @@ mod tests {
         }
     }
 
+    /// Nub runs npm lifecycle scripts through cmd.exe on Windows, so the build jail's
+    /// ambient snapshot carries cmd's hidden `=C:`/`=ExitCode` per-drive entries. A
+    /// `=`-named key cannot round-trip a `KEY=VALUE` block and the backend rejects one
+    /// outright, so this pins that every posture builder DROPS them by allowlist —
+    /// i.e. the build jail was never able to reach that reject.
+    #[test]
+    fn env_postures_drop_cmd_exe_shell_positional_keys() {
+        let ambient = ambient(&[
+            ("=C:", "C:\\Users\\me"),
+            ("=D:", "D:\\work"),
+            ("=ExitCode", "00000000"),
+            ("SystemRoot", "C:/Windows"),
+            ("PATH", "C:/Windows/System32"),
+        ]);
+        for key in ["=C:", "=D:", "=ExitCode"] {
+            assert!(!build_jail_env_allowed(key), "build jail must deny {key}");
+        }
+        let jail = lifecycle_scrubbed_env(&ambient);
+        for posture in [
+            &jail.constructed,
+            &curated_baseline_env(&ambient),
+            &strip_all_env(&ambient).constructed,
+        ] {
+            assert!(
+                !posture.keys().any(|k| k.starts_with('=')),
+                "no posture may construct a `=`-named key: {posture:?}"
+            );
+        }
+        assert!(
+            jail.constructed.contains_key("PATH"),
+            "the drop is name-scoped, not a blanket scrub"
+        );
+    }
+
     /// The env channel a from-source native compile rides, pinned by name: losing any one
     /// of these breaks an offline in-jail node-gyp build, which no other test would catch.
     #[test]
