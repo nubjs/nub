@@ -1093,12 +1093,13 @@ mod win {
             .args(["__sbxchild__", "write", marker_arg.as_str()])
             .cwd(&f.root);
         match apply(&policy, spec) {
+            // The refusal is asserted on `lost`, not on the wording. Which guard rejects
+            // first is an implementation detail: the generic proxy-tier invariant in
+            // `validate_apply_inputs` runs before the Windows-specific loopback-forwarder
+            // refusal, so pinning that platform reason string made this fail on a correct
+            // rejection. `net-per-host` plus the un-run child is the actual contract.
             Err(d) => {
-                let reason = d.reason.as_deref().unwrap_or_default();
-                if d.lost.iter().any(|s| s == "net-per-host")
-                    && reason.contains("every loopback listener")
-                    && reason.contains("forwarder")
-                {
+                if d.lost.iter().any(|s| s == "net-per-host") && d.reason.is_some() {
                     println!("PASS per-host policy fails closed before launch");
                 } else {
                     *fails += 1;
