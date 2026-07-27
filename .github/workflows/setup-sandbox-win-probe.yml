@@ -10,7 +10,7 @@
 #
 # Delete this file before the PR opens.
 #
-# Run 2: after the windows_account `Prepared` field repair.
+# Run 3: real standard-user capture of the non-elevated path.
 name: setup-sandbox-win-probe
 on:
   workflow_dispatch:

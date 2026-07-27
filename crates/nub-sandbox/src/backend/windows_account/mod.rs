@@ -390,6 +390,10 @@ pub fn status() -> std::io::Result<crate::backend::StatusReport> {
         "acl ledger: {} path(s) recorded\n",
         state::ledger_paths().map(|p| p.len()).unwrap_or(0)
     ));
+    // `filters_gone` only DESCRIBES a machine that is otherwise provisioned. On a machine with
+    // no account it is the ordinary post-teardown state, and reporting "the account exists but
+    // its filters are gone" there contradicts the account line printed two lines above it.
+    let filters_gone = filters_gone && ready;
     let ready = ready && !filters_gone;
     out.push_str(&if ready {
         "\nThe sandbox can enforce on this host.\n".to_string()

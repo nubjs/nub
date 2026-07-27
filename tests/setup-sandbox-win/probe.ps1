@@ -32,19 +32,46 @@ $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adminis
 Write-Host "running as: $($identity.Name)"
 Write-Host "elevated: $elevated"
 
-# ── the non-elevated path, via a standard user ────────────────────────────────────────────────
-# `runas /trustlevel` drops to a restricted token WITHOUT a password prompt, which is what makes
-# this capturable in CI at all. It cannot inherit a pipe, so the child writes to a file the
-# elevated parent reads back — the same stdio problem a UAC self-elevation would have, which is
-# precisely why nub prints an instruction instead of self-elevating.
-$out = Join-Path $env:TEMP 'nub-unelevated.txt'
+# ── the non-elevated path, via a real standard user ───────────────────────────────────────────
+# A GitHub runner is already elevated, so the path an ordinary user hits first — the only one
+# that prints an instruction — needs a genuine standard account to reach.
+#
+# The child's output is REDIRECTED TO A FILE rather than inherited, because a `-Credential`
+# launch gets a new console and cannot write to this one. That is the same constraint a UAC
+# self-elevation would face, and the concrete reason nub prints an instruction instead of
+# elevating itself: the setup's report is the useful part, and a re-launched process cannot put
+# it back in front of the person who typed the command.
+$stdout = Join-Path $env:TEMP 'nub-unelevated-out.txt'
+$stderr = Join-Path $env:TEMP 'nub-unelevated-err.txt'
+$pw = 'Pr0be!' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+$secure = ConvertTo-SecureString $pw -AsPlainText -Force
+New-LocalUser -Name 'nubprobe' -Password $secure -Description 'probe: unelevated capture' `
+    -AccountNeverExpires -PasswordNeverExpires -ErrorAction SilentlyContinue | Out-Null
+# The standard user must be able to read and execute the binary under the runner's work dir.
+icacls (Split-Path $Nub -Parent) /grant 'nubprobe:(OI)(CI)RX' /T | Out-Null
+icacls 'D:\a' /grant 'nubprobe:(RX)' | Out-Null
+icacls 'D:\a\nub' /grant 'nubprobe:(RX)' | Out-Null
+icacls 'D:\a\nub\nub' /grant 'nubprobe:(RX)' | Out-Null
+icacls 'D:\a\nub\nub\target' /grant 'nubprobe:(RX)' | Out-Null
+
 Write-Host ""
-Write-Host "===== 1. nub setup-sandbox   (NON-elevated) ====="
+Write-Host "===== 1. nub setup-sandbox   (NON-elevated, as a standard user) ====="
 Write-Host "PS> nub setup-sandbox"
-$cmd = "cmd.exe /c `"`"$Nub`" setup-sandbox > `"$out`" 2>&1`""
-Start-Process -FilePath 'runas.exe' -ArgumentList "/trustlevel:0x20000 $cmd" -Wait -NoNewWindow
-Start-Sleep -Seconds 3
-if (Test-Path $out) { Get-Content $out | Write-Host } else { Write-Host "(no output captured)" }
+$cred = New-Object System.Management.Automation.PSCredential('nubprobe', $secure)
+try {
+    Start-Process -FilePath $Nub -ArgumentList 'setup-sandbox' -Credential $cred `
+        -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+        -WorkingDirectory $env:TEMP -Wait -ErrorAction Stop
+} catch {
+    Write-Host "(could not launch as the standard user: $_)"
+}
+foreach ($f in @($stdout, $stderr)) {
+    if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) { Get-Content $f | Write-Host }
+}
+if (-not ((Test-Path $stdout) -and (Get-Item $stdout).Length -gt 0) -and
+    -not ((Test-Path $stderr) -and (Get-Item $stderr).Length -gt 0)) {
+    Write-Host "(no output captured)"
+}
 
 Show-Step '2. nub setup-sandbox --check   (before setup)' 'nub setup-sandbox --check' {
     & $Nub setup-sandbox --check
@@ -87,5 +114,11 @@ Show-Step '8. nub sandbox setup   (the removed spelling)' 'nub sandbox setup' {
     & $Nub sandbox setup
 }
 
+Remove-LocalUser -Name 'nubprobe' -ErrorAction SilentlyContinue
+
 Write-Host ""
 Write-Host "########## probe complete ##########"
+
+# The last capture step deliberately exercises a command that exits 1, so end on a clean status
+# rather than letting PowerShell propagate it and mark the whole run failed.
+exit 0
