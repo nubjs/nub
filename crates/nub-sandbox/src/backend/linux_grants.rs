@@ -5,7 +5,7 @@
 //! writable reopen without recursively walking the project tree.
 
 use crate::matcher::path::normalize_slashes;
-use crate::policy::{Effect, FsAccess, FsPolicy, SandboxPolicy};
+use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, SandboxPolicy};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,25 +27,26 @@ pub(crate) fn fs_confines(fs: &FsPolicy) -> bool {
 
 /// Compile literal allow entries into Bubblewrap bind operations.
 ///
-/// Denies are installed later as masks. Every non-whole allow must be a literal
-/// current-existing source; broad glob expansion and future-path creation would
-/// either scan an unbounded tree or widen the authored policy.
+/// Denies are installed later as masks. Every non-whole allow must be a literal source;
+/// broad glob expansion and future-path creation would either scan an unbounded tree or
+/// widen the authored policy. Whether that source has to exist depends on who named it —
+/// see the [`FsOrigin`] arm below.
 pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGrant>, String> {
     let mut grants = Vec::new();
-    let mut previous_authored_grant: Option<MountGrant> = None;
+    let mut previous_grant: Option<MountGrant> = None;
 
     for rule in &policy.fs.rules.entries {
         let pattern = rule.matcher.as_str();
         if is_whole_root(pattern) {
             grants.clear();
-            previous_authored_grant = None;
+            previous_grant = None;
             if rule.effect == Effect::Allow && rule.access == FsAccess::ReadWrite {
                 return Err("a writable whole-filesystem mount is not allowed".to_string());
             }
             continue;
         }
         if rule.effect != Effect::Allow {
-            previous_authored_grant = None;
+            previous_grant = None;
             continue;
         }
 
@@ -76,6 +77,18 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
             }
         };
         if !path.exists() {
+            // A built-in set enumerates every ecosystem it supports, so most of its
+            // members are absent on any given machine — refusing there would abort every
+            // confined run on a clean host over caches the policy never depended on.
+            // Absence is not a hole either: no source means no bind, which can only
+            // narrow the child's view. An AUTHORED path is the opposite — the author
+            // named a specific location, so a missing one is a mistake worth refusing
+            // rather than silently downgrading to a grant that is not there. Skipping
+            // leaves `previous_grant` alone deliberately: a rule that emitted no bind
+            // cannot have changed which operation the next twin would duplicate.
+            if rule.origin == FsOrigin::BuiltinSet {
+                continue;
+            }
             return Err(format!(
                 "filesystem mount source does not exist: {}",
                 path.display()
@@ -86,10 +99,10 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
         // The compiler emits a literal and an adjacent `literal/**` subtree twin.
         // They are one bind operation; no non-adjacent entry is collapsed because
         // intervening rules can deliberately change the mount layering.
-        if previous_authored_grant.as_ref() != Some(&grant) {
+        if previous_grant.as_ref() != Some(&grant) {
             grants.push(grant.clone());
         }
-        previous_authored_grant = Some(grant);
+        previous_grant = Some(grant);
     }
 
     Ok(grants)
@@ -151,6 +164,7 @@ fn is_unsafe_write_root(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
     use crate::policy::{CanonGlob, FsRule, FsRuleSet};
+    use std::collections::BTreeMap;
     use tempfile::tempdir;
 
     fn policy(entries: Vec<FsRule>) -> SandboxPolicy {
@@ -167,6 +181,14 @@ mod tests {
             matcher: CanonGlob(path.into()),
             effect: Effect::Allow,
             access,
+            origin: FsOrigin::Authored,
+        }
+    }
+
+    fn builtin_set_allow(path: impl Into<String>, access: FsAccess) -> FsRule {
+        FsRule {
+            origin: FsOrigin::BuiltinSet,
+            ..allow(path, access)
         }
     }
 
@@ -175,6 +197,7 @@ mod tests {
             matcher: CanonGlob(path.into()),
             effect: Effect::Deny,
             access: FsAccess::DENY,
+            origin: FsOrigin::Authored,
         }
     }
 
@@ -248,10 +271,54 @@ mod tests {
             allow("/proc/self", FsAccess::Read),
             allow("/etc", FsAccess::ReadWrite),
             allow("/definitely/not/a/current/nub/path", FsAccess::ReadWrite),
+            // Set membership excuses an ABSENT source, never an unsafe one.
+            builtin_set_allow("/proc/self", FsAccess::Read),
         ];
         for rule in cases {
-            assert!(compile_mount_plan(&policy(vec![rule])).is_err());
+            let matcher = rule.matcher.as_str().to_string();
+            assert!(
+                compile_mount_plan(&policy(vec![rule])).is_err(),
+                "allow {matcher:?} must not compile to a mount"
+            );
         }
+    }
+
+    /// `$tooldirs` names every ecosystem's cache dir at once, so a clean machine carries
+    /// almost none of them. Those members drop out of the plan instead of aborting the
+    /// run; a member that is present still binds, and an authored path — one the policy
+    /// author named specifically — gets no such tolerance.
+    #[test]
+    fn absent_builtin_set_sources_drop_out_while_authored_ones_still_refuse() {
+        let dir = tempdir().unwrap();
+        let present = dir.path().join("pnpm-store");
+        let absent = dir.path().join("gradle-caches");
+        std::fs::create_dir_all(&present).unwrap();
+
+        let plan = compile_mount_plan(&policy(vec![
+            builtin_set_allow(absent.to_string_lossy(), FsAccess::Read),
+            builtin_set_allow(present.to_string_lossy(), FsAccess::Read),
+        ]))
+        .unwrap_or_else(|error| {
+            panic!("an absent built-in-set source must not abort the mount plan: {error}")
+        });
+        assert_eq!(
+            plan,
+            vec![MountGrant {
+                path: present,
+                access: MountAccess::ReadOnly,
+            }],
+            "only the present set member binds; {} is not on this machine",
+            absent.display()
+        );
+
+        let authored = compile_mount_plan(&policy(vec![allow(
+            absent.to_string_lossy(),
+            FsAccess::Read,
+        )]));
+        assert!(
+            authored.is_err(),
+            "an absent path the author named must still refuse, got {authored:?}"
+        );
     }
 
     #[test]
@@ -269,5 +336,53 @@ mod tests {
             ..FsPolicy::default()
         }));
         assert!(fs_confines(&policy(Vec::new()).fs));
+    }
+
+    /// The build jail grants `$tooldirs` — a set naming a dozen ecosystems' cache dirs.
+    /// A clean machine (fresh container, CI runner, a developer without Go or Gradle)
+    /// has almost none of them, and before this was origin-aware the FIRST absent one
+    /// aborted every confined lifecycle script. The jail must still compile there, and
+    /// still compile to the same confinement: the project readable, only the package
+    /// dir writable.
+    #[test]
+    fn build_jail_survives_a_machine_with_no_tool_caches() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("proj");
+        let package_dir = project.join("node_modules/native");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::create_dir_all(home.join(".cache")).unwrap();
+        let policy = crate::compile_build_jail(
+            crate::Homes {
+                home: home.join(".cache").parent().unwrap().to_path_buf(),
+                tmp: std::env::temp_dir(),
+                cache: home.join(".cache"),
+                project: project.clone(),
+            },
+            &package_dir,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("the build-jail preset compiles");
+
+        let plan = compile_mount_plan(&policy).unwrap_or_else(|error| {
+            panic!("the build jail must compile where no tool cache exists: {error}")
+        });
+        assert_eq!(
+            plan,
+            vec![
+                MountGrant {
+                    path: std::fs::canonicalize(&project).unwrap(),
+                    access: MountAccess::ReadOnly,
+                },
+                MountGrant {
+                    path: std::fs::canonicalize(&package_dir).unwrap(),
+                    access: MountAccess::ReadWrite,
+                },
+            ],
+            "dropping the absent cache dirs must leave the confinement intact — the \
+             project read-only and the package dir the only writable subtree"
+        );
     }
 }

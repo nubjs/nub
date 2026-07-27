@@ -13,8 +13,8 @@ use super::reuse;
 use super::{CompileCtx, CompileError, ScopeCapabilities};
 use crate::matcher::path::expand_symbolic;
 use crate::policy::{
-    CanonGlob, CredentialBroker, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsPolicy, FsRule,
-    FsRuleSet, NetPolicy, NetRule, NetTarget, TmpMode,
+    CanonGlob, CredentialBroker, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsOrigin,
+    FsPolicy, FsRule, FsRuleSet, NetPolicy, NetRule, NetTarget, TmpMode,
 };
 use globset::{GlobBuilder, GlobMatcher};
 use serde_json::Value;
@@ -469,6 +469,7 @@ fn push_fs_rules(
             matcher: CanonGlob(crate::matcher::canonicalize_glob_prefix(&g)),
             effect,
             access,
+            origin: FsOrigin::Authored,
         });
     }
 }

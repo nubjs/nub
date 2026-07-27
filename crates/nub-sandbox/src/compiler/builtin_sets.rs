@@ -41,7 +41,7 @@
 //! runtime resolution is deferred to a host-provided `CompileCtx` field, fail-soft.
 
 use crate::matcher::path::{Homes, canonicalize_glob_prefix, expand_symbolic};
-use crate::policy::{CanonGlob, Effect, FsAccess, FsRule, NetRule, NetTarget};
+use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, NetRule, NetTarget};
 
 // ── $trusted (net host set) ────────────────────────────────────────────────────
 
@@ -287,6 +287,7 @@ pub fn tooldirs_fs_rules(homes: &Homes, effect: Effect, access: FsAccess) -> Vec
                 matcher: CanonGlob(canonicalize_glob_prefix(&g)),
                 effect,
                 access,
+                origin: FsOrigin::BuiltinSet,
             });
         }
     }

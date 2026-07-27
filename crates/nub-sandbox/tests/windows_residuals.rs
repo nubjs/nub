@@ -40,8 +40,8 @@ fn main() {
 #[cfg(target_os = "windows")]
 mod win {
     use nub_sandbox::policy::{
-        CanonGlob, Effect, EnvPolicy, FsAccess, FsPolicy, FsRule, FsRuleSet, NetPolicy, PidPolicy,
-        SandboxPolicy, TmpMode,
+        CanonGlob, Effect, EnvPolicy, FsAccess, FsOrigin, FsPolicy, FsRule, FsRuleSet, NetPolicy,
+        PidPolicy, SandboxPolicy, TmpMode,
     };
     use nub_sandbox::{CommandSpec, apply};
     use std::path::{Path, PathBuf};
@@ -226,6 +226,7 @@ mod win {
             matcher: CanonGlob(canon(p)),
             effect: Effect::Allow,
             access,
+            origin: FsOrigin::Authored,
         }
     }
 

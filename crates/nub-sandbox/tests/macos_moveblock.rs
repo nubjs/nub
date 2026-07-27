@@ -19,7 +19,7 @@
 #![cfg(target_os = "macos")]
 
 use nub_sandbox::policy::{
-    CanonGlob, Effect, EnvPolicy, FsAccess, FsRule, FsRuleSet, SandboxPolicy,
+    CanonGlob, Effect, EnvPolicy, FsAccess, FsOrigin, FsRule, FsRuleSet, SandboxPolicy,
 };
 use nub_sandbox::{CommandSpec, apply};
 use std::path::Path;
@@ -47,6 +47,7 @@ fn rule(m: &str, effect: Effect, access: FsAccess) -> FsRule {
         matcher: CanonGlob(m.to_string()),
         effect,
         access,
+        origin: FsOrigin::Authored,
     }
 }
 

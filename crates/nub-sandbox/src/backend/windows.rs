@@ -1318,7 +1318,7 @@ mod launch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{CanonGlob, FsRule, FsRuleSet, TmpMode};
+    use crate::policy::{CanonGlob, FsOrigin, FsRule, FsRuleSet, TmpMode};
 
     fn fs(default_effect: Effect, entries: Vec<FsRule>) -> FsPolicy {
         FsPolicy {
@@ -1334,6 +1334,7 @@ mod tests {
             matcher: CanonGlob(m.to_string()),
             effect,
             access,
+            origin: FsOrigin::Authored,
         }
     }
 

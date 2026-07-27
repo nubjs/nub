@@ -12,7 +12,7 @@ use crate::matcher::path::{
     Homes, canonicalize_glob_prefix, canonicalize_including_nonexistent, expand_symbolic,
     normalize_slashes,
 };
-use crate::policy::{CanonGlob, Effect, FsAccess, FsRule};
+use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule};
 use std::path::Path;
 
 /// Secret-bearing paths to DENY-READ, resolved under the home anchors. Classic
@@ -180,6 +180,7 @@ pub(crate) fn policy_file_deny_rule(policy_file: &Path) -> FsRule {
         matcher: CanonGlob(globset::escape(&normalized)),
         effect: Effect::Deny,
         access: FsAccess::DENY,
+        origin: FsOrigin::Authored,
     }
 }
 
@@ -191,6 +192,7 @@ pub fn generous_read_allow() -> FsRule {
         matcher: CanonGlob("**".to_string()),
         effect: Effect::Allow,
         access: FsAccess::Read,
+        origin: FsOrigin::Authored,
     }
 }
 
@@ -210,6 +212,7 @@ fn deny(glob: String) -> FsRule {
         matcher: CanonGlob(canonicalize_glob_prefix(&glob)),
         effect: Effect::Deny,
         access: FsAccess::DENY,
+        origin: FsOrigin::Authored,
     }
 }
 

@@ -40,8 +40,8 @@ fn main() {
 #[cfg(target_os = "windows")]
 mod win {
     use nub_sandbox::policy::{
-        CanonGlob, Effect, EnvPolicy, FsAccess, FsPolicy, FsRule, FsRuleSet, NetPolicy, PidPolicy,
-        SandboxPolicy, TmpMode,
+        CanonGlob, Effect, EnvPolicy, FsAccess, FsOrigin, FsPolicy, FsRule, FsRuleSet, NetPolicy,
+        PidPolicy, SandboxPolicy, TmpMode,
     };
     use nub_sandbox::{CommandSpec, apply};
     use std::collections::BTreeMap;
@@ -403,6 +403,7 @@ mod win {
                 matcher: CanonGlob(r.to_string_lossy().replace('\\', "/")),
                 effect: Effect::Allow,
                 access: FsAccess::Read,
+                origin: FsOrigin::Authored,
             });
         }
         SandboxPolicy {

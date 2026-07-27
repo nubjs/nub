@@ -1032,7 +1032,7 @@ fn degradation(
 mod tests {
     use super::*;
     use crate::policy::{
-        CanonGlob, FsPolicy, FsRule, FsRuleSet, NetPolicy, NetRule, NetTarget, TmpMode,
+        CanonGlob, FsOrigin, FsPolicy, FsRule, FsRuleSet, NetPolicy, NetRule, NetTarget, TmpMode,
     };
 
     fn spec() -> CommandSpec {
@@ -1057,6 +1057,7 @@ mod tests {
             matcher: CanonGlob(m.to_string()),
             effect,
             access,
+            origin: FsOrigin::Authored,
         }
     }
 

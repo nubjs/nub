@@ -14,7 +14,7 @@
 
 use super::{CompileCtx, CompileError, ScopeCapabilities, compile, defaults};
 use crate::matcher::path::{Homes, canonicalize_glob_prefix};
-use crate::policy::{CanonGlob, Effect, FsAccess, FsRule, SandboxPolicy};
+use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, SandboxPolicy};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -104,6 +104,7 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path) {
             matcher: CanonGlob(canonicalize_glob_prefix(&g)),
             effect: Effect::Allow,
             access: FsAccess::Read,
+            origin: FsOrigin::Authored,
         });
     }
 }
