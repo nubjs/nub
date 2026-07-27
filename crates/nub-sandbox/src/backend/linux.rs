@@ -537,16 +537,12 @@ fn append_confinement_options(
 ) -> Result<Vec<File>, Degradation> {
     setup.args([
         "--die-with-parent",
-        // --new-session is THE defence against TIOCSTI terminal injection, and it is
-        // load-bearing on its own: a confined process sharing the launching terminal's
-        // controlling tty can ioctl(TIOCSTI) bytes into the PARENT SHELL's input queue,
-        // which then executes them OUTSIDE the sandbox. Nothing else here stops it —
-        // measured with this exact flag set minus this one flag, TIOCSTI returns 0 and
-        // the injection lands despite the user namespace, --cap-drop ALL, the PID/IPC/UTS
-        // namespaces, the private /dev and /proc, and the empty netns; seccomp does not
-        // cover it either (TIOCSTI is an ioctl request, not a filtered syscall). With the
-        // flag, setsid() detaches the child from that controlling terminal and the same
-        // ioctl fails EPERM. Do not reorder it out or drop it as redundant boilerplate.
+        // The ONLY defence here against TIOCSTI terminal injection: a child still holding
+        // the launcher's controlling tty can ioctl(TIOCSTI) bytes into the PARENT SHELL's
+        // input queue, to be executed outside the sandbox. Measured with this exact flag
+        // set minus this one flag, the injection lands — every other flag below, and
+        // seccomp (TIOCSTI is an ioctl request, not a filtered syscall), leave it open.
+        // setsid() drops the controlling terminal and the ioctl then fails EPERM.
         "--new-session",
         "--unshare-user",
         "--as-pid-1",
