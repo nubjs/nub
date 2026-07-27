@@ -448,8 +448,105 @@ fn configure_retained_outer(
     retained_monitor: &super::linux_monitor::RetainedMonitorLaunch,
 ) -> Result<RetainedOuterSetup, Degradation> {
     let mut setup = Command::new("");
+    let mut mask_sources = append_confinement_options(
+        &mut setup,
+        policy,
+        root_view,
+        entry_program,
+        mount_plan,
+        masks,
+        tmp_dir,
+        ca_bundle,
+        net_bridge_fd,
+        &|command| retained_monitor.append_runtime_mount(command),
+    )?;
+
+    let mut degradation = Degradation::full();
+    // net-per-host degrades ONLY when a proxy was started but its host bridge did not
+    // (`net_bridge_fd` absent) — then per-host collapses to coarse-deny (fail-SAFE:
+    // denies more, not less). A wired bridge is full per-host enforcement.
+    if policy.net.enforce && proxy_port.is_some() && net_bridge_fd.is_none() {
+        degradation.lost.push("net-per-host".to_string());
+        degradation.reason = Some(
+            "per-host egress bridge could not be established; network was denied completely"
+                .to_string(),
+        );
+    }
+
+    retained_monitor
+        .append_monitor_options(&mut setup)
+        .map_err(|error| Degradation {
+            lost: vec!["process-isolation".to_string()],
+            reason: Some(format!("building retained monitor command: {error}")),
+        })?;
+    let arguments = write_bwrap_arguments(setup.get_args())
+        .and_then(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
+        .map_err(|error| Degradation {
+            lost: vec!["process-entry".to_string()],
+            reason: Some(format!("serializing Bubblewrap launch arguments: {error}")),
+        })?;
+    let mut command = Command::new(bwrap.program());
+    command
+        .env_clear()
+        .arg("--args")
+        .arg(arguments.as_raw_fd().to_string());
+    retained_monitor.append_monitor_command(&mut command);
+    let inherited_fds = mask_sources
+        .iter()
+        .chain(std::iter::once(&arguments))
+        .map(AsRawFd::as_raw_fd)
+        .chain(std::iter::once(bwrap.executable.as_raw_fd()))
+        .chain(ca_bundle.into_iter().map(AsRawFd::as_raw_fd))
+        .chain(net_bridge_fd.into_iter().map(AsRawFd::as_raw_fd))
+        .collect::<Vec<_>>();
+    retained_monitor
+        .install_pre_exec(&mut command, &inherited_fds)
+        .map_err(|error| Degradation {
+            lost: vec!["process-isolation".to_string()],
+            reason: Some(format!("sealing retained monitor descriptors: {error}")),
+        })?;
+    mask_sources.push(arguments);
+    Ok(RetainedOuterSetup {
+        command,
+        setup_files: mask_sources,
+        degradation,
+    })
+}
+
+/// Bubblewrap options that carry the whole policy, in the order Bubblewrap applies
+/// them. Split out from [`configure_retained_outer`] so the option sequence — the
+/// actual filesystem and namespace boundary — is assertable without a real
+/// Bubblewrap, monitor image, or set of live descriptors; see the golden test
+/// `confinement_options_pin_the_namespace_and_mount_boundary`. `runtime_mount` is
+/// the monitor's private-runtime bind, which must land between the fresh `/dev`
+/// and `/proc` views.
+///
+/// The returned files back every `--ro-bind-data` source and must outlive the spawn.
+#[allow(clippy::too_many_arguments)]
+fn append_confinement_options(
+    setup: &mut Command,
+    policy: &SandboxPolicy,
+    root_view: RootView,
+    entry_program: &Path,
+    mount_plan: &[MountGrant],
+    masks: &[Mask],
+    tmp_dir: Option<&Path>,
+    ca_bundle: Option<&File>,
+    net_bridge_fd: Option<&File>,
+    runtime_mount: &dyn Fn(&mut Command),
+) -> Result<Vec<File>, Degradation> {
     setup.args([
         "--die-with-parent",
+        // --new-session is THE defence against TIOCSTI terminal injection, and it is
+        // load-bearing on its own: a confined process sharing the launching terminal's
+        // controlling tty can ioctl(TIOCSTI) bytes into the PARENT SHELL's input queue,
+        // which then executes them OUTSIDE the sandbox. Nothing else here stops it —
+        // measured with this exact flag set minus this one flag, TIOCSTI returns 0 and
+        // the injection lands despite the user namespace, --cap-drop ALL, the PID/IPC/UTS
+        // namespaces, the private /dev and /proc, and the empty netns; seccomp does not
+        // cover it either (TIOCSTI is an ioctl request, not a filtered syscall). With the
+        // flag, setsid() detaches the child from that controlling terminal and the same
+        // ioctl fails EPERM. Do not reorder it out or drop it as redundant boilerplate.
         "--new-session",
         "--unshare-user",
         "--as-pid-1",
@@ -468,11 +565,11 @@ fn configure_retained_outer(
             setup.args(["--ro-bind", "/", "/"]);
         }
         RootView::Minimal => {
-            append_minimal_read_mounts(&mut setup, entry_program)?;
+            append_minimal_read_mounts(setup, entry_program)?;
         }
     };
     setup.args(["--dev", "/dev"]);
-    retained_monitor.append_runtime_mount(&mut setup);
+    runtime_mount(setup);
     setup.args(["--proc", "/proc"]);
 
     match policy.fs.tmp {
@@ -560,62 +657,15 @@ fn configure_retained_outer(
         setup.args(["--remount-ro", "/"]);
     }
 
-    let mut degradation = Degradation::full();
     if policy.net.enforce {
         // The empty netns is THE egress boundary at EVERY posture: coarse-deny (no proxy),
         // per-host (egress reaches only the proxy via the bridge), and even the fallback
-        // below. C3 wires the per-host bridge here; it does NOT weaken `--unshare-net`.
+        // the caller records. C3 wires the per-host bridge here; it does NOT weaken
+        // `--unshare-net`.
         setup.arg("--unshare-net");
-        // net-per-host degrades ONLY when a proxy was started but its host bridge did not
-        // (`net_bridge_fd` absent) — then per-host collapses to coarse-deny (fail-SAFE:
-        // denies more, not less). A wired bridge is full per-host enforcement.
-        if proxy_port.is_some() && net_bridge_fd.is_none() {
-            degradation.lost.push("net-per-host".to_string());
-            degradation.reason = Some(
-                "per-host egress bridge could not be established; network was denied completely"
-                    .to_string(),
-            );
-        }
     }
 
-    retained_monitor
-        .append_monitor_options(&mut setup)
-        .map_err(|error| Degradation {
-            lost: vec!["process-isolation".to_string()],
-            reason: Some(format!("building retained monitor command: {error}")),
-        })?;
-    let arguments = write_bwrap_arguments(setup.get_args())
-        .and_then(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
-        .map_err(|error| Degradation {
-            lost: vec!["process-entry".to_string()],
-            reason: Some(format!("serializing Bubblewrap launch arguments: {error}")),
-        })?;
-    let mut command = Command::new(bwrap.program());
-    command
-        .env_clear()
-        .arg("--args")
-        .arg(arguments.as_raw_fd().to_string());
-    retained_monitor.append_monitor_command(&mut command);
-    let inherited_fds = mask_sources
-        .iter()
-        .chain(std::iter::once(&arguments))
-        .map(AsRawFd::as_raw_fd)
-        .chain(std::iter::once(bwrap.executable.as_raw_fd()))
-        .chain(ca_bundle.into_iter().map(AsRawFd::as_raw_fd))
-        .chain(net_bridge_fd.into_iter().map(AsRawFd::as_raw_fd))
-        .collect::<Vec<_>>();
-    retained_monitor
-        .install_pre_exec(&mut command, &inherited_fds)
-        .map_err(|error| Degradation {
-            lost: vec!["process-isolation".to_string()],
-            reason: Some(format!("sealing retained monitor descriptors: {error}")),
-        })?;
-    mask_sources.push(arguments);
-    Ok(RetainedOuterSetup {
-        command,
-        setup_files: mask_sources,
-        degradation,
-    })
+    Ok(mask_sources)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3214,6 +3264,138 @@ mod tests {
             libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
             "raw x32 syscall child failed with wait status {status:#x}",
         );
+    }
+
+    /// Render a built option sequence for comparison. Descriptor numbers are
+    /// allocation-dependent, so the value carried by an fd-valued option is
+    /// normalised — everything else is compared byte-exactly.
+    fn rendered_options(setup: &Command) -> Vec<String> {
+        let mut rendered = Vec::new();
+        let mut fd_valued = false;
+        for arg in setup.get_args() {
+            if std::mem::take(&mut fd_valued) {
+                rendered.push("<fd>".to_string());
+                continue;
+            }
+            fd_valued = matches!(arg.as_bytes(), b"--ro-bind-data" | b"--ro-bind-fd");
+            rendered.push(arg.to_string_lossy().into_owned());
+        }
+        rendered
+    }
+
+    /// The golden argv for the confinement boundary. Bubblewrap applies these in
+    /// order, so this pins ORDER as well as membership: a refactor that drops
+    /// `--new-session` (the TIOCSTI defence), drops `--cap-drop ALL`, emits a mask
+    /// before the grant it must override, or admits `--not-a-security-boundary`
+    /// (which sets BIND_FAIL_OPEN, silently turning every failed deny mask into a
+    /// skipped one) fails here rather than in production.
+    #[test]
+    fn confinement_options_pin_the_namespace_and_mount_boundary() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join(".env"), "SECRET").unwrap();
+        let secrets = project.join("secrets");
+        fs::create_dir_all(&secrets).unwrap();
+
+        let policy = policy(
+            root.path(),
+            json!({
+                "fs": {
+                    "/**": "r",
+                    "./": "rw",
+                    secrets.display().to_string(): false,
+                },
+                "net": false,
+            }),
+        );
+        let mount_plan = linux_grants::compile_mount_plan(&policy).unwrap();
+        let masks = collect_masks(&policy, std::slice::from_ref(&project)).unwrap();
+        assert_eq!(root_view(&policy), RootView::ReadOnly);
+
+        let mut setup = Command::new("");
+        let sources = append_confinement_options(
+            &mut setup,
+            &policy,
+            RootView::ReadOnly,
+            Path::new("/bin/true"),
+            &mount_plan,
+            &masks,
+            None,
+            None,
+            None,
+            &|command| {
+                command.args(["--tmpfs", "/dev/.nub-sandbox/support"]);
+            },
+        )
+        .unwrap();
+
+        let project = project.display().to_string();
+        assert_eq!(
+            rendered_options(&setup),
+            vec![
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-user",
+                "--as-pid-1",
+                "--cap-drop",
+                "ALL",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--unshare-uts",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/dev/.nub-sandbox/support",
+                "--proc",
+                "/proc",
+                "--bind",
+                &project,
+                &project,
+                "--perms",
+                "444",
+                "--ro-bind-data",
+                "<fd>",
+                &format!("{project}/.env"),
+                "--perms",
+                "000",
+                "--tmpfs",
+                &format!("{project}/secrets"),
+                "--remount-ro",
+                &format!("{project}/secrets"),
+                "--remount-ro",
+                "/dev/.nub-sandbox/support",
+                "--unshare-net",
+            ],
+        );
+        assert_eq!(sources.len(), 1, "one --ro-bind-data source is retained");
+    }
+
+    /// `--args` is a NUL-SEPARATED stream, so an argument carrying an interior NUL
+    /// would be split by Bubblewrap into further options — an injection channel
+    /// ordinary execve argv cannot have. The rejection is the invariant that makes
+    /// the option sequence above the whole option sequence.
+    #[test]
+    fn bwrap_argument_file_is_nul_separated_and_refuses_an_embedded_nul() {
+        let clean = [
+            OsStr::new("--ro-bind"),
+            OsStr::new("/etc"),
+            OsStr::new("/etc"),
+        ];
+        let mut file = write_bwrap_arguments(clean.into_iter()).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"--ro-bind\0/etc\0/etc\0");
+
+        let injected = OsString::from_vec(b"/work\0--bind\0/\0/".to_vec());
+        let error = write_bwrap_arguments(
+            [OsStr::new("--ro-bind"), &injected, OsStr::new("/work")].into_iter(),
+        )
+        .expect_err("an argument carrying an interior NUL must not reach --args");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

@@ -995,6 +995,20 @@ fn runtime_objects_from_parts(
 /// Prepared, one-shot authority for starting the retained PID-1 monitor.
 /// Every child-side descriptor is relocated above the protocol's reserved range
 /// before this value is returned.
+/// Close Bubblewrap's option parsing before the command word. Bubblewrap keeps
+/// reading options until it sees `--`, so without the separator a command-position
+/// program name that begins with `--` would be consumed as another Bubblewrap
+/// option instead of being executed. Nub is doubly covered — the program is always
+/// its own fixed monitor under the private runtime root, never a caller-supplied
+/// name — but the separator is what makes that a belt rather than the only strap.
+fn append_command_position(command: &mut Command, program: &OsStr, args: &[OsString]) {
+    command
+        .arg("--")
+        .arg(program)
+        .args(args)
+        .arg(MONITOR_SENTINEL);
+}
+
 pub(crate) struct RetainedMonitorLaunch {
     spec: BootstrapSpec,
     bootstrap: OwnedFd,
@@ -1123,11 +1137,7 @@ impl RetainedMonitorLaunch {
     }
 
     pub(crate) fn append_monitor_command(&self, command: &mut Command) {
-        command
-            .arg("--")
-            .arg(&self.monitor_program)
-            .args(&self.monitor_args)
-            .arg(MONITOR_SENTINEL);
+        append_command_position(command, &self.monitor_program, &self.monitor_args);
     }
 
     /// Install the only child-side descriptor hook. The whole inherited range
