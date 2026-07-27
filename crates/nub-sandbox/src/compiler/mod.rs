@@ -12,7 +12,7 @@
 
 mod builtin_sets;
 mod clobber;
-mod defaults;
+pub(crate) mod defaults;
 mod env_grammar;
 mod fold;
 mod preset;

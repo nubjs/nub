@@ -3375,6 +3375,12 @@ mod tests {
     /// so the golden above (both `None`) cannot tell them apart at all; this pins
     /// each to its own reserved destination. Also covers the private-tmp and
     /// minimal-root arms, whose remounts the read-only case never reaches.
+    ///
+    /// SCOPE (measured, not assumed): this fails on a swap of the destinations
+    /// WITHIN `append_confinement_options`. It does NOT catch a transposition of the
+    /// two same-typed `Option<&File>` arguments at the `configure_retained_outer`
+    /// call site, because it invokes the callee directly — pinning that would need a
+    /// real Bubblewrap and monitor image.
     #[test]
     fn late_bound_infrastructure_mounts_land_at_their_own_reserved_paths() {
         let root = tempdir().unwrap();
