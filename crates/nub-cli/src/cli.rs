@@ -4900,7 +4900,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     } else {
         project
             .as_ref()
-            .map(|p| nub_core::workspace::env::load_env_files_raw(&p.root))
+            .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
             .unwrap_or_default()
     };
     // The raw values the watched Node receives through forwarded `--env-file`

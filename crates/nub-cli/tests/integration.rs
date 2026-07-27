@@ -4280,6 +4280,9 @@ fn watch_delivers_auto_env_values_on_every_supported_node() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(stderr_file));
     remove_ambient_watch_control_vars(&mut cmd);
+    // The mode selectors decide which `.env.[mode]` slots load; clear both so an
+    // ambient value on the developer's machine cannot change the cascade.
+    cmd.env_remove("APP_ENV").env_remove("NODE_ENV");
     let mut child = spawn_watch_probe(&mut cmd);
 
     let snapshot_text =
@@ -4328,6 +4331,7 @@ fn watch_drops_dotenv_node_env_but_keeps_the_ambient_one() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::from(stderr_file));
         remove_ambient_watch_control_vars(&mut cmd);
+        cmd.env_remove("APP_ENV");
         match ambient {
             Some(value) => cmd.env("NODE_ENV", value),
             // `.env.production` never exists here, so clearing this only removes
@@ -4342,6 +4346,14 @@ fn watch_drops_dotenv_node_env_but_keeps_the_ambient_one() {
         assert_eq!(
             snapshot_text, expected,
             "ambient={ambient:?}: a .env NODE_ENV must be dropped and an ambient one kept"
+        );
+        // Dropping the value silently is the failure the warning exists to
+        // prevent: without it the user has nothing explaining why their mode did
+        // not apply. The direct runner has always warned here.
+        let stderr_text = std::fs::read_to_string(&stderr).unwrap_or_default();
+        assert!(
+            stderr_text.contains("ignoring NODE_ENV set in .env"),
+            "ambient={ambient:?}: watch must explain the dropped .env NODE_ENV; stderr was {stderr_text:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

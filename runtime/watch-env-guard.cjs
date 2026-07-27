@@ -8,6 +8,13 @@
 
 const WATCH_ENV_GUARD = "__NUB_WATCH_ENV_GUARD";
 const { isMainThread } = require("node:worker_threads");
+// The INVARIANT floor, not the full guarded set: state.denylist is a superset,
+// because the launcher also guards NODE_ENV when the auto `.env*` cascade is the
+// live source. Do NOT add NODE_ENV here — the completeness check below requires
+// every fallback key to be present in state.denylist, and the explicit
+// `--env-file` family deliberately omits NODE_ENV, so every
+// `nub watch --env-file=…` run would then abort. The corrupt-state path clears
+// only these and then throws, so a NODE_ENV it misses is never observable.
 const FALLBACK_DENYLIST = [
   "NODE_OPTIONS",
   "NODE_TLS_REJECT_UNAUTHORIZED",
