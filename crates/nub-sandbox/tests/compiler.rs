@@ -538,15 +538,35 @@ fn build_jail_preset_expands() {
     );
     let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
     let proj = common::homes().project;
-    // The project is READ-only (NOT write) — the per-package write is per-spawn.
-    let d = m.decide(&proj.join("build/out.o"));
+    // The DEPENDENCY TREE is READ-only (NOT write) — the per-package write is per-spawn.
+    let d = m.decide(&proj.join("node_modules/.bin/node-gyp-build"));
     assert!(
         matches!(d.effect, Effect::Allow)
             && matches!(d.access, nub_sandbox::policy::FsAccess::Read),
-        "static build-jail reads the project but does not write it"
+        "static build-jail reads the dependency tree but does not write it"
     );
-    // The secret + `.env*` floors hold even under the project read.
-    for secret in [".env", "packages/app/.env", ".env/keys.txt", ".envrc"] {
+    // The CONSUMING PROJECT outside `node_modules` is not in the read set at all. This is
+    // the tightening the read-set measurement bought: a dependency's install script cannot
+    // read the consumer's source, its config, its `.git/hooks/`, or its CI workflows.
+    for outside in [
+        "src/app.ts",
+        "package.json",
+        ".git/hooks/pre-commit",
+        ".github/workflows/ci.yml",
+    ] {
+        assert!(
+            matches!(m.decide(&proj.join(outside)).effect, Effect::Deny),
+            "build-jail must not read <proj>/{outside} — only the dependency tree"
+        );
+    }
+    // The secret + `.env*` floors hold even under the dependency-tree read. A vendored
+    // `.env` is the case that matters now that the grant is `node_modules`-anchored.
+    for secret in [
+        ".env",
+        "node_modules/pkg/.env",
+        "node_modules/.env/keys.txt",
+        ".envrc",
+    ] {
         assert!(
             matches!(m.decide(&proj.join(secret)).effect, Effect::Deny),
             "build-jail must deny <proj>/{secret}"
@@ -559,25 +579,42 @@ fn build_jail_preset_expands() {
         ),
         "build-jail must deny the home secret set"
     );
-    // D6: `/etc` is read-only via the Linux minimal root, but the two password-hash
-    // files are denied within it.
+    // D6: the two password-hash files are denied. macOS's Seatbelt base still grants
+    // `/etc` as a subpath, so this carve-out is what keeps them unreadable there.
     for shadow in ["/etc/shadow", "/etc/gshadow"] {
         assert!(
             matches!(m.decide(std::path::Path::new(shadow)).effect, Effect::Deny),
             "build-jail must deny {shadow}"
         );
     }
-    // Tight read (NOT whole-fs): a `$tooldirs` path (the store/caches) is readable, but
-    // an out-of-project non-secret path is NOT granted at the IR level (the Linux
-    // backend auto-mounts the system essentials at runtime; the IR stays default-deny).
+    // The toolchain read is nub's OWN PM cache — where it bootstraps node-gyp — and NOT
+    // the broad `$tooldirs` set the jail used to take. The other ecosystems' caches carry
+    // no part of a Node build closure and are out of the read set.
     assert!(
         matches!(
-            m.decide(&common::homes().home.join(".cargo/registry/pkg"))
-                .effect,
+            m.decide(
+                &common::homes()
+                    .cache
+                    .join("nub/pm/tools/node-gyp/bin/node-gyp.js")
+            )
+            .effect,
             Effect::Allow
         ),
-        "build-jail grants $tooldirs read"
+        "build-jail grants nub's own PM cache (its node-gyp) read"
     );
+    for tooldir in [
+        ".cargo/registry/pkg",
+        ".m2/repository/x",
+        ".bun/install/cache/y",
+    ] {
+        assert!(
+            matches!(
+                m.decide(&common::homes().home.join(tooldir)).effect,
+                Effect::Deny
+            ),
+            "build-jail must not grant the broad $tooldirs set — ~/{tooldir}"
+        );
+    }
     for denied in [
         std::path::PathBuf::from("/usr/lib/libc.so"),
         common::homes().home.join("notes.txt"),
@@ -638,11 +675,19 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
             && matches!(pkg.access, nub_sandbox::policy::FsAccess::ReadWrite),
         "the dep's own package dir is writable"
     );
-    let sibling = m.decide(&proj.join("src/app.ts"));
+    // A SIBLING dependency stays readable — a lifecycle script's own deps and their
+    // `.bin` shims are hoisted to the consumer's `node_modules`, so this is the grant
+    // `node-gyp-build` and `prebuild-install` actually resolve through.
+    let sibling = m.decide(&proj.join("node_modules/.bin/prebuild-install"));
     assert!(
         matches!(sibling.effect, Effect::Allow)
             && matches!(sibling.access, nub_sandbox::policy::FsAccess::Read),
-        "the rest of the project is read-only"
+        "the sibling dependency tree is read-only"
+    );
+    // The consumer's own source is NOT readable — the whole point of the narrowing.
+    assert!(
+        matches!(m.decide(&proj.join("src/app.ts")).effect, Effect::Deny),
+        "the consuming project's source is outside the jail's read set"
     );
     // The provisioned interpreter (and its bin dir) is readable.
     assert!(

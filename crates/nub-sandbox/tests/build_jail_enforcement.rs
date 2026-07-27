@@ -244,6 +244,10 @@ fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
 /// sibling is compiled here as the negative control: the same script, one variable changed,
 /// reads the sibling's file. That contrast is what makes the denial evidence rather than a
 /// hollow pass, together with the checkout's own read + write succeeding in both runs.
+///
+/// The control's probe sits in the sibling's `node_modules` because that is the ONLY thing
+/// a project anchor now reaches — the anchor grants the dependency tree, not the project.
+/// A probe outside it would be denied in both runs and the control would prove nothing.
 #[test]
 fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steered_anchor() {
     let root = tempfile::tempdir().unwrap();
@@ -253,9 +257,13 @@ fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steere
     let sibling = root.path().join("sibling-scratch");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(checkout.join("src")).unwrap();
-    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::create_dir_all(sibling.join("node_modules")).unwrap();
     std::fs::write(home.join(".nub-secret"), b"HOME-SECRET-DO-NOT-LEAK").unwrap();
-    std::fs::write(sibling.join("scratch.txt"), b"SIBLING-SCRATCH-DO-NOT-LEAK").unwrap();
+    std::fs::write(
+        sibling.join("node_modules/scratch.txt"),
+        b"SIBLING-SCRATCH-DO-NOT-LEAK",
+    )
+    .unwrap();
     std::fs::write(checkout.join("src/own.txt"), b"CHECKOUT-OWN-FILE").unwrap();
     // The committed symlink. `cp -a` reproduces it verbatim into the scratch copy.
     std::os::unix::fs::symlink(&home, checkout.join("evil")).unwrap();
@@ -272,7 +280,7 @@ fn a_fetched_checkout_reads_nothing_outside_itself_through_a_symlink_or_a_steere
         cat '{sibling_file}' 2>&1 | sed 's/^/SIBLING: /'
         "#,
         symlinked = checkout.join("evil/.nub-secret").display(),
-        sibling_file = sibling.join("scratch.txt").display(),
+        sibling_file = sibling.join("node_modules/scratch.txt").display(),
     );
 
     let run = |project: &std::path::Path| -> String {

@@ -31,20 +31,33 @@ pub fn resolve(name: &str) -> Result<Value, CompileError> {
 /// Re-assert a preset's built-in secret floor AFTER its surface object has folded,
 /// closing the last-match-wins hole a broad subtree grant opens.
 ///
-/// build-jail's `"./"` project read re-allows every path under the project —
-/// `<proj>/.env` included, and the home-secret set if a grant overlaps it — because
-/// it is a later matching entry. Re-appending the built-in secret denies makes them
-/// authoritative again. Under the tight (default-deny) read set these are mostly
-/// belt-and-suspenders — an ungranted secret path is unreadable by construction — but
-/// they still close an overlap between a `$tooldirs` grant and an adjacent secret
-/// (e.g. `~/.npmrc` beside `~/.npm/_cacache`). Uses [`defaults::secret_read_denies`]
-/// directly so the floor is byte-consistent across the policy.
+/// build-jail's dependency-tree read re-allows every path under `<proj>/node_modules` —
+/// a vendored `.env` or `.npmrc` included — because it is a later matching entry.
+/// Re-appending the built-in secret denies makes them authoritative again. Under the
+/// tight (default-deny) read set these are mostly belt-and-suspenders — an ungranted
+/// secret path is unreadable by construction — but they still close an overlap between
+/// a granted cache root and an adjacent secret (e.g. `~/.npmrc` beside `~/.npm/_cacache`).
+/// Uses [`defaults::secret_read_denies`] directly so the floor is byte-consistent across
+/// the policy.
 pub fn reassert_secret_floor(name: &str, policy: &mut SandboxPolicy, ctx: &CompileCtx) {
     if name != "build-jail" {
         return;
     }
     let denies = defaults::secret_read_denies(&ctx.homes);
     let entries = &mut policy.fs.rules.entries;
+    // ESTABLISH the floor if the fold skipped it. `fold::finalize_env_deny` appends it only
+    // when the FOLDED surface already granted a read, but build-jail's reads are all
+    // post-fold now (they need SPECULATIVE origin, which the surface cannot express), so the
+    // static `--sandbox build-jail` skeleton folds to denies-only, the fold declines, and the
+    // grants then arrive with nothing trailing them. Re-establishing here — where every
+    // build-jail path converges — is what keeps "grants a read" and "carries the secret
+    // floor" from diverging. A `None` here means genuinely ABSENT rather than displaced:
+    // every build-jail post-fold grant splices at the FRONT, so nothing appends after the
+    // fold and position still implies presence.
+    if defaults::env_deny_floor_start(entries).is_none() {
+        entries.extend(defaults::env_deny_leaf_rules());
+        entries.extend(defaults::env_deny_subtree_rules());
+    }
     // Splice in BEFORE the trailing `.env*`/`.npmrc` floor rather than appending: appending
     // would leave the floor no longer last, and the Linux backend locates it POSITIONALLY
     // (`builtin_env_band_start`) to tell an explicit user deny from the builtin floor. These
@@ -56,7 +69,7 @@ pub fn reassert_secret_floor(name: &str, policy: &mut SandboxPolicy, ctx: &Compi
 
 /// Grant the build-jail interpreter closure (the provisioned Node + the PATH-prepended
 /// shim) READ. nub provisions its own Node under its store rather than `/usr`, so the
-/// tight-read base (Linux `RootView::Minimal` auto-mounting `ESSENTIAL_READ_DIRS`,
+/// tight-read base (Linux `RootView::Minimal` auto-mounting `ESSENTIAL_READ_PATHS`,
 /// macOS's Seatbelt system base) does NOT reach it — the read-set spike proved this is
 /// load-bearing (a node-gyp build with the interpreter ungranted fails). Under nub a
 /// bare `node` hits the shim (`$NODE`) while `npm_node_execpath` names the real binary,
@@ -109,6 +122,57 @@ fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathB
     policy.fs.rules.entries.splice(0..0, grants);
 }
 
+/// nub's own PM cache root, as a `$tooldirs`-style surface pattern. Held here rather
+/// than inlined so the narrowed build-jail grant and the broad `$tooldirs` set resolve
+/// to the same directory on every platform — `builtin_sets` carries the same anchor for
+/// its nub entry, and `the_narrowed_toolchain_grant_stays_inside_tooldirs` pins that they
+/// stay in agreement.
+const NUB_PM_CACHE_PATTERN: &str = "$cache/nub/pm";
+
+/// Grant the build jail's two narrowed READ roots: the consumer's DEPENDENCY TREE and
+/// nub's own PM cache. Together these replace what were once two much broader grants —
+/// `"./"` (the entire consuming project) and `$tooldirs` (16 ecosystem cache patterns).
+///
+/// Measured, not reasoned: a 34-package real-postinstall corpus run under bubblewrap
+/// (`.fray/sandbox-minimum-readset.md`) passes 34/34 with exactly this pair substituted
+/// for the broad two — identical to the baseline. What the narrowing buys is the whole
+/// credential surface those grants carried: under `"./"` a dependency's install script
+/// could read the consumer's source, its config, `.git/hooks/`, and `.github/workflows/`.
+///
+/// Why neither can shrink further:
+/// - a lifecycle script's OWN dependencies are HOISTED to the consumer's `node_modules`,
+///   so `node-gyp-build` and `prebuild-install` resolve out of `<project>/node_modules/.bin`
+///   rather than the package's own directory. Dropping the project read outright fails 27
+///   of 33 packages; keeping only `node_modules` costs nothing.
+/// - nub bootstraps its OWN node-gyp into `<cache>/nub/pm/tools/node-gyp`
+///   (`node_gyp_bootstrap.rs`) — a TOOLCHAIN grant wearing a cache-directory name.
+///   Removing it fails the entire 16-package node-gyp cohort. The other 15 `$tooldirs`
+///   patterns (`~/.cargo/registry`, `~/.m2/repository`, the pnpm/yarn/bun stores, …)
+///   were reached by no package in the corpus.
+///
+/// SPECULATIVE origin is load-bearing, not incidental: both roots are legitimately absent
+/// on a real host — a project whose dependencies are not installed, a machine where nub
+/// has never bootstrapped node-gyp — and `compile_mount_plan` REFUSES a missing AUTHORED
+/// source, which would abort every confined script there.
+///
+/// Front-inserted so the surface's `package_dir` rw entry stays later and keeps winning.
+pub fn grant_build_jail_dependency_reads(name: &str, policy: &mut SandboxPolicy, ctx: &CompileCtx) {
+    if name != "build-jail" {
+        return;
+    }
+    let mut grants = Vec::new();
+    for root in [
+        ctx.homes.project.join("node_modules"),
+        PathBuf::from(crate::matcher::path::expand_symbolic(
+            NUB_PM_CACHE_PATTERN,
+            &ctx.homes,
+        )),
+    ] {
+        push_read_path(&mut grants, &root, FsOrigin::Speculative);
+    }
+    policy.fs.rules.entries.splice(0..0, grants);
+}
+
 /// Push a READ-allow rule per subtree glob for `path` (the node itself + `/**`).
 ///
 /// `origin` decides what an ABSENT path means. The interpreter was resolved from the
@@ -127,40 +191,33 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
     }
 }
 
-/// The build-jail baseline surface. Tight, default-deny read (project + `$tooldirs`
-/// plus the toolchain closure the OS backends supply under a minimal root) with WRITE
-/// confined to a private per-run tmp and — via [`compile_build_jail`] — the script's
-/// own package dir. Egress curated down to the install-time artifact hosts (see
-/// [`build_jail_net`]). `/etc` is granted read-only by the Linux minimal
-/// root (it is in `ESSENTIAL_READ_DIRS`); `/etc/shadow` + `/etc/gshadow` are denied
-/// within it (grant-directory-then-deny) so a lifecycle script can read the benign
-/// `/etc` files it may legitimately need (`resolv.conf`, `localtime`, `ssl/`) without
-/// the two password-hash files ever being readable.
+/// The build-jail baseline surface. Tight, default-deny read — the dependency tree and
+/// nub's own toolchain cache ([`grant_build_jail_dependency_reads`], front-inserted after
+/// this folds) plus the OS backends' minimal-root closure — with WRITE confined to a
+/// private per-run tmp and, via [`compile_build_jail`], the script's own package dir.
+/// Egress curated down to the install-time artifact hosts (see [`build_jail_net`]).
 ///
-/// `package_dir` is the per-spawn WRITE grant, inserted AFTER `"./"` so its
-/// read-write access wins over the project's read-only grant for the package subtree
+/// `package_dir` is the per-spawn WRITE grant. It stays LAST so its read-write access
+/// wins over the front-inserted dependency-tree read for the package subtree
 /// (last-match-wins, preserved by the `preserve_order` serde_json map). `None` yields
-/// the static `--sandbox build-jail` skeleton (project read only; the per-package
-/// write is a production-interposition concern). The env axis is the strip-all floor
-/// here; [`compile_build_jail`] replaces it with the scrubbed lifecycle env.
+/// the static `--sandbox build-jail` skeleton (the per-package write is a production-
+/// interposition concern). The env axis is the strip-all floor here;
+/// [`compile_build_jail`] replaces it with the scrubbed lifecycle env.
 fn build_jail_surface(package_dir: Option<&Path>) -> Value {
     let mut fs = serde_json::Map::new();
     // `$tmp` sets the private per-run tmp MODE (TmpMode::Private) — a writable scratch,
     // shared host tmp hidden. It emits no ordinary fs rule.
     fs.insert("$tmp".to_string(), json!("rw"));
-    // The store + PM/toolchain caches the script resolves deps and tools from.
-    fs.insert("$tooldirs".to_string(), json!("r"));
-    // Project READ (source, sibling `node_modules/.bin`, config the build legitimately
-    // reads) — NOT write. Authored before the package-dir grant so the latter wins.
-    fs.insert("./".to_string(), json!("r"));
     if let Some(dir) = package_dir {
         // Own-package-dir READ-WRITE: the one subtree a dep build may write (its
-        // `build/`, the compiled `.node`). Keyed after `"./"` so its rw beats the
-        // project's read-only under last-match-wins.
+        // `build/`, the compiled `.node`). No wider write grant changes any outcome —
+        // the corpus measured `node_modules` rw and `./` rw as identical to this.
         fs.insert(dir.to_string_lossy().into_owned(), json!("rw"));
     }
-    // D6: `/etc` is granted read-only by the minimal root; deny the two password-hash
-    // files within so a whole-`/etc` read never exposes them.
+    // D6, and now a CROSS-PLATFORM floor rather than a Linux carve-out: the Linux minimal
+    // root no longer mounts `/etc` wholesale, but macOS's Seatbelt base still grants
+    // `/etc` + `/private/etc` as a subpath, so these denies are what keeps the two
+    // password-hash files unreadable there.
     fs.insert("/etc/shadow".to_string(), json!(false));
     fs.insert("/etc/gshadow".to_string(), json!(false));
     json!({
@@ -230,6 +287,7 @@ pub fn compile_build_jail(
     // interpreter grant + secret-floor reassert are applied here rather than in
     // `compile_scope`'s preset branch.
     let mut policy = compile(&surface, &ctx)?;
+    grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx);
     grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
     grant_build_jail_extra_reads(&mut policy, &extra_reads);
     reassert_secret_floor("build-jail", &mut policy, &ctx);
@@ -279,6 +337,31 @@ mod tests {
                 .take(8)
                 .map(|r| r.matcher.as_str())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The build jail's toolchain read was CARVED OUT of `$tooldirs`, so it must remain a
+    /// subset of it. If the two anchors ever drift apart the narrowing stops being a
+    /// narrowing and starts granting a directory the broad set never covered — silently,
+    /// and on one platform at a time. Compared as EXPANDED paths because `$tooldirs` spells
+    /// its nub entry differently on Windows while resolving to the same directory.
+    #[test]
+    fn the_narrowed_toolchain_grant_stays_inside_tooldirs() {
+        let homes = Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        let grant = crate::matcher::path::expand_symbolic(NUB_PM_CACHE_PATTERN, &homes);
+        let inside = crate::compiler::builtin_sets::tooldir_patterns()
+            .iter()
+            .map(|p| crate::matcher::path::expand_symbolic(p, &homes))
+            .any(|t| grant == t || grant.starts_with(&format!("{t}/")));
+        assert!(
+            inside,
+            "the build jail's {NUB_PM_CACHE_PATTERN} grant expanded to {grant}, which no \
+             $tooldirs pattern covers — the carve-out has drifted from the set it came from"
         );
     }
 

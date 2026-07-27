@@ -2,7 +2,7 @@
 //! to the macOS `build_jail_enforcement.rs`. Same load-bearing security contract, one
 //! OS apart: the package dir is writable, home SECRETS stay both unreadable AND
 //! unwritable, the `.env*`/`.npmrc` floor holds at any project depth, `/etc/shadow`
-//! stays denied inside the read-only `/etc` the minimal root grants, and a host outside
+//! stays denied beside the narrowed `/etc` floor the minimal root grants, and a host outside
 //! `$downloads` cannot be dialed. Keep the two files in step — when either grows an assertion, the other
 //! wants it too, because the jail they pin runs on EVERY install and a gap on one OS
 //! is a gap in production.
@@ -268,17 +268,18 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
     assert_no_leak(&stdout, "ROOT-NPMRC-SECRET", "the project root .npmrc");
     assert_no_leak(&stdout, "NESTED-NPMRC-SECRET", "a nested project .npmrc");
 
-    // `/etc` is granted read-only wholesale by the minimal root; the two password-hash
-    // files are denied within it. `/etc/passwd` is the same-directory readable control —
-    // it proves `/etc` is mounted, so the shadow denial is targeted rather than a
-    // missing mount.
+    // The minimal root mounts a NARROWED `/etc` — the measured loader/NSS/DNS/TLS floor,
+    // not the directory. `/etc/passwd` is in that floor and is the readable control: it
+    // proves `/etc` is populated at all, so the `/etc/shadow` denial below is a targeted
+    // withholding rather than the whole directory having gone missing.
     assert!(
         stdout.contains("PASSWD_READ_OK"),
-        "/etc must be readable — otherwise the /etc/shadow denial is just a missing mount:\n{stdout}"
+        "/etc/passwd must be readable — otherwise the /etc/shadow denial is just an \
+         unpopulated /etc:\n{stdout}"
     );
     assert!(
         stdout.contains("SHADOW_DENIED"),
-        "/etc/shadow must be denied inside the granted /etc:\n{stdout}"
+        "/etc/shadow must be denied while the rest of the /etc floor is mounted:\n{stdout}"
     );
 }
 

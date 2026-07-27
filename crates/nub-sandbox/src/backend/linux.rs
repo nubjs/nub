@@ -25,8 +25,54 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStderr, Command};
 use std::time::{Duration, Instant};
 
-const ESSENTIAL_READ_DIRS: &[&str] = &[
-    "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt",
+/// The system read floor a `RootView::Minimal` sandbox mounts before any authored grant:
+/// what a process needs to START, not what it might find useful. Every entry is
+/// package-manager-owned and world-readable; an absent one is skipped, so this is a
+/// superset that degrades to whatever the host actually has.
+///
+/// `/usr` `/bin` `/sbin` `/lib*` stay WHOLESALE deliberately. A native build is not 39
+/// binaries, it is a compiler: `cc1plus`/`collect2` live under a version- and
+/// triple-keyed `/usr/lib/gcc/<triple>/<major>/`, and GCC OPENS far more than it execs —
+/// `specs`, `crt*.o`, the linker scripts, and the whole `/usr/include/**` header tree
+/// (one `node-gyp rebuild` measured 595 opens under `/usr/include` alone). A positive
+/// per-path grant would have to track every GCC major, arch triple, and distro forever,
+/// and buys little: there is no credential class under those roots.
+///
+/// `/etc` and `/opt` are where the credentials actually are, so they are NOT wholesale.
+/// `/etc` is enumerated below; `/opt` is absent entirely — it is third-party software
+/// (~11 GB of it on a GitHub Actions runner: `hostedtoolcache`, `az`, `pipx`, `microsoft`,
+/// `google`), never a system floor. An interpreter that happens to live under `/opt` is
+/// unaffected: it is bound by its own policy grant or as the entry program below, never
+/// by this floor.
+///
+/// The `/etc` set is MEASURED, not guessed (`.fray/sandbox-minimum-readset.md` §5.5): a
+/// 34-package real-postinstall corpus was re-run under an EMPTY `/etc` with
+/// `strace -e trace=%file`, so these are the paths the kernel was actually asked for —
+/// the loader, NSS, DNS, timezone and TLS floor. Note `/etc/ssl/certs` and
+/// `/etc/ssl/openssl.cnf` individually and never `/etc/ssl` wholesale: that would
+/// re-admit `/etc/ssl/private`, which is mode 700 and holds TLS private keys.
+const ESSENTIAL_READ_PATHS: &[&str] = &[
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/lib32",
+    "/libx32",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.preload",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    "/etc/nsswitch.conf",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/hosts",
+    "/etc/host.conf",
+    "/etc/resolv.conf",
+    "/etc/localtime",
+    "/etc/ssl/certs",
+    "/etc/ssl/openssl.cnf",
+    "/etc/alternatives",
 ];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootView {
@@ -980,13 +1026,21 @@ fn append_minimal_read_mounts(
     entry_program: &Path,
 ) -> Result<(), Degradation> {
     let mut mounted = BTreeSet::new();
-    for dir in ESSENTIAL_READ_DIRS {
-        append_ro_mount(command, Path::new(dir), &mut mounted);
+    for path in ESSENTIAL_READ_PATHS {
+        append_ro_mount(command, Path::new(path), &mut mounted);
     }
+    // The entry program is bound in its OWN right, so an interpreter outside the floor
+    // (nub's provisioned Node under its store, a runner's `/opt/hostedtoolcache` Node)
+    // stays launchable no matter how narrow the floor gets.
     append_ro_mount(command, entry_program, &mut mounted);
     Ok(())
 }
 
+/// Bind one floor path read-only, skipping what the host does not have. Absence-tolerance
+/// is what lets the floor enumerate paths that are distro- and layout-specific
+/// (`/etc/ld.so.preload` and `/libx32` exist almost nowhere); binding a missing source
+/// would otherwise abort every confined run. bwrap creates the destination's parent dirs,
+/// so a FILE entry under an unmounted `/etc` still lands.
 fn append_ro_mount(command: &mut Command, path: &Path, mounted: &mut BTreeSet<PathBuf>) {
     if path.exists() && mounted.insert(path.to_path_buf()) {
         command.arg("--ro-bind").arg(path).arg(path);
@@ -1360,7 +1414,7 @@ fn validate_cwd_visibility(
     }
     if root_view == RootView::Minimal
         && !granted
-        && !ESSENTIAL_READ_DIRS
+        && !ESSENTIAL_READ_PATHS
             .iter()
             .any(|root| cwd == Path::new(root) || cwd.starts_with(root))
     {
@@ -2776,6 +2830,50 @@ mod tests {
     use std::collections::BTreeMap;
     use std::os::unix::process::CommandExt;
     use tempfile::tempdir;
+
+    /// The minimal-root floor is a system-START set, not a convenience set. Both halves of
+    /// that are load-bearing and each fails differently: drop `/etc/ld.so.cache` or the GCC
+    /// tree and every confined native build breaks, but keep `/etc` and `/opt` wholesale and
+    /// the floor re-admits the credential surface the read-set measurement found readable by
+    /// any dependency's install script running as root — which is the normal case in a
+    /// container and on a CI runner, where file mode blocks nothing.
+    ///
+    /// Asserted as coverage rather than as a literal list copy, so it pins the CONTRACT and
+    /// not the spelling: reordering or adding a genuinely-essential path keeps it green.
+    #[test]
+    fn the_essential_read_floor_excludes_the_credential_surface_it_used_to_mount() {
+        let covered = |p: &str| {
+            ESSENTIAL_READ_PATHS
+                .iter()
+                .any(|root| p == *root || p.starts_with(&format!("{root}/")))
+        };
+        for needed in [
+            "/usr/lib/gcc/aarch64-linux-gnu/12/cc1plus",
+            "/usr/include/stdio.h",
+            "/lib/aarch64-linux-gnu/libc.so.6",
+            "/etc/ld.so.cache",
+            "/etc/nsswitch.conf",
+            "/etc/passwd",
+            "/etc/resolv.conf",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/ssl/openssl.cnf",
+        ] {
+            assert!(covered(needed), "the floor must still reach {needed}");
+        }
+        for withheld in [
+            "/etc/kubernetes/admin.conf",
+            "/etc/rancher/k3s/k3s.yaml",
+            "/etc/ssl/private/site.key",
+            "/etc/docker/config.json",
+            "/etc/shadow",
+            "/opt/vendorware/creds.txt",
+            // An interpreter under `/opt` is NOT stranded by this: it is mounted by its own
+            // policy grant or as the entry program, never by the floor.
+            "/opt/hostedtoolcache/node/22.15.0/x64/bin/node",
+        ] {
+            assert!(!covered(withheld), "the floor must not mount {withheld}");
+        }
+    }
 
     fn policy(root: &Path, surface: serde_json::Value) -> SandboxPolicy {
         let homes = Homes {

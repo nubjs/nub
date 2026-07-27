@@ -339,13 +339,18 @@ mod tests {
         assert!(fs_confines(&policy(Vec::new()).fs));
     }
 
-    /// The build jail speculates twice: `$tooldirs` names a dozen ecosystems' cache dirs,
-    /// and the per-spawn extra reads name a toolchain layout (`<node-root>/include/node`)
-    /// derived without ever looking it up. A clean machine (fresh container, CI runner, a
-    /// distro Node whose headers ship separately) has almost none of them, and before this
-    /// was origin-aware the FIRST absent one aborted every confined lifecycle script. The
-    /// jail must still compile there, and still compile to the same confinement: the
-    /// project readable, only the package dir writable.
+    /// The build jail speculates on every read it takes: the dependency tree, nub's PM
+    /// cache (where it bootstraps node-gyp), and a per-spawn toolchain layout
+    /// (`<node-root>/include/node`) derived without ever looking it up. A clean machine
+    /// (fresh container, CI runner, a distro Node whose headers ship separately) has almost
+    /// none of them, and before this was origin-aware the FIRST absent one aborted every
+    /// confined lifecycle script. The jail must still compile there, and still compile to
+    /// the same confinement.
+    ///
+    /// It also pins the SHAPE the read-set measurement settled on: the mount plan reaches
+    /// `<project>/node_modules`, NOT the project root. The consuming project's source,
+    /// config, `.git/hooks/` and `.github/workflows/` are outside the jail's read set, and
+    /// a plan naming the project root would silently put them all back.
     #[test]
     fn build_jail_survives_a_machine_with_no_tool_caches() {
         let dir = tempdir().unwrap();
@@ -376,7 +381,7 @@ mod tests {
             plan,
             vec![
                 MountGrant {
-                    path: std::fs::canonicalize(&project).unwrap(),
+                    path: std::fs::canonicalize(project.join("node_modules")).unwrap(),
                     access: MountAccess::ReadOnly,
                 },
                 MountGrant {
@@ -385,7 +390,7 @@ mod tests {
                 },
             ],
             "dropping the absent cache dirs must leave the confinement intact — the \
-             project read-only and the package dir the only writable subtree"
+             dependency tree read-only and the package dir the only writable subtree"
         );
     }
 }
