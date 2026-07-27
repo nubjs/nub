@@ -158,23 +158,23 @@ fn invoking_session_gids() -> Option<Vec<u32>> {
     None
 }
 
-fn current_process_gids() -> Vec<u32> {
+fn current_process_gids() -> Vec<libc::gid_t> {
     // Safe FFI: the standard two-call getgroups — size query, then fill a buffer of exactly
-    // that size. `getgid` cannot fail.
+    // that size. `getgid` cannot fail. `getgroups` reports the SUPPLEMENTARY set only, so the
+    // primary gid is appended; a group can be either, and both are checked by the kernel.
     unsafe {
         let count = libc::getgroups(0, std::ptr::null_mut());
         if count < 0 {
-            return vec![libc::getgid() as u32];
+            return vec![libc::getgid()];
         }
         let mut buffer = vec![0 as libc::gid_t; count as usize];
         let filled = libc::getgroups(count, buffer.as_mut_ptr());
         if filled < 0 {
-            return vec![libc::getgid() as u32];
+            return vec![libc::getgid()];
         }
         buffer.truncate(filled as usize);
-        let mut gids: Vec<u32> = buffer.into_iter().map(|gid| gid as u32).collect();
-        gids.push(libc::getgid() as u32);
-        gids
+        buffer.push(libc::getgid());
+        buffer
     }
 }
 
