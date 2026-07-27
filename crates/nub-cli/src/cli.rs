@@ -3201,15 +3201,48 @@ fn run_sandbox_admin(args: &[String]) -> Result<i32> {
     let usage = "nub sandbox — manage the one-time host setup the agent-sandbox needs\n\n\
                  \x20 setup       install the sandbox helper + profile (needs root on Linux)\n\
                  \x20 status      report what is and isn't set up\n\
-                 \x20 teardown    remove the sandbox helper + profile";
+                 \x20 teardown    remove the sandbox helper + profile\n\n\
+                 setup options\n\
+                 \x20 --all-users  let any local user execute the helper, so no fresh login is\n\
+                 \x20              needed afterwards (for CI runners and single-user machines)";
     let Some(action) = args.first().map(String::as_str) else {
         println!("{usage}");
         return Ok(0);
     };
     #[cfg(target_os = "linux")]
     {
+        use nub_sandbox::linux_admin::HelperAccess;
+
+        // A setup that installed correctly but that the CALLER cannot use yet is neither a
+        // success nor a failure — it exits distinctly so a CI step cannot read it as either.
+        const EXIT_SETUP_NEEDS_FRESH_SESSION: i32 = 3;
+
+        let flags: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+        let mut access = HelperAccess::Group;
+        for flag in &flags {
+            match *flag {
+                "--all-users" => access = HelperAccess::AllUsers,
+                other => {
+                    anyhow::bail!("unknown `nub sandbox {action}` option `{other}`\n\n{usage}")
+                }
+            }
+        }
+        if action != "setup" && !flags.is_empty() {
+            anyhow::bail!("`nub sandbox {action}` takes no options\n\n{usage}");
+        }
+
         let result = match action {
-            "setup" => nub_sandbox::linux_admin::setup(),
+            "setup" => match nub_sandbox::linux_admin::setup(access) {
+                Ok(report) => {
+                    println!("{}", report.text);
+                    return Ok(if report.usable_now {
+                        0
+                    } else {
+                        EXIT_SETUP_NEEDS_FRESH_SESSION
+                    });
+                }
+                Err(message) => Err(message),
+            },
             "status" => nub_sandbox::linux_admin::status(),
             "teardown" => nub_sandbox::linux_admin::teardown(),
             "-h" | "--help" | "help" => {

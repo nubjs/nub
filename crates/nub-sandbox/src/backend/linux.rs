@@ -2119,15 +2119,23 @@ fn relocate_file_at_least(file: File, minimum: RawFd) -> std::io::Result<File> {
 /// disable unprivileged nesting regardless of any profile. Carries no privileged
 /// remediation commands.
 fn classify_bwrap_failures(failures: &[String], nesting: bool) -> String {
-    classify_bwrap_failures_under(failures, nesting, apparmor_restricts_unprivileged_userns())
+    classify_bwrap_failures_under(
+        failures,
+        nesting,
+        apparmor_restricts_unprivileged_userns(),
+        in_container(),
+    )
 }
 
-/// The AppArmor restriction is a parameter so the classification is testable
-/// without the host's real sysctl value.
+/// The AppArmor restriction and the container verdict are parameters so the
+/// classification is testable without the host's real sysctl value — and, since
+/// part of the test suite itself runs inside containers, without the answer
+/// flipping under the runner.
 fn classify_bwrap_failures_under(
     failures: &[String],
     nesting: bool,
     apparmor_restricted: bool,
+    containerized: bool,
 ) -> String {
     let detail = failures.join("; ");
     let lower = detail.to_ascii_lowercase();
@@ -2165,9 +2173,6 @@ fn classify_bwrap_failures_under(
     if lower.contains("unknown option") || lower.contains("invalid option") {
         return format!("installed Bubblewrap lacks required stock options ({detail})");
     }
-    if !nesting && apparmor_restricted && is_namespace_denial(&lower) {
-        return format!("{}\n\n(underlying: {detail})", apparmor_setup_hint());
-    }
     if fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
         .is_ok_and(|value| value.trim() == "0")
     {
@@ -2178,42 +2183,67 @@ fn classify_bwrap_failures_under(
     {
         return format!("Bubblewrap cannot create the required views under WSL ({detail})");
     }
-    if Path::new("/.dockerenv").exists()
+    if containerized {
+        return format!("the container policy blocks required Bubblewrap behavior ({detail})");
+    }
+    // BOTH launch modes land here, and the container/sysctl/WSL arms above must
+    // come first: a namespace denial inside a container on an AppArmor-restricted
+    // host is the container's doing, and host setup run in there fixes nothing —
+    // pointing at it names the wrong cause. Past that, a loaded helper profile
+    // would have permitted the namespace, so a surviving denial means the grant is
+    // not in effect. (Enumerating loaded profiles via securityfs needs privilege,
+    // so it is inferred from the denial, not read.)
+    if apparmor_restricted && is_namespace_denial(&lower) {
+        if nesting {
+            return format!(
+                "the sandbox helper's AppArmor profile is not loaded, so the host blocks the user namespaces the sandbox needs.\n\n{}\n\n(underlying: {detail})",
+                apparmor_setup_hint()
+            );
+        }
+        return format!("{}\n\n(underlying: {detail})", apparmor_setup_hint());
+    }
+    format!("Bubblewrap cannot enforce the required process view ({detail})")
+}
+
+fn in_container() -> bool {
+    Path::new("/.dockerenv").exists()
         || Path::new("/run/.containerenv").exists()
         || fs::read_to_string("/proc/1/cgroup").is_ok_and(|value| {
             ["docker", "containerd", "kubepods", "libpod"]
                 .iter()
                 .any(|marker| value.contains(marker))
         })
-    {
-        return format!("the container policy blocks required Bubblewrap behavior ({detail})");
-    }
-    // A loaded helper profile would have permitted the namespace, so on a
-    // restricted host a surviving denial means the dedicated profile is not
-    // effective. (Enumerating loaded profiles via securityfs needs privilege, so
-    // it is inferred from the denial, not read.)
-    if nesting && apparmor_restricted && is_namespace_denial(&lower) {
-        return format!(
-            "the sandbox helper's AppArmor profile is not loaded, so the host blocks the user namespaces the sandbox needs.\n\n{}\n\n(underlying: {detail})",
-            apparmor_setup_hint()
-        );
-    }
-    format!("Bubblewrap cannot enforce the required process view ({detail})")
 }
 
 /// The remedy line for the AppArmor userns restriction, naming the exact copy-pasteable setup
 /// command and the CI one-liner. Kept in one place so every fail-closed path that the setup
 /// fixes points the user at the same command (epic C1).
+///
+/// The `sudo -n` probe only REPORTS that the machine could repair itself without a prompt; nub
+/// never elevates on its own initiative.
 fn apparmor_setup_hint() -> String {
-    format!(
+    apparmor_setup_hint_with(crate::backend::linux_setup::passwordless_sudo_available())
+}
+
+fn apparmor_setup_hint_with(passwordless_sudo: bool) -> String {
+    use crate::backend::linux_setup::{SETUP_COMMAND, SETUP_COMMAND_ALL_USERS};
+    let base = format!(
         "the sandbox needs a one-time setup on this system. Ubuntu's kernel restricts the user \
          namespaces the sandbox relies on; grant nub's bundled bubblewrap the one capability it \
-         needs (the only step that needs root, paid once per machine):\n\n    {}\n\nThis installs \
-         a digest-pinned copy of bubblewrap at {DEDICATED_HELPER_PATH} and an AppArmor profile \
-         keyed to it; the global restriction stays on for everything else. On ephemeral CI you \
-         can instead run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
-        crate::backend::linux_setup::SETUP_COMMAND
-    )
+         needs (the only step that needs root, paid once per machine):\n\n    {SETUP_COMMAND}\n\n\
+         This installs a digest-pinned copy of bubblewrap at {DEDICATED_HELPER_PATH} and an \
+         AppArmor profile keyed to it; the global restriction stays on for everything else. That \
+         setup gates the helper behind the nub-sandbox group, which an already-running shell or \
+         CI job cannot pick up — on an ephemeral or single-user machine use \
+         `{SETUP_COMMAND_ALL_USERS}` instead and the very next command works."
+    );
+    if passwordless_sudo {
+        return format!(
+            "{base}\n\nPasswordless sudo works here, so this needs no prompt:\n\n    \
+             {SETUP_COMMAND_ALL_USERS}"
+        );
+    }
+    base
 }
 
 fn apparmor_restricts_unprivileged_userns() -> bool {
@@ -4132,7 +4162,7 @@ mod tests {
             "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
             "bwrap: setting up uid map: Permission denied",
         ] {
-            let message = classify_bwrap_failures_under(&[detail.to_string()], false, true);
+            let message = classify_bwrap_failures_under(&[detail.to_string()], false, true, false);
             assert!(
                 message.contains(crate::backend::linux_setup::SETUP_COMMAND),
                 "a restricted host must get the setup hint, not the generic message: {message}"
@@ -4144,11 +4174,36 @@ mod tests {
             &["bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".to_string()],
             false,
             false,
+            false,
         );
         assert!(
             !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_container_is_blamed_before_the_host_apparmor_restriction() {
+        // Both conditions hold at once inside a container on a restricted host, and
+        // the container is the one the caller can act on: host setup run inside a
+        // container fixes nothing, so naming it sends the reader after AppArmor for
+        // a container-policy problem.
+        for nesting in [false, true] {
+            let message = classify_bwrap_failures_under(
+                &["bwrap: setting up uid map: Permission denied".to_string()],
+                nesting,
+                true,
+                true,
+            );
+            assert!(
+                message.contains("container policy"),
+                "nesting={nesting}: {message}"
+            );
+            assert!(
+                !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+                "nesting={nesting}: {message}"
+            );
+        }
     }
 
     #[test]
@@ -4234,6 +4289,26 @@ mod tests {
             "{hint}"
         );
         assert!(hint.contains(DEDICATED_HELPER_PATH), "{hint}");
+    }
+
+    #[test]
+    fn the_hint_names_the_no_prompt_repair_only_where_sudo_needs_no_password() {
+        // A machine that can repair itself non-interactively (a GitHub runner) should be told
+        // so with the exact command; one that would prompt must not imply otherwise. nub only
+        // REPORTS this — it never runs sudo on its own initiative.
+        let passwordless = apparmor_setup_hint_with(true);
+        assert!(
+            passwordless.contains("Passwordless sudo works here"),
+            "{passwordless}"
+        );
+        assert!(
+            passwordless.contains(crate::backend::linux_setup::SETUP_COMMAND_ALL_USERS),
+            "{passwordless}"
+        );
+        assert!(
+            !apparmor_setup_hint_with(false).contains("Passwordless sudo works here"),
+            "an interactive host must not claim a prompt-free repair"
+        );
     }
 
     #[test]

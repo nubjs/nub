@@ -118,7 +118,9 @@ pub use matcher::Homes;
 /// `nub sandbox {setup,status,teardown}`. See `.fray/sandbox-escalation-ux.md`.
 #[cfg(target_os = "linux")]
 pub mod linux_admin {
-    pub use crate::backend::linux_setup::{SETUP_COMMAND, setup, status, teardown};
+    pub use crate::backend::linux_setup::{
+        HelperAccess, SETUP_COMMAND, SETUP_COMMAND_ALL_USERS, SetupReport, setup, status, teardown,
+    };
 }
 
 pub use policy::SandboxPolicy;
