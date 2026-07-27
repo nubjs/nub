@@ -3375,12 +3375,6 @@ mod tests {
     /// so the golden above (both `None`) cannot tell them apart at all; this pins
     /// each to its own reserved destination. Also covers the private-tmp and
     /// minimal-root arms, whose remounts the read-only case never reaches.
-    ///
-    /// SCOPE: this catches a swap of the destinations WITHIN
-    /// `append_confinement_options`. It cannot catch a transposition of the two
-    /// same-typed `Option<&File>` arguments at the `configure_retained_outer` call
-    /// site, because it invokes the callee directly — pinning that would need a real
-    /// Bubblewrap and monitor image.
     #[test]
     fn late_bound_infrastructure_mounts_land_at_their_own_reserved_paths() {
         let root = tempdir().unwrap();
@@ -3435,13 +3429,10 @@ mod tests {
             "the CA bundle is layered before the net bridge: {raw:?}"
         );
         // Private /tmp binds the host dir; the minimal root seals itself read-only last.
-        assert_eq!(rendered[at("/tmp") - 1], tmp_dir.display().to_string());
-        assert_eq!(rendered[at("/tmp") - 2], "--bind");
-        assert_eq!(rendered.last().unwrap(), "--unshare-net");
-        assert_eq!(
-            rendered[rendered.len() - 3..rendered.len() - 1],
-            ["--remount-ro", "/"]
-        );
+        assert_eq!(raw[at("/tmp") - 1], tmp_dir.display().to_string());
+        assert_eq!(raw[at("/tmp") - 2], "--bind");
+        assert_eq!(raw.last().unwrap(), "--unshare-net");
+        assert_eq!(raw[raw.len() - 3..raw.len() - 1], ["--remount-ro", "/"]);
     }
 
     /// `--args` is a NUL-SEPARATED stream, so an argument carrying an interior NUL
