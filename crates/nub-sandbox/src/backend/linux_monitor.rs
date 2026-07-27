@@ -2278,9 +2278,10 @@ fn parse_elf(file: &File) -> io::Result<ParsedElf> {
         match kind {
             1 => loads.push((vaddr, mem_size, file_offset, file_size)),
             2 => {
-                if dynamic.replace((file_offset, file_size)).is_some() {
+                if dynamic.is_some() {
                     return Err(invalid_data("duplicate sandbox monitor ELF PT_DYNAMIC"));
                 }
+                dynamic = Some((file_offset, file_size));
             }
             3 => {
                 if interpreter.is_some() || !(2..=4096).contains(&file_size) {
