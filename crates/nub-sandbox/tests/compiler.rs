@@ -843,15 +843,22 @@ fn inline_policy_with_no_source_file_is_not_self_excluded() {
 
 #[test]
 fn policy_file_deny_is_injected_before_the_env_floor() {
-    // The Linux backend recognizes the secret-file floor POSITIONALLY as the LAST six fs
-    // entries (`builtin_env_band_start`): the LEAF band (`.env*` + `.npmrc`) then the
+    // The Linux backend recognizes the secret-file floor POSITIONALLY as the LAST fs
+    // entries (`builtin_env_band_start`): the LEAF band (the secret FILE globs) then the
     // `.env*` SUBTREE band. The policy-file deny must land BEFORE that floor so the
     // invariant survives self-exclusion.
-    const FLOOR: [&str; 6] = [
+    //
+    // Restated here rather than derived because the source of truth
+    // (`compiler::defaults::ENV_DENY_{LEAF,SUBTREE}_GLOBS`) is crate-private and this is
+    // an integration test. Adding a glob to the floor means updating this literal — the
+    // in-crate consumers derive from those arrays and do not.
+    const FLOOR: [&str; 8] = [
         "**/.env*",
         ".env*",
         "**/.npmrc",
         ".npmrc",
+        "**/node_modules/npm/npmrc",
+        "node_modules/npm/npmrc",
         "**/.env*/**",
         ".env*/**",
     ];
