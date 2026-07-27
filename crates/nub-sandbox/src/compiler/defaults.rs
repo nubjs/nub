@@ -75,6 +75,17 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// its canonical location rather than by bare basename, which would also deny unrelated
 /// files a project happens to call `npmrc`.
 ///
+/// ENFORCEMENT IS macOS-ONLY TODAY (measured: a jailed dep script read
+/// `/opt/homebrew/lib/node_modules/npm/npmrc` before this glob and is refused after).
+/// Linux denies by MASKING a path the mount plan granted, and the mask planner never
+/// reaches this file on two independent counts: the deny walk runs only over the build
+/// jail's `deny_search_roots` (project + package dir), which do not contain the Node
+/// root, and it skips any directory named `node_modules` (`DENY_WALK_SKIP_DIRS`). So on
+/// Linux the file stays readable through the `lib/node_modules` read grant. The policy is
+/// right on both platforms; closing the Linux half belongs with whoever owns that grant —
+/// either an exact-path deny the embedder supplies (it already derives the Node root) or
+/// a grant narrower than the whole `lib/node_modules` subtree.
+///
 /// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — the file itself) and a
 /// SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`, covering a `.env.d/`-style
 /// DIRECTORY of per-target secret files; an npmrc is always a file, so it has no subtree
@@ -1268,8 +1279,12 @@ mod tests {
     /// leading dot, so the `.npmrc` globs miss it — and it sits inside the subtree the
     /// build jail grants so `npm`/`npx` resolve. A managed install can put an auth token
     /// there, so the floor must cover it.
+    ///
+    /// This pins the POLICY only. Whether a backend enforces it is separate: macOS does,
+    /// Linux does not reach this path with a mask (see the `ENV_DENY_LEAF_GLOBS` doc), so
+    /// a green run here is not evidence of Linux enforcement.
     #[test]
-    fn the_floor_covers_npms_undotted_builtin_config() {
+    fn the_floor_denies_npms_undotted_builtin_config_in_policy() {
         // An allow-by-default set with only the floor on top: whatever the floor denies
         // is denied no matter how permissive the grants above it were.
         let set = crate::policy::FsRuleSet {

@@ -1096,7 +1096,11 @@ fn collect_direct_denied_candidates(
     out: &mut Vec<(PathBuf, PathBuf, MaskKind, bool)>,
 ) -> Result<(), String> {
     let roots = strict_search_roots(roots)?;
-    let band_start = builtin_env_band_start(policy);
+    // The boundary between an explicit USER `.env` deny (band 1) and the builtin floor,
+    // which decides the dotenv mask kind. Shared with the compiler so the recognizer reads
+    // the same arrays `finalize_env_deny` emits rather than restating them — a restated
+    // copy desyncs silently, and "floor not found" downgrades a mask instead of failing.
+    let band_start = crate::compiler::defaults::env_deny_floor_start(&policy.fs.rules.entries);
     for root in roots {
         walk_deny_candidates(&root, matcher, band_start, out)?;
     }
@@ -1260,31 +1264,6 @@ fn merge_masks(masks: Vec<Mask>) -> Vec<Mask> {
                     .any(|dir| mask.path != *dir && mask.path.starts_with(dir))
         })
         .collect()
-}
-
-/// The index where the builtin secret-file deny floor begins — the boundary between the
-/// user/default band-1 entries and the floor. COUPLED to `fold::finalize_env_deny`, which
-/// appends the leaf band then the subtree band as the last entries; this recognizes them
-/// positionally. Derived from the `defaults::ENV_DENY_*_GLOBS` arrays rather than
-/// restating them, so adding a glob to the floor cannot silently desync this recognizer
-/// (a hand-copied list here previously had to be edited in lockstep, and a missed edit
-/// degrades to "floor not found" — which downgrades the dotenv mask kind rather than
-/// failing loudly). `None` when the floor was not emitted (a fully-relaxed or no-read
-/// policy). Used to distinguish an explicit USER `.env` deny (in band 1) from the builtin
-/// floor when planning the Linux dotenv mask kind.
-fn builtin_env_band_start(policy: &SandboxPolicy) -> Option<usize> {
-    let floor = crate::compiler::defaults::ENV_DENY_LEAF_GLOBS
-        .iter()
-        .chain(crate::compiler::defaults::ENV_DENY_SUBTREE_GLOBS);
-    let entries = &policy.fs.rules.entries;
-    let start = entries.len().checked_sub(floor.clone().count())?;
-    floor
-        .enumerate()
-        .all(|(offset, glob)| {
-            let rule = &entries[start + offset];
-            rule.effect == Effect::Deny && rule.matcher.as_str() == *glob
-        })
-        .then_some(start)
 }
 
 fn validate_masks_against_mount_plan(

@@ -12,7 +12,10 @@
 
 mod builtin_sets;
 mod clobber;
-mod defaults;
+/// `pub(crate)` for the Linux backend alone: it recognizes the secret-file deny floor
+/// positionally and by membership, and must read the same arrays `finalize_env_deny`
+/// emits rather than restate them.
+pub(crate) mod defaults;
 mod env_grammar;
 mod fold;
 mod preset;
