@@ -17,7 +17,8 @@
 // Node 24+ adds: URLPattern, RegExp.escape, Error.isError, Promise.try.
 // We polyfill those on Node 22.x only.
 //
-// No Node version ships: Temporal, reportError, browser-shape Worker.
+// No Node version ships: Temporal, reportError, browser-shape Worker,
+// Promise.allKeyed / Promise.allSettledKeyed.
 // These need polyfills on all supported versions. (Temporal is a lazy global
 // installed by the preload entry, NOT here — see preload.cjs / preload.mjs.)
 
@@ -266,6 +267,7 @@ function installSyncPolyfills(preloaded) {
 
   installUint8ArrayBase64();
   installDisposableStacks();
+  installKeyedPromiseCombinators();
 }
 
 // ── Uint8Array base64/hex (TC39 Stage 3; native Node 25+, absent below) ──
@@ -797,6 +799,131 @@ function installDisposableStacks() {
     });
     defGlobal("AsyncDisposableStack", AsyncDisposableStack);
   }
+}
+
+// ── Promise.allKeyed / Promise.allSettledKeyed (TC39 "await dictionary",
+//    Stage 3) ──
+// Spec-faithful port of PerformPromiseAllKeyed. No engine and no Node ships
+// these yet, so unlike the rest of this file the feature-detect is not a version
+// gate — it is the step-aside for whenever V8 does, the same posture as Temporal.
+// Four observable details are load-bearing and easy to get wrong:
+//
+//   1. The result object has a NULL prototype (OrdinaryObjectCreate(null)), so
+//      `result.hasOwnProperty` is undefined and util.inspect prints it as
+//      `[Object: null prototype]`. Destructuring — the entire point of the API —
+//      is unaffected.
+//   2. Keys are the argument's own ENUMERABLE keys in [[OwnPropertyKeys]] order,
+//      symbols INCLUDED. That is the proposal's deliberate divergence from the
+//      userland precedents it replaces (bluebird's Promise.props, p-props), which
+//      follow Object.keys and silently drop symbol keys.
+//   3. A non-object argument and a non-callable `this.resolve` REJECT the
+//      returned promise; only a `this` that isn't a constructor throws
+//      synchronously (spec step 2's `?` vs steps 3 and 5).
+//   4. `this` is the constructor, so a Promise subclass drives the result.
+//
+// Both are installed non-enumerable to match how the engine will define them
+// (and this file's additive contract: invisible to enumeration).
+function installKeyedPromiseCombinators() {
+  const needAll = typeof Promise.allKeyed !== "function";
+  const needAllSettled = typeof Promise.allSettledKeyed !== "function";
+  if (!needAll && !needAllSettled) return;
+
+  // NewPromiseCapability(C).
+  const newCapability = (C, name) => {
+    if (typeof C !== "function") {
+      throw new TypeError(`Promise.${name} called on a non-constructor`);
+    }
+    let resolve;
+    let reject;
+    const promise = new C((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    if (typeof resolve !== "function" || typeof reject !== "function") {
+      throw new TypeError("promise capability functions are not callable");
+    }
+    return { promise, resolve, reject };
+  };
+
+  // CreateKeyedPromiseCombinatorResultObject. Plain assignment IS
+  // CreateDataPropertyOrThrow here: with no prototype there is no inherited
+  // setter to intercept (not even `__proto__`), and the keys came from
+  // [[OwnPropertyKeys]] so they are already distinct.
+  const resultObject = (entries) => {
+    const obj = Object.create(null);
+    for (let i = 0; i < entries.length; i++) obj[entries[i].key] = entries[i].value;
+    return obj;
+  };
+
+  // PerformPromiseAllKeyed. `remaining` starts at 1 and is decremented only once
+  // the loop is done, so a dictionary of already-settled promises cannot resolve
+  // the combinator before every key has been visited.
+  const perform = (isSettled, promises, ctor, capability, promiseResolve) => {
+    const entries = [];
+    const remaining = { value: 1 };
+    for (const key of Reflect.ownKeys(promises)) {
+      const desc = Reflect.getOwnPropertyDescriptor(promises, key);
+      if (desc === undefined || !desc.enumerable) continue;
+      const value = promises[key];
+      const index = entries.push({ key, value: undefined }) - 1;
+      const nextPromise = promiseResolve.call(ctor, value);
+      const alreadyCalled = { value: false };
+      const settle = (entryValue) => {
+        if (alreadyCalled.value) return;
+        alreadyCalled.value = true;
+        entries[index].value = entryValue;
+        remaining.value -= 1;
+        if (remaining.value === 0) capability.resolve(resultObject(entries));
+      };
+      remaining.value += 1;
+      // allKeyed: the first rejection rejects the whole combinator through the
+      // capability's own reject function. allSettledKeyed: the rejection is
+      // recorded, and its handler SHARES `alreadyCalled` with the fulfill
+      // handler, so exactly one of the pair counts even for a thenable that
+      // calls both.
+      nextPromise.then(
+        isSettled ? (v) => settle({ status: "fulfilled", value: v }) : settle,
+        isSettled ? (reason) => settle({ status: "rejected", reason }) : capability.reject,
+      );
+    }
+    remaining.value -= 1;
+    if (remaining.value === 0) capability.resolve(resultObject(entries));
+  };
+
+  const install = (name, isSettled) => {
+    const fn = function (promises) {
+      const ctor = this;
+      const capability = newCapability(ctor, name);
+      try {
+        const promiseResolve = ctor.resolve;
+        if (typeof promiseResolve !== "function") {
+          throw new TypeError("Promise resolve is not a function");
+        }
+        if (
+          promises === null ||
+          (typeof promises !== "object" && typeof promises !== "function")
+        ) {
+          throw new TypeError(`Promise.${name} argument must be an object`);
+        }
+        perform(isSettled, promises, ctor, capability, promiseResolve);
+      } catch (err) {
+        capability.reject(err);
+      }
+      return capability.promise;
+    };
+    // A builtin's `name` and `length` are observable; the anonymous function
+    // expression above gives length 1 but an empty name.
+    Object.defineProperty(fn, "name", { value: name, configurable: true });
+    Object.defineProperty(Promise, name, {
+      value: fn,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  };
+
+  if (needAll) install("allKeyed", false);
+  if (needAllSettled) install("allSettledKeyed", true);
 }
 
 // Load the two ESM side-effect modules — Web Locks (navigator.locks) and the

@@ -164,6 +164,21 @@ interface ImportMeta {
   };
 }
 
+// ── Promise.allKeyed / Promise.allSettledKeyed (TC39 "await dictionary", Stage 3;
+//    runtime/polyfills.cjs) ──
+// In no engine, in no @types/node, in no TypeScript lib. The mapped types mirror
+// the proposal README's own signatures: the key set is preserved and each value is
+// `Awaited`. Two runtime facts TypeScript cannot express — the result object has a
+// null prototype, and its keys are the argument's own ENUMERABLE keys (so a
+// non-enumerable or inherited property is absent at runtime while `keyof` still
+// includes it). Neither affects the destructuring this API exists for.
+interface PromiseConstructor {
+  allKeyed<T extends object>(promises: T): Promise<{ -readonly [K in keyof T]: Awaited<T[K]> }>;
+  allSettledKeyed<T extends object>(
+    promises: T,
+  ): Promise<{ -readonly [K in keyof T]: PromiseSettledResult<Awaited<T[K]>> }>;
+}
+
 // ── Date.prototype.toTemporalInstant (runtime/preload-common.cjs installs it) ──
 // Nub assigns the polyfill's `toTemporalInstant` onto Date.prototype on the floor
 // (matching native Node, which ships it once Temporal is native).
