@@ -55,43 +55,49 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 ];
 
 /// The default secret-FILE READ-deny globs: any file whose BASENAME starts with `.env`
-/// (`.env`, `.env.local`, `.env.production`, `.envrc`, …) OR is `.npmrc`, at any depth.
-/// `.env*` holds the exact secrets the sandbox scrubs from the env; a project-local
-/// `.npmrc` (`./.npmrc`, `packages/x/.npmrc`) can hardcode a registry token and would
-/// otherwise fall inside the project `./` read grant (the home-anchored `~/.npmrc` deny
-/// does not cover it). Both are denied by DEFAULT on every read-granting fs policy (an
-/// unconditional floor) — see [`env_deny_leaf_rules`]/[`env_deny_subtree_rules`] and the
-/// injection in `fold::finalize_env_deny`. Denying reads is near-zero-breakage: legit
-/// code reads secrets via the injected process env / the PM's constructed registry
-/// config, not by `fs.read()`-ing the file inside a lifecycle script.
+/// (`.env`, `.env.local`, `.env.production`, `.envrc`, …) OR is an npm config file, at
+/// any depth. `.env*` holds the exact secrets the sandbox scrubs from the env; a
+/// project-local `.npmrc` (`./.npmrc`, `packages/x/.npmrc`) can hardcode a registry
+/// token and would otherwise fall inside the project `./` read grant (the home-anchored
+/// `~/.npmrc` deny does not cover it). Both are denied by DEFAULT on every read-granting
+/// fs policy (an unconditional floor) — see
+/// [`env_deny_leaf_rules`]/[`env_deny_subtree_rules`] and the injection in
+/// `fold::finalize_env_deny`. Denying reads is near-zero-breakage: legit code reads
+/// secrets via the injected process env / the PM's constructed registry config, not by
+/// `fs.read()`-ing the file inside a lifecycle script.
 ///
-/// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — `**/.env*` / `**/.npmrc`,
-/// the file itself) and a SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`,
-/// covering a `.env.d/`-style DIRECTORY of per-target secret files; `.npmrc` is always a
-/// file, so it has no subtree twin). Both are appended as the LAST entries so the block
-/// is UNCONDITIONAL — no directory grant, glob, or exact allow can reopen a `.env*` /
-/// `.npmrc` file or a `.env*/` directory's contents (sandbox.mdx "`.env` files are
-/// always blocked"). See `fold::finalize_env_deny`. The rootless twins (`.env*`,
-/// `.npmrc`) mirror the leaf band for a depth-0 match; canonical candidates are
-/// absolute, so `**/…` is the form that bites.
+/// npm's BUILTIN config file is `<npm>/npmrc` with NO leading dot, so the `.npmrc` globs
+/// miss it. It sits at `<node-root>/lib/node_modules/npm/npmrc` — inside the subtree the
+/// build jail grants to make `npm`/`npx` resolvable — and while it usually holds only
+/// shipped defaults, a managed install can put an auth token there. Denying it keeps the
+/// floor consistent: every OTHER npmrc in npm's hierarchy is already denied, so leaving
+/// the one undotted spelling readable was an artifact of keying on the dot. Matched at
+/// its canonical location rather than by bare basename, which would also deny unrelated
+/// files a project happens to call `npmrc`.
 ///
-/// COUPLED to the Linux backend's `builtin_env_band_start`/`is_builtin_env_glob`, which
-/// recognize these globs positionally — the leaf then subtree emission order and count
-/// here must stay in lockstep with that recognizer. The test-only union below guards
-/// that the two bands never drift.
-pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &["**/.env*", ".env*", "**/.npmrc", ".npmrc"];
-pub(crate) const ENV_DENY_SUBTREE_GLOBS: &[&str] = &["**/.env*/**", ".env*/**"];
-/// The union — the drift-guard the Linux grant derivation recognizes as builtin. Gated to
-/// its consumer's cfg (linux/test) so a macOS/Windows non-test build doesn't warn unused.
-#[cfg(test)]
-pub(crate) const ENV_DENY_GLOBS: &[&str] = &[
+/// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — the file itself) and a
+/// SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`, covering a `.env.d/`-style
+/// DIRECTORY of per-target secret files; an npmrc is always a file, so it has no subtree
+/// twin). Both are appended as the LAST entries so the block is UNCONDITIONAL — no
+/// directory grant, glob, or exact allow can reopen a denied file or a `.env*/`
+/// directory's contents (sandbox.mdx "`.env` files are always blocked"). See
+/// `fold::finalize_env_deny`. Each glob carries a rootless twin mirroring it for a
+/// depth-0 match; canonical candidates are absolute, so `**/…` is the form that bites.
+///
+/// These two arrays are the SINGLE SOURCE OF TRUTH for the floor: the Linux backend's
+/// `builtin_env_band_start` recognizes the floor POSITIONALLY (last N entries, leaf band
+/// then subtree band) and `is_builtin_env_glob` by membership, and both derive from
+/// these constants rather than restating them — a hand-copied list silently desynced on
+/// every edit here.
+pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &[
     "**/.env*",
-    "**/.env*/**",
     ".env*",
-    ".env*/**",
     "**/.npmrc",
     ".npmrc",
+    "**/node_modules/npm/npmrc",
+    "node_modules/npm/npmrc",
 ];
+pub(crate) const ENV_DENY_SUBTREE_GLOBS: &[&str] = &["**/.env*/**", ".env*/**"];
 
 /// Case-insensitive substring test for a secret name-word anywhere in a key. Used by
 /// [`is_npm_config_credential`] for the registry-credential family.
@@ -1238,22 +1244,58 @@ mod tests {
         );
         let leaf_globs: Vec<&str> = leaf.iter().map(|r| r.matcher.as_str()).collect();
         let subtree_globs: Vec<&str> = subtree.iter().map(|r| r.matcher.as_str()).collect();
-        // The LEAF band denies the `.env*` / `.npmrc` file itself; the SUBTREE band denies
-        // a `.env*/`-directory's contents. The split is what lets an exact-file allow sit
-        // between them (leaf-deny → allow → subtree-deny-last). `.npmrc` is a file with no
-        // subtree twin, so it appears only in the leaf band.
-        for g in ["**/.env*", ".env*", "**/.npmrc", ".npmrc"] {
+        // The LEAF band denies the secret FILE itself; the SUBTREE band denies a
+        // `.env*/`-directory's contents. The split is what lets an exact-file allow sit
+        // between them (leaf-deny → allow → subtree-deny-last). An npmrc is a file with
+        // no subtree twin, so it appears only in the leaf band.
+        for g in [
+            "**/.env*",
+            ".env*",
+            "**/.npmrc",
+            ".npmrc",
+            "**/node_modules/npm/npmrc",
+            "node_modules/npm/npmrc",
+        ] {
             assert!(leaf_globs.contains(&g), "leaf band missing {g}");
             assert!(!leaf_globs.contains(&format!("{g}/**").as_str()));
         }
         for g in ["**/.env*/**", ".env*/**"] {
             assert!(subtree_globs.contains(&g), "subtree band missing {g}");
         }
-        // The union still equals the drift-guarded ENV_DENY_GLOBS (is_builtin recognition).
-        let mut union: Vec<&str> = leaf_globs.iter().chain(&subtree_globs).copied().collect();
-        union.sort_unstable();
-        let mut all = ENV_DENY_GLOBS.to_vec();
-        all.sort_unstable();
-        assert_eq!(union, all, "leaf+subtree must equal ENV_DENY_GLOBS");
+    }
+
+    /// npm's builtin config is the one file in its config hierarchy spelled without a
+    /// leading dot, so the `.npmrc` globs miss it — and it sits inside the subtree the
+    /// build jail grants so `npm`/`npx` resolve. A managed install can put an auth token
+    /// there, so the floor must cover it.
+    #[test]
+    fn the_floor_covers_npms_undotted_builtin_config() {
+        // An allow-by-default set with only the floor on top: whatever the floor denies
+        // is denied no matter how permissive the grants above it were.
+        let set = crate::policy::FsRuleSet {
+            entries: env_deny_leaf_rules()
+                .into_iter()
+                .chain(env_deny_subtree_rules())
+                .collect(),
+            default_effect: Effect::Allow,
+        };
+        let matcher = crate::matcher::path::PathMatcher::new(&set);
+        for denied in [
+            "/opt/node/lib/node_modules/npm/npmrc",
+            "/home/u/.nvm/versions/node/v26.5.0/lib/node_modules/npm/npmrc",
+        ] {
+            assert_eq!(
+                matcher.decide(Path::new(denied)).effect,
+                Effect::Deny,
+                "npm's builtin config must be denied: {denied}"
+            );
+        }
+        // Scoped to npm's own location — an unrelated file a project calls `npmrc`
+        // (a template, a distro's `etc/npmrc`) is not swept up by the floor.
+        assert_eq!(
+            matcher.decide(Path::new("/srv/app/config/npmrc")).effect,
+            Effect::Allow,
+            "the floor must not deny an unrelated file named `npmrc`"
+        );
     }
 }

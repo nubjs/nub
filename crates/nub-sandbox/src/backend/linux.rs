@@ -1263,26 +1263,22 @@ fn merge_masks(masks: Vec<Mask>) -> Vec<Mask> {
 }
 
 /// The index where the builtin secret-file deny floor begins — the boundary between the
-/// user/default band-1 entries and the floor. COUPLED to `fold::finalize_env_deny`,
-/// which appends the floor as the last SIX entries in a fixed order (LEAF deny
-/// `**/.env*`, `.env*`, `**/.npmrc`, `.npmrc` then SUBTREE deny `**/.env*/**`,
-/// `.env*/**`); this recognizes them positionally, so if that emission's glob strings,
-/// order, or count change this must change with it. `None` when the floor was not
-/// emitted (a fully-relaxed or no-read policy). Used to distinguish an explicit USER
-/// `.env` deny (in band 1) from the builtin floor when planning the Linux dotenv mask kind.
+/// user/default band-1 entries and the floor. COUPLED to `fold::finalize_env_deny`, which
+/// appends the leaf band then the subtree band as the last entries; this recognizes them
+/// positionally. Derived from the `defaults::ENV_DENY_*_GLOBS` arrays rather than
+/// restating them, so adding a glob to the floor cannot silently desync this recognizer
+/// (a hand-copied list here previously had to be edited in lockstep, and a missed edit
+/// degrades to "floor not found" — which downgrades the dotenv mask kind rather than
+/// failing loudly). `None` when the floor was not emitted (a fully-relaxed or no-read
+/// policy). Used to distinguish an explicit USER `.env` deny (in band 1) from the builtin
+/// floor when planning the Linux dotenv mask kind.
 fn builtin_env_band_start(policy: &SandboxPolicy) -> Option<usize> {
-    const FLOOR: [&str; 6] = [
-        "**/.env*",
-        ".env*",
-        "**/.npmrc",
-        ".npmrc",
-        "**/.env*/**",
-        ".env*/**",
-    ];
-    let entries = &policy.fs.rules.entries;
-    let start = entries.len().checked_sub(FLOOR.len())?;
-    FLOOR
+    let floor = crate::compiler::defaults::ENV_DENY_LEAF_GLOBS
         .iter()
+        .chain(crate::compiler::defaults::ENV_DENY_SUBTREE_GLOBS);
+    let entries = &policy.fs.rules.entries;
+    let start = entries.len().checked_sub(floor.clone().count())?;
+    floor
         .enumerate()
         .all(|(offset, glob)| {
             let rule = &entries[start + offset];
@@ -1598,14 +1594,14 @@ fn unescape_mountinfo_path(encoded: &str) -> Result<OsString, String> {
     Ok(OsString::from_vec(decoded))
 }
 
-/// The six builtin secret-file floor globs (`.env*` bands + the `.npmrc` leaf twin).
-/// COUPLED to `fold::finalize_env_deny` (and the `defaults::ENV_DENY_*_GLOBS` it emits):
-/// these strings must stay in sync with the floor.
+/// Membership in the builtin secret-file floor (the `.env*` bands plus the npm-config
+/// leaf twins). Reads the `defaults::ENV_DENY_*_GLOBS` arrays directly so it cannot
+/// desync from what `fold::finalize_env_deny` actually emits.
 fn is_builtin_env_glob(pattern: &str) -> bool {
-    matches!(
-        pattern,
-        "**/.env*" | "**/.env*/**" | ".env*" | ".env*/**" | "**/.npmrc" | ".npmrc"
-    )
+    crate::compiler::defaults::ENV_DENY_LEAF_GLOBS
+        .iter()
+        .chain(crate::compiler::defaults::ENV_DENY_SUBTREE_GLOBS)
+        .any(|glob| *glob == pattern)
 }
 
 fn is_direct_snapshot_glob(pattern: &str, roots: &[PathBuf]) -> bool {
@@ -3411,31 +3407,32 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = rendered_options(&setup);
+        // The RAW args, not `rendered_options`: that helper normalises every fd value to
+        // a placeholder, which would erase the very distinction under test here.
+        let raw: Vec<String> = setup
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         let at = |needle: &str| {
-            rendered
-                .iter()
+            raw.iter()
                 .position(|a| a == needle)
-                .unwrap_or_else(|| panic!("{needle} missing from {rendered:?}"))
+                .unwrap_or_else(|| panic!("{needle} missing from {raw:?}"))
         };
-        // Each late-bound fd mount is identified by its DESTINATION, which is what a
-        // transposition would swap.
-        assert_eq!(
-            rendered[at(crate::backend::linux_monitor::PRIVATE_CA_BUNDLE) - 1],
-            "<fd>"
-        );
-        assert_eq!(
-            rendered[at(crate::backend::linux_monitor::PRIVATE_CA_BUNDLE) - 2],
-            "--ro-bind-fd"
-        );
-        assert_eq!(
-            rendered[at(crate::backend::linux_net_bridge::PRIVATE_NET_ROOT) - 2],
-            "--ro-bind-fd"
-        );
+        // The two descriptors must be distinguishable or the assertions below hold
+        // equally for a transposed pair and prove nothing.
+        assert_ne!(ca.as_raw_fd(), bridge.as_raw_fd());
+
+        // Each late-bound mount is identified by its DESTINATION; the fd immediately
+        // before it is what a transposed argument pair would swap.
+        let ca_at = at(crate::backend::linux_monitor::PRIVATE_CA_BUNDLE);
+        assert_eq!(raw[ca_at - 1], ca.as_raw_fd().to_string());
+        assert_eq!(raw[ca_at - 2], "--ro-bind-fd");
+        let bridge_at = at(crate::backend::linux_net_bridge::PRIVATE_NET_ROOT);
+        assert_eq!(raw[bridge_at - 1], bridge.as_raw_fd().to_string());
+        assert_eq!(raw[bridge_at - 2], "--ro-bind-fd");
         assert!(
-            at(crate::backend::linux_monitor::PRIVATE_CA_BUNDLE)
-                < at(crate::backend::linux_net_bridge::PRIVATE_NET_ROOT),
-            "the CA bundle is layered before the net bridge: {rendered:?}"
+            ca_at < bridge_at,
+            "the CA bundle is layered before the net bridge: {raw:?}"
         );
         // Private /tmp binds the host dir; the minimal root seals itself read-only last.
         assert_eq!(rendered[at("/tmp") - 1], tmp_dir.display().to_string());

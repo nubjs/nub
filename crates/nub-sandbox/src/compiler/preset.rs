@@ -84,14 +84,19 @@ pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx:
 }
 
 /// Grant the build-jail's per-spawn extra READ subtrees that the interpreter grant misses.
-/// Today this is the provisioned Node's C/C++ header dir (`<node-root>/include/node`):
-/// node-gyp compiles an addon against the headers under `npm_config_nodedir/include/node`,
-/// and nub provisions Node under its version store (`~/.cache/nub/node/<ver>`) — a path in
+/// Today these are two subtrees of the provisioned Node's root: its C/C++ header dir
+/// (`<node-root>/include/node`) and `<node-root>/lib/node_modules`. node-gyp compiles an
+/// addon against the headers under `npm_config_nodedir/include/node`, and `npm`/`npx`/
+/// `corepack` are each a symlink into `lib/node_modules`, so without it they dangle and
+/// the standard `prebuild-install || npm run build` fallback dies at `npm: not found`.
+/// nub provisions Node under its version store (`~/.cache/nub/node/<ver>`) — a path in
 /// neither `$tooldirs` nor the interpreter grant (which covers only `bin/node` + the bin
-/// dir). Without this grant node-gyp finds no local headers and falls back to a network
+/// dir). Without these grants node-gyp finds no local headers and falls back to a network
 /// header download the egress-denied jail blocks, so the entire native-compile ecosystem
-/// fails offline. The embedder supplies the concrete paths — it owns where nub puts Node.
-/// A nonexistent path (a system Node shipping no headers) yields an inert allow.
+/// fails offline. The embedder supplies the concrete paths — it owns where nub puts Node,
+/// and keeps the grant on SUBTREES rather than the bare root, which for a system Node is
+/// a shared prefix. A nonexistent path (a system Node shipping no headers) yields an
+/// inert allow.
 /// Front-inserted as base allows so the reasserted secret/`.env` floor stays authoritative;
 /// these paths never overlap a secret.
 fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathBuf]) {
@@ -176,7 +181,8 @@ fn build_jail_surface(package_dir: Option<&Path>) -> Value {
 /// `interpreter` is the closure to grant read (the provisioned Node + shim); each
 /// path and its bin dir become read grants. `extra_reads` are additional per-spawn read
 /// subtrees the embedder derives (the provisioned Node's `include/node` headers so node-gyp
-/// compiles offline) — see [`grant_build_jail_extra_reads`].
+/// compiles offline, and its `lib/node_modules` so `npm`/`npx` resolve) — see
+/// [`grant_build_jail_extra_reads`].
 pub fn compile_build_jail(
     homes: Homes,
     package_dir: &Path,
@@ -228,7 +234,7 @@ mod tests {
         compile(&json!("build-jail"), &ctx).expect("build-jail preset compiles")
     }
 
-    /// The `.env*`/`.npmrc` floor must remain the LAST fs entries after the preset re-asserts
+    /// The secret-file floor must remain the LAST fs entries after the preset re-asserts
     /// its home-secret denies. The Linux backend reads that boundary positionally to decide
     /// whether a denied dotenv file is masked unreadable or present-but-empty, so a floor
     /// displaced by the re-assert reads as absent and silently downgrades an explicit deny.
@@ -236,10 +242,12 @@ mod tests {
     fn build_jail_secret_reassert_keeps_the_env_floor_trailing() {
         let policy = build_jail_policy();
         let entries = &policy.fs.rules.entries;
+        let floor_len =
+            defaults::ENV_DENY_LEAF_GLOBS.len() + defaults::ENV_DENY_SUBTREE_GLOBS.len();
         assert_eq!(
             defaults::env_deny_floor_start(entries),
-            Some(entries.len() - 6),
-            "the build-jail preset must leave the six `.env*`/`.npmrc` floor entries last; \
+            Some(entries.len() - floor_len),
+            "the build-jail preset must leave the {floor_len} secret-file floor entries last; \
              found trailing entries {:?}",
             entries
                 .iter()
