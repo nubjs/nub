@@ -935,6 +935,23 @@ pub enum RootProvenance<'a> {
     Fetched { checkout_root: &'a Path },
 }
 
+/// The two anchors an embedder-confined lifecycle spawn is scoped by.
+///
+/// They are carried together because the jail needs BOTH and they can disagree: the
+/// write grant is keyed on `package_dir` while the project READ grant expands against
+/// `project_root`. Leaving the read anchor implicit (the caller's `project_root`) let a
+/// fetched checkout steer it — a `workspaces: ["../**"]` entry in the checkout's own
+/// manifest resolves an importer OUTSIDE the fetched tree, and the read grant followed
+/// it onto a sibling of the scratch directory.
+#[derive(Debug, Clone, Copy)]
+pub struct SandboxScope<'a> {
+    /// The one subtree the confined script may WRITE.
+    pub package_dir: &'a Path,
+    /// What the jail's project read grant expands against. For a dependency build this
+    /// is the user's project; for a fetched checkout it is the checkout itself.
+    pub project_root: &'a Path,
+}
+
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
 /// `/dev/null` under `--silent`. Child processes spawned through
 /// `child_stderr()` get a fresh dup of this fd so their stderr still
@@ -1135,7 +1152,7 @@ pub async fn run_script(
     script_cmd: &str,
     extra_bin_dirs: &[&Path],
     jail: Option<&ScriptJail>,
-    sandbox_package_dir: Option<&Path>,
+    sandbox: Option<SandboxScope<'_>>,
 ) -> Result<(), Error> {
     // Per-script diag span. Tags the package name (when present) and the
     // script name so the analyzer can attribute postinstall / preinstall /
@@ -1225,21 +1242,24 @@ pub async fn run_script(
     apply_npm_manifest_env(&mut cmd, manifest, script_dir, script_cmd);
 
     tracing::debug!("lifecycle: {script_name} → {script_cmd}");
-    // Embedder-owned confinement: a spawn of third-party code (`sandbox_package_dir`
-    // set, the embedder hook installed) runs through the host's sandbox INSTEAD of
-    // aube's own spawn/jail. Only USER-AUTHORED root scripts pass `None` and run
-    // unconfined here — a fetched git checkout occupying the root slot is confined
-    // like any dependency (see `RootProvenance`). The two mechanisms are mutually
-    // exclusive: the embedder that installs the hook also gates aube's own jail off
+    // Embedder-owned confinement: a spawn of third-party code (`sandbox` set, the
+    // embedder hook installed) runs through the host's sandbox INSTEAD of aube's own
+    // spawn/jail. Only USER-AUTHORED root scripts pass `None` and run unconfined here
+    // — a fetched git checkout occupying the root slot is confined like any dependency
+    // (see `RootProvenance`). The scope carries its OWN project anchor rather than
+    // reusing `project_root`, which for a fetched checkout is the importer dir the
+    // checkout's own manifest chose. The two mechanisms are mutually exclusive: the
+    // embedder that installs the hook also gates aube's own jail off
     // (`embedder_owns_lifecycle_sandbox`), so `jail` is `None` on this path. A `None`
-    // hook (or no dir) falls through to the normal aube spawn.
-    let status = match sandbox_package_dir.and_then(|dir| {
+    // hook (or no scope) falls through to the normal aube spawn.
+    let status = match sandbox.and_then(|scope| {
         aube_util::engine_context()
             .lifecycle_sandbox
-            .map(|hook| (dir.to_path_buf(), hook))
+            .map(|hook| (scope, hook))
     }) {
-        Some((package_dir, hook)) => {
-            let spawn = lifecycle_sandbox_spawn(&cmd, script_dir, project_root, &package_dir);
+        Some((scope, hook)) => {
+            let spawn =
+                lifecycle_sandbox_spawn(&cmd, script_dir, scope.project_root, scope.package_dir);
             // The host sandbox owns a synchronous spawn+wait (nub-sandbox drives an
             // outer bwrap / Seatbelt child), so run it off the async runtime.
             tokio::task::spawn_blocking(move || hook.run(spawn))
@@ -1327,16 +1347,22 @@ pub async fn run_root_script_by_name(
         return Ok(false);
     };
     // The root exemption from the embedder's build-jail covers USER-AUTHORED code
-    // only. A fetched checkout occupying the root slot (`RootProvenance::Fetched`)
-    // is third-party, so it is confined like a dependency — keyed on the checkout
-    // root, which for a workspace git dep is NOT the importer's own directory.
-    // Default-preserving: standalone aube leaves `embedder_owns_lifecycle_sandbox`
-    // false, so this stays `None` either way.
-    let sandbox_package_dir = match provenance {
+    // only. A fetched checkout occupying the root slot (`RootProvenance::Fetched`) is
+    // third-party, so it is confined like a dependency — BOTH axes keyed on the
+    // checkout root, never on `project_dir`. For a workspace git dep those differ, and
+    // `project_dir` is chosen by the checkout's own `workspaces` globs: a `../**` entry
+    // resolves outside the fetched tree, so anchoring the read grant there would let
+    // attacker-authored content widen its own grant. Default-preserving: standalone
+    // aube leaves `embedder_owns_lifecycle_sandbox` false, so this stays `None` either
+    // way.
+    let sandbox = match provenance {
         RootProvenance::UserAuthored => None,
         RootProvenance::Fetched { checkout_root } => aube_util::embedder()
             .embedder_owns_lifecycle_sandbox
-            .then_some(checkout_root),
+            .then_some(SandboxScope {
+                package_dir: checkout_root,
+                project_root: checkout_root,
+            }),
     };
     run_script(
         project_dir,
@@ -1347,7 +1373,7 @@ pub async fn run_root_script_by_name(
         script_cmd,
         &[],
         None,
-        sandbox_package_dir,
+        sandbox,
     )
     .await?;
     Ok(true)
@@ -1580,11 +1606,15 @@ pub async fn run_dep_hook(
     bin_dirs.push(&dep_bin_dir);
     bin_dirs.extend(tool_bin_dirs.iter().copied());
     // When the embedder owns lifecycle confinement, every DEP build script runs under
-    // its sandbox (keyed on this package dir). Standalone aube leaves this `None` and
-    // relies on `jail` (its own build jail) exactly as before.
-    let sandbox_package_dir = aube_util::embedder()
+    // its sandbox (write keyed on this package dir, project read on the user's own
+    // project). Standalone aube leaves this `None` and relies on `jail` (its own build
+    // jail) exactly as before.
+    let sandbox = aube_util::embedder()
         .embedder_owns_lifecycle_sandbox
-        .then_some(package_dir);
+        .then_some(SandboxScope {
+            package_dir,
+            project_root,
+        });
     run_script(
         package_dir,
         project_root,
@@ -1594,7 +1624,7 @@ pub async fn run_dep_hook(
         script_cmd,
         &bin_dirs,
         jail,
-        sandbox_package_dir,
+        sandbox,
     )
     .await?;
     Ok(true)

@@ -14,10 +14,13 @@
 //! - the constructed lifecycle env minus credential-shaped keys.
 //!
 //! The user's OWN root-package scripts are NOT routed here — aube passes them no
-//! package dir, so `run_script` never reaches this hook for them. A git dependency's
+//! sandbox scope, so `run_script` never reaches this hook for them. A git dependency's
 //! root scripts ARE: its `prepare` runs through a nested install whose root is the
-//! fetched checkout, which aube marks `RootProvenance::Fetched` and confines here
-//! keyed on that checkout directory.
+//! fetched checkout, which aube marks `RootProvenance::Fetched` and confines here with
+//! BOTH anchors on that checkout. The project anchor matters as much as the write one:
+//! `./` is what the read grant expands against, and a checkout's own `workspaces`
+//! globs choose the importer directory, so anchoring reads there would let the fetched
+//! tree grant itself a read on a sibling of its scratch.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

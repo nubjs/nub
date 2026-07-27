@@ -15,13 +15,23 @@
 
 use std::sync::{Arc, Mutex};
 
-/// Stands in for the confiner: records the phase and confinement dir it was handed, and
+/// Stands in for the confiner: records the phase and both grant anchors it was handed, and
 /// reports success WITHOUT spawning. The fetched-checkout fixture's scripts are all `exit 1`, so a phase
 /// that bypasses the hook runs for real, exits non-zero, and fails the call — the bypass
 /// is caught even if the recorder somehow missed it.
 #[derive(Debug, Default)]
 struct Recorder {
-    spawns: Mutex<Vec<(String, std::path::PathBuf)>>,
+    spawns: Mutex<Vec<Spawn>>,
+}
+
+/// The two grant anchors the jail is keyed on, plus the phase that produced them.
+#[derive(Debug, Clone)]
+struct Spawn {
+    phase: String,
+    /// The build-jail's WRITE grant.
+    package_dir: std::path::PathBuf,
+    /// What the jail's project READ grant expands against.
+    project_root: std::path::PathBuf,
 }
 
 impl Recorder {
@@ -30,18 +40,17 @@ impl Recorder {
             .lock()
             .expect("recorder lock")
             .iter()
-            .map(|(phase, _)| phase.clone())
+            .map(|s| s.phase.clone())
             .collect()
     }
 
-    /// The directory each spawn was confined to — the build-jail's write grant.
-    fn confined_to(&self) -> Vec<std::path::PathBuf> {
+    fn last(&self) -> Spawn {
         self.spawns
             .lock()
             .expect("recorder lock")
-            .iter()
-            .map(|(_, dir)| dir.clone())
-            .collect()
+            .last()
+            .expect("a spawn was recorded")
+            .clone()
     }
 }
 
@@ -57,10 +66,11 @@ impl aube_util::LifecycleSandbox for Recorder {
             .and_then(|(_, v)| v.clone())
             .and_then(|v| v.into_string().ok())
             .unwrap_or_else(|| "<unstamped>".to_string());
-        self.spawns
-            .lock()
-            .expect("recorder lock")
-            .push((phase, spawn.package_dir));
+        self.spawns.lock().expect("recorder lock").push(Spawn {
+            phase,
+            package_dir: spawn.package_dir,
+            project_root: spawn.project_root,
+        });
         Ok(success())
     }
 }
@@ -237,11 +247,54 @@ fn a_fetched_checkouts_root_scripts_are_confined_and_a_user_authored_roots_are_n
         },
     ))
     .expect("workspace member's prepare should be confined, not spawned");
+    let scoped = recorder.last();
     assert_eq!(
-        recorder.confined_to().last().expect("a spawn was recorded"),
+        scoped.package_dir,
         fetched.path(),
         "a workspace member's root script must be confined to the whole fetched \
          checkout, not to its own importer directory; scoping to the member denies the \
          shared config and tooling at the checkout root and breaks the dependency"
+    );
+    // Widening is the failure this direction of the fix can regress into, so equality
+    // alone is not enough — pin that the grant did not climb ABOVE the checkout.
+    assert_ne!(
+        Some(scoped.package_dir.as_path()),
+        fetched.path().parent(),
+        "the write grant widened to the checkout's PARENT — that is the shared scratch \
+         directory, so every other package's checkout would be writable"
+    );
+
+    // The importer directory is chosen by the checkout's OWN `workspaces` globs, and
+    // `importer_project_dir` deliberately resolves a `../**` entry to a real sibling of
+    // the checkout — attacker-authored content picking a directory outside the fetched
+    // tree. Both anchors must ignore it: the write grant (above) and, because `./` is
+    // what the project READ grant expands against, the project anchor too.
+    // A second scratch directly in the system temp dir — a true sibling of `fetched`,
+    // which is the production geometry: every git dep's scratch copy lands there.
+    let outside = tempfile::tempdir().expect("tempdir");
+    let outside = outside.path();
+    let outside_manifest = manifest_with(outside, "escapee", "exit 1");
+    rt.block_on(aube_scripts::run_root_script_by_name(
+        outside,
+        "node_modules",
+        &outside_manifest,
+        "prepare",
+        aube_scripts::RootProvenance::Fetched {
+            checkout_root: fetched.path(),
+        },
+    ))
+    .expect("a parent-relative importer's prepare should be confined, not spawned");
+    let steered = recorder.last();
+    assert_eq!(
+        steered.project_root,
+        fetched.path(),
+        "the jail's project anchor must be the fetched checkout; anchoring it on the \
+         importer lets a checkout's own `workspaces: [\"../**\"]` point the read grant \
+         at a sibling of its scratch directory"
+    );
+    assert_eq!(
+        steered.package_dir,
+        fetched.path(),
+        "the write grant must stay on the checkout for a parent-relative importer too"
     );
 }
