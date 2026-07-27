@@ -29,40 +29,10 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-fn bwrap_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        ["/usr/bin/bwrap", "/bin/bwrap"].iter().any(|program| {
-            std::process::Command::new(program)
-                .args([
-                    "--die-with-parent",
-                    "--unshare-user",
-                    "--unshare-net",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--",
-                    "/bin/true",
-                ])
-                .status()
-                .is_ok_and(|status| status.success())
-        })
-    })
-}
-
+/// This suite needs a network namespace on top of the user namespace, so it asks the
+/// engine's probe for that shape specifically.
 fn skip_without_bwrap() -> bool {
-    if bwrap_available() {
-        return false;
-    }
-    let required = matches!(
-        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    );
-    assert!(
-        !required,
-        "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
-    );
-    true
+    nub_sandbox::host_probe::skip_without_bwrap_with("linux_proxy", &["--unshare-net"], &[])
 }
 
 fn runtime() -> &'static RuntimeCapability {

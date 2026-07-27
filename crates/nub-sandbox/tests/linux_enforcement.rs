@@ -49,41 +49,11 @@ fn apply_without_mount_topology_lock(
     apply_with_runtime(policy, spec, runtime)
 }
 
-fn bwrap_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        ["/usr/bin/bwrap", "/bin/bwrap"].iter().any(|program| {
-            std::process::Command::new(program)
-                .args([
-                    "--die-with-parent",
-                    "--unshare-user",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--",
-                    "/bin/true",
-                ])
-                .status()
-                .is_ok_and(|status| status.success())
-        })
-    })
-}
-
-/// Returns true when the caller should skip. A conformance runner can require the
-/// primitive so an unavailable user namespace never reads as a green hollow skip.
+/// Returns true when the caller should skip. Delegates to the engine's own candidate
+/// resolution, so a host where only the dedicated helper works is recognized as
+/// enforcing rather than silently skipped; the skip prints its candidate ledger.
 fn skip_without_bwrap() -> bool {
-    if bwrap_available() {
-        return false;
-    }
-    let required = matches!(
-        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    );
-    assert!(
-        !required,
-        "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
-    );
-    true
+    nub_sandbox::host_probe::skip_without_bwrap("linux_enforcement")
 }
 
 fn host_mount_topology_lock() -> &'static std::sync::RwLock<()> {

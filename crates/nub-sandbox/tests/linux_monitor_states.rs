@@ -92,37 +92,10 @@ fn retained_monitor_parent_session_boundary_is_real() {
     );
 }
 
-fn usable_bwrap() -> Option<&'static str> {
-    let bwrap = ["/usr/bin/bwrap", "/bin/bwrap"]
-        .into_iter()
-        .find(|candidate| Path::new(candidate).is_file());
-    let Some(bwrap) = bwrap else {
-        require_or_skip("stock Bubblewrap is unavailable");
-        return None;
-    };
-    let available = Command::new(bwrap)
-        .args([
-            "--die-with-parent",
-            "--unshare-user",
-            "--ro-bind",
-            "/",
-            "/",
-            "--",
-            "/bin/true",
-        ])
-        .status()
-        .is_ok_and(|status| status.success());
-    if !available {
-        require_or_skip("stock Bubblewrap cannot create the required user namespace");
-        return None;
-    }
-    Some(bwrap)
-}
-
-fn require_or_skip(reason: &str) {
-    let required = matches!(
-        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    );
-    assert!(!required, "NUB_SANDBOX_REQUIRE_BWRAP set but {reason}");
+/// The harness takes the Bubblewrap to exercise as an argv, so this gate needs the
+/// resolved path rather than a yes/no. It comes from the engine's own candidate
+/// resolution — on an AppArmor-restricted host the dedicated helper is the only one
+/// that works, and a probe that knew only the stock pair skipped the whole file there.
+fn usable_bwrap() -> Option<&'static Path> {
+    nub_sandbox::host_probe::usable_bwrap("linux_monitor_states")
 }

@@ -108,6 +108,16 @@ pub use backend::{
     PreparedSignalCallback, exercise_monitor_state_6, exercise_monitor_state_7,
     exercise_monitor_state_8, exercise_monitor_states_1_to_5,
 };
+
+/// The Linux enforcement suites' skip gate, resolving Bubblewrap candidates the way
+/// production does. Test support, not an embedder API.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod host_probe {
+    pub use crate::backend::linux_probe::{
+        BwrapProbe, cached_probe, probe, skip_without_bwrap, skip_without_bwrap_with, usable_bwrap,
+    };
+}
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, ScopeCapabilities, compile,
     compile_build_jail, compile_with_warnings,

@@ -1732,13 +1732,25 @@ fn open_bwrap_candidate_inventory(require_nesting: bool) -> PinnedCandidateInven
     if require_nesting {
         return open_bwrap_candidate_inventory_from([PathBuf::from(DEDICATED_HELPER_PATH)], [], []);
     }
-    // B2: single-level prefers the fixed-path helper too. On an AppArmor-restricted host (24.04)
-    // it is the ONLY candidate that can create the userns — a stock system/bundled bwrap at an
-    // unprofiled path is denied. When the helper is absent (no setup, or an unrestricted host
-    // like 22.04 / sysctl=0) its open fails and the resolver falls through to system/bundled, so
-    // the no-setup path is unchanged where setup isn't needed. `nub sandbox setup` installs it.
-    let dedicated = [PathBuf::from(DEDICATED_HELPER_PATH)];
-    let system = [PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")];
+    let (dedicated, system, bundled) = single_level_bwrap_candidate_paths();
+    open_bwrap_candidate_inventory_from(dedicated, system, bundled)
+}
+
+/// The single-level candidate paths, in resolution order: dedicated helper, then the
+/// stock system paths, then the bundled resource beside the running binary.
+///
+/// B2: single-level prefers the fixed-path helper too. On an AppArmor-restricted host (24.04)
+/// it is the ONLY candidate that can create the userns — a stock system/bundled bwrap at an
+/// unprofiled path is denied. When the helper is absent (no setup, or an unrestricted host
+/// like 22.04 / sysctl=0) its open fails and the resolver falls through to system/bundled, so
+/// the no-setup path is unchanged where setup isn't needed. `nub sandbox setup` installs it.
+///
+/// Split out so [`crate::backend::linux_probe`] can ask the SAME question the resolver
+/// asks; a probe that enumerates its own paths drifts out of step with production and
+/// then reports a host as unable to enforce when only its hardcoded pair was denied.
+pub(crate) fn single_level_bwrap_candidate_paths() -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+    let dedicated = vec![PathBuf::from(DEDICATED_HELPER_PATH)];
+    let system = vec![PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")];
     let bundled = std::env::current_exe()
         .ok()
         .and_then(|executable| executable.parent().map(Path::to_path_buf))
@@ -1749,7 +1761,7 @@ fn open_bwrap_candidate_inventory(require_nesting: bool) -> PinnedCandidateInven
             ]
         })
         .unwrap_or_default();
-    open_bwrap_candidate_inventory_from(dedicated, system, bundled)
+    (dedicated, system, bundled)
 }
 
 /// Validate the Linux resource paired with the running binary before a staged

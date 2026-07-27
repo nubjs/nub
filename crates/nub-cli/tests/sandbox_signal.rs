@@ -21,35 +21,7 @@ fn nub_bin() -> PathBuf {
 /// with a misleading message. Skip there, and hard-fail when a prepared conformance
 /// runner declares the primitive required — the same gate the rest of the suite uses.
 fn skip_without_bwrap() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let available = *AVAILABLE.get_or_init(|| {
-        ["/usr/bin/bwrap", "/bin/bwrap"].iter().any(|program| {
-            Command::new(program)
-                .args([
-                    "--die-with-parent",
-                    "--unshare-user",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--",
-                    "/bin/true",
-                ])
-                .status()
-                .is_ok_and(|status| status.success())
-        })
-    });
-    if available {
-        return false;
-    }
-    let required = matches!(
-        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    );
-    assert!(
-        !required,
-        "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
-    );
-    true
+    nub_sandbox::host_probe::skip_without_bwrap("sandbox_signal")
 }
 
 fn spawn_fixture(

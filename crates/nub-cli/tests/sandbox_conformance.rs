@@ -83,45 +83,27 @@ fn probe_bin() -> PathBuf {
 
 // ── Bubblewrap behavior gate (Linux only) ─────────────────────────────────────────
 
-/// Exercise the stock Bubblewrap operations the backend needs, rather than trusting
-/// a version string. The required CI leg turns an unavailable primitive into a hard
-/// failure; local hosts may skip kernel-enforcement assertions.
+/// Exercise the Bubblewrap operations the backend needs, rather than trusting a version
+/// string. The candidates come from the engine's own resolver, not `bwrap` on PATH: on
+/// an AppArmor-restricted host PATH resolves to the distro binary the kernel denies,
+/// while the dedicated helper `nub sandbox setup` installs is the one that works — so a
+/// PATH probe declared a correctly set-up host unenforceable and skipped the suite.
+///
+/// The required CI leg turns an unavailable primitive into a hard failure; local hosts
+/// may skip kernel-enforcement assertions.
 #[cfg(target_os = "linux")]
 fn linux_enforceable() -> bool {
-    let available = Command::new("bwrap")
-        .args([
-            "--die-with-parent",
+    !nub_sandbox::host_probe::skip_without_bwrap_with(
+        "sandbox_conformance",
+        &[
             "--new-session",
-            "--unshare-user",
             "--cap-drop",
             "ALL",
             "--unshare-pid",
             "--unshare-ipc",
-            "--ro-bind",
-            "/",
-            "/",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--",
-            "true",
-        ])
-        .status()
-        .is_ok_and(|status| status.success());
-    if available {
-        return true;
-    }
-    let required = matches!(
-        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    );
-    assert!(
-        !required,
-        "NUB_SANDBOX_REQUIRE_BWRAP set but the required stock Bubblewrap mount/user/PID \
-         operations could not run"
-    );
-    false
+        ],
+        &["--dev", "/dev", "--proc", "/proc"],
+    )
 }
 
 /// Give a Windows fixture root a PROTECTED DACL — strip inherited ACEs (incl. any inherited

@@ -28,31 +28,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The same gate `linux_enforcement.rs` uses: skip where Bubblewrap cannot create an
-/// unprivileged user namespace, but turn that skip into a HARD FAILURE under
-/// `NUB_SANDBOX_REQUIRE_BWRAP` so the conformance leg proves the tests actually ran.
-/// Duplicated per test binary (each is its own process) rather than shared — the
-/// crate's existing convention in `linux_enforcement`/`linux_proxy`/`ir`.
-fn bwrap_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        ["/usr/bin/bwrap", "/bin/bwrap"].iter().any(|program| {
-            std::process::Command::new(program)
-                .args([
-                    "--die-with-parent",
-                    "--unshare-user",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--",
-                    "/bin/true",
-                ])
-                .status()
-                .is_ok_and(|status| status.success())
-        })
-    })
-}
-
 fn require_enforcement() -> bool {
     matches!(
         std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
@@ -60,16 +35,12 @@ fn require_enforcement() -> bool {
     )
 }
 
-/// Returns true when the caller should skip.
+/// The same gate `linux_enforcement.rs` uses: skip where no Bubblewrap candidate the
+/// engine would resolve can create an unprivileged user namespace, but turn that skip
+/// into a HARD FAILURE under `NUB_SANDBOX_REQUIRE_BWRAP` so the conformance leg proves
+/// the tests actually ran.
 fn skip_without_bwrap() -> bool {
-    if bwrap_available() {
-        return false;
-    }
-    assert!(
-        !require_enforcement(),
-        "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
-    );
-    true
+    nub_sandbox::host_probe::skip_without_bwrap("linux_build_jail_enforcement")
 }
 
 fn runtime() -> &'static nub_sandbox::RuntimeCapability {

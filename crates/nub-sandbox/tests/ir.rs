@@ -46,36 +46,7 @@ fn apply(
 /// outside it.
 #[cfg(target_os = "linux")]
 fn skip_without_bwrap() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let available = *AVAILABLE.get_or_init(|| {
-        ["/usr/bin/bwrap", "/bin/bwrap"].iter().any(|program| {
-            std::process::Command::new(program)
-                .args([
-                    "--die-with-parent",
-                    "--unshare-user",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--",
-                    "/bin/true",
-                ])
-                .status()
-                .is_ok_and(|status| status.success())
-        })
-    });
-    if available {
-        return false;
-    }
-    let required = matches!(
-        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    );
-    assert!(
-        !required,
-        "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
-    );
-    eprintln!("skipping the apply() leg: no Bubblewrap that can create a user namespace");
-    true
+    nub_sandbox::host_probe::skip_without_bwrap("ir (apply() leg)")
 }
 
 #[cfg(not(target_os = "linux"))]
