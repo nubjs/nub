@@ -20,10 +20,13 @@
 //!   `dput` PPA target is absent). A CNAME onto a shared CDN is opaque to any host
 //!   allowlist, since the tenant-selecting `Host` header travels inside TLS
 //!   (`index.crates.io` / `static.crates.io` are kept as single-tenant buckets on that
-//!   basis, not because the hostname proves it). And `registry.npmjs.org` is retained
-//!   despite failing the rule: reading it is how anything installs, `npm publish` is a
-//!   PUT to that same host, and the proxy gates only the CONNECT authority and TLS SNI
-//!   before blind-forwarding — so it cannot tell the two apart. Metadata/link-local +
+//!   basis, not because the hostname proves it). And three entries are retained despite
+//!   failing the rule — `registry.npmjs.org`, `api.anthropic.com`, `claude.ai` — because
+//!   each is load-bearing and its write route answers on the same hostname the legitimate
+//!   read uses (`npm publish` is a PUT to the registry that installs read; a model API
+//!   call carries its payload in the request body). The proxy gates only the CONNECT
+//!   authority and TLS SNI before blind-forwarding, so it cannot separate them; for these
+//!   three, credential scoping is the control, not the host list. Metadata/link-local +
 //!   RFC1918 are a SEPARATE always-on hard floor, never part of this set. Source data:
 //!   `.fray/sandbox-builtin-sets.md`, `.fray/sandbox-shai-hulud-exfil.md`.
 //! - `$tooldirs` is per-OS because a tool's cache home differs across OSes (macOS

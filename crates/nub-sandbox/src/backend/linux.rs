@@ -268,11 +268,7 @@ pub(crate) fn preflight(
     // dedicated helper — never fall back to a stock candidate that cannot nest.
     let bwrap_candidates = open_bwrap_candidate_inventory(spec.require_nesting);
     if bwrap_candidates.candidates.is_empty() {
-        let reason = if spec.require_nesting {
-            classify_nesting_failure(&bwrap_candidates.failures)
-        } else {
-            classify_bwrap_failures(&bwrap_candidates.failures)
-        };
+        let reason = classify_bwrap_failures(&bwrap_candidates.failures, spec.require_nesting);
         return Err(Degradation {
             lost: vec!["fs".to_string()],
             reason: Some(reason),
@@ -738,11 +734,7 @@ fn admit_bwrap_candidate(
             }
         }
     }
-    let reason = if require_nesting {
-        classify_nesting_failure(&failures)
-    } else {
-        classify_bwrap_failures(&failures)
-    };
+    let reason = classify_bwrap_failures(&failures, require_nesting);
     Err(Degradation {
         lost: vec!["fs".to_string()],
         reason: Some(reason),
@@ -2041,16 +2033,63 @@ fn relocate_file_at_least(file: File, minimum: RawFd) -> std::io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn classify_bwrap_failures(failures: &[String]) -> String {
+/// Turn an empty/rejected candidate set into ONE precise diagnostic. A `nesting`
+/// launch differs only where the dedicated helper is involved: its admission
+/// failures — (1) missing `nub-sandbox` group access, (2) an absent helper,
+/// (3) helper integrity — have no single-level counterpart, and the AppArmor
+/// signal is read differently. A single-level launch blames the host restriction
+/// outright; a nesting launch instead INFERS an unloaded helper profile from a
+/// namespace denial, so it must first rule out the host/container causes that
+/// disable unprivileged nesting regardless of any profile. Carries no privileged
+/// remediation commands.
+fn classify_bwrap_failures(failures: &[String], nesting: bool) -> String {
+    classify_bwrap_failures_under(failures, nesting, apparmor_restricts_unprivileged_userns())
+}
+
+/// The AppArmor restriction is a parameter so the classification is testable
+/// without the host's real sysctl value.
+fn classify_bwrap_failures_under(
+    failures: &[String],
+    nesting: bool,
+    apparmor_restricted: bool,
+) -> String {
     let detail = failures.join("; ");
     let lower = detail.to_ascii_lowercase();
+
+    if nesting {
+        if failures
+            .iter()
+            .any(|failure| failure.contains(DEDICATED_HELPER_ACCESS_TAG))
+        {
+            return format!(
+                "the dedicated Bubblewrap nesting helper at {DEDICATED_HELPER_PATH} is not accessible to this user; add the user to the nub-sandbox group and start a fresh login ({detail})"
+            );
+        }
+        // An ENOENT on the CANDIDATE OPEN specifically, not any ENOENT that a
+        // later probe stage might surface.
+        if lower.contains("opening candidate: no such file or directory") {
+            return format!(
+                "the sandbox helper is not installed at {DEDICATED_HELPER_PATH}.\n\n{}\n\n(underlying: {detail})",
+                apparmor_setup_hint()
+            );
+        }
+        if lower.contains("digest")
+            || lower.contains("root-owned")
+            || lower.contains("not a regular file")
+            || lower.contains("not executable")
+            || lower.contains("unexpectedly large")
+            || lower.contains("cannot be verified")
+        {
+            return format!(
+                "the dedicated Bubblewrap nesting helper at {DEDICATED_HELPER_PATH} failed its integrity check; reinstall the packaged helper from the documented host setup ({detail})"
+            );
+        }
+    }
+
     if lower.contains("unknown option") || lower.contains("invalid option") {
         return format!("installed Bubblewrap lacks required stock options ({detail})");
     }
-    if fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-        .is_ok_and(|value| value.trim() == "1")
-        && (lower.contains("permission denied") || lower.contains("uid map"))
-    {
+    if !nesting && apparmor_restricted && is_namespace_denial(&lower) {
         return format!("{}\n\n(underlying: {detail})", apparmor_setup_hint());
     }
     if fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
@@ -2073,86 +2112,17 @@ fn classify_bwrap_failures(failures: &[String]) -> String {
     {
         return format!("the container policy blocks required Bubblewrap behavior ({detail})");
     }
-    format!("Bubblewrap cannot enforce the required process view ({detail})")
-}
-
-/// Turn dedicated-helper admission failures into ONE precise nesting diagnostic,
-/// distinguishing (1) missing `nub-sandbox` group access, (2) helper integrity,
-/// (3) an absent/unloaded AppArmor profile, and (4) a generic host/container
-/// user-namespace failure. Carries no privileged remediation commands.
-fn classify_nesting_failure(failures: &[String]) -> String {
-    let detail = failures.join("; ");
-    let lower = detail.to_ascii_lowercase();
-
-    // (1) group access — the 0750 root:nub-sandbox helper was unopenable.
-    if failures
-        .iter()
-        .any(|failure| failure.contains(DEDICATED_HELPER_ACCESS_TAG))
-    {
-        return format!(
-            "the dedicated Bubblewrap nesting helper at {DEDICATED_HELPER_PATH} is not accessible to this user; add the user to the nub-sandbox group and start a fresh login ({detail})"
-        );
-    }
-    // Helper never installed — an ENOENT on the CANDIDATE OPEN specifically, not
-    // any ENOENT that a later probe stage might surface.
-    if lower.contains("opening candidate: no such file or directory") {
-        return format!(
-            "the sandbox helper is not installed at {DEDICATED_HELPER_PATH}.\n\n{}\n\n(underlying: {detail})",
-            apparmor_setup_hint()
-        );
-    }
-    // (2) integrity — root ownership, writability, digest, or build pinning.
-    if lower.contains("digest")
-        || lower.contains("root-owned")
-        || lower.contains("not a regular file")
-        || lower.contains("not executable")
-        || lower.contains("unexpectedly large")
-        || lower.contains("cannot be verified")
-    {
-        return format!(
-            "the dedicated Bubblewrap nesting helper at {DEDICATED_HELPER_PATH} failed its integrity check; reinstall the packaged helper from the documented host setup ({detail})"
-        );
-    }
-    // (4) generic host/container failures disable unprivileged nesting regardless
-    //     of any profile, so they take precedence over the profile signal.
-    if fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
-        .is_ok_and(|value| value.trim() == "0")
-    {
-        return format!(
-            "unprivileged user namespaces are disabled on this host, so nested sandboxes cannot be created ({detail})"
-        );
-    }
-    if fs::read_to_string("/proc/sys/kernel/osrelease")
-        .is_ok_and(|value| value.to_ascii_lowercase().contains("microsoft"))
-    {
-        return format!(
-            "nested Bubblewrap cannot create the required namespaces under WSL ({detail})"
-        );
-    }
-    if Path::new("/.dockerenv").exists()
-        || Path::new("/run/.containerenv").exists()
-        || fs::read_to_string("/proc/1/cgroup").is_ok_and(|value| {
-            ["docker", "containerd", "kubepods", "libpod"]
-                .iter()
-                .any(|marker| value.contains(marker))
-        })
-    {
-        return format!(
-            "the container policy blocks the user namespaces required for nested sandboxes ({detail})"
-        );
-    }
-    // (3) profile — the AppArmor user-namespace restriction is active and the
-    //     failure is a namespace/credential denial. A loaded helper profile would
-    //     have permitted the namespace, so on a restricted host this denial means
-    //     the dedicated profile is not effective. (Enumerating loaded profiles via
-    //     securityfs needs privilege, so it is inferred from the denial, not read.)
-    if apparmor_restricts_unprivileged_userns() && is_namespace_denial(&lower) {
+    // A loaded helper profile would have permitted the namespace, so on a
+    // restricted host a surviving denial means the dedicated profile is not
+    // effective. (Enumerating loaded profiles via securityfs needs privilege, so
+    // it is inferred from the denial, not read.)
+    if nesting && apparmor_restricted && is_namespace_denial(&lower) {
         return format!(
             "the sandbox helper's AppArmor profile is not loaded, so the host blocks the user namespaces the sandbox needs.\n\n{}\n\n(underlying: {detail})",
             apparmor_setup_hint()
         );
     }
-    format!("nested Bubblewrap could not create the required namespaces on this host ({detail})")
+    format!("Bubblewrap cannot enforce the required process view ({detail})")
 }
 
 /// The remedy line for the AppArmor userns restriction, naming the exact copy-pasteable setup
@@ -2175,13 +2145,17 @@ fn apparmor_restricts_unprivileged_userns() -> bool {
         .is_ok_and(|value| value.trim() == "1")
 }
 
-/// A user-namespace / credential-setup denial in a Bubblewrap failure string. The
-/// exact wording varies by Bubblewrap version ("setting up uid map: Permission
-/// denied", "No permissions to create new namespace").
+/// A namespace / credential-setup denial in a Bubblewrap failure string. The exact
+/// wording varies by Bubblewrap version ("setting up uid map: Permission denied",
+/// "No permissions to create new namespace"), so this matches on the substantive
+/// tokens rather than whole sentences. `RTM_NEWADDR` is the netns-loopback
+/// bring-up: on a restricted Ubuntu host `--unshare-all` dies THERE first, before
+/// reaching any uid-map step, which is why the errno alone is not enough to key on.
 fn is_namespace_denial(lower: &str) -> bool {
     lower.contains("uid map")
         || lower.contains("gid map")
         || lower.contains("new namespace")
+        || lower.contains("rtm_newaddr")
         || lower.contains("permission denied")
         || lower.contains("operation not permitted")
 }
@@ -3816,11 +3790,41 @@ mod tests {
 
     #[test]
     fn bwrap_failure_diagnostics_are_host_specific_without_admin_advice() {
-        let message = classify_bwrap_failures(&["candidate: unknown option --info-fd".into()]);
+        let message =
+            classify_bwrap_failures(&["candidate: unknown option --info-fd".into()], false);
         assert!(message.contains("required stock options"), "{message}");
         for banned in ["sudo", "sysctl", "disable AppArmor", "apparmor_parser"] {
             assert!(!message.contains(banned), "{message}");
         }
+    }
+
+    #[test]
+    fn apparmor_hint_covers_the_loopback_denial_a_restricted_host_actually_emits() {
+        // The observed stderr on a locked-down Ubuntu 24.04 host: `--unshare-all`
+        // fails bringing up the netns loopback, BEFORE any uid-map step, so it
+        // names neither "permission denied" nor "uid map". Matching only those two
+        // left the setup hint dead on the exact case it was written for.
+        for detail in [
+            "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+            "bwrap: setting up uid map: Permission denied",
+        ] {
+            let message = classify_bwrap_failures_under(&[detail.to_string()], false, true);
+            assert!(
+                message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+                "a restricted host must get the setup hint, not the generic message: {message}"
+            );
+        }
+        // Same failure on an UNRESTRICTED host is not a setup problem, so it must
+        // not claim one.
+        let message = classify_bwrap_failures_under(
+            &["bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".to_string()],
+            false,
+            false,
+        );
+        assert!(
+            !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+            "{message}"
+        );
     }
 
     #[test]
@@ -3876,7 +3880,7 @@ mod tests {
         let failures = vec![format!(
             "{DEDICATED_HELPER_ACCESS_TAG}: Permission denied (os error 13)"
         )];
-        let message = classify_nesting_failure(&failures);
+        let message = classify_bwrap_failures(&failures, true);
         assert!(message.contains("nub-sandbox group"), "{message}");
         assert!(message.contains("fresh login"), "{message}");
         assert_no_privileged_advice(&message);
@@ -3888,7 +3892,7 @@ mod tests {
         // missing helper is a setup problem, so the error names the exact setup command.
         let failures =
             vec!["opening candidate: No such file or directory (os error 2)".to_string()];
-        let message = classify_nesting_failure(&failures);
+        let message = classify_bwrap_failures(&failures, true);
         assert!(message.contains("not installed"), "{message}");
         assert!(message.contains(DEDICATED_HELPER_PATH), "{message}");
         assert!(
@@ -3914,7 +3918,7 @@ mod tests {
             "the dedicated helper does not match the packaged Bubblewrap build (digest mismatch): x",
             "dedicated nesting helper is not root-owned and protected from group/other writes (uid=1000, mode=755)",
         ] {
-            let message = classify_nesting_failure(&[detail.to_string()]);
+            let message = classify_bwrap_failures(&[detail.to_string()], true);
             assert!(message.contains("integrity check"), "{message}: {detail}");
             assert_no_privileged_advice(&message);
         }

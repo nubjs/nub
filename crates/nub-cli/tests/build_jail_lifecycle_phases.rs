@@ -54,9 +54,13 @@ fn success() -> std::process::ExitStatus {
 
 /// Minimal profile that opts into embedder-owned lifecycle confinement — the one field
 /// that drives the routing under test. Mirrors nub's real `NUB` profile for that field;
-/// the rest are inert defaults. Declared locally because nub-cli's `NUB` is crate-private
-/// and `set_embedder` is a process-wide `OnceLock`: this test owns its own test binary,
-/// so the global is set exactly once here and cannot race a sibling test.
+/// the rest are inert defaults. Declared locally because nub-cli's `NUB` is crate-private.
+///
+/// This file must stay a SINGLE test. It leaves two process globals dirty — the
+/// `set_embedder` `OnceLock` (first write wins, so a second test could not re-point it)
+/// and the engine context's installed hook — and cargo gives an integration-test file its
+/// own process, which is the whole isolation. A second test added here would silently
+/// inherit both.
 static JAILED: aube_util::Embedder = aube_util::Embedder {
     name: "jailtest",
     display_name: "jailtest",
@@ -140,8 +144,14 @@ fn preinstall_install_and_postinstall_all_reach_the_build_jail() {
                 &[],
                 None,
             ))
-            .unwrap_or_else(|e| {
-                panic!("`{phase}` escaped the build-jail and spawned unconfined: {e}")
+            .unwrap_or_else(|e| match e {
+                // The fixture scripts are `exit 1`, so a non-zero exit means the real
+                // spawn ran — the phase bypassed the confiner. Any other error is a
+                // harness failure and must not be reported as a confinement breach.
+                aube_scripts::Error::NonZeroExit { .. } => {
+                    panic!("`{phase}` escaped the build-jail and spawned unconfined: {e}")
+                }
+                other => panic!("`{phase}` failed to run at all (test harness fault): {other}"),
             });
         assert!(ran, "`{phase}` is declared in the fixture but did not run");
     }
