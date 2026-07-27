@@ -17,6 +17,7 @@
 //! them no package dir, so `run_script` never reaches this hook for them.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nub_sandbox::RuntimeCapability;
@@ -46,25 +47,44 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // it) with the command's explicit operations layered on. Non-UTF-8 entries are
         // dropped (nub-sandbox's env IR is `String`-keyed/valued), matching nub's other
         // ambient-env capture; a build script never needs a non-UTF-8 var.
-        let ambient = reconstruct_child_env(&spawn.env_delta);
+        let mut ambient = reconstruct_child_env(&spawn.env_delta);
 
         // The interpreter closure to grant READ. nub provisions its own Node under its
         // store (not `/usr`), so the tight-read base can't reach it. Under nub a bare
         // `node` resolves via the PATH-prepended shim (`NODE`) which re-execs the real
         // binary (`npm_node_execpath`), so BOTH must be readable/executable — grant each
         // (compile_build_jail dedups and adds each one's bin dir).
-        let interpreter: Vec<std::path::PathBuf> = ["npm_node_execpath", "NODE"]
+        let interpreter: Vec<PathBuf> = ["npm_node_execpath", "NODE"]
             .iter()
             .filter_map(|k| ambient.get(*k))
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
             .collect();
 
+        // Make node-gyp compile offline. It reads Node headers from `npm_config_nodedir/
+        // include/node` (default devdir `~/.cache/node-gyp/<ver>`, unreadable → network
+        // fallback the jail denies). Point nodedir at the provisioned Node root and grant
+        // that root's `include/node` (the store path is outside `$tooldirs` + the
+        // interpreter grant). Set-if-absent: an explicit ambient nodedir is a deliberate
+        // build-against-custom-node choice; the case we fix (nub's own Node) carries none.
+        let mut extra_reads = Vec::new();
+        if let Some((nodedir, headers)) = node_header_grant(&ambient) {
+            ambient
+                .entry("npm_config_nodedir".to_string())
+                .or_insert(nodedir);
+            extra_reads.push(headers);
+        }
+
         let homes = sandbox_homes(&spawn.project_root);
-        let policy =
-            nub_sandbox::compile_build_jail(homes, &spawn.package_dir, interpreter, ambient)
-                .map_err(|e| {
-                    std::io::Error::other(format!("compiling build-jail for lifecycle script: {e}"))
-                })?;
+        let policy = nub_sandbox::compile_build_jail(
+            homes,
+            &spawn.package_dir,
+            interpreter,
+            extra_reads,
+            ambient,
+        )
+        .map_err(|e| {
+            std::io::Error::other(format!("compiling build-jail for lifecycle script: {e}"))
+        })?;
 
         let mut spec = nub_sandbox::CommandSpec::new(&spawn.program)
             .args(&spawn.args)
@@ -138,5 +158,49 @@ fn sandbox_homes(project_root: &std::path::Path) -> nub_sandbox::Homes {
         tmp: std::env::temp_dir(),
         cache,
         project: project_root.to_path_buf(),
+    }
+}
+
+/// The node-gyp header additions derived from the effective child env: the
+/// `npm_config_nodedir` value to inject (the provisioned Node root — `bin/node`'s
+/// grandparent) and the `include/node` read subtree under it. `None` when there is no
+/// `npm_node_execpath` or its path has no `<root>/bin/node` shape, so a caller with no
+/// resolvable Node adds nothing. Pure over its input so the derivation is unit-testable
+/// without a provisioned Node on disk.
+fn node_header_grant(ambient: &BTreeMap<String, String>) -> Option<(String, PathBuf)> {
+    let root = ambient
+        .get("npm_node_execpath")
+        .and_then(|exec| Path::new(exec).parent()?.parent().map(Path::to_path_buf))?;
+    let nodedir = root.to_string_lossy().into_owned();
+    let headers = root.join("include").join("node");
+    Some((nodedir, headers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_header_grant_derives_nodedir_and_include_node() {
+        let ambient: BTreeMap<String, String> = [(
+            "npm_node_execpath".to_string(),
+            "/home/u/.cache/nub/node/v22.14.0/bin/node".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let (nodedir, headers) = node_header_grant(&ambient).expect("derives a grant");
+        assert_eq!(nodedir, "/home/u/.cache/nub/node/v22.14.0");
+        assert_eq!(
+            headers,
+            PathBuf::from("/home/u/.cache/nub/node/v22.14.0/include/node")
+        );
+    }
+
+    #[test]
+    fn node_header_grant_absent_without_execpath() {
+        let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin".to_string())]
+            .into_iter()
+            .collect();
+        assert!(node_header_grant(&ambient).is_none());
     }
 }

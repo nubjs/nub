@@ -69,6 +69,7 @@ fn build_jail_confines_writes_and_hides_secrets() {
         homes(&home, &project),
         &package_dir,
         vec![interpreter],
+        Vec::new(),
         ambient,
     )
     .expect("compile build-jail");
@@ -141,5 +142,78 @@ fn build_jail_confines_writes_and_hides_secrets() {
         std::fs::read(&secret).unwrap(),
         b"PRIVATE-KEY-DO-NOT-LEAK",
         "the secret file is untouched"
+    );
+}
+
+/// The header read-grant that makes node-gyp compile offline: a confined script READS the
+/// provisioned Node's `include/node` tree (passed as the per-spawn extra read), while an
+/// ungranted sibling under the same store stays hidden. Models the real defect — nub's
+/// provisioned Node lives outside `$tooldirs` and the interpreter grant, so absent this
+/// grant node-gyp finds no headers and falls to a network download the jail denies.
+#[test]
+fn build_jail_grants_node_headers_and_nothing_else_under_the_store() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/.aube/native@1.0.0/node_modules/native");
+    std::fs::create_dir_all(&package_dir).unwrap();
+
+    // A provisioned Node root under nub's version store (NOT `/usr`, NOT a `$tooldir`):
+    // `bin/node` + an `include/node` header tree, plus a NON-header sibling that must stay
+    // unreadable (only `include/node` is granted, not the whole root).
+    let node_root = home.join("Library/Caches/nub/node/22.15.0");
+    let include_node = node_root.join("include/node");
+    std::fs::create_dir_all(&include_node).unwrap();
+    std::fs::write(include_node.join("node_api.h"), b"// napi header").unwrap();
+    std::fs::create_dir_all(node_root.join("lib")).unwrap();
+    std::fs::write(node_root.join("lib/private.txt"), b"NOT-A-HEADER").unwrap();
+    let interpreter = node_root.join("bin/node");
+
+    let ambient: BTreeMap<String, String> = [
+        ("PATH", "/usr/bin:/bin"),
+        ("npm_config_nodedir", node_root.to_str().unwrap()),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+
+    let policy = nub_sandbox::compile_build_jail(
+        homes(&home, &project),
+        &package_dir,
+        vec![interpreter],
+        vec![include_node.clone()],
+        ambient,
+    )
+    .expect("compile build-jail");
+
+    let header = include_node.join("node_api.h");
+    let sibling = node_root.join("lib/private.txt");
+    let script = format!(
+        r#"
+        cat '{header}' >/dev/null 2>&1 && echo HEADER_OK || echo HEADER_FAIL
+        cat '{sibling}' >/dev/null 2>&1 && echo SIBLING_LEAK || echo SIBLING_HIDDEN
+        "#,
+        header = header.display(),
+        sibling = sibling.display(),
+    );
+
+    let spec = nub_sandbox::CommandSpec::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .cwd(&package_dir)
+        .deny_search_roots([project.clone(), package_dir.clone()]);
+    let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+    let prepared = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+        .expect("apply build-jail (fail-closed on error)");
+    let out = prepared.output().expect("run confined script");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("HEADER_OK"),
+        "the provisioned Node's include/node must be readable:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("SIBLING_HIDDEN") && !stdout.contains("SIBLING_LEAK"),
+        "only include/node is granted — a sibling under the store stays hidden:\n{stdout}"
     );
 }

@@ -590,10 +590,16 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     // A provisioned Node under nub's data dir — NOT under `/usr`, so the tight-read base
     // cannot reach it; the interpreter grant is the load-bearing addition.
     let interpreter = homes.home.join(".local/share/nub/node/22.15.0/bin/node");
+    // The Node root (`bin/node`'s grandparent) and its `include/node` header dir — the
+    // embedder derives these and passes them as the per-spawn extra reads so node-gyp
+    // compiles offline. It lives under nub's version store, outside `$tooldirs`.
+    let node_root = homes.home.join(".local/share/nub/node/22.15.0");
+    let include_node = node_root.join("include/node");
     let ambient: BTreeMap<String, String> = [
         ("PATH", "/bin"),
         ("NODE", interpreter.to_str().unwrap()),
         ("npm_node_execpath", interpreter.to_str().unwrap()),
+        ("npm_config_nodedir", node_root.to_str().unwrap()),
         ("npm_package_name", "left-pad"),
         ("NPM_TOKEN", "super-secret"),
         ("AWS_SECRET_ACCESS_KEY", "leak"),
@@ -607,6 +613,7 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
         homes.clone(),
         &package_dir,
         vec![interpreter.clone()],
+        vec![include_node.clone()],
         ambient,
     )
     .unwrap();
@@ -637,6 +644,16 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
         ),
         "the interpreter's bin dir is granted read"
     );
+    // The provisioned Node's `include/node` header tree is readable so node-gyp compiles
+    // offline (the store path is outside `$tooldirs` and the interpreter grant, so this
+    // extra-read grant is what makes it reachable).
+    assert!(
+        matches!(
+            m.decide(&include_node.join("node_api.h")).effect,
+            Effect::Allow
+        ),
+        "the Node header dir is granted read"
+    );
     // A `.env` inside the writable package dir is STILL denied (the floor wins over the
     // package-dir grant), and the home secret set stays denied.
     assert!(
@@ -666,6 +683,14 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
         p.env.constructed.get("PATH").map(String::as_str),
         Some("/bin"),
         "PATH is kept (a build needs it)"
+    );
+    assert_eq!(
+        p.env
+            .constructed
+            .get("npm_config_nodedir")
+            .map(String::as_str),
+        node_root.to_str(),
+        "npm_config_nodedir (points node-gyp at the local headers) is kept"
     );
     for cred in [
         "NPM_TOKEN",
