@@ -23,6 +23,81 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # THE DECISIVE END-TO-END CELL. The `facts` job below measures the userns
+  # MECHANISM; this one runs nub's REAL build-jail assertions on a default
+  # ubuntu-latest runner after exactly one privileged step, with
+  # NUB_SANDBOX_REQUIRE_BWRAP=1 so the suite cannot silently skip.
+  #
+  # It profiles /usr/bin/bwrap rather than nub's 0750 root:nub-sandbox helper,
+  # deliberately: the `facts` job proves the group gate makes the helper
+  # un-executable in a CI step (exit 126), so keying the grant to the distro path
+  # isolates "does the JAIL enforce" from "can the runner user exec the helper".
+  e2e:
+    name: Real build-jail on ubuntu-latest, after one sudo step
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      NUB_SANDBOX_REQUIRE_BWRAP: "1"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Pre-flight: confirm the host is the fail-closed shape we claim"
+        shell: bash
+        run: |
+          set +e
+          echo "restrict=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          command -v bwrap || echo "bwrap ABSENT (expected)"
+          ls /usr/libexec/nub/nub-bwrap 2>&1
+          exit 0
+
+      - name: "The one privileged step"
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          sudo tee /etc/apparmor.d/nub-system-bwrap-userns >/dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile nub_system_bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser --replace /etc/apparmor.d/nub-system-bwrap-userns
+          sudo aa-status | grep -i nub_system_bwrap
+
+      - name: "Gate: unprivileged bwrap must now work, and a bare unshare must still not"
+        shell: bash
+        run: |
+          set +e
+          echo "-- the grant works for the profiled path --"
+          /usr/bin/bwrap --die-with-parent --new-session --unshare-user --cap-drop ALL \
+            --unshare-pid --unshare-ipc --ro-bind / / --dev /dev --proc /proc -- /bin/true
+          echo "grant_exit=$?  (0 required, else the e2e below is vacuous)"
+          echo "-- CONTROL: the global restriction is UNTOUCHED --"
+          echo "restrict_still=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          unshare --user --map-root-user -- /bin/true
+          echo "bare_unshare_exit=$?  (nonzero required: proves the grant is path-keyed only)"
+          exit 0
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-test-Linux
+          save-if: false
+
+      - name: "nub's real Linux build-jail enforcement suite"
+        shell: bash
+        run: cargo test -p nub-sandbox --test linux_build_jail_enforcement -- --nocapture
+
+      - name: "nub's real Linux sandbox enforcement suite (broader surface)"
+        if: always()
+        shell: bash
+        run: cargo test -p nub-sandbox --test linux_enforcement
+
   facts:
     name: Userns routes (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
