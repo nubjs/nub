@@ -48,9 +48,21 @@ use std::time::{Duration, Instant};
 /// The `/etc` set is MEASURED, not guessed (`.fray/sandbox-minimum-readset.md` §5.5): a
 /// 34-package real-postinstall corpus was re-run under an EMPTY `/etc` with
 /// `strace -e trace=%file`, so these are the paths the kernel was actually asked for —
-/// the loader, NSS, DNS, timezone and TLS floor. Note `/etc/ssl/certs` and
-/// `/etc/ssl/openssl.cnf` individually and never `/etc/ssl` wholesale: that would
-/// re-admit `/etc/ssl/private`, which is mode 700 and holds TLS private keys.
+/// the loader, NSS, DNS, timezone and TLS floor.
+///
+/// The TLS entries are DISTRO-SHAPED and the measured set alone is not portable, because
+/// the corpus ran on Debian only. On the RHEL family `/etc/ssl/certs` is a symlink to
+/// `/etc/pki/tls/certs` whose entries are ABSOLUTE symlinks into `/etc/pki/ca-trust/…`,
+/// and `OPENSSLDIR` is `/etc/pki/tls` — so binding the Debian paths alone yields a
+/// directory of DANGLING symlinks and every OpenSSL verify fails with "unable to get
+/// local issuer certificate" (reproduced on `rockylinux:9` against a wholesale-`/etc`
+/// control). `/etc/ssl/cert.pem` is musl/Alpine's default `SSL_CERT_FILE`. Node bundles
+/// its own CA and is unaffected, which is exactly why a Node-only corpus stayed green —
+/// but `curl`, `git clone https://`, and python `requests` inside the jail are not.
+///
+/// Every TLS entry is named as a SUBPATH, never `/etc/ssl` or `/etc/pki` wholesale:
+/// `/etc/ssl/private` and `/etc/pki/tls/private` are mode-700 private-key directories and
+/// admitting either would undo the tightening this floor exists for.
 const ESSENTIAL_READ_PATHS: &[&str] = &[
     "/usr",
     "/bin",
@@ -70,9 +82,15 @@ const ESSENTIAL_READ_PATHS: &[&str] = &[
     "/etc/host.conf",
     "/etc/resolv.conf",
     "/etc/localtime",
+    "/etc/alternatives",
+    // TLS trust material. Debian/SUSE spellings first, then the RHEL family, then musl.
     "/etc/ssl/certs",
     "/etc/ssl/openssl.cnf",
-    "/etc/alternatives",
+    "/etc/ssl/cert.pem",
+    "/etc/ca-certificates",
+    "/etc/pki/tls/certs",
+    "/etc/pki/tls/openssl.cnf",
+    "/etc/pki/ca-trust",
 ];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootView {

@@ -319,7 +319,7 @@ pub(crate) fn compile_scope(
                 // SPECULATIVE origin (absent on a host that has neither installed the
                 // project's dependencies nor bootstrapped node-gyp) and the surface fold
                 // marks every entry AUTHORED.
-                preset::grant_build_jail_dependency_reads(s, &mut policy, ctx);
+                preset::grant_build_jail_dependency_reads(s, &mut policy, ctx, None);
                 // The provisioned interpreter lives under nub's store (not `/usr`), so the
                 // tight-read base does not reach it.
                 preset::grant_build_jail_interpreter(s, &mut policy, ctx);

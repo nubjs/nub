@@ -58,6 +58,17 @@ pub fn reassert_secret_floor(name: &str, policy: &mut SandboxPolicy, ctx: &Compi
         entries.extend(defaults::env_deny_leaf_rules());
         entries.extend(defaults::env_deny_subtree_rules());
     }
+    // Same gate, same fix, second finalizer: `fold::finalize_policy_file_deny` also
+    // declines on a denies-only fold, which would leave the very `nub.jsonc` that
+    // configures this jail outside its own self-exclusion. Not reachable today — the
+    // config sits at the project root, outside every post-fold grant — but "any read grant
+    // implies the policy file is denied" must not be conditional on which finalizer ran.
+    if let Some(policy_file) = ctx.policy_file.as_deref() {
+        let rule = defaults::policy_file_deny_rule(policy_file);
+        if !entries.contains(&rule) {
+            entries.push(rule);
+        }
+    }
     // Splice in BEFORE the trailing `.env*`/`.npmrc` floor rather than appending: appending
     // would leave the floor no longer last, and the Linux backend locates it POSITIONALLY
     // (`builtin_env_band_start`) to tell an explicit user deny from the builtin floor. These
@@ -174,22 +185,52 @@ const NUB_PM_CACHE_PATTERN: &str = "$cache/nub/pm";
 /// nested grants keep working unchanged.
 ///
 /// Front-inserted so the surface's `package_dir` rw entry stays later and keeps winning.
-pub fn grant_build_jail_dependency_reads(name: &str, policy: &mut SandboxPolicy, ctx: &CompileCtx) {
+pub fn grant_build_jail_dependency_reads(
+    name: &str,
+    policy: &mut SandboxPolicy,
+    ctx: &CompileCtx,
+    package_dir: Option<&Path>,
+) {
     if name != "build-jail" {
         return;
     }
-    let mut grants = Vec::new();
-    for root in [
+    let mut roots = vec![
         ctx.homes.project.join("package.json"),
         ctx.homes.project.join("node_modules"),
         PathBuf::from(crate::matcher::path::expand_symbolic(
             NUB_PM_CACHE_PATTERN,
             &ctx.homes,
         )),
-    ] {
+    ];
+    // The `node_modules` the package ACTUALLY sits in, which is not always the project's.
+    // aube's hoisted planner is per-IMPORTER, so a workspace member's dependency
+    // materializes at `<root>/packages/<m>/node_modules/<name>` and resolves its own
+    // tooling through the sibling `<root>/packages/<m>/node_modules/.bin` — outside
+    // `<project>/node_modules` entirely. Missing it reproduces exactly the failure the
+    // read ladder measured at 27 of 33 packages when the project read is dropped, but
+    // only in workspaces, which is how it would have escaped a single-project corpus.
+    // Redundant for the root-hoisted and isolated layouts (both anchor under the
+    // project's own `node_modules`), where this resolves to a path already covered.
+    if let Some(dir) = package_dir
+        && let Some(own) = enclosing_node_modules(dir)
+    {
+        roots.push(own);
+    }
+    let mut grants = Vec::new();
+    for root in roots {
         push_read_path(&mut grants, &root, FsOrigin::Speculative);
     }
     policy.fs.rules.entries.splice(0..0, grants);
+}
+
+/// The nearest ancestor of `package_dir` named `node_modules`. That is the directory a
+/// lifecycle script's own dependency closure and `.bin` shims are installed into,
+/// whichever linker placed it.
+fn enclosing_node_modules(package_dir: &Path) -> Option<PathBuf> {
+    package_dir
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == "node_modules"))
+        .map(Path::to_path_buf)
 }
 
 /// Push a READ-allow rule per subtree glob for `path` (the node itself + `/**`).
@@ -306,7 +347,7 @@ pub fn compile_build_jail(
     // interpreter grant + secret-floor reassert are applied here rather than in
     // `compile_scope`'s preset branch.
     let mut policy = compile(&surface, &ctx)?;
-    grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx);
+    grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx, Some(package_dir));
     grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
     grant_build_jail_extra_reads(&mut policy, &extra_reads);
     reassert_secret_floor("build-jail", &mut policy, &ctx);
@@ -362,14 +403,22 @@ mod tests {
     /// The build jail's toolchain read was CARVED OUT of `$tooldirs`, so it must remain a
     /// subset of it. If the two anchors ever drift apart the narrowing stops being a
     /// narrowing and starts granting a directory the broad set never covered — silently,
-    /// and on one platform at a time. Compared as EXPANDED paths because `$tooldirs` spells
-    /// its nub entry differently on Windows while resolving to the same directory.
+    /// and ON ONE PLATFORM AT A TIME, which is the failure this exists to catch.
+    ///
+    /// `cache` is set per-platform to what the embedder actually resolves (`sandbox_homes`
+    /// mirrors the engine's `cache_dir`, `%LOCALAPPDATA%` branch included). Hardcoding the
+    /// POSIX spelling would make this pass on Windows while production aimed the grant at a
+    /// directory node-gyp was never bootstrapped into.
     #[test]
     fn the_narrowed_toolchain_grant_stays_inside_tooldirs() {
         let homes = Homes {
             home: PathBuf::from("/testhome"),
             tmp: PathBuf::from("/testtmp"),
-            cache: PathBuf::from("/testhome/.cache"),
+            cache: if cfg!(windows) {
+                PathBuf::from("/testhome/AppData/Local")
+            } else {
+                PathBuf::from("/testhome/.cache")
+            },
             project: PathBuf::from("/proj"),
         };
         let grant = crate::matcher::path::expand_symbolic(NUB_PM_CACHE_PATTERN, &homes);

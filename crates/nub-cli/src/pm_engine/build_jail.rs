@@ -8,8 +8,10 @@
 //! policy for that package and launches the script confined:
 //!
 //! - WRITE confined to a private per-run tmp + the script's own package dir.
-//! - READ confined to the project, `$tooldirs`, and the provisioned interpreter (the
-//!   OS backends supply the system/toolchain closure under a minimal root).
+//! - READ confined to the consumer's DEPENDENCY TREE and top-level manifest, nub's own
+//!   PM cache (where it bootstraps node-gyp), and the provisioned interpreter (the OS
+//!   backends supply the system/toolchain closure under a minimal root). The consumer's
+//!   source, config, `.git/`, and `.github/` are outside it.
 //! - egress curated to the install-time artifact hosts (`$downloads`) and denied
 //!   everywhere else; the home-secret + `.env*` floors applied; `/etc/shadow` denied.
 //! - the constructed lifecycle env minus credential-shaped keys.
@@ -19,9 +21,9 @@
 //! root scripts ARE: its `prepare` runs through a nested install whose root is the
 //! fetched checkout, which aube marks `RootProvenance::Fetched` and confines here with
 //! BOTH anchors on that checkout. The project anchor matters as much as the write one:
-//! `./` is what the read grant expands against, and a checkout's own `workspaces`
-//! globs choose the importer directory, so anchoring reads there would let the fetched
-//! tree grant itself a read on a sibling of its scratch.
+//! the read grants are anchored on it, and a checkout's own `workspaces` globs choose
+//! the importer directory, so anchoring reads there would let the fetched tree grant
+//! itself a read on a sibling of its scratch.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -97,10 +99,15 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             .args(&spawn.args)
             .cwd(&spawn.cwd);
         // The `.env*` deny floor is a bounded glob, so the backend needs the dirs whose
-        // immediate children it may materialize to enforce it. The build-jail reads the
-        // project + writes the package dir, so those are the roots a `.env` could sit in.
+        // immediate children it may materialize to enforce it. The PACKAGE DIR is the only
+        // such root now: it is the one place the jail both reads and writes. The project
+        // root is deliberately NOT passed — the read set no longer reaches it, so walking
+        // it would build masks for files the script cannot open, and each mask makes bwrap
+        // materialize its parent directories inside the jail, disclosing the shape of the
+        // consumer's tree along exactly the paths that hold secrets. For a fetched git
+        // dependency the two are the same directory anyway.
         if nub_sandbox::requires_deny_search_roots(&policy) {
-            spec = spec.deny_search_roots([spawn.project_root.clone(), spawn.package_dir.clone()]);
+            spec = spec.deny_search_roots([spawn.package_dir.clone()]);
         }
 
         let prepared =
@@ -150,15 +157,26 @@ fn reconstruct_child_env(
 }
 
 /// The per-OS home anchors for the build-jail compile, with the project anchored at
-/// the install's project root (what `./` expands against). Mirrors
-/// `cli::sandbox_homes`, differing only in the project field.
+/// the install's project root. Mirrors `cli::sandbox_homes`, differing only in the
+/// project field.
 fn sandbox_homes(project_root: &std::path::Path) -> nub_sandbox::Homes {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| project_root.to_path_buf());
+    // Resolve the cache home the way the ENGINE does (`aube_store::dirs::cache_dir`),
+    // %LOCALAPPDATA% branch included. The jail grants nub's own node-gyp through a
+    // `$cache`-anchored pattern, so a divergence here aims that grant at a directory the
+    // engine never bootstrapped into — on Windows that silently removes the only node-gyp
+    // a confined native build can reach, since the interposition no longer falls back to
+    // an ambient one.
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
+        .or_else(|| {
+            cfg!(windows)
+                .then(|| std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from))
+                .flatten()
+        })
         .unwrap_or_else(|| home.join(".cache"));
     nub_sandbox::Homes {
         home,
