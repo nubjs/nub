@@ -6474,8 +6474,12 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     if !new_bin.join(NUB_EXE).is_file() {
         bail!("nub upgrade: downloaded archive did not contain bin/{NUB_EXE}");
     }
-    ensure_bin_executable(&new_bin.join("nub"))?;
-    verify_provisioned_version(&new_bin.join("nub"), &version)
+    // The staged binary is validated by RUNNING it below, so it needs +x before the
+    // swap, not only after (the post-swap chmod further down heals the installed
+    // copy). Windows has no mode bit and no `ensure_bin_executable`.
+    #[cfg(not(windows))]
+    ensure_bin_executable(&new_bin.join(NUB_EXE))?;
+    verify_provisioned_version(&new_bin.join(NUB_EXE), &version)
         .context("nub upgrade: staged release bundle failed validation")?;
 
     // The staged binary validates any platform resources it requires before the
@@ -10022,6 +10026,9 @@ mod tests {
         );
     }
 
+    // `swap_dir` is the POSIX half of the swap (Windows renames files individually
+    // through `swap_bin_files_windows`), so this test only compiles off Windows.
+    #[cfg(unix)]
     #[test]
     fn failed_bin_swap_restores_the_prior_install() {
         let install = tempfile::tempdir().unwrap();
