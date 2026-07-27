@@ -254,8 +254,9 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
 /// drops happen HERE at load, so every consumer of the returned map is covered by
 /// construction. The reports are consumed by [`load_env_files`] to warn. The
 /// plain [`load_env_files_raw`] wrapper discards them because watch separately
-/// delegates the raw files to Node; that spawn boundary installs a stable guard
-/// for this same denylist before handing Node the paths.
+/// delegates the raw files to Node; that spawn boundary re-applies these same
+/// drops — this denylist, plus `NODE_ENV` when the auto cascade is the live
+/// source — before handing Node the paths.
 fn load_env_files_raw_reporting(
     project_root: &Path,
 ) -> (HashMap<String, String>, bool, Vec<String>) {
@@ -313,8 +314,9 @@ fn load_env_files_raw_reporting(
 
 /// Emit the "ignoring `.env` `NODE_ENV`" notice at most once per process. Called
 /// only on the direct run/file injection path ([`load_env_files`]), where the
-/// dropped `NODE_ENV` genuinely never reaches the child; the watch path defers to
-/// Node's `--env-file` and does not warn. `Once` guards against any repeat.
+/// dropped `NODE_ENV` genuinely never reaches the child; the watch path re-applies
+/// the drop at its spawn boundary instead, and does not warn (the value is kept
+/// out of the child either way). `Once` guards against any repeat.
 fn warn_node_env_from_dotenv_ignored() {
     use std::sync::Once;
     static WARNED: Once = Once::new();
