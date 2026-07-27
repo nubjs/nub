@@ -165,22 +165,31 @@ fn sandbox_homes(project_root: &std::path::Path) -> nub_sandbox::Homes {
 }
 
 /// The Node-toolchain additions derived from the effective child env: the
-/// `npm_config_nodedir` value to inject (the provisioned Node root — `bin/node`'s
-/// grandparent) and the read subtrees under it. `None` when there is no
-/// `npm_node_execpath` or its path has no `<root>/bin/node` shape, so a caller with no
-/// resolvable Node adds nothing. Pure over its input so the derivation is unit-testable
-/// without a provisioned Node on disk.
+/// `npm_config_nodedir` value to inject (the Node root — `bin/node`'s grandparent) and
+/// the read subtrees under it. `None` only when `npm_node_execpath` is absent or has
+/// fewer than two parents; the `<root>/bin/node` shape is ASSUMED, not checked, so a
+/// Windows layout (`<root>/node.exe`) derives one level too high and yields paths that
+/// do not exist. That is inert rather than wrong — the grants are `Speculative`, so an
+/// absent path is skipped — but it is why this must not be used to derive anything that
+/// has to be correct. Pure over its input, so the derivation is unit-testable without a
+/// Node on disk.
 ///
-/// Two subtrees, NOT the whole root. `include/node` carries the C/C++ headers node-gyp
-/// compiles against. `lib/node_modules` is what makes `<root>/bin/npm`, `npx` and
-/// `corepack` resolvable at all: each is a symlink into it, so with only the bin dir
-/// granted all three are DANGLING inside the jail and the standard
+/// Two subtrees, NOT the whole root. `lib/node_modules` is what makes `<root>/bin/npm`,
+/// `npx` and `corepack` resolvable at all: each is a symlink into it, so with only the
+/// bin dir granted all three are DANGLING inside the jail and the standard
 /// `prebuild-install || npm run build` fallback dies at `npm: not found` (measured on
 /// `keytar`: rc 127 → rc 0 once the target is readable). Granting the ROOT instead would
 /// be simpler but is unbounded — `npm_node_execpath` is the user's Node, which on a
 /// Homebrew or `/usr/local` install makes the root a shared system prefix carrying
-/// unrelated `etc/`/`var/` content. These two subtrees are toolchain-only under every
-/// Node layout.
+/// unrelated `etc/`/`var/` content.
+///
+/// Scope of what this opens: Node's own toolchain plus any globally installed package's
+/// SOURCE (`npm -g` lands in `lib/node_modules`) — third-party code, not user data, and
+/// less sensitive than the `~/.npm/_cacache` tarballs `$tooldirs` already grants. The
+/// `.env*`/`.npmrc` deny floor is re-asserted after these grants and stays authoritative.
+/// KNOWN GAP: npm's builtin config file is `lib/node_modules/npm/npmrc` with no leading
+/// dot, so the `.npmrc` band does not match it; it is benign by default but can carry a
+/// registry token on a managed install.
 fn node_toolchain_grant(ambient: &BTreeMap<String, String>) -> Option<(String, Vec<PathBuf>)> {
     let root = ambient
         .get("npm_node_execpath")

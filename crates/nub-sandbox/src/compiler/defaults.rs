@@ -389,10 +389,13 @@ const BUILD_JAIL_EXTRA_PREFIXES: &[&str] = &["npm_package_", "npm_lifecycle_"];
 /// resolves `node-gyp` from that PATH — measured end-to-end, a from-source addon links
 /// under the jail through both the bare-`node-gyp` and the `npm_config_node_gyp` route.
 /// Admitting the var would REPLACE that working fallback with an exec of the PM binary,
-/// which no read grant covers; the shim does not guard that call, so on a backend where
-/// an ungranted path is absent rather than merely unreadable the compile would hard-fail
-/// instead of falling back. Admitting it therefore requires read-granting the binary in
-/// the same change — see `build_jail_withholds_the_node_gyp_trampoline_exe`.
+/// which no read grant covers, and the shim does not guard that call. Whether that is
+/// survivable is BACKEND-DEPENDENT, so it must not be assumed: under macOS Seatbelt the
+/// binary is unreadable yet still executable (the base profile allows `process-exec`
+/// outright), and the trampoline was measured to succeed; under a Linux bwrap namespace
+/// an ungranted path is simply not mounted, so the same exec is ENOENT and the compile
+/// hard-fails with no fallback left. Admitting the var therefore requires read-granting
+/// the binary in the same change — see `build_jail_withholds_the_node_gyp_trampoline_exe`.
 const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     "NODE",
     "npm_node_execpath",
@@ -1066,11 +1069,8 @@ mod tests {
         }
     }
 
-    /// The env channel a from-source native compile rides. Verified end-to-end under the
-    /// real interposition: with these keys admitted a dependency's `install` hook links an
-    /// addon inside the jail with egress denied, via both a bare `node-gyp` and
-    /// `node $npm_config_node_gyp`. Losing any one of them breaks that offline compile, so
-    /// they are pinned here rather than left to the general allowlist shape.
+    /// The env channel a from-source native compile rides, pinned by name: losing any one
+    /// of these breaks an offline in-jail node-gyp build, which no other test would catch.
     #[test]
     fn build_jail_admits_the_node_gyp_compile_channel() {
         let ambient = ambient(&[
