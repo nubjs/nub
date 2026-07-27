@@ -70,10 +70,11 @@ pub fn reassert_secret_floor(name: &str, policy: &mut SandboxPolicy, ctx: &Compi
         }
     }
     // Splice in BEFORE the trailing `.env*`/`.npmrc` floor rather than appending: appending
-    // would leave the floor no longer last, and the Linux backend locates it POSITIONALLY
-    // (`builtin_env_band_start`) to tell an explicit user deny from the builtin floor. These
-    // home-secret denies still land after every band-1 allow, which is all their re-assertion
-    // needs; ordering among denies does not affect any verdict.
+    // would leave the floor no longer last, and it is located POSITIONALLY
+    // (`defaults::env_deny_floor_start`, which the Linux backend calls to tell an explicit
+    // user deny from the builtin floor). These home-secret denies still land after every
+    // band-1 allow, which is all their re-assertion needs; ordering among denies does not
+    // affect any verdict.
     let at = defaults::env_deny_floor_start(entries).unwrap_or(entries.len());
     entries.splice(at..at, denies);
 }

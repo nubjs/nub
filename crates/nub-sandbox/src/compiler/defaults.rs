@@ -95,11 +95,10 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// `fold::finalize_env_deny`. Each glob carries a rootless twin mirroring it for a
 /// depth-0 match; canonical candidates are absolute, so `**/…` is the form that bites.
 ///
-/// These two arrays are the SINGLE SOURCE OF TRUTH for the floor: the Linux backend's
-/// `builtin_env_band_start` recognizes the floor POSITIONALLY (last N entries, leaf band
-/// then subtree band) and `is_builtin_env_glob` by membership, and both derive from
-/// these constants rather than restating them — a hand-copied list silently desynced on
-/// every edit here.
+/// These two arrays are the SINGLE SOURCE OF TRUTH for the floor: [`env_deny_floor_start`]
+/// recognizes it POSITIONALLY (last N entries, leaf band then subtree band) and the Linux
+/// backend's `is_builtin_env_glob` by membership, and both derive from these constants
+/// rather than restating them — a hand-copied list silently desynced on every edit here.
 pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &[
     "**/.env*",
     ".env*",
@@ -167,11 +166,11 @@ pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
 ///
 /// Exists so a post-fold pass that needs to add band-1 entries can splice BEFORE the floor
 /// instead of appending after it. Displacing the floor is not a matching bug (deny order
-/// among denies is irrelevant) but it desyncs the Linux backend's positional recognizer
-/// (`backend::linux::builtin_env_band_start`), which reads the boundary to tell an explicit
-/// USER `.env` deny from the builtin floor when planning the dotenv mask kind — a floor no
-/// longer trailing reads as "absent", silently downgrading an explicit deny's genuinely-
-/// unreadable mask to the present-but-empty dotenv shape.
+/// among denies is irrelevant) but it defeats this positional recognizer, which the Linux
+/// backend calls to tell an explicit USER `.env` deny from the builtin floor when planning
+/// the dotenv mask kind — a floor no longer trailing reads as "absent", silently
+/// downgrading an explicit deny's genuinely-unreadable mask to the present-but-empty
+/// dotenv shape.
 pub(crate) fn env_deny_floor_start(entries: &[FsRule]) -> Option<usize> {
     let floor_len = ENV_DENY_LEAF_GLOBS.len() + ENV_DENY_SUBTREE_GLOBS.len();
     let start = entries.len().checked_sub(floor_len)?;
@@ -1259,20 +1258,25 @@ mod tests {
         // `.env*/`-directory's contents. The split is what lets an exact-file allow sit
         // between them (leaf-deny → allow → subtree-deny-last). An npmrc is a file with
         // no subtree twin, so it appears only in the leaf band.
-        for g in [
-            "**/.env*",
-            ".env*",
-            "**/.npmrc",
-            ".npmrc",
-            "**/node_modules/npm/npmrc",
-            "node_modules/npm/npmrc",
-        ] {
-            assert!(leaf_globs.contains(&g), "leaf band missing {g}");
-            assert!(!leaf_globs.contains(&format!("{g}/**").as_str()));
-        }
-        for g in ["**/.env*/**", ".env*/**"] {
-            assert!(subtree_globs.contains(&g), "subtree band missing {g}");
-        }
+        //
+        // EXACT, ORDERED equality — not membership. This is the crate's only content pin
+        // on the floor, and both consumers read it POSITIONALLY, so a reorder or a
+        // PREPEND is as much a break as a removal and a subset check sees none of them.
+        // Widening the floor is a deliberate security change: land it here first, then
+        // follow the restated literal in `tests/compiler.rs`, which cannot reach these
+        // crate-private arrays.
+        assert_eq!(
+            leaf_globs,
+            [
+                "**/.env*",
+                ".env*",
+                "**/.npmrc",
+                ".npmrc",
+                "**/node_modules/npm/npmrc",
+                "node_modules/npm/npmrc",
+            ]
+        );
+        assert_eq!(subtree_globs, ["**/.env*/**", ".env*/**"]);
     }
 
     /// npm's builtin config is the one file in its config hierarchy spelled without a

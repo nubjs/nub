@@ -1192,7 +1192,7 @@ fn collect_direct_denied_candidates(
     // which decides the dotenv mask kind. Shared with the compiler so the recognizer reads
     // the same arrays `finalize_env_deny` emits rather than restating them — a restated
     // copy desyncs silently, and "floor not found" downgrades a mask instead of failing.
-    let band_start = crate::compiler::defaults::env_deny_floor_start(&policy.fs.rules.entries);
+    let band_start = crate::compiler::env_deny_floor_start(&policy.fs.rules.entries);
     for root in roots {
         walk_deny_candidates(&root, matcher, band_start, out)?;
     }
@@ -1666,12 +1666,12 @@ fn unescape_mountinfo_path(encoded: &str) -> Result<OsString, String> {
 }
 
 /// Membership in the builtin secret-file floor (the `.env*` bands plus the npm-config
-/// leaf twins). Reads the `defaults::ENV_DENY_*_GLOBS` arrays directly so it cannot
-/// desync from what `fold::finalize_env_deny` actually emits.
+/// leaf twins). Reads the `ENV_DENY_*_GLOBS` arrays directly so it cannot desync from
+/// what `fold::finalize_env_deny` actually emits.
 fn is_builtin_env_glob(pattern: &str) -> bool {
-    crate::compiler::defaults::ENV_DENY_LEAF_GLOBS
+    crate::compiler::ENV_DENY_LEAF_GLOBS
         .iter()
-        .chain(crate::compiler::defaults::ENV_DENY_SUBTREE_GLOBS)
+        .chain(crate::compiler::ENV_DENY_SUBTREE_GLOBS)
         .any(|glob| *glob == pattern)
 }
 
@@ -3532,6 +3532,12 @@ mod tests {
     /// so the golden above (both `None`) cannot tell them apart at all; this pins
     /// each to its own reserved destination. Also covers the private-tmp and
     /// minimal-root arms, whose remounts the read-only case never reaches.
+    ///
+    /// SCOPE: this catches a swap of the destinations WITHIN
+    /// `append_confinement_options`. It cannot catch a transposition of the two
+    /// same-typed `Option<&File>` arguments at the `configure_retained_outer` call
+    /// site, because it invokes the callee directly — pinning that would need a real
+    /// Bubblewrap and monitor image.
     #[test]
     fn late_bound_infrastructure_mounts_land_at_their_own_reserved_paths() {
         let root = tempdir().unwrap();

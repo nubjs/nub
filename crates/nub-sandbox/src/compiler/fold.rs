@@ -96,8 +96,8 @@ pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, 
         }
     }
     // Order is load-bearing: the policy-file deny goes in BEFORE the `.env*` floor so
-    // the four env bands stay the LAST entries — the Linux backend recognizes that floor
-    // POSITIONALLY (`builtin_env_band_start`). The policy-file deny and the env bands are
+    // the four env bands stay the LAST entries — that floor is recognized POSITIONALLY
+    // (`defaults::env_deny_floor_start`). The policy-file deny and the env bands are
     // disjoint (a policy path is never a `.env*` basename), so their relative order does
     // not affect either verdict; only the env-bands-last invariant matters.
     finalize_policy_file_deny(&mut set, ctx);
@@ -284,9 +284,9 @@ fn fold_tooldirs_object_entry(
 ///             allow, are BOTH closed; the same closes a project-local `.npmrc`);
 ///   band 2c — the `.env*` SUBTREE deny (`**/.env*/**`, `.env*/**`), so a `.env*`-NAMED
 ///             DIRECTORY's CONTENTS are denied too (`.npmrc` is always a file — no subtree).
-/// The two bands are always the LAST entries in that fixed order — the Linux backend's
-/// `builtin_env_band_start`/`is_builtin_env_glob` recognize them positionally, so this
-/// emission and that matcher are COUPLED and must change together.
+/// The two bands are always the LAST entries in that fixed order — `env_deny_floor_start`
+/// recognizes them positionally and the Linux backend's `is_builtin_env_glob` by
+/// membership, so this emission and those matchers are COUPLED and must change together.
 ///
 /// Skipped only for a FULLY-relaxed axis (`fs: true` / `sandbox: false` — the explicit
 /// escape hatch) and for a policy that grants no reads at all (a deny-all fs), where the

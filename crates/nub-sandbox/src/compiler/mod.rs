@@ -12,10 +12,7 @@
 
 mod builtin_sets;
 mod clobber;
-/// `pub(crate)` for the Linux backend alone: it recognizes the secret-file deny floor
-/// positionally and by membership, and must read the same arrays `finalize_env_deny`
-/// emits rather than restate them.
-pub(crate) mod defaults;
+mod defaults;
 mod env_grammar;
 mod fold;
 mod preset;
@@ -24,6 +21,15 @@ mod reuse;
 
 pub use preset::compile_build_jail;
 pub use resolve::{CommandRunner, ShellRunner};
+
+/// The secret-file deny floor, re-exported for the Linux backend ALONE — it recognizes
+/// the floor positionally and by membership, and must read the same arrays
+/// `finalize_env_deny` emits rather than restate them. Exposing these three rather than
+/// the whole `defaults` module keeps the policy CONSTRUCTORS out of backend reach, so
+/// "backends replicate the IR, they do not author policy" stays enforced by the compiler
+/// rather than by convention.
+#[cfg(target_os = "linux")]
+pub(crate) use defaults::{ENV_DENY_LEAF_GLOBS, ENV_DENY_SUBTREE_GLOBS, env_deny_floor_start};
 
 use crate::matcher::path::Homes;
 use crate::policy::{Effect, EnvPolicy, FsPolicy, Inspection, NetPolicy, ProxyMode, SandboxPolicy};
@@ -143,11 +149,16 @@ impl CompileCtx {
         mut ambient_env: BTreeMap<String, String>,
     ) -> Self {
         // Boundary B ingestion. Filtering cmd.exe's shell-positional entries HERE, once,
-        // is what keeps every downstream posture safe: `sandbox: false` clones the ambient
-        // map wholesale and a `vars: ["*"]` glob matches any name, so either would carry a
-        // `=`-named key into `constructed` and fail the spawn under any cmd.exe ancestor.
-        // Filtering at ingestion also keeps them out of `withheld`, where they would read
-        // as policy decisions about variables that were never variables.
+        // covers every posture that reads the ctx's ambient map: `sandbox: false` clones it
+        // wholesale and a `vars: ["*"]` glob matches any name, so either would otherwise
+        // carry a `=`-named key into `constructed` and fail the spawn under any cmd.exe
+        // ancestor. Filtering at ingestion also keeps them out of `withheld`, where they
+        // would read as policy decisions about variables that were never variables.
+        //
+        // It does NOT cover the build jail: `compile_build_jail` hands its own unfiltered
+        // `ambient_env` to `lifecycle_scrubbed_env`, never routing it through here. That
+        // posture is safe by its default-deny allowlist — no admitted name starts with
+        // `=` — not by this filter.
         ambient_env.retain(|key, _| !crate::policy::is_shell_positional_env_key(key));
         Self {
             homes,

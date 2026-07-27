@@ -970,10 +970,10 @@ fn inline_policy_with_no_source_file_is_not_self_excluded() {
 
 #[test]
 fn policy_file_deny_is_injected_before_the_env_floor() {
-    // The Linux backend recognizes the secret-file floor POSITIONALLY as the LAST fs
-    // entries (`builtin_env_band_start`): the LEAF band (the secret FILE globs) then the
-    // `.env*` SUBTREE band. The policy-file deny must land BEFORE that floor so the
-    // invariant survives self-exclusion.
+    // The secret-file floor is recognized POSITIONALLY as the LAST fs entries
+    // (`compiler::defaults::env_deny_floor_start`): the LEAF band (the secret FILE globs)
+    // then the `.env*` SUBTREE band. The policy-file deny must land BEFORE that floor so
+    // the invariant survives self-exclusion.
     //
     // Restated here rather than derived because the source of truth
     // (`compiler::defaults::ENV_DENY_{LEAF,SUBTREE}_GLOBS`) is crate-private and this is
@@ -993,24 +993,24 @@ fn policy_file_deny_is_injected_before_the_env_floor() {
     let ctx = common::ctx(true, &[]).with_policy_file(Some(proj.join("policy.jsonc")));
     let p = compile(&json!({ "fs": ["."] }), &ctx).unwrap();
     let entries = &p.fs.rules.entries;
-    let start = entries.len() - FLOOR.len();
-    for (i, glob) in FLOOR.iter().enumerate() {
-        assert_eq!(
-            entries[start + i].matcher.as_str(),
-            *glob,
-            "floor position {i}"
-        );
-        assert_eq!(
-            entries[start + i].effect,
-            Effect::Deny,
-            "floor is deny at {i}"
-        );
-    }
+    // Anchor the floor at the policy-file deny, NOT at `len - FLOOR.len()`: a window
+    // measured back from the END slides past a PREPENDED floor glob and still equals this
+    // literal, so a stale copy would only ever be caught by an APPEND. Pinning "everything
+    // after the policy-file deny" fixes the window's start, so length and order are held
+    // in both directions.
+    let policy_deny = entries
+        .iter()
+        .position(|r| r.effect == Effect::Deny && r.matcher.as_str().ends_with("policy.jsonc"))
+        .expect("policy-file deny sits before the env floor");
+    let floor = &entries[policy_deny + 1..];
+    let globs: Vec<&str> = floor.iter().map(|r| r.matcher.as_str()).collect();
+    assert_eq!(
+        globs, FLOOR,
+        "the floor is exactly what follows the policy-file deny"
+    );
     assert!(
-        entries[..start]
-            .iter()
-            .any(|r| r.effect == Effect::Deny && r.matcher.as_str().ends_with("policy.jsonc")),
-        "policy-file deny sits before the env floor"
+        floor.iter().all(|r| r.effect == Effect::Deny),
+        "every floor entry is a deny"
     );
 }
 
