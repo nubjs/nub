@@ -264,6 +264,55 @@ fn apply_replaces_a_brokered_parent_value_with_a_fresh_marker() {
     assert_ne!(first, second, "each apply must mint a fresh marker");
 }
 
+/// Brokering is only usable if the child can VERIFY the leaves the proxy mints, so the
+/// trust bundle reaching it is part of the contract — and the bundle is delivered as
+/// bytes copied out of an anonymous descriptor, where an emitted-the-right-option
+/// assertion proves nothing about what the child can read. Assert the certificate.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_brokering_child_can_read_the_minted_trust_bundle() {
+    let home = std::env::var("HOME").expect("test parent has HOME");
+    let ambient = [("HOME", home.as_str())];
+    let ctx = common::ctx(true, &ambient);
+    let policy = compile(
+        &json!({
+            "fs": true,
+            "net": ["api.example.com"],
+            "secrets": { "HOME": { "brokerTo": ["api.example.com"] } },
+            "vars": true
+        }),
+        &ctx,
+    )
+    .unwrap();
+    if skip_without_bwrap() {
+        return;
+    }
+    let output = apply(
+        &policy,
+        // Echoing the path first is what keeps this from passing on a HOST trust store:
+        // the bundle is only proof of delivery if it was read from the sandbox-private
+        // destination, which no path outside the sandbox resolves to.
+        CommandSpec::new("/bin/sh")
+            .args(["-c", "echo \"at=$SSL_CERT_FILE\"; cat \"$SSL_CERT_FILE\""]),
+    )
+    .unwrap()
+    .output()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success()
+            && stdout.contains("at=/dev/.nub-sandbox/support/")
+            && stdout.contains("-----BEGIN CERTIFICATE-----"),
+        // A whole trust bundle is hundreds of KB of PEM; the `at=` line and the first
+        // certificate header are the entire diagnostic.
+        "the child must read a certificate from the sandbox-private bundle: \
+         status={:?} stdout={:?} stderr={}",
+        output.status,
+        &stdout[..stdout.len().min(300)],
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn brokered_secret_missing_from_the_environment_fails_at_compile() {
     // A brokered secret is a REQUIRED env entry (a broker must hold a real value to

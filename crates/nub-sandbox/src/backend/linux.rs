@@ -378,9 +378,11 @@ pub fn apply(
             )),
         })?;
     // C3: open + relocate a descriptor to the host bridge socket dir so Bubblewrap can
-    // `--ro-bind-fd` it read-only into the sandbox (fd-based, TOCTOU-free, matching the CA
-    // bundle). The dir itself stays alive on the returned `Prepared`'s `HostNetBridge`, so
-    // this descriptor is valid through the launch.
+    // `--ro-bind-fd` it read-only into the sandbox (fd-based, TOCTOU-checked). A directory
+    // cannot be carried as bind DATA, so unlike the CA bundle this one stays on the fd form
+    // — sound here because the dir is a real on-disk path Bubblewrap can resolve. The dir
+    // itself stays alive on the returned `Prepared`'s `HostNetBridge`, so this descriptor is
+    // valid through the launch.
     let net_bridge_fd = net_bridge_dir
         .map(|dir| {
             File::open(dir)
@@ -626,9 +628,22 @@ fn append_confinement_options(
     // Nub infrastructure is layered after authored masks at a reserved destination
     // below the fresh /dev view. The child never receives the host temporary path,
     // so a Private/Deny /tmp or an ancestor mask cannot hide its trust bundle.
+    // The bundle is an anonymous sealed memfd, which `--ro-bind-fd` CANNOT carry: Bubblewrap
+    // turns that option into a bind on the literal source `/proc/self/fd/N` and `realpath()`s
+    // it, and a memfd resolves to `/memfd:… (deleted)`. Bind DATA copies the bytes out instead
+    // and never resolves a pathname. It reads from the descriptor's CURRENT offset and the
+    // descriptor is a `dup` of a caller-owned file, so nothing here may assume offset 0. What
+    // keeps two launches from interleaving on one shared offset is that `MitmCa` — hence the
+    // memfd — is minted fresh per `apply`; the rewind alone would not make that safe.
     if let Some(bundle) = ca_bundle {
+        Seek::rewind(&mut &*bundle).map_err(|error| Degradation {
+            lost: vec!["net-per-host".to_string()],
+            reason: Some(format!("rewinding the child CA-bundle descriptor: {error}")),
+        })?;
         setup
-            .arg("--ro-bind-fd")
+            .arg("--perms")
+            .arg("444")
+            .arg("--ro-bind-data")
             .arg(bundle.as_raw_fd().to_string())
             .arg(super::linux_monitor::PRIVATE_CA_BUNDLE);
     }
@@ -3399,7 +3414,8 @@ mod tests {
         // before it is what a transposed argument pair would swap.
         let ca_at = at(crate::backend::linux_monitor::PRIVATE_CA_BUNDLE);
         assert_eq!(raw[ca_at - 1], ca.as_raw_fd().to_string());
-        assert_eq!(raw[ca_at - 2], "--ro-bind-fd");
+        assert_eq!(raw[ca_at - 2], "--ro-bind-data");
+        assert_eq!(raw[ca_at - 4..ca_at - 2], ["--perms", "444"]);
         let bridge_at = at(crate::backend::linux_net_bridge::PRIVATE_NET_ROOT);
         assert_eq!(raw[bridge_at - 1], bridge.as_raw_fd().to_string());
         assert_eq!(raw[bridge_at - 2], "--ro-bind-fd");
