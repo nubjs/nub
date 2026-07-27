@@ -1,0 +1,280 @@
+# Branch-scoped probe: CAN NUB'S BUILD-JAIL ENFORCE ON A DEFAULT GITHUB RUNNER?
+#
+# No PR. Triggered only by a push touching this file, on this branch.
+#
+# The question: on a stock `ubuntu-latest` runner there is no bwrap, the
+# AppArmor unprivileged-userns restriction is on, and no `nub sandbox setup` has
+# run — so nub's Linux backend fails closed. This measures which routes restore
+# enforcement, and what each one costs.
+#
+# EVERY arm carries a positive control. A denial that could be a broken binary,
+# a missing file, or a failed spawn is worthless, so each denial is paired with
+# a same-binary / same-inputs success in the same step.
+name: sandbox-ci-enforcement-probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/sandbox-ci-enforcement]
+    paths:
+      - ".github/workflows/sandbox-ci-enforcement-probe.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  facts:
+    name: Userns routes (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: "A. Host facts"
+        shell: bash
+        run: |
+          set +e
+          echo "### A. HOST FACTS"
+          echo "runner_image=$ImageOS $ImageVersion"
+          grep PRETTY_NAME /etc/os-release
+          uname -srm
+          echo "user=$(id -un) uid=$(id -u) groups=$(id -nG)"
+          echo "--- sysctls ---"
+          echo "apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1)"
+          echo "unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>&1)"
+          echo "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>&1)"
+          echo "yama_ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>&1)"
+          echo "--- apparmor LSM ---"
+          echo "lsm=$(cat /sys/kernel/security/lsm 2>&1)"
+          ls -d /sys/kernel/security/apparmor 2>&1
+          echo "apparmor_parser=$(command -v apparmor_parser || echo ABSENT)"
+          echo "aa_status_bin=$(command -v aa-status || echo ABSENT)"
+          echo "--- bwrap presence (the thing the backend looks for) ---"
+          for p in /usr/bin/bwrap /bin/bwrap /usr/libexec/nub/nub-bwrap; do
+            if [ -e "$p" ]; then echo "PRESENT $p $(ls -l $p)"; else echo "ABSENT  $p"; fi
+          done
+          echo "--- sudo ---"
+          sudo -n true && echo "passwordless_sudo=YES" || echo "passwordless_sudo=NO"
+          echo "--- existing apparmor profiles mentioning bwrap/userns ---"
+          sudo -n ls /etc/apparmor.d/ 2>&1 | tr '\n' ' '; echo
+          sudo -n aa-status 2>&1 | head -5
+          exit 0
+
+      - name: "B. Raw unprivileged userns capability (no bwrap involved)"
+        shell: bash
+        run: |
+          set +e
+          echo "### B. RAW unshare(CLONE_NEWUSER) AS THE RUNNER USER"
+          echo "-- B1: unshare -Ur true --"
+          unshare --user --map-root-user -- /bin/true
+          echo "B1_exit=$?"
+          echo "-- B2: capabilities INSIDE a bare userns (CapEff must be nonzero to be useful) --"
+          unshare --user --map-root-user -- grep -E '^(CapEff|CapPrm)' /proc/self/status
+          echo "B2_exit=$?"
+          echo "-- B3: POSITIVE CONTROL, same command under sudo (root is never restricted) --"
+          sudo unshare --user --map-root-user -- grep -E '^CapEff' /proc/self/status
+          echo "B3_exit=$?"
+          exit 0
+
+      - name: "C. Bundled bwrap at an UNPROFILED path (the primary hypothesis)"
+        shell: bash
+        run: |
+          set +e
+          echo "### C. A BWRAP BINARY WE SHIPPED OURSELVES, NEVER INSTALLED BY THE DISTRO"
+          # Fetch the .deb WITHOUT installing it, then unpack to a private path.
+          # This models exactly what @nubjs/nub-linux-x64 does: an executable at
+          # <nub-dir>/nub-resources/bwrap that the distro has never seen.
+          # The sudo here refreshes package indexes so we can FETCH BYTES; the
+          # enforcement measurement below is entirely unprivileged. Nothing is
+          # installed to a system path in this step.
+          sudo apt-get update -qq 2>&1 | tail -2
+          mkdir -p "$HOME/dl" && cd "$HOME/dl"
+          apt-get download bubblewrap 2>&1 | tail -2
+          echo "download_exit=$?"
+          ls -l *.deb 2>&1
+          dpkg-deb -x ./*.deb "$HOME/unpacked" 2>&1
+          echo "unpack_exit=$?"
+          mkdir -p "$HOME/nub-resources"
+          cp "$HOME/unpacked/usr/bin/bwrap" "$HOME/nub-resources/bwrap"
+          chmod 0755 "$HOME/nub-resources/bwrap"
+          BW="$HOME/nub-resources/bwrap"
+          echo "bundled=$BW"
+          ls -l "$BW"
+          file "$BW"
+
+          echo "-- C0: POSITIVE CONTROL, the binary itself is functional (no userns needed) --"
+          "$BW" --version; echo "C0_exit=$?"
+
+          echo "-- C1: bundled bwrap, unprivileged, --unshare-user (THE question) --"
+          "$BW" --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "C1_exit=$?"
+
+          echo "-- C2: same, full jail shape the backend uses --"
+          "$BW" --die-with-parent --new-session --unshare-user --cap-drop ALL \
+                --unshare-pid --unshare-ipc --ro-bind / / --dev /dev --proc /proc -- /bin/true
+          echo "C2_exit=$?"
+
+          echo "-- C3: POSITIVE CONTROL, the SAME binary under sudo (proves binary+args are sound) --"
+          sudo "$BW" --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "C3_exit=$?"
+
+          echo "-- C4: does a copy at a DIFFERENT unprofiled path behave the same? --"
+          cp "$BW" /tmp/bwrap-copy && chmod 0755 /tmp/bwrap-copy
+          /tmp/bwrap-copy --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "C4_exit=$?"
+          exit 0
+
+      - name: "D. sudo apt-get install bubblewrap (the cheapest possible CI step)"
+        shell: bash
+        run: |
+          set +e
+          echo "### D. DOES THE DISTRO PACKAGE ALONE RESTORE UNPRIVILEGED ENFORCEMENT?"
+          sudo apt-get update -qq 2>&1 | tail -2
+          sudo apt-get install -y bubblewrap 2>&1 | tail -5
+          echo "install_exit=$?"
+          echo "-- what the package placed --"
+          ls -l /usr/bin/bwrap
+          /usr/bin/bwrap --version
+          echo "-- apparmor profiles the package (or the distro) provides --"
+          ls -l /etc/apparmor.d/ | grep -iE 'bwrap|unpriv|userns' || echo "(no bwrap/userns-named profile file)"
+          sudo aa-status 2>&1 | grep -iE 'bwrap|profiles are loaded|profiles are in enforce' | head -10
+          echo "-- D1: /usr/bin/bwrap unprivileged, jail shape --"
+          /usr/bin/bwrap --die-with-parent --new-session --unshare-user --cap-drop ALL \
+                --unshare-pid --unshare-ipc --ro-bind / / --dev /dev --proc /proc -- /bin/true
+          echo "D1_exit=$?"
+          echo "-- D2: the BUNDLED copy again, now that the distro profile is loaded --"
+          echo "   (isolates whether the grant is path-keyed to /usr/bin/bwrap)"
+          "$HOME/nub-resources/bwrap" --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "D2_exit=$?"
+          echo "-- D3: NON-VACUOUSNESS, a real confinement effect through /usr/bin/bwrap --"
+          echo "SECRET-CANARY-D3" > "$HOME/canary.txt"
+          # Minimal root: /bin,/lib,/lib64 are symlinks into /usr on Ubuntu, so they
+          # must be recreated as symlinks, not bind-mounted (a bind of a symlink is
+          # what makes a "denial" actually a failed spawn — the broken-control trap).
+          /usr/bin/bwrap --die-with-parent --unshare-user \
+                --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+                --symlink usr/lib64 /lib64 --proc /proc --dev /dev \
+                -- /bin/sh -c 'echo INNER_SH_RAN; cat '"$HOME"'/canary.txt 2>&1'
+          echo "D3_exit=$?  (expect INNER_SH_RAN printed and the canary NOT: HOME was never bound in)"
+          exit 0
+
+      - name: "E. Path-keyed AppArmor profile for OUR OWN binary (nub sandbox setup, by hand)"
+        shell: bash
+        run: |
+          set +e
+          echo "### E. THE nub-sandbox-setup ROUTE, REPRODUCED STEP BY STEP"
+          mkdir -p /tmp/pkgdir
+          # Deliberately NOT /usr/bin/bwrap: a fixed nub-owned path the distro
+          # never profiled, exactly like /usr/libexec/nub/nub-bwrap.
+          sudo install -d -m 0755 /usr/libexec/nub
+          sudo install -o root -g root -m 0755 "$HOME/nub-resources/bwrap" /usr/libexec/nub/nub-bwrap
+          ls -l /usr/libexec/nub/nub-bwrap
+
+          echo "-- E0: BASELINE, the helper path with NO profile loaded yet --"
+          /usr/libexec/nub/nub-bwrap --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "E0_exit=$?  (this is the pre-profile control)"
+
+          echo "-- E1: write and load the path-keyed profile --"
+          sudo tee /etc/apparmor.d/nub-bwrap-userns >/dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile nub_bwrap /usr/libexec/nub/nub-bwrap flags=(unconfined) {
+            userns,
+            include if exists <local/nub-bwrap-userns>
+          }
+          PROFILE
+          sudo apparmor_parser --replace /etc/apparmor.d/nub-bwrap-userns
+          echo "parser_exit=$?"
+          sudo aa-status 2>&1 | grep -i nub_bwrap || echo "(nub_bwrap not listed by aa-status)"
+
+          echo "-- E2: THE MEASUREMENT, helper path unprivileged after the profile --"
+          /usr/libexec/nub/nub-bwrap --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "E2_exit=$?"
+
+          echo "-- E3: full jail shape through the helper --"
+          /usr/libexec/nub/nub-bwrap --die-with-parent --new-session --unshare-user --cap-drop ALL \
+                --unshare-pid --unshare-ipc --ro-bind / / --dev /dev --proc /proc -- /bin/true
+          echo "E3_exit=$?"
+
+          echo "-- E4: NEGATIVE CONTROL, an unprofiled copy of the SAME bytes still denied? --"
+          echo "   (proves the grant is path-keyed, not a global relaxation)"
+          "$HOME/nub-resources/bwrap" --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "E4_exit=$?"
+
+          echo "-- E5: NON-VACUOUSNESS through the helper: canary must NOT leak --"
+          echo "SECRET-CANARY-E5" > "$HOME/canary5.txt"
+          out=$(/usr/libexec/nub/nub-bwrap --die-with-parent --unshare-user \
+                --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+                --symlink usr/lib64 /lib64 --bind /tmp/pkgdir /pkg --proc /proc --dev /dev \
+                -- /bin/sh -c 'echo WROTE > /pkg/out.txt; cat /pkg/out.txt; cat '"$HOME"'/canary5.txt 2>&1' 2>&1)
+          echo "E5_raw_out<<$out>>"
+          case "$out" in
+            *SECRET-CANARY-E5*) echo "E5=LEAKED  (jail did not confine)";;
+            *WROTE*)            echo "E5=CONFINED (package dir readable+writable, secret withheld)";;
+            *)                  echo "E5=INCONCLUSIVE (the package-dir control did not run)";;
+          esac
+          exit 0
+
+      - name: "F. Group semantics: does 0750 root:nub-sandbox work in the SAME CI session?"
+        shell: bash
+        run: |
+          set +e
+          echo "### F. NUB'S REAL SETUP ALSO GATES THE HELPER BEHIND A GROUP"
+          echo "   nub installs the helper 0750 root:nub-sandbox and adds the user to the group."
+          echo "   A CI step is a fresh process of an ALREADY-LOGGED-IN service account, so a"
+          echo "   newly added supplementary group may not apply. Measure it."
+          sudo groupadd --system nub-sandbox 2>&1; echo "groupadd_exit=$?"
+          sudo install -o root -g nub-sandbox -m 0750 "$HOME/nub-resources/bwrap" /usr/libexec/nub/nub-bwrap
+          ls -l /usr/libexec/nub/nub-bwrap
+          sudo usermod -aG nub-sandbox "$(id -un)"; echo "usermod_exit=$?"
+          echo "-- F1: groups visible to THIS shell (already-running session) --"
+          id -nG
+          echo "-- F2: groups the DATABASE now says (fresh lookup) --"
+          id -nG "$(id -un)"
+          echo "-- F3: can this shell actually exec the 0750 helper? --"
+          /usr/libexec/nub/nub-bwrap --version; echo "F3_exit=$?"
+          echo "-- F4: via sg (re-derives supplementary groups) --"
+          sg nub-sandbox -c '/usr/libexec/nub/nub-bwrap --version'; echo "F4_exit=$?"
+          echo "-- F5: via a fresh login shell --"
+          sudo -u "$(id -un)" -i /usr/libexec/nub/nub-bwrap --version; echo "F5_exit=$?"
+          exit 0
+
+      - name: "G. Fresh step (new process) — does E2 still hold, and does F1 change?"
+        shell: bash
+        run: |
+          set +e
+          echo "### G. A LATER STEP IS A NEW PROCESS BUT THE SAME PARENT SERVICE"
+          echo "groups_now=$(id -nG)"
+          echo "-- G1: helper, unprivileged, in a brand new step --"
+          /usr/libexec/nub/nub-bwrap --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "G1_exit=$?"
+          echo "-- G2: /usr/bin/bwrap (distro), unprivileged, new step --"
+          /usr/bin/bwrap --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "G2_exit=$?"
+          exit 0
+
+      - name: "H. The blunt route: globally disabling the restriction"
+        shell: bash
+        run: |
+          set +e
+          echo "### H. sudo sysctl -w  (measured for completeness; a posture change, not a grant)"
+          echo "before=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1)"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1
+          echo "sysctl_exit=$?"
+          echo "after=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1)"
+          echo "-- H1: the UNPROFILED bundled copy, unprivileged, after the flip --"
+          "$HOME/nub-resources/bwrap" --die-with-parent --new-session --unshare-user --cap-drop ALL \
+                --unshare-pid --unshare-ipc --ro-bind / / --dev /dev --proc /proc -- /bin/true
+          echo "H1_exit=$?"
+          echo "-- H2: restore, then confirm the denial returns (control for H1) --"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1 2>&1
+          "$HOME/nub-resources/bwrap" --die-with-parent --unshare-user --ro-bind / / -- /bin/true
+          echo "H2_exit=$?  (must be nonzero on a 24.04-class host, else H1 proved nothing)"
+          exit 0
