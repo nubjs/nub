@@ -13,8 +13,11 @@
 //! - egress denied; the home-secret + `.env*` floors applied; `/etc/shadow` denied.
 //! - the constructed lifecycle env minus credential-shaped keys.
 //!
-//! Root-package scripts (trusted, user-authored) are NOT routed here — aube passes
-//! them no package dir, so `run_script` never reaches this hook for them.
+//! The user's OWN root-package scripts are NOT routed here — aube passes them no
+//! package dir, so `run_script` never reaches this hook for them. A git dependency's
+//! root scripts ARE: its `prepare` runs through a nested install whose root is the
+//! fetched checkout, which aube marks `RootProvenance::Fetched` and confines here
+//! keyed on that checkout directory.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

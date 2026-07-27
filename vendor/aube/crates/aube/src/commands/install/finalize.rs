@@ -49,6 +49,10 @@ pub(super) struct FinalizePhaseInput<'a> {
     pub(super) strict_dep_builds_setting: bool,
     pub(super) ignore_scripts: bool,
     pub(super) skip_root_lifecycle: bool,
+    /// Whether this install's root package is the user's own project or a git
+    /// checkout aube fetched. Decides whether root lifecycle scripts keep the
+    /// trusted-root exemption from the embedder's build-jail.
+    pub(super) root_provenance: aube_scripts::RootProvenance,
     pub(super) workspace_filter_empty: bool,
     pub(super) dep_selection: DepSelection,
     pub(super) cli_flags: &'a [(String, String)],
@@ -194,6 +198,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         strict_dep_builds_setting,
         ignore_scripts,
         skip_root_lifecycle,
+        root_provenance,
         workspace_filter_empty,
         dep_selection,
         cli_flags,
@@ -361,7 +366,14 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
                 aube_scripts::LifecycleHook::PostInstall,
                 aube_scripts::LifecycleHook::Prepare,
             ] {
-                run_root_lifecycle(&project_dir, modules_dir_name, importer_manifest, hook).await?;
+                run_root_lifecycle(
+                    &project_dir,
+                    modules_dir_name,
+                    importer_manifest,
+                    hook,
+                    root_provenance,
+                )
+                .await?;
             }
         }
         phase_timings.record("root_lifecycle", phase_start.elapsed());

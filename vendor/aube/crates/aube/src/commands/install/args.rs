@@ -461,6 +461,19 @@ pub struct InstallOptions {
 }
 
 impl InstallOptions {
+    /// Who authored the package this install treats as its root. `git_prepare_depth`
+    /// is raised by exactly one caller — `run_git_dep_prepare` — and it raises it
+    /// precisely because the install it is constructing has a fetched git checkout as
+    /// its root, so the depth counter already carries the provenance fact. Root
+    /// lifecycle hooks read this to decide whether the trusted-root exemption applies.
+    pub(crate) fn root_provenance(&self) -> aube_scripts::RootProvenance {
+        if self.git_prepare_depth > 0 {
+            aube_scripts::RootProvenance::Fetched
+        } else {
+            aube_scripts::RootProvenance::UserAuthored
+        }
+    }
+
     /// Construct with the given frozen mode and all other flags at their
     /// defaults. Used by commands that chain into install (`add`, `remove`,
     /// `update`, `ensure_installed`) where none of the install-specific flags

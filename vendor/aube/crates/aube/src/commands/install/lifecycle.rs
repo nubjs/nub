@@ -14,6 +14,7 @@ pub(super) async fn run_root_lifecycle(
     modules_dir_name: &str,
     manifest: &aube_manifest::PackageJson,
     hook: aube_scripts::LifecycleHook,
+    provenance: aube_scripts::RootProvenance,
 ) -> miette::Result<()> {
     // Only announce when the hook is actually defined, so projects without
     // lifecycle scripts don't get noise in their install output.
@@ -21,7 +22,7 @@ pub(super) async fn run_root_lifecycle(
         return Ok(());
     }
     tracing::debug!("Running {} script...", hook.script_name());
-    aube_scripts::run_root_hook(project_dir, modules_dir_name, manifest, hook)
+    aube_scripts::run_root_hook(project_dir, modules_dir_name, manifest, hook, provenance)
         .await
         .map_err(|e| {
             // Old message was just the bare error string. User got
