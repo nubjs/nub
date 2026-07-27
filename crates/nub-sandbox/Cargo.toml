@@ -73,6 +73,9 @@ seccompiler = "0.5"
 # (CreateProcessW + STARTUPINFOEX + SECURITY_CAPABILITIES), per-run inheritable
 # allow-ACE grants (Get/SetNamedSecurityInfoW + SetEntriesInAclW), the
 # CreateAppContainerProfile identity, and the Job-Object KILL_ON_JOB_CLOSE reap.
+# The strict-Windows net tier adds the loopback-exemption RMW
+# (NetworkIsolationGet/SetAppContainerConfig, WindowsFirewall) + the elevation query
+# (OpenProcessToken/GetTokenInformation, Threading/Security).
 # 0.61 is already in the workspace lockfile (transitive via clap/anstyle) — no
 # new supply-chain surface. Raw FFI (no COM), gated `#[cfg(target_os = "windows")]`.
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
@@ -84,6 +87,26 @@ features = [
   "Win32_Security_Isolation",
   "Win32_System_Threading",
   "Win32_System_JobObjects",
+  "Win32_System_Memory",
+  "Win32_NetworkManagement_WindowsFirewall",
+  # The dedicated-account + WFP backend (backend/windows_account/): the SID-keyed egress
+  # fence (WindowsFilteringPlatform; System_Rpc only because FwpmEngineOpen0's signature
+  # names SEC_WINNT_AUTH_IDENTITY_W), local-account lifecycle (NetManagement), the
+  # DPAPI-sealed credential (Security_Cryptography), the Winlogon user-picker hide
+  # (System_Registry), profile deletion (DeleteProfileW lives under UI_Shell), and the FILE_GENERIC_* access
+  # masks the grant/deny aces are built from (Storage_FileSystem).
+  "Win32_NetworkManagement_WindowsFilteringPlatform",
+  "Win32_System_Rpc",
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_Security_Cryptography",
+  "Win32_System_Registry",
+  "Win32_UI_Shell",
+  "Win32_Storage_FileSystem",
+  # Window-station / desktop aces for the launch. A non-interactive caller (a service, an SSH
+  # session, a CI agent) runs on a per-logon `Service-0x0-…$` station, NOT `WinSta0`, and the
+  # Secondary Logon service's auto-grant does not cover it — without an explicit ace the child
+  # dies in loader init with STATUS_DLL_INIT_FAILED (VM-diagnosed 2026-07-24).
+  "Win32_System_StationsAndDesktops",
 ]
 
 [dev-dependencies]
@@ -135,3 +158,16 @@ harness = false
 [[test]]
 name = "windows_residuals"
 harness = false
+
+# OPT-IN ONLY. This probe is not a unit test: on an unprovisioned machine it exits non-zero
+# by design, and when run elevated it CREATES a local account, a local group, four persistent
+# WFP filters and a Winlogon registry value. Left ungated, bare `cargo test` on a
+# windows-latest runner would either turn the leg red or silently provision the runner. A
+# human (or the VM harness) opts in with `--features windows-sandbox-probe`.
+[features]
+windows-sandbox-probe = []
+
+[[test]]
+name = "windows_account_enforcement"
+harness = false
+required-features = ["windows-sandbox-probe"]
