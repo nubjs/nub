@@ -62,7 +62,7 @@ const REQUIRED_EXECUTABLE_SNAPSHOT_SEALS: libc::c_int =
 /// outermost sandbox of a nesting chain on an AppArmor-restricted host: a stock
 /// `bwrap//&unpriv_bwrap` outer cannot transition to the helper's more permissive
 /// profile under `no_new_privs`. See `crates/nub-sandbox/setup/linux-nesting/`.
-const DEDICATED_HELPER_PATH: &str = "/usr/libexec/nub/nub-bwrap";
+pub(crate) const DEDICATED_HELPER_PATH: &str = "/usr/libexec/nub/nub-bwrap";
 /// Bounded ceiling for the one-shot nesting feature probe; a correctly set-up
 /// host completes it in well under a second.
 const NESTING_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1679,6 +1679,12 @@ fn open_bwrap_candidate_inventory(require_nesting: bool) -> PinnedCandidateInven
     if require_nesting {
         return open_bwrap_candidate_inventory_from([PathBuf::from(DEDICATED_HELPER_PATH)], [], []);
     }
+    // B2: single-level prefers the fixed-path helper too. On an AppArmor-restricted host (24.04)
+    // it is the ONLY candidate that can create the userns — a stock system/bundled bwrap at an
+    // unprofiled path is denied. When the helper is absent (no setup, or an unrestricted host
+    // like 22.04 / sysctl=0) its open fails and the resolver falls through to system/bundled, so
+    // the no-setup path is unchanged where setup isn't needed. `nub sandbox setup` installs it.
+    let dedicated = [PathBuf::from(DEDICATED_HELPER_PATH)];
     let system = [PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")];
     let bundled = std::env::current_exe()
         .ok()
@@ -1690,7 +1696,7 @@ fn open_bwrap_candidate_inventory(require_nesting: bool) -> PinnedCandidateInven
             ]
         })
         .unwrap_or_default();
-    open_bwrap_candidate_inventory_from([], system, bundled)
+    open_bwrap_candidate_inventory_from(dedicated, system, bundled)
 }
 
 /// Validate the Linux resource paired with the running binary before a staged
@@ -2060,9 +2066,7 @@ fn classify_bwrap_failures(failures: &[String]) -> String {
         .is_ok_and(|value| value.trim() == "1")
         && (lower.contains("permission denied") || lower.contains("uid map"))
     {
-        return format!(
-            "Bubblewrap is blocked by Ubuntu's AppArmor user-namespace policy ({detail})"
-        );
+        return format!("{}\n\n(underlying: {detail})", apparmor_setup_hint());
     }
     if fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
         .is_ok_and(|value| value.trim() == "0")
@@ -2215,7 +2219,8 @@ fn classify_nesting_failure(failures: &[String]) -> String {
     // any ENOENT that a later probe stage might surface.
     if lower.contains("opening candidate: no such file or directory") {
         return format!(
-            "the dedicated Bubblewrap nesting helper is not installed at {DEDICATED_HELPER_PATH}; complete the documented one-time host setup ({detail})"
+            "the sandbox helper is not installed at {DEDICATED_HELPER_PATH}.\n\n{}\n\n(underlying: {detail})",
+            apparmor_setup_hint()
         );
     }
     // (2) integrity — root ownership, writability, digest, or build pinning.
@@ -2265,10 +2270,26 @@ fn classify_nesting_failure(failures: &[String]) -> String {
     //     securityfs needs privilege, so it is inferred from the denial, not read.)
     if apparmor_restricts_unprivileged_userns() && is_namespace_denial(&lower) {
         return format!(
-            "the dedicated Bubblewrap nesting helper's AppArmor profile is not loaded, so the host blocks the user namespaces required for nested sandboxes; complete the documented one-time host setup ({detail})"
+            "the sandbox helper's AppArmor profile is not loaded, so the host blocks the user namespaces the sandbox needs.\n\n{}\n\n(underlying: {detail})",
+            apparmor_setup_hint()
         );
     }
     format!("nested Bubblewrap could not create the required namespaces on this host ({detail})")
+}
+
+/// The remedy line for the AppArmor userns restriction, naming the exact copy-pasteable setup
+/// command and the CI one-liner. Kept in one place so every fail-closed path that the setup
+/// fixes points the user at the same command (epic C1).
+fn apparmor_setup_hint() -> String {
+    format!(
+        "the sandbox needs a one-time setup on this system. Ubuntu's kernel restricts the user \
+         namespaces the sandbox relies on; grant nub's bundled bubblewrap the one capability it \
+         needs (the only step that needs root, paid once per machine):\n\n    {}\n\nThis installs \
+         a digest-pinned copy of bubblewrap at {DEDICATED_HELPER_PATH} and an AppArmor profile \
+         keyed to it; the global restriction stays on for everything else. On ephemeral CI you \
+         can instead run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
+        crate::backend::linux_setup::SETUP_COMMAND
+    )
 }
 
 fn apparmor_restricts_unprivileged_userns() -> bool {
@@ -3984,12 +4005,25 @@ mod tests {
 
     #[test]
     fn nesting_failure_classifies_missing_helper() {
+        // C1 reverses the old "no remediation command" posture for the NOT-SET-UP case: a
+        // missing helper is a setup problem, so the error names the exact setup command.
         let failures =
             vec!["opening candidate: No such file or directory (os error 2)".to_string()];
         let message = classify_nesting_failure(&failures);
         assert!(message.contains("not installed"), "{message}");
         assert!(message.contains(DEDICATED_HELPER_PATH), "{message}");
-        assert_no_privileged_advice(&message);
+        assert!(
+            message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn apparmor_setup_hint_names_the_setup_command() {
+        // The C1 remedy text every not-set-up fail-closed path routes through.
+        let hint = apparmor_setup_hint();
+        assert!(hint.contains(crate::backend::linux_setup::SETUP_COMMAND), "{hint}");
+        assert!(hint.contains(DEDICATED_HELPER_PATH), "{hint}");
     }
 
     #[test]

@@ -1271,7 +1271,8 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci", "init",
+    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "sandbox", "install", "i",
+    "ci", "init",
 ];
 
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
@@ -2172,6 +2173,16 @@ fn dispatch_subcommand(
     if subcommand == "agent" {
         initialize_config_snapshot(false, false)?;
         return crate::agent::run(&rest[1..]);
+    }
+
+    // `sandbox` is the one-time host-setup group for the agent-sandbox
+    // (`setup`/`status`/`teardown`). Like `node`/`pm`/`agent`, a non-forwarding
+    // manual sub-verb match. Setup is privileged (installs a root-owned bwrap
+    // helper + AppArmor profile on Linux) — the verb never self-elevates; it
+    // prints the `sudo` command when run unprivileged. Design: .fray/sandbox-escalation-ux.md.
+    if subcommand == "sandbox" {
+        initialize_config_snapshot(false, false)?;
+        return run_sandbox_admin(&rest[1..]);
     }
 
     // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
@@ -3171,6 +3182,66 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     let result = nub_core::node::spawn::spawn_node(&config)?;
     // PATH shim cleanup is handled once at the top level (see `run`).
     Ok(nub_core::node::spawn::exit_code(&result))
+}
+
+/// `nub sandbox {setup,status,teardown}` — the one-time host-setup group. On Linux, `setup`
+/// installs the fixed-path bwrap helper + AppArmor profile the agent-sandbox needs on Ubuntu
+/// 23.10+/24.04 (epic C1 + B2). It NEVER self-elevates: run unprivileged it prints the exact
+/// `sudo` command. macOS needs no setup; Windows setup is the account/WFP backend reached via
+/// `nub run --sandbox-admin setup` (PR #561) until that integrates here.
+fn run_sandbox_admin(args: &[String]) -> Result<i32> {
+    let usage = "nub sandbox — manage the one-time host setup the agent-sandbox needs\n\n\
+                 \x20 setup       install the sandbox helper + profile (needs root on Linux)\n\
+                 \x20 status      report what is and isn't set up\n\
+                 \x20 teardown    remove the sandbox helper + profile";
+    let Some(action) = args.first().map(String::as_str) else {
+        println!("{usage}");
+        return Ok(0);
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let result = match action {
+            "setup" => nub_sandbox::linux_admin::setup(),
+            "status" => nub_sandbox::linux_admin::status(),
+            "teardown" => nub_sandbox::linux_admin::teardown(),
+            "-h" | "--help" | "help" => {
+                println!("{usage}");
+                return Ok(0);
+            }
+            other => anyhow::bail!("unknown `nub sandbox` action `{other}`\n\n{usage}"),
+        };
+        match result {
+            Ok(report) => {
+                println!("{report}");
+                Ok(0)
+            }
+            // The setup functions embed the actionable remedy (e.g. the sudo command) in their
+            // error text, so surface it verbatim rather than wrapping it.
+            Err(message) => anyhow::bail!("{message}"),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match action {
+            "setup" | "status" => {
+                println!("the sandbox needs no host setup on macOS (Seatbelt is unprivileged).");
+                Ok(0)
+            }
+            "teardown" => Ok(0),
+            "-h" | "--help" | "help" => {
+                println!("{usage}");
+                Ok(0)
+            }
+            other => anyhow::bail!("unknown `nub sandbox` action `{other}`\n\n{usage}"),
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = action;
+        anyhow::bail!(
+            "on Windows the sandbox host setup is the dedicated-account backend: run `nub run --sandbox-admin setup` from an elevated prompt"
+        )
+    }
 }
 
 /// INTERNAL, UNDOCUMENTED entry for the `nub-sandbox` engine (design.md §2.6),
@@ -6872,7 +6943,7 @@ const CLAP_HELP_COMMANDS: &[&str] = &[
 /// of exiting silently — the routing inconsistency the help-router fix addresses.
 fn is_help_routable(word: &str) -> bool {
     CLAP_HELP_COMMANDS.contains(&word)
-        || matches!(word, "node" | "pm" | "agent")
+        || matches!(word, "node" | "pm" | "agent" | "sandbox")
         || crate::pm_engine::lookup_verb(word).is_some()
 }
 

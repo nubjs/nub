@@ -113,6 +113,14 @@ pub use compiler::{
     compile_build_jail, compile_with_warnings,
 };
 pub use matcher::Homes;
+
+/// One-time privileged host setup for the Linux agent-sandbox — the implementation behind
+/// `nub sandbox {setup,status,teardown}`. See `.fray/sandbox-escalation-ux.md`.
+#[cfg(target_os = "linux")]
+pub mod linux_admin {
+    pub use crate::backend::linux_setup::{SETUP_COMMAND, setup, status, teardown};
+}
+
 pub use policy::SandboxPolicy;
 pub use proxy::{Decision, EgressProxy, GrantDecider, Host, StaticDecider};
 
