@@ -1,0 +1,133 @@
+# Branch-scoped pre-PR probe: run ci.yml's `test` job verbatim on real runners.
+#
+# crates/nub-sandbox does not exist on main, so its whole suite has never
+# executed on a GitHub runner. This workflow answers "will the PR's test job be
+# green?" BEFORE the PR opens, without burning the full ~5-workflow PR matrix on
+# a red run. The steps mirror ci.yml's `test` job step-for-step; the extra
+# `Runner capability baseline` step records the host facts (privilege,
+# unprivileged-userns mediation, bwrap presence) that the sandbox suite's
+# skip/degrade paths key on, so a green result can be read honestly.
+#
+# Delete this file before the PR opens.
+name: sandbox-test-probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [nub-jsonc-sandbox-pr]
+    paths:
+      - "crates/**"
+      - ".github/workflows/sandbox-test-probe.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      SOCKET_SECURITY_KEY: ${{ secrets.SOCKET_SECURITY_KEY }}
+      SFW_SHIM_ACTIVE_CARGO: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: "24"
+          - os: windows-latest
+            node: "24"
+          - os: macos-14
+            node: "24"
+          - os: ubuntu-latest
+            node: "18.19"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Runner capability baseline
+        shell: bash
+        run: |
+          set +e
+          echo "user=$(id -un 2>/dev/null) uid=$(id -u 2>/dev/null)"
+          uname -a
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cat /etc/os-release | head -3
+            sysctl kernel.unprivileged_userns_clone
+            sysctl kernel.apparmor_restrict_unprivileged_userns
+            command -v bwrap && bwrap --version
+            ls -l /usr/libexec/nub/nub-bwrap
+            unshare --user --map-root-user true && echo "unpriv-userns=OK" || echo "unpriv-userns=DENIED"
+          fi
+          echo "cwd=$PWD"
+          exit 0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-test-${{ runner.os }}
+          save-if: false
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
+        with:
+          version: 10
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+      - name: Install side Node binaries for version_tiers
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_node() {
+            local ver="$1"
+            local dest="$RUNNER_TEMP/node-v${ver}-linux-x64"
+            if [ ! -x "$dest/bin/node" ]; then
+              curl -fsSL "https://nodejs.org/dist/v${ver}/node-v${ver}-linux-x64.tar.xz" \
+                | tar -xJ -C "$RUNNER_TEMP"
+            fi
+            echo "$dest/bin"
+          }
+          dir_22_13=$(install_node 22.13.0)
+          dir_18_18=$(install_node 18.18.0)
+          dir_20_11=$(install_node 20.11.0)
+          dir_26_5=$(install_node 26.5.0)
+          {
+            echo "TEST_NODE_BIN_22_13_0=$dir_22_13"
+            echo "TEST_NODE_BIN_18_18_0=$dir_18_18"
+            echo "TEST_NODE_BIN_20_11_0=$dir_20_11"
+            echo "TEST_NODE_BIN_26_5_0=$dir_26_5"
+          } >> "$GITHUB_ENV"
+      - name: pinned package managers + socket firewall
+        shell: bash
+        env:
+          MATRIX_NODE: ${{ matrix.node }}
+        run: |
+          NODE_BIN="${TEST_NODE_BIN_26_5_0:+$TEST_NODE_BIN_26_5_0/node}"
+          NODE_BIN="${NODE_BIN:-node}"
+          if [ "$MATRIX_NODE" = "24" ]; then
+            "$NODE_BIN" scripts/soak/external-tools.mts --install pnpm --install npm
+          fi
+          "$NODE_BIN" scripts/soak/external-tools.mts --install sfw --shims
+          "$NODE_BIN" scripts/soak/external-tools.mts --print-bin >> "$GITHUB_PATH"
+      - run: npm ci
+      - name: Build nub-native addon (for data-format loader tests)
+        shell: bash
+        run: |
+          (cd crates/nub-native && cargo build)
+          mkdir -p runtime/addons
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cp target/debug/nub_native.dll runtime/addons/nub-native.node
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            cp target/debug/libnub_native.dylib runtime/addons/nub-native.node
+          else
+            cp target/debug/libnub_native.so runtime/addons/nub-native.node
+          fi
+      - run: cargo test
