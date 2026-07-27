@@ -439,13 +439,34 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
     }
 }
 
-/// Exact ambient spellings for the env-file runtime-control denylist. A Unix
-/// process may carry both canonical and mixed-case spellings; Windows collapses
-/// them through its case-insensitive environment.
-fn ambient_denied_env_file_keys() -> Vec<String> {
+/// The keys the watch guard strips from a forwarded env file's values.
+///
+/// The runtime-control denylist is unconditional. `NODE_ENV` joins it only when
+/// the AUTO `.env*` cascade is the live source, which is what keeps `nub watch`
+/// byte-identical to `nub <file>`: `load_env_files` drops a file-set `NODE_ENV`
+/// (#263 — a `.env` pinning it broke `next build`, whose prerender forks
+/// inherited the wrong mode), while the explicit `--env-file` map deliberately
+/// does not. Forwarding the raw files to Node bypasses that load-time drop
+/// entirely, so the watch path has to re-apply it at the process boundary. The
+/// two families never co-occur — an explicit flag suppresses auto-discovery — so
+/// keying the extra drop on which family is live reproduces each one's
+/// direct-runner behavior exactly.
+fn watch_guarded_env_file_keys(auto_cascade: bool) -> Vec<&'static str> {
+    let mut keys = nub_core::workspace::env::denied_env_file_keys().to_vec();
+    if auto_cascade {
+        keys.push("NODE_ENV");
+    }
+    keys
+}
+
+/// Exact ambient spellings of the guarded keys. A Unix process may carry both
+/// canonical and mixed-case spellings; Windows collapses them through its
+/// case-insensitive environment. An ambient value is the user's own and must
+/// survive untouched — only file-derived values are stripped.
+fn ambient_guarded_env_file_keys(guarded: &[&'static str]) -> Vec<String> {
     env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
-        .filter(|key| nub_core::workspace::env::is_denied_env_file_key(key))
+        .filter(|key| guarded.iter().any(|g| key.eq_ignore_ascii_case(g)))
         .collect()
 }
 
@@ -453,8 +474,12 @@ fn ambient_denied_env_file_keys() -> Vec<String> {
 /// startup consumers cannot read a value from a raw env file. Unix startup
 /// lookup is exact-case, so a mixed-case ambient key does not cover the canonical
 /// spelling; Windows lookup is case-insensitive.
-fn watch_env_guard_placeholders(ambient_keys: &[String], windows: bool) -> Vec<&'static str> {
-    nub_core::workspace::env::denied_env_file_keys()
+fn watch_env_guard_placeholders(
+    guarded: &[&'static str],
+    ambient_keys: &[String],
+    windows: bool,
+) -> Vec<&'static str> {
+    guarded
         .iter()
         .copied()
         .filter(|denied| {
@@ -5024,12 +5049,16 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         }
         .node_options_token();
 
-        let ambient_keys = ambient_denied_env_file_keys();
-        for key in watch_env_guard_placeholders(&ambient_keys, cfg!(windows)) {
+        // The auto cascade is the live family exactly when no explicit flag
+        // suppressed it; that decides whether `NODE_ENV` is guarded here (see
+        // `watch_guarded_env_file_keys`).
+        let guarded_keys = watch_guarded_env_file_keys(!env_file_present && !no_env_file);
+        let ambient_keys = ambient_guarded_env_file_keys(&guarded_keys);
+        for key in watch_env_guard_placeholders(&guarded_keys, &ambient_keys, cfg!(windows)) {
             cmd.env(key, "");
         }
         let state = serde_json::json!({
-            "denylist": nub_core::workspace::env::denied_env_file_keys(),
+            "denylist": guarded_keys,
             "ambientKeys": ambient_keys,
             "nodeOptions": &sanitized_node_options,
         });
@@ -9134,22 +9163,41 @@ mod tests {
 
     #[test]
     fn watch_env_guard_placeholders_follow_os_key_semantics() {
+        let guarded = watch_guarded_env_file_keys(false);
         let ambient = vec![
             "NODE_OPTIONS".to_string(),
             "node_extra_ca_certs".to_string(),
         ];
 
-        let unix = watch_env_guard_placeholders(&ambient, false);
+        let unix = watch_env_guard_placeholders(&guarded, &ambient, false);
         assert!(!unix.contains(&"NODE_OPTIONS"));
         assert!(unix.contains(&"NODE_EXTRA_CA_CERTS"));
         assert!(unix.contains(&"NODE_TLS_REJECT_UNAUTHORIZED"));
         assert!(unix.contains(&"NODE_REPL_EXTERNAL_MODULE"));
 
-        let windows = watch_env_guard_placeholders(&ambient, true);
+        let windows = watch_env_guard_placeholders(&guarded, &ambient, true);
         assert!(!windows.contains(&"NODE_OPTIONS"));
         assert!(!windows.contains(&"NODE_EXTRA_CA_CERTS"));
         assert!(windows.contains(&"NODE_TLS_REJECT_UNAUTHORIZED"));
         assert!(windows.contains(&"NODE_REPL_EXTERNAL_MODULE"));
+    }
+
+    /// `NODE_ENV` is guarded only for the auto `.env*` cascade, matching what the
+    /// direct runner does for each family (#263 drops a file-set `NODE_ENV` from
+    /// the cascade; the explicit `--env-file` map keeps it). An ambient value is
+    /// the user's own and never gets a placeholder.
+    #[test]
+    fn node_env_is_guarded_only_for_the_auto_cascade() {
+        assert!(watch_guarded_env_file_keys(true).contains(&"NODE_ENV"));
+        assert!(!watch_guarded_env_file_keys(false).contains(&"NODE_ENV"));
+
+        let guarded = watch_guarded_env_file_keys(true);
+        assert!(watch_env_guard_placeholders(&guarded, &[], false).contains(&"NODE_ENV"));
+        assert!(
+            !watch_env_guard_placeholders(&guarded, &["NODE_ENV".to_string()], false)
+                .contains(&"NODE_ENV"),
+            "an ambient NODE_ENV must pass through untouched"
+        );
     }
 
     #[test]

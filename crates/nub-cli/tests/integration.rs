@@ -4292,6 +4292,61 @@ fn watch_delivers_auto_env_values_on_every_supported_node() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `nub watch` must drop a `.env`-set `NODE_ENV` exactly like the direct runner
+/// does (#263): forwarding the raw file to Node bypassed the load-time drop, so
+/// the watched child saw a mode the same project run without `--watch` never
+/// would. An AMBIENT `NODE_ENV` is the user's own and still passes through — the
+/// distinction the guard's ambient set already draws for the denylist.
+#[test]
+fn watch_drops_dotenv_node_env_but_keeps_the_ambient_one() {
+    for ambient in [None, Some("test")] {
+        let dir = unique_test_cache();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"name":"watch-node-env"}"#).unwrap();
+        std::fs::write(dir.join(".env"), "NODE_ENV=production\nSENTINEL=ok\n").unwrap();
+        let snapshot = dir.join("snapshot.txt");
+        let stderr = dir.join("stderr.txt");
+        // SENTINEL proves the cascade was loaded at all, so an absent NODE_ENV
+        // reads as "dropped" and never as "the .env was ignored wholesale".
+        std::fs::write(
+            dir.join("probe.cjs"),
+            format!(
+                "require('fs').writeFileSync({path:?}, \
+                 `${{process.env.SENTINEL || 'missing'}}|${{process.env.NODE_ENV || 'unset'}}`);\n",
+                path = snapshot.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let stderr_file = std::fs::File::create(&stderr).unwrap();
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(["--watch", "probe.cjs"])
+            .current_dir(&dir)
+            .env("XDG_CACHE_HOME", dir.join("cache"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(stderr_file));
+        remove_ambient_watch_control_vars(&mut cmd);
+        match ambient {
+            Some(value) => cmd.env("NODE_ENV", value),
+            // `.env.production` never exists here, so clearing this only removes
+            // an inherited value — it does not change which files load.
+            None => cmd.env_remove("NODE_ENV"),
+        };
+        let mut child = spawn_watch_probe(&mut cmd);
+
+        let expected = format!("ok|{}", ambient.unwrap_or("unset"));
+        let snapshot_text = wait_for_watch_snapshot(&snapshot, &expected, &mut child, &stderr);
+        finish_watch_probe(&mut child);
+        assert_eq!(
+            snapshot_text, expected,
+            "ambient={ambient:?}: a .env NODE_ENV must be dropped and an ambient one kept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Unix permits a mixed-case ambient key alongside the canonical spelling Node
 /// consumes at startup. The mixed-case value must survive, while a canonical raw
 /// env-file value is occupied in the supervisor and then removed in the child.
