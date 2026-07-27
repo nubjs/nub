@@ -992,15 +992,11 @@ fn runtime_objects_from_parts(
     Ok(objects)
 }
 
-/// Prepared, one-shot authority for starting the retained PID-1 monitor.
-/// Every child-side descriptor is relocated above the protocol's reserved range
-/// before this value is returned.
-/// Close Bubblewrap's option parsing before the command word. Bubblewrap keeps
-/// reading options until it sees `--`, so without the separator a command-position
-/// program name that begins with `--` would be consumed as another Bubblewrap
-/// option instead of being executed. Nub is doubly covered — the program is always
-/// its own fixed monitor under the private runtime root, never a caller-supplied
-/// name — but the separator is what makes that a belt rather than the only strap.
+/// Close Bubblewrap's option parsing before the command word: it keeps reading
+/// options until `--`, so without the separator a program name beginning with `--`
+/// would be consumed as another Bubblewrap option. Nub's program is always its own
+/// fixed monitor, never caller-supplied, so the separator is the second defence
+/// rather than the only one.
 fn append_command_position(command: &mut Command, program: &OsStr, args: &[OsString]) {
     command
         .arg("--")
@@ -1009,6 +1005,9 @@ fn append_command_position(command: &mut Command, program: &OsStr, args: &[OsStr
         .arg(MONITOR_SENTINEL);
 }
 
+/// Prepared, one-shot authority for starting the retained PID-1 monitor.
+/// Every child-side descriptor is relocated above the protocol's reserved range
+/// before this value is returned.
 pub(crate) struct RetainedMonitorLaunch {
     spec: BootstrapSpec,
     bootstrap: OwnedFd,
@@ -8843,11 +8842,8 @@ fn wait_for_child_status_until(child: &mut Child, deadline: Instant) -> io::Resu
 mod tests {
     use super::*;
 
-    /// A program name that would otherwise be read as a Bubblewrap option is the
-    /// case bubblewrap's own suite covers with `--`. Nub never passes a
-    /// caller-supplied program here, so this pins the separator rather than a
-    /// live exposure — but the separator is what keeps that a second line of
-    /// defence instead of the only one.
+    /// The program name here is deliberately option-shaped: it is the case
+    /// bubblewrap's own suite covers with `--`.
     #[test]
     fn command_position_is_closed_by_a_separator() {
         let mut command = Command::new("bwrap");
