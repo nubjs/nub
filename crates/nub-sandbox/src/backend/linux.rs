@@ -21,7 +21,6 @@ use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -2667,6 +2666,7 @@ mod tests {
     use crate::matcher::path::Homes;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::os::unix::process::CommandExt;
     use tempfile::tempdir;
 
     fn policy(root: &Path, surface: serde_json::Value) -> SandboxPolicy {
