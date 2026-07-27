@@ -1714,8 +1714,17 @@ mod tests {
     fn hostile_input_never_panics() {
         // A malicious/broken project file must degrade to Ok/Err, never panic or
         // stack-overflow. Deep nesting, huge arrays, duplicate keys, embedded NUL.
+        // Nesting is REJECTED rather than merely survived: the parser's descent is
+        // unbounded, and a stack overflow is an uncatchable abort this test could
+        // not observe, so the depth bound is the only thing making the promise in
+        // this test's name true.
         let deep = format!("{}1{}", "[".repeat(2000), "]".repeat(2000));
-        let _ = parse_project_config(&deep); // deep-nesting: no overflow
+        match parse_project_config(&deep) {
+            Err(ConfigError::Parse(message)) => {
+                assert!(message.contains("deeper than"), "{message}")
+            }
+            other => panic!("deep nesting must be a Parse error, got {other:?}"),
+        }
 
         let dup = parse_project_config(r#"{ "nodeCompat": true, "nodeCompat": false }"#);
         assert_eq!(dup.unwrap().node_compat, Some(false), "last duplicate wins");

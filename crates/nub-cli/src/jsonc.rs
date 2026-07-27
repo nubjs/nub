@@ -135,10 +135,12 @@ mod tests {
     }
 
     #[test]
-    fn unterminated_string_and_comment_reach_the_parser() {
-        // A truncated hostile file must still fail as a parse error, not hang or
-        // panic in the scanner.
+    fn truncated_input_passes_through_to_the_parser_verdict() {
+        // A file truncated mid-string or mid-comment leaves the scanner in a
+        // non-Code state at EOF. That must simply end the scan, so the parser --
+        // not the depth guard -- decides the outcome.
         assert!(parse_to_value("{ \"a\": \"unterminated").is_err());
-        assert!(parse_to_value("/* unterminated").is_ok_and(|v| v.is_none()));
+        assert!(parse_to_value("/* unterminated").is_err());
+        assert!(parse_to_value("// unterminated").is_ok_and(|v| v.is_none()));
     }
 }
