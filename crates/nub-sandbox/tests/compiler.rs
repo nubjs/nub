@@ -638,6 +638,60 @@ fn build_jail_preset_expands() {
     }
 }
 
+/// Dropping `/opt` from the Linux minimal-root floor must not strand an interpreter that
+/// LIVES under `/opt`. This is the single most likely way the narrowing breaks CI: a
+/// GitHub Actions runner keeps Node under `/opt/hostedtoolcache/node/<ver>/<arch>`, so
+/// before the floor stopped mounting `/opt` wholesale that interpreter was reachable by
+/// accident. It has to stay reachable ON PURPOSE — through the per-spawn interpreter and
+/// extra-read grants, which are what this pins.
+///
+/// Asserted against the compiled POLICY rather than a launch: the grant must hold on a
+/// host that has no `/opt/hostedtoolcache` to bind, which is every host this suite runs on.
+#[test]
+fn build_jail_reaches_an_interpreter_living_under_opt() {
+    use std::collections::BTreeMap;
+    let homes = common::homes();
+    let node_root = std::path::PathBuf::from("/opt/hostedtoolcache/node/26.0.0/arm64");
+    let interpreter = node_root.join("bin/node");
+    let p = nub_sandbox::compile_build_jail(
+        homes.clone(),
+        &homes.project.join("node_modules/native"),
+        vec![interpreter.clone()],
+        vec![
+            node_root.join("include/node"),
+            node_root.join("lib/node_modules"),
+        ],
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
+    for reachable in [
+        interpreter.clone(),
+        node_root.join("bin/npm"),
+        node_root.join("include/node/node_api.h"),
+        node_root.join("lib/node_modules/npm/bin/npm-cli.js"),
+    ] {
+        assert!(
+            matches!(m.decide(&reachable).effect, Effect::Allow),
+            "a /opt-resident Node toolchain must stay granted: {}",
+            reachable.display()
+        );
+    }
+    // The grant is the toolchain, not `/opt`. Everything else under it stays withheld —
+    // that is the ~11 GB of unrelated third-party software a CI runner keeps there.
+    for withheld in [
+        std::path::PathBuf::from("/opt/vendorware/creds.txt"),
+        std::path::PathBuf::from("/opt/hostedtoolcache/Python/3.12.0/x64/bin/python"),
+        node_root.join("lib/private.txt"),
+    ] {
+        assert!(
+            matches!(m.decide(&withheld).effect, Effect::Deny),
+            "dropping /opt must leave {} withheld",
+            withheld.display()
+        );
+    }
+}
+
 #[test]
 fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
     use std::collections::BTreeMap;
