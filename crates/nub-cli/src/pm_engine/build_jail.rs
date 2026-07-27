@@ -146,16 +146,35 @@ fn refusal(detail: &str) -> String {
         Some(missing) => {
             out.push_str(&remedy(&missing));
             out.push_str("\nThen run `nub install` again.\n");
+            // The launcher writes its own remedy prose for the same conditions, so appending
+            // its whole reason printed the fix twice — once structured, once as a paragraph.
+            // Keep only its candidate ledger, which is the part the remedy above does not
+            // carry and the part a bug report needs.
+            out.push_str(&format!("\n{}\n", evidence(detail)));
         }
         // No prerequisite is missing, so this is not a machine-setup problem and offering a
         // setup command would send the reader somewhere that cannot help. The launcher's
-        // reason is the only real information available.
+        // reason is the only real information available, so it is printed whole.
         None => {
-            out.push_str("  The sandbox could not be applied on this host.\n\n");
+            out.push_str("  The sandbox could not be applied on this host.\n");
+            out.push_str(&format!("\n{detail}\n"));
         }
     }
-    out.push_str(&format!("\n{detail}\n"));
     out
+}
+
+/// The evidence tail of a launcher reason: the per-candidate ledger it parenthesizes, without
+/// the remedy paragraph that precedes it. Falls back to the whole reason when there is no such
+/// tail, so a message shape this does not recognize is passed through rather than truncated.
+fn evidence(detail: &str) -> String {
+    for marker in ["(underlying: ", "("] {
+        if let Some(start) = detail.find(marker)
+            && detail.ends_with(')')
+        {
+            return detail[start + marker.len()..detail.len() - 1].to_string();
+        }
+    }
+    detail.to_string()
 }
 
 /// The first line, which has to be TRUE about where the requirement came from.
@@ -505,6 +524,22 @@ mod tests {
             "{message}"
         );
         assert!(message.starts_with("nub install:"), "{message}");
+    }
+
+    #[test]
+    fn a_structured_remedy_does_not_repeat_the_launchers_own_prose() {
+        // The launcher writes a remedy paragraph for the same conditions the preflight names,
+        // so printing its whole reason showed the fix twice. Only its candidate ledger should
+        // survive alongside a structured remedy.
+        let reason = "the sandbox needs a one-time setup on this system. Run:\n\n    sudo nub \
+                      setup-sandbox\n\n(underlying: /usr/bin/bwrap: candidate probe failed)";
+        assert_eq!(
+            evidence(reason),
+            "/usr/bin/bwrap: candidate probe failed",
+            "only the ledger should survive"
+        );
+        // A shape with no parenthesized tail is passed through rather than truncated.
+        assert_eq!(evidence("no candidates found"), "no candidates found");
     }
 
     #[test]

@@ -121,13 +121,28 @@ fn first_id(field: &str) -> Option<u32> {
     field.split_whitespace().next()?.parse().ok()
 }
 
+/// The real and effective ids from a `/proc` `Uid:`/`Gid:` line, which is `real effective saved
+/// fs`. Both are needed to tell a `sudo` process from the shell that ran it.
+fn real_and_effective(field: &str) -> Option<(u32, u32)> {
+    let mut ids = field.split_whitespace().filter_map(|id| id.parse().ok());
+    Some((ids.next()?, ids.next()?))
+}
+
 /// The group set the KERNEL will check for the session that invoked this command.
 ///
 /// Under `sudo` this process's own group set is root's, and the account's `/etc/group` rows are
 /// not it either — the credentials that matter were fixed when the caller's shell was created.
-/// So walk the parent chain to the first ancestor still running as `SUDO_UID` and read the
-/// group set that process actually holds. That is the only reading that answers "will the next
-/// command in this shell be able to open the helper?".
+/// So walk the parent chain to the invoking shell and read the group set that process actually
+/// holds. That is the only reading that answers "will the next command in this shell be able to
+/// open the helper?".
+///
+/// THE ANCESTOR TEST IS ON BOTH IDS, AND THAT IS THE WHOLE SUBTLETY. `sudo` is setuid: it keeps
+/// the caller's REAL uid and only raises the effective one, so it reads as `Uid: 1000 0 0 0` and
+/// matches a real-uid-only test — on its own PARENT chain position, before the shell is ever
+/// reached. Its supplementary set is root's (`Groups: 0`), so matching it reported that the
+/// caller's session lacked the group EVERY time, and the "not usable from this session yet"
+/// exit fired even for a caller who had held the group since login. Requiring the effective uid
+/// to match too skips `sudo` and lands on the shell.
 fn invoking_session_gids() -> Option<Vec<u32>> {
     let Some(sudo_uid) = std::env::var("SUDO_UID")
         .ok()
@@ -141,7 +156,8 @@ fn invoking_session_gids() -> Option<Vec<u32>> {
         if ppid <= 1 {
             return None;
         }
-        if proc_status_field(ppid, "Uid:").and_then(|f| first_id(&f)) == Some(sudo_uid) {
+        let ids = proc_status_field(ppid, "Uid:").and_then(|f| real_and_effective(&f));
+        if ids == Some((sudo_uid, sudo_uid)) {
             let mut gids: Vec<u32> = proc_status_field(ppid, "Groups:")
                 .map(|list| {
                     list.split_whitespace()
@@ -819,6 +835,23 @@ mod tests {
         assert_eq!(
             from_syscall, from_proc,
             "getgroups() and /proc/{pid}/status disagree about this process's group set"
+        );
+    }
+
+    #[test]
+    fn a_setuid_ancestor_is_not_mistaken_for_the_invoking_shell() {
+        // `sudo` keeps the caller's REAL uid and raises only the effective one, so a
+        // real-uid-only test matched sudo — whose supplementary set is root's — instead of the
+        // shell behind it. That reported "this session lacks the group" for every caller,
+        // including one who had held it since login.
+        let sudo = "1000\t0\t0\t0";
+        let shell = "1000\t1000\t1000\t1000";
+        assert_eq!(real_and_effective(sudo), Some((1000, 0)));
+        assert_eq!(real_and_effective(shell), Some((1000, 1000)));
+        assert_ne!(
+            real_and_effective(sudo),
+            Some((1000, 1000)),
+            "a setuid ancestor must not satisfy the invoking-shell test"
         );
     }
 }
