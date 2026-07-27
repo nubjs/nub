@@ -2111,10 +2111,7 @@ fn trusted_set_expands_in_place_admitting_listed_and_denying_unlisted() {
     let p = compile(&json!({ "net": ["$trusted", "api.mycompany.com"] }), &ctx).unwrap();
     assert!(p.net.enforce);
     let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
-    assert!(
-        m.admits("api.github.com"),
-        "a listed $trusted host is admitted"
-    );
+    assert!(m.admits("nodejs.org"), "a listed $trusted host is admitted");
     assert!(
         m.admits("registry.npmjs.org"),
         "another listed host is admitted"
@@ -2141,10 +2138,7 @@ fn negated_trusted_set_denies_each_host() {
     let ctx = common::ctx(true, &[]);
     let p = compile(&json!({ "net": ["*", "!$trusted"] }), &ctx).unwrap();
     let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
-    assert!(
-        !m.admits("api.github.com"),
-        "!$trusted denies a listed host"
-    );
+    assert!(!m.admits("nodejs.org"), "!$trusted denies a listed host");
     assert!(
         m.admits("anything.else"),
         "the broad allow still admits a non-member"
@@ -2156,20 +2150,20 @@ fn trusted_set_admits_a_brokered_host_in_the_set() {
     // §5 broker-ordering regression: `$trusted` expands into `net.rules` BEFORE
     // `transpose_brokers`/`validate_brokers`, so a broker whose host is a $trusted
     // member is admitted (HostMatcher sees the expanded allow) and the tier derives.
-    let ctx = common::ctx(true, &[("GH_TOKEN", "real-token")]);
+    let ctx = common::ctx(true, &[("NPM_TOKEN", "real-token")]);
     let p = compile(
         &json!({
             "net": ["$trusted"],
-            "secrets": { "GH_TOKEN": { "brokerTo": ["api.github.com"] } }
+            "secrets": { "NPM_TOKEN": { "brokerTo": ["registry.npmjs.org"] } }
         }),
         &ctx,
     )
     .unwrap();
     assert_eq!(p.net.brokers.len(), 1);
-    assert_eq!(p.net.brokers[0].host, "api.github.com");
+    assert_eq!(p.net.brokers[0].host, "registry.npmjs.org");
     assert!(matches!(p.net.inspection, Inspection::TlsInspect));
     assert!(
-        !p.env.constructed.contains_key("GH_TOKEN"),
+        !p.env.constructed.contains_key("NPM_TOKEN"),
         "the brokered secret's real value is withheld"
     );
 }

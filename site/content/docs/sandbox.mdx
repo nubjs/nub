@@ -279,7 +279,7 @@ A list allows only the hosts it names; everything else — including private ran
 { "net": ["$trusted", "api.mycompany.com"] }
 ```
 
-The set deliberately omits blanket object-store wildcards such as `*.amazonaws.com` and `storage.googleapis.com`. Those would let a confined command upload to an attacker-controlled bucket, which is the exfiltration path the sandbox exists to close — so a project that genuinely needs one names the specific bucket host itself. The always-blocked metadata floor still applies. The full list is versioned with the engine.
+The set deliberately omits every host a confined command could upload to. That rules out blanket object-store wildcards such as `*.amazonaws.com` and `storage.googleapis.com`, where anyone can register a bucket, and it rules out the GitHub hosts — `github.com`, `api.github.com`, `gist.github.com`, and the `githubusercontent.com` family — whose authenticated APIs can create a repository or post a gist. Reaching one of those is indistinguishable from exfiltrating to it, which is the path the sandbox exists to close. A project that genuinely needs one names it directly, the way the example above names `api.github.com`. The always-blocked metadata floor still applies. The full list is versioned with the engine.
 
 ### Allow a domain and its subdomains
 

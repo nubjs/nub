@@ -5,11 +5,16 @@
 //! like a `...:#/pointer`-reused list's entries.
 //!
 //! Provenance / curation:
-//! - `$trusted` is the Claude Code default-allowed-domains list MINUS blanket
-//!   multi-tenant object-store wildcards (`*.amazonaws.com`, `storage.googleapis.com`,
-//!   `*.googleapis.com`) — those are exfil sinks; the genuinely-needed named Google
-//!   APIs stay listed. Metadata/link-local + RFC1918 are a SEPARATE always-on hard
-//!   floor, never part of this set. Source data: `.fray/sandbox-builtin-sets.md`.
+//! - `$trusted` derives from the Claude Code default-allowed-domains list, filtered by
+//!   one rule: a trusted host must be READ-ONLY to the confined process. Excluded are
+//!   hosts exposing a write-back route (an authenticated API that can create a repo,
+//!   commit a file, or post a paste) and hosts with rentable path or subdomain tenancy
+//!   (blanket multi-tenant object stores like `*.amazonaws.com` /
+//!   `storage.googleapis.com` / `*.googleapis.com`, and the github family). Both shapes
+//!   are exfiltration sinks: reaching them is indistinguishable from uploading to them.
+//!   Genuinely-needed named Google APIs stay listed. Metadata/link-local + RFC1918 are a
+//!   SEPARATE always-on hard floor, never part of this set. Source data:
+//!   `.fray/sandbox-builtin-sets.md`.
 //! - `$tooldirs` is per-OS because a tool's cache home differs across OSes (macOS
 //!   `~/Library/Caches`, Linux `~/.cache`, Windows `%LOCALAPPDATA%`). Host OS ==
 //!   target OS (the fold runs on the machine it enforces on), so the set is
@@ -39,19 +44,11 @@ pub const TRUSTED_HOSTS: &[&str] = &[
     "platform.claude.com",
     "code.claude.com",
     "claude.ai",
-    // Version control
-    "github.com",
-    "www.github.com",
-    "api.github.com",
-    "npm.pkg.github.com",
-    "raw.githubusercontent.com",
-    "pkg-npm.githubusercontent.com",
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
-    "codeload.github.com",
-    "avatars.githubusercontent.com",
-    "camo.githubusercontent.com",
-    "gist.github.com",
+    // Version control. The github family is deliberately absent: every one of its
+    // hosts either accepts an authenticated write (api.github.com creates repos and
+    // commits files; gist.github.com posts gists) or serves attacker-registrable
+    // per-account paths, which is exactly the channel the Shai-Hulud npm worm used to
+    // exfiltrate harvested secrets.
     "gitlab.com",
     "www.gitlab.com",
     "registry.gitlab.com",
@@ -406,17 +403,29 @@ mod tests {
     }
 
     #[test]
-    fn no_object_store_wildcard_leaked_into_trusted() {
-        // The three blanket multi-tenant object-store wildcards are exfil sinks and MUST
-        // stay removed — a future re-add of the Claude Code base list must not reintroduce them.
+    fn no_exfiltration_sink_leaked_into_trusted() {
+        // Re-syncing the Claude Code base list must not reintroduce a host the confined
+        // process can upload to. Two shapes, both disqualifying: an authenticated
+        // write-back route, and rentable path/subdomain tenancy.
         for banned in [
+            // Multi-tenant object stores.
             "*.amazonaws.com",
             "storage.googleapis.com",
             "*.googleapis.com",
+            "*.blob.core.windows.net",
+            // Write-back APIs and per-account tenancy (the Shai-Hulud exfil channel).
+            "github.com",
+            "www.github.com",
+            "api.github.com",
+            "gist.github.com",
+            "codeload.github.com",
+            "raw.githubusercontent.com",
+            "objects.githubusercontent.com",
+            "*.github.io",
         ] {
             assert!(
                 !TRUSTED_HOSTS.contains(&banned),
-                "object-store wildcard `{banned}` must not be in $trusted"
+                "`{banned}` is an exfiltration sink and must not be in $trusted"
             );
         }
     }
