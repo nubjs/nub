@@ -139,3 +139,196 @@ jobs:
           docker run --rm --user 1000:1000 ubuntu:24.04 sh -c 'id; unshare -Ur true 2>&1; echo "ND_rc=$?"' 2>&1
           echo "rc=$?"
           exit 0
+
+  # ---------------------------------------------------------------------------
+  # Round 2: does UNPRIVILEGED self-confinement (Landlock + seccomp) work where
+  # bwrap+userns does not? This is the build-jail tier, which claims to need no
+  # setup at all. Run on the host AND inside a default docker container.
+  # ---------------------------------------------------------------------------
+  confine:
+    name: confine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - name: build probe (static)
+        continue-on-error: true
+        run: |
+          set +e
+          cc -static -O1 -o /tmp/confine_probe tests/userns-probe/confine_probe.c 2>&1
+          echo "compile_rc=$?"
+          ls -l /tmp/confine_probe; file /tmp/confine_probe 2>/dev/null
+          exit 0
+      - name: HOST — landlock fs / net / seccomp
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== RUNNER: ${{ matrix.os }} (HOST, unprivileged uid=$(id -u)) ==="
+          mkdir -p /tmp/allowed && echo PUBLIC > /tmp/allowed/ok.txt
+          echo "TOPSECRET" > "$HOME/secret.txt"
+          echo "--- C1 abi ---";     /tmp/confine_probe abi; echo "rc=$?"
+          echo "--- C2 fs (allow /tmp/allowed; deny \$HOME/secret.txt) ---"
+          /tmp/confine_probe fs /tmp/allowed "$HOME/secret.txt" /tmp/allowed/ok.txt; echo "rc=$?"
+          echo "--- C3 net (landlock TCP deny) ---"; /tmp/confine_probe net; echo "rc=$?"
+          echo "--- C4 seccomp (deny socket) ---";   /tmp/confine_probe seccomp; echo "rc=$?"
+          exit 0
+      - name: DOCKER default (no --privileged) — same probes
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== RUNNER: ${{ matrix.os }} (inside default docker) ==="
+          for IMG in ubuntu:24.04 node:22-slim; do
+            echo "########## $IMG ##########"
+            docker run --rm -v /tmp/confine_probe:/p:ro "$IMG" sh -c '
+              mkdir -p /tmp/allowed && echo PUBLIC > /tmp/allowed/ok.txt
+              echo TOPSECRET > /root/secret.txt
+              echo "--- abi ---";     /p abi;     echo "rc=$?"
+              echo "--- fs ---";      /p fs /tmp/allowed /root/secret.txt /tmp/allowed/ok.txt; echo "rc=$?"
+              echo "--- net ---";     /p net;     echo "rc=$?"
+              echo "--- seccomp ---"; /p seccomp; echo "rc=$?"
+            ' 2>&1
+            echo "docker_rc=$?"
+          done
+          echo "########## node:22-slim as NON-ROOT (uid 1000) ##########"
+          docker run --rm --user 1000:1000 -v /tmp/confine_probe:/p:ro node:22-slim sh -c '
+            mkdir -p /tmp/allowed && echo PUBLIC > /tmp/allowed/ok.txt
+            echo TOPSECRET > /tmp/secret.txt
+            /p abi; /p fs /tmp/allowed /tmp/secret.txt /tmp/allowed/ok.txt; /p net; /p seccomp' 2>&1
+          echo "rc=$?"
+          exit 0
+
+  # ---------------------------------------------------------------------------
+  # Round 2: which docker security-opt (if any) restores unprivileged userns?
+  # 22.04 vs 24.04 host is the differential that separates "docker's own policy"
+  # from "the host apparmor sysctl reaching into the container".
+  # ---------------------------------------------------------------------------
+  dockeropts:
+    name: dockeropts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - name: docker security-opt matrix
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== RUNNER: ${{ matrix.os }} ==="
+          echo "--- host sysctl ---"; sysctl -n kernel.apparmor_restrict_unprivileged_userns
+          echo "--- docker info security ---"; docker info --format '{{json .SecurityOptions}}'
+          run_case () {
+            echo "########## CASE: $1 ##########"
+            shift
+            docker run --rm "$@" ubuntu:24.04 sh -c '
+              grep -E "^Cap(Eff|Bnd)" /proc/self/status
+              unshare -Ur true 2>&1; echo "unshare_Ur_rc=$?"
+              unshare -Urm -- sh -c "mount -t tmpfs none /mnt && echo MOUNT_OK" 2>&1; echo "mount_rc=$?"
+            ' 2>&1
+            echo "case_rc=$?"
+          }
+          run_case "default"                     
+          run_case "seccomp=unconfined"          --security-opt seccomp=unconfined
+          run_case "apparmor=unconfined"         --security-opt apparmor=unconfined
+          run_case "seccomp+apparmor unconfined" --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+          run_case "cap-add SYS_ADMIN"           --cap-add SYS_ADMIN
+          run_case "cap-add SYS_ADMIN + seccomp=unconfined" --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+          run_case "privileged"                  --privileged
+          exit 0
+
+  # ---------------------------------------------------------------------------
+  # Round 2: the GitHub Actions `container:` job shape — extremely common, and a
+  # different code path from `docker run` inside a normal job.
+  # ---------------------------------------------------------------------------
+  containerjob:
+    name: containerjob (node:22-slim on ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    container: node:22-slim
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - name: probe inside the job container
+        continue-on-error: true
+        run: |
+          set +e
+          echo "--- id/caps ---"; id; grep -E "^Cap(Eff|Bnd)" /proc/self/status
+          cat /etc/os-release | head -2
+          echo "--- userns ---"
+          apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq util-linux gcc libc6-dev >/dev/null 2>&1
+          echo "apt_rc=$?"
+          unshare -Ur true 2>&1; echo "unshare_Ur_rc=$?"
+          echo "--- bwrap ---"
+          apt-get install -y -qq bubblewrap >/dev/null 2>&1; echo "bwrap_install_rc=$?"
+          bwrap --dev-bind / / true 2>&1; echo "bwrap_rc=$?"
+          echo "--- landlock/seccomp ---"
+          cc -O1 -o /tmp/confine_probe tests/userns-probe/confine_probe.c 2>&1; echo "cc_rc=$?"
+          mkdir -p /tmp/allowed && echo PUBLIC > /tmp/allowed/ok.txt && echo TOPSECRET > /tmp/secret.txt
+          /tmp/confine_probe abi; /tmp/confine_probe fs /tmp/allowed /tmp/secret.txt /tmp/allowed/ok.txt
+          /tmp/confine_probe net; /tmp/confine_probe seccomp
+          exit 0
+
+  # ---------------------------------------------------------------------------
+  # Round 2: the two documented 24.04 fixes, and confirmation that neither is
+  # reachable WITHOUT root.
+  # ---------------------------------------------------------------------------
+  fixes:
+    name: fixes (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - name: unprivileged attempts to lift the gate (all must FAIL)
+        continue-on-error: true
+        run: |
+          set +e
+          sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq bubblewrap apparmor-utils >/dev/null 2>&1
+          echo "--- F1: sysctl write as NON-root ---"
+          sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1; echo "F1_rc=$?"
+          echo "--- F2: write the proc file directly as NON-root ---"
+          echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1; echo "F2_rc=$?"
+          echo "--- F3: load an apparmor profile as NON-root ---"
+          cat > /tmp/p.aa <<'EOP'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile mybwrap /tmp/mybwrap flags=(unconfined) {
+            userns,
+            include if exists <local/mybwrap>
+          }
+          EOP
+          apparmor_parser -r /tmp/p.aa 2>&1; echo "F3_rc=$?"
+          echo "--- F4: write into /etc/apparmor.d as NON-root ---"
+          cp /tmp/p.aa /etc/apparmor.d/mybwrap 2>&1; echo "F4_rc=$?"
+          echo "--- F5: is there any user-writable dir under /etc/apparmor.d? ---"
+          find /etc/apparmor.d -writable 2>/dev/null | head; echo "F5_found=$?"
+          echo "--- F6: aa-exec into an existing permissive profile ---"
+          aa-exec -p unconfined -- bwrap --dev-bind / / true 2>&1; echo "F6_rc=$?"
+          echo "--- F7: setuid-copy of bwrap (must be refused by bwrap itself) ---"
+          cp /usr/bin/bwrap /tmp/subwrap && sudo chown root:root /tmp/subwrap && sudo chmod u+s /tmp/subwrap
+          ls -l /tmp/subwrap; /tmp/subwrap --dev-bind / / true 2>&1; echo "F7_rc=$?"
+          exit 0
+      - name: the two ROOT fixes (both must WORK)
+        continue-on-error: true
+        run: |
+          set +e
+          echo "--- G1: root installs a path-keyed apparmor profile for a COPIED bwrap ---"
+          cp /usr/bin/bwrap /tmp/mybwrap && chmod +x /tmp/mybwrap
+          /tmp/mybwrap --dev-bind / / true 2>&1; echo "G1_before_rc=$?"
+          sudo cp /tmp/p.aa /etc/apparmor.d/mybwrap 2>/dev/null || sudo tee /etc/apparmor.d/mybwrap >/dev/null <<'EOP'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile mybwrap /tmp/mybwrap flags=(unconfined) {
+            userns,
+            include if exists <local/mybwrap>
+          }
+          EOP
+          sudo apparmor_parser -r /etc/apparmor.d/mybwrap 2>&1; echo "G1_parser_rc=$?"
+          /tmp/mybwrap --dev-bind / / true 2>&1; echo "G1_after_rc=$?"
+          /tmp/mybwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-all -- /bin/true 2>&1; echo "G1_full_rc=$?"
+          echo "--- G2: root flips the sysctl ---"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1; echo "G2_rc=$?"
+          bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-all -- /bin/true 2>&1; echo "G2_bwrap_rc=$?"
+          exit 0
