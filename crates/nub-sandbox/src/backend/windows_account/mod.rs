@@ -365,10 +365,22 @@ pub fn status() -> std::io::Result<crate::backend::StatusReport> {
             ));
         }
     }
+    // THE ONE PRECONDITION THE PER-RUN PATH CANNOT CHECK. `apply` trusts the marker plus a live
+    // SID match, because WFP gates even ENUMERATION on administrator — so an unelevated run
+    // genuinely cannot tell whether the egress fence still exists. An administrator who deleted
+    // the filters and left the marker leaves every later run believing it is fenced when it is
+    // not. This report is the only place that can catch it, and only when elevated, so when it
+    // CAN look it treats an empty filter set as not-ready rather than reporting a count nobody
+    // reads.
+    let mut filters_gone = false;
     out.push_str(
         &match (account::is_elevated(), wfp::installed_filter_count()) {
             (false, _) => {
                 "wfp filters: cannot read (enumeration requires administrator)\n".to_string()
+            }
+            (true, Ok(0)) => {
+                filters_gone = true;
+                "wfp filters: NONE installed — the egress fence is missing\n".to_string()
             }
             (true, Ok(n)) => format!("wfp filters: {n} installed\n"),
             (true, Err(e)) => format!("wfp filters: could not read ({e})\n"),
@@ -378,8 +390,15 @@ pub fn status() -> std::io::Result<crate::backend::StatusReport> {
         "acl ledger: {} path(s) recorded\n",
         state::ledger_paths().map(|p| p.len()).unwrap_or(0)
     ));
+    let ready = ready && !filters_gone;
     out.push_str(&if ready {
         "\nThe sandbox can enforce on this host.\n".to_string()
+    } else if filters_gone {
+        format!(
+            "\nThe sandbox cannot enforce on this host: the account exists but its network \
+             filters are gone, so egress is unfenced. Re-run the setup to reinstall them.\n\n{}\n",
+            elevated_setup_instruction()
+        )
     } else {
         format!(
             "\nThe sandbox cannot enforce on this host: the dedicated account is not \
