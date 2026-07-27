@@ -380,6 +380,19 @@ const BUILD_JAIL_EXTRA_PREFIXES: &[&str] = &["npm_package_", "npm_lifecycle_"];
 /// PATH/HOME/TMPDIR/TEMP/TMP + the OS-essential + locale/operational set come through
 /// [`baseline_allows`]; of those, only PATH/HOME/TMPDIR were EMPIRICALLY load-bearing
 /// for a from-source node-gyp compile (HOME anchors the header cache on a clean host).
+///
+/// `AUBE_NODE_GYP_EXE` is DELIBERATELY absent. The engine stamps it so its lazy
+/// `npm_config_node_gyp` shim can trampoline back through the PM binary
+/// (`<exe> __node-gyp-bootstrap <dir>`), but that trampoline is neither needed nor safe
+/// here: the engine bootstraps the real node-gyp OUTSIDE the jail and prepends its
+/// `$tooldirs`-readable bin dir to the lifecycle PATH, and the shim's own fallback then
+/// resolves `node-gyp` from that PATH — measured end-to-end, a from-source addon links
+/// under the jail through both the bare-`node-gyp` and the `npm_config_node_gyp` route.
+/// Admitting the var would REPLACE that working fallback with an exec of the PM binary,
+/// which no read grant covers; the shim does not guard that call, so on a backend where
+/// an ungranted path is absent rather than merely unreadable the compile would hard-fail
+/// instead of falling back. Admitting it therefore requires read-granting the binary in
+/// the same change — see `build_jail_withholds_the_node_gyp_trampoline_exe`.
 const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     "NODE",
     "npm_node_execpath",
@@ -1050,6 +1063,57 @@ mod tests {
                 "must withhold {denied}"
             );
             assert!(p.withheld.contains(&denied.to_string()));
+        }
+    }
+
+    /// The env channel a from-source native compile rides. Verified end-to-end under the
+    /// real interposition: with these keys admitted a dependency's `install` hook links an
+    /// addon inside the jail with egress denied, via both a bare `node-gyp` and
+    /// `node $npm_config_node_gyp`. Losing any one of them breaks that offline compile, so
+    /// they are pinned here rather than left to the general allowlist shape.
+    #[test]
+    fn build_jail_admits_the_node_gyp_compile_channel() {
+        let ambient = ambient(&[
+            ("PATH", "/tools/node-gyp/.bin:/usr/bin"),
+            ("npm_config_node_gyp", "/cache/tools/node-gyp/node-gyp.js"),
+            ("npm_config_nodedir", "/nodes/v26.5.0"),
+            ("npm_node_execpath", "/nodes/v26.5.0/bin/node"),
+            ("NODE", "/shim/node"),
+        ]);
+        let p = lifecycle_scrubbed_env(&ambient);
+        for kept in [
+            "PATH",
+            "npm_config_node_gyp",
+            "npm_config_nodedir",
+            "npm_node_execpath",
+            "NODE",
+        ] {
+            assert!(
+                p.constructed.contains_key(kept),
+                "{kept} is load-bearing for an offline node-gyp compile and must be admitted"
+            );
+        }
+    }
+
+    /// `AUBE_NODE_GYP_EXE` stays WITHHELD, and that is what keeps offline compiles working
+    /// — see [`BUILD_JAIL_EXTRA_EXACT`]. The engine's `npm_config_node_gyp` shim only
+    /// trampolines back through the PM binary when this var is present; withheld, it falls
+    /// back to `node-gyp` on the lifecycle PATH, which the jail does grant. Admitting it
+    /// without a matching read grant for the PM binary would turn a working fallback into
+    /// an exec of an ungranted path, so this assertion is a tripwire on that pairing, not
+    /// incidental coverage of the default-deny shape.
+    #[test]
+    fn build_jail_withholds_the_node_gyp_trampoline_exe() {
+        let ambient = ambient(&[
+            ("AUBE_NODE_GYP_EXE", "/usr/local/bin/nub"),
+            ("AUBE_NODE_GYP_PROJECT_DIR", "/proj"),
+        ]);
+        let p = lifecycle_scrubbed_env(&ambient);
+        for withheld in ["AUBE_NODE_GYP_EXE", "AUBE_NODE_GYP_PROJECT_DIR"] {
+            assert!(
+                !p.constructed.contains_key(withheld),
+                "{withheld} must stay withheld unless the PM binary is read-granted too"
+            );
         }
     }
 

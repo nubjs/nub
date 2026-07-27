@@ -66,15 +66,15 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // Make node-gyp compile offline. It reads Node headers from `npm_config_nodedir/
         // include/node` (default devdir `~/.cache/node-gyp/<ver>`, unreadable → network
         // fallback the jail denies). Point nodedir at the provisioned Node root and grant
-        // that root's `include/node` (the store path is outside `$tooldirs` + the
+        // that root's toolchain subtrees (the store path is outside `$tooldirs` + the
         // interpreter grant). Set-if-absent: an explicit ambient nodedir is a deliberate
         // build-against-custom-node choice; the case we fix (nub's own Node) carries none.
         let mut extra_reads = Vec::new();
-        if let Some((nodedir, headers)) = node_header_grant(&ambient) {
+        if let Some((nodedir, reads)) = node_toolchain_grant(&ambient) {
             ambient
                 .entry("npm_config_nodedir".to_string())
                 .or_insert(nodedir);
-            extra_reads.push(headers);
+            extra_reads.extend(reads);
         }
 
         let homes = sandbox_homes(&spawn.project_root);
@@ -164,19 +164,33 @@ fn sandbox_homes(project_root: &std::path::Path) -> nub_sandbox::Homes {
     }
 }
 
-/// The node-gyp header additions derived from the effective child env: the
+/// The Node-toolchain additions derived from the effective child env: the
 /// `npm_config_nodedir` value to inject (the provisioned Node root — `bin/node`'s
-/// grandparent) and the `include/node` read subtree under it. `None` when there is no
+/// grandparent) and the read subtrees under it. `None` when there is no
 /// `npm_node_execpath` or its path has no `<root>/bin/node` shape, so a caller with no
 /// resolvable Node adds nothing. Pure over its input so the derivation is unit-testable
 /// without a provisioned Node on disk.
-fn node_header_grant(ambient: &BTreeMap<String, String>) -> Option<(String, PathBuf)> {
+///
+/// Two subtrees, NOT the whole root. `include/node` carries the C/C++ headers node-gyp
+/// compiles against. `lib/node_modules` is what makes `<root>/bin/npm`, `npx` and
+/// `corepack` resolvable at all: each is a symlink into it, so with only the bin dir
+/// granted all three are DANGLING inside the jail and the standard
+/// `prebuild-install || npm run build` fallback dies at `npm: not found` (measured on
+/// `keytar`: rc 127 → rc 0 once the target is readable). Granting the ROOT instead would
+/// be simpler but is unbounded — `npm_node_execpath` is the user's Node, which on a
+/// Homebrew or `/usr/local` install makes the root a shared system prefix carrying
+/// unrelated `etc/`/`var/` content. These two subtrees are toolchain-only under every
+/// Node layout.
+fn node_toolchain_grant(ambient: &BTreeMap<String, String>) -> Option<(String, Vec<PathBuf>)> {
     let root = ambient
         .get("npm_node_execpath")
         .and_then(|exec| Path::new(exec).parent()?.parent().map(Path::to_path_buf))?;
     let nodedir = root.to_string_lossy().into_owned();
-    let headers = root.join("include").join("node");
-    Some((nodedir, headers))
+    let reads = vec![
+        root.join("include").join("node"),
+        root.join("lib").join("node_modules"),
+    ];
+    Some((nodedir, reads))
 }
 
 #[cfg(test)]
@@ -184,26 +198,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn node_header_grant_derives_nodedir_and_include_node() {
+    fn node_toolchain_grant_derives_nodedir_headers_and_lib_node_modules() {
         let ambient: BTreeMap<String, String> = [(
             "npm_node_execpath".to_string(),
             "/home/u/.cache/nub/node/v22.14.0/bin/node".to_string(),
         )]
         .into_iter()
         .collect();
-        let (nodedir, headers) = node_header_grant(&ambient).expect("derives a grant");
+        let (nodedir, reads) = node_toolchain_grant(&ambient).expect("derives a grant");
         assert_eq!(nodedir, "/home/u/.cache/nub/node/v22.14.0");
         assert_eq!(
-            headers,
-            PathBuf::from("/home/u/.cache/nub/node/v22.14.0/include/node")
+            reads,
+            vec![
+                PathBuf::from("/home/u/.cache/nub/node/v22.14.0/include/node"),
+                PathBuf::from("/home/u/.cache/nub/node/v22.14.0/lib/node_modules"),
+            ]
+        );
+    }
+
+    /// The grant stays SCOPED to toolchain subtrees. Granting the derived root itself
+    /// would hand a dependency build script the whole prefix — for a `/usr/local/bin/node`
+    /// or Homebrew Node that is a shared system prefix, not nub's own store.
+    #[test]
+    fn node_toolchain_grant_never_grants_the_bare_root() {
+        let ambient: BTreeMap<String, String> = [(
+            "npm_node_execpath".to_string(),
+            "/usr/local/bin/node".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let (_, reads) = node_toolchain_grant(&ambient).expect("derives a grant");
+        assert!(
+            !reads.contains(&PathBuf::from("/usr/local")),
+            "the shared prefix itself must never be a read grant: {reads:?}"
         );
     }
 
     #[test]
-    fn node_header_grant_absent_without_execpath() {
+    fn node_toolchain_grant_absent_without_execpath() {
         let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin".to_string())]
             .into_iter()
             .collect();
-        assert!(node_header_grant(&ambient).is_none());
+        assert!(node_toolchain_grant(&ambient).is_none());
     }
 }
