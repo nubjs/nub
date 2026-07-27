@@ -14,6 +14,44 @@ fn nub_bin() -> PathBuf {
     path
 }
 
+/// Both tests below launch a REAL confined child, which on Linux means Bubblewrap and a
+/// working unprivileged user namespace. `ubuntu-latest` is 24.04 with
+/// `apparmor_restrict_unprivileged_userns=1` and no `bwrap` package, so the launch
+/// fails, the ready marker never appears, and the wait below times out at ten seconds
+/// with a misleading message. Skip there, and hard-fail when a prepared conformance
+/// runner declares the primitive required — the same gate the rest of the suite uses.
+fn skip_without_bwrap() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let available = *AVAILABLE.get_or_init(|| {
+        ["/usr/bin/bwrap", "/bin/bwrap"].iter().any(|program| {
+            Command::new(program)
+                .args([
+                    "--die-with-parent",
+                    "--unshare-user",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--",
+                    "/bin/true",
+                ])
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    });
+    if available {
+        return false;
+    }
+    let required = matches!(
+        std::env::var("NUB_SANDBOX_REQUIRE_BWRAP").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    );
+    assert!(
+        !required,
+        "NUB_SANDBOX_REQUIRE_BWRAP set but Bubblewrap cannot create the required user namespace"
+    );
+    true
+}
+
 fn spawn_fixture(
     make_script: impl FnOnce(&Path) -> (String, PathBuf),
 ) -> (TempDir, PathBuf, Child) {
@@ -52,6 +90,9 @@ fn terminate(child: &mut Child) -> ExitStatus {
 
 #[test]
 fn term_reaches_the_sandboxed_descendant_group() {
+    if skip_without_bwrap() {
+        return;
+    }
     let (_fixture, project, mut child) = spawn_fixture(|project| {
         let ready = project.join("ready");
         let handled = project.join("handled");
@@ -72,6 +113,9 @@ fn term_reaches_the_sandboxed_descendant_group() {
 
 #[test]
 fn default_term_exit_maps_to_143() {
+    if skip_without_bwrap() {
+        return;
+    }
     let (_fixture, _project, mut child) = spawn_fixture(|project| {
         let ready = project.join("ready");
         let script = format!("printf ready > {}; exec sleep 30", ready.display());

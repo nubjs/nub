@@ -10,7 +10,7 @@
 #
 # Delete this file before the PR opens.
 #
-# Run 3: re-run against the FsOrigin::Speculative rename plus the Windows cfg fix.
+# Run 4: sandbox_signal gate + the serialized-vs-parallel ir differential.
 name: sandbox-test-probe
 on:
   workflow_dispatch:
@@ -167,5 +167,13 @@ jobs:
         with:
           shared-key: sandbox-probe-enforcement
           save-if: false
+      # Single-variable differential for the brokered-marker failure: the same test
+      # binary, serialized. ir.rs's apply() shim has no equivalent of the mount-topology
+      # lock linux_enforcement.rs takes, so if the fd the monitor hands Bubblewrap is
+      # only lost under parallel launches this run is the one that passes.
+      - run: cargo test -p nub-sandbox --test ir -- --test-threads=1
+        continue-on-error: true
       - run: cargo test -p nub-sandbox --test ir
+        continue-on-error: true
       - run: cargo test -p nub-cli --test sandbox_conformance
+      - run: cargo test -p nub-cli --test sandbox_signal
