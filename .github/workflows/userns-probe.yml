@@ -332,3 +332,32 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>&1; echo "G2_rc=$?"
           bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-all -- /bin/true 2>&1; echo "G2_bwrap_rc=$?"
           exit 0
+
+  # ---------------------------------------------------------------------------
+  # Round 3: can Landlock express nub's build-jail policy SHAPE — grant a
+  # directory then deny a path INSIDE it (/etc/shadow, the `.env*` floor)?
+  # This decides whether a Landlock build-jail tier is buildable at all.
+  # ---------------------------------------------------------------------------
+  landlockdeny:
+    name: landlockdeny (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - name: deny-inside-grant experiment
+        continue-on-error: true
+        run: |
+          set +e
+          cc -O1 -o /tmp/lld tests/userns-probe/landlock_deny.c 2>&1; echo "cc_rc=$?"
+          echo "################ MODE zero (allowed_access = 0) ################"
+          /tmp/lld zero; echo "rc=$?"
+          echo "################ MODE readless (EXECUTE only, no READ) ################"
+          /tmp/lld readless; echo "rc=$?"
+          echo "################ same, inside a DEFAULT docker container ################"
+          cc -static -O1 -o /tmp/lld_s tests/userns-probe/landlock_deny.c 2>&1
+          docker run --rm -v /tmp/lld_s:/lld:ro ubuntu:24.04 sh -c '/lld zero; echo rc=$?; /lld readless; echo rc=$?' 2>&1
+          exit 0
