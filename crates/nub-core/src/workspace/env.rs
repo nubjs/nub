@@ -196,7 +196,9 @@ fn is_safe_mode(mode: &str) -> bool {
 /// order (highest-priority first — same order as [`load_env_files`]'s merge).
 /// Used by `nub watch` to hand `--env-file=<path>` args to the watched Node so
 /// Node watches and re-reads them across restarts, rather than freezing their
-/// values at parent-spawn time. Only paths that currently exist and read as
+/// values at parent-spawn time — on Node 20.6.0+, which is where that flag
+/// exists; below it the caller injects the parsed map instead and the values do
+/// freeze at spawn. Only paths that currently exist and read as
 /// regular files are returned, so a caller passing them to Node's `--env-file`
 /// (which errors on a missing file) won't hit a spurious not-found.
 ///
@@ -244,18 +246,30 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
 /// restart), so injecting it would freeze the startup value (#207). Only the
 /// expansion-changed keys — which Node's `--env-file` can't reproduce — get
 /// injected.
-pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
-    load_env_files_raw_reporting(project_root).0
+/// `forwarded_to_node` says whether the caller will hand these files to Node as
+/// `--env-file` args. When it will, the drops are reported at that spawn
+/// boundary's per-restart guard, so warning here would just repeat it for a
+/// long-lived watcher. When it will not — below Node's 20.6.0 `--env-file`
+/// floor, where the watch path injects the map instead — this is the only place
+/// the drops can be surfaced at all, so warn.
+pub fn load_env_files_raw(project_root: &Path, forwarded_to_node: bool) -> HashMap<String, String> {
+    let (result, node_env_ignored, denied_keys) = load_env_files_raw_reporting(project_root);
+    if !forwarded_to_node {
+        if node_env_ignored {
+            warn_node_env_from_dotenv_ignored();
+        }
+        warn_denied_env_file_keys(&denied_keys);
+    }
+    result
 }
 
 /// The raw loader, additionally reporting (1) whether a `.env` FILE declared
 /// `NODE_ENV` (always dropped — dotenv/@next/env/Vite parity, #263) and (2) which
 /// denylisted runtime-control keys were dropped ([`ENV_FILE_DENYLIST`]). Both
 /// drops happen HERE at load, so every consumer of the returned map is covered by
-/// construction. The reports are consumed by [`load_env_files`] to warn. The
-/// plain [`load_env_files_raw`] wrapper discards them because watch separately
-/// delegates the raw files to Node; that spawn boundary installs a stable guard
-/// for this same denylist before handing Node the paths.
+/// construction. The reports are consumed by [`load_env_files`] to warn, and by
+/// [`load_env_files_raw`] only when it is NOT forwarding to Node — a forwarding
+/// watch defers to the guard the spawn boundary installs for this same denylist.
 fn load_env_files_raw_reporting(
     project_root: &Path,
 ) -> (HashMap<String, String>, bool, Vec<String>) {
@@ -312,9 +326,9 @@ fn load_env_files_raw_reporting(
 }
 
 /// Emit the "ignoring `.env` `NODE_ENV`" notice at most once per process. Called
-/// only on the direct run/file injection path ([`load_env_files`]), where the
-/// dropped `NODE_ENV` genuinely never reaches the child; the watch path defers to
-/// Node's `--env-file` and does not warn. `Once` guards against any repeat.
+/// on every injection path, where the dropped `NODE_ENV` genuinely never reaches
+/// the child; a watch that forwards to Node's `--env-file` defers to the spawn
+/// boundary instead and does not warn. `Once` guards against any repeat.
 fn warn_node_env_from_dotenv_ignored() {
     use std::sync::Once;
     static WARNED: Once = Once::new();
@@ -336,11 +350,10 @@ pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
     // nested references like A=hello, B=${A}_world, C=${B}_!.
     expand_env_map(&mut result);
 
-    // Warn only here — this map is injected straight into the child via
-    // `Command::env`, so a dropped `.env` `NODE_ENV` / denylisted var truly never
-    // reaches it. The watch path (plain `load_env_files_raw`) hands the files to
-    // Node's `--env-file` behind a per-restart process guard, but avoids repeating
-    // this load-time warning for a long-lived watcher.
+    // Warn here — this map is injected straight into the child via `Command::env`,
+    // so a dropped `.env` `NODE_ENV` / denylisted var truly never reaches it.
+    // `load_env_files_raw` makes the same call for its own injecting (non-
+    // forwarding) callers.
     if node_env_ignored {
         warn_node_env_from_dotenv_ignored();
     }
@@ -931,7 +944,7 @@ mod tests {
         )
         .unwrap();
 
-        let raw = load_env_files_raw(&dir);
+        let raw = load_env_files_raw(&dir, true);
         let expanded = load_env_files(&dir);
 
         // Plain var: identical in both → the watch path leaves it to `--env-file`.

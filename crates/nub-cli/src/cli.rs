@@ -281,8 +281,9 @@ fn merge_child_env(
 /// every plain var is left to Node's `--env-file` and live-reloads on restart. A
 /// key absent from `raw_env` is injected — including a CLI-only `--env-file`
 /// value. A CLI value that overrides a config source also differs from `raw_env`
-/// and is injected, keeping CLI strongest. Pure over its inputs so the selection
-/// can be unit-tested without spawning Node.
+/// and is injected, keeping CLI strongest. Below Node's `--env-file` floor nothing
+/// is forwarded, so `raw_env` is empty and every var is injected. Pure over its
+/// inputs so the selection can be unit-tested without spawning Node.
 fn watch_inject_vars<'a>(
     env_vars: &'a HashMap<String, String>,
     raw_env: &HashMap<String, String>,
@@ -293,11 +294,9 @@ fn watch_inject_vars<'a>(
         .collect()
 }
 
-/// Node's `--env-file` floor (landed 20.6.0). Below it Node aborts on the
-/// unknown option before executing anything, so a watch child handed the flag
-/// dies instantly with no output — every env-file source must fall back to
-/// whole-map injection instead. Gates both the auto/config cascade and the
-/// explicit flags; nub supports Node from 18.19, so this range is live.
+/// Node's `--env-file` floor (landed 20.6.0). Below it Node aborts on the unknown
+/// option before executing anything, so a watch child handed the flag dies with no
+/// output — every env-file source falls back to whole-map injection instead.
 fn node_accepts_env_file(version: &nub_core::node::version::NodeVersion) -> bool {
     *version >= nub_core::node::version::NodeVersion::new(20, 6, 0)
 }
@@ -5434,7 +5433,10 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let runtime_json = runtime_config_json(&runtime)?;
 
     // Auto-loaded `.env*` files are handed to the watched Node as `--env-file`
-    // args (below) so Node watches each path and re-reads it on every restart.
+    // args (below) so Node watches each path and re-reads it on every restart —
+    // but only from Node 20.6.0, where the flag exists. Everything about
+    // forwarding below is conditioned on `forward_auto`; under that floor the
+    // whole map is injected instead and nothing live-reloads.
     // However Node's own `--env-file` parser does NOT expand `${VAR}` cross-
     // references, which would make `nub watch` inconsistent with `nub <file>`
     // (which uses `load_env_files` and gets full expansion). To close the gap we
@@ -5462,8 +5464,9 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     //
     // CLI `--env-file` suppresses only the automatic `.env*` cascade. Explicit
     // config `env` sources still compose first, and CLI values overlay them.
-    // Forward explicit files only when the pinned Node accepts every requested
-    // flag flavor (#479); below that floor, inject their whole parsed map.
+    // Forward the auto/config cascade only when the pinned Node has `--env-file`
+    // at all, and the explicit files only when it also accepts every requested
+    // flag flavor (#479); below either floor, inject the whole parsed map.
     let forward_auto = node_accepts_env_file(&node.version);
     let forward_explicit = should_forward_explicit_env_files(&node.version, explicit_env_files);
     let base_raw_env = if no_env_file {
@@ -5472,7 +5475,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         match &runtime.env {
             crate::project_config::RuntimeEnv::Default if !env_file_present => project
                 .as_ref()
-                .map(|p| nub_core::workspace::env::load_env_files_raw(&p.root))
+                .map(|p| nub_core::workspace::env::load_env_files_raw(&p.root, forward_auto))
                 .unwrap_or_default(),
             crate::project_config::RuntimeEnv::Default => HashMap::new(),
             crate::project_config::RuntimeEnv::Sources(paths) => {
@@ -5534,9 +5537,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)
     });
 
-    // Reverse so the highest-priority `.env*` file lands last (Node's
-    // last-writer-wins ⇒ nub's first-writer-wins precedence).
     if forward_auto {
+        // Reverse so the highest-priority `.env*` file lands last (Node's
+        // last-writer-wins ⇒ nub's first-writer-wins precedence). The inversion is
+        // only needed because Node parses these; the injected fallback below the
+        // floor gets its precedence from `base_raw_env` directly.
         let env_paths: Box<dyn Iterator<Item = &PathBuf>> = if config_env_sources {
             Box::new(env_file_paths.iter())
         } else {
@@ -5581,11 +5586,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     if any_env_forwarded {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
     }
-    // Inject ONLY the .env* vars whose `${VAR}` expansion changed the raw value
-    // (#207) — see [`watch_inject_vars`]. A var Node's `--env-file` already
-    // delivers identically is left to Node so the long-lived watcher re-reads it
-    // from the file on every restart (a changed `.env` value is picked up) instead
-    // of freezing at startup.
+    // When the files are forwarded, inject ONLY the .env* vars whose `${VAR}`
+    // expansion changed the raw value (#207) — see [`watch_inject_vars`]. A var
+    // Node's `--env-file` already delivers identically is left to Node so the
+    // long-lived watcher re-reads it from the file on every restart (a changed
+    // `.env` value is picked up) instead of freezing at startup. Below the 20.6
+    // floor `forwarded_raw_env` is empty, so every var is injected and freezes.
     for (k, v) in watch_inject_vars(&env_vars, &forwarded_raw_env) {
         cmd.env(k, v);
     }
@@ -9373,8 +9379,6 @@ mod tests {
     #[test]
     fn auto_and_config_env_file_forwarding_gates_on_node_version() {
         use nub_core::node::version::NodeVersion;
-        // Below 20.6.0 Node aborts on `--env-file`, so the watch path must
-        // deliver the cascade by injection instead of forwarding the flag.
         assert!(!node_accepts_env_file(&NodeVersion::new(18, 19, 0)));
         assert!(!node_accepts_env_file(&NodeVersion::new(20, 5, 0)));
         assert!(node_accepts_env_file(&NodeVersion::new(20, 6, 0)));
