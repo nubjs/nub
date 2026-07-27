@@ -354,11 +354,12 @@ pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
     // nested references like A=hello, B=${A}_world, C=${B}_!.
     expand_env_map(&mut result);
 
-    // Warn only here — this map is injected straight into the child via
-    // `Command::env`, so a dropped `.env` `NODE_ENV` / denylisted var truly never
-    // reaches it. The watch path (plain `load_env_files_raw`) hands the files to
-    // Node's `--env-file` behind a per-restart process guard, but avoids repeating
-    // this load-time warning for a long-lived watcher.
+    // This map is injected straight into the child via `Command::env`, so a
+    // dropped `.env` `NODE_ENV` / denylisted var truly never reaches it. The watch
+    // path re-applies the same drops at its spawn boundary and reports them
+    // through [`load_env_files_raw_warning`]; both sites share the `Once` guards
+    // inside these two calls, so a long-lived watcher still emits each notice at
+    // most once.
     if node_env_ignored {
         warn_node_env_from_dotenv_ignored();
     }
