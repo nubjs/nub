@@ -25,8 +25,22 @@ fn main() {}
 #[cfg(target_os = "windows")]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("__resid__") {
-        std::process::exit(win::child_main(&args[2..]));
+    match args.get(1).map(String::as_str) {
+        Some("__resid__") => std::process::exit(win::child_main(&args[2..])),
+        // FAIL CLOSED. The fixture child IS this binary, so a child command line that
+        // misses the `__resid__` prefix would otherwise fall through and re-run the whole
+        // SUITE — which forks a fresh generation per surrogate vector, unbounded. That
+        // happened: two surrogate spawn builders omitted the prefix, leaving 8 live
+        // processes across 5 `nub-resid-*` roots, and the runner exiting 0 while
+        // descendant generations printed their own FAIL lines onto the shared console.
+        // Exit status is per-process, so a descendant's failure can never reach this
+        // runner's `fails` counter; the only sound answer is for a mis-built child
+        // command line to be an error, not a recursion.
+        Some(other) if !other.starts_with('-') => {
+            eprintln!("windows_residuals: unexpected argv {other:?}; expected `__resid__ <role>`");
+            std::process::exit(3);
+        }
+        _ => {}
     }
     match win::run() {
         Ok(()) => println!("ALL WINDOWS RESIDUAL PROBES PASSED"),
@@ -1439,7 +1453,7 @@ mod win {
             let secret = secret_of(base, vector);
             let _ = std::fs::write(&secret, b"SURROGATE_SECRET=leak");
             let body = format!(
-                "@echo off\r\n\"{}\" surrogate-read \"{}\" \"{}\"\r\n",
+                "@echo off\r\n\"{}\" __resid__ surrogate-read \"{}\" \"{}\"\r\n",
                 reader.display(),
                 secret.display(),
                 marker.display()
@@ -1660,7 +1674,7 @@ mod win {
             };
             quoted(reader.as_os_str(), &mut line);
             line.push(u16::from(b' '));
-            line.extend("surrogate-read".encode_utf16());
+            line.extend("__resid__ surrogate-read".encode_utf16());
             line.push(u16::from(b' '));
             quoted(secret.as_os_str(), &mut line);
             line.push(u16::from(b' '));
