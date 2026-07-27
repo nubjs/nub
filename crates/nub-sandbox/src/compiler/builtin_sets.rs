@@ -27,8 +27,8 @@
 //!   call carries its payload in the request body). The proxy gates only the CONNECT
 //!   authority and TLS SNI before blind-forwarding, so it cannot separate them; for these
 //!   three, credential scoping is the control, not the host list. Metadata/link-local +
-//!   RFC1918 are a SEPARATE always-on hard floor, never part of this set. Source data:
-//!   `.fray/sandbox-builtin-sets.md`, `.fray/sandbox-shai-hulud-exfil.md`.
+//!   RFC1918 are a SEPARATE always-on hard floor, never part of this set. Any host added
+//!   later must clear that same publish-route probe first; absent the probe, leave it out.
 //! - `$tooldirs` is per-OS because a tool's cache home differs across OSes (macOS
 //!   `~/Library/Caches`, Linux `~/.cache`, Windows `%LOCALAPPDATA%`). Host OS ==
 //!   target OS (the fold runs on the machine it enforces on), so the set is
@@ -352,6 +352,29 @@ mod tests {
             "packagist.org",
             "plugins.gradle.org",
             "upload.pypi.org",
+            // Container registries — every one of these is a `docker push` target. The
+            // retained Docker entries are artifact CDNs (`download.docker.com`), not
+            // registries; that is the whole distinction, and it is easy to lose.
+            "ghcr.io",
+            "registry-1.docker.io",
+            "public.ecr.aws",
+            // Telemetry ingest — an attacker-shaped event payload is exfiltration with a
+            // vendor SDK in front of it. `downloads.sentry-cdn.com` is retained because it
+            // serves artifacts; the ingest hostnames are a different surface.
+            "sentry.io",
+            "*.datadoghq.com",
+            // Non-GitHub forges and cloud control planes — the same per-account write
+            // surface that disqualifies `github.com`, minus the name that makes it obvious.
+            "gitlab.com",
+            "bitbucket.org",
+            "dev.azure.com",
+            // Siblings and `www.` twins of RETAINED hosts. The likeliest re-sync mistake:
+            // each of these reads as a host already on the list, but fronts its own upload
+            // route (`pypi.org` is trusted, `test.pypi.org` is not).
+            "test.pypi.org",
+            "hackage.haskell.org",
+            "npm.pkg.github.com",
+            "www.crates.io",
         ] {
             assert!(
                 !TRUSTED_HOSTS.contains(&banned),

@@ -1074,12 +1074,19 @@ mod win {
     }
 
     /// A per-host strict policy: fs read-confine plus one allowed hostname.
+    ///
+    /// `ProxyMode::Auto` is what the compiler derives for a fine-grained allow, and setting
+    /// it is load-bearing: the `Disabled` default trips the generic proxy-tier invariant in
+    /// `validate_apply_inputs`, which rejects with the SAME `net-per-host` label before
+    /// `windows::apply` is ever called — so the probe would pass without reaching the
+    /// AppContainer refusal it exists to prove.
     fn per_host_policy(f: &Fixture) -> SandboxPolicy {
         let mut policy = read_confine(&[&f.work], &[]);
         policy.net = NetPolicy {
             enforce: true,
             rules: vec![allow_rule("example.com")],
             default_effect: Effect::Deny,
+            mode: nub_sandbox::policy::ProxyMode::Auto,
             ..Default::default()
         };
         policy
@@ -1093,11 +1100,10 @@ mod win {
             .args(["__sbxchild__", "write", marker_arg.as_str()])
             .cwd(&f.root);
         match apply(&policy, spec) {
-            // The refusal is asserted on `lost`, not on the wording. Which guard rejects
-            // first is an implementation detail: the generic proxy-tier invariant in
-            // `validate_apply_inputs` runs before the Windows-specific loopback-forwarder
-            // refusal, so pinning that platform reason string made this fail on a correct
-            // rejection. `net-per-host` plus the un-run child is the actual contract.
+            // Asserted on `lost`, not on the wording — pinning the platform reason string
+            // made this fail on a correct rejection. `net-per-host` plus the un-run child
+            // is the contract; `per_host_policy` is what steers the rejection to the
+            // Windows loopback-forwarder guard rather than a generic pre-apply invariant.
             Err(d) => {
                 if d.lost.iter().any(|s| s == "net-per-host") && d.reason.is_some() {
                     println!("PASS per-host policy fails closed before launch");
