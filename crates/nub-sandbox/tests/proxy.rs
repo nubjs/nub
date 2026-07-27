@@ -503,3 +503,94 @@ fn socks5_without_userpass_auth_is_refused() {
         "a no-auth-only SOCKS greeting must be refused"
     );
 }
+
+// ── the build jail's curated egress set ─────────────────────────────────────────
+
+/// The net axis of the real build-jail policy — compiled through the production entry so
+/// this exercises what a dependency lifecycle spawn actually gets, not a hand-built
+/// stand-in that could drift from it.
+fn build_jail_net() -> NetPolicy {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/pkg");
+    nub_sandbox::compile_build_jail(
+        nub_sandbox::Homes {
+            home: root.path().join("home"),
+            tmp: root.path().join("tmp"),
+            cache: root.path().join("cache"),
+            project: project.clone(),
+        },
+        &package_dir,
+        Vec::new(),
+        Vec::new(),
+        Default::default(),
+    )
+    .expect("compile build-jail")
+    .net
+}
+
+#[test]
+fn build_jail_gate_admits_the_download_set_and_refuses_everything_else() {
+    // The decider IS the proxy's gate (it consults this seam for both the CONNECT
+    // authority and the SNI), so asserting on it covers both gates without needing the
+    // listed hosts to be reachable from wherever the suite runs.
+    let decider = StaticDecider::new(build_jail_net());
+    let decide = |h: &str| decider.decide(&Host::Name(h.to_string()));
+
+    // Windows cannot enforce a per-host policy at all, so its jail keeps the deny-all.
+    if !cfg!(windows) {
+        for listed in ["nodejs.org", "binaries.prisma.sh", "cdn.cypress.io"] {
+            assert_eq!(
+                decide(listed),
+                Decision::Allow,
+                "`{listed}` is an install-time artifact host and must pass the gate"
+            );
+        }
+    }
+    for refused in [
+        // Never inherited from `$trusted`: `npm publish` is a PUT to the host that
+        // serves the read, so admitting it would hand a postinstall a publish route.
+        "registry.npmjs.org",
+        "api.github.com",
+        "storage.googleapis.com",
+        // Wildcard-free: an attacker-chosen label under a LISTED host is still refused,
+        // which is what keeps a secret out of a DNS query.
+        "leak.cdn.cypress.io",
+        "evil.test",
+    ] {
+        assert_eq!(
+            decide(refused),
+            Decision::Deny,
+            "`{refused}` must not pass the build jail's gate"
+        );
+    }
+}
+
+#[test]
+fn build_jail_proxy_refuses_a_tunnel_to_an_unlisted_upstream() {
+    // End-to-end through a real proxy carrying the real policy: the CONNECT is refused
+    // before any tunnel exists. The second half is the one-variable control — the same
+    // client, the same upstream, a policy that admits it — so the refusal above is the
+    // policy's doing and not a probe that never connects.
+    let upstream = echo_server();
+    let target = format!("127.0.0.1:{}", upstream.port());
+
+    let jailed = start(build_jail_net());
+    assert!(
+        http_connect(jailed.port(), &target, jailed.token()).is_err(),
+        "an upstream outside $downloads must not be tunneled"
+    );
+
+    // The control admits the SNI as well as the target: the proxy gates both, and only
+    // the target-authority gate is what the assertion above turns on.
+    let permissive = start(net(vec![
+        allow_cidr("127.0.0.0/8"),
+        allow_host("cdn.cypress.io"),
+    ]));
+    let mut tunnel = http_connect(permissive.port(), &target, permissive.token())
+        .expect("control: the same upstream must tunnel under a policy that allows it");
+    assert!(
+        tunnel_forwards(&mut tunnel, "cdn.cypress.io"),
+        "control: the tunnel must actually carry bytes"
+    );
+}

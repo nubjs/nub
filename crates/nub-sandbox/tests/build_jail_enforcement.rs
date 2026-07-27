@@ -145,6 +145,92 @@ fn build_jail_confines_writes_and_hides_secrets() {
     );
 }
 
+/// Curated egress means exactly one hole in the jail's network wall: the loopback proxy,
+/// which gates every tunnel against `$downloads`. This asserts the wall — a listener the
+/// SAME probe reaches a moment earlier unconfined is unreachable from inside, so a host
+/// that is not on the list cannot be dialed directly, only offered to the proxy's gate.
+///
+/// The proxy-port reach is the positive control, and it is what stops this from passing
+/// vacuously: without it, "the connect failed" would equally describe a jail where
+/// networking is simply dead, which is the pre-curation posture rather than the one under
+/// test. `/bin/sh` on macOS carries the `/dev/tcp` redirection, so the probe needs no
+/// external binary that the tight read set might not reach.
+///
+/// The per-host GATE (a listed host admitted, an unlisted one refused through the
+/// sanctioned path) is proven hermetically against this same policy in `tests/proxy.rs`;
+/// what only an enforcing OS can prove is that the wall around it holds.
+#[test]
+fn build_jail_blocks_direct_egress_and_leaves_only_the_proxy_reachable() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/.aube/native@1.0.0/node_modules/native");
+    std::fs::create_dir_all(&package_dir).unwrap();
+
+    // Bound but never accepted: a TCP connect completes off the listen backlog, so the
+    // reachability differential does not need an accept loop racing the assertions.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let script = format!(
+        r#"
+        (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null && echo DIRECT_CONNECTED || echo DIRECT_BLOCKED
+        case "$HTTP_PROXY" in http://*) echo PROXY_ENV_SET ;; *) echo PROXY_ENV_MISSING ;; esac
+        p=${{HTTP_PROXY##*:}}
+        (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null && echo PROXY_REACHED || echo PROXY_UNREACHED
+        "#
+    );
+
+    let control = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "(exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null && echo DIRECT_CONNECTED || echo DIRECT_BLOCKED"
+        ))
+        .output()
+        .expect("run the probe unconfined");
+    assert!(
+        String::from_utf8_lossy(&control.stdout).contains("DIRECT_CONNECTED"),
+        "control: the probe must reach the listener unconfined, or the confined failure \
+         below says nothing about the jail"
+    );
+
+    let ambient: BTreeMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())]
+        .into_iter()
+        .collect();
+    let policy = nub_sandbox::compile_build_jail(
+        homes(&home, &project),
+        &package_dir,
+        vec![home.join("Library/Caches/nub/node/bin/node")],
+        Vec::new(),
+        ambient,
+    )
+    .expect("compile build-jail");
+
+    let spec = nub_sandbox::CommandSpec::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .cwd(&package_dir);
+    let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+    let prepared = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+        .expect("apply build-jail (fail-closed on error)");
+    let out = prepared.output().expect("run confined script");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("DIRECT_BLOCKED") && !stdout.contains("DIRECT_CONNECTED"),
+        "a host outside $downloads must not be dialable directly:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("PROXY_ENV_SET"),
+        "the jail must point the child at the gating proxy:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("PROXY_REACHED"),
+        "the proxy port must be reachable, or DIRECT_BLOCKED above just means the child \
+         has no networking at all:\n{stdout}"
+    );
+}
+
 /// A FETCHED git checkout is confined as a whole, and every byte of it is attacker-authored:
 /// `prepare_scratch_copy` uses `cp -a`, so a symlink committed in the repo survives into the
 /// scratch tree the jail grants. Seatbelt matches the CANONICAL path, so a read through
