@@ -5,16 +5,27 @@
 //! like a `...:#/pointer`-reused list's entries.
 //!
 //! Provenance / curation:
-//! - `$trusted` derives from the Claude Code default-allowed-domains list, filtered by
-//!   one rule: a trusted host must be READ-ONLY to the confined process. Excluded are
-//!   hosts exposing a write-back route (an authenticated API that can create a repo,
-//!   commit a file, or post a paste) and hosts with rentable path or subdomain tenancy
-//!   (blanket multi-tenant object stores like `*.amazonaws.com` /
-//!   `storage.googleapis.com` / `*.googleapis.com`, and the github family). Both shapes
-//!   are exfiltration sinks: reaching them is indistinguishable from uploading to them.
-//!   Genuinely-needed named Google APIs stay listed. Metadata/link-local + RFC1918 are a
-//!   SEPARATE always-on hard floor, never part of this set. Source data:
-//!   `.fray/sandbox-builtin-sets.md`.
+//! - `$trusted` derives from the Claude Code default-allowed-domains list, filtered to
+//!   hosts that are READ-ONLY to the confined process. Two shapes are excluded, both
+//!   because reaching them is indistinguishable from uploading to them: a write-back
+//!   route (an authenticated API that can publish a package, create a repo, or post a
+//!   paste — the Shai-Hulud propagation primitive) and rentable path/subdomain tenancy
+//!   (multi-tenant object stores, forge user pages). Membership was settled by probing
+//!   each ecosystem's *documented* publish route against a same-host bogus-path control,
+//!   which is what distinguishes "route exists, auth-gated" from "host denies this
+//!   method wholesale"; that is how `index.rubygems.org` was caught fronting the same
+//!   Rails app as `rubygems.org`. Three caveats bound what this set can promise. An
+//!   entry is NOT protocol-scoped — the egress proxy tunnels arbitrary TCP via
+//!   CONNECT/SOCKS5, so allowing a host admits non-HTTP upload transports too (why the
+//!   `dput` PPA target is absent). A CNAME onto a shared CDN is opaque to any host
+//!   allowlist, since the tenant-selecting `Host` header travels inside TLS
+//!   (`index.crates.io` / `static.crates.io` are kept as single-tenant buckets on that
+//!   basis, not because the hostname proves it). And `registry.npmjs.org` is retained
+//!   despite failing the rule: reading it is how anything installs, `npm publish` is a
+//!   PUT to that same host, and the proxy gates only the CONNECT authority and TLS SNI
+//!   before blind-forwarding — so it cannot tell the two apart. Metadata/link-local +
+//!   RFC1918 are a SEPARATE always-on hard floor, never part of this set. Source data:
+//!   `.fray/sandbox-builtin-sets.md`, `.fray/sandbox-shai-hulud-exfil.md`.
 //! - `$tooldirs` is per-OS because a tool's cache home differs across OSes (macOS
 //!   `~/Library/Caches`, Linux `~/.cache`, Windows `%LOCALAPPDATA%`). Host OS ==
 //!   target OS (the fold runs on the machine it enforces on), so the set is
@@ -33,179 +44,105 @@ use crate::policy::{CanonGlob, Effect, FsAccess, FsRule, NetRule, NetTarget};
 
 /// The curated trusted-host allowlist. Each entry is a literal host or a leading
 /// `*.suffix` subdomain wildcard — both accepted by [`crate::matcher::host::host_pattern_is_valid`]
-/// and matched by [`crate::matcher::host::host_glob_matches`]. Object-store wildcards
-/// are deliberately absent (see the module doc); the `#[cfg(test)]` unit below guards
-/// both invariants so a future edit cannot smuggle an invalid pattern or an exfil sink in.
+/// and matched by [`crate::matcher::host::host_glob_matches`]. Write-capable and
+/// multi-tenant hosts are deliberately absent (see the module doc for the rule and its
+/// caveats); the `#[cfg(test)]` unit below guards both invariants so a future edit cannot
+/// smuggle an invalid pattern or an exfil sink in.
 pub const TRUSTED_HOSTS: &[&str] = &[
-    // Anthropic
+    // Anthropic / Claude
     "api.anthropic.com",
-    "statsig.anthropic.com",
+    "claude.ai",
+    "code.claude.com",
     "docs.claude.com",
     "platform.claude.com",
-    "code.claude.com",
-    "claude.ai",
-    // Version control. The github family is deliberately absent: every one of its
-    // hosts either accepts an authenticated write (api.github.com creates repos and
-    // commits files; gist.github.com posts gists) or serves attacker-registrable
-    // per-account paths, which is exactly the channel the Shai-Hulud npm worm used to
-    // exfiltrate harvested secrets.
-    "gitlab.com",
-    "www.gitlab.com",
-    "registry.gitlab.com",
-    "bitbucket.org",
-    "www.bitbucket.org",
-    "api.bitbucket.org",
-    // Container registries
-    "registry-1.docker.io",
-    "auth.docker.io",
-    "index.docker.io",
-    "hub.docker.com",
-    "www.docker.com",
-    "production.cloudflare.docker.com",
-    "download.docker.com",
-    "gcr.io",
-    "*.gcr.io",
-    "ghcr.io",
-    "mcr.microsoft.com",
-    "*.data.mcr.microsoft.com",
-    "public.ecr.aws",
-    // Cloud platforms (*.amazonaws.com, storage.googleapis.com, *.googleapis.com REMOVED)
-    "cloud.google.com",
-    "accounts.google.com",
-    "gcloud.google.com",
-    "compute.googleapis.com",
-    "container.googleapis.com",
-    "azure.com",
-    "portal.azure.com",
-    "microsoft.com",
-    "www.microsoft.com",
-    "*.microsoftonline.com",
-    "packages.microsoft.com",
-    "dotnet.microsoft.com",
-    "dot.net",
-    "visualstudio.com",
-    "dev.azure.com",
-    "*.api.aws",
-    "oracle.com",
-    "www.oracle.com",
-    "java.com",
-    "www.java.com",
-    "java.net",
-    "www.java.net",
-    "download.oracle.com",
-    "yum.oracle.com",
-    // JS / Node
+    // npm
     "registry.npmjs.org",
-    "www.npmjs.com",
-    "www.npmjs.org",
-    "npmjs.com",
-    "npmjs.org",
-    "yarnpkg.com",
-    "registry.yarnpkg.com",
+    // Node / JS
+    "nodejs.org",
+    "www.nodejs.org",
+    "binaries.prisma.sh",
+    "downloads.sentry-cdn.com",
     // Python
+    "files.pythonhosted.org",
     "pypi.org",
     "www.pypi.org",
-    "files.pythonhosted.org",
-    "pythonhosted.org",
-    "test.pypi.org",
     "pypi.python.org",
+    "pythonhosted.org",
     "pypa.io",
     "www.pypa.io",
-    // Ruby
-    "rubygems.org",
-    "www.rubygems.org",
-    "api.rubygems.org",
-    "index.rubygems.org",
-    "ruby-lang.org",
-    "www.ruby-lang.org",
-    "rubyforge.org",
-    "www.rubyforge.org",
-    "rubyonrails.org",
-    "www.rubyonrails.org",
-    "rvm.io",
-    "get.rvm.io",
+    "conda.anaconda.org",
+    "repo.anaconda.com",
     // Rust
-    "crates.io",
-    "www.crates.io",
     "index.crates.io",
     "static.crates.io",
-    "rustup.rs",
     "static.rust-lang.org",
     "www.rust-lang.org",
+    "rustup.rs",
     // Go
-    "proxy.golang.org",
-    "sum.golang.org",
-    "index.golang.org",
     "golang.org",
     "www.golang.org",
     "goproxy.io",
+    "index.golang.org",
+    "proxy.golang.org",
+    "sum.golang.org",
     "pkg.go.dev",
-    // JVM
-    "maven.org",
-    "repo.maven.org",
-    "central.maven.org",
+    // Java / JVM
     "repo1.maven.org",
     "repo.maven.apache.org",
-    "jcenter.bintray.com",
+    "maven.org",
     "gradle.org",
     "www.gradle.org",
     "services.gradle.org",
-    "plugins.gradle.org",
+    "spring.io",
     "kotlinlang.org",
     "www.kotlinlang.org",
-    "spring.io",
-    "repo.spring.io",
-    // Other package managers
-    "packagist.org",
-    "www.packagist.org",
-    "repo.packagist.org",
-    "nuget.org",
-    "www.nuget.org",
+    // .NET
     "api.nuget.org",
-    "pub.dev",
-    "api.pub.dev",
-    "hex.pm",
-    "www.hex.pm",
+    "dot.net",
+    "dotnet.microsoft.com",
+    "packages.microsoft.com",
+    // Ruby / Perl / PHP / Swift / Haskell / CocoaPods
+    "rvm.io",
+    "get.rvm.io",
     "cpan.org",
     "www.cpan.org",
     "metacpan.org",
     "www.metacpan.org",
     "api.metacpan.org",
+    "repo.packagist.org",
+    "swift.org",
+    "www.swift.org",
+    "haskell.org",
+    "www.haskell.org",
     "cocoapods.org",
     "www.cocoapods.org",
     "cdn.cocoapods.org",
-    "haskell.org",
-    "www.haskell.org",
-    "hackage.haskell.org",
-    "swift.org",
-    "www.swift.org",
-    // Linux distros
+    // Containers / Kubernetes
+    "download.docker.com",
+    "production.cloudflare.docker.com",
+    "mcr.microsoft.com",
+    "*.data.mcr.microsoft.com",
+    "dl.k8s.io",
+    "pkgs.k8s.io",
+    "k8s.io",
+    "www.k8s.io",
+    // OS distributions
     "archive.ubuntu.com",
     "security.ubuntu.com",
     "ubuntu.com",
     "www.ubuntu.com",
     "*.ubuntu.com",
-    "ppa.launchpad.net",
-    "launchpad.net",
-    "www.launchpad.net",
     "*.nixos.org",
-    // Dev tools / platforms
-    "dl.k8s.io",
-    "pkgs.k8s.io",
-    "k8s.io",
-    "www.k8s.io",
-    "releases.hashicorp.com",
-    "apt.releases.hashicorp.com",
-    "rpm.releases.hashicorp.com",
-    "archive.releases.hashicorp.com",
+    "yum.oracle.com",
+    "download.oracle.com",
+    // HashiCorp
     "hashicorp.com",
     "www.hashicorp.com",
-    "repo.anaconda.com",
-    "conda.anaconda.org",
-    "anaconda.org",
-    "www.anaconda.com",
-    "anaconda.com",
-    "continuum.io",
+    "releases.hashicorp.com",
+    "apt.releases.hashicorp.com",
+    "archive.releases.hashicorp.com",
+    "rpm.releases.hashicorp.com",
+    // Apache / Eclipse
     "apache.org",
     "www.apache.org",
     "archive.apache.org",
@@ -213,38 +150,15 @@ pub const TRUSTED_HOSTS: &[&str] = &[
     "eclipse.org",
     "www.eclipse.org",
     "download.eclipse.org",
-    "nodejs.org",
-    "www.nodejs.org",
-    "developer.apple.com",
-    "developer.android.com",
-    "pkg.stainless.com",
-    "binaries.prisma.sh",
-    // Cloud services / monitoring
-    "statsig.com",
-    "www.statsig.com",
-    "api.statsig.com",
-    "sentry.io",
-    "*.sentry.io",
-    "downloads.sentry-cdn.com",
-    "http-intake.logs.datadoghq.com",
-    "browser-intake-us5-datadoghq.com",
-    "*.datadoghq.com",
-    "*.datadoghq.eu",
-    "api.honeycomb.io",
-    // CDN / mirrors
-    "sourceforge.net",
-    "*.sourceforge.net",
-    "packagecloud.io",
-    "*.packagecloud.io",
-    "fonts.googleapis.com",
-    "fonts.gstatic.com",
-    // Schema / config
+    // Schemas / fonts / vendor docs
     "json-schema.org",
     "www.json-schema.org",
     "json.schemastore.org",
     "www.schemastore.org",
-    // MCP
-    "*.modelcontextprotocol.io",
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "developer.android.com",
+    "developer.apple.com",
 ];
 
 /// Expand `$trusted` into one [`NetRule`] per host with the given effect (Allow for a
@@ -422,6 +336,19 @@ mod tests {
             "raw.githubusercontent.com",
             "objects.githubusercontent.com",
             "*.github.io",
+            // Package registries whose publish route shares the listed hostname.
+            // `index.rubygems.org` is the trap: it looks like a read-only index and
+            // fronts the same Rails app that serves `gem push`.
+            "crates.io",
+            "rubygems.org",
+            "api.rubygems.org",
+            "index.rubygems.org",
+            "nuget.org",
+            "hex.pm",
+            "pub.dev",
+            "packagist.org",
+            "plugins.gradle.org",
+            "upload.pypi.org",
         ] {
             assert!(
                 !TRUSTED_HOSTS.contains(&banned),
