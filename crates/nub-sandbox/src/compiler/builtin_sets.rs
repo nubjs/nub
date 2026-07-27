@@ -52,7 +52,7 @@
 //!   scoping is the control, not the host list. Metadata/link-local + RFC1918 are a SEPARATE
 //!   always-on hard floor, never part of this set. This set is the AGENT-SANDBOX net axis
 //!   and is unrelated to the build jail's download allowlist, which is a separate constant
-//!   over a surface whose net axis is off. Any host added later must clear the same
+//!   with its own, stricter membership. Any host added later must clear the same
 //!   write-route probe; absent the probe, leave it out.
 //! - `$downloads` is the narrower, install-scoped sibling of `$trusted`, and the two are
 //!   kept strictly apart: `$trusted` serves an agent working with the user's own
