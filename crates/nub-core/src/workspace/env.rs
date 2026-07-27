@@ -246,6 +246,7 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
 /// restart), so injecting it would freeze the startup value (#207). Only the
 /// expansion-changed keys — which Node's `--env-file` can't reproduce — get
 /// injected.
+///
 /// `forwarded_to_node` says whether the caller will hand these files to Node as
 /// `--env-file` args. When it will, the drops are reported at that spawn
 /// boundary's per-restart guard, so warning here would just repeat it for a
