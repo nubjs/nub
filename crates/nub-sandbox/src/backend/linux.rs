@@ -63,9 +63,6 @@ const REQUIRED_EXECUTABLE_SNAPSHOT_SEALS: libc::c_int =
 /// `bwrap//&unpriv_bwrap` outer cannot transition to the helper's more permissive
 /// profile under `no_new_privs`. See `crates/nub-sandbox/setup/linux-nesting/`.
 pub(crate) const DEDICATED_HELPER_PATH: &str = "/usr/libexec/nub/nub-bwrap";
-/// Bounded ceiling for the one-shot nesting feature probe; a correctly set-up
-/// host completes it in well under a second.
-const NESTING_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BubblewrapOrigin {
@@ -723,18 +720,7 @@ fn admit_bwrap_candidate(
         let mut stderr = outer.stderr.take();
         drop(setup_files);
         match retained_monitor.run_candidate_probe(outer, Duration::from_secs(5)) {
-            Ok(()) => {
-                if !require_nesting {
-                    return Ok((candidate, probe_ca));
-                }
-                // The single-level monitor probe proves the level-1 launch; a
-                // nesting launch must ALSO prove the host can create a child
-                // sandbox inside it. Gate target release on that bounded probe.
-                match probe_direct_nesting(&candidate, NESTING_PROBE_TIMEOUT) {
-                    Ok(()) => return Ok((candidate, probe_ca)),
-                    Err(reason) => failures.push(reason),
-                }
-            }
+            Ok(()) => return Ok((candidate, probe_ca)),
             Err(error) => {
                 let mut diagnostic_bytes = Vec::new();
                 if let Some(stderr) = stderr.as_mut() {
@@ -2089,113 +2075,6 @@ fn classify_bwrap_failures(failures: &[String]) -> String {
         return format!("the container policy blocks required Bubblewrap behavior ({detail})");
     }
     format!("Bubblewrap cannot enforce the required process view ({detail})")
-}
-
-/// One bounded direct nested launch. The dedicated helper (exec'd through its
-/// pinned descriptor so the path-bound AppArmor `userns` profile attaches) launches
-/// the dedicated helper AGAIN — by its real path, visible inside the outer view — to
-/// run `/bin/true`. Success proves the host can create a child sandbox inside a
-/// helper sandbox; any failure is handed to [`classify_nesting_failure`] for a
-/// precise setup/profile/host diagnostic. This is a kernel/AppArmor capability
-/// check, NOT the production nested-composition launch path (that is D7/D8).
-fn probe_direct_nesting(
-    candidate: &PinnedBubblewrapCandidate,
-    timeout: Duration,
-) -> Result<(), String> {
-    let helper_fd = candidate.executable.as_raw_fd();
-    let mut command = Command::new(candidate.program());
-    command
-        .env_clear()
-        .args([
-            "--die-with-parent",
-            "--new-session",
-            "--unshare-user",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--cap-drop",
-            "ALL",
-            "--ro-bind",
-            "/",
-            "/",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--clearenv",
-            "--",
-            // The inner helper is invoked by real path: the path-bound AppArmor
-            // profile only attaches to `/usr/libexec/nub/nub-bwrap`.
-            DEDICATED_HELPER_PATH,
-            "--die-with-parent",
-            "--unshare-user",
-            "--unshare-pid",
-            "--cap-drop",
-            "ALL",
-            "--ro-bind",
-            "/",
-            "/",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--clearenv",
-            "--",
-            "/bin/true",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
-    // The outer helper is exec'd via `/proc/self/fd/<helper_fd>`; keep that
-    // descriptor open across the child's execve so the magic path resolves.
-    unsafe {
-        command.pre_exec(move || {
-            let flags = libc::fcntl(helper_fd, libc::F_GETFD);
-            if flags < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(helper_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command.spawn().map_err(|error| {
-        format!("the dedicated helper could not start the nesting probe: {error}")
-    })?;
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stderr = String::new();
-                if let Some(mut handle) = child.stderr.take() {
-                    let _ = handle.read_to_string(&mut stderr);
-                }
-                if status.success() {
-                    return Ok(());
-                }
-                let trimmed = stderr.trim();
-                return Err(if trimmed.is_empty() {
-                    format!("nested launch exited unsuccessfully ({status})")
-                } else {
-                    format!("nested launch failed: {trimmed}")
-                });
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("the bounded nesting probe did not complete in time".to_string());
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("waiting on the nesting probe failed: {error}"));
-            }
-        }
-    }
 }
 
 /// Turn dedicated-helper admission failures into ONE precise nesting diagnostic,
@@ -4022,7 +3901,10 @@ mod tests {
     fn apparmor_setup_hint_names_the_setup_command() {
         // The C1 remedy text every not-set-up fail-closed path routes through.
         let hint = apparmor_setup_hint();
-        assert!(hint.contains(crate::backend::linux_setup::SETUP_COMMAND), "{hint}");
+        assert!(
+            hint.contains(crate::backend::linux_setup::SETUP_COMMAND),
+            "{hint}"
+        );
         assert!(hint.contains(DEDICATED_HELPER_PATH), "{hint}");
     }
 

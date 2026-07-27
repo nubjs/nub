@@ -31,7 +31,10 @@ const PROFILE_CONTENT: &str = include_str!("../../setup/linux-nesting/nub-bwrap-
 /// built against (`NUB_BWRAP_VERSION`), so a release and its bundled bwrap can never drift. Falls
 /// back to the 0.11.2 release default for a dev build that set no version.
 fn expected_bwrap_version() -> String {
-    format!("bubblewrap {}", option_env!("NUB_BWRAP_VERSION").unwrap_or("0.11.2"))
+    format!(
+        "bubblewrap {}",
+        option_env!("NUB_BWRAP_VERSION").unwrap_or("0.11.2")
+    )
 }
 
 /// The elevated command a normal user must run. Emitted by the "not set up" runtime error and
@@ -46,8 +49,7 @@ fn is_root() -> bool {
 /// Locate nub's packaged bubblewrap next to the running binary, matching the runtime resolver's
 /// search (`<nub-dir>/nub-resources/bwrap` and the `../` sibling for the npm layout).
 fn packaged_bwrap() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("locating the nub executable: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("locating the nub executable: {e}"))?;
     let dir = exe
         .parent()
         .ok_or_else(|| "the nub executable has no parent directory".to_string())?;
@@ -82,10 +84,7 @@ fn run_tool(cmd: &mut Command, ok_codes: &[i32]) -> Result<(), String> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(format!(
-        "{program} failed (exit {code}): {}",
-        stderr.trim()
-    ))
+    Err(format!("{program} failed (exit {code}): {}", stderr.trim()))
 }
 
 fn tool_exists(name: &str) -> bool {
@@ -196,8 +195,7 @@ pub fn setup() -> Result<String, String> {
     }
 
     // 3. Helper: root-owned, group-executable, NOT setuid. `install(1)` is atomic.
-    std::fs::create_dir_all(HELPER_DIR)
-        .map_err(|e| format!("creating {HELPER_DIR}: {e}"))?;
+    std::fs::create_dir_all(HELPER_DIR).map_err(|e| format!("creating {HELPER_DIR}: {e}"))?;
     run_tool(
         Command::new("install").args([
             "-D",
@@ -231,7 +229,9 @@ pub fn setup() -> Result<String, String> {
     //    membership check, reproducing exactly the runtime scenario a fresh-login user will hit.
     match &target_user {
         Some(user) if tool_exists("runuser") => match verify_as_member(user) {
-            Ok(()) => report.push("verified: a nub-sandbox member can confine a command".to_string()),
+            Ok(()) => {
+                report.push("verified: a nub-sandbox member can confine a command".to_string())
+            }
             Err(e) => {
                 return Err(format!(
                     "setup installed the helper and profile, but the verification launch failed, \
@@ -326,9 +326,14 @@ pub fn status() -> Result<String, String> {
 
     // Helper presence + digest.
     match std::fs::metadata(DEDICATED_HELPER_PATH) {
-        Ok(_) => match (option_env!("NUB_BWRAP_SHA256"), sha256_hex(Path::new(DEDICATED_HELPER_PATH))) {
+        Ok(_) => match (
+            option_env!("NUB_BWRAP_SHA256"),
+            sha256_hex(Path::new(DEDICATED_HELPER_PATH)),
+        ) {
             (Some(expected), Ok(actual)) if expected == actual => {
-                out.push_str(&format!("helper: installed at {DEDICATED_HELPER_PATH} (digest matches)\n"));
+                out.push_str(&format!(
+                    "helper: installed at {DEDICATED_HELPER_PATH} (digest matches)\n"
+                ));
             }
             (Some(_), Ok(actual)) => {
                 ready = false;
@@ -340,7 +345,9 @@ pub fn status() -> Result<String, String> {
         },
         Err(_) => {
             ready = false;
-            out.push_str(&format!("helper: not installed ({DEDICATED_HELPER_PATH} missing)\n"));
+            out.push_str(&format!(
+                "helper: not installed ({DEDICATED_HELPER_PATH} missing)\n"
+            ));
         }
     }
 
@@ -371,7 +378,9 @@ pub fn status() -> Result<String, String> {
             out.push_str(&format!("group: {user} is in {HELPER_GROUP}\n"));
         } else {
             ready = false;
-            out.push_str(&format!("group: {user} is NOT in {HELPER_GROUP} — re-run setup, then start a fresh login\n"));
+            out.push_str(&format!(
+                "group: {user} is NOT in {HELPER_GROUP} — re-run setup, then start a fresh login\n"
+            ));
         }
     }
 
@@ -384,7 +393,9 @@ pub fn status() -> Result<String, String> {
     ));
 
     if !ready {
-        out.push_str(&format!("\nnot fully set up. Run:\n\n    {SETUP_COMMAND}\n"));
+        out.push_str(&format!(
+            "\nnot fully set up. Run:\n\n    {SETUP_COMMAND}\n"
+        ));
     } else if out.contains("not readable") {
         out.push_str(
             "\nhelper and profile are installed; run `sudo nub sandbox status` to confirm the profile is loaded in the kernel.\n",
@@ -413,9 +424,10 @@ pub fn teardown() -> Result<String, String> {
             Command::new("apparmor_parser").args(["--remove", PROFILE_PATH]),
             &[],
         );
-        std::fs::remove_file(PROFILE_PATH)
-            .map_err(|e| format!("removing {PROFILE_PATH}: {e}"))?;
-        report.push(format!("removed and unloaded AppArmor profile {PROFILE_NAME}"));
+        std::fs::remove_file(PROFILE_PATH).map_err(|e| format!("removing {PROFILE_PATH}: {e}"))?;
+        report.push(format!(
+            "removed and unloaded AppArmor profile {PROFILE_NAME}"
+        ));
     } else {
         report.push("AppArmor profile already absent".to_string());
     }
