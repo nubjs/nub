@@ -46,6 +46,9 @@ pub fn validate_adjacent_resource_bundle() -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+pub mod linux_setup;
+
+#[cfg(target_os = "linux")]
 mod linux_monitor;
 
 #[cfg(target_os = "linux")]
