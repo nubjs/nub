@@ -6,7 +6,8 @@
 //! macOS only. Seatbelt (`sandbox-exec`) enforces in a plain process, so this runs in
 //! `cargo test` on the dev host. Linux enforcement (Bubblewrap + the empirically
 //! derived read set — project/`$tooldirs`/interpreter grants, own-pkg write, egress
-//! deny) rides CI / a real-kernel VM; the read-set spike validated it via Docker+bwrap.
+//! curated to `$downloads`) rides CI / a real-kernel VM; the read-set spike validated it
+//! via Docker+bwrap.
 //!
 //! macOS caveat (deliberate build-jail behavior): the DARWIN confstr scratch
 //! (`/var/folders/<uid>/T`, where `tempfile` puts this fixture) stays WRITABLE — the

@@ -736,23 +736,44 @@ fn emit_mitm_notice(policy: &SandboxPolicy) {
 /// vars — without it a bare `fetch()` tries a direct connect the deny-layer blocks
 /// (fail-closed but broken), instead of routing through the loopback proxy. Harmless
 /// (ignored) on older Node. Internal nub-set plumbing var — brand-clean.
+///
+/// Whenever a proxy is engaged nub owns the child's ENTIRE proxy configuration, which is
+/// why the bypass keys are cleared rather than left alone: the env allowlists admit an
+/// ambient `NO_PROXY` and `npm_config_proxy` (a build script legitimately needs proxy
+/// settings), and either one silently wins over what is set here — the fetcher direct-dials,
+/// the deny layer blocks it, and the failure surfaces inside the dependency's own downloader
+/// with nothing pointing at the sandbox. Clearing them costs the child nothing: the ambient
+/// proxy host is unreachable from inside the confinement either way.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn set_proxy_env(command: &mut Command, port: u16, token: Option<&str>) {
     let url = match token {
         Some(t) => format!("http://{t}@127.0.0.1:{port}"),
         None => format!("http://127.0.0.1:{port}"),
     };
-    for key in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "ALL_PROXY",
-    ] {
+    for key in PROXY_URL_KEYS {
         command.env(key, &url);
+    }
+    for key in PROXY_BYPASS_KEYS {
+        command.env_remove(key);
     }
     command.env("NODE_USE_ENV_PROXY", "1");
 }
+
+/// Keys pointed at the loopback proxy. The standard env set in both cases (tools split on
+/// which they read), plus npm's own config spellings, which npm prefers over `HTTP_PROXY`.
+const PROXY_URL_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "ALL_PROXY",
+    "npm_config_proxy",
+    "npm_config_https_proxy",
+];
+
+/// Keys that would route a request AROUND the proxy, and so must not survive into the
+/// child. See [`set_proxy_env`] for why leaving them is a silent bypass.
+const PROXY_BYPASS_KEYS: &[&str] = &["NO_PROXY", "no_proxy", "npm_config_noproxy"];
 
 #[cfg(target_os = "linux")]
 fn insert_proxy_env(env: &mut BTreeMap<OsString, OsString>, port: u16, token: Option<&str>) {
@@ -760,14 +781,11 @@ fn insert_proxy_env(env: &mut BTreeMap<OsString, OsString>, port: u16, token: Op
         Some(token) => format!("http://{token}@127.0.0.1:{port}"),
         None => format!("http://127.0.0.1:{port}"),
     };
-    for key in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "ALL_PROXY",
-    ] {
-        env.insert(OsString::from(key), OsString::from(&url));
+    for key in PROXY_URL_KEYS {
+        env.insert(OsString::from(*key), OsString::from(&url));
+    }
+    for key in PROXY_BYPASS_KEYS {
+        env.remove(OsString::from(*key).as_os_str());
     }
     env.insert(OsString::from("NODE_USE_ENV_PROXY"), OsString::from("1"));
 }
@@ -1317,6 +1335,41 @@ mod tests {
         policy.net.brokers[0].env = vec!["HTTPS_PROXY".to_string()];
         let err = validate_apply_inputs(&policy, &CommandSpec::new("/usr/bin/true")).unwrap_err();
         assert_eq!(err.lost, vec!["credential-broker"]);
+    }
+
+    /// A bypass key the child inherited must not survive, or the whole per-host policy is
+    /// advisory: the build jail's env allowlist admits `NO_PROXY` and `npm_config_proxy`
+    /// (a build script legitimately configures a proxy), and a fetcher that honors either
+    /// direct-dials past the loopback gate and dies against the deny layer instead.
+    #[test]
+    fn set_proxy_env_clears_the_bypass_keys_the_child_inherited() {
+        let mut cmd = Command::new("true");
+        cmd.env("NO_PROXY", "*")
+            .env("no_proxy", "nodejs.org")
+            .env("npm_config_noproxy", "*")
+            .env("npm_config_proxy", "http://corp.example:8080");
+        set_proxy_env(&mut cmd, 4321, Some("abc123"));
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for key in PROXY_BYPASS_KEYS {
+            assert_eq!(
+                envs.get(*key),
+                Some(&None),
+                "`{key}` must be removed from the child env, not merely left unset"
+            );
+        }
+        assert_eq!(
+            envs.get("npm_config_proxy").and_then(|v| v.as_deref()),
+            Some("http://abc123@127.0.0.1:4321"),
+            "npm reads its own config spelling first, so it must point at the loopback proxy"
+        );
     }
 
     /// The proxy env embeds the per-session token as the URL userinfo (so proxy-honoring

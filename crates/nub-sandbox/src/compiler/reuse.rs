@@ -15,7 +15,7 @@
 //! `#` in a pointer is the DOCUMENT root (threaded in via [`CompileCtx::document`]), not
 //! the compiled `sandbox` block — a reused node is typically a *sibling* of `sandbox`
 //! (see sandbox.mdx "Reuse another policy's rules"). Because spliced contents re-fold
-//! through the ordinary path, every in-place expander (`$trusted`/`$tooldirs`/`$tmp`) and
+//! through the ordinary path, every in-place expander (`$trusted`/`$downloads`/`$tooldirs`/`$tmp`) and
 //! the `.env*` floor fire at the spliced position for free, and last-match-wins order is
 //! preserved (spliced contents occupy exactly the token's slot).
 

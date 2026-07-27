@@ -2,8 +2,8 @@
 //! to the macOS `build_jail_enforcement.rs`. Same load-bearing security contract, one
 //! OS apart: the package dir is writable, home SECRETS stay both unreadable AND
 //! unwritable, the `.env*`/`.npmrc` floor holds at any project depth, `/etc/shadow`
-//! stays denied inside the read-only `/etc` the minimal root grants, and egress is
-//! denied. Keep the two files in step — when either grows an assertion, the other
+//! stays denied inside the read-only `/etc` the minimal root grants, and a host outside
+//! `$downloads` cannot be dialed. Keep the two files in step — when either grows an assertion, the other
 //! wants it too, because the jail they pin runs on EVERY install and a gap on one OS
 //! is a gap in production.
 //!
@@ -282,13 +282,21 @@ fn build_jail_confines_writes_and_withholds_every_secret_class() {
     );
 }
 
-/// The jail denies egress. The confined child cannot reach a listener the SAME binary
-/// reaches unconfined a moment earlier — the differential is what rules out a probe that
-/// simply never connects.
+/// A host outside `$downloads` cannot be dialed. The confined child cannot reach a
+/// listener the SAME binary reaches unconfined a moment earlier — the differential is
+/// what rules out a probe that simply never connects.
 ///
-/// Two mechanisms can produce the denial (an empty network namespace, or the seccomp
-/// filter refusing `AF_INET` socket creation); the probe reports either as 42, because
-/// which one fired is the backend's business, not this contract's.
+/// Curated egress narrowed which mechanism fires without changing the contract: per-host
+/// net lifts the seccomp `AF_INET` refusal (the child has to be able to speak TCP to the
+/// loopback proxy), so the denial now comes from the child's empty network namespace,
+/// which the parent's listener is not in. The probe reports either as 42, because which
+/// one fired is the backend's business.
+///
+/// GAP, deliberate: the macOS twin also asserts the proxy port IS reachable, which is
+/// what separates "curated egress" from "no networking at all". The Linux equivalent
+/// would have to dial the in-netns bridge port out of `HTTP_PROXY`, and it can only be
+/// validated on a real bwrap host — so it is left to a run on one rather than written
+/// blind here.
 #[test]
 fn build_jail_denies_egress_to_a_reachable_listener() {
     if skip_without_bwrap() {
