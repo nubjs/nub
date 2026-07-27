@@ -273,13 +273,15 @@ A list allows only the hosts it names; everything else — including private ran
 
 ### `$trusted` (built-in host set)
 
-`$trusted` expands to a curated set of widely-used developer hosts — package registries, tool and CI APIs, documentation sites, and source hosts. Use it as a base and name your own hosts alongside it.
+`$trusted` expands to a curated set of read-only developer hosts — artifact CDNs, package mirrors and indexes, language and OS distribution servers, and vendor documentation. Use it as a base and name your own hosts alongside it.
 
 ```jsonc
 { "net": ["$trusted", "api.mycompany.com"] }
 ```
 
-The set deliberately omits every host a confined command could upload to. That rules out blanket object-store wildcards such as `*.amazonaws.com` and `storage.googleapis.com`, where anyone can register a bucket, and it rules out the GitHub hosts — `github.com`, `api.github.com`, `gist.github.com`, and the `githubusercontent.com` family — whose authenticated APIs can create a repository or post a gist. Reaching one of those is indistinguishable from exfiltrating to it, which is the path the sandbox exists to close. A project that genuinely needs one names it directly, the way the example above names `api.github.com`. The always-blocked metadata floor still applies. The full list is versioned with the engine.
+Membership is decided by one rule: a host in `$trusted` must be read-only to the sandboxed command. Reaching a host you can write to is indistinguishable from exfiltrating to it, so anything with an upload route is left out — the forges and their APIs, package registries whose publish endpoint answers on the same hostname, container registries, telemetry ingest, and multi-tenant object stores like `*.amazonaws.com` where anyone can register a bucket. A project that genuinely needs one of these names it directly, the way the example above names `api.github.com`.
+
+One deliberate exception: `registry.npmjs.org` is included, because reading it is how packages install at all. Publishing is a request to that same host, and a host allowlist cannot tell the two apart — so treat `$trusted` as protecting against a script reaching an *unexpected* destination, not as a guarantee that a script holding a valid npm token cannot use it. Scope credentials with [secrets](#secrets) rather than relying on the host list alone. The always-blocked metadata floor still applies, and the full list is versioned with the engine.
 
 ### Allow a domain and its subdomains
 
