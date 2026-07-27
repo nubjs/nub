@@ -4347,13 +4347,21 @@ fn watch_drops_dotenv_node_env_but_keeps_the_ambient_one() {
             snapshot_text, expected,
             "ambient={ambient:?}: a .env NODE_ENV must be dropped and an ambient one kept"
         );
-        // Dropping the value silently is the failure the warning exists to
-        // prevent: without it the user has nothing explaining why their mode did
-        // not apply. The direct runner has always warned here.
+        // The notice tracks the #263 DROP, not shell-wins. With no ambient value
+        // the `.env` line is dropped and must be explained — dropping it silently
+        // leaves the user nothing to go on when their mode does not apply. With an
+        // ambient value the `.env` line loses to ordinary shell-wins precedence
+        // before the drop is ever reached, so there is nothing to report and the
+        // notice must stay quiet. Both directions match the direct runner exactly,
+        // which is the whole point; the negative half also guards the contract
+        // `dotenv_node_env_is_ignored` already pins for a non-watch run.
         let stderr_text = std::fs::read_to_string(&stderr).unwrap_or_default();
-        assert!(
-            stderr_text.contains("ignoring NODE_ENV set in .env"),
-            "ambient={ambient:?}: watch must explain the dropped .env NODE_ENV; stderr was {stderr_text:?}"
+        let warned = stderr_text.contains("ignoring NODE_ENV set in .env");
+        assert_eq!(
+            warned,
+            ambient.is_none(),
+            "ambient={ambient:?}: the notice must appear only when the .env NODE_ENV \
+             was actually dropped; stderr was {stderr_text:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
