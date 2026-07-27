@@ -10,7 +10,7 @@
 #
 # Delete this file before the PR opens.
 #
-# Run 3: real standard-user capture of the non-elevated path.
+# Run 4: standard-user capture from a directory that user can actually reach.
 name: setup-sandbox-win-probe
 on:
   workflow_dispatch:

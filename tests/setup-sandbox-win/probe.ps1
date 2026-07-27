@@ -41,8 +41,9 @@ Write-Host "elevated: $elevated"
 # self-elevation would face, and the concrete reason nub prints an instruction instead of
 # elevating itself: the setup's report is the useful part, and a re-launched process cannot put
 # it back in front of the person who typed the command.
-$stdout = Join-Path $env:TEMP 'nub-unelevated-out.txt'
-$stderr = Join-Path $env:TEMP 'nub-unelevated-err.txt'
+$shared = 'C:\\Windows\\Temp'
+$stdout = Join-Path $shared 'nub-unelevated-out.txt'
+$stderr = Join-Path $shared 'nub-unelevated-err.txt'
 $pw = 'Pr0be!' + [guid]::NewGuid().ToString('N').Substring(0, 12)
 $secure = ConvertTo-SecureString $pw -AsPlainText -Force
 New-LocalUser -Name 'nubprobe' -Password $secure -Description 'probe: unelevated capture' `
@@ -61,7 +62,7 @@ $cred = New-Object System.Management.Automation.PSCredential('nubprobe', $secure
 try {
     Start-Process -FilePath $Nub -ArgumentList 'setup-sandbox' -Credential $cred `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-        -WorkingDirectory $env:TEMP -Wait -ErrorAction Stop
+        -WorkingDirectory $shared -Wait -ErrorAction Stop
 } catch {
     Write-Host "(could not launch as the standard user: $_)"
 }
