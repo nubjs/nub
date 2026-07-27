@@ -535,14 +535,13 @@ fn append_confinement_options(
     net_bridge_fd: Option<&File>,
     runtime_mount: &dyn Fn(&mut Command),
 ) -> Result<Vec<File>, Degradation> {
+    // `--new-session` is the ONLY defence here against TIOCSTI terminal injection: a child
+    // still holding the launcher's controlling tty can ioctl(TIOCSTI) bytes into the PARENT
+    // SHELL's input queue, to be executed outside the sandbox. Measured with this exact flag
+    // set minus that one flag, the injection lands — every other flag below leaves it open,
+    // and so does seccomp (TIOCSTI is an ioctl request, not a filtered syscall).
     setup.args([
         "--die-with-parent",
-        // The ONLY defence here against TIOCSTI terminal injection: a child still holding
-        // the launcher's controlling tty can ioctl(TIOCSTI) bytes into the PARENT SHELL's
-        // input queue, to be executed outside the sandbox. Measured with this exact flag
-        // set minus this one flag, the injection lands — every other flag below, and
-        // seccomp (TIOCSTI is an ioctl request, not a filtered syscall), leave it open.
-        // setsid() drops the controlling terminal and the ioctl then fails EPERM.
         "--new-session",
         "--unshare-user",
         "--as-pid-1",
@@ -3280,11 +3279,17 @@ mod tests {
     }
 
     /// The golden argv for the confinement boundary. Bubblewrap applies these in
-    /// order, so this pins ORDER as well as membership: a refactor that drops
-    /// `--new-session` (the TIOCSTI defence), drops `--cap-drop ALL`, emits a mask
-    /// before the grant it must override, or admits `--not-a-security-boundary`
-    /// (which sets BIND_FAIL_OPEN, silently turning every failed deny mask into a
-    /// skipped one) fails here rather than in production.
+    /// order, so this pins ORDER as well as membership: dropping `--new-session`
+    /// (the TIOCSTI defence) or `--cap-drop ALL`, or emitting a mask before the
+    /// grant it must override, fails here rather than in production.
+    ///
+    /// Pinning the sequence EXACTLY is what makes it an injection assertion too. A
+    /// single extra fail-open token turns a deny mask — which is a bind mount — into
+    /// a silently skipped one: measured on bubblewrap 0.11.0, `--bind` over a missing
+    /// source refuses the launch while `--bind-try` proceeds and leaves the masked
+    /// file readable. (Upstream's global `--not-a-security-boundary`, which sets
+    /// BIND_FAIL_OPEN for every bind, is unreleased as of 0.11.2 — an exact-sequence
+    /// assertion covers it and anything else without enumerating flags.)
     #[test]
     fn confinement_options_pin_the_namespace_and_mount_boundary() {
         let root = tempdir().unwrap();
@@ -3368,6 +3373,78 @@ mod tests {
             ],
         );
         assert_eq!(sources.len(), 1, "one --ro-bind-data source is retained");
+    }
+
+    /// The two late-bound fd mounts are only distinguishable when BOTH are `Some`,
+    /// so the golden above (both `None`) cannot tell them apart at all; this pins
+    /// each to its own reserved destination. Also covers the private-tmp and
+    /// minimal-root arms, whose remounts the read-only case never reaches.
+    ///
+    /// SCOPE: this catches a swap of the destinations WITHIN
+    /// `append_confinement_options`. It cannot catch a transposition of the two
+    /// same-typed `Option<&File>` arguments at the `configure_retained_outer` call
+    /// site, because it invokes the callee directly — pinning that would need a real
+    /// Bubblewrap and monitor image.
+    #[test]
+    fn late_bound_infrastructure_mounts_land_at_their_own_reserved_paths() {
+        let root = tempdir().unwrap();
+        let tmp_dir = root.path().join("private-tmp");
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let policy = policy(root.path(), json!({"fs": {"$tmp": true}, "net": false}));
+
+        let mut setup = Command::new("");
+        let ca = tempfile::tempfile().unwrap();
+        let bridge = tempfile::tempfile().unwrap();
+        append_confinement_options(
+            &mut setup,
+            &policy,
+            RootView::Minimal,
+            Path::new("/bin/true"),
+            &[],
+            &[],
+            Some(&tmp_dir),
+            Some(&ca),
+            Some(&bridge),
+            &|command| {
+                command.args(["--tmpfs", "/dev/.nub-sandbox/support"]);
+            },
+        )
+        .unwrap();
+
+        let rendered = rendered_options(&setup);
+        let at = |needle: &str| {
+            rendered
+                .iter()
+                .position(|a| a == needle)
+                .unwrap_or_else(|| panic!("{needle} missing from {rendered:?}"))
+        };
+        // Each late-bound fd mount is identified by its DESTINATION, which is what a
+        // transposition would swap.
+        assert_eq!(
+            rendered[at(crate::backend::linux_monitor::PRIVATE_CA_BUNDLE) - 1],
+            "<fd>"
+        );
+        assert_eq!(
+            rendered[at(crate::backend::linux_monitor::PRIVATE_CA_BUNDLE) - 2],
+            "--ro-bind-fd"
+        );
+        assert_eq!(
+            rendered[at(crate::backend::linux_net_bridge::PRIVATE_NET_ROOT) - 2],
+            "--ro-bind-fd"
+        );
+        assert!(
+            at(crate::backend::linux_monitor::PRIVATE_CA_BUNDLE)
+                < at(crate::backend::linux_net_bridge::PRIVATE_NET_ROOT),
+            "the CA bundle is layered before the net bridge: {rendered:?}"
+        );
+        // Private /tmp binds the host dir; the minimal root seals itself read-only last.
+        assert_eq!(rendered[at("/tmp") - 1], tmp_dir.display().to_string());
+        assert_eq!(rendered[at("/tmp") - 2], "--bind");
+        assert_eq!(rendered.last().unwrap(), "--unshare-net");
+        assert_eq!(
+            rendered[rendered.len() - 3..rendered.len() - 1],
+            ["--remount-ro", "/"]
+        );
     }
 
     /// `--args` is a NUL-SEPARATED stream, so an argument carrying an interior NUL
