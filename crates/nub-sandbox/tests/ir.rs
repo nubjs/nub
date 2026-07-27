@@ -88,7 +88,7 @@ fn policy_round_trips_through_serde() {
     let ctx = common::ctx(true, &[("PORT", "3000"), ("NODE_ENV", "prod")]);
     let policy = compile(
         &json!({
-            // `$tooldirs` expands to built-in-set rules, so this one surface covers both
+            // `$tooldirs` expands to speculative rules, so this one surface covers both
             // `FsOrigin` arms: the authored globs must keep serializing without an
             // `origin` key (older fixtures round-trip unchanged), while a set member must
             // carry its origin across the wire — the mount plan reads it to decide whether
@@ -106,8 +106,8 @@ fn policy_round_trips_through_serde() {
             .rules
             .entries
             .iter()
-            .any(|rule| rule.origin == FsOrigin::BuiltinSet),
-        "the $tooldirs expansion must mark its rules as built-in-set members"
+            .any(|rule| rule.origin == FsOrigin::Speculative),
+        "the $tooldirs expansion must mark its rules as speculative"
     );
 
     let text = serde_json::to_string(&policy).unwrap();
@@ -123,9 +123,9 @@ fn policy_round_trips_through_serde() {
             .rules
             .entries
             .iter()
-            .filter(|rule| rule.origin == FsOrigin::BuiltinSet)
+            .filter(|rule| rule.origin == FsOrigin::Speculative)
             .count(),
-        "only built-in-set rules may put an origin key on the wire"
+        "only a speculative rule may put an origin key on the wire"
     );
 }
 

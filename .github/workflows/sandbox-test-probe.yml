@@ -9,6 +9,8 @@
 # skip/degrade paths key on, so a green result can be read honestly.
 #
 # Delete this file before the PR opens.
+#
+# Run 3: re-run against the FsOrigin::Speculative rename plus the Windows cfg fix.
 name: sandbox-test-probe
 on:
   workflow_dispatch:
