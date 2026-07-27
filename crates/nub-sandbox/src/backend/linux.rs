@@ -4051,4 +4051,41 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn probe_diagnostic_drain_completes_on_eof_and_gives_up_on_a_held_pipe() {
+        fn piped_child(script: &str) -> std::process::Child {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn a probe stand-in with piped stderr")
+        }
+
+        let mut writer = piped_child("printf boom >&2");
+        writer.wait().expect("await the exited stand-in");
+        let collected = drain_probe_diagnostic(&mut writer.stderr.take().expect("piped stderr"));
+        assert_eq!(
+            String::from_utf8_lossy(&collected),
+            "boom",
+            "the drain dropped diagnostic bytes already buffered in a closed pipe"
+        );
+
+        // `exec sleep` inherits the write end, so waiting for EOF here would block
+        // apply() for the descendant's lifetime — the defect this drain bounds.
+        let mut holder = piped_child("exec sleep 300");
+        let mut held_stderr = holder.stderr.take().expect("piped stderr");
+        let started = Instant::now();
+        drain_probe_diagnostic(&mut held_stderr);
+        let elapsed = started.elapsed();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the drain blocked {elapsed:?} on a pipe a live descendant still holds open"
+        );
+    }
 }
