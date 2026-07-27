@@ -293,6 +293,15 @@ fn watch_inject_vars<'a>(
         .collect()
 }
 
+/// Node's `--env-file` floor (landed 20.6.0). Below it Node aborts on the
+/// unknown option before executing anything, so a watch child handed the flag
+/// dies instantly with no output — every env-file source must fall back to
+/// whole-map injection instead. Gates both the auto/config cascade and the
+/// explicit flags; nub supports Node from 18.19, so this range is live.
+fn node_accepts_env_file(version: &nub_core::node::version::NodeVersion) -> bool {
+    *version >= nub_core::node::version::NodeVersion::new(20, 6, 0)
+}
+
 /// Whether the watch path forwards the explicit `--env-file` flags to the
 /// watched Node (#479): the pinned Node must accept every flag flavor present —
 /// `--env-file` landed in 20.6.0, `--env-file-if-exists` in 22.9.0. All-or-
@@ -308,8 +317,7 @@ fn should_forward_explicit_env_files(
         return false;
     }
     let needs_if_exists = explicit.iter().any(|(_, if_exists)| *if_exists);
-    *version >= NodeVersion::new(20, 6, 0)
-        && (!needs_if_exists || *version >= NodeVersion::new(22, 9, 0))
+    node_accepts_env_file(version) && (!needs_if_exists || *version >= NodeVersion::new(22, 9, 0))
 }
 
 /// Render a forwarded watch env file (auto-discovered or explicit) for Node's
@@ -5423,6 +5431,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // config `env` sources still compose first, and CLI values overlay them.
     // Forward explicit files only when the pinned Node accepts every requested
     // flag flavor (#479); below that floor, inject their whole parsed map.
+    let forward_auto = node_accepts_env_file(&node.version);
     let forward_explicit = should_forward_explicit_env_files(&node.version, explicit_env_files);
     let base_raw_env = if no_env_file {
         HashMap::new()
@@ -5448,7 +5457,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // Raw values that the watched Node receives through forwarded files. Values
     // absent here must be injected, while values that differ after expansion
     // are injected with their expanded form.
-    let mut forwarded_raw_env = base_raw_env;
+    let mut forwarded_raw_env = if forward_auto {
+        base_raw_env
+    } else {
+        HashMap::new()
+    };
     if forward_explicit {
         if let Some(explicit) = ENV_FILE_VARS_RAW.get() {
             forwarded_raw_env.extend(explicit.clone());
@@ -5490,15 +5503,17 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
 
     // Reverse so the highest-priority `.env*` file lands last (Node's
     // last-writer-wins ⇒ nub's first-writer-wins precedence).
-    let env_paths: Box<dyn Iterator<Item = &PathBuf>> = if config_env_sources {
-        Box::new(env_file_paths.iter())
-    } else {
-        Box::new(env_file_paths.iter().rev())
-    };
-    for path in env_paths {
-        // `cmd` inherits `cwd`; the helper chooses the path form required by the
-        // platform watcher without changing cwd or file precedence.
-        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
+    if forward_auto {
+        let env_paths: Box<dyn Iterator<Item = &PathBuf>> = if config_env_sources {
+            Box::new(env_file_paths.iter())
+        } else {
+            Box::new(env_file_paths.iter().rev())
+        };
+        for path in env_paths {
+            // `cmd` inherits `cwd`; the helper chooses the path form required by the
+            // platform watcher without changing cwd or file precedence.
+            node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
+        }
     }
     // Explicit `--env-file` files forward in USER order — no reverse: Node is
     // last-writer-wins and nub's parse across repeated flags is last-wins too,
@@ -5528,7 +5543,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // identity and non-Windows behavior stays byte-for-byte unchanged.
     // Whether ANY env file (auto-discovered or explicit) reaches Node as a raw
     // `--env-file` arg — the trigger for the per-child guard machinery below.
-    let any_env_forwarded = !env_file_paths.is_empty() || forward_explicit;
+    let any_env_forwarded = (forward_auto && !env_file_paths.is_empty()) || forward_explicit;
     #[cfg(windows)]
     if any_env_forwarded {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
@@ -9320,6 +9335,17 @@ mod tests {
         let arg = watch_env_file_arg(&root.join("missing.env"), &root, true, true).unwrap();
         assert!(arg.starts_with("--env-file-if-exists="), "{arg}");
         assert!(arg.ends_with("missing.env"), "{arg}");
+    }
+
+    #[test]
+    fn auto_and_config_env_file_forwarding_gates_on_node_version() {
+        use nub_core::node::version::NodeVersion;
+        // Below 20.6.0 Node aborts on `--env-file`, so the watch path must
+        // deliver the cascade by injection instead of forwarding the flag.
+        assert!(!node_accepts_env_file(&NodeVersion::new(18, 19, 0)));
+        assert!(!node_accepts_env_file(&NodeVersion::new(20, 5, 0)));
+        assert!(node_accepts_env_file(&NodeVersion::new(20, 6, 0)));
+        assert!(node_accepts_env_file(&NodeVersion::new(26, 0, 0)));
     }
 
     #[test]
