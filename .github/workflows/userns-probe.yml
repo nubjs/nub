@@ -1,0 +1,141 @@
+name: userns-probe
+
+on:
+  push:
+    branches: [probe/userns-prevalence]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: userns (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm]
+    steps:
+      - name: 1. Environment
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== RUNNER LABEL: ${{ matrix.os }} ==="
+          echo "--- uname ---"; uname -a
+          echo "--- os-release ---"; cat /etc/os-release
+          echo "--- sysctls ---"
+          for s in kernel.unprivileged_userns_clone user.max_user_namespaces kernel.apparmor_restrict_unprivileged_userns kernel.apparmor_restrict_unprivileged_unconfined; do
+            printf '%s = ' "$s"; sysctl -n "$s" 2>&1; echo "   (rc=$?)"
+          done
+          echo "--- /proc/sys/user/max_user_namespaces ---"; cat /proc/sys/user/max_user_namespaces 2>&1; echo "rc=$?"
+          echo "--- id ---"; id
+          echo "--- aa-status ---"; aa-status 2>&1 | head -30; echo "rc=$?"
+          echo "--- apparmor profiles (head) ---"; cat /sys/kernel/security/apparmor/profiles 2>&1 | head -40; echo "rc=$?"
+          echo "--- apparmor profiles containing bwrap/unshare ---"; grep -Ei 'bwrap|unshare|userns' /sys/kernel/security/apparmor/profiles 2>&1 | head -20
+          echo "--- sudo ---"
+          sudo -n true && echo "PASSWORDLESS_SUDO=yes" || echo "PASSWORDLESS_SUDO=no"
+          echo "--- kernel config userns ---"
+          (zgrep -E 'CONFIG_USER_NS' /proc/config.gz 2>/dev/null || grep -E 'CONFIG_USER_NS' /boot/config-$(uname -r) 2>&1) | head -5
+          exit 0
+
+      - name: 2. unshare probes (UNPRIVILEGED, no sudo)
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== RUNNER LABEL: ${{ matrix.os }} ==="
+          echo "--- P1: unshare -Ur true ---"
+          unshare -Ur true 2>&1; echo "P1_rc=$?"
+          echo "--- P2: unshare -Urm true ---"
+          unshare -Urm true 2>&1; echo "P2_rc=$?"
+          echo "--- P3: unshare -Urn true ---"
+          unshare -Urn true 2>&1; echo "P3_rc=$?"
+          echo "--- P4: unshare -Urmn -- id + caps ---"
+          unshare -Urmn -- sh -c 'id; grep -E "^Cap(Eff|Prm|Bnd|Inh|Amb)" /proc/self/status' 2>&1; echo "P4_rc=$?"
+          echo "--- P4b: caps OUTSIDE any ns (baseline) ---"
+          grep -E "^Cap(Eff|Prm|Bnd|Inh|Amb)" /proc/self/status
+          echo "--- P5: unshare -Urm mount tmpfs (THE capability test) ---"
+          unshare -Urm -- sh -c 'mkdir -p /tmp/m && mount -t tmpfs none /tmp/m && echo MOUNT_OK' 2>&1; echo "P5_rc=$?"
+          echo "--- P6: unshare -Ur chroot ---"
+          unshare -Ur -- sh -c 'chroot / true && echo CHROOT_OK' 2>&1; echo "P6_rc=$?"
+          echo "--- P7: unshare -Urm pivot_root-ish (bind mount) ---"
+          unshare -Urm -- sh -c 'mkdir -p /tmp/b1 /tmp/b2 && mount --bind /tmp/b1 /tmp/b2 && echo BIND_OK' 2>&1; echo "P7_rc=$?"
+          exit 0
+
+      - name: 3. bwrap probes
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== RUNNER LABEL: ${{ matrix.os }} ==="
+          echo "--- preinstalled? ---"; command -v bwrap; echo "rc=$?"
+          echo "--- install ---"
+          sudo apt-get update -qq >/dev/null 2>&1; echo "update_rc=$?"
+          sudo apt-get install -y -qq bubblewrap >/dev/null 2>&1; echo "install_rc=$?"
+          echo "--- which/version/mode ---"
+          which bwrap; bwrap --version; ls -l "$(which bwrap)"
+          echo "--- B1: bwrap --dev-bind / / true ---"
+          bwrap --dev-bind / / true 2>&1; echo "B1_rc=$?"
+          echo "--- B2: full confinement ---"
+          bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-all --die-with-parent -- /bin/true 2>&1; echo "B2_rc=$?"
+          echo "--- B3 NEGATIVE CONTROL: --unshare-net getent hosts github.com (expect NONZERO = confined) ---"
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net -- getent hosts github.com 2>&1; echo "B3_unshare_net_rc=$?"
+          echo "--- B4 POSITIVE CONTROL: no --unshare-net getent hosts github.com (expect ZERO = passes) ---"
+          bwrap --ro-bind / / --dev /dev --proc /proc -- getent hosts github.com 2>&1; echo "B4_no_unshare_net_rc=$?"
+          echo "--- B5: unprofiled-path copy of bwrap (AppArmor path-profile test) ---"
+          cp "$(which bwrap)" /tmp/mybwrap && chmod +x /tmp/mybwrap
+          /tmp/mybwrap --dev-bind / / true 2>&1; echo "B5_rc=$?"
+          echo "--- B6: unprofiled copy, full confinement ---"
+          /tmp/mybwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-all --die-with-parent -- /bin/true 2>&1; echo "B6_rc=$?"
+          echo "--- B7: bwrap caps inside sandbox ---"
+          bwrap --ro-bind / / --proc /proc --unshare-all -- grep -E "^Cap(Eff|Prm|Bnd)" /proc/self/status 2>&1; echo "B7_rc=$?"
+          exit 0
+
+      - name: 4. Landlock ABI probe
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== RUNNER LABEL: ${{ matrix.os }} ==="
+          cat > /tmp/ll.c <<'EOF'
+          #include <stdio.h>
+          #include <unistd.h>
+          #include <errno.h>
+          #include <string.h>
+          #include <sys/syscall.h>
+          #ifndef __NR_landlock_create_ruleset
+          #define __NR_landlock_create_ruleset 444
+          #endif
+          int main(void){
+            long v = syscall(__NR_landlock_create_ruleset, NULL, 0, 1U);
+            if (v < 0) { printf("LANDLOCK_UNAVAILABLE errno=%d (%s)\n", errno, strerror(errno)); return 0; }
+            printf("LANDLOCK_ABI=%ld\n", v);
+            return 0;
+          }
+          EOF
+          cc -o /tmp/ll /tmp/ll.c 2>&1; echo "compile_rc=$?"
+          /tmp/ll; echo "run_rc=$?"
+          echo "--- LSM list ---"; cat /sys/kernel/security/lsm 2>&1
+          exit 0
+
+      - name: 5. Nested Docker userns check
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== RUNNER LABEL: ${{ matrix.os }} ==="
+          command -v docker; echo "docker_present_rc=$?"
+          docker version --format '{{.Server.Version}}' 2>&1; echo "dv_rc=$?"
+          for IMG in ubuntu:24.04 node:22-slim; do
+            echo "########## IMAGE: $IMG (default seccomp, NOT privileged) ##########"
+            docker run --rm "$IMG" sh -c '
+              echo "--- id ---"; id
+              echo "--- caps baseline ---"; grep -E "^Cap(Eff|Prm|Bnd)" /proc/self/status
+              echo "--- max_user_namespaces ---"; cat /proc/sys/user/max_user_namespaces 2>&1
+              command -v unshare >/dev/null 2>&1 || { echo "NO_UNSHARE_BINARY"; exit 0; }
+              echo "--- D1: unshare -Ur true ---"; unshare -Ur true 2>&1; echo "D1_rc=$?"
+              echo "--- D2: unshare -Urm true ---"; unshare -Urm true 2>&1; echo "D2_rc=$?"
+              echo "--- D3: caps in userns ---"; unshare -Urm -- sh -c "id; grep -E \"^Cap(Eff|Prm|Bnd)\" /proc/self/status" 2>&1; echo "D3_rc=$?"
+              echo "--- D4: mount tmpfs in userns ---"; unshare -Urm -- sh -c "mkdir -p /tmp/m && mount -t tmpfs none /tmp/m && echo MOUNT_OK" 2>&1; echo "D4_rc=$?"
+            ' 2>&1
+            echo "docker_run_rc=$?"
+          done
+          echo "########## nested docker as NON-ROOT user (uid 1000) ##########"
+          docker run --rm --user 1000:1000 ubuntu:24.04 sh -c 'id; unshare -Ur true 2>&1; echo "ND_rc=$?"' 2>&1
+          echo "rc=$?"
+          exit 0
