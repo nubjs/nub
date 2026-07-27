@@ -32,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: macOS Seatbelt enforcement (per-backend + proxy + env-read/move-block closures)
-        run: cargo test -p nub-sandbox --test macos_enforcement --test macos_proxy --test macos_envread --test macos_moveblock
+        run: cargo test -p nub-sandbox --test macos_enforcement --test macos_proxy --test macos_envread --test macos_moveblock --test build_jail_enforcement
       - name: macOS CLI-seam conformance matrix
         run: cargo test -p nub-cli --test sandbox_conformance
 
@@ -68,6 +68,9 @@ jobs:
         run: |
           cargo test -p nub-sandbox --test linux_enforcement --test linux_proxy
           cargo test -p nub-sandbox --test linux_monitor_states
+          # The build-jail runs on EVERY install, so its end-to-end enforcement is
+          # pinned per-OS: macos_* above via Seatbelt, this target via Bubblewrap.
+          cargo test -p nub-sandbox --test linux_build_jail_enforcement
           # ir.rs is otherwise host-independent, but its two apply() tests launch a real
           # child. ubuntu-latest (ci.yml) has no Bubblewrap and no unprivileged user
           # namespace, so they can only skip there; this is the leg that proves them.
