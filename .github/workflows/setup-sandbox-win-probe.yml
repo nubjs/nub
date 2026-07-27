@@ -9,6 +9,8 @@
 # the day the file reaches the default branch, where GitHub first registers it.
 #
 # Delete this file before the PR opens.
+#
+# Run 2: after the windows_account `Prepared` field repair.
 name: setup-sandbox-win-probe
 on:
   workflow_dispatch:
