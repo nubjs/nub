@@ -273,7 +273,7 @@ impl Tree {
     /// Resolve a `proj:`/`home:`/`out:` spec (fs probes) to a concrete path and
     /// materialize it. Non-fs specs are returned unchanged (host:port, env key).
     fn resolve(&self, probe: &str, target: &str) -> String {
-        if probe != "read" && probe != "write" {
+        if probe != "read" && probe != "read-content" && probe != "write" {
             return target.to_string();
         }
         let (anchor, rel) = target.split_once(':').unwrap_or(("proj", target));
@@ -288,8 +288,9 @@ impl Tree {
             std::fs::create_dir_all(parent).unwrap();
         }
         // A read target must EXIST so a deny is a real deny; a write target must not
-        // (write creates it) but its parent (made above) must.
-        if probe == "read" {
+        // (write creates it) but its parent (made above) must. The non-empty body is what
+        // makes `read-content` an oracle: zero bytes in-sandbox can only come from the deny.
+        if probe == "read" || probe == "read-content" {
             std::fs::write(&path, b"CONFORMANCE-SECRET").unwrap();
         }
         path.to_string_lossy().into_owned()

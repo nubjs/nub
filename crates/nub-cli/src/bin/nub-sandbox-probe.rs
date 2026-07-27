@@ -29,11 +29,14 @@ fn main() -> ExitCode {
     }
     let allowed = match action {
         "read" => do_read(arg(&args, 1)),
+        "read-content" => do_read_content(arg(&args, 1)),
         "write" => do_write(arg(&args, 1)),
         "connect" => do_connect(arg(&args, 1), arg(&args, 2)),
         "env" => do_env(arg(&args, 1)),
         _ => {
-            eprintln!("usage: nub-sandbox-probe <read|write|connect|env|env-print> <arg...>");
+            eprintln!(
+                "usage: nub-sandbox-probe <read|read-content|write|connect|env|env-print> <arg...>"
+            );
             return ExitCode::from(2);
         }
     };
@@ -60,6 +63,21 @@ fn arg(args: &[String], i: usize) -> &str {
 fn do_read(path: &str) -> bool {
     match std::fs::File::open(path) {
         Ok(mut f) => f.read(&mut [0u8; 1]).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Whether any CONTENT was disclosed — "allowed" here means at least one byte came back.
+///
+/// The oracle for a secret-file deny, because the backends deny in two different SHAPES and
+/// only one of them fails at `open`: macOS Seatbelt refuses the path (EPERM), while Linux
+/// mount-masks a `.env*` file as a present-but-empty read-only file so a dotenv reader sees
+/// no secret instead of a hard error. `do_read` reports the Linux shape as allowed — true,
+/// and useless as a security assertion. Zero bytes is the property that actually matters and
+/// it holds on every backend, so a fixture asserting non-disclosure stays portable.
+fn do_read_content(path: &str) -> bool {
+    match std::fs::File::open(path) {
+        Ok(mut f) => f.read(&mut [0u8; 1]).map(|n| n > 0).unwrap_or(false),
         Err(_) => false,
     }
 }

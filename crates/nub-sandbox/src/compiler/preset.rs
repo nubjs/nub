@@ -40,13 +40,18 @@ pub fn resolve(name: &str) -> Result<Value, CompileError> {
 /// (e.g. `~/.npmrc` beside `~/.npm/_cacache`). Uses [`defaults::secret_read_denies`]
 /// directly so the floor is byte-consistent across the policy.
 pub fn reassert_secret_floor(name: &str, policy: &mut SandboxPolicy, ctx: &CompileCtx) {
-    if name == "build-jail" {
-        policy
-            .fs
-            .rules
-            .entries
-            .extend(defaults::secret_read_denies(&ctx.homes));
+    if name != "build-jail" {
+        return;
     }
+    let denies = defaults::secret_read_denies(&ctx.homes);
+    let entries = &mut policy.fs.rules.entries;
+    // Splice in BEFORE the trailing `.env*`/`.npmrc` floor rather than appending: appending
+    // would leave the floor no longer last, and the Linux backend locates it POSITIONALLY
+    // (`builtin_env_band_start`) to tell an explicit user deny from the builtin floor. These
+    // home-secret denies still land after every band-1 allow, which is all their re-assertion
+    // needs; ordering among denies does not affect any verdict.
+    let at = defaults::env_deny_floor_start(entries).unwrap_or(entries.len());
+    entries.splice(at..at, denies);
 }
 
 /// Grant the build-jail interpreter closure (the provisioned Node + the PATH-prepended
@@ -200,4 +205,67 @@ pub fn compile_build_jail(
     reassert_secret_floor("build-jail", &mut policy, &ctx);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
     Ok(policy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::compile;
+
+    fn build_jail_policy() -> SandboxPolicy {
+        let homes = Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        let ctx = CompileCtx::new(
+            homes,
+            PathBuf::from("/proj"),
+            ScopeCapabilities::approved(),
+            BTreeMap::new(),
+        );
+        compile(&json!("build-jail"), &ctx).expect("build-jail preset compiles")
+    }
+
+    /// The `.env*`/`.npmrc` floor must remain the LAST fs entries after the preset re-asserts
+    /// its home-secret denies. The Linux backend reads that boundary positionally to decide
+    /// whether a denied dotenv file is masked unreadable or present-but-empty, so a floor
+    /// displaced by the re-assert reads as absent and silently downgrades an explicit deny.
+    #[test]
+    fn build_jail_secret_reassert_keeps_the_env_floor_trailing() {
+        let policy = build_jail_policy();
+        let entries = &policy.fs.rules.entries;
+        assert_eq!(
+            defaults::env_deny_floor_start(entries),
+            Some(entries.len() - 6),
+            "the build-jail preset must leave the six `.env*`/`.npmrc` floor entries last; \
+             found trailing entries {:?}",
+            entries
+                .iter()
+                .rev()
+                .take(8)
+                .map(|r| r.matcher.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Guards the other half: the re-assert must still HAPPEN. Without it a home secret
+    /// overlapping a `$tooldirs` grant would stay readable, and the test above would pass
+    /// vacuously if the re-assert were simply deleted.
+    #[test]
+    fn build_jail_reasserts_the_home_secret_denies() {
+        let policy = build_jail_policy();
+        let ssh_denies = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|r| r.effect == Effect::Deny && r.matcher.as_str().contains("/.ssh"))
+            .count();
+        assert!(
+            ssh_denies > 0,
+            "build-jail must re-assert the home-secret read denies"
+        );
+    }
 }

@@ -144,6 +144,31 @@ pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
         .collect()
 }
 
+/// Index where the builtin secret-file floor begins in `entries` — the boundary between
+/// the user/default band and the two bands `fold::finalize_env_deny` appends LAST. `None`
+/// when the floor is absent (a fully-relaxed or no-read policy) or no longer trailing.
+///
+/// Exists so a post-fold pass that needs to add band-1 entries can splice BEFORE the floor
+/// instead of appending after it. Displacing the floor is not a matching bug (deny order
+/// among denies is irrelevant) but it desyncs the Linux backend's positional recognizer
+/// (`backend::linux::builtin_env_band_start`), which reads the boundary to tell an explicit
+/// USER `.env` deny from the builtin floor when planning the dotenv mask kind — a floor no
+/// longer trailing reads as "absent", silently downgrading an explicit deny's genuinely-
+/// unreadable mask to the present-but-empty dotenv shape.
+pub(crate) fn env_deny_floor_start(entries: &[FsRule]) -> Option<usize> {
+    let floor_len = ENV_DENY_LEAF_GLOBS.len() + ENV_DENY_SUBTREE_GLOBS.len();
+    let start = entries.len().checked_sub(floor_len)?;
+    ENV_DENY_LEAF_GLOBS
+        .iter()
+        .chain(ENV_DENY_SUBTREE_GLOBS)
+        .enumerate()
+        .all(|(offset, glob)| {
+            let rule = &entries[start + offset];
+            rule.effect == Effect::Deny && rule.matcher.as_str() == *glob
+        })
+        .then_some(start)
+}
+
 /// The SUBTREE `.env*` READ-deny entries ([`ENV_DENY_SUBTREE_GLOBS`]) — the CONTENTS of
 /// a `.env*`-named directory. Injected as the LAST band, so it is unconditionally
 /// authoritative for a `.env.d/`-style secret directory: nothing reopens its children.
