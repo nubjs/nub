@@ -1452,6 +1452,112 @@ async fn highest_mode_with_minimum_release_age_keeps_in_memory_times() {
     let _ = std::fs::remove_dir_all(base);
 }
 
+/// Regression: `minimumReleaseAge` must hold when the resolver runs
+/// WITHOUT the full-packument disk cache — the `aube update` / `add` /
+/// `dedupe` / `audit` configuration (`cache_full_packuments: false`,
+/// their dist-tag freshness rule). Against a registry whose abbreviated
+/// (corgi) document omits the `time` map — npmjs does — the uncached
+/// `needs_time` fallback used to fetch that corgi document, and a
+/// version with no publish time bypasses the age cutoff at the pick
+/// site: `aube update` crossed the gate onto a fresh publish that
+/// `aube install` (full cache on) had just refused, then rewrote
+/// `package.json` onto it. The fix fetches the full document (time
+/// included) when the full cache dir is absent. This test mocks
+/// npmjs's Accept-dependent shape and pins the gated pick.
+#[tokio::test]
+async fn minimum_release_age_holds_without_full_packument_cache() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // 1.0.0 is years old; 1.1.0 was "published" moments ago.
+    let now_iso = crate::types::format_iso8601_utc(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let mut full = make_packument("foo", &["1.0.0", "1.1.0"], "1.1.0");
+    full.modified = Some(now_iso.clone());
+    full.time
+        .insert("1.0.0".to_string(), "2024-01-01T00:00:00.000Z".to_string());
+    full.time.insert("1.1.0".to_string(), now_iso);
+    // npmjs's corgi document: same versions, NO time map.
+    let mut corgi = full.clone();
+    corgi.time.clear();
+    corgi.modified = None;
+    let full_body = serde_json::to_vec(&full).unwrap();
+    let corgi_body = serde_json::to_vec(&corgi).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let full_body = full_body.clone();
+            let corgi_body = corgi_body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                // npmjs serves the abbreviated (time-less) document when
+                // the request prefers `application/vnd.npm.install-v1+json`.
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let body = if request.contains("install-v1") {
+                    corgi_body
+                } else {
+                    full_body
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-mra-nofullcache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cache_dir = base.join("packuments");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    // Abbreviated cache only — deliberately NO `with_packument_full_cache`,
+    // matching `build_resolver`'s `cache_full_packuments: false` posture.
+    let mut resolver = Resolver::new(client)
+        .with_packument_cache(cache_dir)
+        .with_minimum_release_age(Some(MinimumReleaseAge {
+            minutes: 1440,
+            ..Default::default()
+        }));
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("foo".to_string(), "^1.0.0".to_string());
+
+    let graph = resolver.resolve(&manifest, None).await.unwrap();
+
+    assert!(
+        graph_has_package(&graph, "foo", "1.0.0"),
+        "the mature 1.0.0 must be picked; graph: {:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !graph_has_package(&graph, "foo", "1.1.0"),
+        "the fresh 1.1.0 must stay behind the minimumReleaseAge cutoff \
+         even without the full-packument cache"
+    );
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+}
+
 /// Regression: a primer-seeded pick that satisfies the range must still
 /// record the package's publish time when `minimumReleaseAge` is active.
 /// The bundled primer's `time` data is sparse, so a primer hit could
