@@ -140,6 +140,12 @@ dotenvy = "0.15"
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 rustc-hash.workspace = true
+# Prefetch's own blocking HTTP client (pm_engine/build_prefetch.rs). Deliberately not
+# nub-core's provisioning downloader: prefetch needs a redirect policy that re-applies its
+# host allowlist to every hop, and a short single-attempt budget, because it runs on the
+# install critical path for a purely speculative optimization. Already in the graph via
+# nub-core/aube-registry, so this adds no build weight.
+reqwest.workspace = true
 semver = "1"
 # npm-semantics range satisfaction for the pre-run dependency-freshness gate
 # (verify_deps.rs). The Cargo `semver` crate above uses Cargo semantics, which

@@ -46,10 +46,22 @@ use super::build_jail::ProbeScope;
 /// for why this is separate from — and broader than — `$downloads`, and why it is not
 /// held to that set's wildcard-free rule.
 ///
-/// `objects.githubusercontent.com` is where `github.com/<o>/<r>/releases/download/…`
-/// 302s; the client follows redirects internally, so only the INITIAL host is matched
-/// here — the entry is what makes a directly-spelled asset URL work.
-const PREFETCH_HOSTS: &[&str] = &["github.com", "objects.githubusercontent.com"];
+/// THE REDIRECT TARGETS ARE LOAD-BEARING ENTRIES, not conveniences. [`fetch`] re-applies
+/// this list to every hop, so a `github.com` release-asset URL only resolves if the host
+/// it 302s to is here too. Measured 2026-07-28 against a real asset:
+/// `github.com/<o>/<r>/releases/download/…` → **`release-assets.githubusercontent.com`**
+/// (a signed, expiring URL). `objects.githubusercontent.com` is the older spelling of the
+/// same asset CDN, retained because directly-published asset URLs still use it.
+///
+/// Deliberately ABSENT: `raw.githubusercontent.com`. `github.com/<o>/<r>/raw/…` redirects
+/// there (verified), which is a fine way to serve arbitrary repo content but is not how a
+/// release artifact is published — admitting it would widen the fetchable surface from
+/// "release assets" to "any file in any repo" for no covered package.
+const PREFETCH_HOSTS: &[&str] = &[
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+];
 
 /// What a lifecycle script's install command will look for locally before it opens a
 /// socket. Selected by which family token appears FIRST in the script line, because a
@@ -158,7 +170,10 @@ pub(super) struct NodeFacts {
 /// Python probe is: this runs UNCONFINED in nub's own process before any policy exists, so
 /// anything a dependency can author into the path must not be executed. A refusal is a
 /// skip — prefetch simply does not happen.
-fn node_facts(ambient: &BTreeMap<String, String>, probe: &ProbeScope) -> Option<&'static NodeFacts> {
+fn node_facts(
+    ambient: &BTreeMap<String, String>,
+    probe: &ProbeScope,
+) -> Option<&'static NodeFacts> {
     static FACTS: OnceLock<Option<NodeFacts>> = OnceLock::new();
     FACTS
         .get_or_init(|| {
@@ -196,30 +211,61 @@ fn parse_node_facts(stdout: &str) -> Option<NodeFacts> {
     })
 }
 
-/// The `libc` slot, which is EMPTY except on musl Linux.
+/// `detect-libc`'s `familySync()`: the C library family on Linux, `None` elsewhere.
 ///
-/// PROVENANCE (prebuild-install `rc.js:56`): `rc.libc = rc.platform !== 'linux' || rc.libc
-/// === detectLibc.GLIBC ? '' : rc.libc`. Off Linux, and on glibc Linux, the slot is
+/// The two families consume this through DIFFERENT rules, so it deliberately returns the
+/// raw family rather than a formatted slot — collapsing them into one helper is what
+/// produced a node-pre-gyp URL of `…-linux-unknown-…` on every glibc machine.
+fn libc_family(platform: &str) -> Option<&'static str> {
+    if platform != "linux" {
+        return None;
+    }
+    // The observable half of detect-libc's interpreter/filesystem probes: a musl system
+    // ships its loader as `/lib/ld-musl-<arch>.so.1`.
+    let musl = std::fs::read_dir("/lib").is_ok_and(|d| {
+        d.filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with("ld-musl-"))
+    });
+    Some(if musl { "musl" } else { "glibc" })
+}
+
+/// prebuild-install's `libc` slot, which is EMPTY except on musl Linux.
+///
+/// PROVENANCE (`rc.js:56`): `rc.libc = rc.platform !== 'linux' || rc.libc ===
+/// detectLibc.GLIBC ? '' : rc.libc`. Off Linux, and on glibc Linux, the slot is
 /// force-blanked — so the `{platform}{libc}` pair is a bare `darwin` / `linux`, and only a
-/// musl host produces the concatenated `linuxmusl` (no separator: the template is
+/// musl host produces the CONCATENATED `linuxmusl` (no separator: the template is
 /// `{platform}{libc}`, not `{platform}-{libc}`). Getting this wrong misses every path.
-fn detect_libc(platform: &str, ambient: &BTreeMap<String, String>) -> String {
+fn prebuild_install_libc(platform: &str, ambient: &BTreeMap<String, String>) -> String {
     if platform != "linux" {
         return String::new();
     }
-    if let Some(v) = ambient.get("LIBC").or_else(|| ambient.get("npm_config_libc")) {
-        return if v == "glibc" { String::new() } else { v.clone() };
+    let family = ambient
+        .get("LIBC")
+        .or_else(|| ambient.get("npm_config_libc"))
+        .map(String::as_str)
+        .or_else(|| libc_family(platform))
+        .unwrap_or_default();
+    if family == "glibc" {
+        String::new()
+    } else {
+        family.to_string()
     }
-    // detect-libc's non-glibc test, reduced to its observable: a musl system ships its
-    // loader as `/lib/ld-musl-<arch>.so.1` and has no glibc `ldd` report to parse.
-    let musl = std::fs::read_dir("/lib").is_ok_and(|d| {
-        d.filter_map(Result::ok).any(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("ld-musl-")
-        })
-    });
-    if musl { "musl".to_string() } else { String::new() }
+}
+
+/// node-pre-gyp's `{libc}` slot, which is a very different rule from the above.
+///
+/// PROVENANCE (`versioning.js:305`): `libc: options.target_libc || detect_libc.familySync()
+/// || 'unknown'`. There is NO glibc-blanking — `familySync()` returns the literal `glibc`
+/// on a glibc host, so packages templating `{libc}` publish `…-linux-glibc-x64.tar.gz`.
+/// Only off Linux, where `familySync()` is null, does the slot become `unknown`.
+fn node_pre_gyp_libc(platform: &str, ambient: &BTreeMap<String, String>) -> String {
+    ambient
+        .get("npm_config_target_libc")
+        .map(String::as_str)
+        .or_else(|| libc_family(platform))
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 // ── prebuild-install ───────────────────────────────────────────────────────────
@@ -237,11 +283,20 @@ fn prebuild_install(
     node: &NodeFacts,
 ) -> Option<()> {
     let url = prebuild_install_url(manifest, ambient, node)?;
-    let dest = spawn
-        .package_dir
-        .join(local_prebuilds_prefix(manifest, ambient))
-        .join(url_basename(&url));
-    place(&url, &dest)
+    // Anchored on the script's CWD, not `package_dir`: `localPrebuild` is cwd-relative
+    // (`util.js` `localPrebuild` joins onto `rc.path`, which `bin.js` chdir's to). The two
+    // coincide for an ordinary dependency hook but diverge for a fetched git dependency's
+    // root script, where writing into the packed checkout would make its fingerprint
+    // host-dependent.
+    let root = spawn.cwd.clone();
+    let dest = contained_dest(
+        &root,
+        [
+            local_prebuilds_prefix(manifest, ambient).as_str(),
+            url_basename(&url),
+        ],
+    )?;
+    place(&url, &root, &dest)
 }
 
 /// The `prebuilds/` directory name, overridable per package via
@@ -280,18 +335,26 @@ fn prebuild_install_url(
         .as_str()
         .or_else(|| ambient.get("npm_config_runtime").map(String::as_str))
         .unwrap_or("node");
-    let target = config["target"]
-        .as_str()
-        .or_else(|| ambient.get("npm_config_target").map(String::as_str))
-        .unwrap_or(&node.version);
+    // `config.target` is read with `json_scalar`, not `as_str`, because it is routinely a
+    // JSON NUMBER — `keytar` ships `"config": { "target": 3, "runtime": "napi" }`. Reading
+    // only the string spelling silently falls through to the running Node's version and
+    // derives the wrong ABI slot for every package that pins one this way.
+    let target = json_scalar(&config["target"])
+        .or_else(|| ambient.get("npm_config_target").cloned())
+        .unwrap_or_else(|| node.version.clone());
 
     // The ABI slot. `node` resolves through node-abi's crosswalk and `electron` /
     // `node-webkit` through their own tables — none of which nub carries (see
-    // `node_facts`). So the only cases derivable here are the two that need no table: the
-    // default runtime AT the running Node's version (ABI = its own `modules`), and a napi
-    // runtime (ABI = the negotiated Node-API level). Anything else declines, and the
-    // script falls back to what it would have done unprefetched.
+    // `node_facts`), so those decline and the script falls back to what it would have
+    // done unprefetched.
+    //
+    // PROVENANCE (`rc.js:53-55`): for a napi runtime the ABI slot IS the target, and
+    // `getBestNapiBuildVersion()` is consulted ONLY when the package pinned no target of
+    // its own — the replacement is gated on `rc.target === process.versions.node`, i.e. on
+    // the default still being in place. A package that pins `target: 3` gets ABI 3
+    // regardless of what `binary.napi_versions` says.
     let abi = match runtime {
+        "napi" if target != node.version => target.clone(),
         "napi" => best_napi_version(manifest, node.napi)?.to_string(),
         "node" if target == node.version => node.modules.clone(),
         _ => return None,
@@ -329,7 +392,7 @@ fn prebuild_install_url(
         ("runtime", runtime.to_string()),
         ("platform", platform),
         ("arch", arch),
-        ("libc", detect_libc(&node.platform, ambient)),
+        ("libc", prebuild_install_libc(&node.platform, ambient)),
         ("configuration", "Release".to_string()),
         (
             "module_name",
@@ -341,7 +404,10 @@ fn prebuild_install_url(
         ("tag_prefix", "v".to_string()),
     ]);
 
-    Some(expand(&prebuild_url_template(manifest, ambient, name)?, &vars))
+    Some(expand(
+        &prebuild_url_template(manifest, ambient, name)?,
+        &vars,
+    ))
 }
 
 /// `util.js` `urlTemplate`, in its own precedence order.
@@ -350,8 +416,7 @@ fn prebuild_url_template(
     ambient: &BTreeMap<String, String>,
     name: &str,
 ) -> Option<String> {
-    const DEFAULT_ASSET: &str =
-        "{name}-v{version}-{runtime}-v{abi}-{platform}{libc}-{arch}.tar.gz";
+    const DEFAULT_ASSET: &str = "{name}-v{version}-{runtime}-v{abi}-{platform}{libc}-{arch}.tar.gz";
 
     if let Some(explicit) = ambient.get("npm_config_download") {
         return Some(explicit.clone());
@@ -361,7 +426,9 @@ fn prebuild_url_template(
         .get(&format!("{prefix}_binary_host"))
         .or_else(|| ambient.get(&format!("{prefix}_binary_host_mirror")));
     if let Some(mirror) = mirror {
-        return Some(format!("{mirror}/{{tag_prefix}}{{version}}/{DEFAULT_ASSET}"));
+        return Some(format!(
+            "{mirror}/{{tag_prefix}}{{version}}/{DEFAULT_ASSET}"
+        ));
     }
     let binary = &manifest["binary"];
     if let Some(host) = binary["host"].as_str() {
@@ -426,22 +493,51 @@ fn node_pre_gyp(
         .join(&package_name)
         .ok()?;
 
-    // The mirror tree lives under nub's PM cache, which `$tooldirs` already read-grants to
-    // the jail — so the placed artifact needs no new fs rule, and it is shared across
-    // packages and across installs instead of being re-fetched per package dir.
-    let root = cache_root()?.join("prefetch").join(digest(url.as_str()));
-    let dest = root.join(remote_path.trim_start_matches('/')).join(&package_name);
-    place(url.as_str(), &dest)?;
-
     // PROVENANCE (`versioning.js:316`): `opts.module_name.replace('-', '_')` — a STRING
     // pattern, so JS replaces only the FIRST dash. A module named `a-b-c` yields
     // `a_b-c`, and a spelling that "helpfully" replaced all of them would set a variable
     // node-pre-gyp never reads. Reproduce the bug or the mirror is ignored.
+    //
+    // The key is built from a manifest field, and nub-sandbox hard-REJECTS a constructed
+    // env key containing `=` or NUL — which the build jail turns into a fail-closed error,
+    // i.e. a hostile `module_name` could break a spawn that would otherwise have worked.
+    // Refusing anything but a plain identifier keeps this module's infallibility contract.
+    if module_name.is_empty()
+        || !module_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        return None;
+    }
+
+    // The mirror tree lives under nub's PM cache, which the jail already read-grants
+    // (`NUB_PM_CACHE_PATTERN`) — so the placed artifact needs no new fs rule, and it is
+    // shared across packages and installs instead of being re-fetched per package dir.
+    // `extra_reads` is still returned rather than relied on implicitly: build_jail resolves
+    // the cache home with a bare `var_os`, so an empty `XDG_CACHE_HOME` (which aube treats
+    // as unset) would leave that pattern anchored somewhere this path is not under.
+    let root = cache_root()?.join("prefetch").join(digest(url.as_str()));
+    // Segments come from RAW manifest strings, while the URL above went through
+    // `Url::join`, which normalizes `..` and drops a `#fragment`. The two therefore
+    // DISAGREE by construction: `package_name = "a#/../../../../.zshenv"` keeps the URL on
+    // an allowlisted host and pointed at a real asset while the naive `Path::join` walks
+    // out of the cache into $HOME. `contained_dest` is what re-couples them.
+    let dest = contained_dest(&root, [remote_path.as_str(), package_name.as_str()])?;
+    place(url.as_str(), &root, &dest)?;
+
     let var = format!(
         "npm_config_{}_binary_host_mirror",
         module_name.replacen('-', "_", 1)
     );
-    ambient.insert(var, format!("file://{}/", root.to_str()?));
+    // `versioning.js:317` gives this env var precedence OVER `binary.host`, so a mirror the
+    // user configured deliberately (a corporate artifact host in `.npmrc`) outranks the
+    // manifest. Set-if-absent keeps that true — the same `.entry().or_insert()` discipline
+    // build_jail uses for `npm_config_nodedir`.
+    let mirror = url::Url::from_directory_path(&root).ok()?;
+    if ambient.contains_key(&var) {
+        return None;
+    }
+    ambient.insert(var, mirror.to_string());
     Some(vec![root])
 }
 
@@ -469,11 +565,17 @@ fn node_pre_gyp_vars(
         format!("napi-v{napi_build_version}")
     };
     Some(BTreeMap::from([
-        ("name", manifest["name"].as_str().unwrap_or_default().to_string()),
+        (
+            "name",
+            manifest["name"].as_str().unwrap_or_default().to_string(),
+        ),
         ("configuration", "Release".to_string()),
         (
             "module_name",
-            binary["module_name"].as_str().unwrap_or_default().to_string(),
+            binary["module_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
         ),
         ("version", version.split(['-', '+']).next()?.to_string()),
         ("prerelease", after_or_empty(version, '-')),
@@ -485,7 +587,11 @@ fn node_pre_gyp_vars(
         ("node_abi", node_abi.clone()),
         (
             "node_abi_napi",
-            if node.napi > 0 { "napi".to_string() } else { node_abi },
+            if node.napi > 0 {
+                "napi".to_string()
+            } else {
+                node_abi
+            },
         ),
         ("napi_version", node.napi.to_string()),
         ("napi_build_version", napi_build_version),
@@ -495,13 +601,7 @@ fn node_pre_gyp_vars(
         ("target_platform", node.platform.clone()),
         ("arch", node.arch.clone()),
         ("target_arch", node.arch.clone()),
-        (
-            "libc",
-            match detect_libc(&node.platform, ambient) {
-                s if s.is_empty() => "unknown".to_string(),
-                s => s,
-            },
-        ),
+        ("libc", node_pre_gyp_libc(&node.platform, ambient)),
         (
             "module_main",
             manifest["main"].as_str().unwrap_or_default().to_string(),
@@ -520,13 +620,83 @@ fn node_pre_gyp_vars(
 
 // ── fetch + place ──────────────────────────────────────────────────────────────
 
+/// Resolve `segments` under `root`, admitting ONLY plain path components.
+///
+/// THE WHOLE SECURITY BOUNDARY FOR PATH CONSTRUCTION. Every segment here originates in a
+/// dependency-authored manifest, and the URL those same strings build goes through
+/// `Url::join`, which normalizes `..` and discards a `#fragment` — so the URL and the
+/// naive `Path::join` of the same strings do NOT describe the same location. A
+/// `package_name` of `a#/../../../../../../.zshenv` yields a perfectly ordinary asset URL
+/// on an allowlisted host while `Path::join` walks out of the cache and into `$HOME`; nub
+/// runs this UNCONFINED, before the jail exists, so that is an arbitrary file create with
+/// the user's full authority. Splitting on BOTH separators is deliberate: `\` is not a
+/// separator in a URL but is one on Windows, so a segment must not be able to smuggle a
+/// component past a POSIX-only split.
+fn contained_dest<'a>(root: &Path, segments: impl IntoIterator<Item = &'a str>) -> Option<PathBuf> {
+    let mut dest = root.to_path_buf();
+    let mut any = false;
+    for segment in segments {
+        // An ABSOLUTE segment is a refusal rather than a strip. Silently dropping the
+        // leading separator would keep the write contained but make the mirror layout
+        // disagree with what `url.resolve` computes downstream (an absolute path resets to
+        // the URL root), so the artifact would never be found — a confusing miss where a
+        // clean decline is honest. Trailing separators are still fine: `fix_slashes` adds
+        // one to every `remote_path` by design.
+        if segment.starts_with('/') || segment.starts_with('\\') {
+            return None;
+        }
+        for part in segment.split(['/', '\\']).filter(|p| !p.is_empty()) {
+            // `.` and `..` are the traversal primitives; a part that `Path` reads as
+            // anything but a single normal component (an absolute root, a Windows drive
+            // prefix) is equally disqualifying.
+            if part == "." || part == ".." {
+                return None;
+            }
+            let mut components = Path::new(part).components();
+            match (components.next(), components.next()) {
+                (Some(std::path::Component::Normal(c)), None) => dest.push(c),
+                _ => return None,
+            }
+            any = true;
+        }
+    }
+    any.then_some(dest)
+}
+
+/// Create every directory from `root` down to `dir`, refusing to follow a SYMLINK.
+///
+/// `create_dir_all` follows symlinks, and the script's own package dir is WRITABLE by the
+/// confined script — while a package's hooks run sequentially, so its `preinstall` can
+/// replace `prebuilds/` with a link to anywhere the user can write and have the
+/// unconfined prefetch for `install` write through it. `HOME` is on the jail's env
+/// allowlist, so the target is freely computable. Checking each existing level with
+/// `symlink_metadata` (which does NOT follow) closes that, and is a distinct root cause
+/// from the lexical traversal `contained_dest` handles — neither check subsumes the other.
+fn create_dir_all_nofollow(root: &Path, dir: &Path) -> Option<()> {
+    let rest = dir.strip_prefix(root).ok()?;
+    let mut current = root.to_path_buf();
+    std::fs::create_dir_all(&current).ok()?;
+    for component in rest.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(md) if md.is_dir() => {}
+            // A symlink (even one resolving inside the root) or a plain file where a
+            // directory must go: refuse rather than write through it.
+            Ok(_) => return None,
+            Err(_) => std::fs::create_dir(&current).ok()?,
+        }
+    }
+    Some(())
+}
+
 /// Fetch `url` into nub's prefetch cache (once per URL, machine-wide) and copy it to
-/// `dest`. `None` on any refusal or failure — the caller then changes nothing.
+/// `dest`, which must lie under `root`. `None` on any refusal or failure — the caller then
+/// changes nothing.
 ///
 /// An existing `dest` is left ALONE. That is not just idempotence: `prebuilds/` is a
 /// documented user-facing drop point ("build it yourself and put it here"), so a file
 /// already present is a deliberate local override and nub must not clobber it.
-fn place(url: &str, dest: &Path) -> Option<()> {
+fn place(url: &str, root: &Path, dest: &Path) -> Option<()> {
     if dest.exists() {
         return Some(());
     }
@@ -534,22 +704,108 @@ fn place(url: &str, dest: &Path) -> Option<()> {
         tracing::debug!(url, "prefetch: host not on the prefetch allowlist");
         return None;
     }
+    let parent = dest.parent()?;
+    create_dir_all_nofollow(root, parent)?;
+    // Belt-and-braces after the directories exist: resolve both ends and re-assert
+    // containment, so a link swapped in concurrently with the walk above still cannot
+    // redirect the write.
+    if !parent
+        .canonicalize()
+        .ok()?
+        .starts_with(root.canonicalize().ok()?)
+    {
+        tracing::debug!(dest = %dest.display(), "prefetch: destination escaped its root");
+        return None;
+    }
+
     let cached = cache_root()?.join("prefetch-blobs").join(digest(url));
     if !cached.exists() {
         std::fs::create_dir_all(cached.parent()?).ok()?;
-        // Download to a sibling temp first: a concurrent install must never observe a
-        // half-written blob at the cache path and treat it as a complete artifact.
-        let tmp = cached.with_extension("part");
-        nub_core::version_management::download::download_to_file_auth(url, &tmp, None, |_, _| {})
-            .map_err(|e| tracing::debug!(url, error = %e, "prefetch: download failed"))
-            .ok()?;
+        // A UNIQUE temp, not a fixed `.part`: lifecycle jobs run `child_concurrency`-wide
+        // in parallel, so a shared name lets two racers truncate the same inode and both
+        // rename — caching a torn blob permanently, since the hit test is existence only.
+        let tmp = cached.with_extension(format!(
+            "{}.{}.part",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let fetched = fetch(url, &tmp);
+        if fetched.is_none() {
+            let _ = std::fs::remove_file(&tmp);
+            return None;
+        }
         std::fs::rename(&tmp, &cached).ok()?;
     }
-    std::fs::create_dir_all(dest.parent()?).ok()?;
     // Copy, never hardlink: prebuild-install probes the pickup path for W_OK and the
     // installer owns the file afterwards, so it must not share an inode with the cache.
-    std::fs::copy(&cached, dest).ok()?;
+    // Via a temp + rename so an interrupted copy cannot leave a truncated file that the
+    // `dest.exists()` check above would then honour as a user override forever.
+    let staged = dest.with_extension(format!("{}.nub-part", std::process::id()));
+    std::fs::copy(&cached, &staged).ok()?;
+    if std::fs::rename(&staged, dest).is_err() {
+        let _ = std::fs::remove_file(&staged);
+        return None;
+    }
     tracing::debug!(url, dest = %dest.display(), "prefetch: placed");
+    Some(())
+}
+
+/// Stream `url` to `dest` under prefetch's OWN client — deliberately not nub-core's
+/// provisioning downloader.
+///
+/// Two properties that downloader cannot give us. (1) The redirect policy re-applies the
+/// host allowlist to EVERY hop: nub-core's follows up to ten and re-checks nothing, and
+/// `github.com/<o>/<r>/raw/…` really does 302 to `raw.githubusercontent.com`, so without
+/// this the allowlist bounds only the first request and the SSRF containment claim is
+/// hollow. (2) The budget is short and single-attempt: nub-core's 600s timeout × 3
+/// attempts is a 30-minute worst case, and this call sits on the install's critical path
+/// holding a concurrency permit for a purely SPECULATIVE optimization. A prefetch that is
+/// slow is worse than no prefetch — failing fast just falls back to the script's own path.
+fn fetch(url: &str, dest: &Path) -> Option<()> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("nub/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error("too many redirects");
+            }
+            if host_allowed(attempt.url().as_str()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .ok()?;
+    let mut resp = client
+        .get(url)
+        // The body must BE the published artifact: a transparently re-encoded response
+        // would be a different byte stream than the installer expects to untar.
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        tracing::debug!(
+            url,
+            status = resp.status().as_u16(),
+            "prefetch: fetch failed"
+        );
+        return None;
+    }
+    // A redirect the policy STOPPED surfaces as a 3xx response here rather than an error,
+    // so the success check above is what refuses an off-allowlist hop's body.
+    let declared = resp.content_length();
+    let mut file = std::fs::File::create(dest).ok()?;
+    let written = std::io::copy(&mut resp, &mut file).ok()?;
+    // A truncated body must never be cached: the hit test downstream is existence only,
+    // so a short read would poison the blob for every later install.
+    if declared.is_some_and(|n| n != written) {
+        return None;
+    }
     Some(())
 }
 
@@ -580,6 +836,17 @@ fn expand(template: &str, vars: &BTreeMap<&str, String>) -> String {
     out
 }
 
+/// A manifest field JS would interpolate directly, whether it was authored as a string or
+/// a number. `JSON.stringify`-free by design: an object or array has no sensible template
+/// spelling, so those decline rather than emitting `[object Object]`.
+fn json_scalar(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 fn strip_scope(name: &str) -> &str {
     name.strip_prefix('@')
         .and_then(|rest| rest.split_once('/'))
@@ -599,7 +866,10 @@ fn after_or_undefined(version: &str, sep: char) -> String {
 }
 
 fn after_or_empty(version: &str, sep: char) -> String {
-    version.split_once(sep).map(|(_, t)| t.to_string()).unwrap_or_default()
+    version
+        .split_once(sep)
+        .map(|(_, t)| t.to_string())
+        .unwrap_or_default()
 }
 
 /// `util.js` `trimSlashes`: strip a leading `./` or `/`, and one trailing `/`.
@@ -614,7 +884,11 @@ fn trim_slashes(s: &str) -> &str {
 }
 
 fn fix_slashes(s: &str) -> String {
-    if s.ends_with('/') { s.to_string() } else { format!("{s}/") }
+    if s.ends_with('/') {
+        s.to_string()
+    } else {
+        format!("{s}/")
+    }
 }
 
 fn drop_double_slashes(s: &str) -> String {
@@ -719,13 +993,31 @@ mod tests {
         );
     }
 
+    /// The two families read `libc` by DIFFERENT rules, and collapsing them produced a
+    /// node-pre-gyp URL of `…-linux-unknown-…` on every glibc machine — i.e. the family
+    /// silently never prefetched on its primary platform.
+    #[test]
+    fn the_two_families_disagree_about_the_libc_slot_on_glibc() {
+        let glibc = BTreeMap::from([
+            ("LIBC".to_string(), "glibc".to_string()),
+            ("npm_config_target_libc".to_string(), "glibc".to_string()),
+        ]);
+        // prebuild-install force-blanks glibc (rc.js:56) …
+        assert_eq!(prebuild_install_libc("linux", &glibc), "");
+        // … while node-pre-gyp emits it verbatim (versioning.js:305).
+        assert_eq!(node_pre_gyp_libc("linux", &glibc), "glibc");
+        // Off Linux the slot is blank for one and the literal `unknown` for the other.
+        assert_eq!(prebuild_install_libc("darwin", &BTreeMap::new()), "");
+        assert_eq!(node_pre_gyp_libc("darwin", &BTreeMap::new()), "unknown");
+    }
+
     #[test]
     fn libc_slot_is_blank_off_linux_and_concatenated_on_musl() {
-        assert_eq!(detect_libc("darwin", &BTreeMap::new()), "");
+        assert_eq!(prebuild_install_libc("darwin", &BTreeMap::new()), "");
         let glibc = BTreeMap::from([("LIBC".to_string(), "glibc".to_string())]);
-        assert_eq!(detect_libc("linux", &glibc), "");
+        assert_eq!(prebuild_install_libc("linux", &glibc), "");
         let musl = BTreeMap::from([("LIBC".to_string(), "musl".to_string())]);
-        assert_eq!(detect_libc("linux", &musl), "musl");
+        assert_eq!(prebuild_install_libc("linux", &musl), "musl");
 
         // The template concatenates with no separator: `linux` + `musl`.
         let manifest = serde_json::json!({
@@ -736,7 +1028,10 @@ mod tests {
         facts.platform = "linux".into();
         facts.arch = "x64".into();
         let url = prebuild_install_url(&manifest, &musl, &facts).unwrap();
-        assert!(url.ends_with("sharp-v0.33.0-node-v140-linuxmusl-x64.tar.gz"), "{url}");
+        assert!(
+            url.ends_with("sharp-v0.33.0-node-v140-linuxmusl-x64.tar.gz"),
+            "{url}"
+        );
     }
 
     #[test]
@@ -749,7 +1044,10 @@ mod tests {
         });
         // 30 is above the interpreter's level, so 8 wins.
         let url = prebuild_install_url(&manifest, &BTreeMap::new(), &node26()).unwrap();
-        assert!(url.ends_with("sodium-native-v4.0.0-napi-v8-darwin-arm64.tar.gz"), "{url}");
+        assert!(
+            url.ends_with("sodium-native-v4.0.0-napi-v8-darwin-arm64.tar.gz"),
+            "{url}"
+        );
     }
 
     #[test]
@@ -799,7 +1097,10 @@ mod tests {
             "{module_name}-v{version}-{node_abi}-{platform}-{arch}.tar.gz",
             &vars,
         );
-        assert_eq!(asset, "better_sqlite3-v11.5.0-node-v140-darwin-arm64.tar.gz");
+        assert_eq!(
+            asset,
+            "better_sqlite3-v11.5.0-node-v140-darwin-arm64.tar.gz"
+        );
         assert_eq!(expand("v{version}", &vars), "v11.5.0");
     }
 
@@ -822,7 +1123,9 @@ mod tests {
 
     #[test]
     fn only_https_hosts_on_the_allowlist_are_fetched() {
-        assert!(host_allowed("https://github.com/o/r/releases/download/v1/a.tar.gz"));
+        assert!(host_allowed(
+            "https://github.com/o/r/releases/download/v1/a.tar.gz"
+        ));
         assert!(host_allowed("https://objects.githubusercontent.com/x"));
         // The SSRF cases the allowlist exists to refuse.
         assert!(!host_allowed("http://169.254.169.254/latest/meta-data/"));
@@ -833,10 +1136,150 @@ mod tests {
         assert!(!host_allowed("https://github.com.evil.net/x"));
     }
 
+    /// The manifest-to-disk path is the one place a dependency gets to steer an
+    /// UNCONFINED write, so the traversal forms are pinned individually. The `#fragment`
+    /// case is the one that makes this a real primitive rather than a theoretical one: the
+    /// fragment never goes on the wire, so the URL stays a genuine asset on an allowlisted
+    /// host while the naive `Path::join` of the same string walks out to `$HOME`.
+    #[test]
+    fn manifest_supplied_segments_cannot_escape_their_root() {
+        let root = Path::new("/cache/prefetch/abc");
+        assert_eq!(
+            contained_dest(root, ["v1.0.0", "pkg.tar.gz"]),
+            Some(PathBuf::from("/cache/prefetch/abc/v1.0.0/pkg.tar.gz"))
+        );
+        for hostile in [
+            "payload#/../../../../../../../.zshenv",
+            "../../../../.zshenv",
+            "..",
+            "a/../../b",
+            "/etc/cron.d/x",
+            // `\` is not a URL separator but IS one on Windows, so a POSIX-only split
+            // would let this smuggle a component past the check.
+            "..\\..\\..\\evil",
+        ] {
+            assert_eq!(
+                contained_dest(root, ["v1.0.0", hostile]),
+                None,
+                "escaped with {hostile:?}"
+            );
+        }
+        // An empty segment set is a refusal, not a silent write to the root itself.
+        assert_eq!(contained_dest(root, ["", ""]), None);
+    }
+
+    /// A package's hooks run sequentially, its own dir is jail-WRITABLE, and prefetch runs
+    /// unconfined — so a confined `preinstall` that turns `prebuilds/` into a symlink
+    /// would otherwise redirect the `install` prefetch's write anywhere. Lexical
+    /// containment does not catch this; only refusing to follow the link does.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_pickup_directory_is_refused_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("package");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("prebuilds")).unwrap();
+
+        let dest = contained_dest(&root, ["prebuilds", "a.tar.gz"]).unwrap();
+        assert!(create_dir_all_nofollow(&root, dest.parent().unwrap()).is_none());
+        // Nothing was written through the link.
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+        // The same layout without the symlink is created normally.
+        std::fs::remove_file(root.join("prebuilds")).unwrap();
+        assert!(create_dir_all_nofollow(&root, dest.parent().unwrap()).is_some());
+        assert!(root.join("prebuilds").is_dir());
+    }
+
+    /// ORACLE TEST. Every URL below was captured from the REAL installer's own request
+    /// line on Node 26.5.0 (`prebuild-install --verbose` → `http request GET …`,
+    /// `node-pre-gyp install` → `http GET …`), so this pins nub's derivation against what
+    /// the tool actually asks for rather than against our reading of its source. Facts are
+    /// that host's: `modules` 147, napi 10, darwin/arm64.
+    #[test]
+    fn derivation_matches_the_real_installers_requested_url() {
+        let host = NodeFacts {
+            version: "26.5.0".into(),
+            modules: "147".into(),
+            napi: 10,
+            platform: "darwin".into(),
+            arch: "arm64".into(),
+        };
+
+        // better-sqlite3@11.5.0 — prebuild-install, no `binary`, URL from `repository`.
+        let bs = serde_json::json!({
+            "name": "better-sqlite3", "version": "11.5.0",
+            "repository": { "type": "git", "url": "git://github.com/WiseLibs/better-sqlite3.git" },
+        });
+        assert_eq!(
+            prebuild_install_url(&bs, &BTreeMap::new(), &host).unwrap(),
+            "https://github.com/WiseLibs/better-sqlite3/releases/download/v11.5.0/\
+             better-sqlite3-v11.5.0-node-v147-darwin-arm64.tar.gz"
+        );
+
+        // keytar@7.9.0 — the numeric `config.target` case: the ABI slot is the pinned
+        // target (3), NOT a level negotiated from `binary.napi_versions` (which keytar
+        // does not even declare). Reading `target` as a string only would silently derive
+        // `napi-v10` here and never hit.
+        let kt = serde_json::json!({
+            "name": "keytar", "version": "7.9.0",
+            "config": { "target": 3, "runtime": "napi" },
+            "repository": { "type": "git", "url": "https://github.com/atom/node-keytar.git" },
+        });
+        assert_eq!(
+            prebuild_install_url(&kt, &BTreeMap::new(), &host).unwrap(),
+            "https://github.com/atom/node-keytar/releases/download/v7.9.0/\
+             keytar-v7.9.0-napi-v3-darwin-arm64.tar.gz"
+        );
+
+        // bcrypt@5.1.1 — node-pre-gyp: templated host/remote_path/package_name, the
+        // `{libc}` slot resolving to `unknown` off Linux, and `napi_build_version` 3.
+        let bc = serde_json::json!({
+            "name": "bcrypt", "version": "5.1.1", "main": "./bcrypt",
+            "binary": {
+                "module_name": "bcrypt_lib",
+                "module_path": "./lib/binding/napi-v{napi_build_version}",
+                "package_name": "{module_name}-v{version}-napi-v{napi_build_version}-{platform}-{arch}-{libc}.tar.gz",
+                "host": "https://github.com",
+                "remote_path": "kelektiv/node.bcrypt.js/releases/download/v{version}",
+                "napi_versions": [3]
+            },
+        });
+        let vars = node_pre_gyp_vars(&bc, &host, &BTreeMap::new()).unwrap();
+        let remote = drop_double_slashes(&fix_slashes(&expand(
+            bc["binary"]["remote_path"].as_str().unwrap(),
+            &vars,
+        )));
+        let asset = expand(bc["binary"]["package_name"].as_str().unwrap(), &vars);
+        let url = url::Url::parse(&fix_slashes(bc["binary"]["host"].as_str().unwrap()))
+            .unwrap()
+            .join(&remote)
+            .unwrap()
+            .join(&asset)
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://github.com/kelektiv/node.bcrypt.js/releases/download/v5.1.1/\
+             bcrypt_lib-v5.1.1-napi-v3-darwin-arm64-unknown.tar.gz"
+        );
+        // And the mirror layout must reproduce what node-pre-gyp re-joins onto `file://`.
+        let root = Path::new("/cache/prefetch/abc");
+        assert_eq!(
+            contained_dest(root, [remote.as_str(), asset.as_str()]).unwrap(),
+            root.join("kelektiv/node.bcrypt.js/releases/download/v5.1.1")
+                .join(&asset)
+        );
+    }
+
     #[test]
     fn node_facts_parse_is_strict_about_shape() {
         let f = parse_node_facts("26.0.0 140 10 darwin arm64\n").unwrap();
-        assert_eq!((f.modules.as_str(), f.napi, f.arch.as_str()), ("140", 10, "arm64"));
+        assert_eq!(
+            (f.modules.as_str(), f.napi, f.arch.as_str()),
+            ("140", 10, "arm64")
+        );
         assert!(parse_node_facts("").is_none());
         assert!(parse_node_facts("26.0.0 140\n").is_none());
     }

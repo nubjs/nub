@@ -2711,6 +2711,7 @@ dependencies = [
  "nub-sandbox",
  "num_cpus",
  "rayon",
+ "reqwest 0.12.28",
  "rustc-hash",
  "semver",
  "serde",
