@@ -746,21 +746,21 @@ fn append_confinement_options(
                 mask_sources.push(source);
             }
             FsOp::Mask(mask) => {
+                // 000 removes TRAVERSAL, not merely listing, and every launch drops
+                // CAP_DAC_READ_SEARCH — so a grant reopened underneath this mask would be
+                // mounted and then unreachable. 111 is the only value that admits the
+                // descent while still refusing to list the directory, read what it hides,
+                // or accept a write; it is also what the Seatbelt backend expresses for
+                // the same policy. A mask with nothing reopened below it keeps 000.
+                let reopened = reopened_below(&ops[position + 1..], &mask.path);
+                let perms = match mask.kind {
+                    MaskKind::EmptyReadable => "555",
+                    MaskKind::Unreadable if reopened => "111",
+                    MaskKind::Unreadable => "000",
+                };
                 setup
                     .arg("--perms")
-                    .arg(match mask.kind {
-                        MaskKind::EmptyReadable => "555",
-                        // 000 removes TRAVERSAL, not merely listing, and every launch
-                        // drops CAP_DAC_READ_SEARCH — so a grant reopened underneath this
-                        // mask would be mounted and then unreachable. 111 is the only
-                        // value that admits the descent while still refusing to list the
-                        // directory, read what it hides, or accept a write; it is also
-                        // what the Seatbelt backend expresses for the same policy.
-                        MaskKind::Unreadable if reopened_below(&ops[position + 1..], &mask.path) => {
-                            "111"
-                        }
-                        MaskKind::Unreadable => "000",
-                    })
+                    .arg(perms)
                     .arg("--tmpfs")
                     .arg(&mask.path);
                 // `--remount-ro` is what actually makes the tmpfs unwritable — a perms-000
