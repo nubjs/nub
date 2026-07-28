@@ -190,7 +190,7 @@ Settings you want on every run go in a [nub.jsonc](/docs/config) at the project 
 
 A preload entry is either a path, resolved from the directory holding the file that supplied it, or a bare package specifier resolved the way an import in your project would be. V8 flags travel through `NODE_OPTIONS`, so only the flags Node accepts there work — Nub rejects the rest before Node starts.
 
-A command-line flag always wins over the file. See [nub.jsonc](/docs/config#project-and-global-configuration) for the full precedence order.
+A command-line flag always wins over the file. See [nub.jsonc](/docs/config#precedence) for the full precedence order.
 
 ## Compatibility mode
 

@@ -1,5 +1,5 @@
 ---
-title: nub.jsonc
+title: Config reference
 description: The project file that configures Nub's runtime, dependency installs, and temporary package runs.
 ---
 
@@ -7,75 +7,85 @@ Put `nub.jsonc` at the project root. Nub finds the nearest file by walking up fr
 
 The file uses JSON with comments and trailing commas. Unknown keys and invalid values stop the command with an error.
 
-## Every field
+## Reference
+
+Every field, with its full value set. Each has its own section below.
 
 ```jsonc title="nub.jsonc"
 {
   "$schema": "https://nubjs.com/schema/latest.json",
 
-  // ── Runtime — applies to file runs, scripts, and watch mode ──
-  "preload": ["./instrumentation.ts"],       // modules loaded before the entry file
-  "nodeOptions": ["--enable-source-maps"],   // Node options for every run
-  "v8Flags": ["--expose-gc"],                // V8 flags, via NODE_OPTIONS
-  "envFile": ["./env/base.env", "./env/local.env"], // true | false | path | path[]
-  "loader": { ".txt": "text" },              // extension → loader
-  "conditions": ["development"],             // extra package export conditions
-  "tsconfig": "./tsconfig.runtime.json",     // TypeScript config for the runtime
-  "verifyDepsBeforeRun": "warn",             // warn | error | false
-  "nodeCompat": false,                       // true = plain Node, version pinning kept
+  // ── runtime — file runs, scripts, and watch mode ──
 
-  // ── Installs ──
+  // relative paths or bare specifiers, loaded in order
+  "preload": ["./setup.ts", "tsx/esm"],
+
+  // any flag your Node accepts in NODE_OPTIONS
+  "nodeOptions": ["--enable-source-maps"],
+  "v8Flags": ["--expose-gc"],      // same channel, so the same set
+
+  // true = the default .env cascade | false = load nothing
+  // a path, or an array of paths where later files win
+  // paths expand ${VAR} and $VAR against the environment
+  "envFile": [".env", ".env.local"],
+
+  // text | jsonc | json5 | toml | yaml | ts | tsx | jsx
+  "loader": { ".txt": "text" },
+
+  "conditions": ["development"],   // matched ahead of "default"
+  "tsconfig": "./tsconfig.runtime.json",
+
+  // warn | error | false
+  // "install" and "prompt" parse for pnpm compat, behave as warn
+  "verifyDepsBeforeRun": "warn",
+
+  "nodeCompat": false,             // true = plain Node, pinning kept
+
+  // ── installs — only when Nub is the project's package manager ──
   "install": {
-    "nodeLinker": "symlink",                 // symlink | isolated | hoisted
-    "symlinkDisablePattern": ["electron"],   // packages to materialize in the project
-    "hoist": false,                          // hidden fallback tree; isolated only
-    "minimumReleaseAge": "3d",               // reject versions published too recently
+    // symlink (default) | isolated | hoisted
+    // "pnp" parses and is rejected at install time
+    "nodeLinker": "symlink",
+
+    "symlinkDisablePattern": ["electron"],  // symlink layout only
+    "hoist": false,                // boolean | string[]; isolated only
+
+    // <integer><s|m|h|d|w>; a bare number is rejected
+    "minimumReleaseAge": "3d",
     "minimumReleaseAgeExclude": ["@company/*"],
-    "nodeOptions": ["--max-old-space-size=8192"] // for lifecycle scripts
+
+    // for dependency build scripts, not for runs
+    "nodeOptions": ["--max-old-space-size=8192"]
   }
 }
 ```
 
-One block, `dlx`, is read from the global file instead:
+One block is read from the global file only, because it configures your machine rather than a checkout. A project file carrying it is an error.
 
 ```jsonc title="~/.config/nub/nub.jsonc"
 {
   // ...
   "dlx": {
-    "consent": "prompt",                     // prompt | never
-    "envFile": "./tools.env"                 // same forms as the top-level envFile
+    "consent": "prompt",       // prompt | never
+    "envFile": "./tools.env"   // same forms as the top-level envFile
   }
 }
 ```
 
-Each field has its own section below, and each is also documented on the page for the feature it configures.
+## Global configuration
 
-## `$schema`
+Use a project file for settings that belong to one repository, and the global file for personal defaults that apply everywhere. Both take the same fields, except that [`dlx`](#dlx) is global-only.
 
-Add the public schema URL for editor completion and validation.
+Nub reads these locations, nearest first:
 
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "$schema": "https://nubjs.com/schema/latest.json"
-}
-```
+- `nub.jsonc` in the project, found by walking up from the command's working directory
+- `$XDG_CONFIG_HOME/nub/nub.jsonc` when `XDG_CONFIG_HOME` is set
+- `~/.config/nub/nub.jsonc` (macOS, Linux)
+- `%APPDATA%\nub\nub.jsonc` (Windows)
 
-The published schema describes the project file, so it does not carry the global-only `dlx` block. Released versions are listed at [nubjs.com/schema](https://nubjs.com/schema).
+A project file fails loudly when it contains an invalid value. The global file is best-effort, so Nub ignores one it cannot read or parse rather than blocking every command.
 
-## Project and global configuration
-
-Use a project `nub.jsonc` for settings that belong to one repository. Use the global file for personal defaults that should apply everywhere:
-
-```text title="Global configuration"
-~/.config/nub/nub.jsonc
-```
-
-Setting `XDG_CONFIG_HOME` moves it to `$XDG_CONFIG_HOME/nub/nub.jsonc`. On Windows the default is `%APPDATA%\nub\nub.jsonc`.
-
-Both files take the same fields, with one exception: the [`dlx`](#dlx) block is read from the global file only.
-
-Project files fail loudly when they contain invalid values. The global file is best-effort: Nub ignores it when it cannot be read or parsed.
+## Precedence
 
 More specific settings replace broader ones:
 
@@ -205,7 +215,7 @@ Read one exact file instead of the automatic set.
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "envFile": "./env/development.env"
+  "envFile": ".env.development"
 }
 ```
 
@@ -215,9 +225,9 @@ Compose several files in order. Later files replace earlier values.
 {
   // ...
   "envFile": [
-    "./env/base.env",
-    "./env/development.env",
-    "./env/local.env"
+    ".env",
+    ".env.development",
+    ".env.local"
   ]
 }
 ```
@@ -229,12 +239,12 @@ Paths also expand `${VAR}` and `$VAR` against the environment, which a config fi
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "envFile": "./env/.env.${APP_ENV}"
+  "envFile": ".env.${APP_ENV}"
 }
 ```
 
 ```bash
-APP_ENV=staging nub app.ts   # reads ./env/.env.staging
+APP_ENV=staging nub app.ts   # reads .env.staging
 ```
 
 ### `loader`
@@ -293,7 +303,7 @@ Add package export conditions.
 
 ### `tsconfig`
 
-Choose the TypeScript configuration used by Nub's runtime.
+Choose the TypeScript configuration Nub's runtime reads. Nub uses it for the options that affect execution — JSX, decorators, and [path mapping](https://www.typescriptlang.org/tsconfig/#paths) — not for type checking.
 
 ```jsonc title="nub.jsonc"
 {
