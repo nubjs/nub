@@ -39,11 +39,41 @@ fn unique_test_cache() -> PathBuf {
     ))
 }
 
+/// OS-bootstrap + toolchain-discovery vars a spawned `nub`/`node` genuinely needs to
+/// run at all — PATH to find them, the home/temp dirs they resolve config/scratch
+/// space from, and (Windows only) the loader essentials `CreateProcessW` and
+/// `cmd.exe` (spawned by `execSync`'s shell:true default) require to start.
+/// Deliberately NOT the full ambient environment: `brand_boundary_no_globals_no_env`
+/// asserts the child sees zero `NUB_*` vars, which is meaningless if the child
+/// inherits this test process's (and CI's) full environment instead of a hermetic
+/// one built from an explicit allowlist.
+const HERMETIC_ENV_PASSTHROUGH: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+];
+
 fn run_nub_with_env(fixture: &str, file: &str, env: &[(&str, &str)]) -> (String, String, i32) {
     let fixture_path = fixtures_dir().join(fixture);
     let mut cmd = Command::new(nub_binary());
     cmd.arg(fixture_path.join(file).to_str().unwrap())
-        .current_dir(&fixture_path);
+        .current_dir(&fixture_path)
+        .env_clear();
+    for key in HERMETIC_ENV_PASSTHROUGH {
+        if let Some(val) = std::env::var_os(key) {
+            cmd.env(key, val);
+        }
+    }
     // Isolate cache state per invocation unless the test sets its own
     // XDG_CACHE_HOME (e.g. the cache-atomicity test, which wins).
     if !env.iter().any(|(k, _)| *k == "XDG_CACHE_HOME") {
