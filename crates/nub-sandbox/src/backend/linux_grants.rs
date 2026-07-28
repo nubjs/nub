@@ -497,5 +497,15 @@ mod tests {
             "dropping the absent cache dirs must leave the confinement intact — the \
              dependency tree read-only and the package dir the only writable subtree"
         );
+        // `as_compiled` shares the normalizer with the code under test, so on Windows the
+        // comparison above would stay green if BOTH sides regressed together. Pin the
+        // canonical shape independently: an IR path is forward-slashed and never verbatim.
+        for grant in &plan {
+            let path = grant.path.to_string_lossy();
+            assert!(
+                !path.contains('\\') && !path.starts_with(r"\\?\"),
+                "a mount-plan path must be a plain forward-slashed path: {path}"
+            );
+        }
     }
 }

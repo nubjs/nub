@@ -253,17 +253,19 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
     if expanded.contains(['*', '?', '[', '{']) {
         return vec![expanded.to_string()];
     }
-    let trimmed = expanded.trim_end_matches('/');
-    // The POSIX root is the whole-filesystem spelling every backend recognizes
-    // (`is_whole_fs` / `is_whole_root` both accept `/`), but the globs it expands to —
-    // `""` and `/**` — are drive-less, and a drive-less path matches nothing on Windows.
-    // A user's `fs: { "/": "r" }` would compile to rules no candidate can ever hit, so the
-    // grant silently evaporates. `**` is the drive-agnostic spelling of the same whole-fs
-    // rule and is already classified as whole-fs by the Windows backend.
+    // `/` is the whole-filesystem spelling every backend recognizes (`is_whole_fs` /
+    // `is_whole_root` accept it), but the globs it expands to — `""` and `/**` — are
+    // drive-less, and a drive-less path matches nothing on Windows. So `fs: { "/": "r" }`
+    // compiled to rules no candidate could hit and the grant silently evaporated, while
+    // the `""` half reached `literal_subtree` as a Some(empty path) the Windows ACL
+    // planner would try to grant. `**` is the drive-agnostic spelling of the same rule and
+    // is already classified as whole-fs everywhere. Matched exactly, not via the trimmed
+    // form: `//` and a slash-normalized bare `\\` are not root spellings on Windows.
     #[cfg(windows)]
-    if trimmed.is_empty() {
+    if expanded == "/" {
         return vec!["**".to_string()];
     }
+    let trimmed = expanded.trim_end_matches('/');
     vec![trimmed.to_string(), format!("{trimmed}/**")]
 }
 

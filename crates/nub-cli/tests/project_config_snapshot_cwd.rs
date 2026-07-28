@@ -53,11 +53,7 @@ fn global_cwd_flag_initializes_one_snapshot_from_the_requested_dir() {
         .and_then(|line| line.rsplit_once(' '))
         .unwrap_or_else(|| panic!("unexpected snapshot line: {}", lines[0]));
     assert_eq!(loaded, "project=loaded");
-    // Both sides are canonicalized rather than string-compared: nub reports the cwd as
-    // `env::current_dir` spells it, which on Windows keeps the 8.3 short components it was
-    // handed and carries no `\\?\` prefix, while `canonicalize` expands and prefixes both.
-    // The directory identity is the contract. (Same reasoning as the verb-local `-C`/
-    // `--dir` variant in install_engine.rs.)
+    // Directory IDENTITY, not spelling — see install_engine.rs's `-C`/`--dir` variant.
     assert_eq!(
         Path::new(cwd).canonicalize().unwrap(),
         target.canonicalize().unwrap(),
