@@ -835,7 +835,11 @@ jobs:
           else
             cp target/debug/libnub_native.so runtime/addons/nub-native.node
           fi
-      - run: cargo test
+      # --no-fail-fast: a plain `cargo test` stops at the FIRST failing test target,
+      # so one unrelated failure would abort the run before it ever reached the
+      # sandbox-enforcement suites this job exists to gate. Run every target to
+      # completion so the gate actually gates.
+      - run: cargo test --no-fail-fast
       # Brand-boundary sweep for the embedded PM engine: a real `nub install`
       # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
       # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev
