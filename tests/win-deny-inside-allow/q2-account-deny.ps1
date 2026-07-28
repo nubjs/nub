@@ -96,17 +96,28 @@ try {
     # .env-exp  : an EXPLICIT allow is placed alongside the explicit deny, so the deny competes with
     #             an explicit allow for the same principal on the same object -- i.e. the test is the
     #             canonical ACE ORDERING rule, not merely explicit-beats-inherited.
-    #             ORDER MATTERS HERE: `icacls /deny` documents that it removes the same permissions
-    #             from any explicit grant, so granting first and denying second leaves NO explicit
-    #             allow behind (run 1 did exactly that and the cell silently degenerated into a copy
-    #             of the .env cell). Deny first, then grant.
-    $d1 = (& icacls $fEnv    /deny  "${acctFull}:(R)" 2>&1 | Out-String); Note "deny  .env     rc=$LASTEXITCODE : $($d1.Trim())"
-    $d2 = (& icacls $fEnvExp /deny  "${acctFull}:(R)" 2>&1 | Out-String); Note "deny  .env-exp rc=$LASTEXITCODE : $($d2.Trim())"
-    $d2b= (& icacls $fEnvExp /grant "${acctFull}:(R)" 2>&1 | Out-String); Note "grant .env-exp rc=$LASTEXITCODE : $($d2b.Trim())"
-    $expAcl = (& icacls $fEnvExp 2>&1 | Out-String)
-    $hasBoth = ($expAcl -match '\(DENY\)') -and ($expAcl -match "(?m)^\s*\S*${acct}:\(R\)")
-    Note ".env-exp carries BOTH an explicit deny and an explicit allow: $hasBoth"
-    if(-not $hasBoth){ Note "WARNING: the explicit-allow-vs-explicit-deny cell did not materialize; treat it as a duplicate of the inherited-allow cell" }
+    #             icacls CANNOT BUILD THIS CELL. `/deny` removes the same permissions from any
+    #             explicit grant, and `/grant` likewise removes the matching explicit deny -- run 1
+    #             (grant-then-deny) and run 2 (deny-then-grant) each ended with only ONE of the two
+    #             ACEs, silently degenerating the cell. So this one DACL is written directly as
+    #             SDDL, and the result is verified before the cell is allowed to count.
+    $d1 = (& icacls $fEnv /deny "${acctFull}:(R)" 2>&1 | Out-String); Note "deny .env rc=$LASTEXITCODE : $($d1.Trim())"
+
+    # D:P = protected (no inheritance), so the account's ONLY allow is the explicit one that the
+    # explicit deny is being asked to override. BA/SY keep the parent able to clean up.
+    $sddlWithDeny    = "D:P(D;;FR;;;$acctSid)(A;;FR;;;$acctSid)(A;;FA;;;BA)(A;;FA;;;SY)"
+    $sddlWithoutDeny = "D:P(A;;FR;;;$acctSid)(A;;FA;;;BA)(A;;FA;;;SY)"
+    function Set-Dacl($path,$dacl){
+        $sd = Get-Acl $path
+        $sd.SetSecurityDescriptorSddlForm($dacl,[System.Security.AccessControl.AccessControlSections]::Access)
+        Set-Acl -Path $path -AclObject $sd
+    }
+    Set-Dacl $fEnvExp $sddlWithDeny
+    $expSddl = (Get-Acl $fEnvExp).Sddl
+    $hasBoth = ($expSddl -match "\(D;;FR;;;$([regex]::Escape($acctSid))\)") -and ($expSddl -match "\(A;;FR;;;$([regex]::Escape($acctSid))\)")
+    Note ".env-exp SDDL: $expSddl"
+    Note ".env-exp carries BOTH an explicit deny AND an explicit allow for the account: $hasBoth"
+    if(-not $hasBoth){ Note "WARNING: the explicit-allow-vs-explicit-deny cell did NOT materialize -- it will be reported INVALID, not as a result" }
 
     # Q3: the FLOOR shape. NT DACLs are per-object, so a ".env*" floor can only be applied by
     # ENUMERATING matches at setup time. icacls' wildcard is command-time glob expansion, not a
@@ -182,8 +193,9 @@ try {
 
     # ---- PHASE 2: remove ONLY the deny ACEs; create the late file -----------------------------
     Section 'PHASE 2 -- remove ONLY the deny ACEs (ARM C) and create the post-setup file (Q3)'
-    & icacls $fEnv    /remove:d "$acctFull" | Out-Null; Note "removed deny from .env      rc=$LASTEXITCODE"
-    & icacls $fEnvExp /remove:d "$acctFull" | Out-Null; Note "removed deny from .env-exp  rc=$LASTEXITCODE"
+    & icacls $fEnv /remove:d "$acctFull" | Out-Null; Note "removed deny from .env rc=$LASTEXITCODE"
+    Set-Dacl $fEnvExp $sddlWithoutDeny   # identical DACL minus the single deny ACE
+    Note ".env-exp SDDL after deny removal: $((Get-Acl $fEnvExp).Sddl)"
     Show-Acl $fEnv
     Show-Acl $fEnvExp
 
@@ -209,17 +221,19 @@ try {
 
     # ---- verdicts -----------------------------------------------------------------------------
     Section 'Q2 / Q3 VERDICTS'
-    function Verdict($tag,$armB,$armC,$label){
+    function Verdict($tag,$armB,$armC,$label,$materialized){
         $v = ''
-        if($armC -ne 'OK'){ $v = "INVALID: ARM C control = $armC" }
+        if(-not $materialized){ $v = "INVALID: the cell's DACL did not materialize as intended -- no conclusion" }
+        elseif($armC -ne 'OK'){ $v = "INVALID: ARM C control = $armC" }
         elseif($armB -eq 'DENIED'){ $v = "DENY BINDS -- read with deny = DENIED, and the SAME file read OK once only the deny ACE was removed" }
         elseif($armB -eq 'OK'){ $v = "DENY INERT -- read with deny = OK" }
         else { $v = "INDETERMINATE: ARM B = $armB" }
         Write-Host "VERDICT $tag ($label): B=$armB C=$armC : $v"
         $verdicts.Add("$tag ($label) B=$armB C=$armC : $v")
     }
-    Verdict 'Q2-inherited-allow' $p1['B_env_inherited_allow'] $p2['C_env_deny_removed']    'explicit deny vs INHERITED allow'
-    Verdict 'Q2-explicit-allow'  $p1['B2_env_explicit_allow'] $p2['C2_envexp_deny_removed'] 'explicit deny vs EXPLICIT allow on the same file'
+    Verdict 'Q2-inherited-allow' $p1['B_env_inherited_allow'] $p2['C_env_deny_removed']    'explicit deny vs INHERITED allow' $true
+    Verdict 'Q2-explicit-allow'  $p1['B2_env_explicit_allow'] $p2['C2_envexp_deny_removed'] 'explicit deny vs EXPLICIT allow on the same file' $hasBoth
+    if(-not $hasBoth){ $fail.Add("the explicit-allow-vs-explicit-deny DACL did not materialize") }
 
     $q3Existing = $p1['Q3_env_local_wildcard_denied']
     $q3LateP1   = $p1['Q3_env_late_not_yet_created']

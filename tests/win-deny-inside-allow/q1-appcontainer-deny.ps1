@@ -54,6 +54,15 @@ $child = Build-ProbeChild $bin
 & icacls $stage /grant "*${ARAP}:(OI)(CI)(RX)" | Out-Null
 Write-Host "probe child: $child"
 
+# LPAC ENABLEMENT. An LPAC process ignores AAP grants, and the .NET Framework directories grant AAP
+# only -- so in run 1 every LPAC cell died at 0x80131702 CLR_E_SHIM_RUNTIMELOAD before the child ran.
+# Granting ARAP on the Framework tree lets the SAME child (and therefore the same exit-code contract)
+# run under LPAC, so the LPAC cells stay directly comparable to the ordinary AppContainer cells.
+Section 'Grant ARAP on the .NET Framework tree so an LPAC child can host the CLR'
+foreach($d in @('C:\Windows\Microsoft.NET','C:\Windows\assembly')){
+    if(Test-Path $d){ $o = (& icacls $d /grant "*${ARAP}:(OI)(CI)(RX)" /T /C /Q 2>&1 | Select-Object -Last 2 | Out-String); Note "$d rc=$LASTEXITCODE $($o.Trim())" }
+}
+
 $acName = 'NubQ1Probe_' + ([guid]::NewGuid().ToString('N').Substring(0,12))
 $acSidPtr = [IntPtr]::Zero
 $hr = [AC]::CreateAppContainerProfile($acName,$acName,'nub Q1 deny-ACE probe',[IntPtr]::Zero,0,[ref]$acSidPtr)
@@ -160,16 +169,13 @@ try {
     Test-DenyCell 'c3_allowAAP_denyAAP' $AAP      'AAP'            $AAP      'AAP'            $false 'clr'
     Test-DenyCell 'c4_allowAC_denyAAP'  $acSidStr 'per-run AC SID' $AAP      'AAP'            $false 'clr'
 
-    # Cross-check the ordinary-AppContainer answer with the OTHER reader, so the result cannot be an
-    # artifact of the C# child's own file-open path.
-    Test-DenyCell 'c1b_allowAC_denyAC_cmdreader' $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $false 'cmd'
-
-    # LPAC cells use the cmd reader: an LPAC process cannot load the .NET Framework CLR, so the C#
-    # child never starts there (measured in run 1). An LPAC child ignores AAP grants entirely, so the
-    # dir must grant the per-run AC SID or ARAP for ARM A to pass.
-    Test-DenyCell 'c5_LPAC_allowAC_denyAC'   $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $true 'cmd'
-    Test-DenyCell 'c6_LPAC_allowARAP_denyAC' $ARAP     'ARAP'           $acSidStr 'per-run AC SID' $true 'cmd'
-    Test-DenyCell 'c7_LPAC_allowARAP_denyARAP' $ARAP   'ARAP'           $ARAP     'ARAP'           $true 'cmd'
+    # LPAC cells. An LPAC child ignores AAP grants entirely, so the cell dir must grant the per-run
+    # AC SID or ARAP for ARM A to pass. (Run 2 tried a cmd.exe-based reader here to dodge the CLR
+    # problem; cmd.exe could not read even the ARM A control file under an ordinary AppContainer,
+    # so it is not a usable reader and the ARAP-on-Framework grant above is the fix instead.)
+    Test-DenyCell 'c5_LPAC_allowAC_denyAC'     $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $true 'clr'
+    Test-DenyCell 'c6_LPAC_allowARAP_denyAC'   $ARAP     'ARAP'           $acSidStr 'per-run AC SID' $true 'clr'
+    Test-DenyCell 'c7_LPAC_allowARAP_denyARAP' $ARAP     'ARAP'           $ARAP     'ARAP'           $true 'clr'
 }
 finally {
     [void][AC]::DeleteAppContainerProfile($acName)
