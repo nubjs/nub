@@ -4,12 +4,21 @@
 //! `$schema` typing rule, unknown-key rejection at every REMAINING object level
 //! (`dlx`, `install.sandbox` axes, `dlx.sandbox` axes), wrapper-type errors at
 //! the nested positions, and one full-surface golden shape.
+//!
+//! `dlx` is global-only, so every case that reaches into it goes through
+//! [`parse_global_config`]; the project parser refuses the section outright.
 
 use super::*;
 
+/// Each row below names the parser for the file that may legally hold its key,
+/// so a case keeps testing the reader it actually describes.
+type Parse = fn(&str) -> Result<ProjectConfig>;
+const PROJECT: Parse = parse_project_config;
+const GLOBAL: Parse = parse_global_config;
+
 #[test]
 fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
-    let cfg = parse_project_config(
+    let cfg = parse_global_config(
         r#"{
           "$schema": "https://nubjs.com/schema/latest.json",
           "nodeCompat": false,
@@ -63,12 +72,12 @@ fn schema_field_must_be_a_string() {
 
 #[test]
 fn schema_key_is_blessed_at_the_root_only() {
-    for (text, path) in [
-        (r#"{ "install": { "$schema": "x" } }"#, "install"),
-        (r#"{ "dlx": { "$schema": "x" } }"#, "dlx"),
-        (r#"{ "sandbox": { "$schema": "x" } }"#, "sandbox"),
+    for (parse, text, path) in [
+        (PROJECT, r#"{ "install": { "$schema": "x" } }"#, "install"),
+        (GLOBAL, r#"{ "dlx": { "$schema": "x" } }"#, "dlx"),
+        (PROJECT, r#"{ "sandbox": { "$schema": "x" } }"#, "sandbox"),
     ] {
-        let err = parse_project_config(text).expect_err("nested $schema must fail loud");
+        let err = parse(text).expect_err("nested $schema must fail loud");
         match err {
             ConfigError::UnknownKey {
                 path: got_path,
@@ -86,20 +95,27 @@ fn schema_key_is_blessed_at_the_root_only() {
 fn unknown_keys_fail_loud_at_every_nested_object_level() {
     // Root, `install`, and top-level `sandbox` axes are covered by the sibling
     // tests module; these are the remaining object levels.
-    for (text, path, key) in [
-        (r#"{ "dlx": { "consnt": "never" } }"#, "dlx", "consnt"),
+    for (parse, text, path, key) in [
         (
+            GLOBAL,
+            r#"{ "dlx": { "consnt": "never" } }"#,
+            "dlx",
+            "consnt",
+        ),
+        (
+            PROJECT,
             r#"{ "install": { "sandbox": { "disk": true } } }"#,
             "install.sandbox",
             "disk",
         ),
         (
+            GLOBAL,
             r#"{ "dlx": { "sandbox": { "network": [] } } }"#,
             "dlx.sandbox",
             "network",
         ),
     ] {
-        let err = parse_project_config(text).expect_err(&format!("{text} must fail loud"));
+        let err = parse(text).expect_err(&format!("{text} must fail loud"));
         match err {
             ConfigError::UnknownKey {
                 path: got_path,
@@ -115,25 +131,28 @@ fn unknown_keys_fail_loud_at_every_nested_object_level() {
 
 #[test]
 fn wrong_wrapper_types_report_the_nested_path() {
-    for (text, path, expected) in [
-        (r#"{ "dlx": [] }"#, "dlx", "an object"),
+    for (parse, text, path, expected) in [
+        (GLOBAL, r#"{ "dlx": [] }"#, "dlx", "an object"),
         (
+            PROJECT,
             r#"{ "install": { "sandbox": 5 } }"#,
             "install.sandbox",
             "a boolean, string (preset or \"./file.json\"), or object",
         ),
         (
+            GLOBAL,
             r#"{ "dlx": { "sandbox": 5 } }"#,
             "dlx.sandbox",
             "a boolean, string (preset or \"./file.json\"), or object",
         ),
         (
+            GLOBAL,
             r#"{ "dlx": { "sandbox": { "fs": "rw" } } }"#,
             "dlx.sandbox.fs",
             "a boolean, array, or object",
         ),
     ] {
-        let err = parse_project_config(text).expect_err(&format!("{text} must fail loud"));
+        let err = parse(text).expect_err(&format!("{text} must fail loud"));
         match err {
             ConfigError::Type {
                 path: got_path,

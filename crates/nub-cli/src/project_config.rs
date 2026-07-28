@@ -11,6 +11,9 @@
 //! file uses. camelCase keys. `$schema` is the one blessed non-field key
 //! (accepted + ignored). Every other unrecognized key fails loud.
 //!
+//! The two files share one schema except for [`GLOBAL_ONLY_KEYS`], which the
+//! global file alone may carry — see [`ConfigScope`] for why.
+//!
 //! Project files are discovered from the invocation's final working directory.
 //! Sandbox values are parsed and retained for forward compatibility, but no
 //! runtime, install, or dlx consumer applies them yet.
@@ -71,6 +74,10 @@ pub enum ConfigError {
     Parse(String),
     /// A key nub does not recognize at `path` (fail-loud, not a silent no-op).
     UnknownKey { path: String, key: String },
+    /// A recognized root section a project file may not carry — distinct from
+    /// [`ConfigError::UnknownKey`] so the author is not sent hunting for a
+    /// misspelling that isn't there. See [`GLOBAL_ONLY_KEYS`].
+    GlobalOnlyKey { key: String },
     /// The value at `path` has the wrong JSON type.
     Type {
         path: String,
@@ -87,6 +94,25 @@ impl fmt::Display for ConfigError {
             ConfigError::Parse(m) => write!(f, "parsing {FILE_NAME}: {m}"),
             ConfigError::UnknownKey { path, key } => {
                 write!(f, "unknown key `{key}` in {path} of {FILE_NAME}")
+            }
+            ConfigError::GlobalOnlyKey { key } => {
+                // Name the destination concretely — the whole failure mode is an
+                // author who wrote a valid section into the wrong file. The path
+                // honors `XDG_CONFIG_HOME` and the Windows home, so resolve it
+                // rather than printing a `~/.config` that may not be theirs.
+                match crate::config::config_path() {
+                    Some(path) => write!(
+                        f,
+                        "`{key}` is configured globally: move it to {}. \
+                         Settings that configure your machine are not read from a checkout.",
+                        path.display()
+                    ),
+                    None => write!(
+                        f,
+                        "`{key}` is configured globally: move it to the global {FILE_NAME}. \
+                         Settings that configure your machine are not read from a checkout."
+                    ),
+                }
             }
             ConfigError::Type { path, expected } => {
                 write!(f, "`{path}` in {FILE_NAME} must be {expected}")
@@ -436,7 +462,7 @@ pub fn parse_project_config(text: &str) -> Result<ProjectConfig> {
         return Ok(ProjectConfig::default());
     };
     let obj = as_object(&value, "")?;
-    validate_root(obj)
+    validate_root(obj, ConfigScope::Project)
 }
 
 fn parse_global_config(text: &str) -> Result<ProjectConfig> {
@@ -454,7 +480,7 @@ fn parse_global_config(text: &str) -> Result<ProjectConfig> {
         })
         .and_then(|value| ImplicitDlx::parse(&value));
     obj.retain(|key, _| ROOT_KEYS.contains(&key.as_str()));
-    let mut config = validate_root(&obj)?;
+    let mut config = validate_root(&obj, ConfigScope::Global)?;
     if config.dlx.consent.is_none() {
         config.dlx.consent = legacy_consent;
     }
@@ -1037,7 +1063,34 @@ fn reject_unknown_keys(
     Ok(())
 }
 
-fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> {
+/// Which file is being parsed. The two differ in exactly one way: `dlx` governs
+/// whether `nubx` may reach the registry on a local miss, which is a decision
+/// about the operator's own machine, not about the checkout. Honouring it from a
+/// project file would let a cloned repository widen a consent the user set
+/// globally, so the section is global-only and a project file carrying one is an
+/// error.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigScope {
+    Project,
+    Global,
+}
+
+/// Sections only the global file may carry. Also the source of truth the
+/// published schema is checked against — the schema describes the PROJECT file,
+/// so every key here must be absent from it.
+const GLOBAL_ONLY_KEYS: &[&str] = &["dlx"];
+
+fn validate_root(
+    obj: &serde_json::Map<String, Value>,
+    scope: ConfigScope,
+) -> Result<ProjectConfig> {
+    if scope == ConfigScope::Project
+        && let Some(key) = obj
+            .keys()
+            .find(|key| GLOBAL_ONLY_KEYS.contains(&key.as_str()))
+    {
+        return Err(ConfigError::GlobalOnlyKey { key: key.clone() });
+    }
     reject_unknown_keys(obj, "", ROOT_KEYS)?;
 
     // `$schema` is accepted + ignored, but still typed: the published schema
@@ -1083,6 +1136,7 @@ fn validate_root(obj: &serde_json::Map<String, Value>) -> Result<ProjectConfig> 
     if let Some(v) = obj.get("install") {
         cfg.install = validate_install(v, "install")?;
     }
+    // Global scope only: the project arm returned above.
     if let Some(v) = obj.get("dlx") {
         cfg.dlx = validate_dlx(v, "dlx")?;
     }
@@ -1330,6 +1384,12 @@ mod tests {
 
     fn parse(text: &str) -> ProjectConfig {
         parse_project_config(text).expect("valid config")
+    }
+
+    /// The global file's parser. `dlx` bodies must go through this one — the
+    /// project parser rejects them by design.
+    fn parse_global(text: &str) -> ProjectConfig {
+        parse_global_config(text).expect("valid global config")
     }
 
     #[test]
@@ -1647,7 +1707,7 @@ mod tests {
 
     #[test]
     fn dlx_block_parses() {
-        let cfg = parse(
+        let cfg = parse_global(
             r#"{
               "dlx": {
                 "consent": "never",
@@ -1664,9 +1724,51 @@ mod tests {
     #[test]
     fn dlx_consent_rejects_unknown_value() {
         assert!(matches!(
-            parse_project_config(r#"{ "dlx": { "consent": "always" } }"#),
+            parse_global_config(r#"{ "dlx": { "consent": "always" } }"#),
             Err(ConfigError::Value { .. })
         ));
+    }
+
+    #[test]
+    fn dlx_is_rejected_in_a_project_file_and_accepted_in_the_global_one() {
+        let body = r#"{ "dlx": { "consent": "prompt" } }"#;
+        let err = parse_project_config(body).expect_err("a project dlx block must fail loud");
+        assert!(
+            matches!(&err, ConfigError::GlobalOnlyKey { key } if key.as_str() == "dlx"),
+            "a correctly-spelled global-only section must not report as a typo: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("`dlx`"),
+            "message must name the key: {message}"
+        );
+        assert!(
+            message.contains("configured globally"),
+            "message must say the section belongs to the global file: {message}"
+        );
+        assert!(
+            !message.contains("unknown key"),
+            "the typo wording must not leak into the scope error: {message}"
+        );
+
+        // The same body is the point of the global file — a project `prompt`
+        // must not be able to widen a global `never`.
+        assert_eq!(
+            parse_global(body).dlx.consent,
+            Some(ImplicitDlx::Prompt),
+            "the global file still accepts the section"
+        );
+    }
+
+    #[test]
+    fn a_project_files_own_sections_still_report_as_typos() {
+        // The scope check runs before unknown-key rejection, so guard that it
+        // did not swallow the ordinary misspelling path.
+        let err = parse_project_config(r#"{ "instal": {} }"#).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownKey { key, .. } if key.as_str() == "instal"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1806,7 +1908,7 @@ mod tests {
     }
 
     #[test]
-    fn published_schema_exposes_only_active_parser_keys() {
+    fn published_schema_exposes_only_active_project_parser_keys() {
         fn keys(value: &Value, pointer: &str) -> std::collections::BTreeSet<String> {
             value
                 .pointer(pointer)
@@ -1816,10 +1918,13 @@ mod tests {
                 .cloned()
                 .collect()
         }
+        // The published schema is what an editor validates a PROJECT file
+        // against, so it carries neither the inert sandbox surface nor any
+        // global-only section — an editor must not bless what the parser rejects.
         fn active(values: &[&str]) -> std::collections::BTreeSet<String> {
             values
                 .iter()
-                .filter(|value| **value != "sandbox")
+                .filter(|value| **value != "sandbox" && !GLOBAL_ONLY_KEYS.contains(*value))
                 .map(|value| (*value).to_string())
                 .collect()
         }
@@ -1832,10 +1937,12 @@ mod tests {
             keys(&schema, "/properties/install/properties"),
             active(INSTALL_KEYS)
         );
-        assert_eq!(
-            keys(&schema, "/properties/dlx/properties"),
-            active(DLX_KEYS)
-        );
+        for key in GLOBAL_ONLY_KEYS {
+            assert!(
+                schema.pointer(&format!("/properties/{key}")).is_none(),
+                "`{key}` is global-only, so the project schema must not offer it"
+            );
+        }
         assert!(schema.pointer("/$defs/sandboxSetting").is_none());
         assert_eq!(
             schema.get("$id").and_then(Value::as_str),
@@ -1900,8 +2007,8 @@ mod tests {
             ImplicitDlx::Never
         );
 
-        let project = LoadedConfig {
-            source: ConfigSource::file(ConfigSourceKind::Project, Path::new("/project/nub.jsonc")),
+        let global = LoadedConfig {
+            source: ConfigSource::file(ConfigSourceKind::Global, Path::new("/global/nub.jsonc")),
             values: ProjectConfig {
                 dlx: DlxConfig {
                     consent: Some(ImplicitDlx::Prompt),
@@ -1912,8 +2019,8 @@ mod tests {
         };
         let snapshot = resolve_effective_config(
             Path::new("/cwd"),
+            Some(global),
             None,
-            Some(project),
             ConfigOverlays {
                 defaults: ProjectConfig::builtin_defaults(),
                 ..ConfigOverlays::default()
@@ -1926,36 +2033,38 @@ mod tests {
     }
 
     #[test]
-    fn project_dlx_env_file_sources_anchor_to_the_winning_file() {
+    fn dlx_env_file_sources_anchor_to_the_global_file_not_the_cwd() {
         let dir = tempfile::tempdir().unwrap();
-        let project_root = dir.path().join("project");
-        let cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(project_root.join("config")).unwrap();
+        let global_root = dir.path().join("config/nub");
+        let cwd = dir.path().join("project/packages/app");
+        std::fs::create_dir_all(global_root.join("env")).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::write(
-            project_root.join(FILE_NAME),
-            r#"{ "dlx": { "envFile": ["./config/first.env", "./config/second.env"] } }"#,
+            global_root.join(FILE_NAME),
+            r#"{ "dlx": { "envFile": ["./env/first.env", "./env/second.env"] } }"#,
         )
         .unwrap();
         std::fs::write(
-            project_root.join("config/first.env"),
+            global_root.join("env/first.env"),
             "DLX_VALUE=first\nCHAIN=$BASE\n",
         )
         .unwrap();
         std::fs::write(
-            project_root.join("config/second.env"),
+            global_root.join("env/second.env"),
             "DLX_VALUE=second\nBASE=expanded\n",
         )
         .unwrap();
 
-        let project = load_project_config(&cwd).unwrap();
-        let snapshot = resolve_effective_config(&cwd, None, project, ConfigOverlays::default());
-        let values = dlx_env_for(&snapshot).expect("project dlx env is active");
+        let global = read_global_config_at(&global_root.join(FILE_NAME)).unwrap();
+        let snapshot =
+            resolve_effective_config(&cwd, Some(global), None, ConfigOverlays::default());
+        let values = dlx_env_for(&snapshot).expect("global dlx env is active");
         assert_eq!(values.get("DLX_VALUE").map(String::as_str), Some("second"));
         assert_eq!(values.get("CHAIN").map(String::as_str), Some("expanded"));
         assert_eq!(
             snapshot.sources.get(&ConfigKey::DlxEnvFile).unwrap().root,
-            project_root
+            global_root,
+            "a relative source resolves next to the file that set it, not the cwd"
         );
     }
 
@@ -1971,11 +2080,10 @@ mod tests {
         ] {
             let snapshot = resolve_effective_config(
                 Path::new("/cwd"),
-                None,
                 Some(LoadedConfig {
                     source: ConfigSource::file(
-                        ConfigSourceKind::Project,
-                        Path::new("/project/nub.jsonc"),
+                        ConfigSourceKind::Global,
+                        Path::new("/global/nub.jsonc"),
                     ),
                     values: ProjectConfig {
                         dlx: DlxConfig {
@@ -1986,6 +2094,7 @@ mod tests {
                         ..ProjectConfig::default()
                     },
                 }),
+                None,
                 ConfigOverlays::default(),
             );
             assert_eq!(dlx_env_for(&snapshot), expected);
@@ -2201,7 +2310,14 @@ mod tests {
                 "dlx",
             ]
         );
-        let text = r#"{
+        assert!(
+            GLOBAL_ONLY_KEYS.iter().all(|key| ROOT_KEYS.contains(key)),
+            "a global-only key must be a real root key, or the scope filter is a no-op"
+        );
+
+        // Everything outside `GLOBAL_ONLY_KEYS` must read identically through
+        // both parsers — the scope split is one carve-out, not two schemas.
+        let shared = r#"{
           "$schema": "https://nubjs.com/schema/latest.json",
           "nodeCompat": false,
           "preload": [],
@@ -2222,19 +2338,33 @@ mod tests {
             "minimumReleaseAgeExclude": [],
             "nodeOptions": [],
             "sandbox": false
-          },
-          "dlx": { "consent": "prompt", "sandbox": false, "envFile": false }
+          }
         }"#;
         let dir = tempfile::tempdir().unwrap();
         let project_path = dir.path().join("project.jsonc");
         let global_path = dir.path().join("global.jsonc");
-        std::fs::write(&project_path, text).unwrap();
-        std::fs::write(&global_path, text).unwrap();
+        std::fs::write(&project_path, shared).unwrap();
+        std::fs::write(&global_path, shared).unwrap();
         let project = read_project_config_at(&project_path).unwrap();
         let global = read_global_config_at(&global_path).unwrap();
         assert_eq!(project.values, global.values);
         assert_eq!(project.source.kind, ConfigSourceKind::Project);
         assert_eq!(global.source.kind, ConfigSourceKind::Global);
+
+        let with_dlx = r#"{
+          "nodeCompat": false,
+          "dlx": { "consent": "prompt", "sandbox": false, "envFile": false }
+        }"#;
+        std::fs::write(&project_path, with_dlx).unwrap();
+        std::fs::write(&global_path, with_dlx).unwrap();
+        let global = read_global_config_at(&global_path).unwrap();
+        assert_eq!(global.values.dlx.consent, Some(ImplicitDlx::Prompt));
+        assert_eq!(global.values.dlx.env_file, Some(EnvFileSetting::Disabled));
+        assert_eq!(global.values.dlx.sandbox, Some(SandboxSetting::Disabled));
+        assert!(matches!(
+            read_project_config_at(&project_path),
+            Err(ConfigError::GlobalOnlyKey { .. })
+        ));
     }
 
     #[test]

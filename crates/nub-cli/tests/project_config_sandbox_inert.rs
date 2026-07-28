@@ -86,16 +86,17 @@ fn restrictive_install_sandbox_config_is_inert_for_an_offline_lifecycle_install(
         "baseline outside-root write"
     );
 
-    // Fully-restrictive values at every sandbox position, alongside the
-    // `install.nodeOptions` liveness probe. If any consumer activated a
-    // posture, the env canary or the outside-project write would diverge.
+    // Fully-restrictive values at every sandbox position a project file may
+    // hold, alongside the `install.nodeOptions` liveness probe. If any consumer
+    // activated a posture, the env canary or the outside-project write would
+    // diverge. The third position, `dlx.sandbox`, is global-only and is covered
+    // by the global-config sibling below.
     let restrictive = r#"{
       "sandbox": { "fs": false, "net": false, "env": false },
       "install": {
         "nodeOptions": ["--stack-trace-limit=19"],
         "sandbox": { "fs": false, "net": false, "env": false }
-      },
-      "dlx": { "sandbox": { "fs": false, "net": false, "env": false } }
+      }
     }"#;
     let (code, observed) =
         run_offline_lifecycle_install(&temp.path().join("configured"), Some(restrictive), None);

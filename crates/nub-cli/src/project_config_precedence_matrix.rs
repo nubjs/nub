@@ -7,6 +7,11 @@
 //! One spec per key. Values are derived from a per-layer tag so ADJACENT layers
 //! always hold distinguishable values (bools/enums alternate by parity), which
 //! is what catches an off-by-one in the merge order.
+//!
+//! Every key is exercised at every layer, `dlx.*` included, even though a
+//! project FILE may not carry `dlx`: that carve-out lives in the parser, and the
+//! merge is deliberately scope-blind. Skipping layers here would trade a real
+//! merge-order check for a redundant restatement of the parser's gate.
 
 use super::*;
 use crate::config::ImplicitDlx;

@@ -45,6 +45,14 @@ fn project_layer(values: ProjectConfig) -> Option<LoadedConfig> {
     })
 }
 
+/// The layer `dlx` values arrive on — the section is global-only.
+fn global_layer(values: ProjectConfig) -> Option<LoadedConfig> {
+    Some(LoadedConfig {
+        source: ConfigSource::file(ConfigSourceKind::Global, Path::new("/global/nub.jsonc")),
+        values,
+    })
+}
+
 #[test]
 fn five_shapes_round_trip_losslessly_at_the_nested_positions() {
     for (raw, expected) in five_shapes() {
@@ -56,7 +64,7 @@ fn five_shapes_round_trip_losslessly_at_the_nested_positions() {
             "install.sandbox: {raw}"
         );
 
-        let dlx = parse_project_config(&format!(r#"{{ "dlx": {{ "sandbox": {raw} }} }}"#))
+        let dlx = parse_global_config(&format!(r#"{{ "dlx": {{ "sandbox": {raw} }} }}"#))
             .expect("dlx.sandbox shape parses");
         assert_eq!(dlx.dlx.sandbox, Some(expected), "dlx.sandbox: {raw}");
     }
@@ -83,10 +91,18 @@ fn runtime_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
         let mut values = base_values.clone();
         values.sandbox = Some(shape.clone());
         values.install.sandbox = Some(shape.clone());
-        values.dlx.sandbox = Some(shape);
+        // The third position rides the global layer, which is the only file
+        // `dlx` may come from.
+        let global = ProjectConfig {
+            dlx: DlxConfig {
+                sandbox: Some(shape),
+                ..DlxConfig::default()
+            },
+            ..ProjectConfig::default()
+        };
         let projected = resolve_effective_config(
             Path::new("/cwd"),
-            None,
+            global_layer(global),
             project_layer(values),
             ConfigOverlays::default(),
         )
@@ -110,11 +126,11 @@ fn dlx_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
     };
     let baseline_snapshot = resolve_effective_config(
         Path::new("/cwd"),
-        None,
-        project_layer(ProjectConfig {
+        global_layer(ProjectConfig {
             dlx: base_dlx.clone(),
             ..ProjectConfig::default()
         }),
+        None,
         ConfigOverlays::default(),
     );
     let baseline_env = dlx_env_for(&baseline_snapshot);
@@ -127,11 +143,11 @@ fn dlx_projection_with_any_sandbox_shape_equals_the_no_sandbox_baseline() {
         dlx.sandbox = Some(shape);
         let snapshot = resolve_effective_config(
             Path::new("/cwd"),
-            None,
-            project_layer(ProjectConfig {
+            global_layer(ProjectConfig {
                 dlx,
                 ..ProjectConfig::default()
             }),
+            None,
             ConfigOverlays::default(),
         );
         assert_eq!(

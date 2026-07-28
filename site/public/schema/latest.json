@@ -126,23 +126,6 @@
           "description": "Node options applied to dependency lifecycle scripts."
         }
       }
-    },
-    "dlx": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "consent": {
-          "enum": [
-            "prompt",
-            "never"
-          ],
-          "description": "Whether an implicit nubx registry fetch may be confirmed."
-        },
-        "envFile": {
-          "$ref": "#/$defs/envFileSetting",
-          "description": "Environment-file loading for nubx and nub dlx."
-        }
-      }
     }
   },
   "$defs": {

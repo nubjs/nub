@@ -107,15 +107,11 @@ Everything above works with no configuration. When you want to change a default,
 
   "install": {
     "minimumReleaseAge": "3d"            // refuse dependencies published in the last 3 days
-  },
-
-  "dlx": {
-    "consent": "never"                   // never fetch an uninstalled CLI from the registry
   }
 }
 ```
 
-Unknown keys and invalid values stop the command with an error, so a typo never silently does nothing. See [nub.jsonc](/docs/config) for every field.
+Unknown keys and invalid values stop the command with an error, so a typo never silently does nothing. See [nub.jsonc](/docs/config) for every field, and for the block that lives in the global file instead.
 
 ## Requirements
 

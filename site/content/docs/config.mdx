@@ -33,12 +33,18 @@ The file uses JSON with comments and trailing commas. Unknown keys and invalid v
     "minimumReleaseAge": "3d",               // reject versions published too recently
     "minimumReleaseAgeExclude": ["@company/*"],
     "nodeOptions": ["--max-old-space-size=8192"] // for lifecycle scripts
-  },
+  }
+}
+```
 
-  // ── Temporary package runs ──
+One block, `dlx`, is read from the global file instead:
+
+```jsonc title="~/.config/nub/nub.jsonc"
+{
+  // ...
   "dlx": {
     "consent": "prompt",                     // prompt | never
-    "envFile": "./env/tools.env"             // same forms as the top-level envFile
+    "envFile": "./tools.env"                 // same forms as the top-level envFile
   }
 }
 ```
@@ -56,6 +62,8 @@ Add the public schema URL for editor completion and validation.
 }
 ```
 
+The published schema describes the project file, so it does not carry the global-only `dlx` block. Released versions are listed at [nubjs.com/schema](https://nubjs.com/schema).
+
 ## Project and global configuration
 
 Use a project `nub.jsonc` for settings that belong to one repository. Use the global file for personal defaults that should apply everywhere:
@@ -65,6 +73,8 @@ Use a project `nub.jsonc` for settings that belong to one repository. Use the gl
 ```
 
 Setting `XDG_CONFIG_HOME` moves it to `$XDG_CONFIG_HOME/nub/nub.jsonc`. On Windows the default is `%APPDATA%\nub\nub.jsonc`.
+
+Both files take the same fields, with one exception: the [`dlx`](#dlx) block is read from the global file only.
 
 Project files fail loudly when they contain invalid values. The global file is best-effort: Nub ignores it when it cannot be read or parsed.
 
@@ -534,13 +544,13 @@ Pass Node options to dependency lifecycle scripts.
 
 ## `dlx`
 
-The dlx block configures temporary package runs through `nubx`, `nub dlx`, and `nub x`.
+The dlx block configures temporary package runs through `nubx`, `nub dlx`, and `nub x`. It is read from the global file only: reaching the registry is a decision about your machine, not about one repository, so a project `nub.jsonc` carrying a `dlx` block stops the command rather than loosening a policy you set for yourself.
 
 ### `dlx.consent`
 
 Ask before an implicit `nubx` registry fetch.
 
-```jsonc title="nub.jsonc"
+```jsonc title="~/.config/nub/nub.jsonc"
 {
   // ...
   "dlx": {
@@ -551,7 +561,7 @@ Ask before an implicit `nubx` registry fetch.
 
 Disable implicit registry fetches.
 
-```jsonc title="nub.jsonc"
+```jsonc title="~/.config/nub/nub.jsonc"
 {
   // ...
   "dlx": {
@@ -566,18 +576,18 @@ Explicit `nub dlx` runs still work because the command itself supplies consent.
 
 Use a separate environment file for temporary tools.
 
-```jsonc title="nub.jsonc"
+```jsonc title="~/.config/nub/nub.jsonc"
 {
   // ...
   "dlx": {
-    "envFile": "./env/tools.env"
+    "envFile": "./tools.env"  // resolved next to the global file
   }
 }
 ```
 
 Disable environment-file loading for temporary tools.
 
-```jsonc title="nub.jsonc"
+```jsonc title="~/.config/nub/nub.jsonc"
 {
   // ...
   "dlx": {
@@ -586,4 +596,4 @@ Disable environment-file loading for temporary tools.
 }
 ```
 
-The field accepts the same boolean, string, and string-array forms as the top-level `envFile` field.
+The field accepts the same boolean, string, and string-array forms as the top-level `envFile` field. Setting it to `true` reads the project's own automatic environment files, the same set a normal run discovers.

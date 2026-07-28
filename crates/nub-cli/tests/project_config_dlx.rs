@@ -28,14 +28,14 @@ fn run_nubx(alias: &Path, cwd: &Path, config_home: &Path, args: &[&str]) -> Outp
         .unwrap()
 }
 
-fn write_global(config_home: &Path, body: &str) {
+/// The `dlx` section is global-only, so every fixture here writes
+/// `$XDG_CONFIG_HOME/nub/nub.jsonc`. Returns that file's directory: a relative
+/// `dlx.envFile` source resolves against it, not against the project.
+fn write_global(config_home: &Path, body: &str) -> PathBuf {
     let dir = config_home.join("nub");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("nub.jsonc"), body).unwrap();
-}
-
-fn write_project(cwd: &Path, body: &str) {
-    std::fs::write(cwd.join("nub.jsonc"), body).unwrap();
+    dir
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn global_typed_and_legacy_consent_feed_the_implicit_nubx_gate() {
         r#"{ "dlx": { "consent": "never" } }"#,
         r#"{ "exec": { "implicitDlx": "never" } }"#,
     ] {
-        write_global(&config_home, body);
+        let _ = write_global(&config_home, body);
         let output = run_nubx(
             &alias,
             &cwd,
@@ -65,7 +65,7 @@ fn global_typed_and_legacy_consent_feed_the_implicit_nubx_gate() {
         );
     }
 
-    write_global(&config_home, r#"{ "dlx": { "consent": "prompt" } }"#);
+    let _ = write_global(&config_home, r#"{ "dlx": { "consent": "prompt" } }"#);
     let output = run_nubx(
         &alias,
         &cwd,
@@ -80,9 +80,38 @@ fn global_typed_and_legacy_consent_feed_the_implicit_nubx_gate() {
     );
 }
 
+#[test]
+fn a_project_dlx_block_aborts_the_command_and_names_the_global_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let alias = nubx_alias(temp.path());
+    let cwd = temp.path().join("project");
+    let config_home = temp.path().join("config");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let global_root = write_global(&config_home, r#"{ "dlx": { "consent": "never" } }"#);
+    // The widening a project file must not be able to perform: `prompt` against
+    // a global `never`.
+    std::fs::write(
+        cwd.join("nub.jsonc"),
+        r#"{ "dlx": { "consent": "prompt" } }"#,
+    )
+    .unwrap();
+
+    let output = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the run must abort: {stderr}");
+    assert!(
+        stderr.contains("`dlx` is configured globally"),
+        "the abort must explain the scope rule: {stderr}"
+    );
+    assert!(
+        stderr.contains(&global_root.join("nub.jsonc").display().to_string()),
+        "the abort must name the file to move it to: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
-fn project_dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
+fn dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().unwrap();
@@ -109,27 +138,24 @@ fn project_dlx_env_controls_nubx_without_enabling_dlx_sandbox() {
     let absent = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
     assert_eq!(String::from_utf8_lossy(&absent.stdout).trim(), "missing");
 
-    write_project(
-        &cwd,
+    let global_root = write_global(
+        &config_home,
         r#"{ "dlx": { "envFile": false, "sandbox": { "net": false } } }"#,
     );
     let disabled = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
     assert_eq!(String::from_utf8_lossy(&disabled.stdout).trim(), "missing");
 
-    write_project(&cwd, r#"{ "dlx": { "envFile": [] } }"#);
+    let _ = write_global(&config_home, r#"{ "dlx": { "envFile": [] } }"#);
     let empty = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
     assert_eq!(String::from_utf8_lossy(&empty.stdout).trim(), "missing");
 
-    let project_env = cwd.join("env");
-    std::fs::create_dir_all(&project_env).unwrap();
-    std::fs::write(
-        project_env.join("dlx.env"),
-        "DLX_CONFIG_VALUE=source-root\n",
-    )
-    .unwrap();
+    let global_env = global_root.join("env");
+    std::fs::create_dir_all(&global_env).unwrap();
+    std::fs::write(global_env.join("dlx.env"), "DLX_CONFIG_VALUE=source-root\n").unwrap();
     // A fully-restrictive dlx sandbox must not affect env sourcing (P6 inertness).
-    write_project(
-        &cwd,
+    // The relative source proves the anchor is the config file, not the cwd.
+    let _ = write_global(
+        &config_home,
         r#"{ "dlx": { "envFile": "./env/dlx.env", "sandbox": { "fs": false, "net": false, "env": false } } }"#,
     );
     let sourced = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
@@ -183,15 +209,19 @@ fn nubx_node_suppresses_config_env_for_local_and_forced_fetch() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&package_bin, permissions).unwrap();
 
-    std::fs::create_dir_all(cwd.join("env")).unwrap();
-    std::fs::write(cwd.join("env/dlx.env"), "DLX_CONFIG_VALUE=configured\n").unwrap();
-    write_project(
-        &cwd,
+    let global_root = write_global(
+        &config_home,
         r#"{ "dlx": {
           "envFile": "./env/dlx.env",
           "sandbox": { "fs": false, "net": false, "env": false }
         } }"#,
     );
+    std::fs::create_dir_all(global_root.join("env")).unwrap();
+    std::fs::write(
+        global_root.join("env/dlx.env"),
+        "DLX_CONFIG_VALUE=configured\n",
+    )
+    .unwrap();
 
     let local_augmented = run_nubx(&alias, &cwd, &config_home, &["show-dlx-env"]);
     assert!(
@@ -260,16 +290,16 @@ fn nub_dlx_and_x_apply_the_same_configured_environment_to_local_bins() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&bin, permissions).unwrap();
 
-    std::fs::create_dir_all(cwd.join("env")).unwrap();
+    let global_root = write_global(
+        &config_home,
+        r#"{ "dlx": { "envFile": "./env/dlx.env", "sandbox": true } }"#,
+    );
+    std::fs::create_dir_all(global_root.join("env")).unwrap();
     std::fs::write(
-        cwd.join("env/dlx.env"),
+        global_root.join("env/dlx.env"),
         "DLX_CONFIG_VALUE=shared-alias-value\n",
     )
     .unwrap();
-    write_project(
-        &cwd,
-        r#"{ "dlx": { "envFile": "./env/dlx.env", "sandbox": true } }"#,
-    );
 
     for verb in ["dlx", "x"] {
         let output = Command::new(nub_binary())
@@ -290,8 +320,10 @@ fn nub_dlx_and_x_apply_the_same_configured_environment_to_local_bins() {
         );
     }
 
+    // `true` is the automatic set, which is discovered from the PROJECT root
+    // even though the setting itself comes from the global file.
     std::fs::write(cwd.join(".env"), "DLX_CONFIG_VALUE=automatic-dlx\n").unwrap();
-    write_project(&cwd, r#"{ "dlx": { "envFile": true } }"#);
+    let _ = write_global(&config_home, r#"{ "dlx": { "envFile": true } }"#);
     let automatic = Command::new(nub_binary())
         .args(["x", "show-dlx-env"])
         .current_dir(&cwd)
@@ -310,7 +342,7 @@ fn nub_dlx_and_x_apply_the_same_configured_environment_to_local_bins() {
     );
 
     std::fs::write(cwd.join("explicit.env"), "DLX_CONFIG_VALUE=cli-wins\n").unwrap();
-    write_project(&cwd, r#"{ "dlx": { "envFile": "./env/dlx.env" } }"#);
+    let _ = write_global(&config_home, r#"{ "dlx": { "envFile": "./env/dlx.env" } }"#);
     let cli = Command::new(nub_binary())
         .args(["--env-file", "explicit.env", "dlx", "show-dlx-env"])
         .current_dir(&cwd)

@@ -64,7 +64,7 @@ export default function SchemaIndexPage() {
     <main className="mx-auto w-full max-w-3xl px-6 py-16 font-mono text-sm">
       <h1 className="text-2xl font-semibold tracking-tight">Index of /schema</h1>
       <p className="mt-4 font-sans text-fd-muted-foreground">
-        JSON Schemas for <Link href="/docs/config" className="underline underline-offset-4">nub.jsonc</Link>. Point
+        JSON Schemas for a project <Link href="/docs/config" className="underline underline-offset-4">nub.jsonc</Link>. Point
         the file&apos;s <span className="rounded bg-fd-muted px-1 py-0.5">$schema</span> key at one of
         these for editor completion and validation.
       </p>

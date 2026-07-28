@@ -39,9 +39,9 @@ A fetch runs through Nub's normal install resolver, so the `minimumReleaseAge` c
 
 ## Configuration
 
-A project [`nub.jsonc`](/docs/config) carries a [`dlx`](/docs/config#dlx) block:
+The global [`nub.jsonc`](/docs/config) carries a [`dlx`](/docs/config#dlx) block. Whether a tool may be pulled from the registry is a decision about your machine, so a project file cannot set it:
 
-```jsonc title="nub.jsonc"
+```jsonc title="~/.config/nub/nub.jsonc"
 {
   // ...
   "dlx": {
@@ -54,11 +54,11 @@ Setting it to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fe
 
 Fetched tools can also read their own environment files:
 
-```jsonc title="nub.jsonc"
+```jsonc title="~/.config/nub/nub.jsonc"
 {
   // ...
   "dlx": {
-    "envFile": "./env/tools.env"
+    "envFile": "./tools.env"  // resolved next to the global file
   }
 }
 ```
