@@ -544,19 +544,39 @@ async function oneBuild(
   }
 }
 
-// Samples the LOCAL host while remote builds run. The whole claim this tool makes is
-// "heavy builds stop touching your Mac", and that claim is only worth anything with a
-// number attached. `top -l 2` is used because the first sample of `top` is a since-boot
-// average, not an instantaneous reading — only the second sample is meaningful.
-function sampleLocal() {
-  const out = sh("top", ["-l", "2", "-n", "0", "-s", "1"]);
+// Samples the LOCAL host while remote builds run, to put a number on "heavy builds stop
+// touching your Mac".
+//
+// CPU/load alone CANNOT support that claim on a shared dev box, and pretending otherwise
+// produces a confidently wrong result: during the first 10-way fanout a SIBLING agent
+// started its own local cargo build mid-run, so the idle figure collapsed for reasons that
+// had nothing to do with this tool. So the load-INDEPENDENT signal is the one that actually
+// answers the question — how many local rustc/cargo processes exist. Remote builds
+// contribute exactly zero; ten local ones would contribute dozens.
+//
+// Must be ASYNC. A synchronous `top` blocks the event loop for ~1-2s every 15s, stalling
+// every in-flight build's I/O, delaying signal delivery, and perturbing the very measurement
+// it is taking.
+async function localBuildProcs() {
+  try {
+    const { stdout } = await execFileAsync("bash", ["-c", "pgrep -x rustc | wc -l; pgrep -x cargo | wc -l"]);
+    const [rustc, cargo] = stdout.trim().split("\n").map((n) => Number(n.trim()));
+    return { rustc: rustc || 0, cargo: cargo || 0 };
+  } catch {
+    return { rustc: 0, cargo: 0 };
+  }
+}
+
+async function sampleLocal() {
+  const { stdout: out } = await execFileAsync("top", ["-l", "2", "-n", "0", "-s", "1"], { timeout: 15_000 });
   const cpuLines = out.split("\n").filter((l) => l.startsWith("CPU usage"));
   const loadLines = out.split("\n").filter((l) => l.startsWith("Load Avg"));
   const cpu = cpuLines[cpuLines.length - 1] || "";
   const load = loadLines[loadLines.length - 1] || "";
   const idle = Number((cpu.match(/([\d.]+)% idle/) || [])[1] ?? NaN);
   const one = Number((load.match(/Load Avg:\s*([\d.]+)/) || [])[1] ?? NaN);
-  return { idle, load: one };
+  const procs = await localBuildProcs();
+  return { idle, load: one, ...procs };
 }
 
 export function isStray(creationTimestamp: string, now: number, maxAgeMs: number) {
@@ -736,19 +756,18 @@ async function main() {
     return;
   }
 
-  const before = sampleLocal();
+  const before = await sampleLocal();
   process.stdout.write(
     `remote-build: job=${a.job} fanout=${a.fanout} source=${source}\n` +
-      `remote-build: local BEFORE — idle ${before.idle}%, load ${before.load}\n`,
+      `remote-build: local BEFORE — idle ${before.idle}%, load ${before.load}, ` +
+      `local rustc=${before.rustc} cargo=${before.cargo}\n`,
   );
 
   // Sample the local host every 15s for the duration, so the contention claim carries a
   // measurement rather than an assertion.
-  const samples: Array<{ idle: number; load: number }> = [];
+  const samples: Array<{ idle: number; load: number; rustc: number; cargo: number }> = [];
   const sampler = setInterval(() => {
-    try {
-      samples.push(sampleLocal());
-    } catch {}
+    sampleLocal().then((s) => samples.push(s)).catch(() => {});
   }, 15_000);
 
   const t0 = Date.now();
@@ -757,7 +776,7 @@ async function main() {
   );
   clearInterval(sampler);
   const wall = (Date.now() - t0) / 1000;
-  const after = sampleLocal();
+  const after = await sampleLocal();
 
   const ok = results.filter((r) => r.ok);
   const failed = results.filter((r) => !r.ok);
@@ -773,12 +792,26 @@ async function main() {
     const idles = samples.map((s) => s.idle).filter((n) => !Number.isNaN(n));
     const loads = samples.map((s) => s.load).filter((n) => !Number.isNaN(n));
     const avg = (xs: number[]) => xs.reduce((p, c) => p + c, 0) / (xs.length || 1);
+    const maxRustc = Math.max(...samples.map((s) => s.rustc));
+    const maxCargo = Math.max(...samples.map((s) => s.cargo));
+    if (idles.length) {
+      process.stdout.write(
+        `remote-build: local DURING (${samples.length} samples) — idle min ${Math.min(...idles).toFixed(1)}% ` +
+          `avg ${avg(idles).toFixed(1)}%, load avg ${avg(loads).toFixed(1)}\n`,
+      );
+    }
+    // The attributable number. CPU/load on a shared box can move for reasons this tool did
+    // not cause; a local compiler process during a REMOTE build cannot be caused by it.
     process.stdout.write(
-      `remote-build: local DURING (${samples.length} samples) — idle min ${Math.min(...idles).toFixed(1)}% ` +
-        `avg ${avg(idles).toFixed(1)}%, load avg ${avg(loads).toFixed(1)}\n`,
+      `remote-build: local compiler processes peaked at rustc=${maxRustc} cargo=${maxCargo} ` +
+        `during ${results.length} remote build(s) — anything above zero came from OTHER work ` +
+        `on this machine, not from these builds.\n`,
     );
   }
-  process.stdout.write(`remote-build: local AFTER — idle ${after.idle}%, load ${after.load}\n`);
+  process.stdout.write(
+    `remote-build: local AFTER — idle ${after.idle}%, load ${after.load}, ` +
+      `local rustc=${after.rustc} cargo=${after.cargo}\n`,
+  );
 
   process.exitCode = failed.length ? 1 : 0;
 }
