@@ -420,7 +420,7 @@ pub fn apply(
     preflight: LinuxPreflight,
 ) -> Result<Prepared, Degradation> {
     if let Some(landlock) = preflight.landlock {
-        return apply_landlock(policy, spec, landlock);
+        return apply_landlock(policy, spec, landlock, tmp_dir);
     }
     let Some(confined) = preflight.confined else {
         return Ok(Prepared {
@@ -2976,6 +2976,7 @@ fn apply_landlock(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     plan: LandlockPreflight,
+    tmp_dir: Option<&Path>,
 ) -> Result<Prepared, Degradation> {
     let seccomp = build_seccomp(
         policy.net.enforce,
@@ -2990,12 +2991,32 @@ fn apply_landlock(
         reason: Some(reason),
     })?;
 
-    let (command, ruleset) =
-        super::linux_landlock::prepare_launch(policy, base_command(&spec, policy), seccomp)
-            .map_err(|reason| Degradation {
-                lost: vec!["fs".to_string()],
-                reason: Some(reason),
-            })?;
+    let mut command = base_command(&spec, policy);
+    // No mount namespace means no `/tmp` rebind, so the child is pointed at the per-run
+    // scratch dir by its real host path instead.
+    if let Some(tmp) = tmp_dir {
+        command.env("TMPDIR", tmp);
+    }
+    // Resolve the entry program the same way the bubblewrap path does, so it can be granted
+    // in its own right even when it lives outside the system read floor.
+    let child_cwd = spec
+        .cwd
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let entry_program = resolve_program(&spec.program, &child_cwd, target_path(policy).as_deref());
+
+    let (command, ruleset) = super::linux_landlock::prepare_launch(
+        policy,
+        command,
+        seccomp,
+        tmp_dir,
+        entry_program.as_deref(),
+    )
+    .map_err(|reason| Degradation {
+        lost: vec!["fs".to_string()],
+        reason: Some(reason),
+    })?;
 
     let degradation = if plan.net_tightened {
         Degradation {

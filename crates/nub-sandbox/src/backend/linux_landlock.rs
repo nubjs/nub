@@ -76,15 +76,41 @@ fn system_read_paths() -> impl Iterator<Item = &'static str> {
     super::linux::ESSENTIAL_READ_PATHS.iter().copied()
 }
 
-/// Character devices a build script legitimately needs. Granted read+write (never
-/// execute) because `/dev` as a whole is a reserved tree the mount planner refuses.
+/// The global `/proc` files a build toolchain reads — CPU count for `make -j`, memory for
+/// a linker's heuristics, `/proc/sys` for limits.
+///
+/// Deliberately NOT the whole tree, which is what bubblewrap's fresh `--proc` mount
+/// effectively gave. Landlock has no PID namespace, so a grant on `/proc` would expose every
+/// same-uid process's `/proc/<pid>/environ` and `cmdline` — the user's shell, editor, and
+/// other tools, environment variables included. That is a secret-disclosure channel the
+/// bubblewrap path did not have, and it is a strictly worse trade than the build breakage
+/// avoided. Per-process entries are consequently unreachable, INCLUDING the child's own:
+/// `/proc/self` cannot be granted because the ruleset is built before `fork`, so it would
+/// resolve to nub's PID, not the child's.
+const PROC_READ_PATHS: &[&str] = &[
+    "/proc/cpuinfo",
+    "/proc/meminfo",
+    "/proc/stat",
+    "/proc/uptime",
+    "/proc/loadavg",
+    "/proc/sys/vm/overcommit_memory",
+    "/proc/sys/kernel/osrelease",
+    "/proc/sys/kernel/ostype",
+];
+
+/// Character devices a build script legitimately needs. Granted read+write (never execute,
+/// never `IOCTL_DEV`) because `/dev` as a whole is a reserved tree the mount planner refuses.
+///
+/// `/dev/tty` is deliberately ABSENT. It is the process's CONTROLLING terminal, and handing
+/// it to a dependency's install script is the TIOCSTI injection vector the `setsid` above
+/// exists to close — granting the node back would reopen it. Bubblewrap never exposed the
+/// host's tty either: its `--dev` supplied a fresh devtmpfs.
 const DEVICE_PATHS: &[&str] = &[
     "/dev/null",
     "/dev/zero",
     "/dev/full",
     "/dev/random",
     "/dev/urandom",
-    "/dev/tty",
     "/dev/ptmx",
 ];
 
@@ -103,6 +129,15 @@ pub(crate) enum LandlockAccess {
 impl LandlockAccess {
     /// The `landlock_access_fs_t` set this access grants at `abi`.
     ///
+    /// Each arm ENUMERATES its rights rather than aliasing [`handled_access_fs`]. The two
+    /// sets answer different questions — handled = "what this ruleset governs at all",
+    /// granted = "what this path may do" — and collapsing them means every right a future
+    /// ABI adds is granted automatically the moment it becomes handled. That is how the
+    /// writable grant silently acquired `MAKE_CHAR`/`MAKE_BLOCK`, i.e. device-node creation,
+    /// which bubblewrap denied outright via `--cap-drop ALL` under a user namespace. Node
+    /// creation, socket and FIFO creation stay HANDLED (so they are denied everywhere) and
+    /// GRANTED nowhere.
+    ///
     /// PROVENANCE — the `ReadExecute` arm is why this function is spelled out rather than
     /// deferred to a helper: a bubblewrap `--ro-bind` grants EXECUTE for free, because a
     /// read-only mount still permits `execve`. Landlock does not — `LANDLOCK_ACCESS_FS_EXECUTE`
@@ -117,8 +152,24 @@ impl LandlockAccess {
             LandlockAccess::ReadExecute => {
                 ACCESS_READ_FILE | ACCESS_READ_DIR | ACCESS_EXECUTE | ioctl_dev(abi)
             }
-            LandlockAccess::ReadWrite => handled_access_fs(abi),
-            LandlockAccess::Device => ACCESS_READ_FILE | ACCESS_WRITE_FILE | ioctl_dev(abi),
+            LandlockAccess::ReadWrite => {
+                ACCESS_READ_FILE
+                    | ACCESS_READ_DIR
+                    | ACCESS_EXECUTE
+                    | ACCESS_WRITE_FILE
+                    | ACCESS_REMOVE_DIR
+                    | ACCESS_REMOVE_FILE
+                    | ACCESS_MAKE_DIR
+                    | ACCESS_MAKE_REG
+                    | ACCESS_MAKE_SYM
+                    | if abi >= 2 { ACCESS_REFER } else { 0 }
+                    | if abi >= 3 { ACCESS_TRUNCATE } else { 0 }
+                    | ioctl_dev(abi)
+            }
+            // No `IOCTL_DEV`: ABI 5+ is the first that can WITHHOLD terminal/device ioctls,
+            // so granting it back is a strict loss against the one kernel that offers the
+            // control. Ordinary read/write on these nodes needs no ioctl.
+            LandlockAccess::Device => ACCESS_READ_FILE | ACCESS_WRITE_FILE,
         }
     }
 }
@@ -235,7 +286,11 @@ pub(crate) struct LandlockGrant {
 /// whole host filesystem and is restricted only by what it may open. Everything the
 /// bubblewrap backend gets implicitly from `RootView::Minimal` must therefore be an
 /// explicit grant here.
-pub(crate) fn derive_grants(policy: &SandboxPolicy) -> Result<Vec<LandlockGrant>, String> {
+pub(crate) fn derive_grants(
+    policy: &SandboxPolicy,
+    tmp_dir: Option<&Path>,
+    entry_program: Option<&Path>,
+) -> Result<Vec<LandlockGrant>, String> {
     let plan = compile_mount_plan(policy)?;
     reject_narrowing_grants(&plan)?;
 
@@ -244,6 +299,33 @@ pub(crate) fn derive_grants(policy: &SandboxPolicy) -> Result<Vec<LandlockGrant>
         grants.push(LandlockGrant {
             path: PathBuf::from(path),
             access: LandlockAccess::ReadExecute,
+        });
+    }
+    for path in PROC_READ_PATHS {
+        grants.push(LandlockGrant {
+            path: PathBuf::from(path),
+            access: LandlockAccess::ReadExecute,
+        });
+    }
+    // The entry program in its own right. Bubblewrap bound it separately from the read floor
+    // so an interpreter living outside that floor — nub's provisioned Node under its own
+    // store, a CI runner's `/opt/hostedtoolcache` Node — stays launchable however narrow the
+    // floor is; without the equivalent here `execve` fails with EACCES before the script runs.
+    if let Some(program) = entry_program {
+        grants.push(LandlockGrant {
+            path: program.to_path_buf(),
+            access: LandlockAccess::ReadExecute,
+        });
+    }
+    // `TmpMode::Private` gives the jail a per-run scratch dir, which bubblewrap bound over
+    // `/tmp`. There is no mount namespace to rebind here, so the child gets the host path
+    // granted directly and `TMPDIR` pointed at it. Without this the whole toolchain loses its
+    // temp dir — `gcc` writes `/tmp/ccXXXXXX.s`, `sh` writes here-docs — and every native
+    // build fails for a reason no denial message would explain.
+    if let Some(tmp) = tmp_dir {
+        grants.push(LandlockGrant {
+            path: tmp.to_path_buf(),
+            access: LandlockAccess::ReadWrite,
         });
     }
     for path in DEVICE_PATHS {
@@ -299,9 +381,13 @@ fn reject_narrowing_grants(plan: &[MountGrant]) -> Result<(), String> {
 /// absent AUTHORED policy path; what reaches here additionally includes the system closure,
 /// which is deliberately distro-spanning (`/libx32`, `/etc/pki`, `/etc/crypto-policies`
 /// exist almost nowhere at once), so refusing on absence would abort every confined run.
-pub(crate) fn build(policy: &SandboxPolicy) -> Result<LandlockRuleset, String> {
+pub(crate) fn build(
+    policy: &SandboxPolicy,
+    tmp_dir: Option<&Path>,
+    entry_program: Option<&Path>,
+) -> Result<LandlockRuleset, String> {
     let abi = probe_abi().ok_or_else(|| "landlock is not available on this kernel".to_string())?;
-    let grants = derive_grants(policy)?;
+    let grants = derive_grants(policy, tmp_dir, entry_program)?;
 
     let attr = RulesetAttr {
         handled_access_fs: handled_access_fs(abi),
@@ -393,6 +479,63 @@ fn is_directory(fd: RawFd) -> bool {
     rc == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR
 }
 
+/// Linux capability-set header version 3 (64-bit caps, two 32-bit data blocks).
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+/// Drop every capability from the calling thread — the analogue of bubblewrap's
+/// `--cap-drop ALL`, which the Landlock path loses along with the user namespace.
+///
+/// This matters precisely where this backend is most needed. `nub install` inside a
+/// container commonly runs as root, and Docker's default set still carries `CAP_CHOWN`,
+/// `CAP_FOWNER`, `CAP_DAC_OVERRIDE` and `CAP_MKNOD`. Landlock does not mediate `chmod`,
+/// `chown`, `setxattr` or `utime` at any ABI, so DAC is the only thing standing between a
+/// dependency's install script and host-wide metadata rewriting — and `CAP_DAC_OVERRIDE`
+/// removes DAC. Unprivileged callers hold nothing to drop and this is a no-op for them.
+///
+/// The BOUNDING set is dropped first, because doing so needs `CAP_SETPCAP` in the effective
+/// set; zeroing the sets first would make the bounding drop fail. A bounding drop that fails
+/// for lack of privilege is not an error — it means there was no capability to remove.
+///
+/// # Safety
+/// Must be called between `fork` and `execve`. Performs only raw syscalls.
+unsafe fn drop_all_capabilities() -> Result<(), std::io::Error> {
+    // 64 covers every capability the kernel defines; past the last one `prctl` returns
+    // EINVAL, which is the loop's natural terminator and not a failure.
+    for cap in 0..64 {
+        unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0) };
+    }
+    let header = CapHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let data = [CapData::default(); 2];
+    if unsafe {
+        libc::syscall(
+            libc::SYS_capset,
+            &header as *const CapHeader,
+            data.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Enforce the ruleset on the CALLING thread and its future children. Async-signal-safe:
 /// two raw syscalls, no allocation, nothing that can take a lock the forking parent held.
 ///
@@ -410,7 +553,9 @@ pub(crate) unsafe fn restrict_self(ruleset_fd: RawFd) -> Result<(), libc::c_int>
     }
     let rc = unsafe { libc::syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0u32) };
     if rc != 0 {
-        return Err(unsafe { *libc::__errno_location() });
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EINVAL));
     }
     Ok(())
 }
@@ -453,15 +598,19 @@ pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, Landl
     // answerable by running both on ONE host — which needs a way to hold the selector
     // still. Not a user knob and not documented as one; absent or unrecognised leaves the
     // ordinary selection below untouched.
-    match std::env::var("NUB_SANDBOX_MECHANISM").as_deref() {
+    let pinned_to_landlock = match std::env::var("NUB_SANDBOX_MECHANISM").as_deref() {
         Ok("bubblewrap") => return Err(LandlockUnavailable::PinnedToBubblewrap),
-        Ok("landlock") | Err(_) | Ok(_) => {}
-    }
+        // A HARD pin: a differential arm that silently fell back to bubblewrap would compare
+        // the mechanism against itself, so the scope gate below is bypassed and any real
+        // unavailability surfaces as an error rather than a quiet substitution.
+        Ok("landlock") => true,
+        _ => false,
+    };
     // SCOPE GATE. Landlock is the BUILD JAIL's mechanism only. A `nub sandbox` scope needs
     // deny-inside-allow plus the mount/PID/net namespaces, and enforcing one here would
     // silently drop every namespace-backed axis it depends on — the tests for those axes
     // fail loudly under Landlock precisely because the mechanism cannot carry them.
-    if !policy.build_jail {
+    if !policy.build_jail && !pinned_to_landlock {
         return Err(LandlockUnavailable::NotABuildJail);
     }
     let abi = probe_abi().ok_or(LandlockUnavailable::NoKernelSupport)?;
@@ -474,7 +623,7 @@ pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, Landl
     {
         return Err(LandlockUnavailable::PolicyHasDenyRules);
     }
-    derive_grants(policy).map_err(LandlockUnavailable::PolicyNotExpressible)?;
+    derive_grants(policy, None, None).map_err(LandlockUnavailable::PolicyNotExpressible)?;
     Ok(abi)
 }
 
@@ -506,26 +655,37 @@ unsafe fn install_confinement_pre_exec(
 ) {
     use std::os::unix::process::CommandExt;
     let hook = move || -> std::io::Result<()> {
-        // Own process group: without a PID namespace this is the only handle the parent
-        // has on the script's descendants, so it must exist before anything can fork.
-        if unsafe { libc::setpgid(0, 0) } != 0 {
+        // `setsid`, NOT `setpgid` — it detaches the CONTROLLING TERMINAL as well as
+        // starting a new process group. Bubblewrap got this from `--new-session`, whose
+        // comment in linux.rs records a MEASURED result: with every other flag present but
+        // that one removed, a confined child holding the launcher's tty can `ioctl(TIOCSTI)`
+        // bytes into the parent shell's input queue, to be executed OUTSIDE the sandbox.
+        // Seccomp cannot catch it (TIOCSTI is an ioctl request, not a syscall), so
+        // relinquishing the terminal is the whole defence. The new session also gives the
+        // parent a process GROUP to signal, which is its only handle on descendants without
+        // a PID namespace. Safe here because a freshly forked child is never already a
+        // process-group leader, which is the sole `EPERM` case.
+        if unsafe { libc::setsid() } < 0 {
             return Err(std::io::Error::last_os_error());
         }
         if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // FIRST, before any restriction is installed: the sweep's fallback path opens
+        // `/proc/self/fd`, which the ruleset below makes unreadable. Ordering it here keeps
+        // that fallback usable on a kernel without `CLOSE_RANGE_CLOEXEC`.
+        super::linux_monitor::mark_inherited_fds_cloexec()?;
         // Both Landlock and seccomp REFUSE an unprivileged caller that could still gain
         // privileges through a setuid execve, so this gates everything below it.
         if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        unsafe { restrict_self(ruleset_fd) }
-            .map_err(std::io::Error::from_raw_os_error)?;
+        unsafe { drop_all_capabilities() }?;
+        unsafe { restrict_self(ruleset_fd) }.map_err(std::io::Error::from_raw_os_error)?;
         if let Some(filter) = &seccomp {
             super::linux_monitor::install_target_seccomp(filter)
                 .map_err(std::io::Error::from_raw_os_error)?;
         }
-        super::linux_monitor::mark_inherited_fds_cloexec()?;
         Ok(())
     };
     // SAFETY: the hook runs between fork and execve and performs only raw syscalls — no
@@ -541,8 +701,10 @@ pub(crate) fn prepare_launch(
     policy: &SandboxPolicy,
     mut command: Command,
     seccomp: Option<Vec<seccompiler::sock_filter>>,
+    tmp_dir: Option<&Path>,
+    entry_program: Option<&Path>,
 ) -> Result<(Command, LandlockRuleset), String> {
-    let ruleset = build(policy)?;
+    let ruleset = build(policy, tmp_dir, entry_program)?;
     let fd = ruleset.as_raw_fd();
     unsafe { install_confinement_pre_exec(&mut command, fd, seccomp.map(std::sync::Arc::new)) };
     Ok((command, ruleset))
@@ -552,6 +714,10 @@ pub(crate) fn prepare_launch(
 mod tests {
     use super::*;
     use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, FsRuleSet};
+
+    fn derive_grants_for_test(p: &SandboxPolicy) -> Result<Vec<LandlockGrant>, String> {
+        derive_grants(p, None, None)
+    }
 
     fn rule(path: &str, effect: Effect, access: FsAccess) -> FsRule {
         FsRule {
@@ -637,7 +803,7 @@ mod tests {
         let child = parent.join("child");
         std::fs::create_dir_all(&child).unwrap();
 
-        let error = derive_grants(&policy(vec![
+        let error = derive_grants_for_test(&policy(vec![
             rule(
                 &parent.to_string_lossy(),
                 Effect::Allow,
@@ -662,7 +828,7 @@ mod tests {
         let package = tree.join("native");
         std::fs::create_dir_all(&package).unwrap();
 
-        let grants = derive_grants(&policy(vec![
+        let grants = derive_grants_for_test(&policy(vec![
             rule(&tree.to_string_lossy(), Effect::Allow, FsAccess::Read),
             rule(
                 &package.to_string_lossy(),
@@ -725,7 +891,7 @@ mod tests {
     /// child unable to exec the loader.
     #[test]
     fn the_system_closure_and_devices_are_granted_explicitly() {
-        let grants = derive_grants(&policy(Vec::new())).unwrap();
+        let grants = derive_grants_for_test(&policy(Vec::new())).unwrap();
         for required in ["/usr", "/etc/resolv.conf", "/dev/null"] {
             assert!(
                 grants.iter().any(|g| g.path == Path::new(required)),
