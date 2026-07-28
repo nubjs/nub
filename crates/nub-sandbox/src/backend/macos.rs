@@ -527,8 +527,9 @@ fn shared_tmp_dirs() -> Vec<String> {
 /// Emit the tmp-mode SBPL. `Shared` is a no-op (the confstr write grant that emit_fs
 /// already emitted stands). `Private`/`Deny` DENY read+write on the shared-tmp roots
 /// (last-match-wins over a generous read); `Private` additionally grants the fresh
-/// per-run dir rw (`file*` subpath). Emitted after emit_fs so the shared-tmp deny is
-/// authoritative even under a `(subpath "/")` generous read.
+/// per-run dir rw via [`regrant_over_tmp_deny`], which is per-operation-node because a
+/// general `file*` allow cannot override those denies. Emitted after emit_fs so the
+/// shared-tmp deny is authoritative even under a `(subpath "/")` generous read.
 ///
 /// COMPILER CARVE-OUT: `$tmp` is a PRIVATE PER-RUN DIR ONLY, plus ONE documented non-private
 /// carve-out on macOS — Apple's fixed toolchain lookup cache. `Private` therefore denies the
@@ -598,13 +599,9 @@ fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut
         }
     }
     if policy.fs.tmp == TmpMode::Private {
-        // AFTER the deny, so last-match-wins re-opens exactly these paths. `file*` because
-        // xcrun WRITES the db, not merely reads it.
+        // xcrun WRITES the db, not merely reads it, so this re-grant must clear BOTH denies.
         for file in darwin_compiler_cache_files() {
-            out.push_str(&format!(
-                "(allow file* (literal \"{}\"))\n",
-                sbpl_escape(&file)
-            ));
+            regrant_over_tmp_deny(&format!("(literal \"{}\")", sbpl_escape(&file)), out);
         }
     }
     if policy.fs.tmp == TmpMode::Private
@@ -615,12 +612,26 @@ fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut
         let canon = canonicalize_including_nonexistent(dir);
         let p = normalize_slashes(&canon.to_string_lossy());
         if !p.is_empty() && p != "/" {
-            out.push_str(&format!(
-                "(allow file* (subpath \"{}\"))\n",
-                sbpl_escape(&p)
-            ));
+            regrant_over_tmp_deny(&format!("(subpath \"{}\")", sbpl_escape(&p)), out);
         }
     }
+}
+
+/// Re-open `term` after the shared-tmp denies above it.
+///
+/// MEASURED SBPL PRECEDENCE (2026-07-28, `sandbox-exec` on darwin 25.5): last-match-wins holds
+/// only WITHIN one operation node. Across nodes the MORE SPECIFIC node wins regardless of
+/// position, so `(allow file* X)` does NOT override `(deny file-write* X/..)` — placing it after
+/// the deny changes nothing. Each denied op must be re-granted in ITS OWN node, positioned after
+/// the deny. `file*` is retained for the ops nothing here denies (ioctl, clone, …).
+///
+/// This is why the per-run tmp dir was unwritable: `make_private_tmp` lands it inside the confstr
+/// scratch this function denies, and a lone `file*` allow could never re-open it.
+fn regrant_over_tmp_deny(term: &str, out: &mut String) {
+    out.push_str(&format!("(allow file* {term})\n"));
+    out.push_str(&format!("(allow file-read* {term})\n"));
+    out.push_str(&format!("(allow file-map-executable {term})\n"));
+    out.push_str(&format!("(allow file-write* {term})\n"));
 }
 
 /// The macOS env-read closure — the load-bearing security default that stops a
@@ -2362,17 +2373,48 @@ mod tests {
         }
         // Exactly ONE thing is granted back, and as a FILE: `xcrun_db`, which xcrun resolves
         // via confstr rather than $TMPDIR and so cannot be redirected into the per-run dir.
-        // It must come AFTER the deny for last-match-wins to re-open it.
+        // Each grant must sit in the SAME operation node as the deny it re-opens and AFTER it
+        // — a general `(allow file* …)` loses to a specific `file-write*` deny at any position.
         for file in darwin_compiler_cache_files() {
-            let grant = format!("(allow file* (literal \"{file}\"))");
+            let dir = file.trim_end_matches("/xcrun_db");
+            for op in ["file-read*", "file-write*"] {
+                let grant = format!("(allow {op} (literal \"{file}\"))");
+                assert!(
+                    prof.contains(&grant),
+                    "the compiler-cache carve-out must be granted back per-op: {grant}"
+                );
+                assert!(
+                    prof.find(&grant) > prof.find(&format!("(deny {op} (subpath \"{dir}\"))")),
+                    "the {op} carve-out grant must follow the {op} deny it re-opens"
+                );
+            }
+        }
+    }
+
+    /// The per-run private tmp dir must be granted back PER OPERATION NODE. Measured
+    /// 2026-07-28: `(allow file* X)` does not override `(deny file-write* <parent>)` at any
+    /// position, and `make_private_tmp` puts the per-run dir under the confstr scratch this
+    /// backend denies — so a lone `file*` grant left `os.tmpdir()` unwritable (EPERM).
+    #[test]
+    fn private_tmp_dir_is_granted_read_and_write_in_their_own_nodes() {
+        let mut p = fs_policy(Effect::Allow, vec![]);
+        p.fs.tmp = crate::policy::TmpMode::Private;
+        let dir = std::path::Path::new("/private/tmp/nub-tmp-unit-fixture");
+        let prof = build_profile(&p, &spec(), None, None, Some(dir));
+        let term = format!("(subpath \"{}\")", dir.display());
+        for op in ["file-read*", "file-write*"] {
+            let grant = format!("(allow {op} {term})");
             assert!(
                 prof.contains(&grant),
-                "the compiler-cache carve-out must be granted back: {grant}"
+                "per-run tmp dir must carry its own {op} grant, else the shared-tmp \
+                 {op} deny wins and the child's own tmp is unusable; profile:\n{prof}"
             );
-            let dir = file.trim_end_matches("/xcrun_db");
+        }
+        for dir in confstr_scratch_dirs() {
             assert!(
-                prof.find(&grant) > prof.find(&format!("(deny file-read* (subpath \"{dir}\"))")),
-                "the carve-out grant must follow the tmp deny it re-opens"
+                prof.find(&format!("(allow file-write* {term})"))
+                    > prof.find(&format!("(deny file-write* (subpath \"{dir}\"))")),
+                "the tmp-dir write grant must follow the shared-tmp write deny"
             );
         }
     }
