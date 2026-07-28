@@ -54,7 +54,15 @@ import { fileURLToPath } from "node:url";
 const execFileAsync = promisify(execFile);
 
 const PROJECT = "pullfrog";
-const ZONE = "us-central1-a";
+// A single (zone, machine-type) pair is a single point of failure: GCE returns
+// ZONE_RESOURCE_POOL_EXHAUSTED (STOCKOUT) for a specific shape in a specific zone, and
+// spot capacity is exactly where that bites. A 10-way fanout asks for ten instances at
+// once, so this is a routine occurrence, not an edge case — it took out the first bake.
+// Candidates are tried in order until one is admitted. c3 first (fastest measured), then
+// progressively more commodity shapes that are almost always available.
+const ZONES = ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"];
+const MACHINE_FALLBACKS = ["c3-standard-8", "n2-standard-8", "n2d-standard-8", "e2-standard-8"];
+const STOCKOUT = /ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources|STOCKOUT|QUOTA_EXCEEDED/i;
 const IMAGE_FAMILY = "nub-builder";
 const LABEL = "nub-builder";
 // Ubuntu 24.04 is the base for the golden image; c3-standard-8 matches the box the
@@ -186,9 +194,9 @@ const SSH_OPTS = [
   "-o", "ServerAliveInterval=30",
 ];
 
-async function instanceIp(name: string) {
+async function instanceIp(name: string, zone: string) {
   return await gcloud([
-    "compute", "instances", "describe", name, "--zone", ZONE,
+    "compute", "instances", "describe", name, "--zone", zone,
     "--format=value(networkInterfaces[0].accessConfigs[0].natIP)",
   ]);
 }
@@ -196,7 +204,7 @@ async function instanceIp(name: string) {
 // A RUNNING status does not mean sshd is up — especially right after create. Poll the
 // real thing (a successful command) rather than the status field, and surface the serial
 // console on give-up, which diagnoses a wedged boot instantly where guessing does not.
-async function waitForSsh(name: string, ip: string, timeoutMs: number) {
+async function waitForSsh(name: string, zone: string, ip: string, timeoutMs: number) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = "";
   while (Date.now() < deadline) {
@@ -210,7 +218,7 @@ async function waitForSsh(name: string, ip: string, timeoutMs: number) {
   }
   let serial = "";
   try {
-    serial = await gcloud(["compute", "instances", "get-serial-port-output", name, "--zone", ZONE]);
+    serial = await gcloud(["compute", "instances", "get-serial-port-output", name, "--zone", zone]);
     serial = serial.split("\n").slice(-25).join("\n");
   } catch {
     serial = "(serial console unavailable)";
@@ -221,11 +229,11 @@ async function waitForSsh(name: string, ip: string, timeoutMs: number) {
 export function instanceCreateArgs(
   name: string,
   pubKey: string,
-  opts: { machine: string; onDemand: boolean; fromImage: boolean; selfDestruct: boolean },
+  opts: { machine: string; zone: string; onDemand: boolean; fromImage: boolean; selfDestruct: boolean },
 ) {
   const args = [
     "compute", "instances", "create", name,
-    "--zone", ZONE,
+    "--zone", opts.zone,
     "--machine-type", opts.machine,
     "--boot-disk-size", `${DISK_GB}GB`,
     "--boot-disk-type", "pd-balanced",
@@ -246,17 +254,41 @@ export function instanceCreateArgs(
   return args;
 }
 
+// Walks the (zone × machine-type) candidate grid until GCE admits one, and returns where
+// it landed so every later call (describe/delete/serial) targets the right zone. Only
+// stockout/quota errors advance the grid — any other failure is a real error and rethrows
+// immediately rather than burning through every combination.
+export function placementCandidates(preferredMachine: string) {
+  const machines = [preferredMachine, ...MACHINE_FALLBACKS.filter((m) => m !== preferredMachine)];
+  const out: Array<{ zone: string; machine: string }> = [];
+  for (const machine of machines) for (const zone of ZONES) out.push({ zone, machine });
+  return out;
+}
+
 async function createInstance(
   name: string,
   opts: { machine: string; onDemand: boolean; fromImage: boolean; selfDestruct: boolean },
+  log: (s: string) => void = () => {},
 ) {
   const pubKey = sh("cat", [`${SSH_KEY}.pub`]).trim();
-  await gcloud(instanceCreateArgs(name, pubKey, opts));
+  let lastErr: any;
+  for (const { zone, machine } of placementCandidates(opts.machine)) {
+    try {
+      await gcloud(instanceCreateArgs(name, pubKey, { ...opts, machine, zone }));
+      return { zone, machine };
+    } catch (e: any) {
+      const msg = String(e?.stderr || e?.message || e);
+      if (!STOCKOUT.test(msg)) throw e;
+      lastErr = e;
+      log(`no ${machine} capacity in ${zone}, trying next`);
+    }
+  }
+  throw new Error(`remote-build: no capacity for ${name} in any zone/machine combination.\n${lastErr?.message || lastErr}`);
 }
 
-async function deleteInstance(name: string) {
+async function deleteInstance(name: string, zone: string) {
   try {
-    await gcloud(["compute", "instances", "delete", name, "--zone", ZONE, "--quiet"]);
+    await gcloud(["compute", "instances", "delete", name, "--zone", zone, "--quiet"]);
   } catch (e: any) {
     process.stderr.write(`remote-build: WARNING could not delete ${name}: ${e?.message || e}\n`);
   }
@@ -363,16 +395,22 @@ async function oneBuild(
   const t0 = Date.now();
   const log = (s: string) => process.stdout.write(`[${idx}] ${s}\n`);
   let created = false;
+  let zone = ZONES[0];
   try {
     log(`creating ${name} (${a.machine}${a.onDemand ? "" : ", spot"})`);
     // Registered BEFORE create so a Ctrl-C during the create call still reaps it — the
     // instance can exist server-side before gcloud returns.
-    live.add(name);
-    await createInstance(name, { machine: a.machine, onDemand: a.onDemand, fromImage: true, selfDestruct: true });
+    const placement = await createInstance(
+      name,
+      { machine: a.machine, onDemand: a.onDemand, fromImage: true, selfDestruct: true },
+      log,
+    );
+    zone = placement.zone;
+    live.add(`${name}|${zone}`);
     created = true;
-    const ip = await instanceIp(name);
-    await waitForSsh(name, ip, 240_000);
-    log(`ssh up at ${ip} (+${((Date.now() - t0) / 1000).toFixed(0)}s)`);
+    const ip = await instanceIp(name, zone);
+    await waitForSsh(name, zone, ip, 240_000);
+    log(`ssh up at ${ip} on ${zone}/${placement.machine} (+${((Date.now() - t0) / 1000).toFixed(0)}s)`);
 
     syncSource(source, ip);
     log(`source synced (+${((Date.now() - t0) / 1000).toFixed(0)}s)`);
@@ -401,8 +439,8 @@ async function oneBuild(
     log(`FAILED after ${secs.toFixed(0)}s: ${e?.message || e}`);
     return { idx, ok: false, secs, artifact: "", signed: null, error: String(e?.message || e) };
   } finally {
-    if (created && !a.keep) await deleteInstance(name);
-    live.delete(name);
+    if (created && !a.keep) await deleteInstance(name, zone);
+    live.delete(`${name}|${zone}`);
   }
 }
 
@@ -433,9 +471,9 @@ async function reap() {
     return 0;
   }
   for (const row of rows) {
-    const [name] = row.split(/\s+/);
-    process.stdout.write(`remote-build: deleting stray ${name}\n`);
-    await deleteInstance(name);
+    const [name, zone] = row.split(/\s+/);
+    process.stdout.write(`remote-build: deleting stray ${name} (${zone})\n`);
+    await deleteInstance(name, zone);
   }
   return rows.length;
 }
@@ -450,10 +488,14 @@ async function buildImage(a: ReturnType<typeof parseArgs>, source: string) {
   process.stdout.write(`remote-build: baking image family ${IMAGE_FAMILY} on ${name}\n`);
   // On-demand (a preemption mid-bake wastes the whole run) and NO self-destruct (the
   // bake stops the instance and images its disk; a server-side DELETE would destroy it).
-  await createInstance(name, { machine: a.machine, onDemand: true, fromImage: false, selfDestruct: false });
+  const { zone } = await createInstance(
+    name,
+    { machine: a.machine, onDemand: true, fromImage: false, selfDestruct: false },
+    (l) => process.stdout.write(`  ${l}\n`),
+  );
   try {
-    const ip = await instanceIp(name);
-    await waitForSsh(name, ip, 300_000);
+    const ip = await instanceIp(name, zone);
+    await waitForSsh(name, zone, ip, 300_000);
     const provision = `set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
@@ -492,16 +534,16 @@ rm -rf ~/src
     await runJob(ip, warm, (l) => process.stdout.write(`  ${l}\n`));
 
     process.stdout.write("remote-build: stopping instance for imaging\n");
-    await gcloud(["compute", "instances", "stop", name, "--zone", ZONE]);
+    await gcloud(["compute", "instances", "stop", name, "--zone", zone]);
     const image = `${IMAGE_FAMILY}-${Date.now().toString(36)}`;
     await gcloud([
       "compute", "images", "create", image,
-      "--source-disk", name, "--source-disk-zone", ZONE,
+      "--source-disk", name, "--source-disk-zone", zone,
       "--family", IMAGE_FAMILY,
     ]);
     process.stdout.write(`remote-build: image ${image} created in family ${IMAGE_FAMILY}\n`);
   } finally {
-    await deleteInstance(name);
+    await deleteInstance(name, zone);
   }
 }
 
@@ -514,9 +556,10 @@ async function main() {
   // bypasses this entirely, which is why every VM also self-deletes server-side.
   const live = new Set<string>();
   const onSignal = () => {
-    for (const n of live) {
+    for (const entry of live) {
+      const [n, z] = entry.split("|");
       try {
-        execFileSync("gcloud", ["compute", "instances", "delete", n, "--zone", ZONE, "--project", PROJECT, "--quiet"], { env: gcloudEnv() });
+        execFileSync("gcloud", ["compute", "instances", "delete", n, "--zone", z, "--project", PROJECT, "--quiet"], { env: gcloudEnv() });
       } catch {}
     }
     process.exit(130);

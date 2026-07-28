@@ -10,7 +10,25 @@
 //      were real bugs during development.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs } from "./remote-build.ts";
+import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates } from "./remote-build.ts";
+
+// GCE returns ZONE_RESOURCE_POOL_EXHAUSTED for a specific shape in a specific zone, and it
+// took out the first image bake. A 10-way fanout requests ten instances at once, so a
+// single (zone, machine) pair is not a viable placement strategy.
+test("placement tries the preferred machine first, then falls back across zones and shapes", () => {
+  const c = placementCandidates("c3-standard-8");
+  assert.equal(c[0].machine, "c3-standard-8", "preferred machine must be tried first");
+  assert.ok(new Set(c.map((x) => x.zone)).size > 1, "must span multiple zones");
+  assert.ok(new Set(c.map((x) => x.machine)).size > 1, "must span multiple machine types");
+  const seen = c.map((x) => `${x.zone}/${x.machine}`);
+  assert.equal(new Set(seen).size, seen.length, "candidates must not repeat");
+});
+
+test("placement does not duplicate the preferred machine when it is also a fallback", () => {
+  const c = placementCandidates("n2-standard-8");
+  const n2 = c.filter((x) => x.machine === "n2-standard-8");
+  assert.equal(n2.length, new Set(n2.map((x) => x.zone)).size, "one entry per zone, no dupes");
+});
 
 // macOS ships openrsync (2.6.9-compatible). An rsync-3.x-only flag fails the entire sync,
 // and it cost a full image bake to find. This pins the flag set to what 2.6.9 accepts.
@@ -65,7 +83,7 @@ test("jobScript(clippy) runs the exact CI gate, and test does not", () => {
 
 test("a builder VM self-destructs server-side, so a SIGKILLed launcher cannot orphan it", () => {
   const args = instanceCreateArgs("b1", "ssh-ed25519 KEY", {
-    machine: "c3-standard-8", onDemand: false, fromImage: true, selfDestruct: true,
+    machine: "c3-standard-8", zone: "us-central1-a", onDemand: false, fromImage: true, selfDestruct: true,
   });
   assert.ok(args.includes("--max-run-duration"), "missing the server-side TTL");
   const idx = args.indexOf("--instance-termination-action");
@@ -78,7 +96,7 @@ test("a builder VM self-destructs server-side, so a SIGKILLed launcher cannot or
 // images its disk. A server-side DELETE mid-bake takes the disk with it.
 test("the image-bake VM does NOT self-destruct, but is still labelled for --reap", () => {
   const args = instanceCreateArgs("bake", "ssh-ed25519 KEY", {
-    machine: "c3-standard-8", onDemand: true, fromImage: false, selfDestruct: false,
+    machine: "c3-standard-8", zone: "us-central1-b", onDemand: true, fromImage: false, selfDestruct: false,
   });
   assert.ok(!args.includes("--max-run-duration"), "a mid-bake delete would destroy the disk being imaged");
   assert.ok(!args.includes("--instance-termination-action"));
