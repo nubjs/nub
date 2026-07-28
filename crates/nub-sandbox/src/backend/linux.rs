@@ -3705,6 +3705,43 @@ mod tests {
         );
     }
 
+    /// npm's own builtin config (`<node-root>/lib/node_modules/npm/npmrc`, no leading dot
+    /// — the `node_modules/npm/npmrc` band in `ENV_DENY_LEAF_GLOBS`) sits inside a
+    /// directory literally named `node_modules`. CONTROL: seeding the deny walk only at
+    /// the package dir (today's `pm_engine::build_jail` behavior before the fix) never
+    /// reaches it — the escape. FIX: seeding the walk directly AT (or below) the
+    /// `node_modules` dir reaches it, because `DENY_WALK_SKIP_DIRS` only blocks
+    /// *descending into* a child named `node_modules`, not enumerating a root that already
+    /// is one.
+    #[test]
+    fn npm_builtin_npmrc_needs_its_own_node_modules_dir_as_a_search_root() {
+        let root = tempdir().unwrap();
+        let package_dir = root.path().join("project/node_modules/some-dep");
+        let npm_dir = root.path().join("node/lib/node_modules/npm");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::create_dir_all(&npm_dir).unwrap();
+        fs::write(npm_dir.join("npmrc"), "//registry/:_authToken=LEAKED").unwrap();
+
+        let p = policy(root.path(), json!({"fs": ["**", "./"]}));
+
+        let escaped = collect_masks(&p, std::slice::from_ref(&package_dir)).unwrap();
+        assert!(
+            escaped.is_empty(),
+            "control: package-dir-only search roots must not reach npm's npmrc \
+             (reproduces the pre-fix escape): {escaped:?}"
+        );
+
+        let fixed = collect_masks(&p, &[package_dir.clone(), npm_dir.clone()]).unwrap();
+        let masked = fixed
+            .iter()
+            .find(|m| m.path == fs::canonicalize(npm_dir.join("npmrc")).unwrap());
+        assert_eq!(
+            masked.map(|m| m.kind),
+            Some(MaskKind::Unreadable),
+            "adding npm's own node_modules dir as a search root must mask its npmrc: {fixed:?}"
+        );
+    }
+
     #[test]
     fn inaccessible_network_socket_masks_its_narrow_parent() {
         use std::os::unix::fs::PermissionsExt;

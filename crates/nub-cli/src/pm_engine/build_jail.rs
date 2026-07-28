@@ -76,10 +76,24 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // interpreter grant). Set-if-absent: an explicit ambient nodedir is a deliberate
         // build-against-custom-node choice; the case we fix (nub's own Node) carries none.
         let mut extra_reads = Vec::new();
+        // npm's builtin `lib/node_modules/npm/npmrc` (no leading dot) sits inside the
+        // `lib/node_modules` grant below; the Linux deny-search walk must be SEEDED there
+        // (or at `npm/` itself) rather than at an ancestor, because it skips descending
+        // into any directory literally named `node_modules` for cost
+        // (`DENY_WALK_SKIP_DIRS` in the Linux backend) — a skip that only blocks descent
+        // INTO such a child, not enumeration of a root that already IS one. Recorded
+        // separately from `extra_reads` (which stays read-only plumbing) and only added
+        // when the dir actually exists, since `deny_search_roots` is strict — an absent
+        // root is a hard compile error, unlike the read grants above, which are best-effort
+        // `Speculative`.
+        let mut npm_builtin_config_deny_root = None;
         if let Some((nodedir, reads)) = node_toolchain_grant(&ambient) {
             ambient
                 .entry("npm_config_nodedir".to_string())
                 .or_insert(nodedir);
+            if let Some(lib_node_modules) = reads.get(1) {
+                npm_builtin_config_deny_root = npm_builtin_config_deny_root_for(lib_node_modules);
+            }
             extra_reads.extend(reads);
         }
 
@@ -99,15 +113,19 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             .args(&spawn.args)
             .cwd(&spawn.cwd);
         // The `.env*` deny floor is a bounded glob, so the backend needs the dirs whose
-        // immediate children it may materialize to enforce it. The PACKAGE DIR is the only
-        // such root now: it is the one place the jail both reads and writes. The project
-        // root is deliberately NOT passed — the read set no longer reaches it, so walking
-        // it would build masks for files the script cannot open, and each mask makes bwrap
-        // materialize its parent directories inside the jail, disclosing the shape of the
-        // consumer's tree along exactly the paths that hold secrets. For a fetched git
-        // dependency the two are the same directory anyway.
+        // immediate children it may materialize to enforce it. The PACKAGE DIR is the
+        // primary such root: it is the one place the jail both reads and writes. The
+        // project root is deliberately NOT passed — the read set no longer reaches it, so
+        // walking it would build masks for files the script cannot open, and each mask
+        // makes bwrap materialize its parent directories inside the jail, disclosing the
+        // shape of the consumer's tree along exactly the paths that hold secrets. For a
+        // fetched git dependency the two are the same directory anyway. npm's own
+        // `node_modules/npm` dir (above) is added on the same basis: it is exactly the
+        // read-granted subtree the floor must reach, no wider.
         if nub_sandbox::requires_deny_search_roots(&policy) {
-            spec = spec.deny_search_roots([spawn.package_dir.clone()]);
+            let mut roots = vec![spawn.package_dir.clone()];
+            roots.extend(npm_builtin_config_deny_root);
+            spec = spec.deny_search_roots(roots);
         }
 
         let prepared =
@@ -208,10 +226,11 @@ fn sandbox_homes(project_root: &std::path::Path) -> nub_sandbox::Homes {
 /// Scope of what this opens: Node's own toolchain plus any globally installed package's
 /// SOURCE (`npm -g` lands in `lib/node_modules`) — third-party code, not user data, and
 /// less sensitive than the `~/.npm/_cacache` tarballs `$tooldirs` already grants. The
-/// `.env*`/`.npmrc` deny floor is re-asserted after these grants and stays authoritative.
-/// KNOWN GAP: npm's builtin config file is `lib/node_modules/npm/npmrc` with no leading
-/// dot, so the `.npmrc` band does not match it; it is benign by default but can carry a
-/// registry token on a managed install.
+/// `.env*`/`.npmrc` deny floor is re-asserted after these grants and stays authoritative,
+/// including npm's own undotted `lib/node_modules/npm/npmrc` (matched by its own
+/// `ENV_DENY_LEAF_GLOBS` band, not the `.npmrc` glob) — the caller additionally passes
+/// `reads[1]`'s `npm/` subdir as a Linux deny-search root so the floor's recursive mask
+/// walk actually reaches it (see the call site).
 fn node_toolchain_grant(ambient: &BTreeMap<String, String>) -> Option<(String, Vec<PathBuf>)> {
     let root = ambient
         .get("npm_node_execpath")
@@ -222,6 +241,18 @@ fn node_toolchain_grant(ambient: &BTreeMap<String, String>) -> Option<(String, V
         root.join("lib").join("node_modules"),
     ];
     Some((nodedir, reads))
+}
+
+/// Whether `lib_node_modules` (the second [`node_toolchain_grant`] read, always
+/// `<node-root>/lib/node_modules`) holds npm's own `npm/` package dir — and if so, its
+/// path, to pass as the extra Linux `deny_search_roots` entry so the recursive mask walk
+/// reaches `npm/npmrc` instead of stopping at the `node_modules`-named ancestor (see the
+/// call site doc). Checked against the real filesystem (unlike the `Speculative` read
+/// grants above): `deny_search_roots` is strict, so an absent root would be a hard
+/// compile error rather than a silently-skipped grant.
+fn npm_builtin_config_deny_root_for(lib_node_modules: &Path) -> Option<PathBuf> {
+    let npm_dir = lib_node_modules.join("npm");
+    npm_dir.is_dir().then_some(npm_dir)
 }
 
 #[cfg(test)]
@@ -271,5 +302,32 @@ mod tests {
             .into_iter()
             .collect();
         assert!(node_toolchain_grant(&ambient).is_none());
+    }
+
+    #[test]
+    fn npm_builtin_config_deny_root_present_when_npm_dir_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib_node_modules = tmp.path().join("lib/node_modules");
+        std::fs::create_dir_all(lib_node_modules.join("npm")).unwrap();
+        assert_eq!(
+            npm_builtin_config_deny_root_for(&lib_node_modules),
+            Some(lib_node_modules.join("npm"))
+        );
+    }
+
+    /// Absence must be tolerated, not just "usually present": a from-source Node build,
+    /// or the Windows-layout mis-derivation `node_toolchain_grant`'s own doc calls out,
+    /// can hand this a `lib_node_modules` that doesn't exist. `deny_search_roots` is
+    /// strict (an absent root is a hard error), so this must return `None`, never a
+    /// dangling path.
+    #[test]
+    fn npm_builtin_config_deny_root_absent_when_npm_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib_node_modules = tmp.path().join("lib/node_modules");
+        std::fs::create_dir_all(&lib_node_modules).unwrap();
+        assert_eq!(npm_builtin_config_deny_root_for(&lib_node_modules), None);
+
+        let nonexistent = tmp.path().join("nowhere/lib/node_modules");
+        assert_eq!(npm_builtin_config_deny_root_for(&nonexistent), None);
     }
 }

@@ -602,6 +602,17 @@ pub(super) mod http1 {
 
     /// Replace all exact marker occurrences in every header value. Header names,
     /// field count, ordering, the request target, and the body are untouched.
+    ///
+    /// A literal marker substitution cannot CORRUPT a `Basic base64(user:pass)` header:
+    /// either the client passes the brokered value through unencoded — copying it
+    /// verbatim into a header field, as npm's legacy `_auth` config does — in which case
+    /// the marker occupies the whole (or a clean, self-contained) substring and swaps in
+    /// safely; or the client base64-ENCODES the marker itself (`curl -u marker:`, most
+    /// Basic-auth libraries), in which case encoding repacks bytes into 6-bit groups and
+    /// the plaintext marker never appears in the output at all — no match, no edit, the
+    /// header passes through unchanged (wrong credentials reach the upstream host, not a
+    /// malformed request). See `client_side_base64_encoded_basic_auth_is_left_untouched_not_corrupted`
+    /// and `basic_auth_marker_used_as_the_whole_parameter_substitutes_cleanly` below.
     pub(super) fn apply_replacements(
         req: &mut Request,
         replacements: &[CredentialReplacement],
@@ -842,6 +853,61 @@ pub(super) mod http1 {
             assert!(wire.contains("Authorization: Bearer child-value\r\n"));
             assert!(wire.ends_with("\r\n\r\nmarker"));
             assert!(!wire.contains("REAL-SECRET"));
+        }
+
+        /// D2 reachability finding: a client that builds Basic auth the standard way
+        /// (base64-encoding "user:password" ITSELF, e.g. `curl -u marker:`) never exposes
+        /// the marker's literal ASCII text on the wire — base64 repacks bytes into 6-bit
+        /// groups, so the encoded output contains no substring equal to the plaintext
+        /// input. `apply_replacements` finds no match and leaves the header byte-for-byte
+        /// unchanged: the request goes out carrying the WRONG (marker-derived) credential
+        /// and fails auth upstream, but the header is never corrupted or malformed, and
+        /// the real secret is never exposed either way. Pins the current safe-by-construction
+        /// behavior rather than a hypothesized "corrupt header" outcome, which is not
+        /// reachable: there is no code path where a base64 ENCODER preserves a literal
+        /// substring of its input in its output.
+        #[test]
+        fn client_side_base64_encoded_basic_auth_is_left_untouched_not_corrupted() {
+            use base64::Engine as _;
+            let marker = "nub-credential-v1-marker";
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(format!("user:{marker}"));
+            let raw = format!(
+                "GET / HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Basic {encoded}\r\n\r\n"
+            );
+            let mut req = read_request(&mut Cursor::new(raw.as_bytes())).unwrap();
+            apply_replacements(&mut req, &[replacement(marker, "REAL-SECRET")]).unwrap();
+            assert_eq!(
+                req.header("Authorization"),
+                Some(format!("Basic {encoded}").as_str()),
+                "a client-side-encoded Basic header must pass through byte-identical, not corrupted"
+            );
+            let wire = String::from_utf8(req.serialize()).unwrap();
+            assert!(
+                !wire.contains("REAL-SECRET"),
+                "the real secret must never appear when the marker could not be matched"
+            );
+        }
+
+        /// The one Basic-auth shape where a marker DOES land as an exact match: a client
+        /// that treats the brokered env var as an ALREADY-encoded blob and copies it
+        /// verbatim into the header (e.g. npm's legacy `_auth` config, which is sent as-is
+        /// in `Authorization: Basic <_auth>` with no additional encoding). There the marker
+        /// IS the entire parameter, so the literal substitution is a correct 1:1 swap, not
+        /// a partial in-place edit of a larger base64 blob — no corruption risk.
+        #[test]
+        fn basic_auth_marker_used_as_the_whole_parameter_substitutes_cleanly() {
+            let marker = "nub-credential-v1-marker";
+            let raw = format!(
+                "GET / HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Basic {marker}\r\n\r\n"
+            );
+            let mut req = read_request(&mut Cursor::new(raw.as_bytes())).unwrap();
+            apply_replacements(&mut req, &[replacement(marker, "dXNlcjpyZWFsLXNlY3JldA==")])
+                .unwrap();
+            assert_eq!(
+                req.header("Authorization"),
+                Some("Basic dXNlcjpyZWFsLXNlY3JldA==")
+            );
         }
 
         #[test]

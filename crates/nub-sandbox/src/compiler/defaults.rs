@@ -75,16 +75,16 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// its canonical location rather than by bare basename, which would also deny unrelated
 /// files a project happens to call `npmrc`.
 ///
-/// ENFORCEMENT IS macOS-ONLY TODAY (measured: a jailed dep script read
+/// ENFORCED ON BOTH PLATFORMS (measured: a jailed dep script read
 /// `/opt/homebrew/lib/node_modules/npm/npmrc` before this glob and is refused after).
-/// Linux denies by MASKING a path the mount plan granted, and the mask planner never
-/// reaches this file on two independent counts: the deny walk runs only over the build
-/// jail's `deny_search_roots` (project + package dir), which do not contain the Node
-/// root, and it skips any directory named `node_modules` (`DENY_WALK_SKIP_DIRS`). So on
-/// Linux the file stays readable through the `lib/node_modules` read grant. The policy is
-/// right on both platforms; closing the Linux half belongs with whoever owns that grant —
-/// either an exact-path deny the embedder supplies (it already derives the Node root) or
-/// a grant narrower than the whole `lib/node_modules` subtree.
+/// Linux denies by MASKING a path the mount plan granted, and the mask planner only
+/// reaches this file if the deny walk is SEEDED at (or below) npm's own `node_modules`
+/// dir: the walk runs over the build jail's `deny_search_roots`, and the recursive
+/// descent skips any directory named `node_modules` for cost (`DENY_WALK_SKIP_DIRS`) —
+/// which blocks descending INTO such a child but not enumerating a root that already IS
+/// one. `pm_engine::build_jail` (nub-cli) supplies `<node-root>/lib/node_modules/npm`
+/// as an extra deny-search root exactly so the walk starts there instead of at an
+/// ancestor.
 ///
 /// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — the file itself) and a
 /// SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`, covering a `.env.d/`-style
