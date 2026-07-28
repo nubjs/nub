@@ -116,17 +116,41 @@ fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathB
     policy.fs.rules.entries.splice(0..0, grants);
 }
 
-/// nub's own PM cache root, as a `$tooldirs`-style surface pattern. Held here rather
-/// than inlined so the narrowed build-jail grant and the broad `$tooldirs` set resolve
-/// to the same directory on every platform — `builtin_sets` carries the same anchor for
-/// its nub entry, and `the_narrowed_toolchain_grant_stays_inside_tooldirs` pins that they
-/// stay in agreement.
-const NUB_PM_CACHE_PATTERN: &str = "$cache/nub/pm";
+/// The two subtrees of nub's own PM cache the jail grants, as `$tooldirs`-style surface
+/// patterns. Held here rather than inlined so they and the broad `$tooldirs` set resolve
+/// against the same anchor on every platform — `builtin_sets` carries `$cache/nub/pm` for
+/// its nub entry, and `the_narrowed_toolchain_grant_stays_inside_tooldirs` pins that these
+/// stay inside it.
+///
+/// The grant used to be the cache ROOT. That was wider than anything the jail reads and it
+/// leaked: a git dependency is cloned to `$cache/nub/pm/git/<key>`, whose `.git/config`
+/// records the fetch URL — so a private dep fetched over HTTPS with a token in the URL put
+/// that token in reach of EVERY lifecycle script on the machine (reproduced under the real
+/// jail on macOS and Linux, 2026-07-28). Naming the subtrees the jail actually needs is a
+/// GRANT NARROWING, not a deny, so the pure-allowlist invariant and the Windows backend are
+/// untouched.
+///
+/// Why exactly these two, and why the rest of the cache is not needed:
+/// - `store` is the global virtual store (`identity.rs` sets `virtual_store_subdir` to
+///   `store`), the directory packages actually materialize into. A project's
+///   `node_modules/<name>` is a SYMLINK out of it, and both Landlock and Seatbelt match on
+///   the canonicalized path, so the project `node_modules` grant does not reach the content
+///   behind the link. Nothing runs without this.
+/// - `tools` holds the node-gyp nub bootstraps for itself
+///   (`node_gyp_bootstrap.rs` → `<cache>/tools/node-gyp`). The read-ladder study measured 16
+///   of 33 packages failing `rc=127` without it.
+/// - `git` stays UNGRANTED. A git dep's own `prepare` still reaches its checkout, because
+///   the checkout is that spawn's `package_dir` rw grant — so the narrowing costs a git dep
+///   nothing and closes every CROSS-package read. (A git dep's script can still see its own
+///   repo's fetch URL; that credential is one it was fetched with, not another project's.)
+/// - `packuments-v1`, `packuments-full-v1`, `trust-policy-v1` are registry metadata the
+///   resolver consumes UNCONFINED, before any script spawns. No lifecycle script reads them.
+const NUB_PM_CACHE_PATTERNS: &[&str] = &["$cache/nub/pm/store", "$cache/nub/pm/tools"];
 
 /// Grant the build jail's narrowed READ set: the consumer's DEPENDENCY TREE, the
-/// consumer's top-level MANIFEST, and nub's own PM cache. Together these replace what
-/// were once two much broader grants — `"./"` (the entire consuming project) and
-/// `$tooldirs` (16 ecosystem cache patterns).
+/// consumer's top-level MANIFEST, and the two [`NUB_PM_CACHE_PATTERNS`] subtrees of nub's
+/// own PM cache. Together these replace what were once two much broader grants — `"./"`
+/// (the entire consuming project) and `$tooldirs` (16 ecosystem cache patterns).
 ///
 /// Measured, not reasoned. A 34-package read-ladder study
 /// (`.fray/sandbox-minimum-readset.md`) isolated which grants are load-bearing, and a
@@ -154,6 +178,8 @@ const NUB_PM_CACHE_PATTERN: &str = "$cache/nub/pm";
 ///   (including the `lazy-bin` shim) is the ONLY node-gyp a native build can reach. The
 ///   other 15 `$tooldirs` patterns (`~/.cargo/registry`, `~/.m2/repository`, the
 ///   pnpm/yarn/bun stores, …) were reached by no package in either corpus.
+/// - `<cache>/nub/pm/store` is where the dependency tree physically lives under the global
+///   virtual store; the `node_modules` grant above only covers the symlinks pointing at it.
 ///
 /// SPECULATIVE origin is load-bearing, not incidental: every root here is legitimately
 /// absent on a real host — a project whose dependencies are not installed, a manifest-less
@@ -180,11 +206,10 @@ pub fn grant_build_jail_dependency_reads(
     let mut roots = vec![
         ctx.homes.project.join("package.json"),
         ctx.homes.project.join("node_modules"),
-        PathBuf::from(crate::matcher::path::expand_symbolic(
-            NUB_PM_CACHE_PATTERN,
-            &ctx.homes,
-        )),
     ];
+    roots.extend(NUB_PM_CACHE_PATTERNS.iter().map(|p| {
+        PathBuf::from(crate::matcher::path::expand_symbolic(p, &ctx.homes))
+    }));
     // The `node_modules` the package ACTUALLY sits in, which is not always the project's.
     // aube's hoisted planner is per-IMPORTER, so a workspace member's dependency
     // materializes at `<root>/packages/<m>/node_modules/<name>` and resolves its own
@@ -531,15 +556,51 @@ mod tests {
             },
             project: PathBuf::from("/proj"),
         };
-        let grant = crate::matcher::path::expand_symbolic(NUB_PM_CACHE_PATTERN, &homes);
-        let inside = crate::compiler::builtin_sets::tooldir_patterns()
+        let tooldirs: Vec<String> = crate::compiler::builtin_sets::tooldir_patterns()
             .iter()
             .map(|p| crate::matcher::path::expand_symbolic(p, &homes))
-            .any(|t| grant == t || grant.starts_with(&format!("{t}/")));
-        assert!(
-            inside,
-            "the build jail's {NUB_PM_CACHE_PATTERN} grant expanded to {grant}, which no \
-             $tooldirs pattern covers — the carve-out has drifted from the set it came from"
+            .collect();
+        for pattern in NUB_PM_CACHE_PATTERNS {
+            let grant = crate::matcher::path::expand_symbolic(pattern, &homes);
+            let inside = tooldirs
+                .iter()
+                .any(|t| &grant == t || grant.starts_with(&format!("{t}/")));
+            assert!(
+                inside,
+                "the build jail's {pattern} grant expanded to {grant}, which no \
+                 $tooldirs pattern covers — the carve-out has drifted from the set it came from"
+            );
+        }
+    }
+
+    /// A git dependency's checkout carries a `.git/config` recording the fetch URL, which
+    /// for a private HTTPS dep can embed a token — so `$cache/nub/pm/git` must stay outside
+    /// the jail's read set while the two subtrees the jail genuinely needs stay inside it.
+    /// The positive half is what makes this non-vacuous: an assertion that `git` is denied
+    /// would pass just as well if the whole PM-cache grant were dropped, which breaks every
+    /// native build and every global-virtual-store resolution.
+    #[test]
+    fn the_pm_cache_grant_reaches_the_store_and_toolchain_but_not_git_checkouts() {
+        let policy = production_build_jail_policy();
+        let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        let cache = Path::new("/testhome/.cache/nub/pm");
+        for granted in [
+            cache.join("store/left-pad@1.3.0-abc/node_modules/left-pad/index.js"),
+            cache.join("tools/node-gyp/lazy-bin/node-gyp"),
+        ] {
+            assert_eq!(
+                m.decide(&granted).effect,
+                Effect::Allow,
+                "{} is the store/toolchain content every confined build resolves through",
+                granted.display()
+            );
+        }
+        assert_eq!(
+            m.decide(&cache.join("git/aube-git-deadbeef/.git/config"))
+                .effect,
+            Effect::Deny,
+            "a git dependency's clone config records its fetch URL — a private HTTPS dep's \
+             token — and must not be reachable from another package's lifecycle script"
         );
     }
 }
