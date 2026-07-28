@@ -4,7 +4,7 @@
 //! policy express a writable parent, a read-only child cap, and a still-narrower
 //! writable reopen without recursively walking the project tree.
 
-use crate::matcher::path::normalize_slashes;
+use crate::matcher::path::{PathMatcher, normalize_slashes};
 use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, SandboxPolicy};
 use std::path::PathBuf;
 
@@ -38,6 +38,7 @@ pub(crate) fn fs_confines(fs: &FsPolicy) -> bool {
 pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGrant>, String> {
     let mut grants = Vec::new();
     let mut previous_grant: Option<MountGrant> = None;
+    let matcher = PathMatcher::new(&policy.fs.rules);
 
     for (rule_index, rule) in policy.fs.rules.entries.iter().enumerate() {
         let pattern = rule.matcher.as_str();
@@ -80,6 +81,23 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
                 MountAccess::ReadWrite
             }
         };
+        // A bind must never re-expose a path the policy goes on to DENY. An allow that a
+        // later rule shadows is dead policy — the surface compiler already warns that it
+        // "can never take effect" — and the old emitter got away with compiling it anyway,
+        // because writing every mask after every bind buried the dead bind under the mask.
+        // Ordered emission puts that bind AFTER the mask instead, which hands the denied
+        // file straight back; the `.env`/`.npmrc` floor is appended after every user entry,
+        // so this is the common shape, not an exotic one. Dropping the grant fixes it where
+        // it originates rather than reintroducing an ordering rule that would also break
+        // the legitimate reopen.
+        //
+        // Placed ahead of the existence check on purpose: a grant that can never take
+        // effect has no business aborting the launch over a source it will not mount. The
+        // representability and safety refusals above still apply to it.
+        if matcher.last_matching_effect_after(&path, &path, rule_index + 1) == Some(Effect::Deny) {
+            continue;
+        }
+
         if !path.exists() {
             // A speculated grant covers every ecosystem it knows of, so most are absent
             // on any given machine — refusing there would abort every confined run on a
@@ -337,6 +355,63 @@ mod tests {
         assert!(
             authored.is_err(),
             "an absent path the author named must still refuse, got {authored:?}"
+        );
+    }
+
+    /// The dotenv/npmrc floor is appended after every user entry, so an explicit allow of
+    /// a secret inside a denied directory is dead policy the compiler already warns about.
+    /// It must not reach the mount plan: ordered emission would write that bind after the
+    /// mask and hand the file back, which is exactly what it hid before.
+    #[test]
+    fn an_allow_a_later_deny_shadows_never_becomes_a_bind() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let private = root.join("private");
+        let secret = private.join(".env");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(&secret, "SECRET").unwrap();
+
+        let plan = compile_mount_plan(&policy(vec![
+            allow(root.to_string_lossy(), FsAccess::ReadWrite),
+            deny(private.to_string_lossy()),
+            allow(secret.to_string_lossy(), FsAccess::Read),
+            deny("**/.env*"),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            plan.iter()
+                .map(|grant| grant.path.clone())
+                .collect::<Vec<_>>(),
+            vec![root.to_path_buf()],
+            "{} is denied last, so binding it would reopen what the mask hides",
+            secret.display()
+        );
+    }
+
+    /// The control for the test above: with no later deny, the same nested allow DOES
+    /// bind. Without this, the shadow filter could drop every nested grant and still pass.
+    #[test]
+    fn an_unshadowed_nested_allow_still_becomes_a_bind() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let reopened = root.join("private/reopened");
+        std::fs::create_dir_all(&reopened).unwrap();
+
+        let plan = compile_mount_plan(&policy(vec![
+            allow(root.to_string_lossy(), FsAccess::ReadWrite),
+            deny(root.join("private").to_string_lossy()),
+            allow(reopened.to_string_lossy(), FsAccess::ReadWrite),
+            deny("**/.env*"),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            plan.iter()
+                .map(|grant| grant.path.clone())
+                .collect::<Vec<_>>(),
+            vec![root.to_path_buf(), reopened],
+            "nothing after it denies the reopen, so it must still bind"
         );
     }
 

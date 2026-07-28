@@ -1,0 +1,15 @@
+{
+  "name": "fs-shadowed-allow-not-reopened",
+  "note": "An allow that a later deny shadows is dead policy — here the dotenv floor, which the compiler appends after every user entry. Ordered mount emission must not bind that file back on top of the mask hiding it.",
+  "policy": {
+    "fs": ["./", "!./private", "./private/.env"],
+    "vars": true,
+    "net": true
+  },
+  "relaxed": false,
+  "cases": [
+    { "probe": "read", "target": "proj:public.txt", "expect": true },
+    { "probe": "read-content", "target": "proj:private/.env", "expect": false },
+    { "probe": "read-content", "target": "proj:private/hidden.txt", "expect": false }
+  ]
+}

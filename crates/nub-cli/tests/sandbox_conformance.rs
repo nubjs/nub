@@ -602,6 +602,16 @@ fn fs_last_match_reopen() {
     drive("fs-last-match-reopen");
 }
 
+/// The twin of the fixture above, and the reason it is safe: emitting mounts in policy
+/// order must reopen only what the policy still allows at the END of the rule list. An
+/// allow the dotenv floor shadows must stay dead, or ordered emission would lay that bind
+/// over the mask and hand the secret back.
+#[test]
+#[cfg(target_os = "linux")]
+fn fs_shadowed_allow_not_reopened() {
+    drive("fs-shadowed-allow-not-reopened");
+}
+
 #[test]
 #[cfg(target_os = "linux")]
 fn build_jail_preset() {

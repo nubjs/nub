@@ -317,6 +317,31 @@ impl PathMatcher {
             .next_back()
     }
 
+    /// Last matching effect among entries AT OR AFTER `start`, i.e. does anything the
+    /// policy says LATER override this one. The Linux mount-plan compiler asks this of
+    /// each allow before turning it into a bind.
+    ///
+    /// Deliberately not `decide`: an allow's own glob need not match its own compiled
+    /// path — `dir/**` compiles to a bind on `dir`, which `dir/**` does not match — so
+    /// `decide` would fall through to the ruleset default and report Deny for a grant
+    /// nothing actually denies.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn last_matching_effect_after(
+        &self,
+        logical: &Path,
+        resolved: &Path,
+        start: usize,
+    ) -> Option<Effect> {
+        let logical = normalize_slashes(&logical.to_string_lossy());
+        let resolved = normalize_slashes(&resolved.to_string_lossy());
+        self.entries
+            .iter()
+            .filter(|(_, _, _, index)| *index >= start)
+            .filter(|(glob, _, _, _)| glob.is_match(&logical) || glob.is_match(&resolved))
+            .map(|(_, effect, _, _)| *effect)
+            .next_back()
+    }
+
     /// Authored position of the LAST rule matching either spelling. The Linux emitter
     /// keys a deny mask's place in the mount-operation stream off this, so a mask lands
     /// where the policy put the deny that produced it rather than after every grant.

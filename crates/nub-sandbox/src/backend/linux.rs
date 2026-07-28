@@ -763,9 +763,10 @@ fn append_confinement_options(
                     .arg(perms)
                     .arg("--tmpfs")
                     .arg(&mask.path);
-                // `--remount-ro` is what actually makes the tmpfs unwritable — a perms-000
-                // tmpfs is still writable under a caps-RETAINING flag set, so the perms
-                // alone are not the write barrier. Applied immediately after its `--tmpfs`,
+                // `--remount-ro` is the write barrier that does not depend on the perms:
+                // under nub's own `--cap-drop ALL` the mode already refuses the write, but a
+                // caps-RETAINING flag set writes a perms-000 tmpfs happily, and 111 does not
+                // refuse it at all. Applied immediately after its `--tmpfs`,
                 // though, it seals the directory BEFORE Bubblewrap can create a nested
                 // bind's mountpoint inside it, and the launch dies on EROFS from
                 // `ensure_dir`. It does not recurse into submounts, so deferring every one
