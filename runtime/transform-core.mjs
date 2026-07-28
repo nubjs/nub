@@ -179,7 +179,11 @@ export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
 // `maybeTranspilePlainJs` gate); a no-op plain-JS file falls through to Node's
 // native loader untouched, byte-identical. node_modules is excluded at the gate.
 export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
-export const DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
+// The data loaders nub SHIPS — a runtime feature, not a project setting, so they stay
+// in force inside node_modules too (see dataExtsFor).
+const BUILTIN_DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
+// The built-ins with this project's `loader` config layered on top. FIRST-PARTY only.
+export const DATA_EXTS = { ...BUILTIN_DATA_EXTS };
 for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
   if (["ts", "tsx", "jsx"].includes(loader)) {
     delete DATA_EXTS[ext];
@@ -190,6 +194,18 @@ for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
   }
 }
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+
+// Which data-loader map governs `url`. A project's `loader` config must not reach code
+// the project didn't write — `{".json": "text"}` would otherwise turn every dependency's
+// JSON import into a string, and pointing a built-in extension at a transpile loader
+// would DELETE a loader a dependency relies on. This is the same project/dependency
+// boundary the TRANSPILE_EXTS and PLAIN_JS_EXTS dispatches draw with `!isNodeModules`,
+// but as a map SWAP rather than a bail: the built-in half must keep serving deps. Both
+// the dispatch sites and loadData() route through here, so the "does this load?" test
+// and the "as what?" answer can never disagree.
+export function dataExtsFor(url) {
+  return isNodeModules(url) ? BUILTIN_DATA_EXTS : DATA_EXTS;
+}
 
 // Packages resolved from Nub's distribution, not the user's.
 export const VENDORED_PACKAGES = new Set(["@oxc-project/runtime"]);
@@ -762,7 +778,7 @@ function stripJsonComments(text) {
 export function loadData(url, ext) {
   const filePath = fileURLToPath(url);
   const raw = readFileSync(filePath, "utf8");
-  const kind = DATA_EXTS[ext];
+  const kind = dataExtsFor(url)[ext];
 
   if (kind === "txt") {
     return { format: "module", source: `export default ${JSON.stringify(raw)};\n`, shortCircuit: true };

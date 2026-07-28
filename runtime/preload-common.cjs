@@ -533,7 +533,7 @@ function makeHooks(core, watchReporting) {
         const r = core.maybeTranspilePlainJs(url, ext);
         if (r) return r;
       }
-      if (ext in core.DATA_EXTS) return core.loadData(url, ext);
+      if (ext in core.dataExtsFor(url)) return core.loadData(url, ext);
       const { readFileSync } = require("node:fs");
       const source = readFileSync(path);
       const pkgType = core.getPackageType(dirname(path));
@@ -618,7 +618,9 @@ function makeHooks(core, watchReporting) {
       const r = core.maybeTranspilePlainJs(url, ext);
       if (r) return r;
     }
-    if (ext in core.DATA_EXTS) return core.loadData(url, ext);
+    // Data-format imports. dataExtsFor pins node_modules to nub's BUILT-IN loaders, so
+    // the project's `loader` config can't redefine how a dependency's imports load.
+    if (ext in core.dataExtsFor(url)) return core.loadData(url, ext);
 
     // Fidelity: a `data:` URL whose MIME maps to no module format (e.g.
     // `data:application/x-unknown,…`) must surface Node's ERR_UNKNOWN_MODULE_FORMAT.
