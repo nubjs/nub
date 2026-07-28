@@ -28,8 +28,10 @@ pub use resolve::{CommandRunner, ShellRunner};
 /// the whole `defaults` module keeps the policy CONSTRUCTORS out of backend reach, so
 /// "backends replicate the IR, they do not author policy" stays enforced by the compiler
 /// rather than by convention.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use defaults::ENV_DENY_LEAF_GLOBS;
 #[cfg(target_os = "linux")]
-pub(crate) use defaults::{ENV_DENY_LEAF_GLOBS, ENV_DENY_SUBTREE_GLOBS, env_deny_floor_start};
+pub(crate) use defaults::{ENV_DENY_SUBTREE_GLOBS, env_deny_floor_start};
 
 use crate::matcher::path::Homes;
 use crate::policy::{Effect, EnvPolicy, FsPolicy, Inspection, NetPolicy, ProxyMode, SandboxPolicy};
@@ -339,9 +341,9 @@ pub(crate) fn compile_scope(
                 // The provisioned interpreter lives under nub's store (not `/usr`), so the
                 // tight-read base does not reach it.
                 preset::grant_build_jail_interpreter(s, &mut policy, ctx);
-                // A preset's subtree grants re-open the built-in secret floor under
-                // last-match-wins; re-assert it post-fold.
-                preset::reassert_secret_floor(s, &mut policy, ctx);
+                // The build jail is a pure allowlist: strip every deny the fold added, so
+                // the policy is grants-only and the allowlist backends can enforce it.
+                preset::enforce_pure_allowlist(s, &mut policy);
                 Ok(policy)
             }
             StringKind::FileRef => Err(CompileError::FileRefUnresolved {

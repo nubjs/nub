@@ -13,7 +13,9 @@
 //!   backends supply the system/toolchain closure under a minimal root). The consumer's
 //!   source, config, `.git/`, and `.github/` are outside it.
 //! - egress curated to the install-time artifact hosts (`$downloads`) and denied
-//!   everywhere else; the home-secret + `.env*` floors applied; `/etc/shadow` denied.
+//!   everywhere else. The fs axis carries NO deny rules at all — the jail compiles to a
+//!   pure allowlist (`preset::enforce_pure_allowlist`), so every secret is withheld by not
+//!   being granted rather than by a deny the allowlist backends cannot express.
 //! - the constructed lifecycle env minus credential-shaped keys.
 //!
 //! The user's OWN root-package scripts are NOT routed here — aube passes them no
@@ -134,6 +136,12 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // fetched git dependency the two are the same directory anyway. npm's own
         // `node_modules/npm` dir (above) is added on the same basis: it is exactly the
         // read-granted subtree the floor must reach, no wider.
+        // INERT TODAY, deliberately kept. The jail compiles to a pure allowlist, so
+        // `requires_deny_search_roots` is always false here and neither this block nor
+        // `npm_builtin_config_deny_root` above runs. Both are retained rather than deleted
+        // because the guard is a correct, self-reactivating safety net: if a deny ever
+        // legitimately returns to a build-jail policy, the Linux mask walk needs these roots
+        // or it would silently under-enforce. Do not read the code above as live.
         if nub_sandbox::requires_deny_search_roots(&policy) {
             let mut roots = vec![spawn.package_dir.clone()];
             roots.extend(npm_builtin_config_deny_root);

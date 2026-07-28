@@ -566,17 +566,27 @@ fn build_jail_preset_expands() {
              and the top-level manifest"
         );
     }
-    // The secret + `.env*` floors hold even under the dependency-tree read. A vendored
-    // `.env` is the case that matters now that the grant is `node_modules`-anchored.
-    for secret in [
-        ".env",
-        "node_modules/pkg/.env",
-        "node_modules/.env/keys.txt",
-        ".envrc",
-    ] {
+    // The CONSUMER's secrets stay denied — by being outside every grant, not by a deny rule.
+    // The project root is ungranted (only `package.json` and `node_modules` are), so a
+    // project-level `.env`/`.envrc` is unreachable by construction.
+    for secret in [".env", ".envrc", ".npmrc", ".env/keys.txt"] {
         assert!(
             matches!(m.decide(&proj.join(secret)).effect, Effect::Deny),
             "build-jail must deny <proj>/{secret}"
+        );
+    }
+    // A VENDORED `.env` inside the granted dependency tree is readable, and that is the
+    // model. The build jail compiles to a pure allowlist: it grants `node_modules` wholesale
+    // because lifecycle scripts resolve their hoisted tooling out of it, and a file inside a
+    // granted subtree is readable. Denying it would mean a deny nested inside a grant — which
+    // Landlock (no deny primitive at any ABI) and Windows AppContainer (a deny-ACE naming the
+    // container's own SID is inert against its own child) cannot express, and which rejected
+    // every read-granting build-jail policy on Windows outright. It is also the dependency's
+    // OWN shipped file, not a consumer credential.
+    for vendored in ["node_modules/pkg/.env", "node_modules/.env/keys.txt"] {
+        assert!(
+            matches!(m.decide(&proj.join(vendored)).effect, Effect::Allow),
+            "a vendored {vendored} is inside the granted dependency tree"
         );
     }
     assert!(
@@ -776,11 +786,13 @@ fn build_jail_interposition_confines_write_grants_interpreter_and_scrubs_env() {
         ),
         "the Node header dir is granted read"
     );
-    // A `.env` inside the writable package dir is STILL denied (the floor wins over the
-    // package-dir grant), and the home secret set stays denied.
+    // A `.env` inside the package dir is readable: that dir is granted read-WRITE outright,
+    // so the script could overwrite the file anyway and a read-deny protected nothing. It is
+    // the dependency's own shipped file. The home secret set below is what actually matters,
+    // and it holds by being ungranted.
     assert!(
-        matches!(m.decide(&package_dir.join(".env")).effect, Effect::Deny),
-        ".env in the package dir is denied by the floor"
+        matches!(m.decide(&package_dir.join(".env")).effect, Effect::Allow),
+        "the package dir is granted rw, so its own .env is readable"
     );
     assert!(
         matches!(

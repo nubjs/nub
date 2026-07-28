@@ -450,12 +450,14 @@ fn deny_tmp_hides_the_shared_system_tmp_too() {
 }
 
 #[test]
-fn private_tmp_keeps_the_apple_compiler_scratch_writable() {
-    // $tmp:rw (Private) hides /private/tmp but CARVES OUT the confstr TEMP scratch
-    // (/var/folders/<uid>/T — the Apple toolchain's fixed, NOT-TMPDIR-redirectable xcrun_db
-    // cache) so native (node-gyp) builds keep working. A write INTO that scratch must SUCCEED
-    // under Private and be DENIED under $tmp:false (Deny), which carves nothing. The scratch
-    // is the process TMPDIR (the confstr dir), canonicalized to match the kernel's view.
+fn private_tmp_hides_the_ambient_confstr_scratch() {
+    // `$tmp` is a private PER-RUN dir plus ONE documented carve-out — Apple's fixed
+    // compiler cache — NOT the enclosing confstr scratch. That scratch
+    // (`/var/folders/<uid>/T`) is a long-lived per-user directory holding every
+    // application's state (measured on a dev host: ~7.5k entries — browser buffers, other
+    // tools' logs, lock dirs), so granting it wholesale handed a confined child read AND
+    // write over all of it. An arbitrary write into it must now be REFUSED under Private,
+    // exactly as it already was under `$tmp: false`.
     let scratch = fs::canonicalize(std::env::temp_dir()).unwrap();
     let target = scratch.join(format!("nub-carve-probe-{}", std::process::id()));
     struct Cleanup(PathBuf);
@@ -467,25 +469,20 @@ fn private_tmp_keeps_the_apple_compiler_scratch_writable() {
     let _c = Cleanup(target.clone());
     let f = fixture();
 
-    // Private: the compiler scratch stays writable (the carve-out).
-    assert!(
-        f.allowed(
-            serde_json::json!({ "fs": { "/": "r", "$tmp": "rw" } }),
-            TOUCH,
-            &[&s(&target)]
-        ),
-        "private tmp must keep the Apple compiler scratch (confstr TEMP) writable"
-    );
-    let _ = fs::remove_file(&target);
-    // NEG-CONTROL: Deny hides the scratch too — the same write is refused.
-    assert!(
-        !f.allowed(
-            serde_json::json!({ "fs": { "/": "r", "$tmp": false } }),
-            TOUCH,
-            &[&s(&target)]
-        ),
-        "deny tmp must hide the compiler scratch too (no carve-out)"
-    );
+    for (label, tmp) in [
+        ("private", serde_json::json!("rw")),
+        ("deny", serde_json::json!(false)),
+    ] {
+        assert!(
+            !f.allowed(
+                serde_json::json!({ "fs": { "/": "r", "$tmp": tmp } }),
+                TOUCH,
+                &[&s(&target)]
+            ),
+            "{label} tmp must hide the ambient confstr scratch, not grant it wholesale"
+        );
+        let _ = fs::remove_file(&target);
+    }
 }
 
 #[test]
