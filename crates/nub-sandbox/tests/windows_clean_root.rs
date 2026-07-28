@@ -1,15 +1,16 @@
 //! Windows clean-DACL working root — the ORDINARY-DIRECTORY regression guard.
 //!
 //! Every other Windows suite hands `apply` a fixture root it first secured itself with
-//! `icacls /inheritance:r`, so all of them passed while `apply` was rejecting every real
-//! directory on the machine: no stock Windows path satisfies the clean-root precondition
-//! (a volume root carries an `ALL APPLICATION PACKAGES` ace and nothing below it is
-//! `SE_DACL_PROTECTED`), which made the Windows build jail unusable in production while
-//! the suite stayed green. This file is the missing case — it hands `apply` directories
-//! exactly as the OS made them, on both the system volume and the CI work volume.
+//! `icacls /inheritance:r`, so all of them passed while `apply` was rejecting ordinary
+//! directories in production: the precondition used to demand an `SE_DACL_PROTECTED`
+//! ancestor, which only `%USERPROFILE%` paths have, so a project on a second volume or at
+//! a volume root could never be confined. This file is the case the suite never had — it
+//! hands `apply` directories exactly as the OS made them, on both volumes.
 //!
-//! It also prints the ancestor survey that established the above, so the record of WHY
-//! the precondition is unsatisfiable lives with the test that pins the fix.
+//! It also prints the ancestor survey the predicate now rests on (every `ALL APPLICATION
+//! PACKAGES` ace found on a stock machine is NON-INHERITABLE, so it cannot reach the tree
+//! the child runs in) and the measurement that ruled out the alternative fix — protecting
+//! the working root severs inheritance INTO it, which would strand the build jail.
 //!
 //! `harness = false`: this is a runner, not a libtest case, matching its sibling Windows
 //! suites (they self-exec as the confined child; this one keeps the same shape so the
@@ -298,15 +299,17 @@ mod win {
     }
 
     /// Hand `apply` a directory exactly as the OS made it — no `icacls`, no pre-securing —
-    /// and require the launch plan to build. Then require the invariant to actually hold
-    /// on disk, and the calling user to still own the directory it was applied to.
+    /// and require the launch plan to build, the predicate to hold on disk, and the DACL to
+    /// be exactly as it was: `apply` is a planner, so a plan that is never launched must
+    /// leave no trace.
     fn ordinary_root_case(fails: &mut u32, label: &str, root: &Path) {
         survey(label, root);
         let before = dacl_facts(root).expect("read the untouched DACL");
-        let before_qualified = qualifies(root);
         println!(
-            "  BEFORE aap_rights=0x{:08x} protected={} qualifies={before_qualified}",
-            before.aap_rights, before.protected
+            "  BEFORE aap_rights=0x{:08x} protected={} qualifies={}",
+            before.aap_rights,
+            before.protected,
+            qualifies(root)
         );
 
         let policy = read_confine(&[root], &[root]);
@@ -322,7 +325,7 @@ mod win {
             }
         }
 
-        let after = dacl_facts(root).expect("read the secured DACL");
+        let after = dacl_facts(root).expect("read the DACL after apply");
         println!(
             "  AFTER  aap_rights=0x{:08x} protected={}",
             after.aap_rights, after.protected
@@ -330,36 +333,31 @@ mod win {
         check(
             fails,
             after.aap_rights == 0,
-            &format!("{label}: no AppContainer reach after apply"),
+            &format!("{label}: no AppContainer reach"),
         );
         check(
             fails,
             qualifies(root),
-            &format!("{label}: the clean-root invariant holds after apply"),
+            &format!("{label}: the clean-root predicate holds"),
         );
-        // Only demand the DACL WRITE where the directory did not already qualify — a path
-        // under the user profile inherits a protected clean boundary and must be left alone,
-        // and asserting otherwise would turn the deliberate no-op into a failure.
-        if !before_qualified {
-            check(
-                fails,
-                after.protected,
-                &format!("{label}: an unqualified root was actually protected by apply"),
-            );
-        }
+        check(
+            fails,
+            after.protected == before.protected && after.aap_rights == before.aap_rights,
+            &format!("{label}: apply left the DACL untouched"),
+        );
         // The engine keeps writing to this tree after the jail exits, and so does the user.
         let probe = root.join("owner-access.txt");
         check(
             fails,
             std::fs::write(&probe, b"ok").is_ok() && std::fs::read(&probe).is_ok(),
-            &format!("{label}: calling user keeps read+write on the secured root"),
+            &format!("{label}: calling user keeps read+write on the root"),
         );
-        // A file created after the hardening must not pick up an AppContainer grant.
+        // A file created under the root must not pick up an AppContainer grant.
         match dacl_facts(&probe) {
             Ok(f) => check(
                 fails,
                 f.aap_rights == 0,
-                &format!("{label}: a file created under the secured root inherits no AAP"),
+                &format!("{label}: a file created under the root inherits no AAP"),
             ),
             Err(e) => {
                 *fails += 1;
@@ -370,20 +368,20 @@ mod win {
 
     /// Does protecting a directory sever a LATER inheritable grant placed on its parent?
     ///
-    /// This is the load-bearing question for the whole approach, because the build jail
-    /// grants the dependency-tree READ on `<project>/node_modules` — an ancestor — while
-    /// each lifecycle script's cwd is `node_modules/<pkg>`. If protecting `<pkg>` blocks
-    /// propagation from `node_modules`, then once package `a`'s script has run, EVERY later
-    /// package's script is granted `node_modules` but cannot read `node_modules/a`, in that
-    /// install and every install after it. `b` is the control: same parent, never protected,
-    /// so a "severed" verdict cannot be an artefact of the grant failing to apply at all.
+    /// This is the measurement that RULED OUT the alternative fix. Rather than relax the
+    /// predicate, `apply` could have CREATED the precondition by giving each working root a
+    /// protected DACL — unprivileged, and it does close the AAP hole. But the build jail
+    /// grants the dependency-tree READ on `<project>/node_modules` while each lifecycle
+    /// script's cwd is `node_modules/<pkg>`. If protecting `<pkg>` blocks propagation from
+    /// `node_modules`, then once package `a`'s script has run, every later package's script
+    /// is granted `node_modules` and still cannot read `node_modules/a` — in that install
+    /// and every install after it, because the protection is permanent.
     ///
-    /// Reported, never asserted — the answer decides a design fork the maintainer owns, and
-    /// either outcome is information rather than a regression in this file.
-    fn inheritance_severing_case(fails: &mut u32) {
-        // Must be OUTSIDE the user profile: under `%USERPROFILE%` the root already qualifies
-        // and `apply` deliberately writes nothing, so `a` would never get protected.
-        let base = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+    /// `b` is the control: same parent, never protected, so a "severed" verdict cannot be an
+    /// artefact of the parent grant failing to apply at all. Reported, never asserted — it
+    /// documents a rejected design, and the ACL model it measures is the platform's.
+    fn inheritance_severing_case() {
+        let base = std::env::temp_dir();
         let nm = base.join(format!("nub-nm-{:x}", nonce()));
         let (a, b) = (nm.join("a"), nm.join("b"));
         for d in [&a, &b] {
@@ -396,32 +394,34 @@ mod win {
             }
         }
 
-        let policy = read_confine(&[&a], &[&a]);
-        let spec = CommandSpec::new("cmd.exe")
-            .args(["/c", "exit", "0"])
-            .cwd(&a);
-        if let Err(d) = apply(&policy, spec) {
-            *fails += 1;
-            eprintln!(
-                "FAIL inheritance-severing setup: apply rejected {}: {d:?}",
-                a.display()
-            );
+        // Model the rejected design directly: protect `a` exactly as `secure_clean_root`
+        // would have. Driving it through `apply` is not an option — the shipped predicate
+        // writes nothing, which is the whole point.
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        let protected = std::process::Command::new("icacls")
+            .arg(&a)
+            .args(["/inheritance:r", "/grant:r"])
+            .arg(format!("{user}:(OI)(CI)F"))
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !protected {
+            println!("SKIP inheritance-severing: icacls could not protect the child");
             let _ = std::fs::remove_dir_all(&nm);
             return;
         }
-        let a_protected = dacl_facts(&a).map(|f| f.protected).unwrap_or(false);
 
         // Now place an inheritable AAP grant on the PARENT, exactly as a later launch would
         // place its inheritable read grant on `node_modules`. AAP is the trustee because the
         // probe can already measure its effective rights on any path.
-        let ok = std::process::Command::new("icacls")
+        let granted = std::process::Command::new("icacls")
             .arg(&nm)
             .arg("/grant")
             .arg("*S-1-15-2-1:(OI)(CI)RX")
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        if !ok {
+        if !granted {
             println!("SKIP inheritance-severing: icacls could not grant on the parent");
             let _ = std::fs::remove_dir_all(&nm);
             return;
@@ -430,19 +430,19 @@ mod win {
         let a_rights = dacl_facts(&a).map(|f| f.aap_rights).unwrap_or(0);
         let b_rights = dacl_facts(&b).map(|f| f.aap_rights).unwrap_or(0);
         println!(
-            "PROBE inheritance-severing a_protected={a_protected} \
-             a_inherits_parent_grant={} b_inherits_parent_grant={} (a=0x{a_rights:08x} b=0x{b_rights:08x})",
+            "PROBE inheritance-severing protected_child_inherits={} control_sibling_inherits={} \
+             (a=0x{a_rights:08x} b=0x{b_rights:08x})",
             a_rights != 0,
             b_rights != 0
         );
         match (a_rights != 0, b_rights != 0) {
             (false, true) => println!(
-                "VERDICT inheritance-severing CONFIRMED: a protected working root does NOT \
-                 receive a later inheritable grant placed on its parent — a cross-run \
-                 ancestor grant cannot reach a previously-confined package dir"
+                "VERDICT inheritance-severing CONFIRMED: a protected directory does NOT \
+                 receive a later inheritable grant on its parent, so protecting each working \
+                 root would strand every previously-confined package dir"
             ),
             (true, true) => println!(
-                "VERDICT inheritance-severing REFUTED: the protected root still received the \
+                "VERDICT inheritance-severing REFUTED: the protected child still received the \
                  parent's inheritable grant"
             ),
             (_, false) => println!(
@@ -509,7 +509,7 @@ mod win {
         // (`C:\nubfx`) — so the fix is shown to be volume-independent, not a D:-only patch.
         case("system-volume-root-dir", PathBuf::from("C:\\"));
 
-        inheritance_severing_case(&mut fails);
+        inheritance_severing_case();
 
         if fails == 0 { Ok(()) } else { Err(fails) }
     }

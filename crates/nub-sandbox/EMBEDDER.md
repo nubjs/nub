@@ -167,15 +167,12 @@ engine defects — they define the seam. Full detail + bounds:
 
 2. **Windows per-host egress and MITM.** An AppContainer child cannot reach a loopback egress proxy without a package-wide exemption. That exemption exposes every loopback listener, not just the proxy port, so the engine rejects per-host and per-request policies before launch. It reports `net-per-host` and, when applicable, `net-per-request`.
 
-3. **Windows clean-DACL work root — no longer a launcher obligation, but it CHANGES
-   YOUR DIRECTORY.** An `ALL APPLICATION PACKAGES` allow-ACE on the work dir satisfies
-   the LowBox check before default-deny, so an ungranted secret under it stays readable.
-   The engine now builds the clean root itself: before a filesystem-confined
-   AppContainer launch it re-authors `cwd`'s DACL — AAP stripped, existing access kept,
-   `SE_DACL_PROTECTED` set — needing only `WRITE_DAC` (owner-implicit, no elevation).
-   The change is persistent and is skipped when the root already qualifies, so pass a
-   `cwd` you are willing to have inheritance disabled on. Ancestor traverse grants are
-   NOT needed (traverse-bypass covers intermediate dirs).
+3. **Windows clean-DACL work root — no longer a launcher obligation.** An
+   `ALL APPLICATION PACKAGES` allow-ACE that reaches the work dir satisfies the LowBox
+   check before default-deny, so an ungranted secret under it stays readable. The engine
+   checks for exactly that and reports `fs-root` when it finds one; it does NOT require a
+   protected ancestor, and it never rewrites your directory's ACL. Ancestor traverse grants
+   are NOT needed either (traverse-bypass covers intermediate dirs).
 
 4. **Per-scope capability boundary.** The engine CANNOT detect trust — the CALLER
    assigns each scope its `ScopeCapabilities` by scope IDENTITY (never inferred from a

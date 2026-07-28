@@ -537,9 +537,9 @@ mod win {
     ///
     /// Why this module owns its LowBox launches instead of reusing [`code`]: the deny must
     /// name the per-run AppContainer SID and be in place BEFORE launch (`apply` mints that
-    /// SID internally and never exposes it), `apply` STRIPS the AAP ace from a working root
-    /// it is handed (`ensure_clean_root`) — which would erase the very grant the `aap-*`
-    /// cells are built on — and LPAC is not a posture the backend can express at all.
+    /// SID internally and never exposes it), `apply` REFUSES an AAP-carrying working root
+    /// (`verify_clean_root`) — which is exactly what the `aap-*` cells must set up — and
+    /// LPAC is not a posture the backend can express at all.
     mod denyace {
         use std::io;
         use std::os::windows::ffi::OsStrExt;

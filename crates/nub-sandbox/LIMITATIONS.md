@@ -436,24 +436,29 @@ ACLs are NOT access-checked: a leaf-only AC-SID grant is reachable under an ORDI
 under `%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`). nub never needs
 `WRITE_DAC` on a shared ancestor.
 
-- **The clean root is the ENGINE's to build, not the launcher's to supply.** Where a work
-  dir carries an `ALL APPLICATION PACKAGES` allow-ACE (inherited or explicit), an ungranted
-  secret UNDER it is readable regardless of the allow-set — the AAP grant satisfies the
-  LowBox check before default-deny is reached. `apply` therefore re-authors the working
-  root's DACL before every filesystem-confined AppContainer launch: strip AAP, keep the
-  access the directory already had, add an explicit self-grant, and set `SE_DACL_PROTECTED`
-  so no later edit to an ancestor can propagate a fresh AAP ACE into the running jail. It
-  needs only `WRITE_DAC`, which the directory's owner holds implicitly — no elevation.
-  - **This mutates the working directory's ACL, persistently.** Inheritance is disabled on
-    that one directory and the change is not reverted when the jail exits: reverting would
-    re-open the window it closes, and a build root reachable by its owner and by no
-    AppContainer is the correct resting state. The write is skipped entirely when the root
-    already satisfies the invariant.
-  - Demonstrated by the before/after differential in `windows_enforcement.rs` (the AAP trap
-    reproduced on a dirty root, then closed on that same directory) and pinned against
-    ordinary, un-pre-secured directories by `windows_clean_root.rs`.
-  - The dedicated-account backend does not share the precondition — its child is a separate
-    local principal, never an AppContainer, so no AAP grant reaches it.
+- **The precondition is INHERITABILITY, not a protected ancestor.** Where an
+  `ALL APPLICATION PACKAGES` allow-ACE can reach a work dir, an ungranted secret UNDER it is
+  readable regardless of the allow-set — the AAP grant satisfies the LowBox check before
+  default-deny is reached. `apply` refuses such a root (`fs-root`). It does NOT refuse a root
+  merely because some ancestor carries an AAP ACE: every AAP ACE on a stock machine is
+  non-inheritable, governing that one directory object, so it cannot reach the tree the child
+  runs in. The earlier form demanded an `SE_DACL_PROTECTED` ancestor above an AAP-free chain,
+  which only `%USERPROFILE%` paths have — a project on a second volume, or a CI checkout,
+  could never be confined.
+- **The engine never rewrites a work dir's DACL.** Creating the precondition instead of
+  checking it was considered and rejected: it is unprivileged and it does close the hole, but
+  `SE_DACL_PROTECTED` severs inheritance INTO the protected directory, and the build jail
+  depends on that inheritance — each lifecycle script's cwd is `node_modules/<pkg>` while the
+  dependency-tree read is granted on `node_modules` itself, so one protected package dir
+  strands every later script that needs to read it, permanently. Measured on windows-latest
+  (`tests/windows_clean_root.rs`): a protected directory took none of a later inheritable
+  grant on its parent while an unprotected sibling took all of it. This also keeps `apply` a
+  pure planner — a plan that is never launched leaves nothing behind.
+- **Residual, accepted:** a root whose ancestor LATER gains an inheritable AAP ACE is not
+  fenced off. Placing one needs `WRITE_DAC` on an ancestor of the jail root, which the
+  confined child does not have, so the only actor who can is the user who owns the tree.
+- **The dedicated-account backend does not share the precondition** — its child is a separate
+  local principal, never an AppContainer, so no AAP grant reaches it.
 
 ### Untrusted-tier tighten-only layering — by design, the caller's responsibility
 

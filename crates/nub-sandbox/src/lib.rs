@@ -60,9 +60,9 @@
 //!     program file only and does not probe the host for it.
 //!   - **Windows loopback exemption** — per-host egress (and the MITM tier) need a
 //!     registered loopback exemption so the child can reach the proxy. The sibling
-//!     clean-DACL work-root obligation is retired: the engine re-authors the working
-//!     root's DACL itself (no `ALL APPLICATION PACKAGES` reach, `SE_DACL_PROTECTED`),
-//!     unprivileged but persistent — see `LIMITATIONS.md`.
+//!     clean-DACL work-root obligation is retired: the engine checks the work root for
+//!     `ALL APPLICATION PACKAGES` reach itself and degrades `fs-root` when it finds it —
+//!     see `LIMITATIONS.md`.
 //!   - **Per-host proxy wiring** — the launcher provisions/exempts the loopback
 //!     proxy path per OS as above.
 //!   - **Untrusted-config trust boundary** — the engine CANNOT detect trust; the
