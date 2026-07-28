@@ -6642,11 +6642,24 @@ fn node_argv0_initializes_one_project_config_snapshot() {
         .map(str::to_owned)
         .collect();
     assert_eq!(
-        lines,
-        vec![format!(
-            "cwd={} project=loaded",
-            proj.canonicalize().unwrap().display()
-        )],
+        lines.len(),
+        1,
+        "the successful node argv0 route must initialize exactly one snapshot from its final cwd: {lines:?}"
+    );
+    let logged = lines[0]
+        .strip_prefix("cwd=")
+        .and_then(|rest| rest.strip_suffix(" project=loaded"))
+        .unwrap_or_else(|| panic!("unexpected snapshot log line: {}", lines[0]));
+    // Compare resolved directories, not path spellings. Windows hands the child
+    // whatever form the environment carried — an 8.3 short name under a
+    // RUNNER~1 home — while `canonicalize` returns the extended-length `\\?\`
+    // form. Both name the same directory; the contract under test is WHICH
+    // directory the snapshot resolved from.
+    assert_eq!(
+        std::path::Path::new(logged)
+            .canonicalize()
+            .expect("logged cwd exists"),
+        proj.canonicalize().expect("target exists"),
         "the successful node argv0 route must initialize exactly one snapshot from its final cwd"
     );
 
