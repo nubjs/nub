@@ -45,7 +45,7 @@
 // PID 1, outlives its launcher, and is not reaped by the harness.
 
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -62,7 +62,10 @@ const PROJECT = "pullfrog";
 // progressively more commodity shapes that are almost always available.
 const ZONES = ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"];
 const MACHINE_FALLBACKS = ["c3-standard-8", "n2-standard-8", "n2d-standard-8", "e2-standard-8"];
-const STOCKOUT = /ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources|STOCKOUT|QUOTA_EXCEEDED/i;
+// Quota shows up as prose ("Quota 'C3_CPUS' exceeded"), not a token — and a --fanout 10 of
+// 8-vCPU shapes asks for 80 vCPUs at once, which is a realistic way to trip a per-FAMILY
+// regional limit. Falling through to another machine family is exactly the right response.
+const STOCKOUT = /ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources|STOCKOUT|QUOTA_EXCEEDED|quota .*exceeded/i;
 const IMAGE_FAMILY = "nub-builder";
 const LABEL = "nub-builder";
 // Ubuntu 24.04 is the base for the golden image; c3-standard-8 matches the box the
@@ -80,6 +83,12 @@ const CRED = join(homedir(), ".config", "pullfrog", "vertex-service-account.json
 // Server-side backstop (layer 2). Generous enough for a cold release build (~7 min) plus
 // sync and toolchain, tight enough that a stray cannot bill for hours.
 const MAX_RUN = "45m";
+// The bake is longer (apt + rustup + cargo-install + a cold dependency compile) and must not
+// be DELETEd — it stops the instance and images the disk. STOP is a valid termination action
+// for --max-run-duration (gcloud documents it for "automatic instance termination", not only
+// spot preemption), and stopping is exactly what the bake does next anyway. So layer 2 covers
+// EVERY instance this tool creates; there is no exception to maintain.
+const BAKE_MAX_RUN = "90m";
 
 const HELP = `remote-build — run a nub build/gate on an ephemeral GCE spot VM
 
@@ -104,7 +113,8 @@ Options:
   --on-demand        Use on-demand rather than spot provisioning.
   --keep             Do not delete the VM on exit (debugging; it still self-deletes at ${MAX_RUN}).
   --build-image      Bake the golden image, then exit.
-  --reap             Delete every VM labelled ${LABEL}=1, then exit.
+  --reap             Delete builder VMs older than 90m (definitionally stray), then exit.
+  --reap-all         Delete EVERY builder VM, including live ones owned by other agents.
   -h, --help         Show this help.
 
 Cost: spot c3-standard-8 is a few cents per build. A stray cannot outlive ${MAX_RUN}.
@@ -122,6 +132,7 @@ export function parseArgs(argv: string[]) {
     keep: false,
     buildImage: false,
     reap: false,
+    reapAll: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
@@ -138,6 +149,7 @@ export function parseArgs(argv: string[]) {
     else if (v === "--keep") a.keep = true;
     else if (v === "--build-image") a.buildImage = true;
     else if (v === "--reap") a.reap = true;
+    else if (v === "--reap-all") a.reapAll = true;
     else {
       process.stderr.write(`remote-build: unknown argument ${v}\n\n${HELP}`);
       process.exit(2);
@@ -145,6 +157,20 @@ export function parseArgs(argv: string[]) {
   }
   if (!["build", "clippy", "test"].includes(a.job)) {
     process.stderr.write(`remote-build: --job must be build|clippy|test\n`);
+    process.exit(2);
+  }
+  // Whitelisted for the same reason --job is: `profile` is interpolated into a script piped
+  // to `bash -s` AND into an rsync REMOTE path (which the far side shell-expands). Not
+  // attacker-reachable — you would already need argv control — but an unvalidated value
+  // there turns a typo into a shell syntax error from inside a generated script.
+  // Without this, `--machine` as the final argv element silently becomes the STRING
+  // "undefined" and every create fails with `--machine-type undefined`.
+  if (!a.machine || !/^[a-z0-9]+-[a-z0-9]+-\d+$/.test(a.machine)) {
+    process.stderr.write(`remote-build: --machine must be a GCE machine type (e.g. c3-standard-8)\n`);
+    process.exit(2);
+  }
+  if (!["fast", "release"].includes(a.profile)) {
+    process.stderr.write(`remote-build: --profile must be fast|release\n`);
     process.exit(2);
   }
   if (!Number.isInteger(a.fanout) || a.fanout < 1) {
@@ -168,13 +194,15 @@ function gcloudEnv() {
   return { ...process.env, CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: CRED };
 }
 
-async function gcloud(args: string[], opts: { quiet?: boolean } = {}) {
+async function gcloud(args: string[]) {
   const full = [...args, "--project", PROJECT];
   const { stdout } = await execFileAsync("gcloud", full, {
     env: gcloudEnv(),
     maxBuffer: 64 * 1024 * 1024,
+    // No gcloud call here should ever take minutes; without this a hung API call hangs the
+    // whole run, and for the bake there is no server-side backstop to end it.
+    timeout: 180_000,
   });
-  if (!opts.quiet) process.stderr.write("");
   return stdout.trim();
 }
 
@@ -209,7 +237,7 @@ async function waitForSsh(name: string, zone: string, ip: string, timeoutMs: num
   let lastErr = "";
   while (Date.now() < deadline) {
     try {
-      await execFileAsync("ssh", ["-i", SSH_KEY, ...SSH_OPTS, `${SSH_USER}@${ip}`, "true"]);
+      await execFileAsync("ssh", ["-i", SSH_KEY, ...SSH_OPTS, `${SSH_USER}@${ip}`, "true"], { timeout: 20_000 });
       return;
     } catch (e: any) {
       lastErr = String(e?.stderr || e?.message || e);
@@ -229,7 +257,7 @@ async function waitForSsh(name: string, zone: string, ip: string, timeoutMs: num
 export function instanceCreateArgs(
   name: string,
   pubKey: string,
-  opts: { machine: string; zone: string; onDemand: boolean; fromImage: boolean; selfDestruct: boolean },
+  opts: { machine: string; zone: string; onDemand: boolean; fromImage: boolean; terminate: "DELETE" | "STOP" },
 ) {
   const args = [
     "compute", "instances", "create", name,
@@ -238,16 +266,17 @@ export function instanceCreateArgs(
     "--boot-disk-size", `${DISK_GB}GB`,
     "--boot-disk-type", "pd-balanced",
     "--labels", `${LABEL}=1`,
-    "--metadata", `ssh-keys=${SSH_USER}:${pubKey}`,
+    // Only this key. A builder gets a public IP on the default network (which ships
+    // default-allow-ssh from 0.0.0.0/0), so project-wide keys are needless extra reach.
+    "--metadata", `ssh-keys=${SSH_USER}:${pubKey},block-project-ssh-keys=TRUE`,
   ];
-  // Layer 2 of the orphan-proofing: GCE deletes the VM server-side at MAX_RUN no matter
-  // what happens to this process. Deliberately NOT applied to the image bake — that flow
-  // stops the instance and images its disk, and a mid-bake server-side DELETE would take
-  // the disk with it. The bake is supervised and short-lived; it relies on the `finally`
-  // and on carrying the label so `--reap` still finds it.
-  if (opts.selfDestruct) {
-    args.push("--max-run-duration", MAX_RUN, "--instance-termination-action", "DELETE");
-  }
+  // Layer 2: GCE terminates the VM server-side no matter what happens to this process —
+  // the only layer a SIGKILL cannot defeat. Builders DELETE (a merely-stopped VM still bills
+  // its disk); the bake STOPs, because it images that disk immediately afterwards.
+  args.push(
+    "--max-run-duration", opts.terminate === "STOP" ? BAKE_MAX_RUN : MAX_RUN,
+    "--instance-termination-action", opts.terminate,
+  );
   if (opts.fromImage) args.push("--image-family", IMAGE_FAMILY, "--image-project", PROJECT);
   else args.push("--image-family", BASE_IMAGE_FAMILY, "--image-project", BASE_IMAGE_PROJECT);
   if (!opts.onDemand) args.push("--provisioning-model", "SPOT");
@@ -267,10 +296,10 @@ export function placementCandidates(preferredMachine: string) {
 
 async function createInstance(
   name: string,
-  opts: { machine: string; onDemand: boolean; fromImage: boolean; selfDestruct: boolean },
+  opts: { machine: string; onDemand: boolean; fromImage: boolean; terminate: "DELETE" | "STOP" },
   log: (s: string) => void = () => {},
 ) {
-  const pubKey = sh("cat", [`${SSH_KEY}.pub`]).trim();
+  const pubKey = readFileSync(`${SSH_KEY}.pub`, "utf8").trim();
   let lastErr: any;
   for (const { zone, machine } of placementCandidates(opts.machine)) {
     try {
@@ -289,8 +318,13 @@ async function createInstance(
 async function deleteInstance(name: string, zone: string) {
   try {
     await gcloud(["compute", "instances", "delete", name, "--zone", zone, "--quiet"]);
+    return true;
   } catch (e: any) {
-    process.stderr.write(`remote-build: WARNING could not delete ${name}: ${e?.message || e}\n`);
+    const msg = String(e?.stderr || e?.message || e);
+    // Spot preemption already deleted it server-side — expected, not a warning worth printing.
+    if (/was not found|already being deleted/i.test(msg)) return true;
+    process.stderr.write(`remote-build: WARNING could not delete ${name} (${zone}): ${msg.split("\n")[0]}\n`);
+    return false;
   }
 }
 
@@ -299,8 +333,19 @@ async function deleteInstance(name: string, zone: string) {
 // decide what to skip, and it times out. The allowlist never touches those paths at all:
 // measured 2.2s for the full ~107 MB payload, 0.8s for a few-file delta.
 // tests/node-suite is a populated submodule (~795 MB) and is dropped explicitly.
-export function filterSourceFiles(lsFilesOutput: string) {
-  return lsFilesOutput.split("\n").filter((f) => f && !f.startsWith("tests/node-suite"));
+// `git ls-files` alone lists the INDEX. Two failure modes follow, and the first is the
+// worst output a build tool can produce: an unstaged NEW file is never synced, so the
+// remote lints/builds a tree WITHOUT your change and reports success. The second: a
+// tracked file deleted in the worktree is still listed, and rsync aborts the entire sync
+// when it cannot open it. So union in untracked-but-not-ignored files, and drop entries
+// that no longer exist (openrsync 2.6.9 has no --ignore-missing-args).
+export function filterSourceFiles(lsFilesOutput: string, exists: (f: string) => boolean = () => true) {
+  const seen = new Set<string>();
+  return lsFilesOutput
+    .split("\n")
+    .filter((f) => f && !f.startsWith("tests/node-suite"))
+    .filter((f) => (seen.has(f) ? false : (seen.add(f), true)))
+    .filter((f) => exists(f));
 }
 
 // macOS ships openrsync ("rsync version 2.6.9 compatible"), NOT rsync 3.x, so any
@@ -313,7 +358,8 @@ export function rsyncPushArgs(listFile: string, source: string, ip: string, sshC
 }
 
 function syncSource(source: string, ip: string) {
-  const files = filterSourceFiles(sh("git", ["ls-files"], { cwd: source }));
+  const listed = sh("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--deduplicate"], { cwd: source });
+  const files = filterSourceFiles(listed, (f) => existsSync(join(source, f)));
   const listFile = join(tmpdir(), `remote-build-files-${process.pid}-${Math.random().toString(36).slice(2)}.txt`);
   writeFileSync(listFile, files.join("\n") + "\n");
   try {
@@ -331,6 +377,21 @@ function syncSource(source: string, ip: string) {
 //     produces a SILENTLY DEGRADED binary. The golden image installs Node for this reason;
 //     this check fails loudly if a caller points at a hand-rolled box that lacks it.
 const PREPARE = `set -euo pipefail
+# sshd runs \`bash -s\` NON-interactively, so it reads neither /etc/profile nor (thanks to
+# Ubuntu's early \`case $- in *i*) ;; *) return\`) ~/.bashrc. rustup's PATH line therefore
+# never applies and every cargo call would die with 127. Source it explicitly, exactly as
+# the bake's own provision/warm scripts do.
+. "$HOME/.cargo/env"
+# Must match the bake's target dir. The bake compiles the dependency graph and then
+# \`rm -rf ~/src\`, so a target dir INSIDE ~/src would be destroyed with it and every
+# builder would pay a full cold compile despite the image claiming otherwise.
+export CARGO_TARGET_DIR="$HOME/.cargo-shared-target"
+# The \`command -v node\` check below only catches a MISSING node. aube-resolver/build.rs has
+# two further silent-degrade branches (generate-primer.mjs fails to spawn, or exits non-zero)
+# that emit a cargo:warning and ship an EMPTY primer — a binary that falls back to network
+# packument fetches, exit code 0, invisible to artifact verification. release.yml:476 sets
+# this same var so build.rs fails loud instead.
+export AUBE_REQUIRE_PRIMER=1
 cd ~/src
 command -v node >/dev/null || { echo "remote-build: node missing on builder (would silently degrade the primer)" >&2; exit 3; }
 mkdir -p runtime/addons
@@ -339,11 +400,21 @@ mkdir -p runtime/addons
 `;
 
 export function jobScript(job: string, profile: string) {
+  // Mirror .github/workflows/ci.yml EXACTLY. The root clippy does NOT cover nub-native —
+  // it is its own workspace (panic=unwind cdylib), `exclude`d from the root — so a
+  // root-only run goes green on code CI then rejects. The brand lint is a cheap grep.
   if (job === "clippy") {
-    return `${PREPARE}cargo clippy --all-targets --all-features -- -D warnings`;
+    return `${PREPARE}cargo clippy --all-targets --all-features -- -D warnings
+(cd crates/nub-native && cargo clippy --all-features -- -D warnings)
+tests/brand-lint/check-env-reads.sh`;
   }
+  // CI runs the WHOLE workspace, and builds the REAL addon first because the data-format
+  // loader tests dlopen it — an 11-byte placeholder makes them fail on a malformed library
+  // rather than skip. Build it here for the same reason.
   if (job === "test") {
-    return `${PREPARE}cargo test -p nub-cli`;
+    return `${PREPARE}(cd crates/nub-native && cargo build)
+cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
+cargo test`;
   }
   return `${PREPARE}cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile ${profile}
 ls -la target/aarch64-apple-darwin/${profile}/nub`;
@@ -376,12 +447,15 @@ function verifyArtifact(path: string) {
     throw new Error(`remote-build: pulled artifact is not an arm64 Mach-O executable:\n  ${fileOut}`);
   }
   let signed = true;
+  let signErr = "";
   try {
     sh("codesign", ["--verify", path], { stdio: "pipe" });
-  } catch {
+  } catch (e: any) {
+    // Keep stderr: "not signed at all" and "malformed signature" need different fixes.
     signed = false;
+    signErr = String(e?.stderr || e?.message || e).trim().split("\n")[0];
   }
-  return { fileOut, signed };
+  return { fileOut, signed, signErr };
 }
 
 async function oneBuild(
@@ -402,10 +476,13 @@ async function oneBuild(
     // instance can exist server-side before gcloud returns.
     const placement = await createInstance(
       name,
-      { machine: a.machine, onDemand: a.onDemand, fromImage: true, selfDestruct: true },
+      { machine: a.machine, onDemand: a.onDemand, fromImage: true, terminate: "DELETE" },
       log,
     );
     zone = placement.zone;
+    // The create window itself is NOT covered by layer 1 — the instance can exist
+    // server-side before gcloud returns, and the placement walk can span several zones.
+    // Builders are covered there by layer 2 (the server-side TTL); --reap catches the rest.
     live.add(`${name}|${zone}`);
     created = true;
     const ip = await instanceIp(name, zone);
@@ -430,6 +507,11 @@ async function oneBuild(
       ]);
       verified = verifyArtifact(artifact);
       log(`pulled ${artifact} — ${verified.fileOut.replace(/^.*?: /, "")}, signature ${verified.signed ? "valid" : "MISSING"}`);
+      // arm64 macOS SIGKILLs an unsigned binary, so handing one back as a success is the
+      // worst outcome available: it fails later, at exec, looking like a build bug.
+      if (!verified.signed) {
+        throw new Error(`artifact is unsigned and will be SIGKILLed on exec: ${artifact} (${verified.signErr})`);
+      }
     }
     const secs = (Date.now() - t0) / 1000;
     log(`done in ${secs.toFixed(0)}s`);
@@ -459,23 +541,44 @@ function sampleLocal() {
   return { idle, load: one };
 }
 
-async function reap() {
+export function isStray(creationTimestamp: string, now: number, maxAgeMs: number) {
+  const created = Date.parse(creationTimestamp);
+  if (Number.isNaN(created)) return false; // unparseable age -> never assume abandoned
+  return now - created > maxAgeMs;
+}
+
+async function reap(all: boolean) {
   const list = await gcloud([
     "compute", "instances", "list",
     "--filter", `labels.${LABEL}=1`,
-    "--format=value(name,zone.basename())",
+    "--format=value(name,zone.basename(),creationTimestamp)",
   ]);
-  const rows = list.split("\n").filter(Boolean);
-  if (!rows.length) {
+  const rows = list.split("\n").filter(Boolean).map((r) => r.split(/\s+/));
+  // A VM younger than the bake TTL may be a SIBLING AGENT'S live build, or a running image
+  // bake. Deleting it destroys someone else's work — and with ~20 agents sharing this project
+  // that is a live footgun in the very layer that is supposed to be the safety net. Age is
+  // the gate: layer 2 guarantees a healthy instance is terminated by BAKE_MAX_RUN, so
+  // anything older than that is genuinely abandoned.
+  const maxAgeMs = 90 * 60_000;
+  const now = Date.now();
+  const targets = all ? rows : rows.filter((r) => isStray(r[2], now, maxAgeMs));
+  const skipped = rows.length - targets.length;
+  if (skipped) {
+    process.stdout.write(
+      `remote-build: skipping ${skipped} builder VM(s) younger than 90m — they may be live ` +
+        `builds owned by another agent. Use --reap-all to force.\n`,
+    );
+  }
+  if (!targets.length) {
     process.stdout.write("remote-build: no stray builder VMs.\n");
-    return 0;
+    return { deleted: 0, failed: 0 };
   }
-  for (const row of rows) {
-    const [name, zone] = row.split(/\s+/);
+  let failed = 0;
+  for (const [name, zone] of targets) {
     process.stdout.write(`remote-build: deleting stray ${name} (${zone})\n`);
-    await deleteInstance(name, zone);
+    if (!(await deleteInstance(name, zone))) failed++;
   }
-  return rows.length;
+  return { deleted: targets.length - failed, failed };
 }
 
 // The golden image is what makes this a go-to tool rather than a ceremony: a bare Ubuntu
@@ -483,16 +586,19 @@ async function reap() {
 // and cargo-zigbuild itself is a multi-minute source build. Baking that once turns per-build
 // setup into boot time. The registry warm-up additionally pre-fetches every crate so a cold
 // builder does not re-download the index on every run.
-async function buildImage(a: ReturnType<typeof parseArgs>, source: string) {
+async function buildImage(a: ReturnType<typeof parseArgs>, source: string, live: Set<string>) {
   const name = `nub-image-bake-${Date.now().toString(36)}`;
   process.stdout.write(`remote-build: baking image family ${IMAGE_FAMILY} on ${name}\n`);
   // On-demand (a preemption mid-bake wastes the whole run) and NO self-destruct (the
   // bake stops the instance and images its disk; a server-side DELETE would destroy it).
   const { zone } = await createInstance(
     name,
-    { machine: a.machine, onDemand: true, fromImage: false, selfDestruct: false },
+    { machine: a.machine, onDemand: true, fromImage: false, terminate: "STOP" },
     (l) => process.stdout.write(`  ${l}\n`),
   );
+  // The bake is the ONE instance with no server-side self-destruct, so layer 1 is all that
+  // stands between a Ctrl-C and an on-demand VM billing indefinitely. Register it.
+  live.add(`${name}|${zone}`);
   try {
     const ip = await instanceIp(name, zone);
     await waitForSsh(name, zone, ip, 300_000);
@@ -521,15 +627,28 @@ echo '. "$HOME/.cargo/env"' >> ~/.bashrc
     // Warm the crate registry + dependency artifacts from a real checkout so a booted
     // builder starts with the expensive dependency graph already compiled.
     syncSource(source, ip);
+    // CARGO_TARGET_DIR must live OUTSIDE ~/src, which this step deletes at the end — that
+    // is the entire point of warming it — and must match PREPARE's, or builders silently
+    // start cold against an image that advertises warm artifacts.
     const warm = `set -euo pipefail
 . "$HOME/.cargo/env"
+export CARGO_TARGET_DIR="$HOME/.cargo-shared-target"
 cd ~/src
 mkdir -p runtime/addons && printf 'placeholder' > runtime/addons/nub-native.node
 npm install --no-audit --no-fund --loglevel=error
 cargo fetch
-cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile fast || true
-cargo build -p nub-cli --profile fast || true
+# Best-effort: a warm-up failure still leaves a usable image (toolchain + registry), so it
+# must not abort the bake — but it must not be SILENT either, or a cold-building image is
+# indistinguishable from a warm one. Warn loudly rather than `|| true`.
+# NOT best-effort: this is the end-to-end smoke test for the pinned zig, the darwin target,
+# cmake and the C-compiling target deps. Masking it would publish an image whose every build
+# dies with the zero-byte, empty-\`= note:\` linker failure this file's header calls the least
+# debuggable failure in the pipeline. Let it fail the bake — no image gets created.
+cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile fast
+cargo build -p nub-cli --profile fast || echo "WARM-WARN: linux warm-up failed; builders will cold-compile"
+(cd crates/nub-native && cargo build) || echo "WARM-WARN: addon warm-up failed"
 rm -rf ~/src
+echo "warm target dir: $(du -sh "$CARGO_TARGET_DIR" | cut -f1)"
 `;
     await runJob(ip, warm, (l) => process.stdout.write(`  ${l}\n`));
 
@@ -544,6 +663,7 @@ rm -rf ~/src
     process.stdout.write(`remote-build: image ${image} created in family ${IMAGE_FAMILY}\n`);
   } finally {
     await deleteInstance(name, zone);
+    live.delete(`${name}|${zone}`);
   }
 }
 
@@ -555,25 +675,43 @@ async function main() {
   // Layer 1: best-effort local cleanup. Deliberately not the only layer — a SIGKILL
   // bypasses this entirely, which is why every VM also self-deletes server-side.
   const live = new Set<string>();
+  let signalled = false;
   const onSignal = () => {
-    for (const entry of live) {
-      const [n, z] = entry.split("|");
-      try {
-        execFileSync("gcloud", ["compute", "instances", "delete", n, "--zone", z, "--project", PROJECT, "--quiet"], { env: gcloudEnv() });
-      } catch {}
-    }
-    process.exit(130);
+    // Re-entrant guard: without it a second Ctrl-C restarts the whole sweep.
+    if (signalled) return;
+    signalled = true;
+    process.stderr.write(`\nremote-build: interrupted — deleting ${live.size} VM(s)…\n`);
+    // Deletes run CONCURRENTLY and asynchronously. Serial synchronous deletes blocked the
+    // event loop for minutes at --fanout 10, so a second Ctrl-C did nothing and the user's
+    // next move was SIGKILL — the exact orphaning this handler exists to prevent.
+    const done = Promise.all(
+      [...live].map((entry) => {
+        const [n, z] = entry.split("|");
+        return deleteInstance(n, z);
+      }),
+    );
+    // Hard backstop: never hang on cleanup. Layer 2 still terminates anything left behind.
+    const bail = setTimeout(() => {
+      process.stderr.write("remote-build: cleanup timed out; server-side TTL will reclaim the rest\n");
+      process.exit(130);
+    }, 45_000);
+    bail.unref();
+    done.then(() => process.exit(130)).catch(() => process.exit(130));
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
+  // Closing the terminal would otherwise skip cleanup entirely.
+  process.on("SIGHUP", onSignal);
 
-  if (a.reap) {
-    const n = await reap();
-    process.exit(n > 0 ? 0 : 0);
+  if (a.reap || a.reapAll) {
+    const r = await reap(a.reapAll);
+    // A reap that failed every delete must NOT read as "clean" to an operator or a wrapper.
+    process.exitCode = r.failed ? 1 : 0;
+    return;
   }
   if (a.buildImage) {
-    await buildImage(a, source);
-    process.exit(0);
+    await buildImage(a, source, live);
+    return;
   }
 
   const before = sampleLocal();
@@ -620,7 +758,7 @@ async function main() {
   }
   process.stdout.write(`remote-build: local AFTER — idle ${after.idle}%, load ${after.load}\n`);
 
-  process.exit(failed.length ? 1 : 0);
+  process.exitCode = failed.length ? 1 : 0;
 }
 
 // Same main-gate as scripts/ci-watch.ts: importing this module (tests) must not run it.

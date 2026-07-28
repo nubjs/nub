@@ -41,7 +41,7 @@ Measured, `n2-standard-16` vs the Mac:
 | warm incremental | 8.1s | ~5s | **stays local — remote loses** |
 | cold `release` | 7m 00s | ~15m | remote, 2× |
 | `clippy --all-targets --all-features` | 35.3s | — | remote |
-| `cargo test -p nub-cli` | 39.4s warm | — | remote (718 passed / 0 failed on Linux) |
+| `cargo test` (whole workspace) | 39.4s warm | — | remote (718 passed / 0 failed on Linux) |
 | cold `fast` | 3m 55s | ~3m | a wash |
 
 **The inner loop is deliberately not a job type.** Do not try to route `cargo build --profile
@@ -70,8 +70,11 @@ own disk**, which is where the relief comes from. Adding local cores would not h
 - **macOS ships openrsync ("2.6.9 compatible"), not rsync 3.x.** Any 3.x-only flag fails the
   whole sync. Sync uses a `--files-from` **allowlist** built from `git ls-files`; an `--exclude`
   blocklist makes rsync walk ~99 GB of gitignored tree and time out at 120s.
-- **A builder without `node` silently degrades the binary** — `aube-resolver/build.rs` emits
-  "shipping empty primer". The job script hard-fails if `node` is missing rather than shipping it.
+- **A builder can silently degrade the binary three ways** — `aube-resolver/build.rs` ships an
+  *empty primer* (falling back to network packument fetches, exit code 0) if `node` is missing, if
+  `generate-primer.mjs` fails to spawn, or if it exits non-zero. A `command -v node` check catches
+  only the first, so the job script also exports **`AUBE_REQUIRE_PRIMER=1`** — the same var
+  `release.yml` sets to make `build.rs` fail loud instead of degrading.
 - **Under `--all-features`, `crates/nub-core/build.rs` panics** unless `runtime/addons/nub-native.node`
   is staged. The job script stages a placeholder, the same trick CI uses for its addon-less job.
 - **`cmake` is mandatory** on the builder — `libz-ng-sys` fails ~35s in without it.
@@ -79,7 +82,7 @@ own disk**, which is where the relief comes from. Adding local cores would not h
   `-platform_version macos 13.0.0` and `MACOSX_DEPLOYMENT_TARGET` does not override it. Fine for
   a dev binary; **this must be solved before cross-compiled artifacts go anywhere near a release.**
 
-## Orphaned builders cannot happen (three layers)
+## Orphaned builders cannot outlive their TTL (three layers)
 
 Stray builders are the exact failure this repo keeps paying for, so a local `finally` — which a
 SIGKILL defeats — is not trusted on its own:
@@ -91,8 +94,21 @@ SIGKILL defeats — is not trusted on its own:
 3. Every VM is labelled `nub-builder=1`, so `nub scripts/remote-build.ts --reap` sweeps strays
    with no local state at all.
 
-The image bake is the one exception to layer 2 — it stops the instance and images its disk, and a
-mid-bake server-side DELETE would destroy that disk. It stays labelled and reapable.
+**Layer 2 covers every instance, including the image bake — there is no exception to remember.**
+`--instance-termination-action` applies to `--max-run-duration`, not only to spot preemption, and it
+accepts `STOP` as well as `DELETE`. So the bake gets `--max-run-duration=90m` with `STOP`, which is
+exactly what it does to itself next anyway before imaging the disk; a builder gets 45m with `DELETE`,
+because a merely-stopped VM still bills its disk.
+
+The *create* window is genuinely not covered by layer 1 — GCE can have the VM up before `gcloud`
+returns, and the placement walk spans several zones — but layer 2 is set at create time, so nothing
+this tool creates can outlive its TTL.
+
+**`--reap` will not touch a VM younger than 90 minutes.** With many agents sharing one GCP project,
+an unfiltered sweep would destroy a sibling's in-flight build — the safety net becoming the hazard.
+Age *is* the definition of stray here: layer 2 guarantees a healthy instance is gone by its TTL, so
+anything older is abandoned. `--reap-all` forces the unfiltered sweep; it is not the default for a
+reason. `--reap` exits non-zero if any delete fails, so "no output, exit 0" genuinely means clean.
 
 Builds run in the ssh **foreground** and are never detached. A detached build reparents to PID 1,
 outlives its launcher, holds locks, and is not reaped — see `rust-build-hygiene`.
@@ -101,9 +117,23 @@ outlives its launcher, holds locks, and is not reaped — see `rust-build-hygien
 
 `--build-image` bakes a `nub-builder` image family with apt deps, rustup + the darwin target +
 clippy, pinned zig, cargo-zigbuild, Node, a warmed crate registry, and pre-compiled dependency
-artifacts. Without it every builder would spend minutes installing a toolchain before doing any
+artifacts in `$HOME/.cargo-shared-target`. That path is load-bearing and must match the one every
+job exports: the bake deletes `~/src` when it finishes, so a target dir inside it would be destroyed
+and every builder would cold-compile while the image advertised warm artifacts. Without it every builder would spend minutes installing a toolchain before doing any
 work — the image is what makes this fast enough to reach for by default. Re-bake it when the
 toolchain or the dependency graph moves substantially; day to day it just sits there.
+
+## What this does NOT give you
+
+- **No provenance binding.** The artifact is checked for being a runnable arm64 Mach-O with a valid
+  ad-hoc signature — an ad-hoc signature attests *runnability*, not origin; anyone can produce one.
+  Nothing cryptographically ties the binary to the source that was sent.
+- **The golden image is a trust concentration.** It is baked once and reused for every subsequent
+  build, so anyone with write access to the `pullfrog` project (or its service-account key) could
+  bake something into every dev binary you later run. That is an accepted property of the design for
+  a single-developer tool, not an oversight — but know it rather than discover it.
+- **`StrictHostKeyChecking=no`.** Unavoidable with ephemeral VMs on recycled IPs, and the same
+  pattern `gcloud-vm` already uses. Closing it properly means `--no-address` + IAP tunnelling.
 
 ## Cost
 

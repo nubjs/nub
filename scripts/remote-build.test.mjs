@@ -10,7 +10,7 @@
 //      were real bugs during development.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates } from "./remote-build.ts";
+import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray } from "./remote-build.ts";
 
 // GCE returns ZONE_RESOURCE_POOL_EXHAUSTED for a specific shape in a specific zone, and it
 // took out the first image bake. A 10-way fanout requests ten instances at once, so a
@@ -75,33 +75,91 @@ test("jobScript(build) cross-compiles the darwin target at the requested profile
   assert.match(s, /--profile release/);
 });
 
-test("jobScript(clippy) runs the exact CI gate, and test does not", () => {
-  assert.match(jobScript("clippy", "fast"), /cargo clippy --all-targets --all-features -- -D warnings/);
-  assert.match(jobScript("test", "fast"), /cargo test -p nub-cli/);
-  assert.doesNotMatch(jobScript("test", "fast"), /clippy/);
+// Verified against .github/workflows/ci.yml: the Clippy job runs THREE things. nub-native
+// is its own workspace (panic=unwind cdylib) `exclude`d from the root, so a root-only
+// clippy goes green on code that CI then rejects — the exact --all-targets-shaped gap
+// AGENTS.md warns about.
+test("jobScript(clippy) reproduces all three legs of the CI clippy gate", () => {
+  const s = jobScript("clippy", "fast");
+  assert.match(s, /cargo clippy --all-targets --all-features -- -D warnings/);
+  assert.match(s, /crates\/nub-native && cargo clippy --all-features -- -D warnings/, "root clippy does NOT cover nub-native");
+  assert.match(s, /tests\/brand-lint\/check-env-reads\.sh/);
 });
 
-test("a builder VM self-destructs server-side, so a SIGKILLed launcher cannot orphan it", () => {
-  const args = instanceCreateArgs("b1", "ssh-ed25519 KEY", {
-    machine: "c3-standard-8", zone: "us-central1-a", onDemand: false, fromImage: true, selfDestruct: true,
-  });
-  assert.ok(args.includes("--max-run-duration"), "missing the server-side TTL");
-  const idx = args.indexOf("--instance-termination-action");
-  assert.notEqual(idx, -1, "missing the termination action");
-  assert.equal(args[idx + 1], "DELETE", "termination action must DELETE, not STOP (a stopped VM still bills its disk)");
-  assert.ok(args.includes("SPOT"), "builders default to spot");
+// CI runs the WHOLE workspace (`cargo test`, not `-p nub-cli`) and builds the REAL addon
+// first, because the data-format loader tests dlopen it — the 11-byte placeholder would
+// make them fail on a malformed library rather than skip.
+test("jobScript(test) matches CI: whole workspace, real addon staged over the placeholder", () => {
+  const s = jobScript("test", "fast");
+  assert.match(s, /\ncargo test$/, "CI runs the whole workspace, not -p nub-cli");
+  assert.match(s, /crates\/nub-native && cargo build/);
+  assert.match(s, /cp "\$CARGO_TARGET_DIR\/debug\/libnub_native\.so" runtime\/addons\/nub-native\.node/);
+  assert.doesNotMatch(s, /clippy/);
 });
 
-// The inverse, and a real bug that shipped once: the image bake STOPS the instance and
-// images its disk. A server-side DELETE mid-bake takes the disk with it.
-test("the image-bake VM does NOT self-destruct, but is still labelled for --reap", () => {
-  const args = instanceCreateArgs("bake", "ssh-ed25519 KEY", {
-    machine: "c3-standard-8", zone: "us-central1-b", onDemand: true, fromImage: false, selfDestruct: false,
+// The bake compiles the dependency graph then `rm -rf ~/src`. A target dir inside ~/src
+// would be destroyed with it, so every builder would pay a full cold compile while the
+// image claimed to carry warm artifacts. Both sides must agree on the path.
+test("every job uses a target dir that survives the bake's cleanup of ~/src", () => {
+  for (const job of ["build", "clippy", "test"]) {
+    const s = jobScript(job, "fast");
+    assert.match(s, /export CARGO_TARGET_DIR="\$HOME\/\.cargo-shared-target"/, `${job} must reuse the baked artifacts`);
+    assert.ok(!/CARGO_TARGET_DIR="?\$HOME\/src/.test(s), `${job} must not target a dir the bake deletes`);
+  }
+});
+
+// sshd runs `bash -s` non-interactively; Ubuntu's .bashrc returns before any appended
+// PATH line, so rustup's env is never applied and cargo dies with 127.
+test("every job sources cargo's env, since a non-interactive ssh shell never does", () => {
+  for (const job of ["build", "clippy", "test"]) {
+    assert.match(jobScript(job, "fast"), /\. "\$HOME\/\.cargo\/env"/, `${job} would die with cargo: command not found`);
+  }
+});
+
+test("filterSourceFiles drops entries missing from the worktree and de-dupes the union", () => {
+  const listed = ["a.rs", "gone.rs", "a.rs", "tests/node-suite/x.js", "b.rs"].join("\n");
+  const out = filterSourceFiles(listed, (f) => f !== "gone.rs");
+  assert.deepEqual(out, ["a.rs", "b.rs"], "a deleted-but-tracked file aborts the whole rsync");
+});
+
+// Layer 2 is the ONLY orphan-proofing a SIGKILL cannot defeat, so it must cover EVERY
+// instance the tool creates — there is no exception to maintain. `--instance-termination-action`
+// applies to `--max-run-duration`, not only spot preemption, which is what makes this possible.
+for (const [label, terminate, spot] of [["builder", "DELETE", true], ["image bake", "STOP", false]]) {
+  test(`the ${label} VM terminates server-side, so a SIGKILLed launcher cannot orphan it`, () => {
+    const args = instanceCreateArgs("v1", "ssh-ed25519 KEY", {
+      machine: "c3-standard-8", zone: "us-central1-a", onDemand: !spot, fromImage: spot, terminate,
+    });
+    assert.ok(args.includes("--max-run-duration"), "missing the server-side TTL");
+    const idx = args.indexOf("--instance-termination-action");
+    assert.notEqual(idx, -1, "missing the termination action");
+    assert.equal(args[idx + 1], terminate);
+    assert.equal(args.includes("SPOT"), spot);
+    assert.ok(args.includes("--labels") && args.includes("nub-builder=1"), "must stay reapable");
   });
-  assert.ok(!args.includes("--max-run-duration"), "a mid-bake delete would destroy the disk being imaged");
-  assert.ok(!args.includes("--instance-termination-action"));
-  assert.ok(!args.includes("SPOT"), "a preemption mid-bake wastes the whole run");
-  assert.ok(args.includes("--labels") && args.includes("nub-builder=1"), "must stay reapable");
+}
+
+// A builder must DELETE (a merely-stopped VM still bills its disk); the bake must STOP,
+// because the very next thing it does is image that disk.
+test("a builder deletes itself but the bake only stops, so its disk survives imaging", () => {
+  const b = instanceCreateArgs("b", "K", { machine: "c3-standard-8", zone: "z", onDemand: false, fromImage: true, terminate: "DELETE" });
+  const k = instanceCreateArgs("k", "K", { machine: "c3-standard-8", zone: "z", onDemand: true, fromImage: false, terminate: "STOP" });
+  assert.equal(b[b.indexOf("--instance-termination-action") + 1], "DELETE");
+  assert.equal(k[k.indexOf("--instance-termination-action") + 1], "STOP");
+  assert.notEqual(
+    b[b.indexOf("--max-run-duration") + 1],
+    k[k.indexOf("--max-run-duration") + 1],
+    "the bake needs a longer TTL than a build",
+  );
+});
+
+// --reap is layer 3, the safety net. With ~20 agents sharing one GCP project, a reap with no
+// age gate destroys a sibling's in-flight build — the net becoming the hazard.
+test("reap treats only VMs older than the bake TTL as stray", () => {
+  const now = Date.parse("2026-07-28T12:00:00Z");
+  assert.equal(isStray("2026-07-28T11:59:00Z", now, 90 * 60_000), false, "a 1-minute-old VM is someone's live build");
+  assert.equal(isStray("2026-07-28T10:00:00Z", now, 90 * 60_000), true, "2h old is past every TTL");
+  assert.equal(isStray("not-a-timestamp", now, 90 * 60_000), false, "unparseable age must never read as abandoned");
 });
 
 test("filterSourceFiles drops the node-suite submodule and keeps everything else", () => {
