@@ -657,11 +657,18 @@ fn build_jail_preset_expands() {
 ///
 /// Asserted against the compiled POLICY rather than a launch: the grant must hold on a
 /// host that has no `/opt/hostedtoolcache` to bind, which is every host this suite runs on.
+/// The tree is drive-anchored on Windows for the same reason `common::homes()` is: a
+/// drive-less absolute path is not absolute there, so the compiler cannot anchor it and
+/// every candidate would fall through to the default deny — a green that proves nothing.
 #[test]
 fn build_jail_reaches_an_interpreter_living_under_opt() {
     use std::collections::BTreeMap;
+    let out_of_tree = |rel: &str| -> std::path::PathBuf {
+        let drive = if cfg!(windows) { "C:" } else { "" };
+        std::path::PathBuf::from(format!("{drive}{rel}"))
+    };
     let homes = common::homes();
-    let node_root = std::path::PathBuf::from("/opt/hostedtoolcache/node/26.0.0/arm64");
+    let node_root = out_of_tree("/opt/hostedtoolcache/node/26.0.0/arm64");
     let interpreter = node_root.join("bin/node");
     let p = nub_sandbox::compile_build_jail(
         homes.clone(),
@@ -690,8 +697,8 @@ fn build_jail_reaches_an_interpreter_living_under_opt() {
     // The grant is the toolchain, not `/opt`. Everything else under it stays withheld —
     // that is the ~11 GB of unrelated third-party software a CI runner keeps there.
     for withheld in [
-        std::path::PathBuf::from("/opt/vendorware/creds.txt"),
-        std::path::PathBuf::from("/opt/hostedtoolcache/Python/3.12.0/x64/bin/python"),
+        out_of_tree("/opt/vendorware/creds.txt"),
+        out_of_tree("/opt/hostedtoolcache/Python/3.12.0/x64/bin/python"),
         node_root.join("lib/private.txt"),
     ] {
         assert!(
@@ -2201,7 +2208,7 @@ fn brokerto_rejects_bad_secret_keys_hosts_and_value_combo() {
 fn fs_substitution_resolves_and_grants_whole_and_embedded() {
     // A `$(…)` fs path resolves at load time and flows into the matcher exactly as
     // a literal would: whole-value (object key), embedded in a larger path, and the
-    // array form (ReadWrite). The stub `store path` → `/home/u/.store`.
+    // array form (ReadWrite). The stub `store path` → `<homes().home>/.store`.
     use nub_sandbox::matcher::PathMatcher;
     use nub_sandbox::policy::FsAccess;
     let ctx = common::ctx(true, &[]);

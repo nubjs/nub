@@ -6,9 +6,14 @@
 //! windows-latest CI leg; entirely against `file://` fixtures through the
 //! internal `NUB_RELEASE_BASE_URL` seam, so it touches no network.
 //!
-//! The fake release's `bin/nub.exe` is marker BYTES, not a real executable —
-//! the upgrade renames it into place without ever running it, so the asserts
-//! can distinguish old from new content unambiguously.
+//! The fake release's `bin/nub.exe` must be a REAL executable that reports the
+//! release's version: the upgrader validates the staged bundle by RUNNING it
+//! (`verify_provisioned_version`) before the swap, so inert marker bytes fail with
+//! `os error 216`. It is therefore a copy of the running `nub.exe` with a marker
+//! appended past the last PE section — overlay bytes the loader ignores, which keeps
+//! the binary runnable while leaving old and new byte-distinguishable. The fake
+//! release version is the running crate's own version for the same reason: the probe
+//! demands the staged binary report exactly the version being installed.
 
 #![cfg(windows)]
 
@@ -59,11 +64,19 @@ fn sha256_hex(bytes: &[u8]) -> String {
     s
 }
 
-const FAKE_VERSION: &str = "9.9.9";
-const NEW_BYTES: &[u8] = b"NEW-NUB-RELEASE-BYTES";
+const FAKE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Build the fake release channel: `<root>/v9.9.9/nub-<target>.zip` (containing
-/// `bin/nub.exe` = `NEW_BYTES`) + its `.sha256` sidecar. The zip is created with
+/// The PE overlay that makes the "released" binary byte-distinct from the installed one.
+const NEW_MARKER: &[u8] = b"NEW-NUB-RELEASE-BYTES";
+
+fn new_bytes() -> Vec<u8> {
+    let mut bytes = std::fs::read(nub_binary()).unwrap();
+    bytes.extend_from_slice(NEW_MARKER);
+    bytes
+}
+
+/// Build the fake release channel: `<root>/v<version>/nub-<target>.zip` (containing
+/// `bin/nub.exe` = [`new_bytes`]) + its `.sha256` sidecar. The zip is created with
 /// the same System32 bsdtar the upgrade extracts with (`-a` picks zip from the
 /// suffix), so the fixture proves the round-trip through the real tooling.
 fn make_fake_release(root: &Path) -> String {
@@ -73,7 +86,7 @@ fn make_fake_release(root: &Path) -> String {
 
     let build = tmp("zip-build");
     std::fs::create_dir_all(build.join("bin")).unwrap();
-    std::fs::write(build.join("bin").join("nub.exe"), NEW_BYTES).unwrap();
+    std::fs::write(build.join("bin").join("nub.exe"), new_bytes()).unwrap();
     let zip_path = version_dir.join(&archive_name);
     let status = Command::new("tar")
         .args(["-a", "-c", "-f"])
@@ -135,9 +148,9 @@ fn selfowned_upgrade_swaps_the_running_exe_via_the_rename_dance() {
     // The live nub.exe is the release's bytes; the pre-upgrade binary moved
     // aside to .old (deletion is impossible while it was executing); the nubx
     // copy was refreshed from the new binary.
-    assert_eq!(std::fs::read(bin.join("nub.exe")).unwrap(), NEW_BYTES);
+    assert_eq!(std::fs::read(bin.join("nub.exe")).unwrap(), new_bytes());
     assert_eq!(std::fs::read(bin.join("nub.exe.old")).unwrap(), old_bytes);
-    assert_eq!(std::fs::read(bin.join("nubx.exe")).unwrap(), NEW_BYTES);
+    assert_eq!(std::fs::read(bin.join("nubx.exe")).unwrap(), new_bytes());
 }
 
 #[test]

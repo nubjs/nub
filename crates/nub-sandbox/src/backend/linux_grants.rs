@@ -473,19 +473,26 @@ mod tests {
         // Compared as (path, access): the preset's absolute rule positions are its own
         // business, and pinning them here would make this confinement assertion fail on
         // any unrelated reordering of the jail's speculated reads.
+        //
+        // The plan carries the path exactly as the COMPILED rule spells it — canonicalized
+        // through `canonicalize_glob_prefix`, which strips a Windows `\\?\` verbatim prefix
+        // and normalizes to forward slashes. Bare `fs::canonicalize` leaves both, a form
+        // the compiler never emits.
+        let as_compiled = |p: &std::path::Path| {
+            std::path::PathBuf::from(crate::matcher::path::normalize_slashes(
+                &crate::matcher::path::canonicalize_including_nonexistent(p).to_string_lossy(),
+            ))
+        };
         assert_eq!(
             plan.iter()
                 .map(|grant| (grant.path.clone(), grant.access))
                 .collect::<Vec<_>>(),
             vec![
                 (
-                    std::fs::canonicalize(project.join("node_modules")).unwrap(),
+                    as_compiled(&project.join("node_modules")),
                     MountAccess::ReadOnly,
                 ),
-                (
-                    std::fs::canonicalize(&package_dir).unwrap(),
-                    MountAccess::ReadWrite,
-                ),
+                (as_compiled(&package_dir), MountAccess::ReadWrite),
             ],
             "dropping the absent cache dirs must leave the confinement intact — the \
              dependency tree read-only and the package dir the only writable subtree"

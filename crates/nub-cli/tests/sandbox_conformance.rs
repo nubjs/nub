@@ -300,16 +300,24 @@ fn applies_here(case: &Case) -> bool {
     case.platforms.is_empty() || case.platforms.iter().any(|p| p == std::env::consts::OS)
 }
 
-/// Run one probe under `policy` in `tree`; true = the action was ALLOWED (nub, and
-/// hence the probe, exited 0). A nub-side compile/apply failure is a HARNESS error
-/// (never a silent "deny"), surfaced loudly with nub's stderr.
+/// One probe run: whether the action was ALLOWED, plus the child's captured streams. A
+/// bare verdict makes an unexpected deny unattributable in CI (the probe's own reason,
+/// nub's warning, and a degradation notice all read identically as "false"), so the
+/// streams ride along for the assertion message.
+struct Verdict {
+    allowed: bool,
+    output: String,
+}
+
+/// Run one probe under `policy` in `tree`. A nub-side compile/apply failure is a HARNESS
+/// error (never a silent "deny"), surfaced loudly with nub's stderr.
 fn run_case(
     tree: &Tree,
     policy: &serde_json::Value,
     ambient: &BTreeMap<String, String>,
     probe: &str,
     target: &str,
-) -> bool {
+) -> Verdict {
     let policy_path = tree.proj.join("__policy.json");
     std::fs::write(&policy_path, tree.render_policy(policy)).unwrap();
 
@@ -347,7 +355,14 @@ fn run_case(
         !(stderr.contains("did not compile") || stderr.contains("could not be applied")),
         "HARNESS ERROR — nub failed to set up the sandbox, not a probe verdict:\n{stderr}"
     );
-    out.status.code() == Some(0)
+    Verdict {
+        allowed: out.status.code() == Some(0),
+        output: format!(
+            "  exit: {:?}\n  stdout: {}\n  stderr: {stderr}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout)
+        ),
+    }
 }
 
 /// Drive one fixture: assert every case's verdict, and re-run each DENY case under
@@ -381,11 +396,11 @@ fn drive(name: &str) {
         let tree = Tree::new();
         let target = tree.resolve(&case.probe, &case.target);
 
-        let allowed = run_case(&tree, &fx.policy, &fx.ambient_env, &case.probe, &target);
+        let verdict = run_case(&tree, &fx.policy, &fx.ambient_env, &case.probe, &target);
         assert_eq!(
-            allowed, case.expect,
-            "[{name}] {} {}: expected allowed={}, got allowed={}",
-            case.probe, case.target, case.expect, allowed
+            verdict.allowed, case.expect,
+            "[{name}] {} {}: expected allowed={}, got allowed={}\n{}",
+            case.probe, case.target, case.expect, verdict.allowed, verdict.output
         );
 
         if !case.expect {
@@ -394,10 +409,10 @@ fn drive(name: &str) {
             // unreachable host, a probe that can't even start).
             let nc = run_case(&tree, &fx.relaxed, &fx.ambient_env, &case.probe, &target);
             assert!(
-                nc,
+                nc.allowed,
                 "[{name}] neg-control {} {}: must be ALLOWED under the relaxed policy \
-                 (the deny is hollow otherwise)",
-                case.probe, case.target
+                 (the deny is hollow otherwise)\n{}",
+                case.probe, case.target, nc.output
             );
         }
     }
@@ -510,9 +525,11 @@ fn reuse_pointer_resolves_against_the_whole_document() {
     // `resolve` materializes the read target and returns its absolute path (as `drive`
     // does); the project subtree is granted ONLY through the reused `#/shared/fs` list.
     let target = tree.resolve("read", "proj:reused-ok.txt");
+    let verdict = run_case(&tree, &doc, &ambient, "read", &target);
     assert!(
-        run_case(&tree, &doc, &ambient, "read", &target),
-        "a `...:#/shared/fs` reuse must resolve against the whole document"
+        verdict.allowed,
+        "a `...:#/shared/fs` reuse must resolve against the whole document\n{}",
+        verdict.output
     );
 }
 
@@ -534,9 +551,11 @@ fn reuse_object_spread_resolves_against_the_whole_document() {
     });
     let ambient = BTreeMap::new();
     let target = tree.resolve("read", "proj:spread-ok.txt");
+    let verdict = run_case(&tree, &doc, &ambient, "read", &target);
     assert!(
-        run_case(&tree, &doc, &ambient, "read", &target),
-        "a `...:#/shared/fs` object-key spread must resolve against the whole document"
+        verdict.allowed,
+        "a `...:#/shared/fs` object-key spread must resolve against the whole document\n{}",
+        verdict.output
     );
 }
 
@@ -625,19 +644,39 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
     let policy = temp.path().join("policy.json");
     let marker = temp.path().join("marker");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(
-        project.join("package.json"),
-        r#"{ "scripts": { "probe": "./probe.sh" } }"#,
-    )
-    .unwrap();
-    std::fs::write(
-        project.join("probe.sh"),
-        format!("#!/bin/sh\nprintf invoked > {}\n", marker.display()),
-    )
-    .unwrap();
-    #[cfg(unix)]
+    // `nub run` hands the script body to the PLATFORM's script shell, so the probe needs a
+    // per-OS spelling: a `#!/bin/sh` file never executes under cmd.exe, and the marker
+    // assertion below would then fail on Windows for a reason unrelated to flag placement.
+    // It stays a script FILE rather than an inline one-liner because the misplaced-flag
+    // forms append `--sandbox <policy>` to the script's argv — a shell/batch file ignores
+    // the extra args, while an inline `node -e …` rejects them as unknown options and never
+    // reaches the marker write.
+    #[cfg(windows)]
+    {
+        std::fs::write(
+            project.join("package.json"),
+            r#"{ "scripts": { "probe": ".\\probe.cmd" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("probe.cmd"),
+            format!("@echo off\r\n> \"{}\" echo invoked\r\n", marker.display()),
+        )
+        .unwrap();
+    }
+    #[cfg(not(windows))]
     {
         use std::os::unix::fs::PermissionsExt;
+        std::fs::write(
+            project.join("package.json"),
+            r#"{ "scripts": { "probe": "./probe.sh" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("probe.sh"),
+            format!("#!/bin/sh\nprintf invoked > {}\n", marker.display()),
+        )
+        .unwrap();
         std::fs::set_permissions(
             project.join("probe.sh"),
             std::fs::Permissions::from_mode(0o755),
@@ -658,6 +697,7 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
         String::from_utf8_lossy(&exact.stderr)
     );
 
+    let mut last_output = None;
     for args in [
         vec!["run", "probe", "--sandbox", policy.to_str().unwrap()],
         vec!["run", "--", "probe", "--sandbox", policy.to_str().unwrap()],
@@ -673,10 +713,19 @@ fn sandbox_activation_requires_the_exact_run_flag_position() {
             "misplaced {args:?} activated the hidden sandbox: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        last_output = Some(output);
     }
     assert!(
         marker.exists(),
-        "post-positional and -- forms must run the script"
+        "post-positional and -- forms must run the script; last run: {}",
+        last_output
+            .map(|o| format!(
+                "exit {:?}\nstdout: {}\nstderr: {}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ))
+            .unwrap_or_default()
     );
 }
 
