@@ -80,3 +80,9 @@ jobs:
       - name: "cell 3 - D drive, GVS OFF"
         if: always()
         run: pwsh -File tests/win576-probe/repro.ps1 -Label "${{ matrix.tag }}-Ddrive-gvsoff" -Root "${{ steps.roots.outputs.droot }}" -GvsOff
+      - name: "round 2 - perturbation modes"
+        if: always()
+        run: |
+          foreach ($m in @('denyRA','denyFull','danglingConnect','dropState','partialEntry','readonlyEntry')) {
+            pwsh -File tests/win576-probe/repro2.ps1 -Mode $m -Root "${{ steps.roots.outputs.droot }}"
+          }

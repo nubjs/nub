@@ -72,6 +72,8 @@ mod win {
         probe4_exists(&root);
         probe5_remove_dir(&root);
         probe6_aube_shape(&root);
+        probe7_exists_false_while_occupied(&root);
+        probe8_reparse_depth(&root);
 
         println!("\nprobe complete (root left in place for the workflow to list): {}", root.display());
     }
@@ -451,5 +453,130 @@ mod win {
             "  create_dir(<existing junction>)     = {:?}",
             fs::create_dir(&link).map_err(|e| (e.kind(), e.raw_os_error()))
         );
+    }
+
+    // ---------------------------------------------------------------- probe 7
+    //
+    // The whole #576 hypothesis in one probe: can `Path::exists()` report FALSE
+    // for a directory that is on disk AND whose children are still writable?
+    // That combination is what lets `link.rs:562`'s `if aube_entry.exists()`
+    // guard fall through into `materialize_into`, whose sibling-link loop then
+    // hits an already-present junction and gets 183.
+    fn probe7_exists_false_while_occupied(root: &Path) {
+        hdr("PROBE 7 — can exists() be FALSE while the path is occupied?");
+
+        let icacls = |args: &[&str]| {
+            let out = std::process::Command::new("icacls").args(args).output();
+            match out {
+                Ok(o) => println!(
+                    "      icacls {:?} -> status={:?} {}",
+                    args,
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stdout).trim().replace('\n', " | ")
+                ),
+                Err(e) => println!("      icacls spawn failed: {e}"),
+            }
+        };
+
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into());
+        println!("  running as USERNAME={user}");
+
+        // (a) deny only ReadAttributes on the entry dir itself.
+        let entry = root.join("p7_entry_deny_ra");
+        let scope = entry.join("node_modules").join("@types");
+        mkdir(&scope);
+        let tgt = root.join("p7_target");
+        mkdir(&tgt);
+        junction::create(&tgt, scope.join("connect")).expect("seed connect junction");
+        println!("  (a) deny RA (ReadAttributes) on the ENTRY dir:");
+        println!("      before: exists() = {}", entry.exists());
+        icacls(&[&entry.to_string_lossy(), "/deny", &format!("{user}:(RA)")]);
+        println!("      after : exists()      = {}", entry.exists());
+        println!("      after : try_exists()  = {:?}", entry.try_exists());
+        println!(
+            "      after : metadata()    = {:?}",
+            fs::metadata(&entry).map(|m| m.is_dir()).map_err(|e| (e.kind(), e.raw_os_error()))
+        );
+        println!(
+            "      after : create_dir_all(<entry>/node_modules/@types) = {:?}",
+            fs::create_dir_all(&scope).map_err(|e| (e.kind(), e.raw_os_error()))
+        );
+        println!(
+            "      after : junction::create over the existing connect = {:?}",
+            junction::create(&tgt, scope.join("connect"))
+                .map_err(|e| (e.kind(), e.raw_os_error()))
+        );
+        icacls(&[&entry.to_string_lossy(), "/remove:d", &user]);
+
+        // (b) deny everything (F) on the entry dir.
+        let entry2 = root.join("p7_entry_deny_full");
+        let scope2 = entry2.join("node_modules").join("@types");
+        mkdir(&scope2);
+        junction::create(&tgt, scope2.join("connect")).expect("seed");
+        println!("  (b) deny F (full) on the ENTRY dir:");
+        icacls(&[&entry2.to_string_lossy(), "/deny", &format!("{user}:(F)")]);
+        println!("      exists()     = {}", entry2.exists());
+        println!("      try_exists() = {:?}", entry2.try_exists());
+        println!(
+            "      metadata()   = {:?}",
+            fs::metadata(&entry2).map(|m| m.is_dir()).map_err(|e| (e.kind(), e.raw_os_error()))
+        );
+        println!(
+            "      junction::create over the existing connect = {:?}",
+            junction::create(&tgt, scope2.join("connect"))
+                .map_err(|e| (e.kind(), e.raw_os_error()))
+        );
+        icacls(&[&entry2.to_string_lossy(), "/remove:d", &user]);
+
+        // (c) deny RA on the PARENT, leaving the entry itself untouched.
+        let parent = root.join("p7_parent_deny");
+        let entry3 = parent.join("@types+body-parser@1.19.6");
+        let scope3 = entry3.join("node_modules").join("@types");
+        mkdir(&scope3);
+        junction::create(&tgt, scope3.join("connect")).expect("seed");
+        println!("  (c) deny RA on the PARENT (.store) dir:");
+        icacls(&[&parent.to_string_lossy(), "/deny", &format!("{user}:(RA)")]);
+        println!("      entry.exists() = {}", entry3.exists());
+        println!(
+            "      junction::create over the existing connect = {:?}",
+            junction::create(&tgt, scope3.join("connect"))
+                .map_err(|e| (e.kind(), e.raw_os_error()))
+        );
+        icacls(&[&parent.to_string_lossy(), "/remove:d", &user]);
+    }
+
+    // ---------------------------------------------------------------- probe 8
+    //
+    // Windows caps reparse-point traversal per path resolution. Past the cap a
+    // path that genuinely exists resolves with ERROR_CANT_RESOLVE_FILENAME —
+    // another way `exists()` can lie in the false direction.
+    fn probe8_reparse_depth(root: &Path) {
+        hdr("PROBE 8 — reparse-point traversal depth limit");
+
+        let leaf = root.join("p8_leaf");
+        mkdir(&leaf);
+        fs::write(leaf.join("marker.txt"), b"m").unwrap();
+
+        let mut current = leaf.clone();
+        let chain = root.join("p8_chain");
+        mkdir(&chain);
+        for i in 0..40u32 {
+            let link = chain.join(format!("j{i}"));
+            if let Err(e) = junction::create(&current, &link) {
+                println!("  create hop {i} failed: {e}");
+                break;
+            }
+            let probe = link.join("marker.txt");
+            let ex = probe.exists();
+            let md = fs::metadata(&probe).map(|_| ()).map_err(|e| (e.kind(), e.raw_os_error()));
+            if !ex || i % 8 == 0 {
+                println!("  hop {i:>2}: marker exists()={ex} metadata={md:?}");
+            }
+            if !ex {
+                println!("  >>> traversal cap hit at hop {i} — the file IS there, exists() says false");
+                break;
+            }
+            current = link;
+        }
     }
 }
