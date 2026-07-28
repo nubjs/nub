@@ -86,3 +86,9 @@ jobs:
           foreach ($m in @('denyRA','denyFull','danglingConnect','dropState','partialEntry','readonlyEntry')) {
             pwsh -File tests/win576-probe/repro2.ps1 -Mode $m -Root "${{ steps.roots.outputs.droot }}"
           }
+      - name: "round 3 - invariant-origin modes"
+        if: always()
+        run: |
+          foreach ($m in @('interruptedThenAdd','interrupted','workspace','afterNpm','concurrentAdd','addChain')) {
+            pwsh -File tests/win576-probe/repro3.ps1 -Mode $m -Root "${{ steps.roots.outputs.droot }}"
+          }
