@@ -78,8 +78,6 @@ const GITHUB_PREFETCH_HOSTS: &[&str] = &[
     "objects.githubusercontent.com",
 ];
 
-/// The hosts beyond `$downloads` this build will fetch from — empty unless the unratified
-/// widening is compiled in.
 fn extra_prefetch_hosts() -> &'static [&'static str] {
     #[cfg(feature = "prefetch-github-hosts")]
     {
@@ -311,10 +309,16 @@ fn prebuild_install(
     node: &NodeFacts,
 ) -> Option<()> {
     let flags = prebuild_flags(&spawn.args);
-    // Two flags make a placed file unreadable by construction, so writing one would be
+    // Three flags make a placed file unreadable by construction, so writing one would be
     // pure waste: `--nolocal` returns straight to `download()` ahead of the local probe
-    // (`download.js:18`), and `--build-from-source` skips the download path outright.
-    if flags.contains_key("nolocal") || flags.contains_key("buildFromSource") {
+    // (`download.js:18`), `--build-from-source` skips the download path outright, and
+    // `--token` diverts to the asset-API URL (`bin.js:67`), whose basename is a numeric
+    // asset id the local probe would look for instead. Tested by VALUE, not presence —
+    // `--no-build-from-source` sets the key to `false` and must not decline.
+    if ["nolocal", "buildFromSource", "token"]
+        .iter()
+        .any(|k| flags.get(*k).is_some_and(|v| v != "false"))
+    {
         return None;
     }
     let url = prebuild_install_url(manifest, ambient, node, &flags)?;
@@ -332,11 +336,10 @@ fn prebuild_install(
         .map(|p| p.trim_start_matches("./"))
         .filter(|p| !p.is_empty() && *p != ".");
     let prefix = local_prebuilds_prefix(manifest, ambient, &flags);
+    let basename = Some(url_basename(&url)).filter(|b| !b.is_empty())?;
     let dest = contained_dest(
         &root,
-        rc_path
-            .into_iter()
-            .chain([prefix.as_str(), url_basename(&url)]),
+        rc_path.into_iter().chain([prefix.as_str(), basename]),
     )?;
     place(&url, &root, &dest)
 }
@@ -725,7 +728,6 @@ fn node_pre_gyp(
     // an allowlisted host and pointed at a real asset while the naive `Path::join` walks
     // out of the cache into $HOME. `contained_dest` is what re-couples them.
     let dest = contained_dest(&root, [remote_path.as_str(), package_name.as_str()])?;
-    place(url.as_str(), &root, &dest)?;
 
     let var = format!(
         "npm_config_{}_binary_host_mirror",
@@ -735,11 +737,23 @@ fn node_pre_gyp(
     // user configured deliberately (a corporate artifact host in `.npmrc`) outranks the
     // manifest. Set-if-absent keeps that true — the same `.entry().or_insert()` discipline
     // build_jail uses for `npm_config_nodedir`.
-    let mirror = url::Url::from_directory_path(&root).ok()?;
     if ambient.contains_key(&var) {
         return None;
     }
-    ambient.insert(var, mirror.to_string());
+    let mirror = url::Url::from_directory_path(&root).ok()?.to_string();
+    // `install.js:283` does `from.slice('file://'.length)` — a RAW slice, no percent-decode
+    // — and then `fs.existsSync`. So any escape `Url` introduces (a space in the cache
+    // path, routine under `C:\Users\First Last\`) becomes a literal `%20` on the filesystem
+    // and the file is never found. Setting the mirror FORCES the local branch, so that
+    // would convert a working download into a hard failure — declining first is what keeps
+    // this fail-soft.
+    if mirror.contains('%') {
+        tracing::debug!(mirror, "prefetch: mirror path needs escaping; declining");
+        return None;
+    }
+    // Everything that can decline is settled — only now spend the network.
+    place(url.as_str(), &root, &dest)?;
+    ambient.insert(var, mirror);
     Some(vec![root])
 }
 
@@ -952,17 +966,39 @@ fn place(url: &str, root: &Path, dest: &Path) -> Option<()> {
         }
         std::fs::rename(&tmp, &cached).ok()?;
     }
-    // Copy, never hardlink: prebuild-install probes the pickup path for W_OK and the
-    // installer owns the file afterwards, so it must not share an inode with the cache.
-    // Via a temp + rename so an interrupted copy cannot leave a truncated file that the
-    // `dest.exists()` check above would then honour as a user override forever.
+    stage_and_rename(&cached, dest)?;
+    tracing::debug!(url, dest = %dest.display(), "prefetch: placed");
+    Some(())
+}
+
+/// Copy the cached blob to `dest` through a staged temp.
+///
+/// Copy, never hardlink: prebuild-install probes the pickup path for W_OK and the installer
+/// owns the file afterwards, so it must not share an inode with the cache. Via a temp +
+/// rename so an interrupted copy cannot leave a truncated file that `place`'s `dest.exists()`
+/// check would then honour as a user override forever.
+///
+/// The staged file is opened with `create_new` (O_EXCL), NOT `fs::copy` — copy opens its
+/// destination O_CREAT|O_TRUNC, which FOLLOWS a symlink. The staged name is derivable by the
+/// package itself (its own artifact name plus nub's pid, readable as `$PPID`) and lands in a
+/// directory the package's confined `preinstall` may write, so a link planted there would
+/// redirect this UNCONFINED write anywhere the user can reach. Neither neighbouring guard
+/// covers it: `create_dir_all_nofollow` checks the directory chain, and `dest.exists()` is a
+/// different path. O_EXCL refuses a live OR dangling link, and incidentally makes the
+/// pid-only name safe against a sibling lifecycle thread racing the same artifact.
+fn stage_and_rename(cached: &Path, dest: &Path) -> Option<()> {
     let staged = dest.with_extension(format!("{}.nub-part", std::process::id()));
-    std::fs::copy(&cached, &staged).ok()?;
-    if std::fs::rename(&staged, dest).is_err() {
-        let _ = std::fs::remove_file(&staged);
+    let copied = std::fs::File::create_new(&staged).and_then(|mut out| {
+        std::io::copy(&mut std::fs::File::open(cached)?, &mut out)?;
+        Ok(())
+    });
+    if copied.is_err() || std::fs::rename(&staged, dest).is_err() {
+        // Only unlinks a path `create_new` proved was not a pre-existing link.
+        if copied.is_ok() {
+            let _ = std::fs::remove_file(&staged);
+        }
         return None;
     }
-    tracing::debug!(url, dest = %dest.display(), "prefetch: placed");
     Some(())
 }
 
@@ -1011,12 +1047,27 @@ fn fetch(url: &str, dest: &Path) -> Option<()> {
     }
     // A redirect the policy STOPPED surfaces as a 3xx response here rather than an error,
     // so the success check above is what refuses an off-allowlist hop's body.
+    //
+    // The write is CAPPED, and the cap is what keeps the fail-soft contract honest: the
+    // body's length is chosen by whoever the manifest points at, and an uncapped
+    // `io::copy` bounded only by the 120s timeout will fill the user's disk — turning a
+    // speculative optimization into a new way for an install to fail. The largest real
+    // prebuilt addons are tens of MB.
+    const MAX_ARTIFACT: u64 = 512 * 1024 * 1024;
     let declared = resp.content_length();
-    let mut file = std::fs::File::create(dest).ok()?;
-    let written = std::io::copy(&mut resp, &mut file).ok()?;
-    // A truncated body must never be cached: the hit test downstream is existence only,
-    // so a short read would poison the blob for every later install.
-    if declared.is_some_and(|n| n != written) {
+    if declared.is_some_and(|n| n > MAX_ARTIFACT) {
+        tracing::debug!(url, declared, "prefetch: artifact over the size cap");
+        return None;
+    }
+    // O_EXCL for the same reason as the staged copy in `place`.
+    use std::io::Read;
+    let mut file = std::fs::File::create_new(dest).ok()?;
+    let written = std::io::copy(&mut (&mut resp).take(MAX_ARTIFACT + 1), &mut file).ok()?;
+    // A body that must never reach the cache: the hit test downstream is existence only,
+    // so either a short read or an over-cap stream would poison the blob for every later
+    // install. An absent `Content-Length` (a chunked response) gets no length check, so
+    // the cap is the only bound there — hence the `+1` probe rather than `== MAX`.
+    if written > MAX_ARTIFACT || declared.is_some_and(|n| n != written) {
         return None;
     }
     Some(())
@@ -1073,19 +1124,15 @@ fn nth_dot(version: &str, n: usize) -> String {
     version.split('.').nth(n).unwrap_or("").to_string()
 }
 
-/// `version.split(sep)[1]` with JS's `String(undefined)` stringification (see the
-/// `prerelease` note in [`prebuild_install_url`]).
+/// `version.split(sep)[1]` — JS splits on EVERY separator and takes the second field, so
+/// `1.0.0-alpha-1` yields `alpha`, not `alpha-1`. `String(undefined)` is the literal
+/// `"undefined"`, which is what a template naming `{prerelease}` on a release version
+/// really resolves to.
 fn after_or_undefined(version: &str, sep: char) -> String {
     version
-        .split_once(sep)
-        .map_or_else(|| "undefined".to_string(), |(_, tail)| tail.to_string())
-}
-
-fn after_or_empty(version: &str, sep: char) -> String {
-    version
-        .split_once(sep)
-        .map(|(_, t)| t.to_string())
-        .unwrap_or_default()
+        .split(sep)
+        .nth(1)
+        .map_or_else(|| "undefined".to_string(), str::to_string)
 }
 
 /// `util.js` `trimSlashes`: strip a leading `./` or `/`, and one trailing `/`.
@@ -1113,6 +1160,9 @@ fn drop_double_slashes(s: &str) -> String {
 
 /// `path.basename(url)` — Node splits on `/` only, so a query string rides along, exactly
 /// as it does in the pickup path prebuild-install computes.
+/// `path.basename(url)`. Empty for a URL ending in `/` — the caller must decline rather
+/// than let `contained_dest` fall back to the directory itself and create a FILE named
+/// `prebuilds` where the pickup directory belongs.
 fn url_basename(url: &str) -> &str {
     url.rsplit('/').next().unwrap_or(url)
 }
@@ -1537,6 +1587,38 @@ mod tests {
         std::fs::remove_file(root.join("prebuilds")).unwrap();
         assert!(create_dir_all_nofollow(&root, dest.parent().unwrap()).is_some());
         assert!(root.join("prebuilds").is_dir());
+    }
+
+    /// The directory guard above does NOT cover the staged temp file: its name is derivable
+    /// by the package (its own artifact name plus nub's pid, readable as `$PPID`) and it
+    /// lands in a directory the confined `preinstall` may write. `fs::copy` would have
+    /// opened it O_CREAT|O_TRUNC and followed the link, writing through it as the USER.
+    #[test]
+    fn a_symlinked_staged_temp_is_refused_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("package");
+        let prebuilds = root.join("prebuilds");
+        std::fs::create_dir_all(&prebuilds).unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"original").unwrap();
+
+        let cached = tmp.path().join("blob");
+        std::fs::write(&cached, b"artifact").unwrap();
+        let dest = prebuilds.join("a.tar.gz");
+        let staged = dest.with_extension(format!("{}.nub-part", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &staged).unwrap();
+
+        assert!(stage_and_rename(&cached, &dest).is_none());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"original");
+        assert!(!dest.exists());
+        // The refusal must not have unlinked the planted link either — only a staged file
+        // this call actually created is ours to remove.
+        assert!(std::fs::symlink_metadata(&staged).unwrap().is_symlink());
+
+        // Without the link the same call places the bytes.
+        std::fs::remove_file(&staged).unwrap();
+        assert!(stage_and_rename(&cached, &dest).is_some());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"artifact");
     }
 
     /// ORACLE TEST. Every URL below was captured from the REAL installer's own request

@@ -53,8 +53,8 @@
 
 pub mod build_jail;
 // Out-of-jail artifact prefetch for the lifecycle families that check a local path before
-// opening a socket. Driven from build_jail's hook; see its module doc for why prefetch's
-// host allowlist is deliberately separate from `$downloads`.
+// opening a socket. Driven from build_jail's hook; see its module doc for the fetch
+// allowlist and the fail-soft contract.
 mod build_prefetch;
 mod bun_config;
 pub mod config_scope;
