@@ -31,6 +31,39 @@ measures the shipped bug rather than the current tree.
 Each scenario dumps whether `node_modules/.store/<entry>` came out as a real directory (GVS off /
 disk-materialized) or a junction (GVS on), because that decides which call site is live.
 
+## Two controls the first run got wrong
+
+Run [30408428542](https://github.com/nubjs/nub/actions/runs/30408428542) came back all-green and
+proved nothing, because both variables the hypotheses depend on were pinned to the wrong value:
+
+1. **Defender real-time protection is OFF on GitHub's Windows runners** (`RealTimeProtectionEnabled :
+   False` in that log). RTP is the leading candidate for whoever holds the handle that produces
+   `os error 32`, so a green run without it falsifies nothing. The workflow now enables it first.
+2. **`CI=true` silently flips the layout.** `Linker::new` defaults the global virtual store to
+   `!is_ci()` (`vendor/aube/crates/aube-linker/src/builder.rs:14`), so the runner exercised the
+   GVS-OFF path while a real user's machine gets GVS-ON — and the two take *different* materialize
+   call sites. The workflow now runs both as a matrix.
+
+Scenario C additionally never launched: `Start-Process -FilePath 'nub'` fails with `%1 is not a
+valid Win32 application` because `nub` on PATH is an npm shim. Fixed, plus scenario D tests the same
+hypothesis deterministically (hand-truncate an entry) rather than by racing an interrupt.
+
 ## Reproduce locally
 
 Windows only. `pwsh tests/win-linker-probe/run.ps1`.
+
+The scenario-D hypothesis is **platform-independent and already reproduced on macOS** — a
+half-materialized `.store/<entry>` is treated as complete forever:
+
+```sh
+mkdir /tmp/p && cd /tmp/p
+printf '{"name":"p","private":true,"version":"1.0.0","dependencies":{"express":"4.21.2"}}' > package.json
+echo enable-global-virtual-store=false > .npmrc
+nub install
+rm node_modules/.store/accepts@1.3.8/node_modules/accepts/index.js \
+   node_modules/.store/accepts@1.3.8/node_modules/accepts/package.json
+rm -rf node_modules/.store/.nub-state
+nub install          # => "✓ Already up to date (69 packages)" — entry is NOT repaired
+node -e "require('express')"   # => MODULE_NOT_FOUND
+rm -rf node_modules && nub install && node -e "require('express')"   # control: works
+```

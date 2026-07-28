@@ -18,6 +18,21 @@ jobs:
   probe:
     runs-on: windows-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `Linker::new` defaults the global virtual store to `!is_ci()`, so a
+          # runner with CI=true silently exercises the GVS-OFF layout (real
+          # `.store/<dep>` dirs) while a real user's machine gets GVS-ON
+          # (junctions into the machine-global store). The two take DIFFERENT
+          # materialize paths, so probing only one is probing the wrong thing —
+          # run both.
+          - gvs: 'on'
+            ci_env: ''
+          - gvs: 'off'
+            ci_env: 'true'
+    name: probe (gvs-${{ matrix.gvs }})
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +45,21 @@ jobs:
       - name: Install nub 0.6.0
         run: npm install -g @nubjs/nub@0.6.0
 
+      # GitHub's Windows runners ship Defender with real-time protection OFF.
+      # That is precisely the variable the ERROR_SHARING_VIOLATION (os 32)
+      # hypothesis depends on, so a green run with RTP off falsifies nothing.
+      # Turn it on and report the state either way.
+      - name: Enable Defender real-time protection
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableScanningNetworkFiles $false -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, AntivirusEnabled | Format-List
+
       - name: Run probe
         shell: pwsh
+        env:
+          CI: ${{ matrix.ci_env }}
         run: pwsh tests/win-linker-probe/run.ps1

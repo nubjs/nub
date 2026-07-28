@@ -114,15 +114,67 @@ $c = New-Project 'c-interrupt' @'
 '@
 Write-Host '--- [C/kill] starting install, killing it 6s in'
 Push-Location $c
-$proc = Start-Process -FilePath 'nub' -ArgumentList 'install' -PassThru -NoNewWindow
+# `nub` on PATH is an npm shim, not a Win32 image — `Start-Process -FilePath 'nub'`
+# fails with "%1 is not a valid Win32 application". Resolve the real executable
+# (or drive the shim through cmd) so the interrupt actually interrupts something.
+$nubCmd = Get-Command nub -ErrorAction SilentlyContinue
+$nubPath = if ($nubCmd) { $nubCmd.Source } else { 'nub' }
+Write-Host "--- [C/kill] resolved nub -> $nubPath"
+$proc = if ($nubPath -match '\.(cmd|bat)$') {
+  Start-Process -FilePath $env:ComSpec -ArgumentList '/c', $nubPath, 'install' -PassThru -NoNewWindow
+} elseif ($nubPath -match '\.ps1$') {
+  Start-Process -FilePath 'pwsh' -ArgumentList '-File', $nubPath, 'install' -PassThru -NoNewWindow
+} else {
+  Start-Process -FilePath $nubPath -ArgumentList 'install' -PassThru -NoNewWindow
+}
 Start-Sleep -Seconds 6
-if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force; Write-Host '--- [C/kill] killed' }
-else { Write-Host "--- [C/kill] already exited ($($proc.ExitCode)) — install was too fast to interrupt" }
+if ($proc -and -not $proc.HasExited) {
+  # Kill the whole tree: the shim spawns nub.exe as a child, and killing only the
+  # shim would leave the real linker running and the interrupt untested.
+  & taskkill.exe /PID $proc.Id /T /F 2>&1 | Write-Host
+  Write-Host '--- [C/kill] killed process tree'
+} elseif ($proc) {
+  Write-Host "--- [C/kill] already exited ($($proc.ExitCode)) — install was too fast to interrupt"
+} else {
+  Write-Host '!!! [C/kill] FAILED TO LAUNCH — scenario C did not run'
+}
 Pop-Location
 Show-StoreShape $c
 Invoke-Probe 'C/resume' 'nub' @('install') $c
 Show-StoreShape $c
 Invoke-Probe 'C/add-after-resume' 'nub' @('add', '-D', 'oxlint') $c
+
+# --------------------------------------------------------------------------
+# The half-materialized-entry hypothesis, tested deterministically instead of by
+# racing an interrupt. Reproduced on macOS already; this confirms it on Windows
+# and shows whether the incomplete entry ALSO produces os 183 on a later `add`.
+Show-Header 'Scenario D — hand-truncated .store entry, then re-run (deterministic)'
+$d = New-Project 'd-partial' @'
+{
+  "name": "probe-d",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": { "express": "4.21.2" }
+}
+'@
+Invoke-Probe 'D/install' 'nub' @('install') $d
+$victim = Join-Path $d 'node_modules\.store\accepts@1.3.8\node_modules\accepts'
+if (Test-Path $victim) {
+  # `materialize_into` pre-creates the package dir before the file loop, so a
+  # mid-link failure leaves exactly this shape: entry present, files missing.
+  Remove-Item -Force (Join-Path $victim 'index.js'), (Join-Path $victim 'package.json') -ErrorAction SilentlyContinue
+  Remove-Item -Recurse -Force (Join-Path $d 'node_modules\.store\.nub-state') -ErrorAction SilentlyContinue
+  Write-Host "--- [D] truncated $victim; remaining:"
+  Get-ChildItem $victim | ForEach-Object { Write-Host "      $($_.Name)" }
+  Invoke-Probe 'D/reinstall' 'nub' @('install') $d
+  Write-Host '--- [D] entry after reinstall (repaired, or still truncated?):'
+  Get-ChildItem $victim | ForEach-Object { Write-Host "      $($_.Name)" }
+  Invoke-Probe 'D/add-after-partial' 'nub' @('add', '-D', 'oxlint') $d
+  Write-Host '--- [D] does express resolve?'
+  Push-Location $d; node -e "require('express'); console.log('express loads OK')" 2>&1 | Write-Host; Pop-Location
+} else {
+  Write-Host "!!! [D] victim path not found — layout differs, scenario D did not run: $victim"
+}
 
 Show-Header 'done — probe never fails the job; read the log for reproduced os errors'
 exit 0
