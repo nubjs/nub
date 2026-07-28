@@ -1060,7 +1060,7 @@ mod tests {
         // `.aube/<dep_path>` symlink first and land in the store — the very
         // geometry no consumer sees, and the premise that shipped this bug.
         let basedir = shim.parent().unwrap();
-        let resolved = aube_linker::normalize_path(&basedir.join(&target));
+        let resolved = aube_linker::normalize_path(&basedir.join(target));
         assert!(
             resolved.exists(),
             "shim target must resolve from the project-side `.bin` the \
