@@ -1400,15 +1400,30 @@ mod tests {
                 )
             })
             .collect();
+        // Windows environment names are case-insensitive, so `NO_PROXY` and `no_proxy`
+        // collapse into ONE `CommandEnv` entry keyed by whichever spelling arrived first —
+        // an exact-name lookup misses the survivor and reads as "not removed". Fold the
+        // lookup the way the platform folds the names.
+        let entry = |key: &str| {
+            envs.iter()
+                .find(|(k, _)| {
+                    if cfg!(windows) {
+                        k.eq_ignore_ascii_case(key)
+                    } else {
+                        k.as_str() == key
+                    }
+                })
+                .map(|(_, v)| v)
+        };
         for key in PROXY_BYPASS_KEYS {
             assert_eq!(
-                envs.get(*key),
+                entry(key),
                 Some(&None),
                 "`{key}` must be removed from the child env, not merely left unset"
             );
         }
         assert_eq!(
-            envs.get("npm_config_proxy").and_then(|v| v.as_deref()),
+            entry("npm_config_proxy").and_then(|v| v.as_deref()),
             Some("http://abc123@127.0.0.1:4321"),
             "npm reads its own config spelling first, so it must point at the loopback proxy"
         );

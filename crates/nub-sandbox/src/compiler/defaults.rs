@@ -254,6 +254,16 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
         return vec![expanded.to_string()];
     }
     let trimmed = expanded.trim_end_matches('/');
+    // The POSIX root is the whole-filesystem spelling every backend recognizes
+    // (`is_whole_fs` / `is_whole_root` both accept `/`), but the globs it expands to —
+    // `""` and `/**` — are drive-less, and a drive-less path matches nothing on Windows.
+    // A user's `fs: { "/": "r" }` would compile to rules no candidate can ever hit, so the
+    // grant silently evaporates. `**` is the drive-agnostic spelling of the same whole-fs
+    // rule and is already classified as whole-fs by the Windows backend.
+    #[cfg(windows)]
+    if trimmed.is_empty() {
+        return vec!["**".to_string()];
+    }
     vec![trimmed.to_string(), format!("{trimmed}/**")]
 }
 

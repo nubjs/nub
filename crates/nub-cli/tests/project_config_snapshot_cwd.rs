@@ -4,7 +4,7 @@
 //! PM route in pm_shim.rs, and the verb-local `-C`/`--dir` route in
 //! install_engine.rs; this file adds only the global-flag variant.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn nub_binary() -> PathBuf {
@@ -47,13 +47,21 @@ fn global_cwd_flag_initializes_one_snapshot_from_the_requested_dir() {
         .lines()
         .map(str::to_owned)
         .collect();
+    assert_eq!(lines.len(), 1, "exactly one loaded snapshot: {lines:?}");
+    let (cwd, loaded) = lines[0]
+        .strip_prefix("cwd=")
+        .and_then(|line| line.rsplit_once(' '))
+        .unwrap_or_else(|| panic!("unexpected snapshot line: {}", lines[0]));
+    assert_eq!(loaded, "project=loaded");
+    // Both sides are canonicalized rather than string-compared: nub reports the cwd as
+    // `env::current_dir` spells it, which on Windows keeps the 8.3 short components it was
+    // handed and carries no `\\?\` prefix, while `canonicalize` expands and prefixes both.
+    // The directory identity is the contract. (Same reasoning as the verb-local `-C`/
+    // `--dir` variant in install_engine.rs.)
     assert_eq!(
-        lines,
-        vec![format!(
-            "cwd={} project=loaded",
-            target.canonicalize().unwrap().display()
-        )],
-        "exactly one loaded snapshot, anchored to the --cwd dir"
+        Path::new(cwd).canonicalize().unwrap(),
+        target.canonicalize().unwrap(),
+        "the snapshot must be anchored to the --cwd dir"
     );
 }
 

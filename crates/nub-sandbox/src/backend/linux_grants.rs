@@ -377,15 +377,24 @@ mod tests {
         let plan = compile_mount_plan(&policy).unwrap_or_else(|error| {
             panic!("the build jail must compile where no tool cache exists: {error}")
         });
+        // The plan carries the path exactly as the COMPILED rule spells it — canonicalized
+        // through `canonicalize_glob_prefix`, which strips a Windows `\\?\` verbatim prefix
+        // and normalizes to forward slashes. Bare `fs::canonicalize` leaves both, a form
+        // the compiler never emits.
+        let as_compiled = |p: &std::path::Path| {
+            std::path::PathBuf::from(crate::matcher::path::normalize_slashes(
+                &crate::matcher::path::canonicalize_including_nonexistent(p).to_string_lossy(),
+            ))
+        };
         assert_eq!(
             plan,
             vec![
                 MountGrant {
-                    path: std::fs::canonicalize(project.join("node_modules")).unwrap(),
+                    path: as_compiled(&project.join("node_modules")),
                     access: MountAccess::ReadOnly,
                 },
                 MountGrant {
-                    path: std::fs::canonicalize(&package_dir).unwrap(),
+                    path: as_compiled(&package_dir),
                     access: MountAccess::ReadWrite,
                 },
             ],
