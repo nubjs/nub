@@ -4146,6 +4146,66 @@ mod tests {
         );
     }
 
+    /// Ordering must never let a bind be layered OVER a mask: a bind on the mask's own
+    /// path or an ancestor of it replaces that subtree with the host's view, which would
+    /// hand back the very file the deny hides. A mask authored before such a bind is
+    /// clamped past it. The all-masks-last emitter got this for free; the ordered one has
+    /// to state it.
+    #[test]
+    fn a_mask_is_clamped_past_any_bind_that_would_otherwise_cover_it() {
+        let grant = |path: &str, rule_index: usize| MountGrant {
+            path: PathBuf::from(path),
+            access: MountAccess::ReadOnly,
+            rule_index,
+        };
+        let mask = |path: &str, order: usize| Mask {
+            path: PathBuf::from(path),
+            kind: MaskKind::Unreadable,
+            directory: false,
+            order,
+        };
+
+        // The secret is authored FIRST and the covering bind second, so the raw key would
+        // emit the mask and then bury it.
+        let covered = mask("/p/.env", 1);
+        let covering = grant("/p", 5);
+        assert!(
+            matches!(
+                order_fs_operations(
+                    std::slice::from_ref(&covering),
+                    std::slice::from_ref(&covered)
+                )
+                .as_slice(),
+                [FsOp::Bind(_), FsOp::Mask(_)]
+            ),
+            "a bind covering the mask must be emitted before it"
+        );
+
+        // Control: an UNRELATED bind must not drag the mask anywhere. Without this the
+        // assertion above would also hold for a clamp that simply moved every mask last.
+        assert!(
+            matches!(
+                order_fs_operations(&[grant("/other", 5)], std::slice::from_ref(&covered))
+                    .as_slice(),
+                [FsOp::Mask(_), FsOp::Bind(_)]
+            ),
+            "a bind on a disjoint path must leave the mask at its authored position"
+        );
+
+        // An infrastructure mask has no authored position and stays last regardless.
+        let infra = Mask {
+            order: INFRASTRUCTURE_ORDER,
+            ..mask("/run/dbus", 0)
+        };
+        assert!(
+            matches!(
+                order_fs_operations(&[covering], &[infra]).as_slice(),
+                [FsOp::Bind(_), FsOp::Mask(_)]
+            ),
+            "an infrastructure mask sorts after every policy bind"
+        );
+    }
+
     /// A deny with NOTHING reopened underneath keeps 000 — 111 is the narrow concession
     /// that a nested bind forces, not the new default.
     #[test]
