@@ -830,7 +830,12 @@ jobs:
           else
             cp target/debug/libnub_native.so runtime/addons/nub-native.node
           fi
-      - run: cargo test
+      # PROBE-ONLY DEVIATION from ci.yml: --no-fail-fast. Plain `cargo test` stops at
+      # the FIRST failing test target — verified on this branch's first probe run,
+      # where an unrelated integration.rs failure aborted the whole session before
+      # nub-sandbox's own test targets (linux_enforcement, linux_build_jail_enforcement,
+      # etc.) ever ran. This probe needs every target's real result, not a truncated one.
+      - run: cargo test --no-fail-fast
       # Brand-boundary sweep for the embedded PM engine: a real `nub install`
       # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
       # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev
