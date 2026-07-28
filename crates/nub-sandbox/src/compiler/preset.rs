@@ -207,9 +207,11 @@ pub fn grant_build_jail_dependency_reads(
         ctx.homes.project.join("package.json"),
         ctx.homes.project.join("node_modules"),
     ];
-    roots.extend(NUB_PM_CACHE_PATTERNS.iter().map(|p| {
-        PathBuf::from(crate::matcher::path::expand_symbolic(p, &ctx.homes))
-    }));
+    roots.extend(
+        NUB_PM_CACHE_PATTERNS
+            .iter()
+            .map(|p| PathBuf::from(crate::matcher::path::expand_symbolic(p, &ctx.homes))),
+    );
     // The `node_modules` the package ACTUALLY sits in, which is not always the project's.
     // aube's hoisted planner is per-IMPORTER, so a workspace member's dependency
     // materializes at `<root>/packages/<m>/node_modules/<name>` and resolves its own
