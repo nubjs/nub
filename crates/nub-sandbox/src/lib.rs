@@ -115,6 +115,7 @@ pub use backend::{
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod host_probe {
+    pub use crate::backend::landlock_abi;
     pub use crate::backend::linux_probe::{
         BwrapProbe, cached_probe, probe, skip_without_bwrap, skip_without_bwrap_with, usable_bwrap,
     };

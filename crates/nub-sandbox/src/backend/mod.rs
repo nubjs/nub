@@ -73,6 +73,14 @@ pub use linux_monitor::{
     exercise_monitor_state_8, exercise_monitor_states_1_to_5,
 };
 
+/// The Landlock suite's skip gate — `None` when this kernel has no usable Landlock.
+/// Test support, not an embedder API.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn landlock_abi() -> Option<u32> {
+    linux_landlock::probe_abi()
+}
+
 /// Non-Linux embedders keep the same explicit startup/apply seam without carrying
 /// a platform runtime image.
 #[cfg(not(target_os = "linux"))]
