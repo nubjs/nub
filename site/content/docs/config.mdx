@@ -37,18 +37,15 @@ Add the public schema URL for editor completion and validation.
 
 ## Project and global configuration
 
-Use a project `nub.jsonc` for settings that belong to one repository. Use the
-global file for personal defaults that should apply everywhere:
+Use a project `nub.jsonc` for settings that belong to one repository. Use the global file for personal defaults that should apply everywhere:
 
 ```text title="Global configuration"
 ~/.config/nub/nub.jsonc
 ```
 
-`$XDG_CONFIG_HOME/nub/nub.jsonc` is used when `XDG_CONFIG_HOME` is set.
-On Windows, the default path is `%APPDATA%\nub\nub.jsonc`.
+Setting `XDG_CONFIG_HOME` moves it to `$XDG_CONFIG_HOME/nub/nub.jsonc`. On Windows the default is `%APPDATA%\nub\nub.jsonc`.
 
-Project files fail loudly when they contain invalid values. The global file is
-best-effort: Nub ignores it when it cannot be read or parsed.
+Project files fail loudly when they contain invalid values. The global file is best-effort: Nub ignores it when it cannot be read or parsed.
 
 More specific settings replace broader ones:
 
@@ -64,9 +61,7 @@ global nub.jsonc
 built-in default
 ```
 
-Relative paths come from the file that supplied the final value. A project
-`preload` path is relative to the project file; a global `preload` path is
-relative to the global file.
+Relative paths come from the file that supplied the final value. A project `preload` path is relative to the project file; a global `preload` path is relative to the global file.
 
 ## Runtime
 
@@ -345,9 +340,11 @@ Use a flat, real-directory layout.
 }
 ```
 
-The `"pnp"` value is accepted by the schema but reserved for future
-Plug'n'Play support. An install that uses it is rejected until support is
-enabled.
+The `"pnp"` value is reserved for future Plug'n'Play support. An install that uses it is rejected until support lands.
+
+```text
+nub: `install.nodeLinker: "pnp"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]
+```
 
 ### `symlinkDisablePattern`
 
