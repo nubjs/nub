@@ -24,6 +24,13 @@ path = "src/bin/nub-sandbox-probe.rs"
 # and `make install-dev` keep walking to the in-repo `runtime/`. CI release builds
 # pass `--features embed-runtime`.
 embed-runtime = ["nub-core/embed-runtime"]
+# Widen the build-jail PREFETCH fetch allowlist (pm_engine/build_prefetch.rs) past
+# `$downloads` to GitHub's release-asset hosts. OFF by default, and deliberately a
+# COMPILE-TIME feature: prefetch runs unconfined, as the user, before the jail exists, so
+# admitting a host confined code cannot itself reach is a maintainer call on nub's
+# network-trust surface and must not be flippable by a user or a dependency at runtime.
+# With it off, prefetch fetches only from hosts a lifecycle script could already contact.
+prefetch-github-hosts = []
 
 [dependencies]
 nub-core = { path = "../nub-core" }

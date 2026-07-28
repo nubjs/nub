@@ -12,21 +12,35 @@
 //! node-gyp's headers, which is why `nodejs.org` is contacted by none of the corpus
 //! despite being in the set.
 //!
-//! TWO ALLOWLISTS, DELIBERATELY DISTINCT — do not merge them. `$downloads` is what
-//! CONFINED CODE may reach. [`PREFETCH_HOSTS`] is what NUB ITSELF will GET from on a
-//! package's behalf, and it may be broader because the two grant categorically different
-//! things: a `$downloads` entry hands a running attacker script a bidirectional socket,
-//! whereas a prefetch entry only lets nub perform one anonymous GET whose body is written
-//! to a file and never executed by nub. So `github.com` here covers the whole
-//! prebuilt-binary population while `$downloads` gains nothing.
+//! THE FETCH ALLOWLIST IS `$downloads` — UNRATIFIED WIDENING IS OFF BY DEFAULT. On a
+//! default build [`host_allowed`] admits exactly [`nub_sandbox::DOWNLOAD_HOSTS`], so
+//! prefetch introduces NO new network-trust surface: every host nub contacts here is one
+//! the confined script could already have contacted itself, and the change is purely
+//! WHICH SIDE of the jail performs the GET.
 //!
-//! The wildcard-free rule `$downloads` enforces does NOT carry over, and the reason is
-//! worth recording: there, an exact host pins every DNS label so a confined script cannot
-//! exfiltrate through the resolver. Here nub composes the URL from a manifest the attacker
-//! already authored and already knows — there is no secret for a hostname to leak. What
-//! the allowlist buys on THIS side is SSRF containment: without it a manifest could point
-//! `binary.host` at `169.254.169.254` or an intranet name and have nub, unconfined, fetch
-//! it. Entries are still added only on evidence.
+//! There IS a real argument that this side may be broader — a `$downloads` entry hands a
+//! running attacker script a bidirectional socket, whereas a prefetch entry only lets nub
+//! perform one anonymous GET whose body is written to a file and never executed. That
+//! would make `github.com` (which covers essentially the whole prebuilt-binary population)
+//! cheap here and useless in `$downloads`. But this code path runs UNCONFINED, as the
+//! user, before the jail exists — it is where this branch's own review found two
+//! arbitrary-file-write defects — so widening it is a maintainer call, not an
+//! implementer's. That widening therefore sits behind the off-by-default
+//! `prefetch-github-hosts` cargo feature ([`GITHUB_PREFETCH_HOSTS`]) and ships inert
+//! pending ratification. A cargo feature, not an env var or config field, precisely so
+//! neither a user nor a dependency can turn it on.
+//!
+//! Note the gate is on FETCHING, not on USE: [`place`] honours an artifact already on
+//! disk regardless, which is what "nub will not contact a new host" means and all it
+//! should mean.
+//!
+//! Whatever the set contains, what it buys is SSRF containment: without it a manifest
+//! could point `binary.host` at `169.254.169.254` or an intranet name and have nub,
+//! unconfined, fetch it. The wildcard-free rule `$downloads` enforces is not what is doing
+//! the work on this side — there, an exact host pins every DNS label so a confined script
+//! cannot exfiltrate through the resolver; here nub composes the URL from a manifest the
+//! attacker already authored and already knows, so there is no secret for a hostname to
+//! leak.
 //!
 //! FAIL-SOFT, ALWAYS. Every failure path — unparseable manifest, unrecognized family, a
 //! host off the allowlist, a 404, a dead network — returns having changed nothing, and
@@ -42,13 +56,13 @@ use serde_json::Value;
 
 use super::build_jail::ProbeScope;
 
-/// Hosts nub will GET a prebuilt artifact from on a package's behalf. See the module doc
-/// for why this is separate from — and broader than — `$downloads`, and why it is not
-/// held to that set's wildcard-free rule.
+/// The UNRATIFIED widening of the fetch allowlist past `$downloads`, compiled in only
+/// under the off-by-default `prefetch-github-hosts` feature. See the module doc for why it
+/// is gated; enabling it is a maintainer decision about nub's network-trust surface.
 ///
 /// THE REDIRECT TARGETS ARE LOAD-BEARING ENTRIES, not conveniences. [`fetch`] re-applies
-/// this list to every hop, so a `github.com` release-asset URL only resolves if the host
-/// it 302s to is here too. Measured 2026-07-28 against a real asset:
+/// the allowlist to every hop, so a `github.com` release-asset URL only resolves if the
+/// host it 302s to is here too. Measured 2026-07-28 against a real asset:
 /// `github.com/<o>/<r>/releases/download/…` → **`release-assets.githubusercontent.com`**
 /// (a signed, expiring URL). `objects.githubusercontent.com` is the older spelling of the
 /// same asset CDN, retained because directly-published asset URLs still use it.
@@ -57,11 +71,25 @@ use super::build_jail::ProbeScope;
 /// there (verified), which is a fine way to serve arbitrary repo content but is not how a
 /// release artifact is published — admitting it would widen the fetchable surface from
 /// "release assets" to "any file in any repo" for no covered package.
-const PREFETCH_HOSTS: &[&str] = &[
+#[cfg(feature = "prefetch-github-hosts")]
+const GITHUB_PREFETCH_HOSTS: &[&str] = &[
     "github.com",
     "release-assets.githubusercontent.com",
     "objects.githubusercontent.com",
 ];
+
+/// The hosts beyond `$downloads` this build will fetch from — empty unless the unratified
+/// widening is compiled in.
+fn extra_prefetch_hosts() -> &'static [&'static str] {
+    #[cfg(feature = "prefetch-github-hosts")]
+    {
+        GITHUB_PREFETCH_HOSTS
+    }
+    #[cfg(not(feature = "prefetch-github-hosts"))]
+    {
+        &[]
+    }
+}
 
 /// What a lifecycle script's install command will look for locally before it opens a
 /// socket. Selected by which family token appears FIRST in the script line, because a
@@ -282,29 +310,161 @@ fn prebuild_install(
     manifest: &Value,
     node: &NodeFacts,
 ) -> Option<()> {
-    let url = prebuild_install_url(manifest, ambient, node)?;
+    let flags = prebuild_flags(&spawn.args);
+    // Two flags make a placed file unreadable by construction, so writing one would be
+    // pure waste: `--nolocal` returns straight to `download()` ahead of the local probe
+    // (`download.js:18`), and `--build-from-source` skips the download path outright.
+    if flags.contains_key("nolocal") || flags.contains_key("buildFromSource") {
+        return None;
+    }
+    let url = prebuild_install_url(manifest, ambient, node, &flags)?;
     // Anchored on the script's CWD, not `package_dir`: `localPrebuild` is cwd-relative
     // (`util.js` `localPrebuild` joins onto `rc.path`, which `bin.js` chdir's to). The two
     // coincide for an ordinary dependency hook but diverge for a fetched git dependency's
     // root script, where writing into the packed checkout would make its fingerprint
     // host-dependent.
     let root = spawn.cwd.clone();
+    // `-p/--path` moves that anchor (`bin.js:20` chdir's to the resolved `rc.path`). It
+    // stays a SEGMENT rather than a new root so `contained_dest` still adjudicates it —
+    // an absolute or `..`-bearing value is then a decline, not a write outside the cwd.
+    let rc_path = flags
+        .get("path")
+        .map(|p| p.trim_start_matches("./"))
+        .filter(|p| !p.is_empty() && *p != ".");
+    let prefix = local_prebuilds_prefix(manifest, ambient, &flags);
     let dest = contained_dest(
         &root,
-        [
-            local_prebuilds_prefix(manifest, ambient).as_str(),
-            url_basename(&url),
-        ],
+        rc_path
+            .into_iter()
+            .chain([prefix.as_str(), url_basename(&url)]),
     )?;
     place(&url, &root, &dest)
 }
 
-/// The `prebuilds/` directory name, overridable per package via
-/// `npm_config_<sanitized-name>_local_prebuilds` (`util.js` `localPrebuild`).
-fn local_prebuilds_prefix(manifest: &Value, ambient: &BTreeMap<String, String>) -> String {
+/// The `prebuild-install` invocation's OWN flags, parsed from its segment of the script
+/// line.
+///
+/// PROVENANCE (`rc.js:35`, `rc/index.js`): these are handed to `rc` as its ARGV layer, and
+/// `rc` returns `deepExtend(defaults, …files, env, argv)` — argv LAST. So a command-line
+/// flag outranks `package.json#config`, every `npm_config_*`, and the built-in defaults.
+/// `"install": "prebuild-install -r napi"` is the shape this exists for: honouring only
+/// `config.runtime` derives the wrong ABI slot, the placed filename never matches the one
+/// the installer probes for, and the prefetch silently misses.
+///
+/// Scoped to the ONE command rather than the whole line: `prebuild-install || node-gyp
+/// rebuild` is the canonical shape, and letting the fallback's flags leak in would
+/// attribute node-gyp's `--arch` to prebuild-install. Cutting at the first shell operator
+/// errs toward attributing too FEW flags, which is the fail-soft direction.
+fn prebuild_flags(args: &[std::ffi::OsString]) -> BTreeMap<String, String> {
+    let line = args
+        .iter()
+        .map(|a| a.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let Some(idx) = line.find("prebuild-install") else {
+        return BTreeMap::new();
+    };
+    let tail = &line[idx + "prebuild-install".len()..];
+    let end = tail.find([';', '\n', '&', '|', ')']).unwrap_or(tail.len());
+    parse_flag_tokens(&shell_tokens(&tail[..end]))
+}
+
+/// Whitespace-split honouring single/double quotes — enough for the flag values a
+/// lifecycle line carries (`--download 'https://…'`), not a general shell parser.
+fn shell_tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                started = true;
+            }
+            None if c.is_whitespace() => {
+                if started || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            None => cur.push(c),
+        }
+    }
+    if started || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// minimist's shapes, restricted to the ones a lifecycle script actually writes:
+/// `--key=v`, `--key v`, `-k v`, `-k=v`, bare `--flag`, and `--no-key`. A value-taking
+/// flag consumes the next token only when it does not itself look like a flag.
+fn parse_flag_tokens(tokens: &[String]) -> BTreeMap<String, String> {
+    // `rc.js`'s own alias table, plus its `buildFromSource`/`build-from-source` pair.
+    fn canonical(k: &str) -> &str {
+        match k {
+            "t" => "target",
+            "r" => "runtime",
+            "a" => "arch",
+            "p" => "path",
+            "d" => "download",
+            "T" => "token",
+            "build-from-source" => "buildFromSource",
+            other => other,
+        }
+    }
+    let mut out = BTreeMap::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        let body = match token.strip_prefix("--") {
+            Some(b) if !b.is_empty() => b,
+            _ => match token.strip_prefix('-') {
+                Some(b) if !b.is_empty() && !b.starts_with('-') => b,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            },
+        };
+        if let Some((k, v)) = body.split_once('=') {
+            out.insert(canonical(k).to_string(), v.to_string());
+        } else if let Some(k) = token
+            .starts_with("--")
+            .then(|| body.strip_prefix("no-"))
+            .flatten()
+        {
+            out.insert(canonical(k).to_string(), "false".to_string());
+        } else if tokens.get(i + 1).is_some_and(|n| !n.starts_with('-')) {
+            // An EMPTY next token is still a value: minimist gates only on `/^-/`, and
+            // `--tag-prefix ''` is the real spelling for a package whose assets carry no
+            // `v` prefix. Only an explicit `''`/`""` reaches here — unquoted whitespace
+            // never produces an empty token.
+            out.insert(canonical(body).to_string(), tokens[i + 1].clone());
+            i += 1;
+        } else {
+            out.insert(canonical(body).to_string(), "true".to_string());
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The `prebuilds/` directory name. `util.js` `localPrebuild` reads
+/// `process.env[<prefix>_local_prebuilds] || opts['local-prebuilds'] || 'prebuilds'` — the
+/// env var outranks the flag here, the one place in this family where it does.
+fn local_prebuilds_prefix(
+    manifest: &Value,
+    ambient: &BTreeMap<String, String>,
+    flags: &BTreeMap<String, String>,
+) -> String {
     let name = manifest["name"].as_str().unwrap_or_default();
     ambient
         .get(&format!("{}_local_prebuilds", prebuild_env_prefix(name)))
+        .or_else(|| flags.get("local-prebuilds"))
         .cloned()
         .unwrap_or_else(|| "prebuilds".to_string())
 }
@@ -326,20 +486,26 @@ fn prebuild_install_url(
     manifest: &Value,
     ambient: &BTreeMap<String, String>,
     node: &NodeFacts,
+    flags: &BTreeMap<String, String>,
 ) -> Option<String> {
     let name = manifest["name"].as_str()?;
     let version = manifest["version"].as_str()?;
     let config = &manifest["config"];
 
-    let runtime = config["runtime"]
-        .as_str()
+    let runtime = flags
+        .get("runtime")
+        .map(String::as_str)
+        .or_else(|| config["runtime"].as_str())
         .or_else(|| ambient.get("npm_config_runtime").map(String::as_str))
         .unwrap_or("node");
     // `config.target` is read with `json_scalar`, not `as_str`, because it is routinely a
     // JSON NUMBER — `keytar` ships `"config": { "target": 3, "runtime": "napi" }`. Reading
     // only the string spelling silently falls through to the running Node's version and
     // derives the wrong ABI slot for every package that pins one this way.
-    let target = json_scalar(&config["target"])
+    let target = flags
+        .get("target")
+        .cloned()
+        .or_else(|| json_scalar(&config["target"]))
         .or_else(|| ambient.get("npm_config_target").cloned())
         .unwrap_or_else(|| node.version.clone());
 
@@ -360,13 +526,18 @@ fn prebuild_install_url(
         _ => return None,
     };
 
-    let platform = ambient
-        .get("npm_config_platform")
+    // `rc.js:22-24`: platform has NO `pkgConf` layer while arch does — reproduced rather
+    // than unified, since a package pinning `config.arch` really does move only the one.
+    let platform = flags
+        .get("platform")
+        .or_else(|| ambient.get("npm_config_platform"))
         .cloned()
         .unwrap_or_else(|| node.platform.clone());
-    let arch = ambient
-        .get("npm_config_arch")
+    let arch = flags
+        .get("arch")
         .cloned()
+        .or_else(|| config["arch"].as_str().map(str::to_string))
+        .or_else(|| ambient.get("npm_config_arch").cloned())
         .unwrap_or_else(|| node.arch.clone());
 
     // PROVENANCE (`util.js:8`): the `{name}` slot is the package name with its `@scope/`
@@ -392,8 +563,26 @@ fn prebuild_install_url(
         ("runtime", runtime.to_string()),
         ("platform", platform),
         ("arch", arch),
-        ("libc", prebuild_install_libc(&node.platform, ambient)),
-        ("configuration", "Release".to_string()),
+        (
+            "libc",
+            flags
+                .get("libc")
+                .cloned()
+                .unwrap_or_else(|| prebuild_install_libc(&node.platform, ambient)),
+        ),
+        // `util.js:24` keys this off `opts.debug`, whose rc default is the STRING test
+        // `env.npm_config_debug === 'true'` (`rc.js:26`) — so any other env spelling is
+        // false, while a bare `--debug` on the line is true.
+        (
+            "configuration",
+            if flags.get("debug").is_some_and(|v| v != "false")
+                || ambient.get("npm_config_debug").is_some_and(|v| v == "true")
+            {
+                "Debug".to_string()
+            } else {
+                "Release".to_string()
+            },
+        ),
         (
             "module_name",
             manifest["binary"]["module_name"]
@@ -401,11 +590,17 @@ fn prebuild_install_url(
                 .unwrap_or("undefined")
                 .to_string(),
         ),
-        ("tag_prefix", "v".to_string()),
+        (
+            "tag_prefix",
+            flags
+                .get("tag-prefix")
+                .cloned()
+                .unwrap_or_else(|| "v".to_string()),
+        ),
     ]);
 
     Some(expand(
-        &prebuild_url_template(manifest, ambient, name)?,
+        &prebuild_url_template(manifest, ambient, name, flags)?,
         &vars,
     ))
 }
@@ -415,10 +610,17 @@ fn prebuild_url_template(
     manifest: &Value,
     ambient: &BTreeMap<String, String>,
     name: &str,
+    flags: &BTreeMap<String, String>,
 ) -> Option<String> {
     const DEFAULT_ASSET: &str = "{name}-v{version}-{runtime}-v{abi}-{platform}{libc}-{arch}.tar.gz";
 
-    if let Some(explicit) = ambient.get("npm_config_download") {
+    // `urlTemplate` takes `opts.download` as the template only when it is a STRING
+    // (`util.js:38`); a bare `-d` is boolean true and falls through to the host rules.
+    if let Some(explicit) = flags
+        .get("download")
+        .filter(|v| *v != "true" && *v != "false")
+        .or_else(|| ambient.get("npm_config_download"))
+    {
         return Some(explicit.clone());
     }
     let prefix = prebuild_env_prefix(name);
@@ -555,6 +757,12 @@ fn node_pre_gyp_vars(
     if ambient.contains_key("npm_config_target") || ambient.contains_key("npm_config_runtime") {
         return None;
     }
+    // Build metadata starts at the FIRST `+`; the prerelease is the first `-` in what
+    // remains. Splitting on `['-','+']` at once mis-assigns `1.2.3-rc.1+b`.
+    let (core_with_prerelease, build) = version.split_once('+').unwrap_or((version, ""));
+    let (core, prerelease) = core_with_prerelease
+        .split_once('-')
+        .unwrap_or((core_with_prerelease, ""));
     let node_abi = format!("node-v{}", node.modules);
     let napi_build_version = best_napi_version(manifest, node.napi)
         .map(|v| v.to_string())
@@ -577,12 +785,17 @@ fn node_pre_gyp_vars(
                 .unwrap_or_default()
                 .to_string(),
         ),
-        ("version", version.split(['-', '+']).next()?.to_string()),
-        ("prerelease", after_or_empty(version, '-')),
-        ("build", after_or_empty(version, '+')),
-        ("major", version.split('.').next().unwrap_or("").to_string()),
-        ("minor", nth_dot(version, 1)),
-        ("patch", nth_dot(version, 2)),
+        // `versioning.js:283-289` runs these through `semver.parse`, NOT string splits —
+        // which is why this family diverges from prebuild-install's naive `split` above.
+        // `SemVer#version` is `major.minor.patch` plus the prerelease and WITHOUT build
+        // metadata, so `1.2.3-rc.1` keeps its `-rc.1` and `1.2.3+b` sheds `+b`; and
+        // major/minor/patch come off the parsed core, so `patch` is `3`, never `3-rc`.
+        ("version", core_with_prerelease.to_string()),
+        ("prerelease", prerelease.to_string()),
+        ("build", build.to_string()),
+        ("major", core.split('.').next().unwrap_or("").to_string()),
+        ("minor", nth_dot(core, 1)),
+        ("patch", nth_dot(core, 2)),
         ("runtime", "node".to_string()),
         ("node_abi", node_abi.clone()),
         (
@@ -811,7 +1024,10 @@ fn fetch(url: &str, dest: &Path) -> Option<()> {
 
 fn host_allowed(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|u| {
-        u.scheme() == "https" && u.host_str().is_some_and(|h| PREFETCH_HOSTS.contains(&h))
+        u.scheme() == "https"
+            && u.host_str().is_some_and(|h| {
+                nub_sandbox::DOWNLOAD_HOSTS.contains(&h) || extra_prefetch_hosts().contains(&h)
+            })
     })
 }
 
@@ -910,11 +1126,20 @@ fn github_from_package(manifest: &Value) -> Option<String> {
         .or_else(|| github_match(&manifest.to_string()))
 }
 
+/// The upstream regex is `/\bgithub.com[:\/]([^\/"]+)\/([^\/"]+)/`, and `RegExp#exec`
+/// scans for the first substring that matches the WHOLE pattern — not the first occurrence
+/// of the literal. Anchoring on `find("github.com")` and giving up when that one occurrence
+/// fails to be followed by `<owner>/<repo>` therefore declines on manifests upstream
+/// resolves: a bare `"homepage": "https://github.com"` earlier in the JSON, or the
+/// `"url": "https://github.com/"` shape, shadows the real `repository` match that follows.
 fn github_match(text: &str) -> Option<String> {
-    let idx = text.find("github.com")?;
-    let rest = &text[idx + "github.com".len()..];
-    // The upstream regex is `github.com[:/]([^/"]+)/([^/"]+)`, so both the `git@host:owner`
-    // and `https://host/owner` spellings land on the same two segments.
+    text.match_indices("github.com")
+        .find_map(|(idx, _)| github_owner_repo(&text[idx + "github.com".len()..]))
+}
+
+/// The capture half: `[:/]` then two `[^/"]+` segments. Both the `git@host:owner` and
+/// `https://host/owner` spellings land here.
+fn github_owner_repo(rest: &str) -> Option<String> {
     let tail = rest.strip_prefix(':').or_else(|| rest.strip_prefix('/'))?;
     let mut segments = tail.split(['/', '"']);
     let owner = segments.next().filter(|s| !s.is_empty())?;
@@ -980,7 +1205,8 @@ mod tests {
             "version": "12.0.1",
             "repository": "https://github.com/serialport/bindings-cpp.git",
         });
-        let url = prebuild_install_url(&manifest, &BTreeMap::new(), &node26()).unwrap();
+        let url =
+            prebuild_install_url(&manifest, &BTreeMap::new(), &node26(), &BTreeMap::new()).unwrap();
         assert_eq!(
             url,
             "https://github.com/serialport/bindings-cpp/releases/download/v12.0.1/\
@@ -1027,7 +1253,7 @@ mod tests {
         let mut facts = node26();
         facts.platform = "linux".into();
         facts.arch = "x64".into();
-        let url = prebuild_install_url(&manifest, &musl, &facts).unwrap();
+        let url = prebuild_install_url(&manifest, &musl, &facts, &BTreeMap::new()).unwrap();
         assert!(
             url.ends_with("sharp-v0.33.0-node-v140-linuxmusl-x64.tar.gz"),
             "{url}"
@@ -1043,7 +1269,8 @@ mod tests {
             "repository": "https://github.com/holepunchto/sodium-native",
         });
         // 30 is above the interpreter's level, so 8 wins.
-        let url = prebuild_install_url(&manifest, &BTreeMap::new(), &node26()).unwrap();
+        let url =
+            prebuild_install_url(&manifest, &BTreeMap::new(), &node26(), &BTreeMap::new()).unwrap();
         assert!(
             url.ends_with("sodium-native-v4.0.0-napi-v8-darwin-arm64.tar.gz"),
             "{url}"
@@ -1057,7 +1284,10 @@ mod tests {
             "config": { "runtime": "electron" },
             "repository": "https://github.com/o/x",
         });
-        assert!(prebuild_install_url(&manifest, &BTreeMap::new(), &node26()).is_none());
+        assert!(
+            prebuild_install_url(&manifest, &BTreeMap::new(), &node26(), &BTreeMap::new())
+                .is_none()
+        );
     }
 
     #[test]
@@ -1068,7 +1298,8 @@ mod tests {
                         "remote_path": "v{version}" },
             "repository": "https://github.com/Level/leveldown",
         });
-        let url = prebuild_install_url(&manifest, &BTreeMap::new(), &node26()).unwrap();
+        let url =
+            prebuild_install_url(&manifest, &BTreeMap::new(), &node26(), &BTreeMap::new()).unwrap();
         assert_eq!(
             url,
             "https://github.com/Level/leveldown/releases/download/v6.1.1/\
@@ -1123,17 +1354,132 @@ mod tests {
 
     #[test]
     fn only_https_hosts_on_the_allowlist_are_fetched() {
-        assert!(host_allowed(
-            "https://github.com/o/r/releases/download/v1/a.tar.gz"
-        ));
-        assert!(host_allowed("https://objects.githubusercontent.com/x"));
+        // The default allowlist IS `$downloads` — nothing confined code cannot already reach.
+        assert!(host_allowed("https://nodejs.org/download/release/x.tar.gz"));
         // The SSRF cases the allowlist exists to refuse.
         assert!(!host_allowed("http://169.254.169.254/latest/meta-data/"));
         assert!(!host_allowed("https://internal.corp/x.tar.gz"));
         assert!(!host_allowed("file:///etc/passwd"));
         // A lookalike must not match by suffix.
-        assert!(!host_allowed("https://evil-github.com/x"));
-        assert!(!host_allowed("https://github.com.evil.net/x"));
+        assert!(!host_allowed("https://evil-nodejs.org/x"));
+        assert!(!host_allowed("https://nodejs.org.evil.net/x"));
+        // Plaintext is refused even for an allowlisted host.
+        assert!(!host_allowed("http://nodejs.org/x.tar.gz"));
+    }
+
+    /// The unratified widening is INERT unless compiled in — the property that keeps this
+    /// branch from quietly adding a network-trust surface nobody approved.
+    #[test]
+    fn github_is_fetchable_only_under_the_opt_in_feature() {
+        let asset = "https://github.com/o/r/releases/download/v1/a.tar.gz";
+        if cfg!(feature = "prefetch-github-hosts") {
+            assert!(host_allowed(asset));
+            assert!(host_allowed("https://objects.githubusercontent.com/x"));
+        } else {
+            assert!(!host_allowed(asset));
+            assert!(!host_allowed("https://objects.githubusercontent.com/x"));
+        }
+    }
+
+    /// `"install": "prebuild-install -r napi"` is common, and reading only `config.runtime`
+    /// derived the wrong ABI slot — so the placed filename never matched the probed one.
+    #[test]
+    fn a_command_line_flag_outranks_config_and_env() {
+        let manifest = serde_json::json!({
+            "name": "pkg",
+            "version": "1.0.0",
+            "config": { "runtime": "node" },
+            "binary": { "napi_versions": [3] },
+            "repository": "https://github.com/o/r.git",
+        });
+        let env = BTreeMap::from([("npm_config_runtime".to_string(), "node".to_string())]);
+        let flags = prebuild_flags(&args("prebuild-install -r napi"));
+        assert_eq!(flags.get("runtime").map(String::as_str), Some("napi"));
+
+        // argv wins over BOTH `config.runtime` and `npm_config_runtime` (rc deepExtends
+        // argv last), so the asset is the napi-v3 spelling, not node-v140.
+        let url = prebuild_install_url(&manifest, &env, &node26(), &flags).unwrap();
+        assert!(
+            url.ends_with("pkg-v1.0.0-napi-v3-darwin-arm64.tar.gz"),
+            "{url}"
+        );
+        // Without the flag the same manifest resolves to the node-ABI asset.
+        let unflagged = prebuild_install_url(&manifest, &env, &node26(), &BTreeMap::new()).unwrap();
+        assert!(
+            unflagged.ends_with("pkg-v1.0.0-node-v140-darwin-arm64.tar.gz"),
+            "{unflagged}"
+        );
+    }
+
+    #[test]
+    fn flags_are_scoped_to_the_prebuild_install_command_alone() {
+        // The fallback's flags must not be attributed to prebuild-install.
+        let chained = prebuild_flags(&args(
+            "prebuild-install -r napi || node-gyp rebuild --arch=ia32",
+        ));
+        assert_eq!(chained.get("runtime").map(String::as_str), Some("napi"));
+        assert_eq!(chained.get("arch"), None);
+        // Long, `=`, and quoted-value spellings all parse.
+        let long = prebuild_flags(&args(
+            "prebuild-install --runtime=electron --tag-prefix '' --download https://m/a.tar.gz",
+        ));
+        assert_eq!(long.get("runtime").map(String::as_str), Some("electron"));
+        assert_eq!(long.get("tag-prefix").map(String::as_str), Some(""));
+        assert_eq!(
+            long.get("download").map(String::as_str),
+            Some("https://m/a.tar.gz")
+        );
+        // A bare boolean flag does not swallow the following token.
+        let bare = prebuild_flags(&args("prebuild-install --debug --verbose"));
+        assert_eq!(bare.get("debug").map(String::as_str), Some("true"));
+    }
+
+    /// `--nolocal` and `--build-from-source` both bypass the local-pickup probe, so a
+    /// placed file could never be read — prefetch must decline rather than write one.
+    #[test]
+    fn flags_that_defeat_local_pickup_decline_the_prefetch() {
+        for script in [
+            "prebuild-install --nolocal",
+            "prebuild-install --build-from-source",
+        ] {
+            let flags = prebuild_flags(&args(script));
+            assert!(
+                flags.contains_key("nolocal") || flags.contains_key("buildFromSource"),
+                "{script} -> {flags:?}"
+            );
+        }
+    }
+
+    /// node-pre-gyp runs the version through `semver.parse`, so `{version}` keeps the
+    /// prerelease and sheds build metadata, and `{patch}` is the parsed core — not `3-rc`.
+    #[test]
+    fn node_pre_gyp_version_slots_follow_semver_not_string_splits() {
+        let manifest = serde_json::json!({
+            "name": "m",
+            "version": "1.2.3-rc.1+build5",
+            "binary": { "module_name": "m" },
+        });
+        let vars = node_pre_gyp_vars(&manifest, &node26(), &BTreeMap::new()).unwrap();
+        assert_eq!(vars["version"], "1.2.3-rc.1");
+        assert_eq!(vars["prerelease"], "rc.1");
+        assert_eq!(vars["build"], "build5");
+        assert_eq!(vars["major"], "1");
+        assert_eq!(vars["minor"], "2");
+        assert_eq!(vars["patch"], "3");
+    }
+
+    /// `RegExp#exec` scans for the first full MATCH, so an earlier bare `github.com` must
+    /// not shadow the real `<owner>/<repo>` that follows.
+    #[test]
+    fn github_match_scans_past_a_non_matching_occurrence() {
+        let manifest = serde_json::json!({
+            "homepage": "https://github.com",
+            "repository": { "url": "git+https://github.com/owner/repo.git" },
+        });
+        assert_eq!(
+            github_from_package(&manifest).unwrap(),
+            "https://github.com/owner/repo"
+        );
     }
 
     /// The manifest-to-disk path is the one place a dependency gets to steer an
@@ -1214,7 +1560,7 @@ mod tests {
             "repository": { "type": "git", "url": "git://github.com/WiseLibs/better-sqlite3.git" },
         });
         assert_eq!(
-            prebuild_install_url(&bs, &BTreeMap::new(), &host).unwrap(),
+            prebuild_install_url(&bs, &BTreeMap::new(), &host, &BTreeMap::new()).unwrap(),
             "https://github.com/WiseLibs/better-sqlite3/releases/download/v11.5.0/\
              better-sqlite3-v11.5.0-node-v147-darwin-arm64.tar.gz"
         );
@@ -1229,7 +1575,7 @@ mod tests {
             "repository": { "type": "git", "url": "https://github.com/atom/node-keytar.git" },
         });
         assert_eq!(
-            prebuild_install_url(&kt, &BTreeMap::new(), &host).unwrap(),
+            prebuild_install_url(&kt, &BTreeMap::new(), &host, &BTreeMap::new()).unwrap(),
             "https://github.com/atom/node-keytar/releases/download/v7.9.0/\
              keytar-v7.9.0-napi-v3-darwin-arm64.tar.gz"
         );

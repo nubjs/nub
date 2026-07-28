@@ -132,8 +132,8 @@ pub mod windows_admin {
     pub use crate::backend::windows_account::{clean, setup, status, teardown};
 }
 pub use compiler::{
-    CommandRunner, CompileCtx, CompileError, CompileWarning, ScopeCapabilities, compile,
-    compile_build_jail, compile_with_warnings,
+    CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS, ScopeCapabilities,
+    compile, compile_build_jail, compile_with_warnings,
 };
 pub use matcher::Homes;
 
