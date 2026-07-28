@@ -18,7 +18,6 @@ The file uses JSON with comments and trailing commas. Unknown keys and invalid v
   "nodeOptions": ["--enable-source-maps"],   // Node options for every run
   "v8Flags": ["--expose-gc"],                // V8 flags, via NODE_OPTIONS
   "envFile": ["./env/base.env", "./env/local.env"], // true | false | path | path[]
-  "define": { "APP_VERSION": "\"1.4.0\"" },  // compile-time identifier replacement
   "loader": { ".txt": "text" },              // extension → loader
   "conditions": ["development"],             // extra package export conditions
   "tsconfig": "./tsconfig.runtime.json",     // TypeScript config for the runtime
@@ -238,27 +237,6 @@ Paths also expand `${VAR}` and `$VAR` against the environment, which a config fi
 APP_ENV=staging nub app.ts   # reads ./env/.env.staging
 ```
 
-### `define`
-
-Replace identifiers at compile time. Each value is a JavaScript source string.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "define": {
-    "APP_VERSION": "\"1.4.0\"",
-    "FEATURE_SEARCH": "true",
-    "BUILD_NUMBER": "42"
-  }
-}
-```
-
-```ts title="version.ts"
-console.log(APP_VERSION);   // "1.4.0"
-console.log(FEATURE_SEARCH); // true
-console.log(BUILD_NUMBER);   // 42
-```
-
 ### `loader`
 
 Choose a loader for a file extension.
@@ -377,7 +355,7 @@ Use plain Node behavior while keeping Nub's Node version selection.
 }
 ```
 
-This is the project-wide form of the `--node` escape hatch. Nub does not load its runtime hooks, environment files, preloads, custom loaders, defines, or conditions.
+This is the project-wide form of the `--node` escape hatch. Nub does not load its runtime hooks, environment files, preloads, custom loaders, or conditions.
 
 ## `install`
 

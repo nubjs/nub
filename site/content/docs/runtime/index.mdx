@@ -184,12 +184,11 @@ Settings you want on every run go in a [nub.jsonc](/docs/config) at the project 
 {
   "preload": ["./instrumentation.ts", "tsx/esm"], // loaded before the entry file
   "nodeOptions": ["--enable-source-maps"],        // Node options for every run
-  "v8Flags": ["--expose-gc"],                     // V8 flags, via NODE_OPTIONS
-  "define": { "APP_VERSION": "\"1.4.0\"" }        // compile-time replacement
+  "v8Flags": ["--expose-gc"]                      // V8 flags, via NODE_OPTIONS
 }
 ```
 
-A preload entry is either a path, resolved from the directory holding the file that supplied it, or a bare package specifier resolved the way an import in your project would be. Each `define` value is JavaScript source, so a string constant carries its own quotes. V8 flags travel through `NODE_OPTIONS`, so only the flags Node accepts there work — Nub rejects the rest before Node starts.
+A preload entry is either a path, resolved from the directory holding the file that supplied it, or a bare package specifier resolved the way an import in your project would be. V8 flags travel through `NODE_OPTIONS`, so only the flags Node accepts there work — Nub rejects the rest before Node starts.
 
 A command-line flag always wins over the file. See [nub.jsonc](/docs/config#project-and-global-configuration) for the full precedence order.
 

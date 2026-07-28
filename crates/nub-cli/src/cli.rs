@@ -467,7 +467,7 @@ fn watch_guarded_env_file_keys(auto_cascade: bool) -> Vec<&'static str> {
         // enforces that by planting an empty placeholder. That is wrong for a
         // key nub itself hands the child: the runtime snapshot is stamped from
         // the resolved `nub.jsonc`, never from a file, so blanking it strips
-        // the child's own `tsconfig`/`define`/`loader` and it starts unconfigured.
+        // the child's own `tsconfig`/`preload`/`loader` and it starts unconfigured.
         // Skipping it here costs nothing — the denylist already stopped any
         // file-supplied value from ever reaching the injection map.
         .filter(|key| *key != nub_core::node::spawn::RUNTIME_CONFIG_ENV)

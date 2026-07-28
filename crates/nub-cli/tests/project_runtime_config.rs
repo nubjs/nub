@@ -46,7 +46,6 @@ impl Fixture {
               "nodeOptions": ["--stack-trace-limit=23"],
               "v8Flags": ["--max-old-space-size=256"],
               "envFile": "./runtime.env",
-              "define": { "CONFIG_WORD": "\"defined\"" },
               "loader": { ".blob": "text", ".view": "jsx" },
               "conditions": ["runtime-config"],
               "tsconfig": "./tsconfig.runtime.jsonc",
@@ -98,7 +97,6 @@ import { alias } from 'runtime-alias';
 import condition from 'conditional-pkg';
 import component from './component.view';
 console.log(JSON.stringify({
-  define: CONFIG_WORD,
   env: process.env.RUNTIME_ENV,
   preload: globalThis.__runtimePreload,
   text, alias, condition,
@@ -155,7 +153,6 @@ console.log(JSON.stringify({
         let value: serde_json::Value =
             serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
                 .unwrap();
-        assert_eq!(value["define"], "defined");
         assert_eq!(value["env"], "from-config");
         assert_eq!(value["preload"], "preloaded");
         assert_eq!(value["text"], "loaded-text");
@@ -189,7 +186,6 @@ console.log(JSON.stringify({
         let value: serde_json::Value =
             serde_json::from_slice(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
                 .unwrap();
-        assert_eq!(value["define"], "defined");
         assert_eq!(value["env"], "from-config");
         assert_eq!(value["text"], "loaded-text");
         assert_eq!(value["alias"], "aliased");
@@ -221,7 +217,6 @@ fn inherited_runtime_snapshot_ignores_all_sandbox_config_positions() {
       "nodeOptions": [],
       "v8Flags": [],
       "envFile": { "kind": "default" },
-      "define": {},
       "loader": {},
       "conditions": [],
       "tsconfig": null,
@@ -269,7 +264,6 @@ fn runtime_snapshot_reaches_watch_child() {
     let _ = child.kill();
     let _ = child.wait();
     let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(value["define"], "defined");
     assert_eq!(value["env"], "from-config");
     assert_eq!(value["text"], "loaded-text");
     assert_eq!(value["alias"], "aliased");

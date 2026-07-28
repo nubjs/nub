@@ -31,10 +31,6 @@
       "$ref": "#/$defs/envFileSetting",
       "description": "Environment-file loading for runtime commands."
     },
-    "define": {
-      "$ref": "#/$defs/stringMap",
-      "description": "Compile-time replacements. Values are JavaScript source strings."
-    },
     "loader": {
       "type": "object",
       "description": "Map file extensions to Nub loaders.",
@@ -132,12 +128,6 @@
     "stringArray": {
       "type": "array",
       "items": {
-        "type": "string"
-      }
-    },
-    "stringMap": {
-      "type": "object",
-      "additionalProperties": {
         "type": "string"
       }
     },

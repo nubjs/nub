@@ -154,7 +154,6 @@ if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 // process plumbing, not a user-facing environment knob.
 let RUNTIME_CONFIG = {};
 try { RUNTIME_CONFIG = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
-const RUNTIME_DEFINE = RUNTIME_CONFIG.define || {};
 const RUNTIME_LOADER = RUNTIME_CONFIG.loader || {};
 const RUNTIME_TSCONFIG = RUNTIME_CONFIG.tsconfig || undefined;
 
@@ -643,7 +642,6 @@ export function loadTranspile(url, ext) {
     // (top-level await, class fields, private methods) untouched.
     target: "es2022",
     typescript: {},
-    define: RUNTIME_DEFINE,
     // Decorators default to OFF (Stage-3 mode), matching tsc: legacy semantics
     // and metadata are opt-in via tsconfig. See wiki/runtime/non-erasable-syntax.md.
     decorator: co?.experimentalDecorators === true
@@ -679,7 +677,7 @@ export function loadTranspile(url, ext) {
   // type → different format → distinct entry). `cacheDir: null/undefined` is the
   // JS enable/disable signal: native then skips all cache I/O and just transforms.
   const formatByte = format === "commonjs" ? "c" : "m";
-  const runtimeHash = JSON.stringify({ define: RUNTIME_DEFINE, loader: configuredLoader || null, tsconfig: RUNTIME_TSCONFIG || null });
+  const runtimeHash = JSON.stringify({ loader: configuredLoader || null, tsconfig: RUNTIME_TSCONFIG || null });
   const result = nubNative.transformCached(
     filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined,
   );
@@ -715,7 +713,7 @@ export function maybeTranspilePlainJs(url, ext) {
   }
   // lang "ts" parses all JS (a TS superset) but NOT JSX — JSX-in-.js is out of scope.
   const info = detectModuleInfo(filePath, source, "ts");
-  if (!info.transformableSyntax && !info.hasDecorators && Object.keys(RUNTIME_DEFINE).length === 0) {
+  if (!info.transformableSyntax && !info.hasDecorators) {
     return null; // no-op: Node's native loader handles it, byte-identical.
   }
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,

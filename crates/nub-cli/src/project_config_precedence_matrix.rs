@@ -112,14 +112,6 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.env_file == Some(EnvFileSetting::Disabled)),
         },
         KeySpec {
-            key: ConfigKey::Define,
-            name: "define",
-            set: |c, t| c.define = Some(string_map(t)),
-            matches: |c, t| c.define == Some(string_map(t)),
-            set_empty: Some(|c| c.define = Some(BTreeMap::new())),
-            is_empty: Some(|c| c.define == Some(BTreeMap::new())),
-        },
-        KeySpec {
             key: ConfigKey::Loader,
             name: "loader",
             set: |c, t| c.loader = Some(string_map(t)),
@@ -266,22 +258,21 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::NodeOptions => 2,
         ConfigKey::V8Flags => 3,
         ConfigKey::EnvFile => 4,
-        ConfigKey::Define => 5,
-        ConfigKey::Loader => 6,
-        ConfigKey::Conditions => 7,
-        ConfigKey::Tsconfig => 8,
-        ConfigKey::VerifyDepsBeforeRun => 9,
-        ConfigKey::Sandbox => 10,
-        ConfigKey::InstallNodeLinker => 11,
-        ConfigKey::InstallSymlinkDisablePattern => 12,
-        ConfigKey::InstallHoist => 13,
-        ConfigKey::InstallMinimumReleaseAge => 14,
-        ConfigKey::InstallMinimumReleaseAgeExclude => 15,
-        ConfigKey::InstallNodeOptions => 16,
-        ConfigKey::InstallSandbox => 17,
-        ConfigKey::DlxConsent => 18,
-        ConfigKey::DlxSandbox => 19,
-        ConfigKey::DlxEnvFile => 20,
+        ConfigKey::Loader => 5,
+        ConfigKey::Conditions => 6,
+        ConfigKey::Tsconfig => 7,
+        ConfigKey::VerifyDepsBeforeRun => 8,
+        ConfigKey::Sandbox => 9,
+        ConfigKey::InstallNodeLinker => 10,
+        ConfigKey::InstallSymlinkDisablePattern => 11,
+        ConfigKey::InstallHoist => 12,
+        ConfigKey::InstallMinimumReleaseAge => 13,
+        ConfigKey::InstallMinimumReleaseAgeExclude => 14,
+        ConfigKey::InstallNodeOptions => 15,
+        ConfigKey::InstallSandbox => 16,
+        ConfigKey::DlxConsent => 17,
+        ConfigKey::DlxSandbox => 18,
+        ConfigKey::DlxEnvFile => 19,
     }
 }
 
@@ -319,8 +310,8 @@ fn resolve(layers: [Option<ProjectConfig>; 5]) -> EffectiveConfig {
 #[test]
 fn spec_table_covers_every_config_key_exactly_once() {
     let specs = specs();
-    assert_eq!(specs.len(), 21, "one spec per ConfigKey variant");
-    let mut seen = [false; 21];
+    assert_eq!(specs.len(), 20, "one spec per ConfigKey variant");
+    let mut seen = [false; 20];
     for spec in &specs {
         let idx = ordinal(spec.key);
         assert!(!seen[idx], "duplicate spec for {}", spec.name);

@@ -39,7 +39,6 @@ const ROOT_KEYS: &[&str] = &[
     "nodeOptions",
     "v8Flags",
     "envFile",
-    "define",
     "loader",
     "conditions",
     "tsconfig",
@@ -145,7 +144,6 @@ pub struct ProjectConfig {
     pub node_options: Option<Vec<String>>,
     pub v8_flags: Option<Vec<String>>,
     pub env_file: Option<EnvFileSetting>,
-    pub define: Option<BTreeMap<String, String>>,
     pub loader: Option<BTreeMap<String, String>>,
     pub conditions: Option<Vec<String>>,
     pub tsconfig: Option<String>,
@@ -299,7 +297,6 @@ pub enum ConfigKey {
     NodeOptions,
     V8Flags,
     EnvFile,
-    Define,
     Loader,
     Conditions,
     Tsconfig,
@@ -348,7 +345,6 @@ pub(crate) struct RuntimeConfig {
     pub node_options: Vec<String>,
     pub v8_flags: Vec<String>,
     pub env_file: RuntimeEnvFile,
-    pub define: BTreeMap<String, String>,
     pub loader: BTreeMap<String, String>,
     pub conditions: Vec<String>,
     pub tsconfig: Option<String>,
@@ -370,7 +366,6 @@ impl Default for RuntimeConfig {
             node_options: Vec::new(),
             v8_flags: Vec::new(),
             env_file: RuntimeEnvFile::Default,
-            define: BTreeMap::new(),
             loader: BTreeMap::new(),
             conditions: Vec::new(),
             tsconfig: None,
@@ -749,7 +744,6 @@ impl EffectiveConfig {
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
             env_file,
-            define: values.define.clone().unwrap_or_default(),
             loader: values.loader.clone().unwrap_or_default(),
             conditions: values.conditions.clone().unwrap_or_default(),
             tsconfig,
@@ -847,7 +841,6 @@ fn merge_layer(
     );
     merge_field!(values, sources, layer, source, v8_flags, ConfigKey::V8Flags);
     merge_field!(values, sources, layer, source, env_file, ConfigKey::EnvFile);
-    merge_field!(values, sources, layer, source, define, ConfigKey::Define);
     merge_field!(values, sources, layer, source, loader, ConfigKey::Loader);
     merge_field!(
         values,
@@ -1008,7 +1001,7 @@ fn as_string_array(v: &Value, path: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-/// A `{ string: string }` map (define, loader) — every value must be a string.
+/// A `{ string: string }` map (`loader`) — every value must be a string.
 fn as_string_map(v: &Value, path: &str) -> Result<BTreeMap<String, String>> {
     let obj = as_object(v, path)?;
     obj.iter()
@@ -1114,9 +1107,6 @@ fn validate_root(
     }
     if let Some(v) = obj.get("envFile") {
         cfg.env_file = Some(validate_env_file_setting(v, "envFile")?);
-    }
-    if let Some(v) = obj.get("define") {
-        cfg.define = Some(as_string_map(v, "define")?);
     }
     if let Some(v) = obj.get("loader") {
         cfg.loader = Some(validate_loader(v, "loader")?);
@@ -1444,7 +1434,6 @@ mod tests {
               "preload": ["./telemetry.ts"],
               "nodeOptions": ["--max-old-space-size=4096"],
               "v8Flags": ["--expose-gc"],
-              "define": { "__DEV__": "false" },
               "loader": { ".svg": "text" },
               "conditions": ["worker"],
               "tsconfig": "./tsconfig.runtime.json",
@@ -1457,13 +1446,6 @@ mod tests {
             Some(vec!["--max-old-space-size=4096".into()])
         );
         assert_eq!(cfg.v8_flags, Some(vec!["--expose-gc".into()]));
-        assert_eq!(
-            cfg.define
-                .as_ref()
-                .and_then(|values| values.get("__DEV__"))
-                .map(String::as_str),
-            Some("false")
-        );
         assert_eq!(
             cfg.loader
                 .as_ref()
@@ -1578,18 +1560,6 @@ mod tests {
             ConfigError::Type { path, expected } => {
                 assert_eq!(path, "preload");
                 assert_eq!(expected, "an array of strings");
-            }
-            other => panic!("expected Type error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn define_rejects_non_string_values() {
-        let err = parse_project_config(r#"{ "define": { "__DEV__": false } }"#).unwrap_err();
-        match err {
-            ConfigError::Type { path, expected } => {
-                assert_eq!(path, "define.__DEV__");
-                assert_eq!(expected, "a string");
             }
             other => panic!("expected Type error, got {other:?}"),
         }
@@ -2259,7 +2229,6 @@ mod tests {
             values: ProjectConfig {
                 node_compat: Some(true),
                 preload: Some(vec!["./project.ts".into()]),
-                define: Some(BTreeMap::from([("PROJECT".into(), "true".into())])),
                 ..ProjectConfig::default()
             },
         };
@@ -2271,7 +2240,6 @@ mod tests {
                 cli: ProjectConfig {
                     node_compat: Some(false),
                     preload: Some(Vec::new()),
-                    define: Some(BTreeMap::new()),
                     ..ProjectConfig::default()
                 },
                 ..ConfigOverlays::default()
@@ -2280,8 +2248,7 @@ mod tests {
 
         assert_eq!(snapshot.values.node_compat, Some(false));
         assert_eq!(snapshot.values.preload, Some(Vec::new()));
-        assert_eq!(snapshot.values.define, Some(BTreeMap::new()));
-        for key in [ConfigKey::NodeCompat, ConfigKey::Preload, ConfigKey::Define] {
+        for key in [ConfigKey::NodeCompat, ConfigKey::Preload] {
             assert_eq!(
                 snapshot.sources.get(&key).unwrap().kind,
                 ConfigSourceKind::Cli
@@ -2300,7 +2267,6 @@ mod tests {
                 "nodeOptions",
                 "v8Flags",
                 "envFile",
-                "define",
                 "loader",
                 "conditions",
                 "tsconfig",
@@ -2324,7 +2290,6 @@ mod tests {
           "nodeOptions": [],
           "v8Flags": [],
           "envFile": false,
-          "define": {},
           "loader": {},
           "conditions": [],
           "tsconfig": "./tsconfig.json",
