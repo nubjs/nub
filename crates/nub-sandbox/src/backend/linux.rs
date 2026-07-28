@@ -2262,6 +2262,23 @@ fn classify_bwrap_failures_under(
     if lower.contains("unknown option") || lower.contains("invalid option") {
         return format!("installed Bubblewrap lacks required stock options ({detail})");
     }
+    // `--ro-bind-fd FD DEST` is not a descriptor bind: Bubblewrap rewrites it to a bind on
+    // the literal string `/proc/self/fd/FD` and `realpath()`s that from inside the new user
+    // namespace, so the source is resolved by PATH under a single-uid map. Nub re-anchors an
+    // object whose path will not resolve there before it launches, which means reaching here
+    // is the residual case where that repair was itself unavailable.
+    //
+    // Deliberately ahead of the container, sysctl, WSL and AppArmor arms, all of which would
+    // otherwise claim it: this is not a namespace denial at all, so neither host setup nor a
+    // container flag can fix it and naming either sends the reader somewhere useless.
+    if lower.contains("can't find source path /proc/self/fd/") {
+        return format!(
+            "nub could not mount its own runtime into the sandbox: Bubblewrap resolves the \
+             mount by path from inside the user namespace, and that path is unreachable \
+             there. Install nub under a directory every user can search, such as \
+             /usr/local/bin, or make /tmp writable and executable ({detail})"
+        );
+    }
     if fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
         .is_ok_and(|value| value.trim() == "0")
     {
@@ -2342,17 +2359,20 @@ fn apparmor_restricts_unprivileged_userns() -> bool {
 
 /// A namespace / credential-setup denial in a Bubblewrap failure string. The exact
 /// wording varies by Bubblewrap version ("setting up uid map: Permission denied",
-/// "No permissions to create new namespace"), so this matches on the substantive
+/// "No permissions to create a new namespace"), so this matches on the substantive
 /// tokens rather than whole sentences. `RTM_NEWADDR` is the netns-loopback
 /// bring-up: on a restricted Ubuntu host `--unshare-all` dies THERE first, before
 /// reaching any uid-map step, which is why the errno alone is not enough to key on.
+///
+/// The OPERATION is what identifies a namespace denial, never the errno: Bubblewrap
+/// always names the step it failed at, and matching the bare errno instead swept in
+/// every unrelated EACCES — most damagingly the source-path resolution failure that
+/// breaks a root launch, which the AppArmor setup cannot fix and must not be blamed for.
 fn is_namespace_denial(lower: &str) -> bool {
     lower.contains("uid map")
         || lower.contains("gid map")
         || lower.contains("new namespace")
         || lower.contains("rtm_newaddr")
-        || lower.contains("permission denied")
-        || lower.contains("operation not permitted")
 }
 
 fn executable(path: &Path) -> bool {
@@ -4356,6 +4376,48 @@ mod tests {
             !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
             "{message}"
         );
+    }
+
+    #[test]
+    fn an_unreachable_bind_source_is_not_blamed_on_the_apparmor_setup() {
+        // The verbatim stderr of `sudo nub install` with nub under a 0750 $HOME. It is an
+        // EACCES, so the old bare "permission denied" match routed it to the AppArmor arm
+        // and told the user to run a setup that cannot possibly fix it.
+        let detail = "bwrap: Can't find source path /proc/self/fd/204: Permission denied";
+        for restricted in [true, false] {
+            let message =
+                classify_bwrap_failures_under(&[detail.to_string()], false, restricted, false);
+            assert!(
+                !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+                "restricted={restricted}: {message}"
+            );
+            assert!(
+                message.contains("resolves the mount by path"),
+                "restricted={restricted}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_errno_alone_is_not_read_as_a_namespace_denial() {
+        // Bubblewrap always names the step it failed at, so the operation is the signal.
+        for named in [
+            "bwrap: setting up uid map: Permission denied",
+            "bwrap: setting up gid map: Permission denied",
+            "bwrap: No permissions to create a new namespace",
+            "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+        ] {
+            assert!(is_namespace_denial(&named.to_ascii_lowercase()), "{named}");
+        }
+        for unnamed in [
+            "bwrap: Can't find source path /proc/self/fd/204: Permission denied",
+            "bwrap: Can't create file at /x: Operation not permitted",
+        ] {
+            assert!(
+                !is_namespace_denial(&unnamed.to_ascii_lowercase()),
+                "{unnamed}"
+            );
+        }
     }
 
     #[test]

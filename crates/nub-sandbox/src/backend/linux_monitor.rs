@@ -85,7 +85,7 @@ pub(crate) struct FileIdentity {
 }
 
 impl FileIdentity {
-    fn from_file(file: &File) -> io::Result<Self> {
+    pub(super) fn from_file(file: &File) -> io::Result<Self> {
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             return Err(io::Error::new(
@@ -146,6 +146,10 @@ pub(crate) struct RuntimeImage {
     pub(crate) executable: PinnedObject,
     pub(crate) kind: RuntimeKind,
     pub(crate) build_marker: [u8; 32],
+    /// Owns the staging directory when any object had to be re-anchored there. Every
+    /// launch resolves the bind sources by path, so it must outlive the image, not the
+    /// launch that created it.
+    _stage: Option<super::linux_runtime_stage::StagedRuntime>,
 }
 
 /// Opaque, non-cloneable authority returned by the embedder's earliest hook.
@@ -296,10 +300,10 @@ fn early_authority_from_inventory(
 }
 
 fn materialize_early_authority(authority: &EarlyRuntimeAuthority) -> io::Result<RuntimeImage> {
-    let executable = duplicate_pinned(&authority.executable)?;
+    let mut executable = duplicate_pinned(&authority.executable)?;
     let inventory = parse_pinned_inventory(&authority.inventory)?;
     let parsed = parse_elf(&executable.file)?;
-    let kind = match (
+    let mut kind = match (
         &parsed.interpreter,
         &authority.loader,
         &authority.loader_path,
@@ -335,12 +339,27 @@ fn materialize_early_authority(authority: &EarlyRuntimeAuthority) -> io::Result<
         }
         _ => return Err(invalid_data("ELF PT_INTERP changed after early capture")),
     };
+    // Re-anchoring comes AFTER every identity check above, which validates the objects
+    // against the live mapping inventory, and BEFORE the manifest — so the marker the
+    // monitor re-derives inside the sandbox records what Bubblewrap will actually bind.
+    let mut staging = super::linux_runtime_stage::RuntimeStaging::new();
+    staging.reanchor(&mut executable);
+    if let RuntimeKind::Dynamic {
+        loader, libraries, ..
+    } = &mut kind
+    {
+        staging.reanchor(loader);
+        for library in libraries {
+            staging.reanchor(library);
+        }
+    }
     let objects = runtime_objects_from_parts(&executable, &kind)?;
     let build_marker = runtime_build_marker(&objects);
     Ok(RuntimeImage {
         executable,
         kind,
         build_marker,
+        _stage: staging.finish(),
     })
 }
 
@@ -2808,7 +2827,7 @@ fn duplicate_pinned(object: &PinnedObject) -> io::Result<PinnedObject> {
     })
 }
 
-fn duplicate_above_stdio(file: &File) -> io::Result<File> {
+pub(super) fn duplicate_above_stdio(file: &File) -> io::Result<File> {
     duplicate_file_at_least(file, 3)
 }
 

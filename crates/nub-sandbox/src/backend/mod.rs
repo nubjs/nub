@@ -62,6 +62,9 @@ mod linux_monitor;
 mod linux_net_bridge;
 
 #[cfg(target_os = "linux")]
+mod linux_runtime_stage;
+
+#[cfg(target_os = "linux")]
 pub use linux_monitor::{
     RuntimeCapability, earliest_bootstrap, exercise_monitor_state_6, exercise_monitor_state_7,
     exercise_monitor_state_8, exercise_monitor_states_1_to_5,

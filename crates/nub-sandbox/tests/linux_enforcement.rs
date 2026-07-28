@@ -1886,3 +1886,66 @@ fn exact_etc_user_deny_is_masked_without_hiding_other_config() {
         "the rest of /etc stays readable for the loader after the carve"
     );
 }
+
+// ── runtime-image reachability ────────────────────────────────────────────────
+
+#[test]
+fn a_runtime_image_behind_an_unsearchable_directory_still_launches() {
+    // `--ro-bind-fd FD DEST` is not a descriptor bind: Bubblewrap rewrites it to a bind on
+    // the literal string `/proc/self/fd/FD` and `realpath()`s that from inside the sandbox
+    // user namespace, which maps exactly one uid. An image behind a directory owned by an
+    // unmapped uid therefore stops resolving there EVEN FOR ROOT, because a capability
+    // held in a non-initial user namespace does not override DAC for an unmapped inode.
+    // That is what broke `sudo nub install` for every nub under a 0750 `$HOME` — the
+    // curl installer's `~/.nub/bin/nub`, and every dev build. Measured before the repair:
+    // 34 of this suite's 38 tests died on `Can't find source path /proc/self/fd/204:
+    // Permission denied`, with the identical run green once the ancestor was searchable.
+    //
+    // Root-only: a foreign-uid ancestor is the entire fixture and only root can create
+    // one. The portable half of the mechanism — the searchability rule and the copy out of
+    // the pinned descriptor — is unit-tested in `backend::linux_runtime_stage`.
+    if skip_without_bwrap() {
+        return;
+    }
+    use std::fs::Permissions;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let tmp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    // A file's owner is the creating process's effective uid, so this reads it without
+    // pulling libc into the test target.
+    let euid_probe = root.join("euid-probe");
+    std::fs::write(&euid_probe, b"").unwrap();
+    if std::fs::metadata(&euid_probe).unwrap().uid() != 0 {
+        return;
+    }
+
+    let blocked = root.join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    let harness = blocked.join("nub-sandbox-monitor-harness");
+    std::fs::copy(env!("CARGO_BIN_EXE_nub-sandbox-monitor-harness"), &harness).unwrap();
+    std::fs::set_permissions(&harness, Permissions::from_mode(0o755)).unwrap();
+    // 65534 is `nobody` everywhere it exists and an unused uid where it does not; either
+    // way it is not the uid Bubblewrap maps. 0750 leaves the "other" class nothing, which
+    // is precisely Ubuntu's `HOME_MODE` since 21.04.
+    std::os::unix::fs::chown(&blocked, Some(65534), Some(65534)).unwrap();
+    std::fs::set_permissions(&blocked, Permissions::from_mode(0o750)).unwrap();
+
+    let runtime = RuntimeCapability::from_verified_executable(&harness)
+        .expect("pin a runtime image behind an unsearchable directory");
+    let f = fixture();
+    let policy = compile(&serde_json::json!({ "fs": true }), &f.ctx(&[])).expect("compiles");
+    let _mount_topology = host_mount_topology_lock()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let out = apply_with_runtime(&policy, CommandSpec::new(TRUE).cwd(&f.proj), &runtime)
+        .expect("apply")
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "a launch whose runtime image sits behind an unsearchable directory must still \
+         reach the child: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
