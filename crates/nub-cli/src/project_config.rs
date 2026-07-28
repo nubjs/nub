@@ -44,7 +44,7 @@ const ROOT_KEYS: &[&str] = &[
     "loader",
     "conditions",
     "tsconfig",
-    "verifyDepsBeforeRun",
+    "verifyDeps",
     "sandbox",
     "install",
     "dlx",
@@ -149,7 +149,7 @@ pub struct ProjectConfig {
     pub loader: Option<BTreeMap<String, String>>,
     pub conditions: Option<Vec<String>>,
     pub tsconfig: Option<String>,
-    pub verify_deps_before_run: Option<VerifyDepsBeforeRun>,
+    pub verify_deps: Option<VerifyDeps>,
 
     // ── the default sandbox (parsed and retained, not consumed) ──
     pub sandbox: Option<SandboxSetting>,
@@ -166,7 +166,7 @@ impl ProjectConfig {
         Self {
             node_compat: Some(false),
             env_file: Some(EnvFileSetting::Default),
-            verify_deps_before_run: Some(VerifyDepsBeforeRun::Warn),
+            verify_deps: Some(VerifyDeps::Warn),
             dlx: DlxConfig {
                 consent: Some(ImplicitDlx::Prompt),
                 ..DlxConfig::default()
@@ -193,11 +193,17 @@ pub enum EnvFileSetting {
     Sources(Vec<String>),
 }
 
-/// `verifyDepsBeforeRun` — pnpm's literal field name + value space (zero-
-/// translation compat). `Enabled(false)` is pnpm's `false`; the string arms are
-/// pnpm's `"install"|"warn"|"error"|"prompt"`.
+/// `verifyDeps` — nub's own field name, carrying pnpm's value space.
+/// `Enabled(false)` is pnpm's `false`; the string arms are pnpm's
+/// `"install"|"warn"|"error"|"prompt"`. The name is deliberately NOT pnpm's
+/// `verifyDepsBeforeRun`: that spelling is reserved for adopting a pnpm field
+/// verbatim, and nub honours only three of the five values (`install` and
+/// `prompt` both resolve to `warn` — see [`crate::verify_deps`]), so the gate is
+/// also not "before run": it fires on `nub <file>`, `nub exec`, and `nubx` too.
+/// pnpm's own `verifyDepsBeforeRun` in `.npmrc` / `pnpm-workspace.yaml` is a
+/// separate, unrenamed compat surface read only under a pnpm incumbent.
 #[derive(Debug, Clone, PartialEq)]
-pub enum VerifyDepsBeforeRun {
+pub enum VerifyDeps {
     Enabled(bool),
     Install,
     Warn,
@@ -302,7 +308,7 @@ pub enum ConfigKey {
     Loader,
     Conditions,
     Tsconfig,
-    VerifyDepsBeforeRun,
+    VerifyDeps,
     Sandbox,
     InstallNodeLinker,
     InstallSymlinkDisablePattern,
@@ -865,8 +871,8 @@ fn merge_layer(
         sources,
         layer,
         source,
-        verify_deps_before_run,
-        ConfigKey::VerifyDepsBeforeRun
+        verify_deps,
+        ConfigKey::VerifyDeps
     );
     merge_field!(values, sources, layer, source, sandbox, ConfigKey::Sandbox);
 
@@ -1119,8 +1125,8 @@ fn validate_root(
     if let Some(v) = obj.get("tsconfig") {
         cfg.tsconfig = Some(as_str(v, "tsconfig")?.to_string());
     }
-    if let Some(v) = obj.get("verifyDepsBeforeRun") {
-        cfg.verify_deps_before_run = Some(validate_verify_deps(v, "verifyDepsBeforeRun")?);
+    if let Some(v) = obj.get("verifyDeps") {
+        cfg.verify_deps = Some(validate_verify_deps(v, "verifyDeps")?);
     }
     if let Some(v) = obj.get("sandbox") {
         cfg.sandbox = Some(validate_sandbox(v, "sandbox")?);
@@ -1149,14 +1155,14 @@ fn validate_env_file_setting(v: &Value, path: &str) -> Result<EnvFileSetting> {
     }
 }
 
-fn validate_verify_deps(v: &Value, path: &str) -> Result<VerifyDepsBeforeRun> {
+fn validate_verify_deps(v: &Value, path: &str) -> Result<VerifyDeps> {
     match v {
-        Value::Bool(b) => Ok(VerifyDepsBeforeRun::Enabled(*b)),
+        Value::Bool(b) => Ok(VerifyDeps::Enabled(*b)),
         Value::String(s) => match s.as_str() {
-            "install" => Ok(VerifyDepsBeforeRun::Install),
-            "warn" => Ok(VerifyDepsBeforeRun::Warn),
-            "error" => Ok(VerifyDepsBeforeRun::Error),
-            "prompt" => Ok(VerifyDepsBeforeRun::Prompt),
+            "install" => Ok(VerifyDeps::Install),
+            "warn" => Ok(VerifyDeps::Warn),
+            "error" => Ok(VerifyDeps::Error),
+            "prompt" => Ok(VerifyDeps::Prompt),
             other => Err(ConfigError::Value {
                 path: path.into(),
                 message: format!(
@@ -1570,15 +1576,15 @@ mod tests {
     #[test]
     fn verify_deps_covers_bool_and_string_arms() {
         assert_eq!(
-            parse(r#"{ "verifyDepsBeforeRun": true }"#).verify_deps_before_run,
-            Some(VerifyDepsBeforeRun::Enabled(true))
+            parse(r#"{ "verifyDeps": true }"#).verify_deps,
+            Some(VerifyDeps::Enabled(true))
         );
         assert_eq!(
-            parse(r#"{ "verifyDepsBeforeRun": "warn" }"#).verify_deps_before_run,
-            Some(VerifyDepsBeforeRun::Warn)
+            parse(r#"{ "verifyDeps": "warn" }"#).verify_deps,
+            Some(VerifyDeps::Warn)
         );
         assert!(matches!(
-            parse_project_config(r#"{ "verifyDepsBeforeRun": "yes" }"#),
+            parse_project_config(r#"{ "verifyDeps": "yes" }"#),
             Err(ConfigError::Value { .. })
         ));
     }
@@ -2276,7 +2282,7 @@ mod tests {
                 "loader",
                 "conditions",
                 "tsconfig",
-                "verifyDepsBeforeRun",
+                "verifyDeps",
                 "sandbox",
                 "install",
                 "dlx",
@@ -2299,7 +2305,7 @@ mod tests {
           "loader": {},
           "conditions": [],
           "tsconfig": "./tsconfig.json",
-          "verifyDepsBeforeRun": false,
+          "verifyDeps": false,
           "sandbox": false,
           "install": {
             "nodeLinker": "symlink",

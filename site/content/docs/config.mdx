@@ -22,7 +22,11 @@ Every field, with its full value set. Each has its own section below.
 
   // any flag your Node accepts in NODE_OPTIONS
   "nodeOptions": ["--enable-source-maps"],
-  "v8Flags": ["--expose-gc"],      // same channel, so the same set
+
+  // passed on the command line, so the full V8 set
+  "v8Flags": ["--expose-gc"],
+
+  "nodeCompat": false,             // true = plain Node, pinning kept
 
   // true = the default .env cascade | false = load nothing
   // a path, or an array of paths where later files win
@@ -30,16 +34,14 @@ Every field, with its full value set. Each has its own section below.
   "envFile": [".env", ".env.local"],
 
   // text | jsonc | json5 | toml | yaml | ts | tsx | jsx
-  "loader": { ".txt": "text" },
+  "loader": { ".graphql": "text" },
 
   "conditions": ["development"],   // matched ahead of "default"
   "tsconfig": "./tsconfig.runtime.json",
 
   // warn | error | false
   // "install" and "prompt" parse for pnpm compat, behave as warn
-  "verifyDepsBeforeRun": "warn",
-
-  "nodeCompat": false,             // true = plain Node, pinning kept
+  "verifyDeps": "warn",
 
   // ── installs — only when Nub is the project's package manager ──
   "install": {
@@ -179,16 +181,28 @@ Pass V8 flags without adding them to every command.
 {
   // ...
   "v8Flags": [
-    "--expose-gc"
+    "--expose-gc",
+    "--stack-size=2000"
   ]
 }
 ```
 
-Flags reach Node through `NODE_OPTIONS`, so the accepted set is the one your Node version allows there. Nub checks each entry against that set before Node starts, which turns an unusable flag into a Nub error rather than a Node startup abort.
+These flags reach Node on its command line rather than through `NODE_OPTIONS`, so the whole V8 flag set is available — including the flags `NODE_OPTIONS` rejects, such as `--stack-size` and `--no-opt`. Use [`nodeOptions`](#nodeoptions) for Node's own options, which do travel through `NODE_OPTIONS`.
 
-```text
-nub.jsonc `v8Flags` option `--harmony` is not supported by Node 26.5.0
+Nub applies them to every Node process it starts, including the ones your package scripts launch as `node`. A script that runs Node through a hardcoded absolute path instead does not get them.
+
+### `nodeCompat`
+
+Use plain Node behavior while keeping Nub's Node version selection.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "nodeCompat": true
+}
 ```
+
+This is the project-wide form of the `--node` escape hatch. Nub does not load its runtime hooks, environment files, preloads, custom loaders, or conditions.
 
 ### `envFile`
 
@@ -249,19 +263,20 @@ APP_ENV=staging nub app.ts   # reads .env.staging
 
 ### `loader`
 
-Choose a loader for a file extension.
+Teach Nub an extension it does not already know, by mapping it onto a loader it has.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
   "loader": {
-    ".txt": "text",
-    ".config": "jsonc",
-    ".data": "yaml",
-    ".component": "tsx"
+    ".graphql": "text",   // import a schema as a string
+    ".rules": "yaml",     // a project file that happens to be YAML
+    ".view": "tsx"        // project source under a name of your own
   }
 }
 ```
+
+Nub already imports `.txt`, `.jsonc`, `.json5`, `.toml`, `.yaml`, and `.yml`, along with the TypeScript and JSX extensions, so none of those need an entry here.
 
 The supported loader names are:
 
@@ -323,14 +338,14 @@ Choose the TypeScript configuration Nub's runtime reads. Nub uses it for the opt
 }
 ```
 
-### `verifyDepsBeforeRun`
+### `verifyDeps`
 
 Warn when installed dependencies may be stale.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "verifyDepsBeforeRun": "warn"
+  "verifyDeps": "warn"
 }
 ```
 
@@ -339,7 +354,7 @@ Stop instead of running.
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "verifyDepsBeforeRun": "error"
+  "verifyDeps": "error"
 }
 ```
 
@@ -348,24 +363,11 @@ Skip the check.
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "verifyDepsBeforeRun": false
+  "verifyDeps": false
 }
 ```
 
 The `"install"` and `"prompt"` values are accepted for pnpm compatibility and currently behave as `"warn"`.
-
-### `nodeCompat`
-
-Use plain Node behavior while keeping Nub's Node version selection.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "nodeCompat": true
-}
-```
-
-This is the project-wide form of the `--node` escape hatch. Nub does not load its runtime hooks, environment files, preloads, custom loaders, or conditions.
 
 ## `install`
 

@@ -102,6 +102,7 @@ console.log(JSON.stringify({
   text, alias, condition,
   jsxMode: component.mode,
   stack: Error.stackTraceLimit,
+  execArgv: process.execArgv,
   nodeOptions: process.env.NODE_OPTIONS,
   runtimeSnapshot: process.env.__NUB_RUNTIME_CONFIG,
 }));
@@ -160,8 +161,24 @@ console.log(JSON.stringify({
         assert_eq!(value["condition"], "condition");
         assert_eq!(value["jsxMode"], "classic");
         assert_eq!(value["stack"], 23);
-        let options = value["nodeOptions"].as_str().unwrap();
-        assert!(options.contains("--max-old-space-size=256"), "{options}");
+        // The two runtime option fields ride DIFFERENT channels, and the split is
+        // the whole point: Node refuses most V8-only flags in `NODE_OPTIONS`
+        // ("is not allowed in NODE_OPTIONS", exit 9) but accepts them on argv, so
+        // `v8Flags` must arrive as argv and `nodeOptions` as `NODE_OPTIONS`.
+        let exec_argv = value["execArgv"].to_string();
+        assert!(
+            exec_argv.contains("--max-old-space-size=256"),
+            "v8Flags must reach the child on argv: {exec_argv}"
+        );
+        let options = value["nodeOptions"].as_str().unwrap_or_default();
+        assert!(
+            !options.contains("--max-old-space-size=256"),
+            "v8Flags must not be routed through NODE_OPTIONS: {options}"
+        );
+        assert!(
+            options.contains("--stack-trace-limit=23"),
+            "nodeOptions must still travel through NODE_OPTIONS: {options}"
+        );
         let snapshot: serde_json::Value = serde_json::from_str(
             value["runtimeSnapshot"]
                 .as_str()

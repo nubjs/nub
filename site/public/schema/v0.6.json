@@ -25,7 +25,7 @@
     },
     "v8Flags": {
       "$ref": "#/$defs/stringArray",
-      "description": "V8 flags applied to runtime commands."
+      "description": "V8 flags passed on Node's command line, so the full V8 set applies."
     },
     "envFile": {
       "$ref": "#/$defs/envFileSetting",
@@ -58,7 +58,7 @@
       "type": "string",
       "description": "Path to the tsconfig used by Nub's runtime."
     },
-    "verifyDepsBeforeRun": {
+    "verifyDeps": {
       "oneOf": [
         {
           "type": "boolean"

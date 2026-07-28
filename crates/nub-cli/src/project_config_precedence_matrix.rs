@@ -37,12 +37,12 @@ fn string_map(tag: usize) -> BTreeMap<String, String> {
     BTreeMap::from([("KEY".to_string(), format!("value-{tag}"))])
 }
 
-fn verify_deps(tag: usize) -> VerifyDepsBeforeRun {
+fn verify_deps(tag: usize) -> VerifyDeps {
     [
-        VerifyDepsBeforeRun::Install,
-        VerifyDepsBeforeRun::Warn,
-        VerifyDepsBeforeRun::Error,
-        VerifyDepsBeforeRun::Prompt,
+        VerifyDeps::Install,
+        VerifyDeps::Warn,
+        VerifyDeps::Error,
+        VerifyDeps::Prompt,
     ][tag % 4]
         .clone()
 }
@@ -137,16 +137,12 @@ fn specs() -> Vec<KeySpec> {
             is_empty: None,
         },
         KeySpec {
-            key: ConfigKey::VerifyDepsBeforeRun,
-            name: "verifyDepsBeforeRun",
-            set: |c, t| c.verify_deps_before_run = Some(verify_deps(t)),
-            matches: |c, t| c.verify_deps_before_run == Some(verify_deps(t)),
-            set_empty: Some(|c| {
-                c.verify_deps_before_run = Some(VerifyDepsBeforeRun::Enabled(false))
-            }),
-            is_empty: Some(|c| {
-                c.verify_deps_before_run == Some(VerifyDepsBeforeRun::Enabled(false))
-            }),
+            key: ConfigKey::VerifyDeps,
+            name: "verifyDeps",
+            set: |c, t| c.verify_deps = Some(verify_deps(t)),
+            matches: |c, t| c.verify_deps == Some(verify_deps(t)),
+            set_empty: Some(|c| c.verify_deps = Some(VerifyDeps::Enabled(false))),
+            is_empty: Some(|c| c.verify_deps == Some(VerifyDeps::Enabled(false))),
         },
         KeySpec {
             key: ConfigKey::Sandbox,
@@ -261,7 +257,7 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::Loader => 5,
         ConfigKey::Conditions => 6,
         ConfigKey::Tsconfig => 7,
-        ConfigKey::VerifyDepsBeforeRun => 8,
+        ConfigKey::VerifyDeps => 8,
         ConfigKey::Sandbox => 9,
         ConfigKey::InstallNodeLinker => 10,
         ConfigKey::InstallSymlinkDisablePattern => 11,

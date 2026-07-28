@@ -706,6 +706,11 @@ pub struct SpawnConfig<'a> {
     pub cwd: &'a Path,
     /// Resolved project/global Node options, already validated against this Node.
     pub runtime_node_options: &'a [String],
+    /// Resolved project/global `v8Flags`. Delivered as ARGV, not `NODE_OPTIONS`:
+    /// Node refuses most V8-only flags (`--stack-size`, `--no-opt`, …) in
+    /// `NODE_OPTIONS` but accepts them on the command line, so this is the only
+    /// channel that can carry them.
+    pub runtime_v8_flags: &'a [String],
 }
 
 /// The result of spawning a Node process.
@@ -1156,6 +1161,17 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         if let Some(node_path) = vendored_node_path(preload.as_deref()) {
             cmd.env("NODE_PATH", node_path);
         }
+    }
+
+    // `v8Flags` ride argv, and deliberately sit OUTSIDE the augment block above:
+    // that block is skipped on a re-entrant spawn (a `node` reaching us through
+    // the PATH shim from inside a script or a child process), yet that child is
+    // exactly the real Node process the flags must reach. Each V8 flag is applied
+    // to each Node process once — the ancestor that installed the shim spawned a
+    // SHELL, not a Node, so there is no double-application to guard against.
+    // Compat mode is the zero-augmentation contract, so it carries none.
+    if !config.compat_mode {
+        cmd.args(config.runtime_v8_flags);
     }
 
     // .env vars injected by the CLI layer.

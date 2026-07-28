@@ -20,7 +20,7 @@
 //!   running script spawns from re-checking (matching npm/pnpm).
 //!
 //! Policy lives in the neutral `.npmrc` key `verify-deps-before-run` (with the
-//! `NUB_VERIFY_DEPS_BEFORE_RUN` env override); nub's default is `warn`. That is a
+//! `NUB_VERIFY_DEPS` env override); nub's default is `warn`. That is a
 //! deliberate divergence from the vendored engine's `install` default, wired
 //! through nub's OWN resolution so standalone aube's default is untouched
 //! (fork-discipline). Under a pnpm-**11+** incumbent the key lives SOLELY in
@@ -159,13 +159,13 @@ fn resolve_policy(project: &Project) -> Policy {
     if let Some(value) = crate::project_config::effective_config().and_then(|config| {
         config
             .sources
-            .get(&crate::project_config::ConfigKey::VerifyDepsBeforeRun)
+            .get(&crate::project_config::ConfigKey::VerifyDeps)
             .filter(|source| source.kind != crate::project_config::ConfigSourceKind::Defaults)?;
-        config.values.verify_deps_before_run.as_ref()
+        config.values.verify_deps.as_ref()
     }) {
         return project_config_policy(value);
     }
-    if let Some(p) = std::env::var("NUB_VERIFY_DEPS_BEFORE_RUN")
+    if let Some(p) = std::env::var("NUB_VERIFY_DEPS")
         .ok()
         .and_then(|v| parse_policy(&v))
     {
@@ -189,15 +189,14 @@ fn resolve_policy(project: &Project) -> Policy {
     Policy::Warn
 }
 
-fn project_config_policy(value: &crate::project_config::VerifyDepsBeforeRun) -> Policy {
-    use crate::project_config::VerifyDepsBeforeRun;
+fn project_config_policy(value: &crate::project_config::VerifyDeps) -> Policy {
+    use crate::project_config::VerifyDeps;
     match value {
-        VerifyDepsBeforeRun::Enabled(false) => Policy::Off,
-        VerifyDepsBeforeRun::Error => Policy::Error,
-        VerifyDepsBeforeRun::Enabled(true)
-        | VerifyDepsBeforeRun::Install
-        | VerifyDepsBeforeRun::Warn
-        | VerifyDepsBeforeRun::Prompt => Policy::Warn,
+        VerifyDeps::Enabled(false) => Policy::Off,
+        VerifyDeps::Error => Policy::Error,
+        VerifyDeps::Enabled(true) | VerifyDeps::Install | VerifyDeps::Warn | VerifyDeps::Prompt => {
+            Policy::Warn
+        }
     }
 }
 
@@ -642,20 +641,17 @@ mod tests {
 
     #[test]
     fn maps_the_typed_project_policy_without_reparsing() {
-        use crate::project_config::VerifyDepsBeforeRun;
+        use crate::project_config::VerifyDeps;
         assert_eq!(
-            project_config_policy(&VerifyDepsBeforeRun::Enabled(false)),
+            project_config_policy(&VerifyDeps::Enabled(false)),
             Policy::Off
         );
-        assert_eq!(
-            project_config_policy(&VerifyDepsBeforeRun::Error),
-            Policy::Error
-        );
+        assert_eq!(project_config_policy(&VerifyDeps::Error), Policy::Error);
         for value in [
-            VerifyDepsBeforeRun::Enabled(true),
-            VerifyDepsBeforeRun::Install,
-            VerifyDepsBeforeRun::Warn,
-            VerifyDepsBeforeRun::Prompt,
+            VerifyDeps::Enabled(true),
+            VerifyDeps::Install,
+            VerifyDeps::Warn,
+            VerifyDeps::Prompt,
         ] {
             assert_eq!(project_config_policy(&value), Policy::Warn);
         }

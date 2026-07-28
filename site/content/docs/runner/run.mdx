@@ -139,20 +139,20 @@ Set the behavior with the `verify-deps-before-run` key in `.npmrc`. The values a
 verify-deps-before-run = warn
 ```
 
-A project [`nub.jsonc`](/docs/config) sets the same policy under [`verifyDepsBeforeRun`](/docs/config#verifydepsbeforerun), where skipping the check is spelled `false`:
+A project [`nub.jsonc`](/docs/config) sets the same policy under [`verifyDeps`](/docs/config#verifydeps), where skipping the check is spelled `false`:
 
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "verifyDepsBeforeRun": "error"  // stop rather than run against a stale tree
+  "verifyDeps": "error"  // stop rather than run against a stale tree
 }
 ```
 
-The `NUB_VERIFY_DEPS_BEFORE_RUN` variable overrides the file for one shell, and `--no-check` (or `--no-install` on `nub run`) skips the check for a single invocation:
+The `NUB_VERIFY_DEPS` variable overrides the file for one shell, and `--no-check` (or `--no-install` on `nub run`) skips the check for a single invocation:
 
 ```bash
 nub run --no-check build
-NUB_VERIFY_DEPS_BEFORE_RUN=off nub run build
+NUB_VERIFY_DEPS=off nub run build
 ```
 
 Nub does not install on your behalf here — `install` and `prompt` are accepted as values but behave like `warn`, since Nub won't reshape a tree another package manager set up. Run `nub install` when you see the warning. The check also applies to `nub <file>`, `nub exec`, and `nubx`, and is skipped in [`--node` / compat mode](#--node) and inside an already-running script (so a script that spawns `node` doesn't re-check).

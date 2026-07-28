@@ -2855,17 +2855,17 @@ fn node_compat_env_setting() -> Option<bool> {
     }
 }
 
-fn verify_deps_env_setting() -> Option<crate::project_config::VerifyDepsBeforeRun> {
-    use crate::project_config::VerifyDepsBeforeRun;
+fn verify_deps_env_setting() -> Option<crate::project_config::VerifyDeps> {
+    use crate::project_config::VerifyDeps;
 
-    let value = env::var("NUB_VERIFY_DEPS_BEFORE_RUN").ok()?;
+    let value = env::var("NUB_VERIFY_DEPS").ok()?;
     match value.trim().to_ascii_lowercase().as_str() {
-        "off" | "false" | "0" | "no" | "none" | "skip" => Some(VerifyDepsBeforeRun::Enabled(false)),
-        "true" => Some(VerifyDepsBeforeRun::Enabled(true)),
-        "install" => Some(VerifyDepsBeforeRun::Install),
-        "warn" => Some(VerifyDepsBeforeRun::Warn),
-        "error" => Some(VerifyDepsBeforeRun::Error),
-        "prompt" => Some(VerifyDepsBeforeRun::Prompt),
+        "off" | "false" | "0" | "no" | "none" | "skip" => Some(VerifyDeps::Enabled(false)),
+        "true" => Some(VerifyDeps::Enabled(true)),
+        "install" => Some(VerifyDeps::Install),
+        "warn" => Some(VerifyDeps::Warn),
+        "error" => Some(VerifyDeps::Error),
+        "prompt" => Some(VerifyDeps::Prompt),
         _ => None,
     }
 }
@@ -2880,7 +2880,7 @@ fn command_config_flags(command: &Option<Command>) -> (bool, bool) {
 }
 
 pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
-    use crate::project_config::{ConfigOverlays, ProjectConfig, VerifyDepsBeforeRun};
+    use crate::project_config::{ConfigOverlays, ProjectConfig, VerifyDeps};
 
     let cwd = env::current_dir()?;
     let mut overlays = ConfigOverlays {
@@ -2891,11 +2891,11 @@ pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> 
         overlays.cli.node_compat = Some(true);
     }
     if cli_no_check {
-        overlays.cli.verify_deps_before_run = Some(VerifyDepsBeforeRun::Enabled(false));
+        overlays.cli.verify_deps = Some(VerifyDeps::Enabled(false));
     }
     overlays.environment = ProjectConfig {
         node_compat: node_compat_env_setting(),
-        verify_deps_before_run: verify_deps_env_setting(),
+        verify_deps: verify_deps_env_setting(),
         ..ProjectConfig::default()
     };
     crate::project_config::initialize_effective_config(&cwd, overlays)?;
@@ -2911,6 +2911,24 @@ fn effective_compat_mode(explicit: bool, runtime: &crate::project_config::Runtim
     explicit || runtime.node_compat
 }
 
+/// `v8Flags` reach Node as ARGV, never through `NODE_OPTIONS` — the two channels
+/// accept DIFFERENT flag sets. Node refuses `--stack-size`, `--no-opt` and most
+/// other V8-only flags in `NODE_OPTIONS` ("is not allowed in NODE_OPTIONS",
+/// exit 9) while accepting them on the command line, so the field is only useful
+/// on the argv channel and validating it against `allowedNodeEnvironmentFlags`
+/// would reject exactly the flags it exists to carry. Hence no accepted-set
+/// check here: only the structural one, with Node itself rejecting a flag it
+/// does not know.
+fn runtime_v8_flags(runtime: &crate::project_config::RuntimeConfig) -> Result<Vec<String>> {
+    for value in &runtime.v8_flags {
+        if !value.starts_with('-') || value.contains('\0') || value.chars().any(char::is_whitespace)
+        {
+            bail!("nub.jsonc `v8Flags` entry `{value}` must be one complete Node option token");
+        }
+    }
+    Ok(runtime.v8_flags.clone())
+}
+
 fn runtime_node_options(
     runtime: &crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
@@ -2918,19 +2936,9 @@ fn runtime_node_options(
     let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let mut options = Vec::new();
 
-    for (field, values) in [
-        ("nodeOptions", runtime.node_options.as_slice()),
-        ("v8Flags", runtime.v8_flags.as_slice()),
-    ] {
-        for value in values {
-            validate_runtime_node_option(
-                field,
-                value,
-                accepted.as_ref(),
-                &node.version.to_string(),
-            )?;
-            options.push(value.clone());
-        }
+    for value in &runtime.node_options {
+        validate_runtime_node_option(value, accepted.as_ref(), &node.version.to_string())?;
+        options.push(value.clone());
     }
 
     for condition in &runtime.conditions {
@@ -2972,20 +2980,19 @@ fn runtime_node_options(
 }
 
 fn validate_runtime_node_option(
-    field: &str,
     value: &str,
     accepted: Option<&std::collections::BTreeSet<String>>,
     node_version: &str,
 ) -> Result<()> {
     if !value.starts_with('-') || value.contains('\0') || value.chars().any(char::is_whitespace) {
-        bail!("nub.jsonc `{field}` entry `{value}` must be one complete Node option token");
+        bail!("nub.jsonc `nodeOptions` entry `{value}` must be one complete Node option token");
     }
     let name = value.split_once('=').map_or(value, |(name, _)| name);
     if let Some(accepted) = accepted
         && !accepted.contains(name)
     {
         bail!(
-            "nub.jsonc `{field}` option `{name}` is not supported by Node {}",
+            "nub.jsonc `nodeOptions` option `{name}` is not supported by Node {}",
             node_version
         );
     }
@@ -3190,6 +3197,11 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     } else {
         runtime_node_options(&runtime, &node)?
     };
+    let runtime_v8_flags = if compat_mode {
+        Vec::new()
+    } else {
+        runtime_v8_flags(&runtime)?
+    };
     let runtime_json = if compat_mode {
         None
     } else {
@@ -3214,6 +3226,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         pnp: pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
         cwd,
         runtime_node_options: &runtime_node_options,
+        runtime_v8_flags: &runtime_v8_flags,
     };
 
     let result = nub_core::node::spawn::spawn_node(&config)?;
@@ -5227,6 +5240,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
     let runtime_node_options = runtime_node_options(&runtime, &node)?;
+    let runtime_v8_flags = runtime_v8_flags(&runtime)?;
     let runtime_json = runtime_config_json(&runtime)?;
 
     // Auto-loaded `.env*` files are handed to the watched Node as `--env-file`
@@ -5353,6 +5367,10 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for flag in &inject {
         node_args.push(flag.to_string());
     }
+    // `v8Flags` ride argv here for the same reason they do in `spawn_node`:
+    // `NODE_OPTIONS` refuses most V8-only flags. Node's watch supervisor re-execs
+    // the child with this same argv, so they survive every restart.
+    node_args.extend(runtime_v8_flags.iter().cloned());
     let sanitized_node_options = node_options.map(|existing| {
         nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)
     });
