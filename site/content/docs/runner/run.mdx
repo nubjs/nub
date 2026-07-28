@@ -143,7 +143,8 @@ A project [`nub.jsonc`](/docs/config) sets the same policy under [`verifyDepsBef
 
 ```jsonc title="nub.jsonc"
 {
-  "verifyDepsBeforeRun": "error"
+  // ...
+  "verifyDepsBeforeRun": "error"  // stop rather than run against a stale tree
 }
 ```
 

@@ -117,23 +117,23 @@ Node does the condition matching, but you choose which conditions are active. Ad
 
 ```jsonc title="nub.jsonc"
 {
-  "conditions": ["development"],
-  "preload": ["@company/telemetry/register"]
+  // ...
+  "conditions": ["development"]  // matched ahead of "default"
 }
 ```
 
-```json title="node_modules/@company/telemetry/package.json"
+```json title="node_modules/example/package.json"
 {
   "exports": {
-    "./register": {
-      "development": "./register.dev.js",
-      "default": "./register.js"
+    ".": {
+      "development": "./development.js",
+      "default": "./production.js"
     }
   }
 }
 ```
 
-The conditions apply to every resolution in the project, so the bare-specifier [preload](/docs/runtime#project-configuration) above loads `./register.dev.js` rather than the default.
+Every resolution in the project matches against them, a bare-specifier [preload](/docs/config#preload) included.
 
 ## Yarn Plug'n'Play
 

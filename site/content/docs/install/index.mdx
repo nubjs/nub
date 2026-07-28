@@ -251,15 +251,28 @@ A project [`nub.jsonc`](/docs/config) carries an [`install`](/docs/config#instal
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
-    "minimumReleaseAge": "3d",                   // cooling window
-    "minimumReleaseAgeExclude": ["@company/*"],  // exempt from the window
-    "nodeOptions": ["--max-old-space-size=8192"] // for dependency build scripts
+    // an integer plus one of s, m, h, d, w
+    // a bare number is rejected
+    "minimumReleaseAge": "3d",
+    "minimumReleaseAgeExclude": ["@company/*"]  // exempt from the window
   }
 }
 ```
 
-Durations are an integer plus one of `s`, `m`, `h`, `d`, or `w` — a bare number is rejected. The top-level `nodeOptions` field is a separate setting that covers runtime commands, not dependency builds. Layout settings live in the same block; see [the virtual store](/docs/install/virtual-store#project-configuration).
+Dependency build scripts take their own Node options:
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "nodeOptions": ["--max-old-space-size=8192"]
+  }
+}
+```
+
+The top-level `nodeOptions` field is separate — it covers runtime commands, not dependency builds. Layout settings live in the same block; see [the virtual store](/docs/install/virtual-store#project-configuration).
 
 ## CLI
 

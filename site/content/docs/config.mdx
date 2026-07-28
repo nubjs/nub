@@ -51,6 +51,7 @@ Add the public schema URL for editor completion and validation.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "$schema": "https://nubjs.com/schema/latest.json"
 }
 ```
@@ -93,6 +94,7 @@ Load one or more modules before the entry file.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "preload": [
     "./instrumentation.ts",
     "./register-hooks.mjs"
@@ -110,6 +112,7 @@ An entry may also be a bare package specifier, resolved the way an import in you
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "preload": ["tsx/esm", "@company/telemetry/register"]
 }
 ```
@@ -118,6 +121,7 @@ A bare specifier resolves through the package's `exports` map, so [`conditions`]
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "conditions": ["development"],
   "preload": ["@company/telemetry/register"]
 }
@@ -140,6 +144,7 @@ Pass Node options to runtime commands.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "nodeOptions": [
     "--enable-source-maps",
     "--stack-trace-limit=50"
@@ -153,6 +158,7 @@ Pass V8 flags without adding them to every command.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "v8Flags": [
     "--expose-gc"
   ]
@@ -171,6 +177,7 @@ Keep automatic environment-file discovery with `true`.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "env": true
 }
 ```
@@ -179,6 +186,7 @@ Disable environment-file loading with `false`.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "env": false
 }
 ```
@@ -187,6 +195,7 @@ Read one exact file instead of the automatic set.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "env": "./env/development.env"
 }
 ```
@@ -195,6 +204,7 @@ Compose several files in order. Later files replace earlier values.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "env": [
     "./env/base.env",
     "./env/development.env",
@@ -209,6 +219,7 @@ Paths also expand `${VAR}` and `$VAR` against the environment, which a config fi
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "env": "./env/.env.${APP_ENV}"
 }
 ```
@@ -223,6 +234,7 @@ Replace identifiers at compile time. Each value is a JavaScript source string.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "define": {
     "APP_VERSION": "\"1.4.0\"",
     "FEATURE_SEARCH": "true",
@@ -243,6 +255,7 @@ Choose a loader for a file extension.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "loader": {
     ".txt": "text",
     ".config": "jsonc",
@@ -271,6 +284,7 @@ Add package export conditions.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "conditions": [
     "development",
     "react-server"
@@ -295,6 +309,7 @@ Choose the TypeScript configuration used by Nub's runtime.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "tsconfig": "./tsconfig.runtime.json"
 }
 ```
@@ -316,6 +331,7 @@ Warn when installed dependencies may be stale.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "verifyDepsBeforeRun": "warn"
 }
 ```
@@ -324,6 +340,7 @@ Stop instead of running.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "verifyDepsBeforeRun": "error"
 }
 ```
@@ -332,6 +349,7 @@ Skip the check.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "verifyDepsBeforeRun": false
 }
 ```
@@ -344,6 +362,7 @@ Use plain Node behavior while keeping Nub's Node version selection.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "nodeCompat": true
 }
 ```
@@ -362,6 +381,7 @@ Use Nub's shared symlink layout.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "nodeLinker": "symlink"
   }
@@ -372,6 +392,7 @@ Use a project-local isolated store.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "nodeLinker": "isolated"
   }
@@ -382,6 +403,7 @@ Use a flat, real-directory layout.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "nodeLinker": "hoisted"
   }
@@ -400,6 +422,7 @@ Materialize selected packages inside the project instead of linking them from th
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "symlinkDisablePattern": [
       "electron",
@@ -415,6 +438,7 @@ Fill the hidden fallback tree that packages reach when they import something the
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "nodeLinker": "isolated",
     "hoist": true
@@ -426,6 +450,7 @@ Keep the strict layout, where an undeclared import fails.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "nodeLinker": "isolated",
     "hoist": false
@@ -437,6 +462,7 @@ Hoist only matching packages.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "nodeLinker": "isolated",
     "hoist": [
@@ -459,6 +485,7 @@ Reject versions published too recently.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "minimumReleaseAge": "3d"
   }
@@ -479,6 +506,7 @@ Exclude selected packages when they must update immediately.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "minimumReleaseAge": "3d",
     "minimumReleaseAgeExclude": [
@@ -495,6 +523,7 @@ Pass Node options to dependency lifecycle scripts.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
     "nodeOptions": [
       "--max-old-space-size=8192"
@@ -513,6 +542,7 @@ Ask before an implicit `nubx` registry fetch.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "dlx": {
     "consent": "prompt"
   }
@@ -523,6 +553,7 @@ Disable implicit registry fetches.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "dlx": {
     "consent": "never"
   }
@@ -537,6 +568,7 @@ Use a separate environment file for temporary tools.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "dlx": {
     "env": "./env/tools.env"
   }
@@ -547,6 +579,7 @@ Disable environment-file loading for temporary tools.
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "dlx": {
     "env": false
   }

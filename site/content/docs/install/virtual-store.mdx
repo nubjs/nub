@@ -118,9 +118,10 @@ A project [`nub.jsonc`](/docs/config) picks the layout with one [`nodeLinker`](/
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
-    "nodeLinker": "isolated",           // project-local store
-    "hoist": ["*eslint*", "@types/*"]   // fallback tree; isolated only
+    "nodeLinker": "isolated",          // hoist applies to this layout only
+    "hoist": ["*eslint*", "@types/*"]  // the hidden fallback tree
   }
 }
 ```
@@ -129,8 +130,8 @@ The [`hoist`](/docs/config#installhoist) field fills the hidden fallback tree th
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "install": {
-    "nodeLinker": "symlink",
     "symlinkDisablePattern": ["electron", "@company/native-*"]
   }
 }

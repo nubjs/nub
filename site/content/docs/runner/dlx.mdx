@@ -43,14 +43,27 @@ A project [`nub.jsonc`](/docs/config) carries a [`dlx`](/docs/config#dlx) block:
 
 ```jsonc title="nub.jsonc"
 {
+  // ...
   "dlx": {
-    "consent": "never",       // no implicit nubx registry fetch
-    "env": "./env/tools.env"  // environment files for fetched tools
+    "consent": "never"  // no implicit nubx registry fetch
   }
 }
 ```
 
-Setting `consent` to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fetch; an explicit `nub dlx` still runs, because typing it is the consent. The `env` key takes the same `true`, `false`, path, and path-array forms as the top-level `env` field.
+Setting it to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fetch. An explicit `nub dlx` still runs, because typing it is the consent.
+
+Fetched tools can also read their own environment files:
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "dlx": {
+    "env": "./env/tools.env"
+  }
+}
+```
+
+The `env` key takes the same `true`, `false`, path, and path-array forms as the top-level field.
 
 ## Related
 
