@@ -494,6 +494,147 @@ static FEATURES: &[Feature] = &[
         ],
         evidence: "native on Node 24+",
     },
+    // ── Stage 3+ library surfaces ───────────────────────────────────────────
+    // union is the detect anchor for all SEVEN set methods (union/intersection/
+    // difference/symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom); each
+    // is still guarded individually in the runtime file.
+    Feature {
+        name: "Set.union",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Set.prototype.union",
+                },
+            ),
+            (band((22, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 / ES2025 (new Set methods); native on Node 22+",
+    },
+    Feature {
+        name: "Array.fromAsync",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Array.fromAsync",
+                },
+            ),
+            (band((22, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 / ES2025; native on Node 22+",
+    },
+    // Shipped under the name getOrInsert, NOT the proposal's original `upsert` --
+    // no runtime ever exposed `upsert`. Anchor also covers getOrInsertComputed and
+    // the WeakMap forms.
+    Feature {
+        name: "Map.getOrInsert",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((26, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Map.prototype.getOrInsert",
+                },
+            ),
+            (band((26, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 / ES2026 (upsert, shipped as getOrInsert); native on Node 26+",
+    },
+    // Anchor for Iterator.from plus the eleven ES2025 helpers (map/filter/take/drop/
+    // flatMap/reduce/toArray/some/every/find/forEach).
+    Feature {
+        name: "Iterator.from",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((22, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Iterator.from",
+                },
+            ),
+            (band((22, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 / ES2025 (sync iterator helpers); native on Node 22+",
+    },
+    Feature {
+        name: "Iterator.concat",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((26, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Iterator.concat",
+                },
+            ),
+            (band((26, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 (iterator-sequencing); native on Node 26+",
+    },
+    // joint-iteration is the ITERATOR twin of Promise.allKeyed -- the await-dictionary
+    // proposal explicitly follows its shape. Stage 4 yet shipped by no engine.
+    Feature {
+        name: "Iterator.zip",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Iterator.zip",
+            },
+        )],
+        evidence: "Stage 4 (joint-iteration); absent on every Node through 26.5",
+    },
+    Feature {
+        name: "Iterator.zipKeyed",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Iterator.zipKeyed",
+            },
+        )],
+        evidence: "Stage 4 (joint-iteration); absent on every Node through 26.5",
+    },
+    // Anchor for the Stage 3 prototype additions: chunks/windows (iterator-chunking),
+    // includes (iterator-includes) and join (iterator-join). These install even where
+    // the ES2025 helpers above are already native.
+    Feature {
+        name: "Iterator.chunks",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Iterator.prototype.chunks",
+            },
+        )],
+        evidence: "Stage 3 (iterator-chunking/includes/join); absent on every Node through 26.5",
+    },
+    Feature {
+        name: "Math.sumPrecise",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Math.sumPrecise",
+            },
+        )],
+        evidence: "Stage 3 (proposal-math-sum); absent on every Node through 26.5 (bun ships it)",
+    },
+    // Only the well-known symbol; POPULATING class metadata is the decorator
+    // transform's job, and the spec's value for an undecorated class is undefined.
+    Feature {
+        name: "Symbol.metadata",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Symbol.metadata",
+            },
+        )],
+        evidence: "Stage 3 (decorator metadata); absent on every Node through 26.5",
+    },
     // ── Shipped-standard builtins missing below their Node line ─────────────
     // All Stage 4 except Atomics.pause (Stage 3). Each was left unpolyfilled by the
     // same stale-floor premise as Promise.withResolvers below; bands are measured,

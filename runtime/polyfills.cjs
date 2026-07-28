@@ -276,6 +276,762 @@ function installSyncPolyfills(preloaded) {
   installKeyedPromiseCombinators();
   installPromiseWithResolvers();
   installFloorBuiltins();
+  installSetMethods();
+  installArrayFromAsync();
+  installMapGetOrInsert();
+  installMathSumPrecise();
+  installIteratorSurface();
+  installSymbolMetadata();
+}
+
+// ── The Iterator surface: constructor, Iterator.from, the 11 sync helpers, and
+//    the newer statics (concat / zip / zipKeyed) plus chunks/windows/includes/join ──
+// Node ships this in layers — helpers and `from` at 22.0, `concat` only at 26, and
+// zip/zipKeyed/chunks/windows/includes/join nowhere yet — so this installer is
+// deliberately built as INDEPENDENT per-name guards rather than one all-or-nothing
+// branch. A runtime with native helpers keeps every native method untouched and
+// gains only the names it lacks.
+//
+// FIDELITY LIMIT (inherent, same class as the polyfilled Float16Array not being an
+// ArrayBuffer.isView): the helper objects here are generator objects, so their
+// prototype is not the spec's %IteratorHelperPrototype% and their
+// Symbol.toStringTag reads "Generator" rather than "Iterator Helper". Iteration,
+// laziness, argument validation and underlying-iterator closing all behave
+// correctly — only the internal identity differs, which no realistic consumer
+// inspects. Generators were chosen precisely because they get the hard part right:
+// an early `return()` propagates to the source iterator.
+function installIteratorSurface() {
+  // %IteratorPrototype% is reachable from any built-in iterator: array iterator →
+  // %ArrayIteratorPrototype% → %IteratorPrototype%.
+  const IteratorProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+
+  if (typeof globalThis.Iterator !== "function") {
+    // The Iterator constructor is abstract: calling it directly throws, and
+    // subclassing is the only legitimate use. Its .prototype IS %IteratorPrototype%.
+    const Iterator = function Iterator() {
+      if (new.target === undefined || new.target === Iterator) {
+        throw new TypeError("Abstract class Iterator not directly constructable");
+      }
+    };
+    Object.defineProperty(Iterator, "prototype", {
+      value: IteratorProto,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+    defBuiltin(IteratorProto, "constructor", Iterator);
+    Object.defineProperty(globalThis, "Iterator", {
+      value: Iterator,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  const Iterator = globalThis.Iterator;
+
+  // GetIteratorDirect: helpers operate on the object's OWN `next`, without
+  // re-invoking Symbol.iterator — so a partially-consumed iterator keeps its place.
+  const iterOf = (obj) => {
+    if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
+      throw new TypeError("not an object");
+    }
+    return obj;
+  };
+  // Drive an iterator record with for..of semantics while forwarding closure.
+  // The `finally` is load-bearing: when a consumer abandons a helper early (a
+  // `break`, a `return`, a throw), native helpers call the SOURCE iterator's
+  // `return()`, and without this the source would be left open — verified against
+  // native, which is how the omission was caught. It must fire ONLY on early exit,
+  // since native does not call `return()` on an already-exhausted iterator.
+  function* drain(rec) {
+    let exhausted = false;
+    try {
+      while (true) {
+        const r = rec.next();
+        if (r.done) {
+          exhausted = true;
+          return;
+        }
+        yield r.value;
+      }
+    } finally {
+      if (!exhausted) {
+        const ret = rec.return;
+        if (typeof ret === "function") {
+          // A throw from `return()` must not mask the completion in flight.
+          try {
+            ret.call(rec);
+          } catch { /* swallow, matching IteratorClose's error handling here */ }
+        }
+      }
+    }
+  }
+  const asIterable = (rec) => ({ [Symbol.iterator]: () => drain(rec) });
+  // ToIntegerOrInfinity plus the helpers' shared limit validation: NaN and negative
+  // are RangeErrors, which is where a naive `Number(x) | 0` diverges.
+  const toLimit = (v) => {
+    const n = Number(v);
+    if (Number.isNaN(n)) throw new RangeError("limit must not be NaN");
+    const i = n === Infinity ? Infinity : Math.trunc(n) || 0;
+    if (i < 0) throw new RangeError("limit must not be negative");
+    return i;
+  };
+  const requireFn = (f, what) => {
+    if (typeof f !== "function") throw new TypeError(`${what} is not a function`);
+  };
+
+  const protoHelpers = {
+    map(mapper) {
+      const rec = iterOf(this);
+      requireFn(mapper, "mapper");
+      return (function* () {
+        let i = 0;
+        for (const v of asIterable(rec)) yield mapper(v, i++);
+      })();
+    },
+    filter(predicate) {
+      const rec = iterOf(this);
+      requireFn(predicate, "predicate");
+      return (function* () {
+        let i = 0;
+        for (const v of asIterable(rec)) if (predicate(v, i++)) yield v;
+      })();
+    },
+    take(limit) {
+      const rec = iterOf(this);
+      const n = toLimit(limit);
+      return (function* () {
+        if (n === 0) return;
+        let left = n;
+        for (const v of asIterable(rec)) {
+          yield v;
+          if (--left === 0) return;
+        }
+      })();
+    },
+    drop(limit) {
+      const rec = iterOf(this);
+      const n = toLimit(limit);
+      return (function* () {
+        let left = n;
+        for (const v of asIterable(rec)) {
+          if (left > 0) {
+            left--;
+            continue;
+          }
+          yield v;
+        }
+      })();
+    },
+    flatMap(mapper) {
+      const rec = iterOf(this);
+      requireFn(mapper, "mapper");
+      return (function* () {
+        let i = 0;
+        for (const v of asIterable(rec)) {
+          const inner = mapper(v, i++);
+          // The mapper must return something iterable; a bare value is a TypeError
+          // rather than being wrapped.
+          if (inner === null || inner === undefined || typeof inner[Symbol.iterator] !== "function") {
+            throw new TypeError("flatMap mapper did not return an iterable");
+          }
+          yield* inner;
+        }
+      })();
+    },
+    reduce(reducer) {
+      const rec = iterOf(this);
+      requireFn(reducer, "reducer");
+      let acc;
+      let i = 0;
+      if (arguments.length > 1) {
+        acc = arguments[1];
+      } else {
+        const first = rec.next();
+        if (first.done) {
+          throw new TypeError("reduce of empty iterator with no initial value");
+        }
+        acc = first.value;
+        i = 1;
+      }
+      for (const v of asIterable(rec)) acc = reducer(acc, v, i++);
+      return acc;
+    },
+    toArray() {
+      const rec = iterOf(this);
+      const out = [];
+      for (const v of asIterable(rec)) out.push(v);
+      return out;
+    },
+    some(predicate) {
+      const rec = iterOf(this);
+      requireFn(predicate, "predicate");
+      let i = 0;
+      for (const v of asIterable(rec)) if (predicate(v, i++)) return true;
+      return false;
+    },
+    every(predicate) {
+      const rec = iterOf(this);
+      requireFn(predicate, "predicate");
+      let i = 0;
+      for (const v of asIterable(rec)) if (!predicate(v, i++)) return false;
+      return true;
+    },
+    find(predicate) {
+      const rec = iterOf(this);
+      requireFn(predicate, "predicate");
+      let i = 0;
+      for (const v of asIterable(rec)) if (predicate(v, i++)) return v;
+      return undefined;
+    },
+    forEach(fn) {
+      const rec = iterOf(this);
+      requireFn(fn, "fn");
+      let i = 0;
+      for (const v of asIterable(rec)) fn(v, i++);
+      return undefined;
+    },
+    // ── Stage 3 additions, in no engine yet ──
+    // iterator-chunking: chunks() partitions into non-overlapping arrays of n and
+    // yields a SHORT final chunk; windows() slides by one and yields nothing at all
+    // when the source is shorter than n. Both reject n < 1, unlike take/drop.
+    chunks(chunkSize) {
+      const rec = iterOf(this);
+      const n = toLimit(chunkSize);
+      if (n < 1 || n === Infinity) throw new RangeError("chunkSize must be a positive integer");
+      return (function* () {
+        let buf = [];
+        for (const v of asIterable(rec)) {
+          buf.push(v);
+          if (buf.length === n) {
+            yield buf;
+            buf = [];
+          }
+        }
+        if (buf.length > 0) yield buf;
+      })();
+    },
+    windows(windowSize) {
+      const rec = iterOf(this);
+      const n = toLimit(windowSize);
+      if (n < 1 || n === Infinity) throw new RangeError("windowSize must be a positive integer");
+      return (function* () {
+        const buf = [];
+        for (const v of asIterable(rec)) {
+          buf.push(v);
+          if (buf.length > n) buf.shift();
+          if (buf.length === n) yield buf.slice();
+        }
+      })();
+    },
+    // iterator-includes: SameValueZero, so NaN is found and -0 matches +0.
+    includes(searchElement) {
+      const rec = iterOf(this);
+      for (const v of asIterable(rec)) {
+        if (v === searchElement || (Number.isNaN(v) && Number.isNaN(searchElement))) return true;
+      }
+      return false;
+    },
+    // iterator-join: like Array.prototype.join — default separator ",", and
+    // null/undefined elements become the empty string.
+    join(separator) {
+      const rec = iterOf(this);
+      const sep = separator === undefined ? "," : String(separator);
+      let out = "";
+      let first = true;
+      for (const v of asIterable(rec)) {
+        if (!first) out += sep;
+        first = false;
+        if (v !== null && v !== undefined) out += String(v);
+      }
+      return out;
+    },
+  };
+  // `chunks` is written out literally as the matrix anchor for the Stage 3 additions
+  // (chunks/windows/includes/join), which install even where the ES2025 helpers are
+  // already native. Every name is still guarded individually.
+  if (typeof Iterator.prototype.chunks !== "function") {
+    defBuiltin(IteratorProto, "chunks", protoHelpers.chunks);
+  }
+  for (const name of Object.keys(protoHelpers)) {
+    if (name !== "chunks" && typeof IteratorProto[name] !== "function") {
+      defBuiltin(IteratorProto, name, protoHelpers[name]);
+    }
+  }
+
+  // Iterator.from: wraps an iterable OR a bare iterator-like object. An object that
+  // already inherits from %IteratorPrototype% is returned AS IS.
+  if (typeof Iterator.from !== "function") {
+    defBuiltin(Iterator, "from", function from(O) {
+      if (typeof O === "string") {
+        return (function* () {
+          yield* O;
+        })();
+      }
+      iterOf(O);
+      const method = O[Symbol.iterator];
+      let rec;
+      if (typeof method === "function") {
+        rec = method.call(O);
+        if (IteratorProto.isPrototypeOf(rec)) return rec;
+      } else {
+        if (typeof O.next !== "function") throw new TypeError("not iterable and has no next");
+        if (IteratorProto.isPrototypeOf(O)) return O;
+        rec = O;
+      }
+      return (function* () {
+        yield* asIterable(rec);
+      })();
+    });
+  }
+
+  // Iterator.concat (Stage 4, native only on Node 26+): each argument must be
+  // iterable, and each one's Symbol.iterator is called LAZILY, only when the
+  // previous source is exhausted.
+  if (typeof Iterator.concat !== "function") {
+    defBuiltin(Iterator, "concat", function concat(...items) {
+      for (const it of items) {
+        if (it === null || it === undefined || typeof it[Symbol.iterator] !== "function") {
+          throw new TypeError("Iterator.concat arguments must be iterable");
+        }
+      }
+      return (function* () {
+        for (const it of items) yield* it;
+      })();
+    });
+  }
+
+  // Iterator.zip / Iterator.zipKeyed (Stage 4, proposal-joint-iteration — in no
+  // engine). zipKeyed is the ITERATOR twin of Promise.allKeyed: same own-enumerable
+  // key treatment, same dictionary-in/dictionary-out shape. `mode` selects what
+  // happens on unequal lengths: "shortest" (default) stops at the first exhausted
+  // source, "longest" pads with `padding`/undefined, "strict" throws.
+  const zipMode = (options) => {
+    if (options === undefined) return { mode: "shortest", padding: undefined };
+    if (options === null || typeof options !== "object") {
+      throw new TypeError("options must be an object");
+    }
+    const mode = options.mode === undefined ? "shortest" : options.mode;
+    if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
+      throw new TypeError('mode must be "shortest", "longest", or "strict"');
+    }
+    return { mode, padding: options.padding };
+  };
+  if (typeof Iterator.zip !== "function") {
+    defBuiltin(Iterator, "zip", function zip(iterables) {
+      if (iterables === null || iterables === undefined || typeof iterables[Symbol.iterator] !== "function") {
+        throw new TypeError("Iterator.zip requires an iterable of iterables");
+      }
+      const { mode, padding } = zipMode(arguments.length > 1 ? arguments[1] : undefined);
+      const sources = [...iterables].map((it) => {
+        if (it === null || it === undefined || typeof it[Symbol.iterator] !== "function") {
+          throw new TypeError("Iterator.zip sources must be iterable");
+        }
+        return it[Symbol.iterator]();
+      });
+      const pads = padding === undefined ? [] : [...padding];
+      return (function* () {
+        const live = sources.map(() => true);
+        while (true) {
+          const row = [];
+          let anyLive = false;
+          let anyDone = false;
+          for (let i = 0; i < sources.length; i++) {
+            if (!live[i]) {
+              row.push(pads[i]);
+              anyDone = true;
+              continue;
+            }
+            const r = sources[i].next();
+            if (r.done) {
+              live[i] = false;
+              anyDone = true;
+              row.push(pads[i]);
+            } else {
+              anyLive = true;
+              row.push(r.value);
+            }
+          }
+          if (sources.length === 0) return;
+          if (mode === "shortest" && anyDone) return;
+          if (mode === "strict" && anyDone) {
+            if (!anyLive) return;
+            throw new TypeError("Iterator.zip strict mode requires equal-length inputs");
+          }
+          if (mode === "longest" && !anyLive) return;
+          yield row;
+        }
+      })();
+    });
+  }
+  if (typeof Iterator.zipKeyed !== "function") {
+    defBuiltin(Iterator, "zipKeyed", function zipKeyed(iterables) {
+      iterOf(iterables);
+      const { mode, padding } = zipMode(arguments.length > 1 ? arguments[1] : undefined);
+      // Own ENUMERABLE keys including symbols, matching Promise.allKeyed.
+      const keys = Reflect.ownKeys(iterables).filter((k) => {
+        const d = Reflect.getOwnPropertyDescriptor(iterables, k);
+        return d !== undefined && d.enumerable;
+      });
+      const sources = keys.map((k) => {
+        const it = iterables[k];
+        if (it === null || it === undefined || typeof it[Symbol.iterator] !== "function") {
+          throw new TypeError("Iterator.zipKeyed sources must be iterable");
+        }
+        return it[Symbol.iterator]();
+      });
+      const padFor = (k) =>
+        padding === null || padding === undefined ? undefined : padding[k];
+      return (function* () {
+        const live = sources.map(() => true);
+        while (true) {
+          if (sources.length === 0) return;
+          const row = Object.create(null);
+          let anyLive = false;
+          let anyDone = false;
+          for (let i = 0; i < sources.length; i++) {
+            if (!live[i]) {
+              row[keys[i]] = padFor(keys[i]);
+              anyDone = true;
+              continue;
+            }
+            const r = sources[i].next();
+            if (r.done) {
+              live[i] = false;
+              anyDone = true;
+              row[keys[i]] = padFor(keys[i]);
+            } else {
+              anyLive = true;
+              row[keys[i]] = r.value;
+            }
+          }
+          if (mode === "shortest" && anyDone) return;
+          if (mode === "strict" && anyDone) {
+            if (!anyLive) return;
+            throw new TypeError("Iterator.zipKeyed strict mode requires equal-length inputs");
+          }
+          if (mode === "longest" && !anyLive) return;
+          yield row;
+        }
+      })();
+    });
+  }
+}
+
+// ── Symbol.metadata (TC39 Stage 3, decorator metadata; in no engine) ──
+// Only the well-known symbol is provided. POPULATING `klass[Symbol.metadata]` is
+// the decorator transform's job, and the spec's own answer for an undecorated class
+// is `undefined` — so defining the symbol makes `Symbol.metadata` referenceable
+// without inventing metadata that isn't there.
+function installSymbolMetadata() {
+  if (typeof Symbol.metadata === "symbol") return;
+  Object.defineProperty(Symbol, "metadata", {
+    value: Symbol("Symbol.metadata"),
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+}
+
+// Shared `def`: non-enumerable + writable + configurable, matching how the engine
+// defines its own builtins (and this file's enumeration-invisibility contract).
+// EVERY installer below guards per-METHOD on its own feature-detect, so a runtime
+// that ships some of a family natively keeps those and only gains the rest — no
+// polyfill ever overwrites a native implementation.
+function defBuiltin(target, name, value) {
+  Object.defineProperty(target, name, {
+    value,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+// ── New Set methods (TC39 Stage 4 / ES2025; native Node 22+, absent 18.19–21.x) ──
+// The subtlety that makes these more than one-liners is that the ARGUMENT is not
+// required to be a Set: the spec defines a "set-like" protocol (a `size` number
+// plus callable `has` and `keys`), and reads it through GetSetRecord in a fixed
+// order with specific error types. A naive `new Set(other)` implementation would
+// accept the wrong inputs, reject the right ones, and iterate in the wrong order.
+function installSetMethods() {
+  // Real brand check: the `size` getter throws for anything without [[SetData]],
+  // which is exactly the receiver check the spec performs first.
+  const sizeGetter = Object.getOwnPropertyDescriptor(Set.prototype, "size").get;
+  const requireSet = (o) => {
+    sizeGetter.call(o);
+  };
+  // GetSetRecord: the argument-validation order is observable, so it is preserved
+  // exactly — size read and coerced first (NaN is a TypeError, negative a
+  // RangeError), then `has`, then `keys`.
+  const setRecord = (obj) => {
+    if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
+      throw new TypeError("argument is not an object");
+    }
+    const numSize = Number(obj.size);
+    if (Number.isNaN(numSize)) throw new TypeError("size is NaN");
+    const intSize = Math.trunc(numSize) || 0;
+    if (intSize < 0) throw new RangeError("size is negative");
+    const has = obj.has;
+    if (typeof has !== "function") throw new TypeError("has is not callable");
+    const keys = obj.keys;
+    if (typeof keys !== "function") throw new TypeError("keys is not callable");
+    return { obj, size: intSize, has, keys };
+  };
+  // -0 is normalized to +0 on the way into a result set, matching SameValueZero.
+  const norm = (v) => (v === 0 ? 0 : v);
+  const otherKeys = (rec) => rec.keys.call(rec.obj);
+
+  const methods = {
+    union(other) {
+      requireSet(this);
+      const rec = setRecord(other);
+      const out = new Set(this);
+      for (const k of otherKeys(rec)) out.add(norm(k));
+      return out;
+    },
+    intersection(other) {
+      requireSet(this);
+      const rec = setRecord(other);
+      const out = new Set();
+      // Iterate the SMALLER side, but membership is always tested against the
+      // other — the spec picks by size for complexity, and the observable
+      // difference is which side's iteration order the result follows.
+      if (this.size <= rec.size) {
+        for (const k of this) if (rec.has.call(rec.obj, k)) out.add(k);
+      } else {
+        for (const k of otherKeys(rec)) if (this.has(k)) out.add(norm(k));
+      }
+      return out;
+    },
+    difference(other) {
+      requireSet(this);
+      const rec = setRecord(other);
+      const out = new Set(this);
+      if (this.size <= rec.size) {
+        for (const k of this) if (rec.has.call(rec.obj, k)) out.delete(k);
+      } else {
+        for (const k of otherKeys(rec)) out.delete(norm(k));
+      }
+      return out;
+    },
+    symmetricDifference(other) {
+      requireSet(this);
+      const rec = setRecord(other);
+      const out = new Set(this);
+      for (const k of otherKeys(rec)) {
+        const key = norm(k);
+        if (this.has(key)) out.delete(key);
+        else out.add(key);
+      }
+      return out;
+    },
+    isSubsetOf(other) {
+      requireSet(this);
+      const rec = setRecord(other);
+      if (this.size > rec.size) return false;
+      for (const k of this) if (!rec.has.call(rec.obj, k)) return false;
+      return true;
+    },
+    isSupersetOf(other) {
+      requireSet(this);
+      const rec = setRecord(other);
+      if (this.size < rec.size) return false;
+      for (const k of otherKeys(rec)) if (!this.has(norm(k))) return false;
+      return true;
+    },
+    isDisjointFrom(other) {
+      requireSet(this);
+      const rec = setRecord(other);
+      if (this.size <= rec.size) {
+        for (const k of this) if (rec.has.call(rec.obj, k)) return false;
+      } else {
+        for (const k of otherKeys(rec)) if (this.has(norm(k))) return false;
+      }
+      return true;
+    },
+  };
+  // `union` is written out literally as the feature-matrix row's detect anchor; the
+  // rest loop, and every method is still guarded on its own so a runtime shipping
+  // only part of the family keeps what it has.
+  if (typeof Set.prototype.union !== "function") defBuiltin(Set.prototype, "union", methods.union);
+  for (const name of Object.keys(methods)) {
+    if (name !== "union" && typeof Set.prototype[name] !== "function") {
+      defBuiltin(Set.prototype, name, methods[name]);
+    }
+  }
+}
+
+// ── Array.fromAsync (TC39 Stage 4 / ES2025; native Node 22+, absent 18.19–21.x) ──
+// Async-iterable OR sync-iterable OR array-like, in that precedence, with an
+// optional mapfn whose result is AWAITED. `this` is the constructor when callable,
+// so a subclass drives the result — matching Array.from.
+function installArrayFromAsync() {
+  if (typeof Array.fromAsync === "function") return;
+  // mapfn/thisArg ride `arguments`: they are optional, so native length is 1.
+  defBuiltin(Array, "fromAsync", async function fromAsync(asyncItems) {
+    const mapfn = arguments.length > 1 ? arguments[1] : undefined;
+    const thisArg = arguments.length > 2 ? arguments[2] : undefined;
+    const C = typeof this === "function" ? this : Array;
+    if (mapfn !== undefined && typeof mapfn !== "function") {
+      throw new TypeError("mapfn is not a function");
+    }
+    const usingAsync = asyncItems != null && asyncItems[Symbol.asyncIterator] !== undefined;
+    const usingSync = asyncItems != null && asyncItems[Symbol.iterator] !== undefined;
+    if (usingAsync || usingSync) {
+      const out = new C();
+      let i = 0;
+      // A sync iterator's YIELDED VALUES are awaited too, which is what makes
+      // `Array.fromAsync([promise])` resolve rather than collect promises.
+      for await (const v of asyncItems) {
+        out[i] = mapfn === undefined ? v : await mapfn.call(thisArg, v, i);
+        i++;
+      }
+      out.length = i;
+      return out;
+    }
+    // Array-like fallback: read `length`, then each index, awaiting both the
+    // element and the mapfn result.
+    const arrayLike = Object(asyncItems);
+    const len = Math.trunc(Number(arrayLike.length)) || 0;
+    const out = new C(len);
+    for (let i = 0; i < len; i++) {
+      const v = await arrayLike[i];
+      out[i] = mapfn === undefined ? v : await mapfn.call(thisArg, v, i);
+    }
+    out.length = len;
+    return out;
+  });
+}
+
+// ── Map/WeakMap getOrInsert + getOrInsertComputed ──
+//    (TC39 Stage 4 / ES2026 "upsert"; native Node 26+, absent below)
+// Shipped under the name getOrInsert, NOT the proposal's original `upsert` — no
+// runtime has ever exposed `upsert`, so only these two names are installed.
+// getOrInsertComputed calls the callback ONLY on a miss, and re-reads the map
+// afterwards because the callback can insert the same key reentrantly.
+function installMapGetOrInsert() {
+  // `Map.prototype.getOrInsert` is spelled out below as the feature-matrix row's
+  // detect anchor; WeakMap rides the same guards through the loop.
+  for (const Ctor of [Map, WeakMap]) {
+    if (Ctor === Map && typeof Map.prototype.getOrInsert === "function"
+        && typeof Map.prototype.getOrInsertComputed === "function") {
+      continue;
+    }
+    if (typeof Ctor.prototype.getOrInsert !== "function") {
+      defBuiltin(Ctor.prototype, "getOrInsert", function getOrInsert(key, value) {
+        if (this.has(key)) return this.get(key);
+        this.set(key, value);
+        return value;
+      });
+    }
+    if (typeof Ctor.prototype.getOrInsertComputed !== "function") {
+      defBuiltin(
+        Ctor.prototype,
+        "getOrInsertComputed",
+        function getOrInsertComputed(key, callbackfn) {
+          if (typeof callbackfn !== "function") {
+            throw new TypeError("callbackfn is not a function");
+          }
+          if (this.has(key)) return this.get(key);
+          const value = callbackfn(key);
+          // The callback may have inserted `key` itself; the spec's final write
+          // wins, so set unconditionally rather than re-checking `has`.
+          this.set(key, value);
+          return value;
+        },
+      );
+    }
+  }
+}
+
+// ── Math.sumPrecise (TC39 Stage 3; in no Node — bun ships it, so bun is the
+//    differential oracle used to verify this) ──
+// Returns the CORRECTLY ROUNDED sum, not a left-to-right accumulation, so naive
+// `reduce((a, b) => a + b)` is wrong: it loses low bits at every step. This is
+// Shewchuk's exact-expansion algorithm — maintain a set of non-overlapping partial
+// sums whose total is exact, then round once at the end.
+function installMathSumPrecise() {
+  if (typeof Math.sumPrecise === "function") return;
+  defBuiltin(Math, "sumPrecise", function sumPrecise(items) {
+    const partials = [];
+    // Power-of-two factor the expansion is held in, so an intermediate overflow
+    // can be escaped without losing exactness. Undone before returning.
+    let scale = 1;
+    let count = 0;
+    let hasNaN = false;
+    let posInf = false;
+    let negInf = false;
+    for (const x of items) {
+      count++;
+      if (typeof x !== "number") throw new TypeError("Math.sumPrecise accepts only Numbers");
+      if (Number.isNaN(x)) {
+        hasNaN = true;
+        continue;
+      }
+      if (x === Infinity) {
+        posInf = true;
+        continue;
+      }
+      if (x === -Infinity) {
+        negInf = true;
+        continue;
+      }
+      if (hasNaN || (posInf && negInf)) continue;
+      // Two-sum each new value against every existing partial, keeping the exact
+      // low-order remainders as new partials.
+      //
+      // OVERFLOW: two partials can each be near MAX_VALUE while the TRUE sum is
+      // finite (e.g. [1e308, 1e308, -1e308, -1e308] sums to 0), and a plain
+      // expansion returns NaN there — caught by differential-testing against
+      // bun's native implementation. When an intermediate goes non-finite,
+      // HALVE the whole expansion and the incoming value and retry, tracking the
+      // power-of-two `scale` to undo at the end. Halving a double is exact until
+      // it goes subnormal, and a partial that subnormalizes here was already
+      // ~2^-1074 relative to a ~2^1023 magnitude — far below the ULP of any
+      // representable result, so no bit that could affect the rounding is lost.
+      let xi = x * scale;
+      for (;;) {
+        let used = 0;
+        let overflowed = false;
+        for (let j = 0; j < partials.length; j++) {
+          let y = partials[j];
+          if (Math.abs(xi) < Math.abs(y)) {
+            const t = xi;
+            xi = y;
+            y = t;
+          }
+          const hi = xi + y;
+          if (!Number.isFinite(hi)) {
+            overflowed = true;
+            break;
+          }
+          const lo = y - (hi - xi);
+          if (lo !== 0) partials[used++] = lo;
+          xi = hi;
+        }
+        if (!overflowed) {
+          partials.length = used;
+          partials.push(xi);
+          break;
+        }
+        // Rescale everything down by 2 and start this value over.
+        for (let j = 0; j < partials.length; j++) partials[j] *= 0.5;
+        scale *= 0.5;
+        xi = x * scale;
+      }
+    }
+    if (hasNaN) return NaN;
+    if (posInf && negInf) return NaN;
+    if (posInf) return Infinity;
+    if (negInf) return -Infinity;
+    // The additive identity here is -0: summing nothing, or only -0s, gives -0.
+    if (count === 0 || partials.length === 0) return -0;
+    // Add smallest-to-largest so the single final rounding is correct, then undo
+    // the scale. Dividing by `scale` (a power of two) reintroduces no error.
+    let total = 0;
+    for (let j = partials.length - 1; j >= 0; j--) total += partials[j];
+    return total / scale;
+  });
 }
 
 // ── Shipped-standard ECMAScript builtins missing below their Node line ──
