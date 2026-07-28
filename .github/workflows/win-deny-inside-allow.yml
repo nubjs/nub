@@ -1,0 +1,57 @@
+# Throwaway ground-truth probe: can Windows express DENY-INSIDE-ALLOW, on each of the two
+# confinement principals nub uses?
+#   Q1  AppContainer (the UNPRIVILEGED build-jail principal) -- re-verification of sandbox-epic 15r.
+#   Q2  a dedicated LOCAL ACCOUNT (the PRIVILEGED `nub sandbox` principal).
+#   Q3  does an account-route deny survive files created AFTER setup (the ".env*" floor shape)?
+# Branch-scoped: runs on push to probe/win-deny-inside-allow -- NO PR required. Touches no crate.
+name: win-deny-inside-allow
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/win-deny-inside-allow]
+    paths:
+      - 'tests/win-deny-inside-allow/**'
+      - '.github/workflows/win-deny-inside-allow.yml'
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ASCII guard (PS 5.1 mis-decodes non-ASCII in .ps1/.cs)
+        shell: powershell
+        run: |
+          $bad=@()
+          Get-ChildItem -Path tests/win-deny-inside-allow -File -Include *.ps1,*.cs -Recurse | ForEach-Object {
+            $bytes=[System.IO.File]::ReadAllBytes($_.FullName)
+            for($i=0;$i -lt $bytes.Length;$i++){ if($bytes[$i] -gt 127){ $bad+="$($_.Name) @byte $i"; break } }
+          }
+          if($bad.Count -gt 0){ Write-Host "NON-ASCII bytes found:`n$($bad -join "`n")"; exit 1 }
+          Write-Host "ASCII guard OK"
+      - name: Baseline (who are we, what OS)
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          Write-Host "User: $($id.Name)"
+          Write-Host "IsElevated(admin): $((New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator))"
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture | Format-List
+      - name: 'Q1 -- AppContainer principal: is a deny ACE honored?'
+        id: q1
+        continue-on-error: true
+        shell: powershell
+        run: ./tests/win-deny-inside-allow/q1-appcontainer-deny.ps1
+      - name: 'Q2/Q3 -- dedicated local account principal: is a deny ACE honored, and does it cover late files?'
+        id: q2
+        continue-on-error: true
+        shell: powershell
+        run: ./tests/win-deny-inside-allow/q2-account-deny.ps1
+      - name: Summary
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "Q1 (AppContainer)      harness outcome: ${{ steps.q1.outcome }}"
+          Write-Host "Q2/Q3 (local account)  harness outcome: ${{ steps.q2.outcome }}"
+          Write-Host "outcome=success means the CONTROLS held, so the VERDICT lines in each step log are trustworthy."
+          Write-Host "Read the 'VERDICT ...' lines in the step logs for the actual answers."
