@@ -946,7 +946,14 @@ fn place(url: &str, root: &Path, dest: &Path) -> Option<()> {
     }
 
     let cached = cache_root()?.join("prefetch-blobs").join(digest(url));
-    if !cached.exists() {
+    // Source the bytes: the permanent blob when it exists, else a fresh transfer. A
+    // transfer whose completeness could NOT be established is used for this run and never
+    // promoted — the cache hit test is existence-only, so a short body admitted here would
+    // be served to every later install until someone wiped the cache by hand. Sticky
+    // failure is exactly what the module's fail-soft contract forbids.
+    let source = if cached.exists() {
+        cached.clone()
+    } else {
         std::fs::create_dir_all(cached.parent()?).ok()?;
         // A UNIQUE temp, not a fixed `.part`: lifecycle jobs run `child_concurrency`-wide
         // in parallel, so a shared name lets two racers truncate the same inode and both
@@ -959,14 +966,23 @@ fn place(url: &str, root: &Path, dest: &Path) -> Option<()> {
                 .map(|d| d.as_nanos())
                 .unwrap_or_default()
         ));
-        let fetched = fetch(url, &tmp);
-        if fetched.is_none() {
-            let _ = std::fs::remove_file(&tmp);
-            return None;
+        match fetch(url, &tmp) {
+            None => {
+                let _ = std::fs::remove_file(&tmp);
+                return None;
+            }
+            Some(BodyLength::Unverifiable) => tmp,
+            Some(BodyLength::Verified) => {
+                std::fs::rename(&tmp, &cached).ok()?;
+                cached.clone()
+            }
         }
-        std::fs::rename(&tmp, &cached).ok()?;
+    };
+    let placed = stage_and_rename(&source, dest);
+    if source != cached {
+        let _ = std::fs::remove_file(&source);
     }
-    stage_and_rename(&cached, dest)?;
+    placed?;
     tracing::debug!(url, dest = %dest.display(), "prefetch: placed");
     Some(())
 }
@@ -1013,7 +1029,10 @@ fn stage_and_rename(cached: &Path, dest: &Path) -> Option<()> {
 /// attempts is a 30-minute worst case, and this call sits on the install's critical path
 /// holding a concurrency permit for a purely SPECULATIVE optimization. A prefetch that is
 /// slow is worse than no prefetch — failing fast just falls back to the script's own path.
-fn fetch(url: &str, dest: &Path) -> Option<()> {
+///
+/// Returns HOW the body's completeness was established, which decides whether the caller
+/// may keep the blob (see [`BodyLength`]).
+fn fetch(url: &str, dest: &Path) -> Option<BodyLength> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("nub/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -1067,10 +1086,32 @@ fn fetch(url: &str, dest: &Path) -> Option<()> {
     // so either a short read or an over-cap stream would poison the blob for every later
     // install. An absent `Content-Length` (a chunked response) gets no length check, so
     // the cap is the only bound there — hence the `+1` probe rather than `== MAX`.
-    if written > MAX_ARTIFACT || declared.is_some_and(|n| n != written) {
+    if written > MAX_ARTIFACT {
+        tracing::debug!(url, written, "prefetch: body exceeded the size cap");
         return None;
     }
-    Some(())
+    // TRUNCATION, and what can actually be proven about it. A declared length is checked
+    // here. Chunked framing needs no check: it is self-terminating, and a drop before the
+    // terminating chunk surfaces as a READ ERROR the `io::copy` above already refused —
+    // verified by `a_body_truncated_under_chunked_framing_is_refused`. What remains is a
+    // close-delimited body (neither header, the body ends at EOF), where a truncated
+    // transfer is byte-indistinguishable from a complete one. That case is reported
+    // UNVERIFIABLE so the caller declines to cache it, rather than asserting an integrity
+    // guarantee this function cannot make.
+    match declared {
+        Some(n) if n != written => None,
+        Some(_) => Some(BodyLength::Verified),
+        None => Some(BodyLength::Unverifiable),
+    }
+}
+
+/// Whether a transfer's completeness could be ESTABLISHED, which is what decides if the
+/// blob may be kept. Not a quality signal about the bytes — only about the framing.
+enum BodyLength {
+    /// A declared `Content-Length` matched what was written.
+    Verified,
+    /// No length to check. Safe to use now, never safe to cache — see [`place`].
+    Unverifiable,
 }
 
 fn host_allowed(url: &str) -> bool {
@@ -1710,5 +1751,72 @@ mod tests {
         );
         assert!(parse_node_facts("").is_none());
         assert!(parse_node_facts("26.0.0 140\n").is_none());
+    }
+
+    /// Serve ONE verbatim HTTP/1.1 response on an ephemeral port, then close. Raw bytes so
+    /// a test can express framing a real server would not produce.
+    fn serve_raw(raw: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let _ = sock.read(&mut [0u8; 4096]);
+                let _ = sock.write_all(raw);
+            }
+        });
+        format!("http://127.0.0.1:{port}/a.tar.gz")
+    }
+
+    /// Truncation across all three transfer framings, each with its passing control. The
+    /// property under test is what `place` keys caching on: a body whose completeness
+    /// cannot be PROVEN must never be promoted to the existence-only blob cache, or one
+    /// short read is served to every later install until the cache is wiped by hand.
+    #[test]
+    fn only_a_provably_complete_body_is_cacheable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = |n: &str| tmp.path().join(n);
+
+        // Declared length, honoured — the one shape that can be verified.
+        let ok = fetch(
+            &serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"),
+            &at("len"),
+        );
+        assert!(matches!(ok, Some(BodyLength::Verified)));
+        assert_eq!(std::fs::read(at("len")).unwrap(), b"hello");
+
+        // Declared length, body cut short: refused outright.
+        assert!(
+            fetch(
+                &serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\nhello"),
+                &at("len-short"),
+            )
+            .is_none()
+        );
+
+        // Chunked, terminated: self-framing, so complete but with no length to check.
+        let chunked = fetch(
+            &serve_raw(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+            ),
+            &at("chunk"),
+        );
+        assert!(matches!(chunked, Some(BodyLength::Unverifiable)));
+        assert_eq!(std::fs::read(at("chunk")).unwrap(), b"hello");
+
+        // Chunked, dropped before the terminator: hyper surfaces a read error, so this is
+        // refused rather than merely unverifiable.
+        assert!(
+            fetch(
+                &serve_raw(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"),
+                &at("chunk-short"),
+            )
+            .is_none()
+        );
+
+        // Close-delimited: a truncated transfer is byte-identical to a complete one, which
+        // is precisely why it is reported unverifiable and never cached.
+        let eof = fetch(&serve_raw(b"HTTP/1.0 200 OK\r\n\r\nhello"), &at("close"));
+        assert!(matches!(eof, Some(BodyLength::Unverifiable)));
     }
 }
