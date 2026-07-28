@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// Bases tried in order. `TMPDIR` is deliberately NOT honoured: under `sudo` it still
@@ -219,15 +219,14 @@ fn create_stage_dir() -> Option<PathBuf> {
         }
         sweep_abandoned(base, uid);
         let dir = base.join(format!("{STAGE_PREFIX}{pid}.{suffix:016x}"));
-        // `create_dir` never follows a final symlink, so a pre-created name in a
-        // world-writable base is an EEXIST rather than a redirect.
-        if fs::create_dir(&dir).is_err() {
+        // 0700 at CREATION, not afterwards: `mkdir` applies the umask, so a
+        // create-then-chmod would leave the directory group/other-readable for a window in
+        // a world-writable base. `mkdir` also never follows a final symlink, so a
+        // pre-created name there is an EEXIST rather than a redirect.
+        if fs::DirBuilder::new().mode(0o700).create(&dir).is_err() {
             continue;
         }
-        if fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).is_ok()
-            && resolvable_directory_chain(&dir.join("x"))
-            && exec_permitted(&dir)
-        {
+        if resolvable_directory_chain(&dir.join("x")) && exec_permitted(&dir) {
             return Some(dir);
         }
         let _ = fs::remove_dir_all(&dir);
