@@ -343,12 +343,37 @@ fn fs_confines(policy: &SandboxPolicy) -> bool {
 }
 
 /// Build the full SBPL profile text for `policy`.
+///
+/// NOT a pure function of its arguments: it reads the calling process's own fd table to
+/// find the stdio paths the child will inherit (see [`emit_inherited_stdio`]), so the same
+/// policy yields a slightly different profile depending on where the caller's stdio points.
 fn build_profile(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
     proxy_port: Option<u16>,
     ca_bundle: Option<&std::path::Path>,
     tmp_dir: Option<&std::path::Path>,
+) -> String {
+    build_profile_with_stdio(
+        policy,
+        spec,
+        proxy_port,
+        ca_bundle,
+        tmp_dir,
+        &inherited_stdio_paths(spec),
+    )
+}
+
+/// [`build_profile`] with the inherited-stdio paths supplied rather than read from this
+/// process — the seam that lets a test pin where the stdio grants land relative to the
+/// backend's own denies.
+fn build_profile_with_stdio(
+    policy: &SandboxPolicy,
+    spec: &CommandSpec,
+    proxy_port: Option<u16>,
+    ca_bundle: Option<&std::path::Path>,
+    tmp_dir: Option<&std::path::Path>,
+    stdio_paths: &[String],
 ) -> String {
     let mut out = String::with_capacity(MACOS_SEATBELT_BASE.len() + 2048);
     out.push_str(MACOS_SEATBELT_BASE);
@@ -369,8 +394,119 @@ fn build_profile(
             sbpl_escape(&bundle.to_string_lossy())
         ));
     }
+    // Last by hygiene, not by necessity — see `emit_stdio_grants` for why position is not what
+    // makes this survive the denies above it, and why a policy-denied path is withheld here
+    // rather than allowed to punch through.
+    emit_stdio_grants(policy, stdio_paths, &mut out);
 
     out
+}
+
+/// The paths behind the stdio descriptors the child will INHERIT from this process.
+///
+/// Redaction replaces fd 1 / fd 2 with a pipe at spawn, so those are excluded; stdin is never
+/// re-pointed on the [`Prepared::spawn`](crate::backend::Prepared::spawn) path.
+///
+/// KNOWN OVER-GRANT: [`Prepared::output`](crate::backend::Prepared::output) re-points all three
+/// to null/pipes AFTER the profile is frozen, so on that path the grants name paths the child
+/// never receives. It has no production caller (the build jail uses `status`, `--sandbox` uses
+/// `spawn_with_signal_target`) and the residue is a stat capability on nub's own stdio, but it
+/// is why the claim below is "does not exceed the parent's own descriptors", not "the child
+/// already holds every path named here".
+fn inherited_stdio_paths(spec: &CommandSpec) -> Vec<String> {
+    [
+        (0, true),
+        (1, !spec.redact_stdout),
+        (2, !spec.redact_stderr),
+    ]
+    .into_iter()
+    .filter_map(|(fd, inherited)| inherited.then(|| stdio_fd_path(fd)).flatten())
+    .collect()
+}
+
+/// `file-read-metadata` on each inherited stdio path.
+///
+/// WHY THIS EXISTS — without it every Node under a confining profile dies with SIGABRT and no
+/// diagnostic. Seatbelt evaluates `file-read-metadata` against an fd's vnode on `fstat`, even
+/// for a descriptor the process never opened by path. Node's `PlatformInit` stats fds 0/1/2
+/// before its own error machinery is up and reads `if (errno != EBADF) ABORT()` — so an
+/// ungranted stdio path turns EPERM into a message-less abort inside
+/// `InitializeOncePerProcessInternal`. Denial line that named it:
+/// `Sandbox: node(3101) deny(1) file-read-metadata /private/tmp/.../out.log`. Node is only the
+/// loudest victim; any program that stats its own stdio hits the same wall.
+///
+/// Measured: only a WRITE-ONLY fd is affected. An `O_RDWR` stdio fd stats fine ungranted, which
+/// is why an interactive shell survives and a `>` redirect — the shape a log-capturing harness
+/// and every CI job produce — does not.
+///
+/// SCOPE. Metadata only (never read-data: verified that a bare metadata grant yields `statSync`
+/// and `access` but EPERM on read/open/readlink/readdir), on the exact resolved path, never a
+/// parent directory. A pipe or socket has no vnode, `F_GETPATH` fails, and nothing is granted.
+///
+/// WHY THE POLICY-DENY CHECK IS LOAD-BEARING, and position is not. SBPL is last-match-wins only
+/// WITHIN one operation node: a `file-read-metadata` allow beats a `file-read*` deny on the same
+/// path whether it is emitted before or after it — measured, both orders boot Node — because the
+/// leaf operation outranks the group. Every deny in a compiled profile is `file-read*` (both the
+/// policy's own, via `emit_fs`, and `emit_tmp`'s shared-tmp deny), so this grant would silently
+/// punch a stat-shaped hole through the `.env`/`~/.ssh` floor that `compiler::defaults` promises
+/// no later allow can reopen. Withholding the path is the only thing that actually closes it;
+/// only a same-leaf `file-read-metadata` deny would be shadowed by ordering, and none is emitted.
+fn emit_stdio_grants(policy: &SandboxPolicy, paths: &[String], out: &mut String) {
+    let mut seen: Vec<&str> = Vec::new();
+    for path in paths {
+        if seen.contains(&path.as_str()) || policy_denies(policy, path) {
+            continue;
+        }
+        out.push_str(&format!(
+            "(allow file-read-metadata (literal \"{}\"))\n",
+            sbpl_escape(path)
+        ));
+        seen.push(path);
+    }
+}
+
+/// Whether an EXPLICIT policy deny covers `path`. Deliberately ignores `default_effect`: under
+/// the build jail's pure allowlist every path outside the grants defaults to Deny, so honoring
+/// the default here would withhold every stdio grant and restore the abort.
+fn policy_denies(policy: &SandboxPolicy, path: &str) -> bool {
+    policy
+        .fs
+        .rules
+        .entries
+        .iter()
+        .filter(|rule| rule.effect == Effect::Deny)
+        .filter_map(|rule| crate::matcher::path::compile_glob(rule.matcher.as_str()).ok())
+        .any(|glob| glob.is_match(path))
+}
+
+/// The path behind `fd`, or `None` when it has no vnode (pipe, socket, closed).
+///
+/// `F_GETPATH` returns the kernel's CANONICAL path — measured: an fd opened as `/tmp/x` reports
+/// `/private/tmp/x`, and one opened through a symlink reports the target — which is the form the
+/// kernel matches a `(literal …)` against, so no further canonicalization is correct here.
+/// Notably NOT `normalize_slashes`: a backslash is a legal macOS filename byte and rewriting it
+/// to `/` would both miss the real path and name an unrelated one.
+///
+/// No existence check either. `F_GETPATH` still reports the stale path of an UNLINKED-but-open
+/// fd, the kernel still honors a `(literal …)` grant on that stale name (measured, both halves),
+/// and an fd on a deleted temp file is an ordinary stdio shape — so requiring existence would
+/// drop the grant exactly where it is still needed.
+fn stdio_fd_path(fd: std::os::raw::c_int) -> Option<String> {
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: `F_GETPATH` takes no length and writes into `buf` unconditionally, so the buffer
+    // MUST be at least MAXPATHLEN (== PATH_MAX == 1024 here). Do not shrink it.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    let path = std::str::from_utf8(&buf[..len]).ok()?;
+    // The base profile already grants `file-read-metadata` across all of `/dev` (the regex near
+    // the end of `macos_seatbelt_base.sbpl`), which covers every tty, `/dev/null`, and `/dev/fd`
+    // stdio — the interactive and `cargo test` cases. Emitting those would be pure noise.
+    if !path.starts_with('/') || path.starts_with("/dev/") {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 /// The macOS shared-system-tmp roots hidden under `TmpMode::{Private,Deny}`: the per-user
@@ -1277,6 +1413,7 @@ mod tests {
     use crate::policy::{
         CanonGlob, FsOrigin, FsPolicy, FsRule, FsRuleSet, NetPolicy, NetRule, NetTarget, TmpMode,
     };
+    use tempfile::TempDir;
 
     fn spec() -> CommandSpec {
         CommandSpec::new("/bin/cat")
@@ -1306,6 +1443,125 @@ mod tests {
 
     fn term_str(glob: &str) -> String {
         emit_term(&to_match_term(glob))
+    }
+
+    // ── inherited stdio (the message-less SIGABRT) ────────────────────────────
+
+    /// A `TmpMode::Private` policy granting only Node's own bin dir, so a log file in
+    /// `/private/tmp` lands inside the shared-tmp deny — the shape that took the build jail down.
+    fn stdio_fixture() -> Option<(PathBuf, TempDir, String, SandboxPolicy)> {
+        let node = std::env::var_os("PATH").and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("node"))
+                .find(|p| p.is_file())
+        })?;
+        let tmp = tempfile::Builder::new()
+            .prefix("nub-stdio-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let log = std::fs::canonicalize(tmp.path()).unwrap().join("out.log");
+        let log_str = log.to_string_lossy().into_owned();
+        let mut policy = fs_policy(
+            Effect::Deny,
+            vec![rule(
+                &node.parent().unwrap().to_string_lossy(),
+                Effect::Allow,
+                FsAccess::Read,
+            )],
+        );
+        policy.fs.tmp = TmpMode::Private;
+        Some((node, tmp, log_str, policy))
+    }
+
+    /// Seatbelt gates `fstat` on an already-open fd by its vnode, so a stdio descriptor whose
+    /// path no grant covers makes `fstat(1)` return EPERM. Node's `PlatformInit` turns that into
+    /// a bare `ABORT()` — exit 134 with a native stack trace and no message.
+    ///
+    /// The kernel-level differential: same profile builder, same child, the inherited-stdio path
+    /// list the ONLY variable. `File::create` is `O_WRONLY`, which is what makes it bite — an
+    /// `O_RDWR` stdio fd stats fine ungranted. The log deliberately sits inside `TmpMode::Private`'s
+    /// shared-tmp deny, so a pass also proves the grant survives that deny in a real profile.
+    #[test]
+    fn an_inherited_stdio_grant_is_what_keeps_node_from_aborting() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let Some((node, _tmp, log_str, policy)) = stdio_fixture() else {
+            eprintln!("skipping: node not on PATH");
+            return;
+        };
+        let base = build_profile_with_stdio(&policy, &spec(), None, None, None, &[]);
+        let granted = build_profile_with_stdio(
+            &policy,
+            &spec(),
+            None,
+            None,
+            None,
+            std::slice::from_ref(&log_str),
+        );
+
+        let run = |profile: &str| {
+            let dir = tempfile::Builder::new()
+                .prefix("nub-stdio-prof-")
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            let path = dir.path().join("p.sb");
+            std::fs::write(&path, profile).unwrap();
+            let out = std::fs::File::create(&log_str).unwrap();
+            Command::new("/usr/bin/sandbox-exec")
+                .arg("-f")
+                .arg(&path)
+                .arg(&node)
+                .args(["-e", "0"])
+                .stdin(std::process::Stdio::null())
+                .stdout(out.try_clone().unwrap())
+                .stderr(out)
+                .status()
+                .unwrap()
+        };
+
+        // `sandbox-exec` execs Node in place, so the abort surfaces as a SIGABRT-terminated
+        // status here; the 134 a user sees is aube mapping 128+signal.
+        let control = run(&base);
+        assert_eq!(
+            control.signal(),
+            Some(libc::SIGABRT),
+            "control: with no stdio grant Node must still die on SIGABRT, else this test proves \
+             nothing — got {control:?}"
+        );
+        let treated = run(&granted);
+        assert!(
+            treated.success(),
+            "the inherited-stdio grant is what lets Node boot — got {treated:?}"
+        );
+    }
+
+    /// A stdio path the POLICY denies is WITHHELD, never re-opened. A `file-read-metadata` allow
+    /// beats a `file-read*` deny on the same path at ANY position (leaf outranks group — measured
+    /// in both orders), and every emitted deny is `file-read*`, so this check — not the emit
+    /// position — is what keeps the grant from punching a stat hole through the secret floor.
+    #[test]
+    fn a_policy_denied_stdio_path_is_withheld() {
+        let Some((_node, _tmp, log_str, mut policy)) = stdio_fixture() else {
+            eprintln!("skipping: node not on PATH");
+            return;
+        };
+        policy
+            .fs
+            .rules
+            .entries
+            .push(rule("**/out.log", Effect::Deny, FsAccess::Read));
+        let prof = build_profile_with_stdio(
+            &policy,
+            &spec(),
+            None,
+            None,
+            None,
+            std::slice::from_ref(&log_str),
+        );
+        assert!(
+            !prof.contains(&format!("(literal \"{log_str}\")")),
+            "a policy-denied stdio path must not be granted back"
+        );
     }
 
     // ── matcher translation ──────────────────────────────────────────────────

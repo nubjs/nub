@@ -553,10 +553,25 @@ shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp
   shared tmp roots (the confstr `$TMPDIR` scratch `/private/var/folders/<uid>/T` and the
   world-shared `/private/tmp`) after the fs grants, and — for `Private` — grants the fresh
   per-run dir `(allow file* (subpath …))`. The deny is last-match-wins, so it hides the shared
-  tmp even under a generous `(subpath "/")` read. Verified: a file in `/private/tmp` is DENIED
+  tmp even under a generous `(subpath "/")` read — with one documented exception, the inherited
+  stdio grant below. Verified: a file in `/private/tmp` is DENIED
   under `$tmp: "rw"`/`false` and readable without, and reachable via a literal `/tmp` grant
   (`tests/macos_enforcement.rs` `private_tmp_hides_the_shared_system_tmp` /
   `deny_tmp_hides_the_shared_system_tmp_too` / `literal_tmp_path_is_the_only_way_to_the_shared_system_tmp`).
+  - **Inherited-stdio stat carve-out (macOS, all tmp modes):** the profile grants
+    `file-read-metadata` on the path behind each stdio descriptor the child inherits, which is
+    NOT derived from the policy and survives the shared-tmp deny (the usual case: the caller's
+    output is captured to a log under `$TMPDIR` or `/private/tmp`). Without it every Node under
+    the profile dies with SIGABRT and no message — Seatbelt gates `fstat` on an already-open
+    write-only fd by its vnode, and Node's `PlatformInit` `ABORT()`s when that `fstat` fails.
+    Why bounded: metadata only (`statSync`/`access` succeed; read, open, `readlink`, `readdir`
+    and xattr listing all still EPERM), on the exact resolved path only, and a path any policy
+    `Deny` covers is withheld rather than granted, so the secret floor is not reopened. Residual:
+    on `Prepared::output()` the stdio is re-pointed to pipes AFTER the profile is frozen, so the
+    grants name paths the child never receives — a stat capability on nub's own stdio. That
+    method has no production caller (build-jail uses `status`, `--sandbox` uses
+    `spawn_with_signal_target`); it is test-only today. Where fixed: `emit_stdio_grants` /
+    `inherited_stdio_paths` in `backend/macos.rs`.
   - **Native-build carve-out (`Private` only):** under `Private` the confstr TEMP scratch
     (`/var/folders/<uid>/T` — the Apple toolchain's fixed, non-TMPDIR-redirectable `xcrun_db`
     lookup cache) is EXCLUDED from the shared-tmp deny, so it stays granted and a from-source
