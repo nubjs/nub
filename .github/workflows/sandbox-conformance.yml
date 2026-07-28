@@ -1,9 +1,9 @@
 # Cross-platform sandbox CONFORMANCE — the done-gate. Real OS enforcement proven on
 # macOS (Seatbelt), real-kernel Linux (stock Bubblewrap), and Windows (AppContainer),
 # each axis paired with a NEGATIVE CONTROL so a hollow/no-op enforcement cannot pass.
-# Branch-scoped (NO PR required): a push to `sandbox-primitives` touching the engine,
-# the CLI seam, or this file runs it. Supersedes the Windows-only
-# sandbox-win-enforcement.yml (folded into the `windows` leg here).
+# Runs on every PR touching the engine or the CLI seam, plus a push to
+# `sandbox-primitives` (pre-PR / trunk coverage on that branch). Supersedes the
+# Windows-only sandbox-win-enforcement.yml (folded into the `windows` leg here).
 #
 # Two layers share ONE committed fixture matrix:
 #   - the CLI-seam conformance matrix drives the real `nub run --sandbox <file> -- <probe>`
@@ -12,12 +12,21 @@
 #     probe can't reach (Degradation honesty, canonicalization traps, seccomp syscalls).
 #
 # `workflow_dispatch` is inert until this file reaches the default branch (GitHub only
-# registers dispatch from default); the `push` trigger is what fires it on the branch.
+# registers dispatch from default); the `push`/`pull_request` triggers are what fire it
+# in the meantime.
 name: sandbox-conformance
 on:
   workflow_dispatch:
   push:
     branches: [sandbox-primitives]
+    paths:
+      - "crates/nub-sandbox/**"
+      - "crates/nub-cli/**"
+      - "scripts/build-bwrap-resource.sh"
+      - "scripts/bwrap-toolchain-linux-*.sha256"
+      - ".github/workflows/sandbox-conformance.yml"
+  pull_request:
+    branches: [main]
     paths:
       - "crates/nub-sandbox/**"
       - "crates/nub-cli/**"

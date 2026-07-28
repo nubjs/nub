@@ -477,7 +477,7 @@ Add `brokerTo` and the child receives a random marker instead of the real value 
 
 ## Credential brokering
 
-Brokering lets a command authenticate to a host without ever holding the real secret. At startup Nub reads the secret and replaces it, in the child's environment, with a random marker. The child uses the variable however it likes — any header, query parameter, or body. When Nub's proxy sees that marker in a request to a brokered host, it swaps in the real value; a marker sent anywhere else stays an inert hash.
+Brokering lets a command authenticate to a host without ever holding the real secret. At startup Nub reads the secret and replaces it, in the child's environment, with a random marker. The child puts the marker in a request header value. When Nub's proxy sees that marker in a header sent to a brokered host, it swaps in the real value; a marker sent anywhere else stays an inert hash.
 
 ```jsonc
 {
@@ -487,7 +487,7 @@ Brokering lets a command authenticate to a host without ever holding the real se
 }
 ```
 
-Because the child never holds the secret, a dependency that reads `GITHUB_TOKEN` and posts it to another host leaks only the marker. Brokering is placement-agnostic — Nub substitutes the marker wherever the child already put it, and never attaches or rewrites a header itself. Brokering does not open the network: a brokered host must also appear in `net`.
+Because the child never holds the secret, a dependency that reads `GITHUB_TOKEN` and posts it to another host leaks only the marker. Brokering substitutes the marker only in request header values — Nub never adds a header the child didn't already send, and a marker in the request target, query string, or body passes through unreplaced. Brokering does not open the network: a brokered host must also appear in `net`.
 
 ## Composition and nesting
 

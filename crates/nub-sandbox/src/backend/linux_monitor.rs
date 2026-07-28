@@ -5,8 +5,10 @@
 //! environment-independent states 1-5 bootstrap, stopped-target handshake, and
 //! one-shot exec transition, plus the pinned ELF runtime closure and framed control
 //! channel, runtime signal relay, exact terminal-status reporting, and namespace
-//! process-tree cleanup. The harness closes the authenticated parent completion
-//! boundary; production launcher adoption remains deliberately uninstalled.
+//! process-tree cleanup. The production confined-Linux path (`backend::linux::apply`)
+//! constructs and adopts this launcher unconditionally; the sealed hold flags on
+//! `BootstrapSpec` let the harness independently exercise states 5-8 of the same
+//! protocol against a real child process.
 #![cfg(target_os = "linux")]
 
 use super::{CommandSpec, Degradation};
@@ -643,11 +645,13 @@ pub(crate) struct BootstrapSpec {
     pub(crate) env: BTreeMap<OsString, OsString>,
     // Whether `--unshare-net` was applied — TRUE for BOTH coarse-deny and per-host (the
     // empty netns is the boundary either way). Governs the parent's private-netns
-    // attestation. DISTINCT from the socket seccomp, which per-host drops (see `per_host`).
+    // attestation. DISTINCT from the socket seccomp's per-family gating, which per-host
+    // narrows rather than drops (see `per_host`).
     pub(crate) network_filter: bool,
     // C3: whether the PER-HOST egress bridge is active. When set, the socket-blocking
-    // seccomp is NOT installed (the child must create sockets to reach the in-netns bridge;
-    // the empty netns confines it), while `--unshare-net`/`network_filter` still hold.
+    // seccomp STAYS installed but permits AF_INET/AF_INET6 (the families needed to reach
+    // the in-netns bridge; the empty netns confines them), while `--unshare-net`/
+    // `network_filter` still hold and every other family (incl. AF_UNIX) stays denied.
     pub(crate) per_host: bool,
     pub(crate) deny_keyring: bool,
     // Whether the keyring-deny seccomp permits keyctl(KEYCTL_JOIN_SESSION_KEYRING,
@@ -690,10 +694,11 @@ impl BootstrapSpec {
         runtime: &RuntimeCapability,
         policy: &SandboxPolicy,
         // C3: whether the PER-HOST egress bridge is active. Per-host confines egress with
-        // the empty netns alone, so the target must be able to create sockets and reach the
-        // in-netns bridge on loopback — the socket-blocking seccomp filter is therefore NOT
-        // installed for per-host (it IS for coarse-deny, which blocks every family incl.
-        // AF_UNIX). The netns is the boundary in both cases.
+        // the empty netns, but the target must still be able to create AF_INET/AF_INET6
+        // sockets to reach the in-netns bridge on loopback — so the socket-blocking seccomp
+        // filter stays installed for per-host but permits those two families (it denies
+        // every family, incl. AF_UNIX, for coarse-deny). The netns is the boundary in both
+        // cases.
         per_host: bool,
         spec: &CommandSpec,
         program: OsString,
@@ -899,9 +904,10 @@ impl BootstrapSpec {
     }
 
     /// Whether the target installs a seccomp filter. Per-host STILL installs the socket
-    /// filter (a per-host variant that permits AF_INET/AF_INET6/AF_UNIX but keeps denying
-    /// AF_VSOCK and the other netns-unconfined families) — so `network_filter` alone gates
-    /// the filter regardless of `per_host`.
+    /// filter (a per-host variant that permits only AF_INET/AF_INET6 — the families needed
+    /// to reach the in-netns bridge — while keeping AF_UNIX, AF_VSOCK, and the other
+    /// netns-unconfined families denied) — so `network_filter` alone gates the filter
+    /// regardless of `per_host`.
     fn uses_seccomp(&self) -> bool {
         self.network_filter || self.deny_keyring
     }

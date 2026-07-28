@@ -96,7 +96,7 @@ pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, 
         }
     }
     // Order is load-bearing: the policy-file deny goes in BEFORE the `.env*` floor so
-    // the four env bands stay the LAST entries — that floor is recognized POSITIONALLY
+    // the two env-deny bands stay the LAST entries — that floor is recognized POSITIONALLY
     // (`defaults::env_deny_floor_start`). The policy-file deny and the env bands are
     // disjoint (a policy path is never a `.env*` basename), so their relative order does
     // not affect either verdict; only the env-bands-last invariant matters.

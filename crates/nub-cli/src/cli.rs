@@ -5033,86 +5033,76 @@ impl PipeReaders {
 /// Concurrently drain stdout + stderr on the CURRENT thread (no second thread),
 /// using `poll(2)` to multiplex the two pipes so a full buffer on either can
 /// never block the other — preserving the no-deadlock guarantee without a thread.
-/// Non-Unix has no `poll` here; it falls back to sequential draining, accepting
-/// the rare large-output deadlock window (the abort this replaces was Linux-only,
-/// and Windows never exhibited the thread-exhaustion bug).
+/// Unix-only: it is called solely from the thread-spawn-failure fallback in the
+/// `#[cfg(unix)]` arm above (Windows never exhibited the thread-exhaustion abort
+/// this replaces, so it has no caller and no need for a `poll`-based sibling).
+#[cfg(unix)]
 fn drain_both_inline(
     out: std::process::ChildStdout,
     out_policy: DrainPolicy,
     err: Option<std::process::ChildStderr>,
     err_policy: DrainPolicy,
 ) -> (Vec<String>, Vec<String>) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        // `out` / `err` stay owned (and so their fds stay valid) until this block
-        // ends. Set both pipes non-blocking so a `read` after a `poll`-ready
-        // signal can never block (and returns `WouldBlock` when momentarily
-        // drained), which is what makes the single-thread multiplex safe.
-        set_nonblocking(out.as_raw_fd());
-        if let Some(e) = err.as_ref() {
-            set_nonblocking(e.as_raw_fd());
-        }
-        let mut out_pipe = LinePipe::new(out.as_raw_fd(), out_policy);
-        let mut err_pipe = err
-            .as_ref()
-            .map(|e| LinePipe::new(e.as_raw_fd(), err_policy));
+    use std::os::unix::io::AsRawFd;
+    // `out` / `err` stay owned (and so their fds stay valid) until this block
+    // ends. Set both pipes non-blocking so a `read` after a `poll`-ready
+    // signal can never block (and returns `WouldBlock` when momentarily
+    // drained), which is what makes the single-thread multiplex safe.
+    set_nonblocking(out.as_raw_fd());
+    if let Some(e) = err.as_ref() {
+        set_nonblocking(e.as_raw_fd());
+    }
+    let mut out_pipe = LinePipe::new(out.as_raw_fd(), out_policy);
+    let mut err_pipe = err
+        .as_ref()
+        .map(|e| LinePipe::new(e.as_raw_fd(), err_policy));
 
-        loop {
-            let mut fds: Vec<libc::pollfd> = Vec::with_capacity(2);
-            if !out_pipe.done {
+    loop {
+        let mut fds: Vec<libc::pollfd> = Vec::with_capacity(2);
+        if !out_pipe.done {
+            fds.push(libc::pollfd {
+                fd: out_pipe.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        if let Some(ep) = err_pipe.as_ref() {
+            if !ep.done {
                 fds.push(libc::pollfd {
-                    fd: out_pipe.fd,
+                    fd: ep.fd,
                     events: libc::POLLIN,
                     revents: 0,
                 });
             }
-            if let Some(ep) = err_pipe.as_ref() {
-                if !ep.done {
-                    fds.push(libc::pollfd {
-                        fd: ep.fd,
-                        events: libc::POLLIN,
-                        revents: 0,
-                    });
-                }
+        }
+        if fds.is_empty() {
+            break;
+        }
+        // SAFETY: `fds` is a valid, len-sized slice of pollfd; -1 = no timeout.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if rc < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
             }
-            if fds.is_empty() {
-                break;
+            break; // unrecoverable poll error — stop draining
+        }
+        for pfd in &fds {
+            if pfd.revents == 0 {
+                continue;
             }
-            // SAFETY: `fds` is a valid, len-sized slice of pollfd; -1 = no timeout.
-            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
-            if rc < 0 {
-                let e = std::io::Error::last_os_error();
-                if e.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                break; // unrecoverable poll error — stop draining
-            }
-            for pfd in &fds {
-                if pfd.revents == 0 {
-                    continue;
-                }
-                if pfd.fd == out_pipe.fd {
-                    out_pipe.pump();
-                } else if let Some(ep) = err_pipe.as_mut() {
-                    if pfd.fd == ep.fd {
-                        ep.pump();
-                    }
+            if pfd.fd == out_pipe.fd {
+                out_pipe.pump();
+            } else if let Some(ep) = err_pipe.as_mut() {
+                if pfd.fd == ep.fd {
+                    ep.pump();
                 }
             }
         }
-        let out_lines = out_pipe.finish();
-        let err_lines = err_pipe.map(LinePipe::finish).unwrap_or_default();
-        (out_lines, err_lines)
     }
-    #[cfg(not(unix))]
-    {
-        // No `poll` — drain sequentially. Safe for the small-output common case;
-        // the thread-exhaustion abort this guards was never seen off Linux.
-        let out_lines = out_policy.run(out);
-        let err_lines = err.map(|e| err_policy.run(e)).unwrap_or_default();
-        (out_lines, err_lines)
-    }
+    let out_lines = out_pipe.finish();
+    let err_lines = err_pipe.map(LinePipe::finish).unwrap_or_default();
+    (out_lines, err_lines)
 }
 
 /// Put a raw fd into non-blocking mode (best-effort — a failure just leaves the

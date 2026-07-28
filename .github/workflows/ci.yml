@@ -174,12 +174,20 @@ jobs:
       # Windows leg is the source of truth, so the cross-check is dropped.
 
   clippy:
-    name: Clippy
+    name: Clippy (${{ matrix.os }})
     needs: matrix-plan
     if: needs.matrix-plan.outputs.run_rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      # All three hosted OSes: clippy is a compile-adjacent lint, so an
+      # OS-specific #[cfg] arm (e.g. a Windows-only dead_code miss) is invisible
+      # on a single-OS gate. Caught in practice: an `unused variable` on Windows
+      # and a `dead_code` on Windows, both invisible on ubuntu-only clippy.
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -189,7 +197,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
-          shared-key: ci-clippy
+          shared-key: ci-clippy-${{ runner.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             .
@@ -199,6 +207,7 @@ jobs:
       # in release.yml) and fails loud if it's absent. Stage a placeholder so the lint
       # build's four-entrypoint set is complete; clippy never runs the binary.
       - name: Stage placeholder addon for the embed-runtime lint build
+        shell: bash
         run: |
           mkdir -p runtime/addons
           printf 'placeholder-addon' > runtime/addons/nub-native.node
@@ -209,10 +218,13 @@ jobs:
       # own dbg_macro/todo/unimplemented lints (Cargo.toml [workspace.lints]) are
       # still enforced. (No --all-targets: the cdylib sets test=false/doctest=false.)
       - run: cd crates/nub-native && cargo clippy --all-features -- -D warnings
+        shell: bash
       # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
       # source (the embedded engine's brand is never nub's config surface). Cheap
-      # grep, no build — runs alongside clippy on the same run_rust gate.
+      # grep, no build — OS-independent, so one leg is enough.
       - name: Brand lint (no AUBE_* env reads)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: tests/brand-lint/check-env-reads.sh
 
   # The single-binary `embed-runtime` feature is OFF in every default build, so the
@@ -595,6 +607,10 @@ jobs:
       # registry writes). The sentinel makes the cargo shim exec the real
       # cargo directly — pnpm/npm installs stay firewalled.
       SFW_SHIM_ACTIVE_CARGO: "1"
+      # Turns a Linux sandbox-enforcement test's skip_without_bwrap() into a hard
+      # failure instead of a silent pass — see the "Repair unprivileged userns" step
+      # below. Inert on Windows/macOS (their skip_without_bwrap() ignores this var).
+      NUB_SANDBOX_REQUIRE_BWRAP: "1"
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix-plan.outputs.test) }}
@@ -665,6 +681,23 @@ jobs:
           workspaces: |
             .
             crates/nub-native
+      # ubuntu-latest (24.04) mediates unprivileged user namespaces via AppArmor;
+      # installing bwrap alone is NOT enough there — measured 2/38 Linux
+      # sandbox-enforcement tests running (the rest skip_without_bwrap()) even with
+      # the package present. `nub sandbox setup` installs the root-owned bwrap
+      # helper + AppArmor profile that repairs this (measured 38/38 after, ~6s).
+      # NUB_SANDBOX_REQUIRE_BWRAP above is the backstop: if this step ever silently
+      # fails to fix the host, the tests fail loud instead of reporting a hollow
+      # green.
+      - name: Install Bubblewrap and repair unprivileged userns for sandbox enforcement (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          cargo build -p nub-cli
+          sudo target/debug/nub sandbox setup --all-users
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
