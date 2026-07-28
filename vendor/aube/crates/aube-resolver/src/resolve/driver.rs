@@ -854,7 +854,12 @@ impl<'a> ResolveDriver<'a> {
                                 .fetch_packument_with_time_cached(&registry_name, dir)
                                 .await
                         }
-                        None => self.resolver.client.fetch_packument(&registry_name).await,
+                        None => {
+                            self.resolver
+                                .client
+                                .fetch_packument_with_time(&registry_name)
+                                .await
+                        }
                     }
                     .map_err(|e| Error::Registry(registry_name.clone(), e.to_string()))?;
                     self.packument_fetch_time += fetch_start.elapsed();
@@ -930,7 +935,12 @@ impl<'a> ResolveDriver<'a> {
                                     .fetch_packument_with_time_cached(&registry_name, dir)
                                     .await
                             }
-                            None => self.resolver.client.fetch_packument(&registry_name).await,
+                            None => {
+                                self.resolver
+                                    .client
+                                    .fetch_packument_with_time(&registry_name)
+                                    .await
+                            }
                         }
                     } else {
                         match self.resolver.client.fetch_packument(&registry_name).await {
@@ -965,7 +975,12 @@ impl<'a> ResolveDriver<'a> {
                                     .fetch_packument_with_time_cached(&registry_name, dir)
                                     .await
                             }
-                            None => self.resolver.client.fetch_packument(&registry_name).await,
+                            None => {
+                                self.resolver
+                                    .client
+                                    .fetch_packument_with_time(&registry_name)
+                                    .await
+                            }
                         }
                     } else {
                         match self.resolver.client.fetch_packument(&registry_name).await {

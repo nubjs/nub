@@ -261,7 +261,12 @@ async fn fetch_one_packument(inputs: FetchInputs) -> Result<(String, Packument, 
                     .fetch_packument_with_time_cached_after_lookup(&name, dir, cached)
                     .await
             }
-            None => client.fetch_packument(&name).await,
+            // No full-packument disk cache (update's dist-tag freshness
+            // rule) still needs the `time` map: the corgi fallback here
+            // silently disabled the `minimumReleaseAge` gate, because a
+            // version with no publish time bypasses the cutoff at the
+            // pick site.
+            None => client.fetch_packument_with_time(&name).await,
         }
     } else if let Some(ref dir) = cache_dir {
         client
