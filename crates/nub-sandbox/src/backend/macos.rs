@@ -149,35 +149,44 @@ pub fn apply(
 ///
 /// Seatbelt matches its rules against the resolved path, so a lookup that traverses an
 /// UNGRANTED symlink is denied — and Seatbelt denies with `EPERM`, which `posix_spawnp`
-/// treats as FATAL. It skips the `ENOENT`/`EACCES` an ordinary miss yields, but `EPERM`
-/// aborts the search outright. That is libuv's spawner, so it is the one every Node build
-/// script reaches through `child_process`; libc `execvp` skips the same entry, which is
-/// why an identical PATH works from `/usr/bin/env` and fails from Node.
+/// treats as FATAL rather than skipping it like the `ENOENT`/`EACCES` of an ordinary miss.
+/// That is libuv's spawner, so it is the one every Node build script reaches through
+/// `child_process`; libc `execvp` skips the same entry, which is why an identical PATH
+/// works from `/usr/bin/env` and fails from Node.
 ///
 /// One symlinked, ungranted entry therefore MASKS EVERY LATER ENTRY, `/usr/bin` included:
-/// a build script spawning a bare `make` / `sh` / `cc` dies with `spawn EPERM` even though
-/// the tool is present, granted, and executable by absolute path. (Measured:
+/// a build script spawning a bare `make` / `sh` / `cc` dies with `spawn EPERM`. (Measured:
 /// `/opt/homebrew/opt/openjdk/bin` — a Homebrew `opt/<pkg>` link — killed node-gyp's
 /// `make` at entry 10 of 56. The same directory reached by its real `Cellar/…` path is
 /// skipped harmlessly.) Homebrew `opt` links and version-manager shims make this the
 /// common case on a developer machine, not a corner.
 ///
 /// Canonicalizing removes the symlink hop, demoting an unusable entry from fatal to
-/// skippable. Order is preserved (PATH order is precedence) and entries that resolve onto
-/// one another are de-duplicated. A RELATIVE entry is passed through untouched: it
-/// resolves against the CHILD's cwd, which is not ours to resolve against, and it carries
-/// no symlinked absolute prefix for the kernel to reject.
+/// skippable (PATH order is precedence, so order survives). This is NOT invisible to the
+/// child: it now observes resolved paths, and a Homebrew `opt/<pkg>` alias resolves to a
+/// VERSION-PINNED `Cellar/<pkg>/<version>` one, so a script that bakes `$PATH` into a
+/// generated artifact pins a version the next `brew upgrade` invalidates. That is the
+/// accepted cost of native builds working at all. A RELATIVE entry is passed through
+/// untouched: it resolves against the CHILD's cwd, which is not ours to resolve against,
+/// and it carries no symlinked absolute prefix for the kernel to reject.
 fn canonicalize_path_var(path: &str) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for entry in path.split(':') {
-        let resolved = if Path::new(entry).is_absolute() {
+        let mut resolved = if Path::new(entry).is_absolute() {
             canonicalize_including_nonexistent(Path::new(entry))
                 .to_string_lossy()
                 .into_owned()
         } else {
             entry.to_string()
         };
+        // A colon is legal in a macOS filename but is THE PATH separator, so a canonical
+        // form containing one would split into two bogus entries — the tail of which is
+        // relative, and so would be searched against the child's cwd (the package dir
+        // under the build jail). Keep the original, which at worst stays fatal-on-miss.
+        if resolved.contains(':') {
+            resolved = entry.to_string();
+        }
         if seen.insert(resolved.clone()) {
             out.push(resolved);
         }
@@ -185,8 +194,7 @@ fn canonicalize_path_var(path: &str) -> String {
     out.join(":")
 }
 
-/// Close every inherited descriptor at exec, so the child starts with stdio and nothing
-/// else.
+/// Close every inherited descriptor at exec.
 ///
 /// The profile confines what the child may OPEN; it says nothing about a descriptor that
 /// is ALREADY OPEN when it starts. A leaked fd is a live handle to a file, socket, or pipe
@@ -201,7 +209,10 @@ fn canonicalize_path_var(path: &str) -> String {
 /// blind `3..rlimit` loop would cost ~1M syscalls per spawn. `PROC_PIDLISTFDS` enumerates
 /// only the OPEN descriptors instead. It runs in the CHILD, after fork, where the process
 /// is single-threaded and the list cannot race; the buffer is sized in the PARENT because
-/// the post-fork closure must not allocate.
+/// the post-fork closure must not allocate. The parent-side probe is load-bearing beyond
+/// sizing — it resolves `proc_pidinfo`'s lazy dyld binding, so the post-fork call cannot
+/// enter the binder, whose locks another thread may have held at fork. Do not replace it
+/// with a hardcoded size.
 ///
 /// CLOEXEC rather than `close()` is deliberate, matching Linux: it leaves std's own
 /// post-fork plumbing (the exec-error report pipe) intact and takes effect exactly at
@@ -252,13 +263,16 @@ fn install_fd_sweep(command: &mut Command) {
                 buf.as_mut_ptr().cast(),
                 bytes,
             );
-            if got <= 0 {
-                // Enumeration is the only mechanism available here, and aborting would kill
-                // a spawn that is otherwise fine — fail open onto the CLOEXEC-by-construction
-                // baseline rather than turning a diagnostic gap into an outage.
-                return Ok(());
+            // FAIL CLOSED, as the Linux twin does (`mark_inherited_fds_cloexec()?`): a
+            // confinement control that silently degrades is worse than a refused spawn.
+            // Enumerating your own pid cannot realistically fail, and an exactly-full
+            // buffer means the list may have been TRUNCATED — dropping precisely the
+            // highest descriptors, which is what a late `dup()` produces and so the very
+            // case this exists to catch.
+            if got <= 0 || got >= bytes {
+                return Err(std::io::Error::last_os_error());
             }
-            let count = (got as usize / size_of::<libc::proc_fdinfo>()).min(buf.len());
+            let count = got as usize / size_of::<libc::proc_fdinfo>();
             for info in &buf[..count] {
                 let fd = info.proc_fd;
                 if fd < 3 {
@@ -1962,6 +1976,36 @@ mod tests {
             term.contains(&program.to_string_lossy().replace('\\', "\\\\")),
             "program grant must name the child-PATH executable: {term}"
         );
+    }
+
+    #[test]
+    fn path_canonicalization_resolves_absolutes_and_leaves_the_rest_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(root.path()).unwrap().join("real");
+        let link = real.parent().unwrap().join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let colon_target = real.parent().unwrap().join("we:ird");
+        let colon_link = real.parent().unwrap().join("clink");
+        std::fs::create_dir_all(&colon_target).unwrap();
+        std::os::unix::fs::symlink(&colon_target, &colon_link).unwrap();
+        let p = |s: &str| canonicalize_path_var(s);
+        let d = |x: &std::path::Path| x.to_string_lossy().into_owned();
+
+        assert_eq!(
+            p(&format!("{}:/usr/bin", d(&link))),
+            format!("{}:/usr/bin", d(&real))
+        );
+        // A relative entry resolves against the CHILD's cwd, so it must survive verbatim —
+        // as must the empty entry, which is POSIX for "the current directory".
+        assert_eq!(p("bin:/usr/bin:"), "bin:/usr/bin:");
+        // Aliases that resolve onto each other collapse; the FIRST wins, so precedence holds.
+        assert_eq!(p(&format!("{}:{}", d(&link), d(&real))), d(&real));
+        // A colon in the resolved form would split one entry into two bogus ones, the tail
+        // of which is relative — keep the original rather than corrupt the list.
+        assert_eq!(p(&d(&colon_link)), d(&colon_link));
+        // A dangling entry is a harmless skippable miss; it must not panic or vanish.
+        assert_eq!(p("/nonexistent-xyz/bin"), "/nonexistent-xyz/bin");
     }
 
     #[test]

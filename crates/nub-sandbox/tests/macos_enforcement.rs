@@ -853,15 +853,10 @@ fn hardlink_to_denied_secret_leaks_via_alias() {
 
 #[test]
 fn child_path_entries_are_canonicalized() {
-    // Seatbelt denies with EPERM, and `posix_spawnp` — the spawner libuv uses, so the one
-    // every Node build script reaches through `child_process` — treats EPERM as FATAL,
-    // unlike the ENOENT/EACCES it skips. (libc `execvp` skips it, which is why the same
-    // PATH works from `/usr/bin/env` and fails from Node.) So ONE ungranted symlinked
-    // PATH entry aborts the whole search, masking every later entry including /usr/bin:
-    // node-gyp's bare `make` died with `spawn EPERM` while /usr/bin/make ran by absolute
-    // path. Canonicalizing the child PATH removes the symlink hop, which is what demotes
-    // such an entry from fatal to skippable. Asserted on the PATH the child actually
-    // observes, since that is the thing the kernel resolves.
+    // An ungranted SYMLINKED PATH entry is denied with EPERM, which `posix_spawnp` treats
+    // as fatal — so it aborts the whole search and masks /usr/bin (see
+    // `canonicalize_path_var` for the mechanism). Asserted on the PATH the child actually
+    // observes, since that is what the kernel resolves.
     let f = fixture();
     let real = f.root.join("outside/realbin");
     let link = f.root.join("outside/linkbin");
