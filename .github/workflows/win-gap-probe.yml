@@ -1,0 +1,42 @@
+name: win-gap-probe
+
+on:
+  push:
+    branches: [probe/win-gap-ph, probe/win-gap-sc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: AAP census (P1) — is the allowlist premise sound on this host?
+        shell: cmd
+        run: |
+          echo ==== icacls LOCALAPPDATA
+          icacls "%LOCALAPPDATA%"
+          echo ==== icacls LOCALAPPDATA\Packages
+          icacls "%LOCALAPPDATA%\Packages"
+          echo ==== icacls TEMP
+          icacls "%TEMP%"
+          echo ==== CONTROL icacls C:\Users
+          icacls C:\Users
+          echo ==== CONTROL icacls C:\
+          icacls C:\
+          echo ==== CONTROL icacls D:\
+          icacls D:\
+          echo ==== session
+          query session
+          exit /b 0
+      - name: Repo's own windows_enforcement harness (baseline control)
+        shell: cmd
+        run: cargo test -p nub-sandbox --test windows_enforcement
+        continue-on-error: true
+      - name: THE GAP PROBE
+        shell: cmd
+        run: cargo test -p nub-sandbox --test win_gap_probe

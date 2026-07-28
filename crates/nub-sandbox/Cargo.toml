@@ -175,3 +175,7 @@ windows-sandbox-probe = []
 name = "windows_account_enforcement"
 harness = false
 required-features = ["windows-sandbox-probe"]
+
+[[test]]
+name = "win_gap_probe"
+harness = false
