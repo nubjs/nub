@@ -7,8 +7,8 @@
 //! silent-no-op lesson — [`.fray/nub-config-spec.md`]).
 //!
 //! Dialect: JSONC (JSON + comments + trailing commas), the tsconfig dialect,
-//! parsed through `jsonc_parser::parse_to_serde_value` — the same reader the
-//! global file uses. camelCase keys. `$schema` is the one blessed non-field key
+//! parsed through [`crate::jsonc`] — the same depth-guarded reader the global
+//! file uses. camelCase keys. `$schema` is the one blessed non-field key
 //! (accepted + ignored). Every other unrecognized key fails loud.
 //!
 //! Project files are discovered from the invocation's final working directory.
@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use jsonc_parser::ParseOptions;
 use serde_json::Value;
 
 use crate::config::ImplicitDlx;
@@ -429,8 +428,7 @@ pub(crate) fn read_global_config_at(path: &Path) -> Result<LoadedConfig> {
 /// Parse + validate from raw JSONC text. Split out so tests can hit the validator
 /// without touching the filesystem.
 pub fn parse_project_config(text: &str) -> Result<ProjectConfig> {
-    let value = jsonc_parser::parse_to_serde_value(text, &ParseOptions::default())
-        .map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let value = crate::jsonc::parse_to_value(text).map_err(ConfigError::Parse)?;
     let Some(value) = value else {
         // An empty / comment-only file is a valid empty config.
         return Ok(ProjectConfig::default());
@@ -440,8 +438,7 @@ pub fn parse_project_config(text: &str) -> Result<ProjectConfig> {
 }
 
 fn parse_global_config(text: &str) -> Result<ProjectConfig> {
-    let value = jsonc_parser::parse_to_serde_value(text, &ParseOptions::default())
-        .map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let value = crate::jsonc::parse_to_value(text).map_err(ConfigError::Parse)?;
     let Some(value) = value else {
         return Ok(ProjectConfig::default());
     };
@@ -705,8 +702,8 @@ impl EffectiveConfig {
                 path: "tsconfig".into(),
                 message: format!("cannot read `{path}`: {error}"),
             })?;
-            let parsed = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
-                .map_err(|error| ConfigError::Value {
+            let parsed =
+                crate::jsonc::parse_to_value(&text).map_err(|error| ConfigError::Value {
                     path: "tsconfig".into(),
                     message: format!("cannot parse `{path}`: {error}"),
                 })?;

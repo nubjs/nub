@@ -915,25 +915,6 @@ fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &
     ) == Some(config_scope::Role::Nub)
 }
 
-/// Whether Nub's native-only hard release-age default applies. Lenient engine
-/// sessions collapse identity contradictions to `None`, so `truly_fresh` alone
-/// is insufficient there: independently prove that strict identity resolution
-/// also sees no incumbent signal before treating an undetected project as new.
-fn native_release_age_default_enabled(
-    detected: Option<&DetectedLockfile>,
-    truly_fresh: bool,
-    cwd: &Path,
-) -> bool {
-    if detected.is_some() {
-        return native_pm_mode(detected, truly_fresh, cwd);
-    }
-    truly_fresh
-        && matches!(
-            resolve_identity_walk_up(cwd, IdentityStrictness::Strict),
-            Ok(None)
-        )
-}
-
 fn lower_native_install_settings(
     install: &crate::project_config::InstallConfig,
     embedder_defaults: &[(String, String)],
@@ -2499,16 +2480,6 @@ fn nub_setting_defaults(
         ),
         ("diskMaterializePackages".to_string(), disk_materialize),
     ];
-    // Nub-native projects make the default 24-hour release-age gate hard: if
-    // registry metadata cannot establish a publish time, resolution fails
-    // closed. Incumbent npm/pnpm/yarn/bun projects retain their own prior
-    // setting/default behavior unchanged, as does standalone aube.
-    if native_release_age_default_enabled(detected, truly_fresh, cwd) {
-        defaults.insert(
-            2,
-            ("minimumReleaseAgeStrict".to_string(), "true".to_string()),
-        );
-    }
     if let Some(data) = nub_data_dir() {
         defaults.push((
             "storeDir".to_string(),
@@ -3303,6 +3274,18 @@ mod tests {
             }"#,
         )
         .unwrap();
+        // `load_effective_config` reads the GLOBAL layer, which resolves through
+        // `XDG_CONFIG_HOME` — a process-global. Hold the same lock the mutating
+        // tests hold: `config::with_config_home` calls `unsafe set_var`, and an
+        // unsynchronized `getenv` against it is a data race under edition 2024.
+        // Pointing the var at this test's own dir also stops the developer's real
+        // `~/.config/nub/nub.jsonc` from merging into the snapshot asserted below.
+        let _env = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: guarded by test_env_lock; restored before the guard drops.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
         let snapshot = crate::project_config::load_effective_config(
             dir.path(),
             crate::project_config::ConfigOverlays::default(),
@@ -3328,6 +3311,14 @@ mod tests {
             get(&lowered.settings, "nodeOptions"),
             Some("--trace-warnings")
         );
+
+        // SAFETY: still under test_env_lock; restores what the process started with.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
     }
 
     #[test]
@@ -3741,85 +3732,6 @@ mod tests {
                 "{label}: dangerouslyAllowAllBuilds must not appear in defaults"
             );
         }
-    }
-
-    #[test]
-    fn minimum_release_age_strict_default_is_native_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let detected = |kind| DetectedLockfile {
-            kind,
-            dir: dir.path().to_path_buf(),
-            fresh: false,
-        };
-
-        for kind in [
-            LockfileKind::Npm,
-            LockfileKind::NpmShrinkwrap,
-            LockfileKind::Pnpm,
-            LockfileKind::Yarn,
-            LockfileKind::YarnBerry,
-            LockfileKind::Bun,
-        ] {
-            let incumbent = detected(kind);
-            let defaults = nub_setting_defaults(
-                Some(&incumbent),
-                false,
-                dir.path(),
-                VirtualStoreLocality::Default,
-            );
-            assert_eq!(
-                get(&defaults, "minimumReleaseAgeStrict"),
-                None,
-                "{kind:?} incumbent must retain the engine's prior default"
-            );
-        }
-
-        let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
-        assert_eq!(
-            get(&fresh, "minimumReleaseAgeStrict"),
-            Some("true"),
-            "a truly fresh Nub-native project must fail closed"
-        );
-
-        let nub = detected(LockfileKind::Aube);
-        let nub_defaults =
-            nub_setting_defaults(Some(&nub), false, dir.path(), VirtualStoreLocality::Default);
-        assert_eq!(
-            get(&nub_defaults, "minimumReleaseAgeStrict"),
-            Some("true"),
-            "an existing Nub-native project must fail closed"
-        );
-    }
-
-    #[test]
-    fn minimum_release_age_strict_default_rejects_lenient_identity_ambiguity() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("package.json"),
-            r#"{"name":"ambiguous","packageManager":"npm@10.0.0"}"#,
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
-
-        assert!(
-            resolve_identity_walk_up(dir.path(), IdentityStrictness::Lenient)
-                .unwrap()
-                .is_none(),
-            "the regression requires the lenient session to suppress the contradiction"
-        );
-        assert!(
-            resolve_identity_walk_up(dir.path(), IdentityStrictness::Strict).is_err(),
-            "strict identity resolution must retain the contradiction"
-        );
-
-        // Lenient callers previously passed this lossy `None` together with a
-        // derived fresh=true, which incorrectly enabled Nub's native default.
-        let defaults = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
-        assert_eq!(
-            get(&defaults, "minimumReleaseAgeStrict"),
-            None,
-            "an ambiguous incumbent project must not be treated as Nub-native"
-        );
     }
 
     #[test]

@@ -25,6 +25,11 @@ const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// - `NODE_TLS_REJECT_UNAUTHORIZED` — `=0` turns off TLS certificate verification.
 /// - `NODE_EXTRA_CA_CERTS` — adds a trusted CA to the process.
 /// - `NODE_REPL_EXTERNAL_MODULE` — auto-loads a module at start-up.
+/// - `__NUB_RUNTIME_CONFIG` — nub's own resolved `nub.jsonc` snapshot, handed to
+///   the child as JSON. It carries `define` (compile-time source substitution),
+///   `preload`, and `loader`, so a `.env` that sets it would rewrite the code nub
+///   transpiles. The watch path in particular applies its injected `.env` values
+///   AFTER stamping this var, so without the denylist a repo-supplied `.env` wins.
 ///
 /// Only values ORIGINATING from a `.env*` file are dropped: an ambiently-set value
 /// passes through untouched (shell-wins, and the child inherits nub's env). A user
@@ -35,6 +40,7 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "NODE_TLS_REJECT_UNAUTHORIZED",
     "NODE_EXTRA_CA_CERTS",
     "NODE_REPL_EXTERNAL_MODULE",
+    "__NUB_RUNTIME_CONFIG",
 ];
 
 /// The runtime-control keys Nub refuses to source from env files.

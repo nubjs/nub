@@ -111,9 +111,15 @@ Pass V8 flags without adding them to every command.
 ```jsonc title="nub.jsonc"
 {
   "v8Flags": [
-    "--max-old-space-size=4096"
+    "--expose-gc"
   ]
 }
+```
+
+Flags reach Node through `NODE_OPTIONS`, so the accepted set is the one your Node version allows there. Nub checks each entry against that set before Node starts, which turns an unusable flag into a Nub error rather than a Node startup abort.
+
+```text
+nub.jsonc `v8Flags` option `--harmony` is not supported by Node 26.5.0
 ```
 
 ### `env`
@@ -155,6 +161,18 @@ Compose several files in order. Later files replace earlier values.
 ```
 
 Paths are resolved from the directory containing `nub.jsonc`, not the shell's current directory.
+
+Paths also expand `${VAR}` and `$VAR` against the environment, which a config file never gets from the shell.
+
+```jsonc title="nub.jsonc"
+{
+  "env": "./env/.env.${APP_ENV}"
+}
+```
+
+```bash
+APP_ENV=staging nub app.ts   # reads ./env/.env.staging
+```
 
 ### `define`
 
@@ -259,35 +277,23 @@ Warn when installed dependencies may be stale.
 }
 ```
 
-Choose another response:
+Stop instead of running.
 
 ```jsonc title="nub.jsonc"
 {
-  // Install the missing or stale dependencies.
-  "verifyDepsBeforeRun": "install"
-}
-```
-
-```jsonc title="nub.jsonc"
-{
-  // Stop instead of running.
   "verifyDepsBeforeRun": "error"
 }
 ```
 
-```jsonc title="nub.jsonc"
-{
-  // Ask in a terminal.
-  "verifyDepsBeforeRun": "prompt"
-}
-```
+Skip the check.
 
 ```jsonc title="nub.jsonc"
 {
-  // Skip the check.
   "verifyDepsBeforeRun": false
 }
 ```
+
+The `"install"` and `"prompt"` values are accepted for pnpm compatibility and currently behave as `"warn"`.
 
 ### `nodeCompat`
 
@@ -304,6 +310,8 @@ This is the project-wide form of the `--node` escape hatch. Nub does not load it
 ## `install`
 
 The install block configures Nub's package manager and dependency lifecycle scripts.
+
+It applies when Nub is the project's package manager. A project with an `npm`, `pnpm`, `yarn`, or `bun` lockfile keeps that tool's own configuration, and this block is ignored.
 
 ### `nodeLinker`
 
@@ -358,21 +366,23 @@ Materialize selected packages inside the project instead of linking them from th
 
 ### `hoist`
 
-Hoist every package.
+Fill the hidden fallback tree that packages reach when they import something they never declared. It applies to the isolated layout only, so set `nodeLinker` alongside it.
 
 ```jsonc title="nub.jsonc"
 {
   "install": {
+    "nodeLinker": "isolated",
     "hoist": true
   }
 }
 ```
 
-Keep the strict layout.
+Keep the strict layout, where an undeclared import fails.
 
 ```jsonc title="nub.jsonc"
 {
   "install": {
+    "nodeLinker": "isolated",
     "hoist": false
   }
 }
@@ -383,12 +393,19 @@ Hoist only matching packages.
 ```jsonc title="nub.jsonc"
 {
   "install": {
+    "nodeLinker": "isolated",
     "hoist": [
       "*eslint*",
       "@types/*"
     ]
   }
 }
+```
+
+Nub rejects the field under any other layout rather than accepting a setting it would ignore.
+
+```text
+nub: `install.hoist` is supported only with `install.nodeLinker: "isolated"` [ERR_NUB_CONFIG_UNSUPPORTED]
 ```
 
 ### `minimumReleaseAge`
