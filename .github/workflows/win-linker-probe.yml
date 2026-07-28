@@ -1,0 +1,35 @@
+name: win-linker-probe
+
+# Branch-scoped throwaway probe for the Windows linker failures in #552 / #566 / #576.
+# No PR — `push` to this branch is the only trigger that fires a workflow that
+# does not live on the default branch (see .claude/skills/ci-adhoc-test/SKILL.md).
+on:
+  push:
+    branches: [probe-win-linker-552]
+    paths:
+      - 'tests/win-linker-probe/**'
+      - '.github/workflows/win-linker-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The published binary both reporters ran. Probing the shipped artifact
+      # keeps the result comparable to the issue reports.
+      - name: Install nub 0.6.0
+        run: npm install -g @nubjs/nub@0.6.0
+
+      - name: Run probe
+        shell: pwsh
+        run: pwsh tests/win-linker-probe/run.ps1
