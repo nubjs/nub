@@ -648,7 +648,7 @@ echo '. "$HOME/.cargo/env"' >> ~/.bashrc
     // CARGO_TARGET_DIR must live OUTSIDE ~/src, which this step deletes at the end — that
     // is the entire point of warming it — and must match PREPARE's, or builders silently
     // start cold against an image that advertises warm artifacts.
-    const warm = `set -euo pipefail
+    const warm = `set -euxo pipefail
 . "$HOME/.cargo/env"
 export CARGO_TARGET_DIR="$HOME/.cargo-shared-target"
 cd ~/src
