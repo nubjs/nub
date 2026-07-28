@@ -122,6 +122,24 @@
           "description": "Node options applied to dependency lifecycle scripts."
         }
       }
+    },
+    "dlx": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Temporary package runs. Read from the global config file only; a project file carrying this block is an error.",
+      "properties": {
+        "consent": {
+          "enum": [
+            "prompt",
+            "never"
+          ],
+          "description": "Whether an implicit nubx registry fetch may be confirmed."
+        },
+        "envFile": {
+          "$ref": "#/$defs/envFileSetting",
+          "description": "Environment-file loading for nubx and nub dlx."
+        }
+      }
     }
   },
   "$defs": {

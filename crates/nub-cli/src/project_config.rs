@@ -11,8 +11,10 @@
 //! file uses. camelCase keys. `$schema` is the one blessed non-field key
 //! (accepted + ignored). Every other unrecognized key fails loud.
 //!
-//! The two files share one schema except for [`GLOBAL_ONLY_KEYS`], which the
-//! global file alone may carry — see [`ConfigScope`] for why.
+//! The two files share one published schema, which carries every key either
+//! accepts. [`GLOBAL_ONLY_KEYS`] names the sections only the global file may
+//! carry — see [`ConfigScope`] for why — and that scope is enforced here, not
+//! by the schema, so an editor still completes and validates both files.
 //!
 //! Project files are discovered from the invocation's final working directory.
 //! Sandbox values are parsed and retained for forward compatibility, but no
@@ -1878,7 +1880,7 @@ mod tests {
     }
 
     #[test]
-    fn published_schema_exposes_only_active_project_parser_keys() {
+    fn published_schema_exposes_every_active_parser_key() {
         fn keys(value: &Value, pointer: &str) -> std::collections::BTreeSet<String> {
             value
                 .pointer(pointer)
@@ -1888,13 +1890,19 @@ mod tests {
                 .cloned()
                 .collect()
         }
-        // The published schema is what an editor validates a PROJECT file
-        // against, so it carries neither the inert sandbox surface nor any
-        // global-only section — an editor must not bless what the parser rejects.
+        // ONE schema covers both files, so it carries every key either accepts,
+        // global-only sections included. Scope is the parser's job and it fails
+        // loud with a message naming the file to move the block to; the schema's
+        // job is completion and value validation, and splitting it per file
+        // would leave the global file with none at all.
+        //
+        // `sandbox` is the one omission, for the opposite reason: it parses but
+        // nothing consumes it, so offering it would invite a security policy
+        // that silently does nothing.
         fn active(values: &[&str]) -> std::collections::BTreeSet<String> {
             values
                 .iter()
-                .filter(|value| **value != "sandbox" && !GLOBAL_ONLY_KEYS.contains(*value))
+                .filter(|value| **value != "sandbox")
                 .map(|value| (*value).to_string())
                 .collect()
         }
@@ -1907,12 +1915,10 @@ mod tests {
             keys(&schema, "/properties/install/properties"),
             active(INSTALL_KEYS)
         );
-        for key in GLOBAL_ONLY_KEYS {
-            assert!(
-                schema.pointer(&format!("/properties/{key}")).is_none(),
-                "`{key}` is global-only, so the project schema must not offer it"
-            );
-        }
+        assert_eq!(
+            keys(&schema, "/properties/dlx/properties"),
+            active(DLX_KEYS)
+        );
         assert!(schema.pointer("/$defs/sandboxSetting").is_none());
         assert_eq!(
             schema.get("$id").and_then(Value::as_str),
