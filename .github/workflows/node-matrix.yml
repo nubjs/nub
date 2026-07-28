@@ -165,7 +165,20 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+      # actions/node-versions publishes no 23.x or 25.x, so four of these legs (23.6, 23.11,
+      # 25.0, 25.2) miss the manifest and setup-node falls back to fetching
+      # nodejs.org/dist/index.json live on every run. That request
+      # retries only on 502/503/504 (@actions/http-client), so a DNS timeout or connection
+      # reset kills the leg outright — and with no diagnostic at all, which is what made
+      # nubjs/nub#585 cost a full investigation to attribute. Upstream: actions/setup-node#1136.
+      # One retry turns that class of red back into the blip it is.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        id: setup-node
+        continue-on-error: true
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        if: steps.setup-node.outcome == 'failure'
         with:
           node-version: ${{ matrix.node }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -230,15 +243,32 @@ jobs:
     needs: [smoke, real-apps]
     if: always()
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      # Reading this run's own job list is what lets the gate NAME the leg that died. The
+      # `needs.*.result` rollup cannot: it collapses 14 smoke legs into one word, so a red
+      # here used to say "smoke failed" and nothing else — the reason nubjs/nub#585 took a
+      # whole investigation just to identify which version had broken.
+      actions: read
     steps:
       - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           smoke='${{ needs.smoke.result }}'
           apps='${{ needs.real-apps.result }}'
           echo "smoke=$smoke real-apps=$apps"
-          # A skipped leg (PR that didn't trigger it) is fine; a failure is not.
-          [[ "$smoke" == "success" || "$smoke" == "skipped" ]] || { echo "smoke failed"; exit 1; }
-          [[ "$apps"  == "success" || "$apps"  == "skipped" ]] || { echo "real-apps failed"; exit 1; }
-          echo "node matrix gate: OK"
+          # A skipped leg (a PR that didn't trigger it) is fine. Everything else is red on
+          # purpose, including `cancelled` and `abandoned` (GitHub reclaimed the runner):
+          # both mean the leg went UNVERIFIED, and fail-closed is the only safe reading.
+          if [[ "$smoke" == "success" || "$smoke" == "skipped" ]] \
+             && [[ "$apps" == "success" || "$apps" == "skipped" ]]; then
+            echo "node matrix gate: OK"
+            exit 0
+          fi
+          echo "::error::Node matrix red — smoke=$smoke real-apps=$apps. Failing legs:"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            --paginate --jq '.jobs[]
+              | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
+              | "  \(.conclusion)\t\(.name)\t\(.html_url)"' || echo "  (job list unavailable)"
+          exit 1

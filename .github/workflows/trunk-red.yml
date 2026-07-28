@@ -29,6 +29,8 @@ on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusi
 permissions:
   contents: read
   issues: write
+  # Re-checking each implicated workflow's latest main run before clearing the flag.
+  actions: read
 
 # Serialize so two failing workflows finishing together can't both create the
 # tracking issue (the find-or-create below is read-then-write, not atomic).
@@ -64,11 +66,43 @@ jobs:
           short="${SHA:0:9}"
 
           if [[ "$CONCLUSION" == "success" ]]; then
-            # Only the workflow that carries the macOS integration leg can clear
-            # the flag; a green Docker smoke says nothing about CI being fixed.
-            if [[ -n "$existing" && "$WORKFLOW" == "CI" ]]; then
+            [[ -n "$existing" ]] || exit 0
+
+            # Seven workflows can file this issue, so ONE of them going green does not mean
+            # trunk is green. The old rule closed on any `CI` success and cleared reds filed
+            # by the other six without ever verifying them — #550 was filed by WPT Worker
+            # and Node matrix, then closed by a CI green while both were still unchecked.
+            # Every red report opens with "`<workflow>` failed on main at `<sha>`.", so the
+            # issue already records which workflows are implicated: re-check each one's
+            # latest main run and clear the flag only once they are ALL green.
+            # shellcheck disable=SC2016  # the backticks are literal: they match the report's markdown
+            reported=$(gh issue view "$existing" --repo "$REPO" --json body,comments \
+              --jq '[.body] + [.comments[].body] | .[]' \
+              | sed -n 's/^`\([^`]*\)` failed on main at .*/\1/p' | sort -u)
+            [[ -n "$reported" ]] || reported="$WORKFLOW"
+
+            still_red=""
+            while IFS= read -r wf; do
+              [[ -n "$wf" ]] || continue
+              latest=$(gh run list --repo "$REPO" --workflow "$wf" --branch main --limit 1 \
+                --json conclusion --jq '.[0].conclusion // ""' 2>/dev/null || echo "")
+              # Only a terminal green clears a workflow. An IN-FLIGHT run ("") holds the
+              # issue open on purpose: during a merge burst everything reads as in-flight,
+              # and treating that as green would reinstate the very false-clear this fixes.
+              # This converges — every watched workflow re-fires trunk-red when it completes,
+              # so the last one to settle re-evaluates with all of them terminal. `cancelled`
+              # is a superseded run, which the job-level `if:` above already treats as noise.
+              case "$latest" in
+                success|cancelled|skipped) ;;
+                *) still_red="$still_red $wf" ;;
+              esac
+            done <<< "$reported"
+
+            if [[ -z "${still_red// /}" ]]; then
               gh issue close "$existing" --repo "$REPO" \
                 --comment "Green again on \`$short\` — $RUN_URL"
+            else
+              echo "still red:$still_red — leaving #$existing open"
             fi
             exit 0
           fi
@@ -79,7 +113,7 @@ jobs:
 
           Trunk-only legs (the macOS integration suite) do not run on pull requests, so a
           regression can land green and only surface here. This issue tracks the red and
-          closes automatically when CI passes on main again."
+          closes automatically once every workflow reported above is green on main again."
 
           if [[ -n "$existing" ]]; then
             gh issue comment "$existing" --repo "$REPO" --body "$body"
