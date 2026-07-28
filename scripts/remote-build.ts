@@ -423,9 +423,17 @@ tests/brand-lint/check-env-reads.sh`;
 cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
 cargo test`;
   }
+  // The CLI alone is not a usable dev binary. nub's TypeScript path goes through the
+  // nub-native N-API addon, and PREPARE only stages an 11-byte PLACEHOLDER (enough to satisfy
+  // the build.rs integrity hash, not to load). Without the real cdylib the binary runs and
+  // installs packages fine but dies on the first .ts file with `nubNative.transformCached is
+  // not a function` — a partial artifact that looks complete. Build both, always.
+  // nub-native is its own workspace with its own profiles, so it takes --release rather than
+  // the CLI's profile name.
   return `${PREPARE}export RUSTFLAGS="-C link-arg=-L$HOME/.darwin-stubs -C link-arg=-F$HOME/.darwin-stubs"
 cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile ${profile}
-ls -la "$CARGO_TARGET_DIR/aarch64-apple-darwin/${profile}/nub"`;
+(cd crates/nub-native && cargo zigbuild --target aarch64-apple-darwin --release)
+ls -la "$CARGO_TARGET_DIR/aarch64-apple-darwin/${profile}/nub" "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/libnub_native.dylib"`;
 }
 
 // `bash -s` reads the script FROM STDIN, incrementally, as it executes. Any command inside
@@ -525,12 +533,19 @@ async function oneBuild(
     if (a.job === "build") {
       mkdirSync(outDir, { recursive: true });
       artifact = join(outDir, a.fanout > 1 ? `nub-${idx}` : "nub");
-      sh("rsync", [
-        "-az",
-        "-e", `ssh -i ${SSH_KEY} ${SSH_OPTS.join(" ")}`,
-        `${SSH_USER}@${ip}:~/.cargo-shared-target/aarch64-apple-darwin/${a.profile}/nub`,
-        artifact,
-      ]);
+      const addon = join(outDir, a.fanout > 1 ? `nub-native-${idx}.node` : "nub-native.node");
+      const ssh = `ssh -i ${SSH_KEY} ${SSH_OPTS.join(" ")}`;
+      sh("rsync", ["-az", "-e", ssh, `${SSH_USER}@${ip}:~/.cargo-shared-target/aarch64-apple-darwin/${a.profile}/nub`, artifact]);
+      sh("rsync", ["-az", "-e", ssh, `${SSH_USER}@${ip}:~/.cargo-shared-target/aarch64-apple-darwin/release/libnub_native.dylib`, addon]);
+      // Stage the addon where the binary actually looks for it. runtime/addons is gitignored
+      // and is exactly what `make addon-fast` populates locally, so this is the same contract
+      // — without it the pulled binary is inert on any TypeScript input.
+      if (a.fanout === 1) {
+        const staged = join(source, "runtime", "addons");
+        mkdirSync(staged, { recursive: true });
+        sh("cp", [addon, join(staged, "nub-native.node")]);
+        log(`staged addon -> ${join(staged, "nub-native.node")}`);
+      }
       verified = verifyArtifact(artifact);
       log(`pulled ${artifact} — ${verified.fileOut.replace(/^.*?: /, "")}, signature ${verified.signed ? "valid" : "MISSING"}`);
       // arm64 macOS SIGKILLs an unsigned binary, so handing one back as a success is the

@@ -79,6 +79,16 @@ test("jobScript(build) cross-compiles the darwin target at the requested profile
 // SystemConfiguration, CoreFoundation, libcompression and libiconv (rustls-native-certs ->
 // reqwest, and lzma-sys), so without the stub TBDs on the linker's search path the build
 // dies at LINK time with `library not found for -lcompression` — after a full compile.
+// A CLI without the N-API addon is a PARTIAL artifact that looks complete: it runs, reports a
+// version, and installs packages, then dies on the first .ts file with
+// `nubNative.transformCached is not a function`. PREPARE's 11-byte placeholder satisfies the
+// build.rs integrity hash but cannot be loaded.
+test("the darwin build produces the N-API addon, not just the CLI", () => {
+  const s = jobScript("build", "fast");
+  assert.match(s, /cd crates\/nub-native && cargo zigbuild --target aarch64-apple-darwin --release/);
+  assert.match(s, /libnub_native\.dylib/, "must surface the addon so a missing one fails loudly");
+});
+
 test("the darwin build points the linker at the stub TBDs", () => {
   const s = jobScript("build", "fast");
   assert.match(s, /cp -R scripts\/darwin-stubs\/\. "\$HOME\/\.darwin-stubs\/"/, "stubs must be installed");
