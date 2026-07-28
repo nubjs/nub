@@ -388,6 +388,13 @@ pub(crate) fn apply(
     let sandboxing = confine_fs || policy.net.enforce;
     let tmp_lost = super::tmp_lost_axis(policy);
 
+    // Which of the two Windows backends owns this launch. Decided BEFORE the working-root
+    // work below because the clean-DACL precondition is an AppContainer-model requirement
+    // that the dedicated-account route does not share; the dispatch itself happens after.
+    let account_route = sandboxing
+        && super::windows_account::needs_account_backend(policy)
+        && super::windows_account::is_provisioned();
+
     if confine_fs {
         let Some(cwd) = spec.cwd.as_deref() else {
             return Err(Degradation {
@@ -409,7 +416,14 @@ pub(crate) fn apply(
                 cwd.display()
             )),
         })?;
-        if let Err(error) = launch::verify_clean_root(&effective_cwd) {
+        // ESTABLISH the clean-DACL root rather than demand one: no stock Windows directory
+        // satisfies `verify_clean_root` (every volume root carries an `ALL APPLICATION
+        // PACKAGES` ACE and nothing below it is `SE_DACL_PROTECTED`), so requiring it made
+        // AppContainer confinement unreachable on a normal machine. `ensure_clean_root`
+        // verifies first and only re-authors the DACL when the invariant is missing.
+        // The dedicated-account route is exempt: its child is a separate local principal,
+        // never an AppContainer, so no AAP grant can widen it (see `windows_account`).
+        if !account_route && let Err(error) = launch::ensure_clean_root(&effective_cwd) {
             return Err(Degradation {
                 lost: vec!["fs-root".to_string()],
                 reason: Some(format!(
@@ -435,10 +449,7 @@ pub(crate) fn apply(
     // unreachable. Falling through instead keeps the AppContainer tier live and degrading
     // honestly (over-confined reads, a reported deny it cannot carve), which is strictly
     // better than refusing to run on a machine that never opted into the elevated setup.
-    if sandboxing
-        && super::windows_account::needs_account_backend(policy)
-        && super::windows_account::is_provisioned()
-    {
+    if account_route {
         return super::windows_account::apply(policy, spec, proxy_port, proxy_token, ca_bundle);
     }
 
@@ -794,8 +805,9 @@ pub(super) mod launch {
     use windows_sys::Win32::Security::{
         ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, FreeSid, GetLengthSid,
         GetSecurityDescriptorControl, GetTokenInformation, OBJECT_INHERIT_ACE,
-        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
-        TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+        TokenElevation, TokenUser,
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -836,6 +848,171 @@ pub(super) mod launch {
     /// dir); without this, two non-atomic RMWs race and one run's ACE is lost (its grant
     /// then missing). A single global lock is ample — ACL edits are brief and rare.
     static ACL_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Make `cwd` satisfy [`verify_clean_root`], re-authoring its DACL only if it does not
+    /// already.
+    ///
+    /// WHY THIS EXISTS AS A SETTER. `verify_clean_root` alone is unsatisfiable on a stock
+    /// machine: volume roots carry an `ALL APPLICATION PACKAGES` ACE and no ordinary
+    /// directory beneath one is `SE_DACL_PROTECTED`, so the walk always reaches the root and
+    /// fails. The precondition is nub's to CREATE, not the user's to have.
+    ///
+    /// The verify-first order keeps an already-clean root (a nub store dir, a fixture that
+    /// secured itself) untouched, so the DACL write happens once per working root at most.
+    pub(super) fn ensure_clean_root(cwd: &Path) -> io::Result<()> {
+        if verify_clean_root(cwd).is_ok() {
+            return Ok(());
+        }
+        secure_clean_root(cwd).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not give {} a protected clean DACL: {error}",
+                    cwd.display()
+                ),
+            )
+        })?;
+        verify_clean_root(cwd)
+    }
+
+    /// Re-author `dir`'s DACL as a PROTECTED copy of its current effective one, minus every
+    /// `ALL APPLICATION PACKAGES` entry, plus an explicit full-control entry for the calling
+    /// user.
+    ///
+    /// UNPRIVILEGED BY CONSTRUCTION: the only right this needs is `WRITE_DAC`, which an
+    /// object's owner holds implicitly regardless of its DACL — and nub's confined working
+    /// roots (a package dir the linker materialized, a private tmp) are created by the
+    /// calling user. No elevation, no admin setup.
+    ///
+    /// The self-grant is not a widening of the child: an AppContainer access check requires
+    /// an ALLOW ACE naming the package SID or one of its capabilities ON TOP of the ordinary
+    /// user pass, so a user-SID grant is inert for the LowBox child. It is there so the
+    /// hardening can never lock nub out of its own working root, whatever the platform does
+    /// with the inherited ACEs it copies down.
+    ///
+    /// NOT TORN DOWN after the run, unlike the per-run grant ACEs: restoring inheritance
+    /// would re-open the very window this closes, and the end state — a directory reachable
+    /// by its owner and by no AppContainer — is the correct resting state for a build root.
+    /// Re-running is idempotent (`ensure_clean_root` verifies first).
+    fn secure_clean_root(dir: &Path) -> io::Result<()> {
+        // Same lock as `set_ace`: both are non-atomic DACL read-modify-writes and can name
+        // the same path across concurrent launches.
+        let _lock: MutexGuard<'_, ()> = ACL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let wpath = to_wide_path(dir);
+        let mut old_dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // The DACL read back here already has every INHERITED ace materialized into it, so
+        // carrying it forward under PROTECTED preserves the access the directory has today.
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                wpath.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut old_dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        let sd_guard = LocalFreeGuard(sd);
+
+        let aap_text = to_wide(ALL_APPLICATION_PACKAGES_SID);
+        let mut aap_sid: PSID = std::ptr::null_mut();
+        if unsafe { ConvertStringSidToSidW(aap_text.as_ptr(), &mut aap_sid) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _aap = LocalFreeGuard(aap_sid.cast());
+        let user = current_user_sid()?;
+
+        let mut entries: [EXPLICIT_ACCESS_W; 2] = unsafe { std::mem::zeroed() };
+        // REVOKE removes every ace naming the trustee whatever its mask or inheritance.
+        entries[0].grfAccessPermissions = 0;
+        entries[0].grfAccessMode = REVOKE_ACCESS;
+        entries[0].grfInheritance = NO_INHERITANCE;
+        entries[0].Trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: aap_sid.cast(),
+        };
+        entries[1].grfAccessPermissions = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE;
+        entries[1].grfAccessMode = GRANT_ACCESS;
+        entries[1].grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+        entries[1].Trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: user.as_ptr().cast_mut().cast(),
+        };
+
+        let mut new_dacl: *mut ACL = std::ptr::null_mut();
+        let rc = unsafe { SetEntriesInAclW(2, entries.as_ptr(), old_dacl, &mut new_dacl) };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        let new_guard = LocalFreeGuard(new_dacl.cast());
+
+        // PROTECTED_DACL_SECURITY_INFORMATION is the whole point: it sets SE_DACL_PROTECTED,
+        // which both terminates `verify_clean_root`'s ancestor walk here and stops any later
+        // edit to an ancestor from propagating a fresh AAP ace down into the running jail.
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                wpath.as_ptr() as *mut u16,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                new_dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        drop(new_guard);
+        drop(sd_guard);
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(())
+    }
+
+    /// The calling process's user SID, as owned bytes.
+    fn current_user_sid() -> io::Result<Vec<u8>> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: query-only handle into our own process token.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _token = HandleGuard(token);
+        let mut len = 0u32;
+        // First call sizes the variable-length TOKEN_USER (it trails the SID bytes).
+        unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+        if len == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut buf = vec![0u8; len as usize];
+        // SAFETY: `buf` is exactly the length the sizing call asked for.
+        let ok = unsafe {
+            GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len)
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: on success `buf` holds a TOKEN_USER whose `User.Sid` points inside it.
+        let sid = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_USER>()) }
+            .User
+            .Sid;
+        if sid.is_null() {
+            return Err(io::Error::other("token reported a null user SID"));
+        }
+        let sid_len = unsafe { GetLengthSid(sid) } as usize;
+        // SAFETY: GetLengthSid reports the SID's exact byte length.
+        Ok(unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), sid_len) }.to_vec())
+    }
 
     /// Verify that `cwd` is rooted beneath a protected DACL and that neither it nor any
     /// ancestor up to that boundary grants ALL APPLICATION PACKAGES access. The LowBox

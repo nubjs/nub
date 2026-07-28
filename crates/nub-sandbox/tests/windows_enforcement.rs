@@ -548,39 +548,61 @@ mod win {
         let child = f.child.clone();
         let a = |s: &str| s.to_string();
 
-        // The allowlist is sound only below a protected DACL with no AAP reach. A dirty
-        // working root must fail before the child can create a marker.
+        // ── the AAP trap, and the clean-root construction that closes it ───────────
+        // The allowlist is sound only below a protected DACL with no AAP reach, and no
+        // stock directory has one — so `apply` BUILDS it. This runs as a before/after
+        // differential on ONE directory so the "after" cannot be read as a vacuous pass:
+        //   before — an inherited AAP allow really does defeat default-deny (the trap)
+        //   after  — `apply` on that same root cleans it, and the SAME read is denied
+        // The secret is created BEFORE the grant is stripped, so the "after" cell also
+        // proves the DACL edit re-propagates down to files that already materialized an
+        // inherited AAP ace, not just to the directory itself.
         let dirty = f.root.join("dirty-aap");
         std::fs::create_dir_all(&dirty).unwrap();
         grant_all_application_packages(&dirty);
-        let dirty_marker = dirty.join("must-not-run.txt");
-        let dirty_marker_arg = dirty_marker.to_string_lossy().into_owned();
+        let aap_secret = dirty.join("aap-secret.env");
+        std::fs::write(&aap_secret, b"AAP_SECRET=leak").unwrap();
+        let aap_secret_arg = aap_secret.to_string_lossy().into_owned();
+        // Read it from a child confined to work/ only — `dirty` is in no allow-set, so a
+        // success can only come from the AAP grant.
+        let elsewhere = read_confine(&[&f.work], &[]);
+        expect(
+            &mut fails,
+            "NC inherited AAP defeats default-deny before the root is cleaned",
+            code(
+                &elsewhere,
+                &child,
+                &["__sbxchild__", "read", aap_secret_arg.as_str()],
+            ),
+            0,
+        );
+
         let dirty_policy = read_confine(&[&dirty], &[&dirty]);
         let dirty_spec = CommandSpec::new(child.as_os_str())
-            .args(["__sbxchild__", "write", dirty_marker_arg.as_str()])
+            .args(["__sbxchild__", "read", aap_secret_arg.as_str()])
             .cwd(&dirty);
         match apply(&dirty_policy, dirty_spec) {
-            Err(d)
-                if d.lost.iter().any(|axis| axis == "fs-root")
-                    && d.reason
-                        .as_deref()
-                        .unwrap_or_default()
-                        .contains("ALL APPLICATION PACKAGES") =>
-            {
-                println!("PASS dirty AAP working root fails closed")
-            }
+            Ok(_) => println!("PASS dirty AAP working root is cleaned, not rejected"),
             Err(d) => {
                 fails += 1;
-                eprintln!("FAIL dirty-root diagnostic: {d:?}");
-            }
-            Ok(_) => {
-                fails += 1;
-                eprintln!("FAIL dirty AAP working root was accepted");
+                eprintln!("FAIL dirty AAP working root still rejected: {d:?}");
             }
         }
-        if dirty_marker.exists() {
+        expect_in(
+            &mut fails,
+            "AAP secret under the cleaned root DENIED (grant stripped + re-propagated)",
+            code(
+                &elsewhere,
+                &child,
+                &["__sbxchild__", "read", aap_secret_arg.as_str()],
+            ),
+            &[5, 9],
+        );
+        // The hardening must not cost the CALLING user its own access — it is the same
+        // tree nub keeps writing to after the jail exits.
+        if std::fs::write(dirty.join("owner-still-writes.txt"), b"ok").is_err() {
             fails += 1;
-            eprintln!("FAIL dirty-root rejection still ran the child");
+            eprintln!("FAIL cleaned root lost the calling user's write access");
         }
 
         // Every requested ACE is part of the launch promise. A missing grant target must
