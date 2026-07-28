@@ -111,6 +111,19 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             extra_reads.extend(python.reads);
         }
 
+        // PREFETCH — the same move `npm_config_nodedir` makes above, applied to the
+        // package's own prebuilt binary: resolve the artifact out here, land it on the
+        // path the installer checks before it opens a socket, and the confined script
+        // completes without the net axis granting its host at all. Runs LAST of the
+        // pre-resolution steps because it is the only one that may need the env the
+        // others populated. Infallible by contract — it either improves the spawn or
+        // leaves it byte-identical.
+        extra_reads.extend(super::build_prefetch::prefetch(
+            &spawn,
+            &mut ambient,
+            &ProbeScope::new(&spawn),
+        ));
+
         let homes = sandbox_homes(&spawn.project_root);
         let policy = nub_sandbox::compile_build_jail(
             homes,
@@ -404,20 +417,20 @@ fn python_toolchain_grant(
 ///
 /// The refusal is a SKIP, not a stop: the search continues to the next candidate, so a
 /// planted `python3` costs the attacker nothing and gains them nothing.
-struct ProbeScope {
+pub(super) struct ProbeScope {
     project_root: PathBuf,
     package_dir: PathBuf,
 }
 
 impl ProbeScope {
-    fn new(spawn: &aube_util::LifecycleSandboxSpawn) -> Self {
+    pub(super) fn new(spawn: &aube_util::LifecycleSandboxSpawn) -> Self {
         Self {
             project_root: canonical(&spawn.project_root),
             package_dir: canonical(&spawn.package_dir),
         }
     }
 
-    fn allows(&self, candidate: &Path) -> bool {
+    pub(super) fn allows(&self, candidate: &Path) -> bool {
         let authored_here = |p: &Path| {
             p.components().any(|c| c.as_os_str() == "node_modules")
                 || p.starts_with(&self.project_root)
