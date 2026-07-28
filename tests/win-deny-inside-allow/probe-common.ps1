@@ -25,6 +25,18 @@ function Build-ProbeChild([string]$outDir) {
     return $exe
 }
 
+# Compile the CLR-free native reader (see probe-reader.rs for why it is needed).
+function Build-ProbeReader([string]$outDir) {
+    if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+    $exe = Join-Path $outDir 'probe-reader.exe'
+    if (Test-Path $exe) { return $exe }
+    $src = Join-Path $PSScriptRoot 'probe-reader.rs'
+    if (-not (Test-Path $src)) { throw "probe-reader.rs not found at $src" }
+    & rustc -O -o $exe $src 2>&1 | Write-Host
+    if (-not (Test-Path $exe)) { throw "probe-reader.exe failed to compile" }
+    return $exe
+}
+
 Add-Type -Language CSharp -TypeDefinition @"
 using System; using System.Runtime.InteropServices; using System.ComponentModel;
 public static class AC {

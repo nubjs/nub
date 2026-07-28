@@ -50,18 +50,11 @@ Write-Host "stage: $stage"
 # ordinary case, ARAP + the per-run AC SID for the LPAC case (LPAC ignores AAP entirely).
 $bin = Join-Path $stage 'bin'
 $child = Build-ProbeChild $bin
+$readerExe = Build-ProbeReader $bin
 & icacls $stage /grant "*${AAP}:(OI)(CI)(RX)"  | Out-Null
 & icacls $stage /grant "*${ARAP}:(OI)(CI)(RX)" | Out-Null
-Write-Host "probe child: $child"
-
-# LPAC ENABLEMENT. An LPAC process ignores AAP grants, and the .NET Framework directories grant AAP
-# only -- so in run 1 every LPAC cell died at 0x80131702 CLR_E_SHIM_RUNTIMELOAD before the child ran.
-# Granting ARAP on the Framework tree lets the SAME child (and therefore the same exit-code contract)
-# run under LPAC, so the LPAC cells stay directly comparable to the ordinary AppContainer cells.
-Section 'Grant ARAP on the .NET Framework tree so an LPAC child can host the CLR'
-foreach($d in @('C:\Windows\Microsoft.NET','C:\Windows\assembly')){
-    if(Test-Path $d){ $o = (& icacls $d /grant "*${ARAP}:(OI)(CI)(RX)" /T /C /Q 2>&1 | Select-Object -Last 2 | Out-String); Note "$d rc=$LASTEXITCODE $($o.Trim())" }
-}
+Write-Host "probe child (CLR): $child"
+Write-Host "probe reader (native, CLR-free): $readerExe"
 
 $acName = 'NubQ1Probe_' + ([guid]::NewGuid().ToString('N').Substring(0,12))
 $acSidPtr = [IntPtr]::Zero
@@ -75,10 +68,10 @@ Write-Host "per-run AppContainer SID: $acSidStr"
 #         hosts the CLR, and an LPAC process cannot load the .NET Framework runtime (the Framework
 #         directories grant AAP, which LPAC ignores) -- run 1 failed every LPAC cell with
 #         0x80131702 CLR_E_SHIM_RUNTIMELOAD, i.e. the child never started.
-#   cmd : cmd.exe is a pure Win32 System32 image, which DOES carry an ARAP grant, so it starts under
-#         LPAC. 'type' exits 0 on a successful read and non-zero when it cannot open the file. It
-#         cannot name the failure reason, but the seeded file plus the ARM A / ARM C controls
-#         already exclude not-found and unreadable-for-other-reasons.
+#   native : a small rustc-built binary (probe-reader.rs). No CLR, so it starts under LPAC, and it
+#         still distinguishes ERROR_ACCESS_DENIED from every other failure. It doubles as an
+#         INDEPENDENT second reader for the ordinary cells, so the headline result cannot be an
+#         artifact of one runtime's file-open path.
 function Read-Clr($path, $lpac){
     try { $c = [AC]::LaunchEx($acSidPtr, $null, $lpac, "`"$child`" read `"$path`"", $bin) }
     catch { Note "LAUNCH FAILED (not a deny): $($_.Exception.Message)"; return 'LAUNCHFAIL' }
@@ -87,13 +80,15 @@ function Read-Clr($path, $lpac){
     if($c -eq 2148734722){ Note "child exit 0x80131702 CLR_E_SHIM_RUNTIMELOAD -- the CLR never loaded (not a deny)"; return 'LAUNCHFAIL' }
     return "OTHER($c)"
 }
-function Read-Cmd($path, $lpac){
-    try { $c = [AC]::LaunchEx($acSidPtr, $null, $lpac, "cmd.exe /c type `"$path`" >nul 2>&1", $bin) }
+function Read-Native($path, $lpac){
+    try { $c = [AC]::LaunchEx($acSidPtr, $null, $lpac, "`"$readerExe`" `"$path`"", $bin) }
     catch { Note "LAUNCH FAILED (not a deny): $($_.Exception.Message)"; return 'LAUNCHFAIL' }
-    if($c -eq 0){ return 'OK' } else { return 'BLOCKED' }
+    if($c -eq 0){ return 'OK' }
+    if($c -eq 5){ return 'BLOCKED' }
+    return "OTHER($c)"
 }
 function Launch-Read($path, $lpac, $reader){
-    if($reader -eq 'cmd'){ return Read-Cmd $path $lpac } else { return Read-Clr $path $lpac }
+    if($reader -eq 'native'){ return Read-Native $path $lpac } else { return Read-Clr $path $lpac }
 }
 
 try {
@@ -173,9 +168,13 @@ try {
     # AC SID or ARAP for ARM A to pass. (Run 2 tried a cmd.exe-based reader here to dodge the CLR
     # problem; cmd.exe could not read even the ARM A control file under an ordinary AppContainer,
     # so it is not a usable reader and the ARAP-on-Framework grant above is the fix instead.)
-    Test-DenyCell 'c5_LPAC_allowAC_denyAC'     $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $true 'clr'
-    Test-DenyCell 'c6_LPAC_allowARAP_denyAC'   $ARAP     'ARAP'           $acSidStr 'per-run AC SID' $true 'clr'
-    Test-DenyCell 'c7_LPAC_allowARAP_denyARAP' $ARAP     'ARAP'           $ARAP     'ARAP'           $true 'clr'
+    # Independent-reader cross-check of the headline (ordinary AppContainer) result.
+    Test-DenyCell 'c1n_allowAC_denyAC_native'  $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $false 'native'
+    Test-DenyCell 'c3n_allowAAP_denyAAP_native' $AAP     'AAP'            $AAP      'AAP'            $false 'native'
+
+    Test-DenyCell 'c5_LPAC_allowAC_denyAC'     $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $true 'native'
+    Test-DenyCell 'c6_LPAC_allowARAP_denyAC'   $ARAP     'ARAP'           $acSidStr 'per-run AC SID' $true 'native'
+    Test-DenyCell 'c7_LPAC_allowARAP_denyARAP' $ARAP     'ARAP'           $ARAP     'ARAP'           $true 'native'
 }
 finally {
     [void][AC]::DeleteAppContainerProfile($acName)
