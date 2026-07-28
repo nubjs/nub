@@ -428,6 +428,8 @@ pub(crate) enum LandlockUnavailable {
     PolicyNotExpressible(String),
     /// `NUB_SANDBOX_MECHANISM=bubblewrap` pinned the selector for a differential run.
     PinnedToBubblewrap,
+    /// A `nub sandbox` scope rather than the build jail. Out of scope by design.
+    NotABuildJail,
 }
 
 /// Choose the Linux enforcement mechanism for `policy`. THE decision point — kept as one
@@ -454,6 +456,13 @@ pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, Landl
     match std::env::var("NUB_SANDBOX_MECHANISM").as_deref() {
         Ok("bubblewrap") => return Err(LandlockUnavailable::PinnedToBubblewrap),
         Ok("landlock") | Err(_) | Ok(_) => {}
+    }
+    // SCOPE GATE. Landlock is the BUILD JAIL's mechanism only. A `nub sandbox` scope needs
+    // deny-inside-allow plus the mount/PID/net namespaces, and enforcing one here would
+    // silently drop every namespace-backed axis it depends on — the tests for those axes
+    // fail loudly under Landlock precisely because the mechanism cannot carry them.
+    if !policy.build_jail {
+        return Err(LandlockUnavailable::NotABuildJail);
     }
     let abi = probe_abi().ok_or(LandlockUnavailable::NoKernelSupport)?;
     if policy
@@ -677,6 +686,37 @@ mod tests {
                 .map(|g| g.access)
                 .expect("the package dir is granted"),
             LandlockAccess::ReadWrite
+        );
+    }
+
+    /// The scope boundary between the two products. A `nub sandbox` scope leans on the
+    /// mount/PID/net namespaces Landlock does not have, so routing one here would silently
+    /// drop those axes; only the build jail is eligible.
+    #[test]
+    fn only_a_build_jail_policy_is_landlock_eligible() {
+        let mut scope = policy(Vec::new());
+        assert_eq!(
+            landlock_availability(&scope),
+            Err(LandlockUnavailable::NotABuildJail),
+            "a nub sandbox scope must never be routed to landlock"
+        );
+        scope.build_jail = true;
+        assert_ne!(
+            landlock_availability(&scope),
+            Err(LandlockUnavailable::NotABuildJail),
+            "control: the same policy marked as the build jail clears the scope gate"
+        );
+    }
+
+    /// Landlock unions rules and cannot subtract, so a policy carrying any deny must fall
+    /// back rather than be enforced with the deny silently dropped.
+    #[test]
+    fn a_deny_rule_disqualifies_landlock() {
+        let mut denied = policy(vec![rule("/tmp/secret", Effect::Deny, FsAccess::DENY)]);
+        denied.build_jail = true;
+        assert_eq!(
+            landlock_availability(&denied),
+            Err(LandlockUnavailable::PolicyHasDenyRules)
         );
     }
 

@@ -360,6 +360,7 @@ pub fn compile_build_jail(
     grant_build_jail_extra_reads(&mut policy, &extra_reads);
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
+    policy.build_jail = true;
     Ok(policy)
 }
 
