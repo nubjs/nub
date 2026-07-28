@@ -271,18 +271,21 @@ export function filterSourceFiles(lsFilesOutput: string) {
   return lsFilesOutput.split("\n").filter((f) => f && !f.startsWith("tests/node-suite"));
 }
 
+// macOS ships openrsync ("rsync version 2.6.9 compatible"), NOT rsync 3.x, so any
+// 3.x-only flag fails the whole sync — `--delete-missing-args` cost a full image bake
+// before this was caught. No deletion flag is needed anyway: every builder boots fresh
+// from the golden image, whose bake removes ~/src, so there is never anything stale on
+// the far side to delete. Keep this list 2.6.9-safe.
+export function rsyncPushArgs(listFile: string, source: string, ip: string, sshCmd: string) {
+  return ["-az", `--files-from=${listFile}`, "-e", sshCmd, `${source}/`, `${SSH_USER}@${ip}:~/src/`];
+}
+
 function syncSource(source: string, ip: string) {
   const files = filterSourceFiles(sh("git", ["ls-files"], { cwd: source }));
   const listFile = join(tmpdir(), `remote-build-files-${process.pid}-${Math.random().toString(36).slice(2)}.txt`);
   writeFileSync(listFile, files.join("\n") + "\n");
   try {
-    sh("rsync", [
-      "-az", "--delete", "--delete-missing-args",
-      `--files-from=${listFile}`,
-      "-e", `ssh -i ${SSH_KEY} ${SSH_OPTS.join(" ")}`,
-      `${source}/`,
-      `${SSH_USER}@${ip}:~/src/`,
-    ]);
+    sh("rsync", rsyncPushArgs(listFile, source, ip, `ssh -i ${SSH_KEY} ${SSH_OPTS.join(" ")}`));
   } finally {
     rmSync(listFile, { force: true });
   }

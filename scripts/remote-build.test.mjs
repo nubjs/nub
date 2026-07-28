@@ -10,7 +10,18 @@
 //      were real bugs during development.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles } from "./remote-build.ts";
+import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs } from "./remote-build.ts";
+
+// macOS ships openrsync (2.6.9-compatible). An rsync-3.x-only flag fails the entire sync,
+// and it cost a full image bake to find. This pins the flag set to what 2.6.9 accepts.
+test("rsync push uses no rsync-3.x-only flags (macOS ships openrsync 2.6.9)", () => {
+  const args = rsyncPushArgs("/tmp/list.txt", "/src", "1.2.3.4", "ssh -i k");
+  for (const banned of ["--delete-missing-args", "--info", "--outbuf", "--mkpath", "--atimes"]) {
+    assert.ok(!args.includes(banned), `${banned} is rsync 3.x only and breaks on macOS`);
+  }
+  assert.ok(args.some((a) => a.startsWith("--files-from=")), "must use the allowlist, not an --exclude blocklist");
+  assert.ok(!args.some((a) => a.startsWith("--exclude")), "a blocklist makes rsync walk ~99 GB of gitignored tree and time out");
+});
 
 test("parseArgs defaults to a spot darwin fast build with fanout 1", () => {
   const a = parseArgs([]);
