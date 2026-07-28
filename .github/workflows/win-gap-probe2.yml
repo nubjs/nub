@@ -1,0 +1,34 @@
+name: win-gap-probe2
+
+on:
+  push:
+    branches: [probe/win-gap-oo, probe/win-gap-pf]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Windows reparse/junction facts (settles the POSIX-shaped prefetch guards)
+        shell: cmd
+        run: |
+          echo LOCALAPPDATA=%LOCALAPPDATA%
+          echo does the profile path contain a space?
+          echo %LOCALAPPDATA% | findstr /C:" " >nul && echo YES_SPACE || echo NO_SPACE
+          exit /b 0
+      - name: build_jail unit tests (per-package opt-out + self-unjail gate)
+        shell: cmd
+        run: cargo test -p nub-cli --bins build_jail -- --nocapture
+        continue-on-error: true
+      - name: prefetch unit tests
+        shell: cmd
+        run: cargo test -p nub-cli --bins prefetch -- --nocapture
+        continue-on-error: true
+      - name: FULL nub-cli bin unit suite (everything these branches touch)
+        shell: cmd
+        run: cargo test -p nub-cli --bins
