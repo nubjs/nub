@@ -1,0 +1,77 @@
+name: Probe — Windows proxy deadlock
+
+# THROWAWAY branch-scoped probe (ci-adhoc-test skill). Deleted before this branch
+# merges. `push` is the trigger that matters — workflow_dispatch is inert until the
+# file is on the default branch.
+on:
+  push:
+    branches: [fix/windows-proxy-deadlock]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  probe:
+    name: proxy.rs (${{ matrix.variant }})
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # baseline = the pre-fix proxy/mod.rs at the epic tip; it is EXPECTED to hang,
+        # and the job passes only when it does (exit 124 from `timeout`). That is the
+        # control that makes the `fixed` leg mean something.
+        variant: [baseline, fixed]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: probe-win-proxy
+          save-if: false
+      - name: Restore the pre-fix splice
+        if: matrix.variant == 'baseline'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout f35bf4311707 -- crates/nub-sandbox/src/proxy/mod.rs
+          git --no-pager diff --stat
+      # Separate so the run step's `timeout` measures the RUN, not the compile.
+      - name: Build the test binary
+        shell: bash
+        run: cargo test -p nub-sandbox --test proxy --no-run
+      - name: Run at the DEFAULT thread count
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -uo pipefail
+          # 10 iterations for the fix (a concurrency race: one green run proves nothing);
+          # 1 for the baseline, which only has to hang once.
+          iters=10
+          [ "$VARIANT" = baseline ] && iters=1
+          for i in $(seq 1 $iters); do
+            echo "::group::iteration $i/$iters"
+            timeout 300 cargo test -p nub-sandbox --test proxy
+            code=$?
+            echo "::endgroup::"
+            echo "iteration $i exit=$code"
+            if [ "$VARIANT" = baseline ]; then
+              [ $code -eq 124 ] && { echo "REPRODUCED: proxy.rs hung (no progress in 300s)"; exit 0; }
+              echo "NOT REPRODUCED — the baseline finished with exit $code"; exit 1
+            fi
+            [ $code -eq 0 ] || { echo "FAILED at iteration $i (exit $code)"; exit 1; }
+          done
+          echo "$iters/$iters consecutive green at the default thread count"
