@@ -23,6 +23,7 @@ on:
     branches: [fix/windows-clean-root]
     paths:
       - ".github/workflows/win-clean-root-probe.yml"
+      - "crates/nub-sandbox/tests/windows_clean_root.rs"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
