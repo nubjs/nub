@@ -161,7 +161,15 @@ pub struct RuntimeCapability {
 
 enum RuntimeSource {
     Current {
-        authority: EarlyRuntimeAuthority,
+        /// The capture is EAGER — it must observe the pristine process image before any
+        /// application code runs, which is the anti-substitution property itself. Its
+        /// FAILURE is deferred, because this authority is consumed only by the Bubblewrap
+        /// launch: a capture that could not complete must fail THAT launch, not the
+        /// process. Landlock confines with no runtime image at all and legitimately
+        /// cannot read `/proc/self/maps` — its ruleset is built pre-`fork`, so
+        /// `/proc/self` is ungrantable — and every nub process nested inside a build jail
+        /// re-enters this hook. Failing eagerly killed each one before its work began.
+        authority: Result<EarlyRuntimeAuthority, CaptureFailure>,
         image: Box<OnceLock<Result<RuntimeImage, CaptureFailure>>>,
     },
     Explicit(RuntimeImage),
@@ -230,23 +238,30 @@ impl std::fmt::Debug for RuntimeCapability {
 }
 
 impl RuntimeCapability {
-    fn current_process() -> io::Result<Self> {
-        Ok(Self {
+    fn current_process() -> Self {
+        Self {
             source: RuntimeSource::Current {
-                authority: capture_early_current_authority()?,
+                authority: capture_early_current_authority().map_err(CaptureFailure::from_io),
                 image: Box::new(OnceLock::new()),
             },
-        })
+        }
     }
 
     pub(crate) fn materialize(&self) -> io::Result<&RuntimeImage> {
         match &self.source {
-            RuntimeSource::Current { authority, image } => image
-                .get_or_init(|| {
-                    materialize_early_authority(authority).map_err(CaptureFailure::from_io)
-                })
-                .as_ref()
-                .map_err(CaptureFailure::to_io),
+            RuntimeSource::Current { authority, image } => {
+                // Replays the deferred capture error verbatim. The caller
+                // (`linux::preflight`) turns it into a `Degradation`, which the build jail
+                // reports fail-closed — so nothing that needed this authority proceeds
+                // without it.
+                let authority = authority.as_ref().map_err(CaptureFailure::to_io)?;
+                image
+                    .get_or_init(|| {
+                        materialize_early_authority(authority).map_err(CaptureFailure::from_io)
+                    })
+                    .as_ref()
+                    .map_err(CaptureFailure::to_io)
+            }
             RuntimeSource::Explicit(image) => Ok(image),
         }
     }
@@ -397,7 +412,7 @@ pub fn earliest_bootstrap() -> io::Result<RuntimeCapability> {
         Some(value) if value.as_bytes().starts_with(b"__nub-sandbox-") => Err(invalid_data(
             "invalid or unsupported sandbox monitor bootstrap sentinel",
         )),
-        _ => RuntimeCapability::current_process(),
+        _ => Ok(RuntimeCapability::current_process()),
     }
 }
 
@@ -9966,6 +9981,9 @@ mod tests {
         let runtime = earliest_bootstrap().unwrap();
         match &runtime.source {
             RuntimeSource::Current { authority, image } => {
+                let authority = authority
+                    .as_ref()
+                    .expect("host bootstrap captured authority");
                 assert!(image.get().is_none());
                 assert!(!authority.inventory.is_empty());
                 assert!(
@@ -9981,7 +9999,7 @@ mod tests {
 
     #[test]
     fn unconfined_apply_does_not_materialize_the_host_token() {
-        let runtime = RuntimeCapability::current_process().unwrap();
+        let runtime = RuntimeCapability::current_process();
         let mut policy = SandboxPolicy::default();
         policy.env.resolved = true;
         policy.fs.rules.default_effect = crate::policy::Effect::Allow;
