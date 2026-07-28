@@ -199,7 +199,15 @@ pub fn create_bin_shim(
         } else {
             std::os::unix::fs::symlink(target, &link_path)?;
             use std::os::unix::fs::PermissionsExt;
-            if target.exists() {
+            // Both `Path::exists` and `set_permissions` FOLLOW symlinks, and
+            // `target` is package content a lifecycle script can replace after
+            // it runs — so a planted `<pkg>/bin/x -> /outside/file` would
+            // redirect this chmod out of the package tree. `validate_bin_target`
+            // contains the path only lexically; `symlink_metadata` is what
+            // contains the final component. Requiring a regular file also keeps
+            // the chmod off a dir/fifo/device. Legitimate bins are regular
+            // files, so nothing real loses its executable bit here.
+            if std::fs::symlink_metadata(target).is_ok_and(|md| md.is_file()) {
                 let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
             }
         }
@@ -1240,6 +1248,46 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&script).unwrap().permissions().mode();
         assert_eq!(mode & 0o755, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_bin_shim_never_chmods_through_a_symlinked_bin_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "not a bin\n").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // A lifecycle script can swap its own bin for a symlink after it runs.
+        let planted = pkg_dir.join("planted.js");
+        std::os::unix::fs::symlink(&outside, &planted).unwrap();
+        create_bin_shim(&bin_dir, "planted", &planted, BinShimOptions::default()).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "chmod followed the symlink out of the package tree"
+        );
+
+        // Control: an ordinary bin target in the same run still gets 0755, so
+        // the assertion above cannot pass merely because the chmod stopped.
+        let real = pkg_dir.join("real.js");
+        std::fs::write(&real, "#!/usr/bin/env node\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        create_bin_shim(&bin_dir, "real", &real, BinShimOptions::default()).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o755,
+            0o755,
+            "a regular bin target must still be made executable"
+        );
     }
 
     #[test]
