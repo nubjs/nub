@@ -75,16 +75,23 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// its canonical location rather than by bare basename, which would also deny unrelated
 /// files a project happens to call `npmrc`.
 ///
-/// ENFORCED ON BOTH PLATFORMS (measured: a jailed dep script read
-/// `/opt/homebrew/lib/node_modules/npm/npmrc` before this glob and is refused after).
-/// Linux denies by MASKING a path the mount plan granted, and the mask planner only
-/// reaches this file if the deny walk is SEEDED at (or below) npm's own `node_modules`
-/// dir: the walk runs over the build jail's `deny_search_roots`, and the recursive
-/// descent skips any directory named `node_modules` for cost (`DENY_WALK_SKIP_DIRS`) —
-/// which blocks descending INTO such a child but not enumerating a root that already IS
-/// one. `pm_engine::build_jail` (nub-cli) supplies `<node-root>/lib/node_modules/npm`
-/// as an extra deny-search root exactly so the walk starts there instead of at an
-/// ancestor.
+/// NO LONGER ENFORCED FOR THE BUILD JAIL, and the machinery that used to enforce it there
+/// is inert. `preset::enforce_pure_allowlist` strips every deny from a build-jail policy, so
+/// `requires_deny_search_roots` returns false for it and the Linux mask walk never runs —
+/// which also makes `pm_engine::build_jail`'s `npm_builtin_config_deny_root` seeding (added
+/// solely to aim that walk at npm's own dir past `DENY_WALK_SKIP_DIRS`) dead on that path.
+///
+/// This glob is IRREDUCIBLE under a pure allowlist and is the one build-jail residual with a
+/// real credential behind it: the jail must grant `<node-root>/lib/node_modules` wholesale so
+/// `npm`/`npx`/`corepack` resolve, `npmrc` sits inside that tree, and withholding one file
+/// from inside a granted subtree is precisely the deny-in-grant shape Landlock and Windows
+/// AppContainer cannot express. Narrowing the grant instead would mean enumerating npm's tree
+/// to exclude one entry — an enumerate-to-exclude scan, which breaks on anything created after
+/// the scan and is not the model. Closing it properly means not granting npm's tree at all
+/// (e.g. resolving `npm`/`npx` through a shim), which is a separate design change.
+///
+/// The band still applies in full to every NON-build-jail policy, where it is enforced as
+/// before — Linux by masking a granted path, macOS by an SBPL deny.
 ///
 /// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — the file itself) and a
 /// SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`, covering a `.env.d/`-style
@@ -171,6 +178,7 @@ pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
 /// the dotenv mask kind — a floor no longer trailing reads as "absent", silently
 /// downgrading an explicit deny's genuinely-unreadable mask to the present-but-empty
 /// dotenv shape.
+#[cfg(target_os = "linux")]
 pub(crate) fn env_deny_floor_start(entries: &[FsRule]) -> Option<usize> {
     let floor_len = ENV_DENY_LEAF_GLOBS.len() + ENV_DENY_SUBTREE_GLOBS.len();
     let start = entries.len().checked_sub(floor_len)?;

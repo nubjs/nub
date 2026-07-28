@@ -9,12 +9,13 @@
 //! curated to `$downloads`) rides CI / a real-kernel VM; the read-set spike validated it
 //! via Docker+bwrap.
 //!
-//! macOS caveat (deliberate build-jail behavior): the DARWIN confstr scratch
-//! (`/var/folders/<uid>/T`, where `tempfile` puts this fixture) stays WRITABLE — the
-//! Apple toolchain's `xcrun_db` lives there and is not `TMPDIR`-redirectable. So a
-//! generic "write outside the package dir" cannot be asserted for a fixture under the
-//! scratch; this asserts the SECURITY-critical denials (secrets read+write) instead,
-//! which hold even inside the scratch via the secret floor + the move-block re-deny.
+//! macOS: the DARWIN confstr scratch (`/var/folders/<uid>/T`, where `tempfile` puts this
+//! fixture) is HIDDEN like the rest of the shared tmp. `$tmp` grants a private per-run dir
+//! plus exactly one documented carve-out — the Apple toolchain's `xcrun_db`, which is not
+//! `TMPDIR`-redirectable — and the policy's own explicit grants are re-opened inside it, so
+//! a fixture placed there still builds while the ambient scratch stays withheld. That is
+//! what makes the write assertions below meaningful: the fake home sits inside the scratch
+//! and is unwritable because nothing grants it, not because a deny carves it back out.
 #![cfg(target_os = "macos")]
 
 use std::collections::BTreeMap;
@@ -41,11 +42,11 @@ fn build_jail_confines_writes_and_hides_secrets() {
     std::fs::write(home.join(".ssh/id_rsa"), b"PRIVATE-KEY-DO-NOT-LEAK").unwrap();
     // A source file in the package dir the build legitimately reads.
     std::fs::write(package_dir.join("binding.gyp"), b"{}").unwrap();
-    // `.npmrc` with a hardcoded token, at the PACKAGE DIR's root AND nested inside it.
-    // The package dir is the writable subtree the jail grants outright, so the secret-file
-    // floor is the only thing keeping these hidden — which is what makes probing them
-    // meaningful. A project-local `.npmrc` outside `node_modules` is no longer in the read
-    // set at all, so probing there would pass without the floor doing anything.
+    // `.npmrc` with a hardcoded token, at the PACKAGE DIR's root AND nested inside it. Both
+    // are READABLE under the grant-only model — the package dir is granted rw — and the
+    // probes below pin that as the contract. They stay in the fixture because they mark the
+    // exact boundary of what the jail does and does not protect: a dependency's own files,
+    // yes; the consumer's, no.
     std::fs::write(
         package_dir.join(".npmrc"),
         b"//registry.npmjs.org/:_authToken=NPMRC-TOKEN-DO-NOT-LEAK",
@@ -136,13 +137,23 @@ fn build_jail_confines_writes_and_hides_secrets() {
         stdout.contains("SECRET_WRITE_BLOCKED") && !stdout.contains("SECRET_WRITE_WROTE"),
         "a write into the home secret dir must be blocked:\n{stdout}"
     );
+    // An `.npmrc` INSIDE the package dir is readable, and that is the model rather than a
+    // gap. The build jail compiles to a pure allowlist, and the package dir is granted
+    // read-WRITE outright — the script can overwrite or delete this file whenever it likes,
+    // so denying the read protected nothing. It is also the dependency's OWN shipped file,
+    // not a consumer credential. Expressing the old deny meant a deny nested inside a grant,
+    // which Landlock (no deny primitive) and Windows AppContainer (a deny-ACE naming the
+    // container's own SID is inert against its child) cannot enforce at all — it rejected
+    // every read-granting build-jail policy on Windows. The consumer's real secrets are
+    // withheld by being outside every grant, which is what the assertions above and below
+    // pin (`SECRET_HIDDEN`, `SOURCE_DENIED`).
     assert!(
-        stdout.contains("NPMRC_HIDDEN") && !stdout.contains("NPMRC_LEAK"),
-        "an .npmrc in the writable package dir must be unreadable:\n{stdout}"
+        stdout.contains("NPMRC_LEAK"),
+        "the package dir is granted rw, so its own .npmrc is readable by design:\n{stdout}"
     );
     assert!(
-        stdout.contains("NPMRC_NESTED_HIDDEN") && !stdout.contains("NPMRC_NESTED_LEAK"),
-        "a nested .npmrc must be unreadable:\n{stdout}"
+        stdout.contains("NPMRC_NESTED_LEAK"),
+        "...and likewise one nested inside the package dir:\n{stdout}"
     );
     // The narrowed project read: the top-level manifest is readable, everything else in
     // the consumer's tree is not.
@@ -431,5 +442,117 @@ fn build_jail_grants_node_headers_and_nothing_else_under_the_store() {
     assert!(
         stdout.contains("SIBLING_HIDDEN") && !stdout.contains("SIBLING_LEAK"),
         "only include/node is granted — a sibling under the store stays hidden:\n{stdout}"
+    );
+}
+
+/// A real native compile must still work under the narrowed `$tmp`.
+///
+/// `$tmp` narrowed from "the whole confstr scratch" to "a private per-run dir plus Apple's
+/// fixed compiler cache", which is the shape the design specifies. This is the regression
+/// guard for that narrowing: it already caught the tmp deny — emitted after `emit_fs` so it
+/// can override a generous base read — swallowing the jail's own package-dir grant for any
+/// tree living under `$TMPDIR`. Judges on the OBJECT FILE, never an exit code.
+///
+/// MEASURED, and worth knowing before anyone tightens further: this passes with the
+/// `xcrun_db` carve-out SUPPRESSED. That file is a lookup CACHE — `xcrun` falls back to the
+/// slow toolchain search on a miss rather than failing — so the carve-out is a performance
+/// affordance here, not what makes this compile succeed. It is kept because the design
+/// specifies it and it costs one file, but do not read this test as proving it load-bearing;
+/// a heavier node-gyp/xcodebuild path may yet depend on it.
+#[test]
+fn a_native_compile_still_works_under_the_narrowed_tmp() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/.aube/native@1.0.0/node_modules/native");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        package_dir.join("addon.c"),
+        b"int nub_probe(int x) { return x + 1; }\n",
+    )
+    .unwrap();
+
+    let policy = nub_sandbox::compile_build_jail(
+        homes(&home, &project),
+        &package_dir,
+        vec![home.join("Library/Caches/nub/node/bin/node")],
+        Vec::new(),
+        [("PATH", "/usr/bin:/bin")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    )
+    .expect("compile build-jail");
+
+    let spec = nub_sandbox::CommandSpec::new("/usr/bin/cc")
+        .args(["-c", "addon.c", "-o", "addon.o"])
+        .cwd(&package_dir);
+    let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+    let out = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+        .expect("apply build-jail (fail-closed on error)")
+        .output()
+        .expect("run confined compile");
+
+    // The marker, not the status: an object file the compiler actually produced.
+    assert!(
+        package_dir.join("addon.o").exists(),
+        "a native compile must still succeed under the narrowed $tmp — the xcrun_db \
+         carve-out is what makes that possible.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// Canary for the `/etc` narrowing: the Seatbelt base stopped granting `(subpath "/etc")`,
+/// so anything a confined script legitimately reads there must be an enumerated leaf. Date
+/// formatting is the most common such read (`/etc/localtime`), and TLS/name resolution the
+/// most consequential.
+#[test]
+fn common_etc_reads_survive_the_leaf_narrowing() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/.aube/p@1.0.0/node_modules/p");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+
+    let policy = nub_sandbox::compile_build_jail(
+        homes(&home, &project),
+        &package_dir,
+        vec![home.join("Library/Caches/nub/node/bin/node")],
+        Vec::new(),
+        [("PATH", "/usr/bin:/bin")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    )
+    .expect("compile build-jail");
+
+    let script = "date > date.txt 2>/dev/null && echo DATE_OK || echo DATE_FAIL; \
+                  head -c 1 /etc/ssl/cert.pem >/dev/null 2>&1 && echo TLS_OK || echo TLS_FAIL; \
+                  head -c 1 /etc/hosts >/dev/null 2>&1 && echo HOSTS_OK || echo HOSTS_FAIL; \
+                  head -c 1 /etc/passwd >/dev/null 2>&1 && echo PASSWD_OK || echo PASSWD_FAIL; \
+                  head -c 1 /etc/bashrc >/dev/null 2>&1 && echo UNLISTED_LEAK || echo UNLISTED_HIDDEN";
+    let spec = nub_sandbox::CommandSpec::new("/bin/sh")
+        .args(["-c", script])
+        .cwd(&package_dir);
+    let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+    let out = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+        .expect("apply build-jail")
+        .output()
+        .expect("run confined probe");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    eprintln!("--- /etc probe ---\n{stdout}");
+    for ok in ["DATE_OK", "TLS_OK", "HOSTS_OK", "PASSWD_OK"] {
+        assert!(stdout.contains(ok), "{ok} missing:\n{stdout}");
+    }
+    // The narrowing actually bites: `/etc/bashrc` is world-readable (0444) yet outside the
+    // enumerated leaves, so it is refused. Deliberately NOT probed with `/etc/master.passwd`
+    // — that file is mode 0600 root-only, so a refusal there proves filesystem permissions,
+    // not the sandbox, and would be a control that passes for the wrong reason.
+    assert!(
+        stdout.contains("UNLISTED_HIDDEN"),
+        "an unlisted, world-readable /etc file must be refused by the leaf narrowing:\n{stdout}"
     );
 }

@@ -200,8 +200,31 @@
   (subpath "/dev/fd"))
 (allow file-read* file-test-existence file-write-data file-ioctl
   (literal "/dev/dtracehelper"))
-(allow file-read* (subpath "/etc"))
-(allow file-read* (subpath "/private/etc"))
+; `/etc` is granted by LEAF, never as a subpath. The wholesale subpath swept in
+; `/etc/shadow` + `/etc/gshadow`, which the build-jail preset then carved back out with a
+; deny — and a deny inside a grant is precisely what the allowlist backends (Landlock,
+; Windows AppContainer) cannot express, so that carve-out made every build-jail policy
+; unenforceable there. Narrowing the grant protects the password hashes by construction on
+; every backend instead. This mirrors what the Linux minimal root already does: its
+; `ESSENTIAL_READ_PATHS` names `/etc` LEAVES and never binds the directory.
+;
+; `/etc` is a firmlink to `/private/etc`, so both spellings are granted. Beyond the standard
+; config files granted above, these are the leaves a lifecycle script actually reaches: TLS
+; trust roots, name resolution, and the `paths`/`paths.d` PATH seed.
+(allow file-read* file-test-existence
+  (subpath "/private/etc/ssl")
+  (subpath "/etc/ssl")
+  (subpath "/private/etc/paths.d")
+  (subpath "/etc/paths.d")
+  (literal "/private/etc/hosts")
+  (literal "/etc/hosts")
+  (literal "/private/etc/resolv.conf")
+  (literal "/etc/resolv.conf")
+  (literal "/private/etc/group")
+  (literal "/etc/group")
+  (literal "/private/etc/networks")
+  (literal "/private/etc/paths")
+  (literal "/etc/paths"))
 (allow file-read* file-test-existence
   (literal "/System/Library/CoreServices")
   (literal "/System/Library/CoreServices/.SystemVersionPlatform.plist")

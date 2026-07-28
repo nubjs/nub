@@ -389,33 +389,82 @@ fn shared_tmp_dirs() -> Vec<String> {
 /// per-run dir rw (`file*` subpath). Emitted after emit_fs so the shared-tmp deny is
 /// authoritative even under a `(subpath "/")` generous read.
 ///
-/// COMPILER CARVE-OUT: under `Private` ($tmp:rw) the confstr TEMP scratch is EXCLUDED from
-/// the deny — it stays granted (emit_fs write-grants it, and a generous read covers its
-/// reads), so it is the one part of the shared tmp that remains shared. It holds the Apple
-/// toolchain's fixed `xcrun_db` lookup cache, which is not TMPDIR-redirectable, so keeping
-/// it lets a native (node-gyp) build retain the same toolchain access it has under `Shared`.
-/// Only the world-shared `/private/tmp` is hidden. `Deny` ($tmp:false = no tmp at all)
-/// carves nothing — it hides the confstr scratch too. See LIMITATIONS.md.
+/// COMPILER CARVE-OUT: `$tmp` is a PRIVATE PER-RUN DIR ONLY, plus ONE documented non-private
+/// carve-out on macOS — Apple's fixed toolchain lookup cache. `Private` therefore denies the
+/// WHOLE shared tmp (confstr scratch included) and grants back exactly
+/// [`darwin_compiler_cache_files`].
+///
+/// The carve-out is ONE FILE, not the enclosing scratch: `$TMPDIR` is a long-lived per-user
+/// directory holding every application's state (~7.5k entries on a dev host), so granting the
+/// subpath handed a confined child read+write over all of it.
+///
+/// `xcrun_db` earns its exemption by being non-redirectable — measured, `TMPDIR=<elsewhere>
+/// xcrun --find cc` still writes the confstr-resolved `$TMPDIR/xcrun_db` and leaves the
+/// override untouched. Anything the toolchain scratches that DOES follow `TMPDIR` needs no
+/// grant (the jail points it at the per-run dir) and must not be added here. See
+/// LIMITATIONS.md.
 fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut String) {
     use crate::policy::TmpMode;
     if policy.fs.tmp == TmpMode::Shared {
         return;
     }
-    // Private keeps the confstr TEMP scratch (the compiler carve-out); Deny carves nothing.
-    // `shared_tmp_dirs()` is the confstr scratch(es) + `/private/tmp`, so excluding the
-    // confstr set leaves exactly `/private/tmp` in the Private deny set.
-    let carve = if policy.fs.tmp == TmpMode::Private {
-        confstr_scratch_dirs()
-    } else {
-        Vec::new()
-    };
-    for dir in shared_tmp_dirs() {
-        if carve.contains(&dir) {
-            continue;
-        }
-        let term = format!("(subpath \"{}\")", sbpl_escape(&dir));
+    // Both modes hide the WHOLE shared tmp; they differ only in what is granted back below
+    // (Private: the policy's own grants + the compiler cache + the per-run dir; Deny: only
+    // the policy's own grants).
+    let roots = shared_tmp_dirs();
+    for dir in &roots {
+        let term = format!("(subpath \"{}\")", sbpl_escape(dir));
         out.push_str(&format!("(deny file-read* {term})\n"));
         out.push_str(&format!("(deny file-write* {term})\n"));
+    }
+    // Re-open the policy's OWN explicit grants that happen to live inside the shared tmp.
+    // The deny above targets the AMBIENT scratch, not a tree someone deliberately put there
+    // — CI checkouts, `npm pack`, and nub's own dlx staging all run under `$TMPDIR`. Because
+    // the deny is emitted after `emit_fs` (so it can override a generous base read), without
+    // this it would also silently nuke the build jail's package-dir write grant and every
+    // read it depends on: the documented `/private/tmp` footgun, generalized to the whole
+    // per-user scratch.
+    //
+    // ORDER IS THE WHOLE PROBLEM HERE. Re-emitting the same rule SET is not order-neutral:
+    // these allows land after everything `emit_fs` wrote, so a naive replay would out-rank
+    // the policy's own denies and re-open, say, `$TMPDIR/work/.env` on a policy that still
+    // carries the secret floor. So each re-grant is followed by a replay of every deny that
+    // matches at or under the same root, restoring last-match-wins, and the write arm
+    // re-applies `is_dangerous_write_root` — `emit_fs` guards its write grants with it, and
+    // skipping it here would hand out `(allow file-write* (subpath "/private/tmp"))`.
+    let mut regranted = false;
+    for rule in &policy.fs.rules.entries {
+        if rule.effect != Effect::Allow || !grant_is_under(rule.matcher.as_str(), &roots) {
+            continue;
+        }
+        let m = to_match_term(rule.matcher.as_str());
+        let term = emit_term(&m);
+        out.push_str(&format!("(allow file-read* {term})\n"));
+        out.push_str(&format!("(allow file-map-executable {term})\n"));
+        if rule.access == FsAccess::ReadWrite && !is_dangerous_write_root(&m) {
+            out.push_str(&format!("(allow file-write* {term})\n"));
+        }
+        regranted = true;
+    }
+    if regranted {
+        for rule in &policy.fs.rules.entries {
+            if rule.effect != Effect::Deny {
+                continue;
+            }
+            let term = emit_term(&to_match_term(rule.matcher.as_str()));
+            out.push_str(&format!("(deny file-read* {term})\n"));
+            out.push_str(&format!("(deny file-write* {term})\n"));
+        }
+    }
+    if policy.fs.tmp == TmpMode::Private {
+        // AFTER the deny, so last-match-wins re-opens exactly these paths. `file*` because
+        // xcrun WRITES the db, not merely reads it.
+        for file in darwin_compiler_cache_files() {
+            out.push_str(&format!(
+                "(allow file* (literal \"{}\"))\n",
+                sbpl_escape(&file)
+            ));
+        }
     }
     if policy.fs.tmp == TmpMode::Private
         && let Some(dir) = tmp_dir
@@ -803,6 +852,47 @@ fn resolve_program(
 /// canonicalized (a `/var/folders/…` firmlink resolving under `/private`). Only the
 /// TEMP dir — NOT the persistent CACHE dir (`…/C`), which is a cross-build poisoning
 /// surface. Empty off macOS or when confstr yields nothing.
+/// Whether an fs rule's literal path lies STRICTLY INSIDE one of the shared-tmp roots, so
+/// the tmp deny would otherwise swallow a grant the policy made deliberately.
+///
+/// Strictly inside: a grant of a tmp root ITSELF is the very thing the `$tmp` posture exists
+/// to hide, and re-opening it would let `fs: {"/private/tmp": "rw"}` defeat `$tmp: "rw"` —
+/// the posture is authoritative over the shared roots, which is why `emit_tmp` runs after
+/// `emit_fs` at all. Only a tree someone placed under a root is re-opened.
+///
+/// Compares the glob's literal prefix (the `/**` subtree twin stripped) on a path-COMPONENT
+/// boundary, so `/private/var/folders/x/T` never matches a sibling `/private/var/folders/x/Tools`.
+/// A matcher carrying embedded globs has no literal prefix to compare and is simply not
+/// re-granted — fail-closed, and the same shape `emit_fs` already declines to widen.
+fn grant_is_under(matcher: &str, roots: &[String]) -> bool {
+    let literal = matcher.strip_suffix("/**").unwrap_or(matcher);
+    roots.iter().any(|root| {
+        let root = root.trim_end_matches('/');
+        literal
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.len() > 1 && rest.starts_with('/'))
+    })
+}
+
+/// The ONE documented non-private carve-out inside the shared tmp: Apple's fixed toolchain
+/// lookup cache, granted back after `$tmp`'s deny so native builds keep working.
+///
+/// `xcrun` resolves this path through `confstr(_CS_DARWIN_USER_TEMP_DIR)` rather than
+/// `$TMPDIR`, so redirecting the child's `TMPDIR` at the private per-run dir does NOT move it
+/// — measured directly: `TMPDIR=<fresh dir> xcrun --find cc` updated the real
+/// `$TMPDIR/xcrun_db` and left the fresh dir empty. That non-redirectability is the entire
+/// reason this is a carve-out; anything the toolchain writes that DOES follow `TMPDIR` needs
+/// no grant and must not be added here.
+///
+/// A FILE, never its parent directory — the parent is the shared scratch this narrowing
+/// exists to withhold.
+fn darwin_compiler_cache_files() -> Vec<String> {
+    confstr_scratch_dirs()
+        .into_iter()
+        .map(|dir| format!("{}/xcrun_db", dir.trim_end_matches('/')))
+        .collect()
+}
+
 fn confstr_scratch_dirs() -> Vec<String> {
     let mut out = Vec::new();
     if let Some(dir) = confstr_dir(libc::_CS_DARWIN_USER_TEMP_DIR) {
@@ -1807,17 +1897,90 @@ mod tests {
             prof.contains("(deny file-read* (subpath \"/private/tmp\"))"),
             "Private must hide the world-shared /private/tmp"
         );
-        // The confstr scratch stays granted (emit_fs write-grant survives) and is never denied.
+        // The confstr scratch is HIDDEN like the rest of the shared tmp. `$TMPDIR` is a
+        // long-lived per-user directory holding every application's scratch state, so
+        // granting the whole subpath handed a lifecycle script read+write over all of it —
+        // far broader than "a private per-run dir plus Apple's fixed compiler cache".
         for dir in confstr_scratch_dirs() {
             assert!(
-                prof.contains(&format!("(allow file-write* (subpath \"{dir}\"))")),
-                "confstr scratch write grant must remain for the compiler carve-out"
+                prof.contains(&format!("(deny file-read* (subpath \"{dir}\"))")),
+                "Private must hide the confstr scratch, not grant it wholesale"
             );
             assert!(
-                !prof.contains(&format!("(deny file-read* (subpath \"{dir}\"))")),
-                "Private must NOT deny the confstr scratch (native-build carve-out)"
+                prof.contains(&format!("(deny file-write* (subpath \"{dir}\"))")),
+                "...for writes as well as reads"
             );
         }
+        // Exactly ONE thing is granted back, and as a FILE: `xcrun_db`, which xcrun resolves
+        // via confstr rather than $TMPDIR and so cannot be redirected into the per-run dir.
+        // It must come AFTER the deny for last-match-wins to re-open it.
+        for file in darwin_compiler_cache_files() {
+            let grant = format!("(allow file* (literal \"{file}\"))");
+            assert!(
+                prof.contains(&grant),
+                "the compiler-cache carve-out must be granted back: {grant}"
+            );
+            let dir = file.trim_end_matches("/xcrun_db");
+            assert!(
+                prof.find(&grant) > prof.find(&format!("(deny file-read* (subpath \"{dir}\"))")),
+                "the carve-out grant must follow the tmp deny it re-opens"
+            );
+        }
+    }
+
+    /// The tmp re-grant must not out-rank the policy's own denies. It is emitted after
+    /// `emit_fs` (so it can override a generous base read), which means replaying the same
+    /// rule SET is NOT order-neutral — without a deny replay behind it, a tmp-resident grant
+    /// re-opens `$TMPDIR/<grant>/.env` on any policy still carrying the secret floor.
+    #[test]
+    fn the_tmp_regrant_does_not_reopen_a_policy_deny() {
+        let Some(scratch) = confstr_scratch_dirs().into_iter().next() else {
+            return;
+        };
+        let work = format!("{scratch}/work");
+        let mut p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule(&work, Effect::Allow, FsAccess::ReadWrite),
+                rule("**/.env*", Effect::Deny, FsAccess::Read),
+            ],
+        );
+        p.fs.tmp = TmpMode::Private;
+        let prof = build_profile(&p, &spec(), None, None, None);
+        let regrant = prof
+            .rfind(&format!("(allow file-read* (subpath \"{work}\"))"))
+            .expect("the tmp-resident grant must be re-opened");
+        let deny = prof
+            .rfind("(deny file-read* (regex")
+            .expect("the .env floor must still be emitted");
+        assert!(
+            deny > regrant,
+            "the deny replay must follow the tmp re-grant, or $TMPDIR/work/.env reopens"
+        );
+    }
+
+    /// The re-grant's write arm must apply the same dangerous-root guard `emit_fs` does,
+    /// or a `/private/tmp` rw grant becomes a filesystem-wide write hole under Private.
+    #[test]
+    fn the_tmp_regrant_still_refuses_a_dangerous_write_root() {
+        let mut p = fs_policy(
+            Effect::Deny,
+            vec![rule("/private/tmp", Effect::Allow, FsAccess::ReadWrite)],
+        );
+        p.fs.tmp = TmpMode::Private;
+        let private = build_profile(&p, &spec(), None, None, None);
+        // The DIFFERENTIAL is the point: `Shared` skips `emit_tmp` entirely, so whatever it
+        // emits is `emit_fs`'s pre-existing behavior. The re-grant must not add a write that
+        // `emit_fs` did not already allow — this pins the re-grant specifically, not the
+        // dangerous-root policy in general (`/private/tmp` is deliberately NOT on that list).
+        p.fs.tmp = TmpMode::Shared;
+        let shared = build_profile(&p, &spec(), None, None, None);
+        let w = "(allow file-write* (subpath \"/private/tmp\"))";
+        assert_eq!(
+            private.matches(w).count(),
+            shared.matches(w).count(),
+            "the tmp re-grant must not add a write grant emit_fs did not already emit"
+        );
     }
 
     #[test]

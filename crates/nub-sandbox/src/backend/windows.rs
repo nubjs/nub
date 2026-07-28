@@ -1852,6 +1852,62 @@ mod tests {
         assert!(!deny_shadows_grant(&depth_indep, &[]));
     }
 
+    /// THE defect this change exists to fix. Every read-granting build-jail policy was
+    /// rejected on Windows: SIX of the fold's eight secret-file globs (`**/.env*`, `.env*`,
+    /// `**/.npmrc`, `**/node_modules/npm/npmrc`, `**/.env*/**`, `.env*/**` — measured) are
+    /// depth-independent, so their `literal_prefix` is empty and each shadows EVERY grant.
+    /// One is enough: `deny_shadows_grant` fires, `apply` returns
+    /// `Degradation{lost:["fs-read-deny"]}`, and `pm_engine::build_jail` turns that into
+    /// "build-jail could not be applied (fail-closed)" — no lifecycle script runs at all. The
+    /// other two (`.npmrc`, `node_modules/npm/npmrc`) are the relative rootless twins, whose
+    /// prefixes never match an absolute grant. A pure allowlist emits no deny at all, so the
+    /// predicate has nothing to fire on.
+    #[test]
+    fn a_pure_allowlist_build_jail_is_no_longer_rejected() {
+        use crate::compiler::compile_build_jail;
+        use crate::matcher::Homes;
+        use std::collections::BTreeMap;
+
+        let homes = Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        let policy = compile_build_jail(
+            homes,
+            Path::new("/proj/node_modules/somepkg"),
+            vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
+            vec![PathBuf::from(
+                "/testhome/.cache/nub/node/v26/lib/node_modules",
+            )],
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        let (grants, _, _) = derive_grants(&policy.fs);
+
+        assert!(
+            !grants.is_empty(),
+            "the control is only meaningful against a policy that actually grants reads"
+        );
+        assert!(
+            !deny_shadows_grant(&policy.fs.rules.entries, &grants),
+            "a pure-allowlist build-jail policy must be accepted on Windows"
+        );
+        // CONTROL: re-attach the band this change removed and the rejection comes straight
+        // back — so the pass above is the removal doing the work, not an empty rule set.
+        let mut with_floor = policy.fs.rules.entries.clone();
+        with_floor.extend(
+            crate::compiler::ENV_DENY_LEAF_GLOBS
+                .iter()
+                .map(|g| rule(g, Effect::Deny, FsAccess::Read)),
+        );
+        assert!(
+            deny_shadows_grant(&with_floor, &grants),
+            "control arm must reproduce the shipping rejection"
+        );
+    }
+
     #[test]
     fn dangerous_write_roots_never_get_a_write_grant() {
         // A rw allow that resolves to a system root must not open an inheritable modify

@@ -28,55 +28,33 @@ pub fn resolve(name: &str) -> Result<Value, CompileError> {
     }
 }
 
-/// Re-assert a preset's built-in secret floor AFTER its surface object has folded,
-/// closing the last-match-wins hole a broad subtree grant opens.
+/// Make the build jail a PURE ALLOWLIST: strip every deny the fold produced, so the
+/// compiled policy carries grants only.
 ///
-/// build-jail's dependency-tree read re-allows every path under `<proj>/node_modules` —
-/// a vendored `.env` or `.npmrc` included — because it is a later matching entry.
-/// Re-appending the built-in secret denies makes them authoritative again. Under the
-/// tight (default-deny) read set these are mostly belt-and-suspenders — an ungranted
-/// secret path is unreadable by construction — but they still close an overlap between
-/// a granted cache root and an adjacent secret (e.g. `~/.npmrc` beside `~/.npm/_cacache`).
-/// Uses [`defaults::secret_read_denies`] directly so the floor is byte-consistent across
-/// the policy.
-pub fn reassert_secret_floor(name: &str, policy: &mut SandboxPolicy, ctx: &CompileCtx) {
+/// The build jail is not a deny model compiled into grants — it never had denies to begin
+/// with. Its shape is "install into a temp dir, run the script there with access to only
+/// that dir plus specific deps", and under a `default_effect == Deny` base a path is
+/// unreadable because nothing granted it. A deny rule on top is therefore either redundant
+/// (the path is outside every grant — the `~/.ssh` family, `/etc/shadow`) or a sign that a
+/// GRANT is too broad, which is fixed by narrowing the grant, never by carving it.
+///
+/// This is not cosmetic. Deny-inside-allow is inexpressible on the zero-privilege
+/// mechanisms: Landlock unions rules and has no deny primitive at any ABI, and an explicit
+/// deny-ACE naming a Windows AppContainer's own SID is inert against that AppContainer's
+/// child. Because the fold's `.env*`/`.npmrc` band is depth-independent, its literal prefix
+/// is empty, so `backend::windows::deny_shadows_grant` sees it shadow every grant and
+/// REJECTS the policy — which is why every read-granting build-jail policy fails closed on
+/// Windows today with `build-jail could not be applied`. Emitting no denies is what lets the
+/// allowlist backends enforce the jail at all.
+///
+/// Enforced by stripping rather than by suppressing each finalizer, so a deny added to the
+/// surface or to a fold finalizer later cannot silently reintroduce the rejection; the
+/// invariant lives in one place and is asserted by `build_jail_emits_no_deny_rules`.
+pub fn enforce_pure_allowlist(name: &str, policy: &mut SandboxPolicy) {
     if name != "build-jail" {
         return;
     }
-    let denies = defaults::secret_read_denies(&ctx.homes);
-    let entries = &mut policy.fs.rules.entries;
-    // ESTABLISH the floor if the fold skipped it. `fold::finalize_env_deny` appends it only
-    // when the FOLDED surface already granted a read, but build-jail's reads are all
-    // post-fold now (they need SPECULATIVE origin, which the surface cannot express), so the
-    // static `--sandbox build-jail` skeleton folds to denies-only, the fold declines, and the
-    // grants then arrive with nothing trailing them. Re-establishing here — where every
-    // build-jail path converges — is what keeps "grants a read" and "carries the secret
-    // floor" from diverging. A `None` here means genuinely ABSENT rather than displaced:
-    // every build-jail post-fold grant splices at the FRONT, so nothing appends after the
-    // fold and position still implies presence.
-    if defaults::env_deny_floor_start(entries).is_none() {
-        entries.extend(defaults::env_deny_leaf_rules());
-        entries.extend(defaults::env_deny_subtree_rules());
-    }
-    // Same gate, same fix, second finalizer: `fold::finalize_policy_file_deny` also
-    // declines on a denies-only fold, which would leave the very `nub.jsonc` that
-    // configures this jail outside its own self-exclusion. Not reachable today — the
-    // config sits at the project root, outside every post-fold grant — but "any read grant
-    // implies the policy file is denied" must not be conditional on which finalizer ran.
-    for policy_file in &ctx.policy_files {
-        let rule = defaults::policy_file_deny_rule(policy_file);
-        if !entries.contains(&rule) {
-            entries.push(rule);
-        }
-    }
-    // Splice in BEFORE the trailing `.env*`/`.npmrc` floor rather than appending: appending
-    // would leave the floor no longer last, and it is located POSITIONALLY
-    // (`defaults::env_deny_floor_start`, which the Linux backend calls to tell an explicit
-    // user deny from the builtin floor). These home-secret denies still land after every
-    // band-1 allow, which is all their re-assertion needs; ordering among denies does not
-    // affect any verdict.
-    let at = defaults::env_deny_floor_start(entries).unwrap_or(entries.len());
-    entries.splice(at..at, denies);
+    policy.fs.rules.entries.retain(|r| r.effect != Effect::Deny);
 }
 
 /// Grant the build-jail interpreter closure (the provisioned Node + the PATH-prepended
@@ -305,12 +283,11 @@ fn build_jail_surface(package_dir: Option<&Path>) -> Value {
         // closed on every install there.
         fs.insert(dir.to_string_lossy().into_owned(), json!("rw"));
     }
-    // D6, and now a CROSS-PLATFORM floor rather than a Linux carve-out: the Linux minimal
-    // root no longer mounts `/etc` wholesale, but macOS's Seatbelt base still grants
-    // `/etc` + `/private/etc` as a subpath, so these denies are what keeps the two
-    // password-hash files unreadable there.
-    fs.insert("/etc/shadow".to_string(), json!(false));
-    fs.insert("/etc/gshadow".to_string(), json!(false));
+    // NO `/etc/shadow` deny here any more. The build jail is a PURE ALLOWLIST — it emits no
+    // deny rules at all — so the password-hash files are protected by not being granted:
+    // free on Linux (the minimal root binds `/etc` LEAVES, never the directory), and on
+    // macOS by the Seatbelt base granting the specific `/private/etc` files it needs instead
+    // of the whole subpath (`macos_seatbelt_base.sbpl`).
     json!({
         "fs": Value::Object(fs),
         "net": build_jail_net(),
@@ -381,7 +358,7 @@ pub fn compile_build_jail(
     grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx, Some(package_dir));
     grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
     grant_build_jail_extra_reads(&mut policy, &extra_reads);
-    reassert_secret_floor("build-jail", &mut policy, &ctx);
+    enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
     Ok(policy)
 }
@@ -407,28 +384,129 @@ mod tests {
         compile(&json!("build-jail"), &ctx).expect("build-jail preset compiles")
     }
 
-    /// The secret-file floor must remain the LAST fs entries after the preset re-asserts
-    /// its home-secret denies. The Linux backend reads that boundary positionally to decide
-    /// whether a denied dotenv file is masked unreadable or present-but-empty, so a floor
-    /// displaced by the re-assert reads as absent and silently downgrades an explicit deny.
+    /// The PRODUCTION path — what every lifecycle spawn actually runs. Reaches the fold with
+    /// a `package_dir` allow present, so the fold's env-deny finalizer fires here where it
+    /// declines on the denies-only static skeleton; that difference is exactly why the
+    /// pure-allowlist invariant is asserted on both.
+    fn production_build_jail_policy() -> SandboxPolicy {
+        let homes = Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        compile_build_jail(
+            homes,
+            Path::new("/proj/node_modules/somepkg"),
+            vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
+            vec![PathBuf::from(
+                "/testhome/.cache/nub/node/v26/lib/node_modules",
+            )],
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles")
+    }
+
+    /// THE build-jail invariant: the compiled policy is a PURE ALLOWLIST — zero deny rules.
+    /// Rationale on [`enforce_pure_allowlist`]. Asserted on BOTH entry points because they
+    /// reach the fold differently: the static skeleton folds to denies-only so the env-deny
+    /// finalizer declines, while the production path folds with a `package_dir` allow present
+    /// and the finalizer fires.
     #[test]
-    fn build_jail_secret_reassert_keeps_the_env_floor_trailing() {
-        let policy = build_jail_policy();
-        let entries = &policy.fs.rules.entries;
-        let floor_len =
-            defaults::ENV_DENY_LEAF_GLOBS.len() + defaults::ENV_DENY_SUBTREE_GLOBS.len();
-        assert_eq!(
-            defaults::env_deny_floor_start(entries),
-            Some(entries.len() - floor_len),
-            "the build-jail preset must leave the {floor_len} secret-file floor entries last; \
-             found trailing entries {:?}",
-            entries
+    fn build_jail_emits_no_deny_rules() {
+        for (label, policy) in [
+            ("static --sandbox build-jail", build_jail_policy()),
+            ("compile_build_jail", production_build_jail_policy()),
+        ] {
+            let denies: Vec<&str> = policy
+                .fs
+                .rules
+                .entries
                 .iter()
-                .rev()
-                .take(8)
+                .filter(|r| r.effect == Effect::Deny)
                 .map(|r| r.matcher.as_str())
-                .collect::<Vec<_>>()
+                .collect();
+            assert!(
+                denies.is_empty(),
+                "{label} must compile to a pure allowlist; found deny rules {denies:?}"
+            );
+            assert_eq!(
+                policy.fs.rules.default_effect,
+                Effect::Deny,
+                "{label}: the allowlist only confines over a default-deny base"
+            );
+        }
+    }
+
+    /// The strip is BUILD-JAIL ONLY. A general policy still carries the secret floor, and
+    /// must — it has no narrow compiler-authored grant set to withhold secrets by shape, so
+    /// its `.env` protection genuinely is the deny band. Guards against the `name` gate being
+    /// dropped or `enforce_pure_allowlist` being hoisted into the shared compile path.
+    #[test]
+    fn a_general_policy_keeps_its_secret_floor() {
+        let ctx = CompileCtx::new(
+            Homes {
+                home: PathBuf::from("/testhome"),
+                tmp: PathBuf::from("/testtmp"),
+                cache: PathBuf::from("/testhome/.cache"),
+                project: PathBuf::from("/proj"),
+            },
+            PathBuf::from("/proj"),
+            ScopeCapabilities::approved(),
+            BTreeMap::new(),
         );
+        for surface in [json!(true), json!({ "fs": ["./"] })] {
+            let policy = compile(&surface, &ctx).expect("compiles");
+            assert!(
+                policy
+                    .fs
+                    .rules
+                    .entries
+                    .iter()
+                    .any(|r| r.effect == Effect::Deny),
+                "a general policy ({surface}) must keep its denies — only build-jail is stripped"
+            );
+            let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+            assert_eq!(
+                m.decide(Path::new("/proj/.env")).effect,
+                Effect::Deny,
+                "the `.env` floor must still hold for a general policy ({surface})"
+            );
+        }
+    }
+
+    /// The other half of the invariant: dropping the denies must not make anything readable.
+    /// Each secret is now withheld by NOT BEING GRANTED, so the matcher must still refuse it
+    /// — including the `/etc` password hashes, which lost their explicit deny when the
+    /// Seatbelt base stopped granting `/etc` as a subpath.
+    #[test]
+    fn build_jail_withholds_every_secret_without_a_single_deny() {
+        let policy = production_build_jail_policy();
+        let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        for secret in [
+            "/testhome/.ssh/id_rsa",
+            "/testhome/.aws/credentials",
+            "/testhome/.npmrc",
+            "/testhome/.config/gh/hosts.yml",
+            "/etc/shadow",
+            "/etc/gshadow",
+            "/proj/.env",
+            "/proj/.env.local",
+            "/proj/src/index.ts",
+            "/proj/.git/config",
+            "/proj/.github/workflows/release.yml",
+            // The policy file that CONFIGURES this jail. `fold::finalize_policy_file_deny`
+            // used to self-exclude it explicitly; the strip removes that, so the guarantee
+            // now rests entirely on the project root being ungranted. Pinned here because a
+            // future grant that reached the project root would silently reopen it.
+            "/proj/nub.jsonc",
+        ] {
+            assert_eq!(
+                m.decide(Path::new(secret)).effect,
+                Effect::Deny,
+                "{secret} must be unreachable by construction (ungranted), not by a deny rule"
+            );
+        }
     }
 
     /// The build jail's toolchain read was CARVED OUT of `$tooldirs`, so it must remain a
@@ -461,25 +539,6 @@ mod tests {
             inside,
             "the build jail's {NUB_PM_CACHE_PATTERN} grant expanded to {grant}, which no \
              $tooldirs pattern covers — the carve-out has drifted from the set it came from"
-        );
-    }
-
-    /// Guards the other half: the re-assert must still HAPPEN. Without it a home secret
-    /// overlapping a `$tooldirs` grant would stay readable, and the test above would pass
-    /// vacuously if the re-assert were simply deleted.
-    #[test]
-    fn build_jail_reasserts_the_home_secret_denies() {
-        let policy = build_jail_policy();
-        let ssh_denies = policy
-            .fs
-            .rules
-            .entries
-            .iter()
-            .filter(|r| r.effect == Effect::Deny && r.matcher.as_str().contains("/.ssh"))
-            .count();
-        assert!(
-            ssh_denies > 0,
-            "build-jail must re-assert the home-secret read denies"
         );
     }
 }
