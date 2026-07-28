@@ -145,11 +145,13 @@ jobs:
           # The task body goes in a FILE: schtasks caps /tr at 261 characters.
           # PowerShell, never cmd.exe: a cmd ancestor injects hidden `=C:` drive-cwd vars
           # and the sandbox rejects them as invalid env keys, which would void every cell.
-          @'
-whoami /groups | Out-File -Encoding utf8 C:\nubprobe\out\who.txt
-& 'C:\nubprobe\windows_clean_root.exe' *> 'C:\nubprobe\out\probe.txt'
-$LASTEXITCODE | Out-File -Encoding utf8 C:\nubprobe\out\rc.txt
-'@ | Set-Content -Encoding utf8 C:\nubprobe\run.ps1
+          $body = @(
+            'whoami /groups | Out-File -Encoding utf8 C:\nubprobe\out\who.txt',
+            "& 'C:\nubprobe\windows_clean_root.exe' *> 'C:\nubprobe\out\probe.txt'",
+            '$LASTEXITCODE | Out-File -Encoding utf8 C:\nubprobe\out\rc.txt'
+          )
+          Set-Content -Encoding utf8 -Path C:\nubprobe\run.ps1 -Value $body
+          icacls C:\nubprobe\run.ps1 /grant 'nubstd:(RX)' | Out-Null
           $action = 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\nubprobe\run.ps1'
           schtasks /create /tn nubprobe /tr $action /sc once /st 23:59 /ru nubstd /rp $pw /rl LIMITED /f
           if ($LASTEXITCODE -ne 0) { throw "schtasks /create failed" }
