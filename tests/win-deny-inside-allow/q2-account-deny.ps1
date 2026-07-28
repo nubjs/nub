@@ -93,10 +93,20 @@ try {
 
     Section 'Stamp the DENY ACEs'
     # .env      : allow is INHERITED from stage, deny is EXPLICIT on the file.
-    # .env-exp  : allow is ALSO made EXPLICIT on the file, so the deny competes with an explicit allow.
-    & icacls $fEnvExp /grant "${acctFull}:(R)" | Out-Null
-    $d1 = (& icacls $fEnv    /deny "${acctFull}:(R)" 2>&1 | Out-String); Note "deny .env      rc=$LASTEXITCODE : $($d1.Trim())"
-    $d2 = (& icacls $fEnvExp /deny "${acctFull}:(R)" 2>&1 | Out-String); Note "deny .env-exp  rc=$LASTEXITCODE : $($d2.Trim())"
+    # .env-exp  : an EXPLICIT allow is placed alongside the explicit deny, so the deny competes with
+    #             an explicit allow for the same principal on the same object -- i.e. the test is the
+    #             canonical ACE ORDERING rule, not merely explicit-beats-inherited.
+    #             ORDER MATTERS HERE: `icacls /deny` documents that it removes the same permissions
+    #             from any explicit grant, so granting first and denying second leaves NO explicit
+    #             allow behind (run 1 did exactly that and the cell silently degenerated into a copy
+    #             of the .env cell). Deny first, then grant.
+    $d1 = (& icacls $fEnv    /deny  "${acctFull}:(R)" 2>&1 | Out-String); Note "deny  .env     rc=$LASTEXITCODE : $($d1.Trim())"
+    $d2 = (& icacls $fEnvExp /deny  "${acctFull}:(R)" 2>&1 | Out-String); Note "deny  .env-exp rc=$LASTEXITCODE : $($d2.Trim())"
+    $d2b= (& icacls $fEnvExp /grant "${acctFull}:(R)" 2>&1 | Out-String); Note "grant .env-exp rc=$LASTEXITCODE : $($d2b.Trim())"
+    $expAcl = (& icacls $fEnvExp 2>&1 | Out-String)
+    $hasBoth = ($expAcl -match '\(DENY\)') -and ($expAcl -match "(?m)^\s*\S*${acct}:\(R\)")
+    Note ".env-exp carries BOTH an explicit deny and an explicit allow: $hasBoth"
+    if(-not $hasBoth){ Note "WARNING: the explicit-allow-vs-explicit-deny cell did not materialize; treat it as a duplicate of the inherited-allow cell" }
 
     # Q3: the FLOOR shape. NT DACLs are per-object, so a ".env*" floor can only be applied by
     # ENUMERATING matches at setup time. icacls' wildcard is command-time glob expansion, not a

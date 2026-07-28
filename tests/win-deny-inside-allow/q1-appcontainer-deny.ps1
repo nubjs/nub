@@ -61,9 +61,30 @@ if ($hr -ne 0) { throw "CreateAppContainerProfile failed hr=0x$("{0:X8}" -f $hr)
 $acSidStr = [AC]::SidToString($acSidPtr)
 Write-Host "per-run AppContainer SID: $acSidStr"
 
-function Launch-Read($path, $lpac){
-    try { return [AC]::LaunchEx($acSidPtr, $null, $lpac, "`"$child`" read `"$path`"", $bin) }
-    catch { Note "LAUNCH FAILED (not a deny -- inconclusive): $($_.Exception.Message)"; return 255 }
+# Two readers, both normalizing to OK / BLOCKED / LAUNCHFAIL. A LAUNCHFAIL is NEVER read as a deny.
+#   clr : the C# probe-child. Precise (it distinguishes ACCESS_DENIED from other errors) but it
+#         hosts the CLR, and an LPAC process cannot load the .NET Framework runtime (the Framework
+#         directories grant AAP, which LPAC ignores) -- run 1 failed every LPAC cell with
+#         0x80131702 CLR_E_SHIM_RUNTIMELOAD, i.e. the child never started.
+#   cmd : cmd.exe is a pure Win32 System32 image, which DOES carry an ARAP grant, so it starts under
+#         LPAC. 'type' exits 0 on a successful read and non-zero when it cannot open the file. It
+#         cannot name the failure reason, but the seeded file plus the ARM A / ARM C controls
+#         already exclude not-found and unreadable-for-other-reasons.
+function Read-Clr($path, $lpac){
+    try { $c = [AC]::LaunchEx($acSidPtr, $null, $lpac, "`"$child`" read `"$path`"", $bin) }
+    catch { Note "LAUNCH FAILED (not a deny): $($_.Exception.Message)"; return 'LAUNCHFAIL' }
+    if($c -eq 0){ return 'OK' }
+    if($c -eq 5){ return 'BLOCKED' }
+    if($c -eq 2148734722){ Note "child exit 0x80131702 CLR_E_SHIM_RUNTIMELOAD -- the CLR never loaded (not a deny)"; return 'LAUNCHFAIL' }
+    return "OTHER($c)"
+}
+function Read-Cmd($path, $lpac){
+    try { $c = [AC]::LaunchEx($acSidPtr, $null, $lpac, "cmd.exe /c type `"$path`" >nul 2>&1", $bin) }
+    catch { Note "LAUNCH FAILED (not a deny): $($_.Exception.Message)"; return 'LAUNCHFAIL' }
+    if($c -eq 0){ return 'OK' } else { return 'BLOCKED' }
+}
+function Launch-Read($path, $lpac, $reader){
+    if($reader -eq 'cmd'){ return Read-Cmd $path $lpac } else { return Read-Clr $path $lpac }
 }
 
 try {
@@ -84,12 +105,12 @@ try {
     & icacls $vault /inheritance:r /grant:r "${me}:(OI)(CI)(F)" | Out-Null
     $vsec = Join-Path $vault 'never-granted.txt'; Set-Content $vsec 'NEVER' -NoNewline
     Note "vault ACL:`n$((& icacls $vsec | Out-String).Trim())"
-    $tn = Launch-Read $vsec $false
-    Note "read never-granted file = $tn  (MUST be 5)"
-    if($tn -ne 5){ $fail.Add("TRUE-NEGATIVE control broke: ungranted read gave $tn, expected 5 -- the child is not confined, so no Q1 cell can be trusted") }
+    $tn = Launch-Read $vsec $false 'clr'
+    Note "read never-granted file = $tn  (MUST be BLOCKED)"
+    if($tn -ne 'BLOCKED'){ $fail.Add("TRUE-NEGATIVE control broke: ungranted read gave $tn, expected BLOCKED -- the child is not confined, so no Q1 cell can be trusted") }
 
     # ---- the deny cells -----------------------------------------------------------------------
-    function Test-DenyCell($tag, $allowSid, $allowLabel, $denySid, $denyLabel, $lpac){
+    function Test-DenyCell($tag, $allowSid, $allowLabel, $denySid, $denyLabel, $lpac, $reader){
         Section "CELL $tag -- allow=$allowLabel deny=$denyLabel lpac=$lpac"
         $r = Join-Path $stage $tag; New-Item -ItemType Directory -Path $r -Force | Out-Null
         & icacls $r /inheritance:r /grant:r "${me}:(OI)(CI)(F)" | Out-Null
@@ -104,46 +125,51 @@ try {
         Note "--- secret.txt SDDL   WITH deny (ACE ORDER is left-to-right; D: = DACL) ---"
         Note "$((Get-Acl $sec).Sddl)"
 
-        $a = Launch-Read $pub $lpac      # ARM A  positive control (sibling)
-        $b = Launch-Read $sec $lpac      # ARM B  the measurement
+        $a = Launch-Read $pub $lpac $reader   # ARM A  positive control (sibling)
+        $b = Launch-Read $sec $lpac $reader   # ARM B  the measurement
 
         # ARM C: remove ONLY the deny ACE, change nothing else, re-read the SAME file.
         $rm = (& icacls $sec /remove:d "*${denySid}" 2>&1 | Out-String); $rmRc = $LASTEXITCODE
         Note "remove-deny rc=$rmRc : $($rm.Trim())"
         Note "--- secret.txt icacls WITHOUT deny ---`n$((& icacls $sec | Out-String).Trim())"
-        $c = Launch-Read $sec $lpac      # ARM C  positive control (same file, deny gone)
+        $c = Launch-Read $sec $lpac $reader   # ARM C  positive control (same file, deny gone)
 
-        Note "ARM A public(with deny in place)=$a  ARM B secret(deny)=$b  ARM C secret(deny removed)=$c"
+        Note "ARM A public(with deny in place)=$a  ARM B secret(deny)=$b  ARM C secret(deny removed)=$c  reader=$reader"
 
         $verdict = ''
-        if($a -ne 0){
-            $verdict = "INVALID: ARM A positive control failed (public read=$a, expected 0) -- the allow grant or launch never worked"
+        if($a -ne 'OK'){
+            $verdict = "INVALID: ARM A positive control = $a (expected OK) -- the allow grant or the launch never worked, so ARM B means nothing"
             $fail.Add("$tag ARM A control failed ($a)")
-        } elseif($c -ne 0){
-            $verdict = "INVALID: ARM C positive control failed (secret read after deny removal=$c, expected 0) -- the file was unreadable for a reason other than the deny"
+        } elseif($c -ne 'OK'){
+            $verdict = "INVALID: ARM C positive control = $c (expected OK) -- the file was unreadable for a reason other than the deny"
             $fail.Add("$tag ARM C control failed ($c)")
-        } elseif($b -eq 0){
-            $verdict = "DENY INERT -- controls both green (A=0, C=0) and the child read the denied file anyway (B=0)"
-        } elseif($b -eq 5){
-            $verdict = "DENY BINDS -- controls both green and the denied read was ACCESS_DENIED (B=5)"
+        } elseif($b -eq 'OK'){
+            $verdict = "DENY INERT -- controls both green (A=OK, C=OK) and the child read the denied file anyway"
+        } elseif($b -eq 'BLOCKED'){
+            $verdict = "DENY BINDS -- controls both green and the denied read was blocked"
         } else {
-            $verdict = "INDETERMINATE: B=$b (neither 0 nor 5)"
+            $verdict = "INDETERMINATE: ARM B = $b"
             $fail.Add("$tag ARM B indeterminate ($b)")
         }
         Write-Host "VERDICT $tag : $verdict"
         $verdicts.Add("$tag (allow=$allowLabel deny=$denyLabel lpac=$lpac) A=$a B=$b C=$c : $verdict")
     }
 
-    Test-DenyCell 'c1_allowAC_denyAC'   $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $false
-    Test-DenyCell 'c2_allowAAP_denyAC'  $AAP      'AAP'            $acSidStr 'per-run AC SID' $false
-    Test-DenyCell 'c3_allowAAP_denyAAP' $AAP      'AAP'            $AAP      'AAP'            $false
-    Test-DenyCell 'c4_allowAC_denyAAP'  $acSidStr 'per-run AC SID' $AAP      'AAP'            $false
+    Test-DenyCell 'c1_allowAC_denyAC'   $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $false 'clr'
+    Test-DenyCell 'c2_allowAAP_denyAC'  $AAP      'AAP'            $acSidStr 'per-run AC SID' $false 'clr'
+    Test-DenyCell 'c3_allowAAP_denyAAP' $AAP      'AAP'            $AAP      'AAP'            $false 'clr'
+    Test-DenyCell 'c4_allowAC_denyAAP'  $acSidStr 'per-run AC SID' $AAP      'AAP'            $false 'clr'
 
-    # LPAC cells. An LPAC child ignores AAP grants entirely, so the dir must grant the AC SID (or
-    # ARAP) for ARM A to pass. If ARM A fails here it is an LPAC launch/loader problem, and the cell
-    # is reported INVALID rather than being read as a deny.
-    Test-DenyCell 'c5_LPAC_allowAC_denyAC'   $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $true
-    Test-DenyCell 'c6_LPAC_allowARAP_denyAC' $ARAP     'ARAP'           $acSidStr 'per-run AC SID' $true
+    # Cross-check the ordinary-AppContainer answer with the OTHER reader, so the result cannot be an
+    # artifact of the C# child's own file-open path.
+    Test-DenyCell 'c1b_allowAC_denyAC_cmdreader' $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $false 'cmd'
+
+    # LPAC cells use the cmd reader: an LPAC process cannot load the .NET Framework CLR, so the C#
+    # child never starts there (measured in run 1). An LPAC child ignores AAP grants entirely, so the
+    # dir must grant the per-run AC SID or ARAP for ARM A to pass.
+    Test-DenyCell 'c5_LPAC_allowAC_denyAC'   $acSidStr 'per-run AC SID' $acSidStr 'per-run AC SID' $true 'cmd'
+    Test-DenyCell 'c6_LPAC_allowARAP_denyAC' $ARAP     'ARAP'           $acSidStr 'per-run AC SID' $true 'cmd'
+    Test-DenyCell 'c7_LPAC_allowARAP_denyARAP' $ARAP   'ARAP'           $ARAP     'ARAP'           $true 'cmd'
 }
 finally {
     [void][AC]::DeleteAppContainerProfile($acName)
