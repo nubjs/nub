@@ -426,6 +426,8 @@ pub(crate) enum LandlockUnavailable {
     /// The grant shape itself is inexpressible (see [`reject_narrowing_grants`]), or the
     /// mount plan refused.
     PolicyNotExpressible(String),
+    /// `NUB_SANDBOX_MECHANISM=bubblewrap` pinned the selector for a differential run.
+    PinnedToBubblewrap,
 }
 
 /// Choose the Linux enforcement mechanism for `policy`. THE decision point — kept as one
@@ -444,6 +446,15 @@ pub(crate) enum LandlockUnavailable {
 /// one place enforcement quietly weakens. On a host with neither mechanism the caller still
 /// fails closed exactly as it does today.
 pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, LandlockUnavailable> {
+    // INTERNAL mechanism pin, for differential testing only. The two backends enforce the
+    // same policy through different primitives, so "did behaviour change?" is only
+    // answerable by running both on ONE host — which needs a way to hold the selector
+    // still. Not a user knob and not documented as one; absent or unrecognised leaves the
+    // ordinary selection below untouched.
+    match std::env::var("NUB_SANDBOX_MECHANISM").as_deref() {
+        Ok("bubblewrap") => return Err(LandlockUnavailable::PinnedToBubblewrap),
+        Ok("landlock") | Err(_) | Ok(_) => {}
+    }
     let abi = probe_abi().ok_or(LandlockUnavailable::NoKernelSupport)?;
     if policy
         .fs
