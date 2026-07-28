@@ -117,7 +117,18 @@ struct Mask {
     path: PathBuf,
     kind: MaskKind,
     directory: bool,
+    /// Position of the deny rule that produced this mask in `FsRuleSet::entries`, which
+    /// is the emitter's interleaving key. [`INFRASTRUCTURE_ORDER`] marks a mask the
+    /// BACKEND installs (network-equivalent sockets, alternate procfs, keyring metadata)
+    /// rather than one the policy authored; those have no authored position and sort
+    /// after every policy operation, which is where they have always been emitted.
+    order: usize,
 }
+
+/// Sort key for a mask with no authored position. Deliberately the maximum: an
+/// infrastructure mask is unconditional, so it must never be layered under — and thereby
+/// clobbered by — a policy bind.
+const INFRASTRUCTURE_ORDER: usize = usize::MAX;
 
 const FIRST_LAUNCH_DATA_FD: RawFd = super::linux_monitor::SIGNAL_RELAY_FD + 1;
 const MAX_BUNDLED_BWRAP_BYTES: u64 = 16 * 1024 * 1024;
@@ -305,12 +316,6 @@ pub(crate) fn preflight(
             reason: Some(reason),
         },
     )?;
-    validate_masks_against_mount_plan(policy, &masks, &mount_plan).map_err(|reason| {
-        Degradation {
-            lost: vec!["fs-read-deny".to_string()],
-            reason: Some(reason),
-        }
-    })?;
     validate_entry_visibility(&entry_program, policy.fs.tmp, &masks, &mount_plan).map_err(
         |reason| Degradation {
             lost: vec!["process-entry".to_string()],
@@ -584,6 +589,52 @@ fn configure_retained_outer(
     })
 }
 
+/// One filesystem operation the emitter writes, carrying which policy rule asked for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FsOp<'a> {
+    Bind(&'a MountGrant),
+    Mask(&'a Mask),
+}
+
+/// Merge the compiled grants and the collected masks into the single stream the policy
+/// authored, so last-match-wins survives into the mount layout.
+///
+/// One containment property is enforced here rather than assumed: a bind on a mask's own
+/// path or on an ANCESTOR of it replaces that whole subtree with the host's view, so such
+/// a mask is pushed past the bind instead of being layered under it. Last-match-wins
+/// already keeps the shape from arising through the surface grammar — an ancestor allow
+/// carries a `/**` twin that wins the mask's own path, so no mask is produced at all — but
+/// a deny that survives collection must not depend on the compiler for that.
+fn order_fs_operations<'a>(mount_plan: &'a [MountGrant], masks: &'a [Mask]) -> Vec<FsOp<'a>> {
+    // Rank 0 vs 1 breaks a tie toward the bind, which is what puts a clamped mask AFTER
+    // the bind it was clamped to rather than merely alongside it.
+    let mut ops: Vec<(usize, u8, FsOp<'a>)> = mount_plan
+        .iter()
+        .map(|grant| (grant.rule_index, 0, FsOp::Bind(grant)))
+        .collect();
+    ops.extend(masks.iter().map(|mask| {
+        let shadowed_by = mount_plan
+            .iter()
+            .filter(|grant| mask.path.starts_with(&grant.path))
+            .map(|grant| grant.rule_index)
+            .max();
+        let order = shadowed_by.map_or(mask.order, |bind| mask.order.max(bind));
+        (order, 1, FsOp::Mask(mask))
+    }));
+    ops.sort_by_key(|(order, rank, _)| (*order, *rank));
+    ops.into_iter().map(|(_, _, op)| op).collect()
+}
+
+/// Whether any LATER operation binds something strictly inside `mask`, which the mask's
+/// permissions must therefore leave traversable. A nested mask needs no traversal — it is
+/// hidden either way — so only binds count.
+fn reopened_below(rest: &[FsOp<'_>], mask: &Path) -> bool {
+    rest.iter().any(|op| match op {
+        FsOp::Bind(grant) => grant.path != mask && grant.path.starts_with(mask),
+        FsOp::Mask(_) => false,
+    })
+}
+
 /// Bubblewrap options that carry the whole policy, in the order Bubblewrap applies
 /// them. Split out from [`configure_retained_outer`] so the option sequence — the
 /// actual filesystem and namespace boundary — is assertable without a real
@@ -654,45 +705,78 @@ fn append_confinement_options(
         }
     }
 
-    for grant in mount_plan {
-        setup
-            .arg(match grant.access {
-                MountAccess::ReadOnly => "--ro-bind",
-                MountAccess::ReadWrite => "--bind",
-            })
-            .arg(&grant.path)
-            .arg(&grant.path);
-    }
+    // ONE policy-ordered stream of binds and masks. Bubblewrap applies operations strictly
+    // in argv order and CREATES its own mountpoints — `SETUP_BIND_MOUNT` calls
+    // `ensure_dir`/`ensure_file`, whose parents come from `mkdir_with_parents` — so a bind
+    // INSIDE an earlier deny's tmpfs layers on top of it with no `--dir` scaffolding. That
+    // is the whole mechanism behind an interleaved policy like
+    // `["./", "!./private", "./private/reopened"]`. Emitting every grant and only then
+    // every mask, as this once did, throws the interleaving away: the mask lands last and
+    // silently swallows the reopen, with the launch still reporting success.
+    let ops = order_fs_operations(mount_plan, masks);
     let mut mask_sources = Vec::new();
-    for mask in masks.iter().filter(|mask| !mask.directory) {
-        let source = open_inheritable_dev_null()
-            .and_then(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
-            .map_err(|error| Degradation {
-                lost: vec!["fs-read-deny".to_string()],
-                reason: Some(format!("opening empty mask source: {error}")),
-            })?;
-        setup
-            .arg("--perms")
-            .arg(match mask.kind {
-                MaskKind::EmptyReadable => "444",
-                MaskKind::Unreadable => "000",
-            })
-            .arg("--ro-bind-data")
-            .arg(source.as_raw_fd().to_string())
-            .arg(&mask.path);
-        mask_sources.push(source);
+    let mut deferred_remounts: Vec<&Path> = Vec::new();
+    for position in 0..ops.len() {
+        match ops[position] {
+            FsOp::Bind(grant) => {
+                setup
+                    .arg(match grant.access {
+                        MountAccess::ReadOnly => "--ro-bind",
+                        MountAccess::ReadWrite => "--bind",
+                    })
+                    .arg(&grant.path)
+                    .arg(&grant.path);
+            }
+            FsOp::Mask(mask) if !mask.directory => {
+                let source = open_inheritable_dev_null()
+                    .and_then(super::linux_monitor::RetainedMonitorLaunch::relocate_setup_file)
+                    .map_err(|error| Degradation {
+                        lost: vec!["fs-read-deny".to_string()],
+                        reason: Some(format!("opening empty mask source: {error}")),
+                    })?;
+                setup
+                    .arg("--perms")
+                    .arg(match mask.kind {
+                        MaskKind::EmptyReadable => "444",
+                        MaskKind::Unreadable => "000",
+                    })
+                    .arg("--ro-bind-data")
+                    .arg(source.as_raw_fd().to_string())
+                    .arg(&mask.path);
+                mask_sources.push(source);
+            }
+            FsOp::Mask(mask) => {
+                setup
+                    .arg("--perms")
+                    .arg(match mask.kind {
+                        MaskKind::EmptyReadable => "555",
+                        // 000 removes TRAVERSAL, not merely listing, and every launch
+                        // drops CAP_DAC_READ_SEARCH — so a grant reopened underneath this
+                        // mask would be mounted and then unreachable. 111 is the only
+                        // value that admits the descent while still refusing to list the
+                        // directory, read what it hides, or accept a write; it is also
+                        // what the Seatbelt backend expresses for the same policy.
+                        MaskKind::Unreadable if reopened_below(&ops[position + 1..], &mask.path) => {
+                            "111"
+                        }
+                        MaskKind::Unreadable => "000",
+                    })
+                    .arg("--tmpfs")
+                    .arg(&mask.path);
+                // `--remount-ro` is what actually makes the tmpfs unwritable — a perms-000
+                // tmpfs is still writable under a caps-RETAINING flag set, so the perms
+                // alone are not the write barrier. Applied immediately after its `--tmpfs`,
+                // though, it seals the directory BEFORE Bubblewrap can create a nested
+                // bind's mountpoint inside it, and the launch dies on EROFS from
+                // `ensure_dir`. It does not recurse into submounts, so deferring every one
+                // past the whole stream keeps the reopened binds writable and still seals
+                // the mask itself.
+                deferred_remounts.push(&mask.path);
+            }
+        }
     }
-    for mask in masks.iter().filter(|mask| mask.directory) {
-        setup
-            .arg("--perms")
-            .arg(match mask.kind {
-                MaskKind::EmptyReadable => "555",
-                MaskKind::Unreadable => "000",
-            })
-            .arg("--tmpfs")
-            .arg(&mask.path)
-            .arg("--remount-ro")
-            .arg(&mask.path);
+    for path in deferred_remounts {
+        setup.arg("--remount-ro").arg(path);
     }
     // Nub infrastructure is layered after authored masks at a reserved destination
     // below the fresh /dev view. The child never receives the host temporary path,
@@ -1137,10 +1221,19 @@ fn collect_masks(
         }
         if verdict.effect == Effect::Deny || masks_subtree {
             reject_denied_hardlink(&logical, &path, &metadata)?;
+            // The mask belongs where the policy LAST spoke about this path — the same
+            // evaluation `verdict` just made, read as a position instead of an effect.
+            // Deriving it here rather than from the loop above covers the snapshot-walk
+            // candidates identically: they have no single originating rule, and the deny
+            // that decided them is exactly the one whose position they should take.
+            let order = matcher
+                .last_matching_index(&logical, &path)
+                .unwrap_or(INFRASTRUCTURE_ORDER);
             masks.push(Mask {
                 path,
                 kind,
                 directory: metadata.is_dir(),
+                order,
             });
         }
     }
@@ -1339,6 +1432,10 @@ fn merge_masks(masks: Vec<Mask>) -> Vec<Mask> {
                     current.kind = MaskKind::Unreadable;
                 }
                 current.directory |= mask.directory;
+                // Two masks on one path merge to the LATER position, so a path that is
+                // both policy-denied and backend infrastructure keeps the infrastructure
+                // mask's unconditional placement instead of sorting under a bind.
+                current.order = current.order.max(mask.order);
             })
             .or_insert(mask);
     }
@@ -1356,29 +1453,6 @@ fn merge_masks(masks: Vec<Mask>) -> Vec<Mask> {
                     .any(|dir| mask.path != *dir && mask.path.starts_with(dir))
         })
         .collect()
-}
-
-fn validate_masks_against_mount_plan(
-    policy: &SandboxPolicy,
-    masks: &[Mask],
-    grants: &[linux_grants::MountGrant],
-) -> Result<(), String> {
-    let matcher = PathMatcher::new(&policy.fs.rules);
-    for mask in masks.iter().filter(|mask| mask.directory) {
-        for grant in grants
-            .iter()
-            .filter(|grant| grant.path != mask.path && grant.path.starts_with(&mask.path))
-        {
-            if matcher.decide(&grant.path).effect == Effect::Allow {
-                return Err(format!(
-                    "denied directory {} contains a later allowed mount {}; stock Bubblewrap cannot preserve that ordering",
-                    mask.path.display(),
-                    grant.path.display()
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn validate_entry_visibility(
@@ -1534,6 +1608,7 @@ fn net_equivalent_socket_mask(path: &Path) -> Result<Option<Mask>, String> {
         path: resolved,
         kind: MaskKind::Unreadable,
         directory: false,
+        order: INFRASTRUCTURE_ORDER,
     }))
 }
 
@@ -1556,6 +1631,7 @@ fn inaccessible_socket_parent_mask(path: &Path) -> Result<Mask, String> {
                     path: resolved,
                     kind: MaskKind::Unreadable,
                     directory: true,
+                    order: INFRASTRUCTURE_ORDER,
                 });
             }
             Ok(_) => {
@@ -1610,6 +1686,7 @@ fn alternate_procfs_masks() -> Result<Vec<Mask>, String> {
                 path: mountpoint,
                 kind: MaskKind::Unreadable,
                 directory: true,
+                order: INFRASTRUCTURE_ORDER,
             });
         }
     }
@@ -1634,6 +1711,7 @@ fn keyring_procfs_masks() -> Result<Vec<Mask>, String> {
                 path,
                 kind: MaskKind::Unreadable,
                 directory: false,
+                order: INFRASTRUCTURE_ORDER,
             })
         })
         .collect()
@@ -3550,15 +3628,19 @@ mod tests {
                 "--bind",
                 &project,
                 &project,
+                // The two denies land in the order the policy authored them: the explicit
+                // `secrets` deny, then the compiler's `.env` floor, which is appended after
+                // every user entry. Each mask's `--remount-ro` is deferred past the whole
+                // stream so a bind reopened inside one can still have its mountpoint made.
+                "--perms",
+                "000",
+                "--tmpfs",
+                &format!("{project}/secrets"),
                 "--perms",
                 "444",
                 "--ro-bind-data",
                 "<fd>",
                 &format!("{project}/.env"),
-                "--perms",
-                "000",
-                "--tmpfs",
-                &format!("{project}/secrets"),
                 "--remount-ro",
                 &format!("{project}/secrets"),
                 "--remount-ro",
@@ -3683,12 +3765,11 @@ mod tests {
         let p = policy(root.path(), json!({"fs": ["**", "./"]}));
         let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
         assert_eq!(
-            masks,
-            vec![Mask {
-                path: project.join(".env"),
-                kind: MaskKind::EmptyReadable,
-                directory: false,
-            }]
+            masks
+                .iter()
+                .map(|mask| (&mask.path, mask.kind, mask.directory))
+                .collect::<Vec<_>>(),
+            vec![(&project.join(".env"), MaskKind::EmptyReadable, false)]
         );
     }
 
@@ -3974,16 +4055,19 @@ mod tests {
                 path: path.clone(),
                 kind: MaskKind::EmptyReadable,
                 directory: false,
+                order: 1,
             },
             Mask {
                 path: PathBuf::from("/z"),
                 kind: MaskKind::EmptyReadable,
                 directory: false,
+                order: 2,
             },
             Mask {
                 path: path.clone(),
                 kind: MaskKind::Unreadable,
                 directory: false,
+                order: 4,
             },
         ]);
         assert_eq!(masks[0].path, path);
@@ -3991,8 +4075,16 @@ mod tests {
         assert_eq!(masks[1].path, PathBuf::from("/z"));
     }
 
+    /// The interleaved shape `[allow parent, deny child, allow grandchild]`, pinned at the
+    /// option level. Bubblewrap applies operations in argv order and makes its own
+    /// mountpoints, so all three of these are required together and each was measured to
+    /// break the reopen on its own: the deny must sit BETWEEN the two binds, its
+    /// `--remount-ro` must come after the nested bind (an immediate one makes the tmpfs
+    /// read-only and `ensure_dir` fails EROFS), and its perms must be 111 rather than 000
+    /// (000 removes traversal, and every launch drops CAP_DAC_READ_SEARCH, so the child
+    /// could not reach the mount at all).
     #[test]
-    fn denied_directory_with_later_allowed_child_is_rejected() {
+    fn a_reopened_child_is_bound_inside_its_denied_parent_and_stays_traversable() {
         let root = tempdir().unwrap();
         let project = root.path().join("project");
         let denied = project.join("denied");
@@ -4002,14 +4094,82 @@ mod tests {
             root.path(),
             json!({"fs": [
                 "**",
+                project.to_string_lossy().to_string(),
                 format!("!{}", denied.display()),
                 child.to_string_lossy().to_string()
             ]}),
         );
         let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
         let plan = linux_grants::compile_mount_plan(&p).unwrap();
-        let error = validate_masks_against_mount_plan(&p, &masks, &plan).unwrap_err();
-        assert!(error.contains("later allowed mount"), "{error}");
+
+        let mut setup = Command::new("");
+        append_confinement_options(
+            &mut setup,
+            &p,
+            RootView::ReadOnly,
+            Path::new("/bin/true"),
+            &plan,
+            &masks,
+            None,
+            None,
+            None,
+            &|command| {
+                command.args(["--tmpfs", "/dev/.nub-sandbox/support"]);
+            },
+        )
+        .unwrap();
+
+        let raw: Vec<String> = setup
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = |needle: &[&str]| {
+            raw.windows(needle.len())
+                .position(|w| w == needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from {raw:?}"))
+        };
+        let denied_str = denied.display().to_string();
+        let child_str = child.display().to_string();
+        let parent_bind = at(&["--bind", &project.display().to_string()]);
+        let mask = at(&["--perms", "111", "--tmpfs", &denied_str]);
+        let child_bind = at(&["--bind", &child_str, &child_str]);
+        let remount = at(&["--remount-ro", &denied_str]);
+        assert!(
+            parent_bind < mask && mask < child_bind && child_bind < remount,
+            "the deny must be layered between the two binds and sealed only after the \
+             reopen: parent={parent_bind} mask={mask} child={child_bind} remount={remount} \
+             in {raw:?}"
+        );
+        assert!(
+            !raw.windows(2).any(|w| w == ["000", "--tmpfs"]),
+            "a mask holding a reopened child must not use traversal-removing 000: {raw:?}"
+        );
+    }
+
+    /// A deny with NOTHING reopened underneath keeps 000 — 111 is the narrow concession
+    /// that a nested bind forces, not the new default.
+    #[test]
+    fn a_denied_directory_with_no_reopen_keeps_traversal_closed() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let denied = project.join("denied");
+        fs::create_dir_all(&denied).unwrap();
+        let p = policy(
+            root.path(),
+            json!({"fs": [
+                "**",
+                project.to_string_lossy().to_string(),
+                format!("!{}", denied.display()),
+            ]}),
+        );
+        let masks = collect_masks(&p, std::slice::from_ref(&project)).unwrap();
+        let plan = linux_grants::compile_mount_plan(&p).unwrap();
+        let ops = order_fs_operations(&plan, &masks);
+        assert!(
+            !reopened_below(&ops, &denied),
+            "no grant lies inside {}: {ops:?}",
+            denied.display()
+        );
     }
 
     #[test]
@@ -4083,6 +4243,7 @@ mod tests {
         let mut plan = vec![linux_grants::MountGrant {
             path: PathBuf::from("/inherited/read-only"),
             access: MountAccess::ReadWrite,
+            rule_index: 0,
         }];
         cap_inherited_read_only_with(&mut plan, |_| true);
         assert_eq!(plan[0].access, MountAccess::ReadOnly);
@@ -4137,12 +4298,14 @@ mod tests {
             path: entry.clone(),
             kind: MaskKind::Unreadable,
             directory: false,
+            order: 0,
         };
         assert!(validate_entry_visibility(&entry, TmpMode::Shared, &[mask], &[]).is_err());
         assert!(validate_entry_visibility(&entry, TmpMode::Deny, &[], &[]).is_err());
         let grant = linux_grants::MountGrant {
             path: PathBuf::from("/tmp/project"),
             access: MountAccess::ReadOnly,
+            rule_index: 0,
         };
         assert!(validate_entry_visibility(&entry, TmpMode::Deny, &[], &[grant]).is_ok());
     }
@@ -4154,6 +4317,7 @@ mod tests {
             path: cwd.clone(),
             kind: MaskKind::Unreadable,
             directory: true,
+            order: 0,
         };
         assert!(
             validate_cwd_visibility(&cwd, RootView::ReadWrite, TmpMode::Shared, &[mask], &[])
@@ -4165,6 +4329,7 @@ mod tests {
         let grant = linux_grants::MountGrant {
             path: PathBuf::from("/tmp/project"),
             access: MountAccess::ReadOnly,
+            rule_index: 0,
         };
         assert!(
             validate_cwd_visibility(&cwd, RootView::Minimal, TmpMode::Private, &[], &[grant])
@@ -4349,12 +4514,14 @@ mod tests {
         let grant = MountGrant {
             path: PathBuf::from("/dev"),
             access: MountAccess::ReadOnly,
+            rule_index: 0,
         };
         assert!(validate_reserved_runtime_view(Path::new("/"), entry, &[grant], &[]).is_err());
         let mask = Mask {
             path: root.join("lib"),
             kind: MaskKind::Unreadable,
             directory: true,
+            order: 0,
         };
         assert!(validate_reserved_runtime_view(Path::new("/"), entry, &[], &[mask]).is_err());
     }

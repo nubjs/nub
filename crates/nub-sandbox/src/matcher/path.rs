@@ -241,8 +241,11 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// once at construction; `decide()` walks the entries and returns the LAST match
 /// (or the ruleset's `default_effect`).
 pub struct PathMatcher {
-    /// Parallel to the ruleset entries: (compiled glob, effect, access).
-    entries: Vec<(GlobMatcher, Effect, FsAccess)>,
+    /// One per COMPILABLE ruleset entry: (compiled glob, effect, access, source index).
+    /// The source index is the position in the original `FsRuleSet`, which a malformed
+    /// glob makes non-identical to the position here — the Linux emitter orders its
+    /// mount operations by that authored position, so it must be the ruleset's.
+    entries: Vec<(GlobMatcher, Effect, FsAccess, usize)>,
     default_effect: Effect,
 }
 
@@ -260,9 +263,9 @@ impl PathMatcher {
     /// validates globs up front, so this only guards a corrupt deserialized IR.
     pub fn new(set: &FsRuleSet) -> Self {
         let mut entries = Vec::with_capacity(set.entries.len());
-        for rule in &set.entries {
+        for (index, rule) in set.entries.iter().enumerate() {
             match compile_glob(rule.matcher.as_str()) {
-                Ok(m) => entries.push((m, rule.effect, rule.access)),
+                Ok(m) => entries.push((m, rule.effect, rule.access, index)),
                 Err(e) => {
                     tracing::warn!(glob = rule.matcher.as_str(), error = %e, "skipping malformed fs glob");
                 }
@@ -309,8 +312,23 @@ impl PathMatcher {
         self.entries
             .iter()
             .take(end)
-            .filter(|(glob, _, _)| glob.is_match(&logical) || glob.is_match(&resolved))
-            .map(|(_, effect, _)| *effect)
+            .filter(|(glob, _, _, _)| glob.is_match(&logical) || glob.is_match(&resolved))
+            .map(|(_, effect, _, _)| *effect)
+            .next_back()
+    }
+
+    /// Authored position of the LAST rule matching either spelling. The Linux emitter
+    /// keys a deny mask's place in the mount-operation stream off this, so a mask lands
+    /// where the policy put the deny that produced it rather than after every grant.
+    /// `None` means no rule matched — the candidate is backend infrastructure, not policy.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn last_matching_index(&self, logical: &Path, resolved: &Path) -> Option<usize> {
+        let logical = normalize_slashes(&logical.to_string_lossy());
+        let resolved = normalize_slashes(&resolved.to_string_lossy());
+        self.entries
+            .iter()
+            .filter(|(glob, _, _, _)| glob.is_match(&logical) || glob.is_match(&resolved))
+            .map(|(_, _, _, index)| *index)
             .next_back()
     }
 
@@ -318,14 +336,14 @@ impl PathMatcher {
     pub(crate) fn matches_deny_entry(&self, logical: &Path, resolved: &Path) -> bool {
         let logical = normalize_slashes(&logical.to_string_lossy());
         let resolved = normalize_slashes(&resolved.to_string_lossy());
-        self.entries.iter().any(|(glob, effect, _)| {
+        self.entries.iter().any(|(glob, effect, _, _)| {
             *effect == Effect::Deny && (glob.is_match(&logical) || glob.is_match(&resolved))
         })
     }
 
     fn decide_normalized(&self, first: &str, second: Option<&str>) -> FsDecision {
         let mut winner: Option<(Effect, FsAccess)> = None;
-        for (glob, effect, access) in &self.entries {
+        for (glob, effect, access, _) in &self.entries {
             if glob.is_match(first) || second.is_some_and(|path| glob.is_match(path)) {
                 winner = Some((*effect, *access));
             }

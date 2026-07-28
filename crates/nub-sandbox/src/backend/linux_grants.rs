@@ -12,6 +12,10 @@ use std::path::PathBuf;
 pub(crate) struct MountGrant {
     pub path: PathBuf,
     pub access: MountAccess,
+    /// Position of the allow rule in `FsRuleSet::entries` that produced this bind.
+    /// The emitter interleaves binds and deny masks by this key, so a bind lands where
+    /// the policy authored it rather than ahead of every mask.
+    pub rule_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +39,7 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
     let mut grants = Vec::new();
     let mut previous_grant: Option<MountGrant> = None;
 
-    for rule in &policy.fs.rules.entries {
+    for (rule_index, rule) in policy.fs.rules.entries.iter().enumerate() {
         let pattern = rule.matcher.as_str();
         if is_whole_root(pattern) {
             grants.clear();
@@ -96,11 +100,21 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
             ));
         }
 
-        let grant = MountGrant { path, access };
+        let grant = MountGrant {
+            path,
+            access,
+            rule_index,
+        };
         // The compiler emits a literal and an adjacent `literal/**` subtree twin.
         // They are one bind operation; no non-adjacent entry is collapsed because
-        // intervening rules can deliberately change the mount layering.
-        if previous_grant.as_ref() != Some(&grant) {
+        // intervening rules can deliberately change the mount layering. The twins
+        // differ only in `rule_index`, so the duplicate test compares what makes them
+        // the same OPERATION — the collapsed grant keeps the EARLIER position, which is
+        // where the pair starts and therefore where the bind belongs in the stream.
+        if previous_grant
+            .as_ref()
+            .is_none_or(|previous| (&previous.path, previous.access) != (&grant.path, grant.access))
+        {
             grants.push(grant.clone());
         }
         previous_grant = Some(grant);
@@ -220,15 +234,18 @@ mod tests {
             vec![
                 MountGrant {
                     path: parent,
-                    access: MountAccess::ReadWrite
+                    access: MountAccess::ReadWrite,
+                    rule_index: 0,
                 },
                 MountGrant {
                     path: child,
-                    access: MountAccess::ReadOnly
+                    access: MountAccess::ReadOnly,
+                    rule_index: 1,
                 },
                 MountGrant {
                     path: grandchild,
-                    access: MountAccess::ReadWrite
+                    access: MountAccess::ReadWrite,
+                    rule_index: 2,
                 },
             ]
         );
@@ -307,6 +324,7 @@ mod tests {
             vec![MountGrant {
                 path: present,
                 access: MountAccess::ReadOnly,
+                rule_index: 1,
             }],
             "only the present speculated path binds; {} is not on this machine",
             absent.display()
@@ -377,17 +395,22 @@ mod tests {
         let plan = compile_mount_plan(&policy).unwrap_or_else(|error| {
             panic!("the build jail must compile where no tool cache exists: {error}")
         });
+        // Compared as (path, access): the preset's absolute rule positions are its own
+        // business, and pinning them here would make this confinement assertion fail on
+        // any unrelated reordering of the jail's speculated reads.
         assert_eq!(
-            plan,
+            plan.iter()
+                .map(|grant| (grant.path.clone(), grant.access))
+                .collect::<Vec<_>>(),
             vec![
-                MountGrant {
-                    path: std::fs::canonicalize(project.join("node_modules")).unwrap(),
-                    access: MountAccess::ReadOnly,
-                },
-                MountGrant {
-                    path: std::fs::canonicalize(&package_dir).unwrap(),
-                    access: MountAccess::ReadWrite,
-                },
+                (
+                    std::fs::canonicalize(project.join("node_modules")).unwrap(),
+                    MountAccess::ReadOnly,
+                ),
+                (
+                    std::fs::canonicalize(&package_dir).unwrap(),
+                    MountAccess::ReadWrite,
+                ),
             ],
             "dropping the absent cache dirs must leave the confinement intact — the \
              dependency tree read-only and the package dir the only writable subtree"
