@@ -7,6 +7,14 @@
 #      is an administrator, so the admin leg alone cannot answer that; the second job
 #      creates a standard local user and re-runs the same binary as that user.
 #
+# ANSWERS (run 30321816008, both jobs green):
+#   1. Volume roots are not uniform — `C:\` grants AAP nothing, `D:\` grants 0x001200a9,
+#      `C:\Users` grants 0x001200a9. EVERY AAP ace found is NON-INHERITABLE, and
+#      `C:\Users\<name>` is SE_DACL_PROTECTED. So a path under the profile already
+#      qualified; a path on another volume or at a volume root never could.
+#   2. No admin. The standard user (BUILTIN\Users, Medium IL, no S-1-5-32-544) secured
+#      roots on both volumes and kept its own read+write.
+#
 # Delete this file before the change graduates to a PR.
 name: win-clean-root-probe
 on:
