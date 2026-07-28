@@ -1,0 +1,15 @@
+# Standalone: an empty [workspace] table keeps this crate OUT of the repo's
+# root cargo workspace so the probe builds in seconds instead of pulling the
+# whole nub/aube dependency graph.
+[workspace]
+
+[package]
+name = "win576-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Pinned to the version the aube workspace resolves (Cargo.lock: junction 2.0.0)
+# so the observed behavior is the behavior of the real linker code path.
+[target.'cfg(windows)'.dependencies]
+junction = "=2.0.0"
