@@ -49,6 +49,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 
@@ -101,7 +102,7 @@ Options:
 Cost: spot c3-standard-8 is a few cents per build. A stray cannot outlive ${MAX_RUN}.
 `;
 
-function parseArgs(argv: string[]) {
+export function parseArgs(argv: string[]) {
   const a = {
     job: "build",
     profile: "fast",
@@ -217,8 +218,9 @@ async function waitForSsh(name: string, ip: string, timeoutMs: number) {
   throw new Error(`remote-build: ssh to ${name} (${ip}) never came up.\nlast: ${lastErr}\nserial tail:\n${serial}`);
 }
 
-async function createInstance(
+export function instanceCreateArgs(
   name: string,
+  pubKey: string,
   opts: { machine: string; onDemand: boolean; fromImage: boolean; selfDestruct: boolean },
 ) {
   const args = [
@@ -228,7 +230,7 @@ async function createInstance(
     "--boot-disk-size", `${DISK_GB}GB`,
     "--boot-disk-type", "pd-balanced",
     "--labels", `${LABEL}=1`,
-    "--metadata", `ssh-keys=${SSH_USER}:${sh("cat", [`${SSH_KEY}.pub`]).trim()}`,
+    "--metadata", `ssh-keys=${SSH_USER}:${pubKey}`,
   ];
   // Layer 2 of the orphan-proofing: GCE deletes the VM server-side at MAX_RUN no matter
   // what happens to this process. Deliberately NOT applied to the image bake — that flow
@@ -241,7 +243,15 @@ async function createInstance(
   if (opts.fromImage) args.push("--image-family", IMAGE_FAMILY, "--image-project", PROJECT);
   else args.push("--image-family", BASE_IMAGE_FAMILY, "--image-project", BASE_IMAGE_PROJECT);
   if (!opts.onDemand) args.push("--provisioning-model", "SPOT");
-  await gcloud(args);
+  return args;
+}
+
+async function createInstance(
+  name: string,
+  opts: { machine: string; onDemand: boolean; fromImage: boolean; selfDestruct: boolean },
+) {
+  const pubKey = sh("cat", [`${SSH_KEY}.pub`]).trim();
+  await gcloud(instanceCreateArgs(name, pubKey, opts));
 }
 
 async function deleteInstance(name: string) {
@@ -257,10 +267,12 @@ async function deleteInstance(name: string) {
 // decide what to skip, and it times out. The allowlist never touches those paths at all:
 // measured 2.2s for the full ~107 MB payload, 0.8s for a few-file delta.
 // tests/node-suite is a populated submodule (~795 MB) and is dropped explicitly.
+export function filterSourceFiles(lsFilesOutput: string) {
+  return lsFilesOutput.split("\n").filter((f) => f && !f.startsWith("tests/node-suite"));
+}
+
 function syncSource(source: string, ip: string) {
-  const files = sh("git", ["ls-files"], { cwd: source })
-    .split("\n")
-    .filter((f) => f && !f.startsWith("tests/node-suite"));
+  const files = filterSourceFiles(sh("git", ["ls-files"], { cwd: source }));
   const listFile = join(tmpdir(), `remote-build-files-${process.pid}-${Math.random().toString(36).slice(2)}.txt`);
   writeFileSync(listFile, files.join("\n") + "\n");
   try {
@@ -291,7 +303,7 @@ mkdir -p runtime/addons
 [ -d node_modules ] || npm install --no-audit --no-fund --loglevel=error
 `;
 
-function jobScript(job: string, profile: string) {
+export function jobScript(job: string, profile: string) {
   if (job === "clippy") {
     return `${PREPARE}cargo clippy --all-targets --all-features -- -D warnings`;
   }
@@ -565,7 +577,11 @@ async function main() {
   process.exit(failed.length ? 1 : 0);
 }
 
-main().catch((e) => {
-  process.stderr.write(`remote-build: ${e?.message || e}\n`);
-  process.exit(1);
-});
+// Same main-gate as scripts/ci-watch.ts: importing this module (tests) must not run it.
+const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  main().catch((e) => {
+    process.stderr.write(`remote-build: ${e?.message || e}\n`);
+    process.exit(1);
+  });
+}
