@@ -1449,12 +1449,16 @@ mod tests {
 
     /// A `TmpMode::Private` policy granting only Node's own bin dir, so a log file in
     /// `/private/tmp` lands inside the shared-tmp deny — the shape that took the build jail down.
-    fn stdio_fixture() -> Option<(PathBuf, TempDir, String, SandboxPolicy)> {
-        let node = std::env::var_os("PATH").and_then(|p| {
+    fn node_on_path() -> Option<PathBuf> {
+        std::env::var_os("PATH").and_then(|p| {
             std::env::split_paths(&p)
                 .map(|d| d.join("node"))
                 .find(|p| p.is_file())
-        })?;
+        })
+    }
+
+    fn stdio_fixture() -> Option<(PathBuf, TempDir, String, SandboxPolicy)> {
+        let node = node_on_path()?;
         let tmp = tempfile::Builder::new()
             .prefix("nub-stdio-")
             .tempdir_in("/private/tmp")
@@ -1561,6 +1565,190 @@ mod tests {
         assert!(
             !prof.contains(&format!("(literal \"{log_str}\")")),
             "a policy-denied stdio path must not be granted back"
+        );
+    }
+
+    /// THE REACHABILITY VERDICT for the withhold branch above: it cannot fire under the BUILD
+    /// JAIL, which is why the residual abort it leaves is a `nub sandbox` shape and not a
+    /// lifecycle-script one. `preset::enforce_pure_allowlist` strips every deny from a
+    /// build-jail policy and [`policy_denies`] reads only explicit `Effect::Deny` entries, so
+    /// the grant is emitted whatever the child's stdio points at.
+    ///
+    /// The `nub sandbox` arm is the control, and it is what stops this passing hollow: the same
+    /// paths through the same call ARE withheld there, so a regression that simply stopped
+    /// withholding would fail here rather than sail through the build-jail half. The paths are
+    /// chosen to sit on the generous-read secret floor for the same reason.
+    #[test]
+    fn the_build_jail_never_withholds_an_inherited_stdio_grant() {
+        use crate::compiler::{CompileCtx, ScopeCapabilities, compile, compile_build_jail};
+        use crate::matcher::Homes;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        let homes = || Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        };
+        let jail = compile_build_jail(
+            homes(),
+            Path::new("/proj/node_modules/somepkg"),
+            vec![PathBuf::from("/testhome/.cache/nub/node/v26/bin/node")],
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        let sandbox = compile(
+            &json!(true),
+            &CompileCtx::new(
+                homes(),
+                PathBuf::from("/proj"),
+                ScopeCapabilities::approved(),
+                BTreeMap::new(),
+            ),
+        )
+        .expect("generous-read wrapper compiles");
+
+        for target in ["/proj/.env.log", "/testhome/.ssh/out.log"] {
+            assert!(
+                !policy_denies(&jail, target),
+                "the build jail must never withhold the stdio grant for {target} — it emits no \
+                 denies, so a redirect there cannot abort the child"
+            );
+            assert!(
+                policy_denies(&sandbox, target),
+                "control: the generous-read wrapper must deny {target}, else the build-jail \
+                 assertion above proves nothing"
+            );
+        }
+    }
+
+    /// The contract for what an inherited stdio descriptor earns, across the four shapes a child
+    /// actually gets — one policy, one profile builder, the fd the child inherits the only input
+    /// that moves.
+    ///
+    /// `/dev/null` and a pipe earn NOTHING and still boot: the base profile already covers all of
+    /// `/dev` and a pipe has no vnode to name, so the grant set stays as small as the mechanism
+    /// allows instead of blanket-covering stdio. `/dev/null` stands in for the terminal case and
+    /// is the stronger probe of the two — opened `O_WRONLY` it is in the failing class, where a
+    /// tty is `O_RDWR` and stats fine ungranted regardless.
+    ///
+    /// A redirect into a granted dir earns its grant and boots. A redirect into a policy-DENIED
+    /// dir is withheld and Node still aborts — ACCEPTED, not fixed. Withholding is correct
+    /// (granting would punch a stat-shaped hole through the secret floor); the resulting EPERM is
+    /// handled fine by most programs (`/bin/echo`, `bash`, `python3` all succeed; `cat` fails
+    /// cleanly with `stdout: Operation not permitted`); Node alone turns it into a bare `ABORT()`
+    /// in `PlatformInit`, which nub cannot fix from outside. And it is unreachable under the build
+    /// jail — see `the_build_jail_never_withholds_an_inherited_stdio_grant`.
+    #[test]
+    fn node_boots_under_every_stdio_shape_except_a_policy_denied_redirect() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::process::ExitStatusExt;
+
+        let Some(node) = node_on_path() else {
+            eprintln!("skipping: node not on PATH");
+            return;
+        };
+        let dir = tempfile::Builder::new()
+            .prefix("nub-stdio-shape-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(root.join("denied")).unwrap();
+        let policy = fs_policy(
+            Effect::Deny,
+            vec![
+                rule(
+                    &node.parent().unwrap().to_string_lossy(),
+                    Effect::Allow,
+                    FsAccess::Read,
+                ),
+                rule(
+                    &format!("{}/denied/**", root.display()),
+                    Effect::Deny,
+                    FsAccess::Read,
+                ),
+            ],
+        );
+
+        // Derives the grant list from the fd the way a real spawn does, so "which shape" is the
+        // only thing that varies between arms. Returns the emitted grant TEXT alongside the
+        // status — "booted" and "booted for the stated reason" are different claims — recovered
+        // by differencing against the same profile built with no stdio paths, which also pins
+        // that `emit_stdio_grants` really is the last thing appended.
+        let bare = build_profile_with_stdio(&policy, &spec(), None, None, None, &[]);
+        let run = |fd: &OwnedFd| -> (std::process::ExitStatus, String) {
+            let paths: Vec<String> = stdio_fd_path(fd.as_raw_fd()).into_iter().collect();
+            let profile = build_profile_with_stdio(&policy, &spec(), None, None, None, &paths);
+            let granted = profile
+                .strip_prefix(bare.as_str())
+                .expect("stdio grants are appended after everything else")
+                .to_string();
+            let prof_dir = tempfile::Builder::new()
+                .prefix("nub-shape-prof-")
+                .tempdir_in("/private/tmp")
+                .unwrap();
+            let path = prof_dir.path().join("p.sb");
+            std::fs::write(&path, profile).unwrap();
+            let status = Command::new("/usr/bin/sandbox-exec")
+                .arg("-f")
+                .arg(&path)
+                .arg(&node)
+                .args(["-e", "0"])
+                .stdin(std::process::Stdio::null())
+                .stdout(fd.try_clone().unwrap())
+                .stderr(fd.try_clone().unwrap())
+                .status()
+                .unwrap();
+            (status, granted)
+        };
+
+        // Both ends held: an abort trace (~1 KiB) fits the pipe buffer, so no drain is needed,
+        // but dropping the read end would turn a failure into SIGPIPE and mask it.
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both descriptors come from a successful `pipe(2)` and are owned here.
+        let (_pipe_r, pipe_w) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+
+        let ok_log = root.join("ok.log");
+        for (shape, fd, expected) in [
+            (
+                "/dev/null",
+                OwnedFd::from(std::fs::File::create("/dev/null").unwrap()),
+                String::new(),
+            ),
+            ("pipe", pipe_w, String::new()),
+            (
+                "granted-dir redirect",
+                OwnedFd::from(std::fs::File::create(&ok_log).unwrap()),
+                format!(
+                    "(allow file-read-metadata (literal \"{}\"))\n",
+                    ok_log.display()
+                ),
+            ),
+        ] {
+            let (status, granted) = run(&fd);
+            assert_eq!(
+                granted, expected,
+                "{shape}: a pass means nothing if the grant set is not the one claimed"
+            );
+            assert!(status.success(), "{shape}: Node must boot — got {status:?}");
+        }
+
+        let denied = OwnedFd::from(std::fs::File::create(root.join("denied/out.log")).unwrap());
+        let (status, granted) = run(&denied);
+        assert!(
+            granted.is_empty(),
+            "a policy-denied redirect target must earn no grant, got {granted:?}"
+        );
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGABRT),
+            "documented residual: with the grant withheld Node still aborts. If this now passes, \
+             check WHY before relaxing it — the likely cause is the withhold branch regressing \
+             into granting a policy-denied path, which reopens the stat floor"
         );
     }
 

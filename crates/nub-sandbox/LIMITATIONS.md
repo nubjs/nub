@@ -572,6 +572,25 @@ shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp
     method has no production caller (build-jail uses `status`, `--sandbox` uses
     `spawn_with_signal_target`); it is test-only today. Where fixed: `emit_stdio_grants` /
     `inherited_stdio_paths` in `backend/macos.rs`.
+  - **ACCEPTED, NOT FIXED — a `>` redirect into a policy-DENIED directory still aborts Node
+    (macOS, `nub sandbox` only).** The withhold above is what leaves it: with no grant, `fstat` on
+    the write-only stdio fd returns EPERM, and Node's `PlatformInit` turns that into a bare
+    `ABORT()` — exit 134, native stack trace, no message. **Not reachable under the BUILD JAIL:**
+    `preset::enforce_pure_allowlist` strips every deny and `policy_denies` reads only explicit
+    `Effect::Deny` entries, so a build-jail policy withholds nothing whatever the redirect target
+    (`the_build_jail_never_withholds_an_inherited_stdio_grant`). Reaching it needs a
+    `nub sandbox`-shaped policy AND a caller pointing the child's stdio at a path that same policy
+    denies read on — `> ~/.ssh/log`, `> .env.log`. Why accepted rather than pending: the EPERM is
+    correct, and most programs handle it (measured under one profile — `/bin/echo`, `bash` and
+    `python3` exit 0; `/bin/cat` exits 1 with `cat: stdout: Operation not permitted`), so what
+    turns it into a crash is Node's error handling, not the policy. Each candidate fix costs more
+    than it buys: granting the metadata punches the stat-shaped hole through the secret floor that
+    the withhold exists to prevent; refusing the launch regresses the programs that work today;
+    re-opening the fd `O_RDWR` hands the child READ on a file it only had write access to, and is
+    impossible for an unlinked fd. Relaying through a nub-owned pipe would preserve everyone, at a
+    per-fd thread and join on the spawn path plus changed stdout/stderr interleaving — not worth
+    it for a case the build jail cannot reach. Pinned with its controls by
+    `node_boots_under_every_stdio_shape_except_a_policy_denied_redirect`.
   - **Native-build carve-out (`Private` only):** under `Private` the confstr TEMP scratch
     (`/var/folders/<uid>/T` — the Apple toolchain's fixed, non-TMPDIR-redirectable `xcrun_db`
     lookup cache) is EXCLUDED from the shared-tmp deny, so it stays granted and a from-source
