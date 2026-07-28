@@ -16,7 +16,7 @@ pub fn sibling_tempdir(final_path: &Path) -> PathBuf {
     let mut name: OsString = final_path
         .file_name()
         .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("aube-tmp"));
+        .unwrap_or_else(|| OsString::from(format!("{}-tmp", crate::prog())));
     name.push(format!(".tmp.{pid}.{nanos}.{n}"));
     match final_path.parent() {
         Some(parent) => parent.join(name),

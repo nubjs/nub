@@ -385,7 +385,7 @@ impl Store {
                     Error::Io(path.to_path_buf(), std::io::ErrorKind::NotFound.into())
                 })?;
                 let mut tmp = tempfile::Builder::new()
-                    .prefix(".aube-cas-")
+                    .prefix(&format!(".{}-cas-", aube_util::prog()))
                     .tempfile_in(parent)
                     .map_err(|e| Error::Io(path.to_path_buf(), e))?;
                 use std::io::Write;

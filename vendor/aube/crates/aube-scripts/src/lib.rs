@@ -838,7 +838,9 @@ fn jail_home(package_dir: &Path) -> PathBuf {
         })
         .collect::<String>();
     std::env::temp_dir()
-        .join("aube-jail")
+        // Brand-scoped: the jail root is a real directory under the system temp
+        // dir, so an embedder must not have the engine's brand in it.
+        .join(format!("{}-jail", aube_util::prog()))
         .join(std::process::id().to_string())
         .join(format!("{name}-{hash:016x}"))
 }

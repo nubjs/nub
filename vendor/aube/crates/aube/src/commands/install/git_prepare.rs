@@ -38,7 +38,11 @@ pub(super) fn prepare_scratch_copy(
         .map(|d| d.as_nanos())
         .unwrap_or(0)
         .hash(&mut hasher);
-    let dst = std::env::temp_dir().join(format!("aube-git-prep-{:x}", hasher.finish()));
+    let dst = std::env::temp_dir().join(format!(
+        "{}-git-prep-{:x}",
+        aube_util::prog(),
+        hasher.finish()
+    ));
     if dst.exists() {
         let _ = std::fs::remove_dir_all(&dst);
     }

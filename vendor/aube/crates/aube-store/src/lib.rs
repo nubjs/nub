@@ -52,7 +52,13 @@ use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::Ordering;
 
-pub const CACHE_DIR_NAME: &str = "aube-cache";
+/// Sibling-of-store cache dir name used by [`Store::at`], brand-scoped to the
+/// active embedder so an explicitly-rooted store never plants an `aube`-named
+/// directory inside a host's own data tree. `prog()` is `"aube"` under the
+/// default profile, so standalone aube's layout is unchanged.
+pub fn cache_dir_name() -> String {
+    format!("{}-cache", aube_util::prog())
+}
 pub const INDEX_SUBDIR: &str = "index";
 /// Sibling of `files/` holding per-package extracted trees — the
 /// single-`clonefile(2)` clone sources for the macOS whole-dir linker
@@ -139,7 +145,7 @@ impl Store {
     /// Used by tests that need a fully isolated layout; production code
     /// should prefer `default_location` or `with_root`.
     pub fn at(root: PathBuf) -> Self {
-        let cache_dir = root.parent().unwrap_or(&root).join(CACHE_DIR_NAME);
+        let cache_dir = root.parent().unwrap_or(&root).join(cache_dir_name());
         Self {
             root,
             cache_dir,

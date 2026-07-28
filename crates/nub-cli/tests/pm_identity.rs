@@ -624,3 +624,84 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
         "config set must not write a nub-branded user config file"
     );
 }
+
+/// Brand boundary on the on-disk PATH surface: nub must never create a path
+/// carrying the embedded engine's brand. Two independent mechanisms broke this
+/// before, and the assertions below pin both.
+///
+/// 1. `aube_util::embedder()` falls back to the *aube* profile whenever the
+///    identity OnceLock is unset, and identity was registered only inside the
+///    PM engine's preflight. `nub run` never reaches preflight, so it wrote the
+///    engine's lazy node-gyp shim to `<cache>/aube/tools/…` and handed that path
+///    to every script as `npm_config_node_gyp`. `main` now registers identity
+///    before anything else runs.
+/// 2. On-disk marker/probe/temp names inside the engine were hardcoded to
+///    `aube` rather than composed from the active profile, so they landed
+///    brand-crossed even once identity was correct.
+///
+/// The run path is the probe because it is the one that regressed; the
+/// assertion is on the whole isolated home, so any new brand-crossed write
+/// from any subsystem trips it. `npm_config_node_gyp` is asserted positively
+/// too — absence alone would also pass if the var stopped being exported.
+#[test]
+fn nub_never_writes_an_aube_branded_path() {
+    let dir = project(
+        "aube-path-brand",
+        r#"{"name":"app","version":"1.0.0","scripts":{"probe":"node -e \"console.log(process.env.npm_config_node_gyp)\""}}"#,
+    );
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["run", "probe"])
+        .current_dir(&dir)
+        .env("NUB_SELF_SHIM", "0")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "stdout: {stdout}\nstderr: {stderr}");
+
+    let node_gyp = stdout
+        .lines()
+        .find(|l| l.contains("node-gyp"))
+        .unwrap_or_else(|| panic!("script did not print npm_config_node_gyp: {stdout}"));
+    assert!(
+        node_gyp.contains("/nub/") && !node_gyp.contains("/aube/"),
+        "npm_config_node_gyp must live under nub's cache namespace: {node_gyp}"
+    );
+
+    let mut offenders = Vec::new();
+    collect_brand_crossed_paths(&dir, &mut offenders);
+    assert!(
+        offenders.is_empty(),
+        "nub wrote aube-branded path(s): {offenders:#?}"
+    );
+}
+
+/// Every path under `root` whose file name carries the embedded engine's
+/// brand. Walks rather than globbing so a brand-crossed leaf at any depth is
+/// caught (the side-effects marker sits several levels inside the store).
+fn collect_brand_crossed_paths(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.to_ascii_lowercase().contains("aube"))
+        {
+            out.push(path.clone());
+        }
+        if path.is_dir() && !path.is_symlink() {
+            collect_brand_crossed_paths(&path, out);
+        }
+    }
+}

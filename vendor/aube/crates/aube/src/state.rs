@@ -1013,7 +1013,12 @@ pub fn no_integrity_dir(project_dir: &Path) -> PathBuf {
         Some(custom) => custom.join("v1"),
         None => aube_store::dirs::store_dir()
             .and_then(|files| files.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store").join("v1")),
+            .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join(aube_util::prog())
+                .join("store")
+                .join("v1")
+        }),
     };
     store_v1.join("no-integrity")
 }

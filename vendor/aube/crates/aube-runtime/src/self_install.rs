@@ -63,11 +63,11 @@ pub fn self_dir() -> Option<PathBuf> {
     }
     #[cfg(windows)]
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        return Some(PathBuf::from(local).join("aube/self"));
+        return Some(PathBuf::from(local).join(aube_util::embedder().data_namespace).join("self"));
     }
     let data_home = aube_util::env::xdg_data_home()
         .or_else(|| aube_util::env::home_dir().map(|h| h.join(".local/share")))?;
-    Some(data_home.join("aube/self"))
+    Some(data_home.join(aube_util::embedder().data_namespace).join("self"))
 }
 
 /// Every valid installed aube across mise's installs dir and aube's

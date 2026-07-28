@@ -1,7 +1,14 @@
 use miette::{Context, IntoDiagnostic, miette};
 use sha2::Digest;
 
-const SIDE_EFFECTS_CACHE_MARKER: &str = ".aube-side-effects-cache";
+/// The per-package marker the side-effects cache stamps. Brand-scoped to the
+/// active embedder because this file lands inside the global CAS store AND
+/// inside a consumer's `node_modules` — a hardcoded `aube` leaf puts the
+/// engine's brand in an embedder's user-visible tree. `prog()` is `"aube"`
+/// under the default profile, so standalone aube's on-disk name is unchanged.
+fn side_effects_cache_marker() -> String {
+    format!(".{}-side-effects-cache", aube_util::prog())
+}
 const SIDE_EFFECTS_CACHE_TMP_PREFIX: &str = ".tmp-side-effects-";
 const SIDE_EFFECTS_CACHE_TMP_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
@@ -259,7 +266,7 @@ struct SideEffectsMarker {
 /// resolved Node, and the marker's copy is compared, never trusted as a
 /// path segment.
 fn read_valid_side_effects_marker(package_dir: &std::path::Path) -> Option<SideEffectsMarker> {
-    let marker = std::fs::read_to_string(package_dir.join(SIDE_EFFECTS_CACHE_MARKER)).ok()?;
+    let marker = std::fs::read_to_string(package_dir.join(side_effects_cache_marker())).ok()?;
     let marker = marker.trim();
     let (engine, hash) = match marker.rsplit_once(':') {
         Some((engine, hash)) => (Some(engine), hash),
@@ -281,7 +288,7 @@ fn write_side_effects_marker(
     input_hash: &str,
 ) -> miette::Result<()> {
     aube_util::fs_atomic::atomic_write(
-        &package_dir.join(SIDE_EFFECTS_CACHE_MARKER),
+        &package_dir.join(side_effects_cache_marker()),
         format!("{engine}:{input_hash}").as_bytes(),
     )
     .into_diagnostic()
@@ -314,7 +321,7 @@ fn hash_dir_inner(
 
     for entry in entries {
         let path = entry.path();
-        if path.file_name().and_then(|n| n.to_str()) == Some(SIDE_EFFECTS_CACHE_MARKER) {
+        if path.file_name().and_then(|n| n.to_str()) == Some(side_effects_cache_marker().as_str()) {
             continue;
         }
         let rel = path
@@ -565,7 +572,7 @@ mod tests {
     #[test]
     fn side_effects_marker_accepts_only_sha512_hex() {
         let dir = tempfile::tempdir().unwrap();
-        let marker_path = dir.path().join(SIDE_EFFECTS_CACHE_MARKER);
+        let marker_path = dir.path().join(side_effects_cache_marker());
 
         std::fs::write(&marker_path, "../../evil").unwrap();
         assert!(read_valid_side_effects_marker(dir.path()).is_none());
@@ -646,7 +653,7 @@ mod tests {
 
         let saved = entry(&root, &pkg, Some("26.5.0"));
         saved.save(&pkg, false).unwrap();
-        std::fs::write(pkg.join(SIDE_EFFECTS_CACHE_MARKER), &saved.input_hash).unwrap();
+        std::fs::write(pkg.join(side_effects_cache_marker()), &saved.input_hash).unwrap();
 
         let reread = entry(&root, &pkg, Some("26.5.0"));
         assert_eq!(

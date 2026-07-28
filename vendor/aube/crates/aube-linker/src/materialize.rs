@@ -129,8 +129,12 @@ impl Linker {
             return *hit;
         }
 
-        let test_src = src_dir.join(".aube-link-test-src");
-        let test_dst = dst_dir.join(".aube-link-test-dst");
+        // Probe files land in the caller's real store / node_modules dirs, so
+        // the leaf is brand-scoped to the active embedder rather than hardcoded
+        // to `aube` (`prog()` is `"aube"` by default — standalone aube unchanged).
+        let brand = aube_util::prog();
+        let test_src = src_dir.join(format!(".{brand}-link-test-src"));
+        let test_dst = dst_dir.join(format!(".{brand}-link-test-dst"));
 
         let strategy = if std::fs::write(&test_src, b"test").is_ok() {
             let result = if std::fs::hard_link(&test_src, &test_dst).is_ok() {

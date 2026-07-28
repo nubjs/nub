@@ -218,6 +218,12 @@ jobs:
       # grep, no build — runs alongside clippy on the same run_rust gate.
       - name: Brand lint (no AUBE_* env reads)
         run: tests/brand-lint/check-env-reads.sh
+      # The write-side twin of the gate above: no on-disk path nub creates may
+      # carry the engine's brand. Scans the vendored engine too — that is where
+      # the hardcoded names lived, and where they leaked into users' caches,
+      # stores, and node_modules.
+      - name: Brand lint (no aube-branded path literals)
+        run: tests/brand-lint/check-path-literals.sh
 
   # The single-binary `embed-runtime` feature is OFF in every default build, so the
   # feature-off `test` job never RUNS the runtime_cache extraction/race/GC/INTEGRITY
