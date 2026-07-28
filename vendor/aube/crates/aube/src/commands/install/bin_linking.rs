@@ -49,6 +49,13 @@ pub(crate) fn materialized_pkg_dir(
         .join(name)
 }
 
+/// Resolve a virtual-store directory to the location that physically holds it.
+/// Falls back to the input on any failure, so a caller never gets a hard error
+/// where it previously got a usable path. See [`link_dep_bins`] for why.
+fn resolve_store_dir(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
 /// Directory holding the dep's own `node_modules/` — i.e. the dir
 /// that contains both `<name>` and its sibling symlinks. For scoped
 /// packages (`@scope/name`) `package_dir` is two levels below that
@@ -93,19 +100,9 @@ pub(super) fn dep_modules_dir_for(package_dir: &std::path::Path, name: &str) -> 
 /// bubbles up as `Err` so the user sees a real failure instead of a
 /// silently dropped bin link. Parse errors likewise propagate.
 fn read_materialized_pkg_json(
-    aube_dir: &std::path::Path,
-    dep_path: &str,
+    pkg_dir: &std::path::Path,
     name: &str,
-    virtual_store_dir_max_length: usize,
-    placements: Option<&aube_linker::HoistedPlacements>,
 ) -> miette::Result<Option<serde_json::Value>> {
-    let pkg_dir = materialized_pkg_dir(
-        aube_dir,
-        dep_path,
-        name,
-        virtual_store_dir_max_length,
-        placements,
-    );
     let pkg_json_path = pkg_dir.join("package.json");
     let content = match std::fs::read_to_string(&pkg_json_path) {
         Ok(s) => s,
@@ -123,25 +120,16 @@ fn read_materialized_pkg_json(
     Ok(Some(value))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_materialized_pkg_json_cached(
     cache: &mut PkgJsonCache,
-    aube_dir: &std::path::Path,
     dep_path: &str,
+    pkg_dir: &std::path::Path,
     name: &str,
-    virtual_store_dir_max_length: usize,
-    placements: Option<&aube_linker::HoistedPlacements>,
 ) -> miette::Result<Option<serde_json::Value>> {
     if let Some(value) = cache.get(dep_path) {
         return Ok(value.clone());
     }
-    let value = read_materialized_pkg_json(
-        aube_dir,
-        dep_path,
-        name,
-        virtual_store_dir_max_length,
-        placements,
-    )?;
+    let value = read_materialized_pkg_json(pkg_dir, name)?;
     cache.insert(dep_path.to_string(), value.clone());
     Ok(value)
 }
@@ -168,22 +156,31 @@ pub(super) fn link_bins_for_dep(
         virtual_store_dir_max_length,
         placements,
     );
-    if let Some(pkg_json) = read_materialized_pkg_json_cached(
-        cache,
-        aube_dir,
-        dep_path,
-        name,
-        virtual_store_dir_max_length,
-        placements,
-    )? {
+    link_bins_for_dep_at(cache, bin_dir, graph, dep_path, name, &pkg_dir, shim_opts)
+}
+
+/// [`link_bins_for_dep`] with the dep's materialized directory supplied by the
+/// caller. Split out for `link_dep_bins`, which must name that directory in the
+/// virtual store's own coordinate system rather than re-deriving it from
+/// `aube_dir` — see the store-resolution note there.
+pub(super) fn link_bins_for_dep_at(
+    cache: &mut PkgJsonCache,
+    bin_dir: &std::path::Path,
+    graph: &aube_lockfile::LockfileGraph,
+    dep_path: &str,
+    name: &str,
+    pkg_dir: &std::path::Path,
+    shim_opts: aube_linker::BinShimOptions,
+) -> miette::Result<()> {
+    if let Some(pkg_json) = read_materialized_pkg_json_cached(cache, dep_path, pkg_dir, name)? {
         if let Some(bin) = pkg_json.get("bin") {
-            link_bin_entries(bin_dir, &pkg_dir, Some(name), bin, shim_opts)?;
+            link_bin_entries(bin_dir, pkg_dir, Some(name), bin, shim_opts)?;
         } else if let Some(dir_bin) = pkg_json.get("directories").and_then(|d| d.get("bin")) {
             // `bin` wins; `directories.bin` is the fallback only.
-            link_dir_bins(bin_dir, &pkg_dir, dir_bin, shim_opts)?;
+            link_dir_bins(bin_dir, pkg_dir, dir_bin, shim_opts)?;
         }
     }
-    link_bundled_bins(bin_dir, &pkg_dir, graph, dep_path, shim_opts)?;
+    link_bundled_bins(bin_dir, pkg_dir, graph, dep_path, shim_opts)?;
     Ok(())
 }
 
@@ -555,8 +552,33 @@ pub(crate) fn link_dep_bins(
             // a dep that was never materialized.
             continue;
         }
-        let dep_modules_dir = dep_modules_dir_for(&pkg_dir, &pkg.name);
+        // Under the GVS this `.bin/` resolves through `.aube/<dep_path>` into the
+        // machine-global store, whose entries carry a graph-hash suffix the
+        // project side does not — so a target spelled in project coordinates
+        // names a directory present in neither namespace, and every transitive
+        // CLI a build script shells out to (the `prebuild-install` /
+        // `node-pre-gyp` native-addon shape) dies with `Cannot find module`.
+        // Name both endpoints in the store that physically holds them; that also
+        // keeps the shim valid for every OTHER project sharing the entry. GVS
+        // off: both resolve to themselves and the emitted shim is unchanged.
+        let dep_modules_dir = resolve_store_dir(&dep_modules_dir_for(&pkg_dir, &pkg.name));
         let bin_dir = dep_modules_dir.join(".bin");
+        // Same rule for the NODE_PATH hidden-hoist entry. Without it `pathdiff`
+        // would escape the store and bake one project's absolute path into a
+        // shim every project shares; re-anchoring keeps the emitted string
+        // byte-identical to the pre-GVS one. (Under GVS that entry is inert —
+        // the linker deletes `<store>/node_modules` — but that is pre-existing
+        // and orthogonal to the leak.)
+        let hidden_modules_dir = dep_modules_dir
+            .parent()
+            .and_then(Path::parent)
+            .map(|store_root| store_root.join("node_modules"));
+        let shim_opts = aube_linker::BinShimOptions {
+            hidden_modules_dir: shim_opts
+                .hidden_modules_dir
+                .and(hidden_modules_dir.as_deref()),
+            ..shim_opts
+        };
         // Don't `create_dir_all(&bin_dir)` here — most deps have
         // no child that ships a `bin`, and an eager mkdir would leave
         // empty `.bin/` directories everywhere. `create_bin_link`
@@ -582,17 +604,22 @@ pub(crate) fn link_dep_bins(
                 continue;
             }
             // The sibling may have been filtered (optional on another
-            // platform); `link_bins_for_dep` already returns Ok when
+            // platform); `link_bins_for_dep_at` already returns Ok when
             // the target pkg_json is absent, so just call through.
-            link_bins_for_dep(
-                cache,
+            let child_pkg_dir = resolve_store_dir(&materialized_pkg_dir(
                 aube_dir,
-                &bin_dir,
-                graph,
                 &child_dep_path,
                 child_name,
                 virtual_store_dir_max_length,
                 placements,
+            ));
+            link_bins_for_dep_at(
+                cache,
+                &bin_dir,
+                graph,
+                &child_dep_path,
+                child_name,
+                &child_pkg_dir,
                 shim_opts,
             )?;
         }
@@ -969,6 +996,82 @@ mod tests {
             .join(".bin")
             .join("node-gyp-build-optional-packages");
         (graph, expected_shim)
+    }
+
+    /// THE STORE-KEY REGRESSION. Under the global virtual store each
+    /// `.aube/<dep_path>` is a symlink into a machine-global store whose
+    /// entries carry a graph-hash suffix, so a per-dep `.bin/` derived from
+    /// the project side lands PHYSICALLY in that store — and a shim target
+    /// spelled `../../../<dep_path>/…` then names a directory that exists in
+    /// neither namespace. Every transitive CLI a build script shells out to
+    /// (`prebuild-install`, `node-gyp-build`, node-pre-gyp — the whole native
+    /// addon family) died with `Cannot find module`. The assertion is
+    /// deliberately on RESOLUTION from the shim's real directory, not on the
+    /// target's spelling: it holds under either store layout and fails for
+    /// any future scheme that reintroduces a cross-namespace path.
+    #[test]
+    #[cfg(unix)]
+    fn dep_bin_shims_resolve_when_the_entry_is_a_symlink_into_a_hashed_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let aube_dir = dir.path().join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+
+        // Build the graph + package trees under a throwaway `.aube`, then move
+        // each entry into the store under its hashed name and leave a symlink
+        // behind — the exact shape `link_all`'s GVS step 1 produces.
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let (graph, _) = fixture_parent_with_bin_bearing_child(&staging);
+        for (dep_path, hash) in [
+            ("lmdb@3.0.0", "0123456789abcdef"),
+            ("node-gyp-build-optional-packages@5.2.0", "fedcba9876543210"),
+        ] {
+            let entry = dep_path_to_filename(dep_path, 120);
+            let hashed = store.join(format!("{entry}-{hash}"));
+            std::fs::create_dir_all(store.join("node_modules")).unwrap();
+            std::fs::rename(staging.join(&entry), &hashed).unwrap();
+            std::os::unix::fs::symlink(&hashed, aube_dir.join(&entry)).unwrap();
+        }
+
+        let hidden = aube_dir.join("node_modules");
+        link_dep_bins(
+            &aube_dir,
+            &graph,
+            120,
+            None,
+            aube_linker::BinShimOptions {
+                extend_node_path: true,
+                // The isolated linker's shape: a shell shim carrying a RELATIVE
+                // target, which is the form the store-key mismatch broke.
+                prefer_symlinked_executables: Some(false),
+                hidden_modules_dir: Some(&hidden),
+            },
+            &mut PkgJsonCache::new(),
+        )
+        .unwrap();
+
+        let shim = store
+            .join(format!("lmdb@3.0.0-{}", "0123456789abcdef"))
+            .join("node_modules/.bin/node-gyp-build-optional-packages");
+        let body = std::fs::read_to_string(&shim)
+            .unwrap_or_else(|e| panic!("no shim at {}: {e}", shim.display()));
+        let target =
+            aube_linker::parse_posix_shim_target(&body).expect("shim must carry its target marker");
+        let resolved = shim.parent().unwrap().join(&target);
+        assert!(
+            resolved.exists(),
+            "shim target must resolve from the directory the shim physically \
+             lives in; {} + {target} does not exist",
+            shim.parent().unwrap().display()
+        );
+
+        // A shim in the SHARED store is read by every project that shares the
+        // entry, so its NODE_PATH must not name one project's tree either.
+        assert!(
+            !body.contains(dir.path().join("node_modules").to_str().unwrap()),
+            "store-resident shim leaked a project path into NODE_PATH:\n{body}"
+        );
     }
 
     /// THE LINK-SITE TRANSITIVE-BIN REGRESSION. `maybe_link_dep_bins` is
