@@ -436,12 +436,24 @@ ACLs are NOT access-checked: a leaf-only AC-SID grant is reachable under an ORDI
 under `%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`). nub never needs
 `WRITE_DAC` on a shared ancestor.
 
-- **Real launcher contract:** the confined root must carry a CLEAN DACL — no inherited
-  `ALL APPLICATION PACKAGES` allow-ACE. Where a work dir inherits an AAP grant (some
-  `%TEMP%`/profile trees), an ungranted secret UNDER it is readable regardless of the
-  allow-set (the AAP grant satisfies the LowBox check before default-deny). Demonstrated by
-  the `windows_residuals.rs` RT-B probe; the fixtures strip inherited ACEs
-  (`icacls /inheritance:r`) to model the clean root the launcher provides.
+- **The clean root is the ENGINE's to build, not the launcher's to supply.** Where a work
+  dir carries an `ALL APPLICATION PACKAGES` allow-ACE (inherited or explicit), an ungranted
+  secret UNDER it is readable regardless of the allow-set — the AAP grant satisfies the
+  LowBox check before default-deny is reached. `apply` therefore re-authors the working
+  root's DACL before every filesystem-confined AppContainer launch: strip AAP, keep the
+  access the directory already had, add an explicit self-grant, and set `SE_DACL_PROTECTED`
+  so no later edit to an ancestor can propagate a fresh AAP ACE into the running jail. It
+  needs only `WRITE_DAC`, which the directory's owner holds implicitly — no elevation.
+  - **This mutates the working directory's ACL, persistently.** Inheritance is disabled on
+    that one directory and the change is not reverted when the jail exits: reverting would
+    re-open the window it closes, and a build root reachable by its owner and by no
+    AppContainer is the correct resting state. The write is skipped entirely when the root
+    already satisfies the invariant.
+  - Demonstrated by the before/after differential in `windows_enforcement.rs` (the AAP trap
+    reproduced on a dirty root, then closed on that same directory) and pinned against
+    ordinary, un-pre-secured directories by `windows_clean_root.rs`.
+  - The dedicated-account backend does not share the precondition — its child is a separate
+    local principal, never an AppContainer, so no AAP grant reaches it.
 
 ### Untrusted-tier tighten-only layering — by design, the caller's responsibility
 

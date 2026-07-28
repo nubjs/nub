@@ -58,10 +58,11 @@
 //!   - **macOS toolchain read-confine** — a non-system interpreter (Homebrew/nvm
 //!     Node) needs its toolchain dir in the read-allow set; the engine grants the
 //!     program file only and does not probe the host for it.
-//!   - **Windows loopback exemption + clean-DACL work root** — per-host egress (and
-//!     the MITM tier) need a registered loopback exemption so the child can reach
-//!     the proxy; confined work dirs must sit under a CLEAN-DACL root (no inherited
-//!     `ALL APPLICATION PACKAGES` allow-ACE).
+//!   - **Windows loopback exemption** — per-host egress (and the MITM tier) need a
+//!     registered loopback exemption so the child can reach the proxy. The sibling
+//!     clean-DACL work-root obligation is retired: the engine re-authors the working
+//!     root's DACL itself (no `ALL APPLICATION PACKAGES` reach, `SE_DACL_PROTECTED`),
+//!     unprivileged but persistent — see `LIMITATIONS.md`.
 //!   - **Per-host proxy wiring** — the launcher provisions/exempts the loopback
 //!     proxy path per OS as above.
 //!   - **Untrusted-config trust boundary** — the engine CANNOT detect trust; the

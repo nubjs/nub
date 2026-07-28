@@ -176,6 +176,22 @@ mod win {
         }
     }
 
+    /// The engine's clean-root predicate, re-derived: walk up until an ancestor grants
+    /// AAP (fail) or carries a protected DACL (pass). Independent of the code under test,
+    /// so a broken `verify_clean_root` cannot make this probe agree with it.
+    fn qualifies(start: &Path) -> bool {
+        for p in start.ancestors() {
+            let Ok(f) = dacl_facts(p) else { return false };
+            if f.aap_rights != 0 {
+                return false;
+            }
+            if f.protected {
+                return true;
+            }
+        }
+        false
+    }
+
     // ── the survey that explains WHY the precondition was unsatisfiable ──────────────
 
     fn survey(label: &str, start: &Path) {
@@ -287,8 +303,9 @@ mod win {
     fn ordinary_root_case(fails: &mut u32, label: &str, root: &Path) {
         survey(label, root);
         let before = dacl_facts(root).expect("read the untouched DACL");
+        let before_qualified = qualifies(root);
         println!(
-            "  BEFORE aap_rights=0x{:08x} protected={}",
+            "  BEFORE aap_rights=0x{:08x} protected={} qualifies={before_qualified}",
             before.aap_rights, before.protected
         );
 
@@ -317,9 +334,19 @@ mod win {
         );
         check(
             fails,
-            after.protected,
-            &format!("{label}: DACL is protected after apply"),
+            qualifies(root),
+            &format!("{label}: the clean-root invariant holds after apply"),
         );
+        // Only demand the DACL WRITE where the directory did not already qualify — a path
+        // under the user profile inherits a protected clean boundary and must be left alone,
+        // and asserting otherwise would turn the deliberate no-op into a failure.
+        if !before_qualified {
+            check(
+                fails,
+                after.protected,
+                &format!("{label}: an unqualified root was actually protected by apply"),
+            );
+        }
         // The engine keeps writing to this tree after the jail exits, and so does the user.
         let probe = root.join("owner-access.txt");
         check(

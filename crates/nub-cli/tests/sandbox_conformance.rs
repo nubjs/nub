@@ -180,8 +180,9 @@ impl Tree {
         // `ALL APPLICATION PACKAGES` (AAP) ACE (AAP satisfies the LowBox check for the whole
         // subtree, which would collapse read-confine). A user-SID grant does NOT satisfy the
         // LowBox check, so the child still reaches only the backend's explicit AC-SID grants.
-        // %TEMP% under a user profile carries no AAP today, so this is defensive; it mirrors
-        // the clean-DACL precondition the backend verifies before launch.
+        // %TEMP% under a user profile carries no AAP today, so this is defensive; it puts the
+        // root in the state the backend would otherwise build for itself before launch, so the
+        // fixture's ACL stays under the fixture's control.
         secure_windows_root(&root);
         let proj = root.join("proj");
         let home = root.join("home");
