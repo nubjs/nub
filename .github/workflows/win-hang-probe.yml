@@ -1,5 +1,8 @@
-# Throwaway branch-scoped probe: find which test binary hangs the Windows
-# `cargo test --no-fail-fast` leg. Delete this file once the answer is recorded.
+# Throwaway branch-scoped probe. The real CI log already named the stuck binary
+# (crates/nub-sandbox/tests/proxy.rs, tests `correct_token_still_forwards` and
+# `decider_seam_is_consulted_for_target_and_sni`); this run reproduces it in
+# isolation and dumps native thread stacks + socket state so the block point is
+# measured rather than inferred. Delete this file once the answer is recorded.
 name: win-hang-probe
 
 on:
@@ -12,9 +15,9 @@ permissions:
 
 jobs:
   probe:
-    name: Windows hang probe
+    name: Windows proxy-test hang probe
     runs-on: windows-latest
-    timeout-minutes: 110
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -24,145 +27,69 @@ jobs:
         with:
           shared-key: ci-test-${{ runner.os }}
           save-if: false
-          workspaces: |
-            .
-            crates/nub-native
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
-        with:
-          version: 10
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
-        with:
-          node-version: '24'
-          cache: 'npm'
-      - name: pinned package managers + socket firewall
-        shell: bash
-        run: |
-          node scripts/soak/external-tools.mts --install pnpm --install npm
-          node scripts/soak/external-tools.mts --install sfw --shims
-          node scripts/soak/external-tools.mts --print-bin >> "$GITHUB_PATH"
-      - run: npm ci
-      - name: Build nub-native addon
-        shell: bash
-        run: |
-          (cd crates/nub-native && cargo build)
-          mkdir -p runtime/addons
-          cp target/debug/nub_native.dll runtime/addons/nub-native.node
-      - name: Build all test binaries
-        run: cargo test --workspace --no-run
-      - name: Run the suite under a stall watchdog
+      - name: Build the proxy test binary
+        run: cargo test -p nub-sandbox --test proxy --no-run
+      - name: Reproduce and dump
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $log  = Join-Path $env:RUNNER_TEMP 'cargo-test.log'
-          $snap = Join-Path $env:RUNNER_TEMP 'procsnap.tsv'
-          New-Item -ItemType File -Path $log, $snap -Force | Out-Null
 
-          $p = Start-Process -FilePath 'cargo' `
-                 -ArgumentList 'test','--workspace','--no-fail-fast' `
-                 -RedirectStandardOutput $log -RedirectStandardError "$log.err" `
-                 -PassThru -NoNewWindow
+          $exe = Get-ChildItem target\debug\deps\proxy-*.exe |
+                   Where-Object { $_.Name -notlike '*.pdb' } |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          Write-Host "test binary: $($exe.FullName)"
 
-          $stallLimit  = [TimeSpan]::FromMinutes(8)
-          $hardDeadline = (Get-Date).AddMinutes(75)
-          $lastSize = -1
-          $lastGrowth = Get-Date
+          $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          Write-Host "cdb present: $(Test-Path $cdb)"
 
-          while (-not $p.HasExited -and (Get-Date) -lt $hardDeadline) {
-            Start-Sleep -Seconds 20
-            $ts = (Get-Date).ToString('HH:mm:ss')
-            # Snapshot every live test binary plus the child kinds a test could block on.
-            Get-CimInstance Win32_Process |
-              Where-Object {
-                ($_.ExecutablePath -and $_.ExecutablePath -like '*\target\debug\deps\*') -or
-                ($_.Name -in @('node.exe','npm.exe','pnpm.exe','nub.exe','sfw.exe','cmd.exe','powershell.exe','conhost.exe'))
-              } |
-              ForEach-Object {
-                "$ts`t$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.Name)`t$($_.CreationDate)`t$($_.CommandLine)"
-              } | Add-Content $snap
-
-            $size = (Get-Item $log).Length + (Get-Item "$log.err").Length
-            if ($size -ne $lastSize) { $lastSize = $size; $lastGrowth = Get-Date }
-            $stalled = (Get-Date) - $lastGrowth
-            Write-Host "[$ts] log=$size bytes, no growth for $([int]$stalled.TotalSeconds)s"
-            if ($stalled -gt $stallLimit) { Write-Host '=== STALL DETECTED ==='; break }
-          }
-
-          $hung = -not $p.HasExited
-          Write-Host "=== suite exited: $(-not $hung) ==="
-
-          Write-Host '=== tail of cargo stdout ==='
-          Get-Content $log -Tail 80
-          Write-Host '=== tail of cargo stderr ==='
-          Get-Content "$log.err" -Tail 80
-
-          Write-Host '=== live processes at stall/exit ==='
-          $live = Get-CimInstance Win32_Process |
-            Where-Object {
-              ($_.ExecutablePath -and $_.ExecutablePath -like '*\target\debug\deps\*') -or
-              ($_.Name -in @('node.exe','npm.exe','pnpm.exe','nub.exe','sfw.exe'))
+          function Invoke-Attempt($label, $extraArgs, $timeoutSec) {
+            Write-Host "########## $label (args: $extraArgs) ##########"
+            $out = Join-Path $env:RUNNER_TEMP "$label.log"
+            $err = Join-Path $env:RUNNER_TEMP "$label.err.log"
+            $argList = @('--nocapture') + $extraArgs
+            $p = Start-Process -FilePath $exe.FullName -ArgumentList $argList `
+                   -RedirectStandardOutput $out -RedirectStandardError $err `
+                   -PassThru -NoNewWindow
+            $deadline = (Get-Date).AddSeconds($timeoutSec)
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+            if ($p.HasExited) {
+              Write-Host "$label COMPLETED, exit=$($p.ExitCode)"
+              Get-Content $out -Tail 40
+              Get-Content $err -Tail 20
+              return $false
             }
-          $live | ForEach-Object {
-            "PID=$($_.ProcessId) PPID=$($_.ParentProcessId) $($_.Name) started=$($_.CreationDate)`n    $($_.CommandLine)"
-          }
-
-          Write-Host '=== per-binary lifetime from the snapshots (longest-lived last) ==='
-          Import-Csv $snap -Delimiter "`t" -Header ts,pid,ppid,name,created,cmd |
-            Where-Object { $_.name -like '*.exe' } |
-            Group-Object pid |
-            ForEach-Object {
-              [pscustomobject]@{
-                Pid = $_.Name
-                Name = $_.Group[0].name
-                Samples = $_.Count
-                First = $_.Group[0].ts
-                Last = $_.Group[-1].ts
-                Cmd = $_.Group[0].cmd
-              }
-            } | Sort-Object Samples | Format-Table -AutoSize -Wrap
-
-          Copy-Item $snap  (Join-Path $env:GITHUB_WORKSPACE 'procsnap.tsv')  -Force
-          Copy-Item $log   (Join-Path $env:GITHUB_WORKSPACE 'cargo-test.log') -Force
-          Copy-Item "$log.err" (Join-Path $env:GITHUB_WORKSPACE 'cargo-test.err.log') -Force
-
-          if ($hung) {
-            # Identify the stuck test binary, kill the tree, then re-run it alone,
-            # single-threaded, so libtest's ordered progress names the stuck test.
-            $stuck = $live | Where-Object { $_.ExecutablePath -like '*\target\debug\deps\*' } | Select-Object -First 1
-            Write-Host "=== STUCK BINARY: $($stuck.ExecutablePath) ==="
-            $live | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            Write-Host "$label HUNG after ${timeoutSec}s"
+            Write-Host '--- stdout so far ---'; Get-Content $out -Tail 60
+            Write-Host '--- stderr so far ---'; Get-Content $err -Tail 30
+            $proc = Get-Process -Id $p.Id
+            Write-Host "--- thread count: $($proc.Threads.Count) ---"
+            Write-Host '--- sockets owned by the test process ---'
+            (netstat -ano) | Select-String " $($p.Id)$"
+            if (Test-Path $cdb) {
+              Write-Host '--- native stacks (all threads) ---'
+              & $cdb -p $p.Id -c '~*kv; !locks; q' 2>&1 | Select-Object -Last 400
+            }
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 5
-
-            if ($stuck) {
-              $solo = Join-Path $env:RUNNER_TEMP 'solo.log'
-              $sp = Start-Process -FilePath $stuck.ExecutablePath `
-                      -ArgumentList '--test-threads=1','--nocapture' `
-                      -RedirectStandardOutput $solo -RedirectStandardError "$solo.err" `
-                      -PassThru -NoNewWindow
-              $soloDeadline = (Get-Date).AddMinutes(15)
-              while (-not $sp.HasExited -and (Get-Date) -lt $soloDeadline) { Start-Sleep -Seconds 15 }
-              Write-Host '=== solo run tail (last printed test name is the stuck one) ==='
-              Get-Content $solo -Tail 40
-              Get-Content "$solo.err" -Tail 40
-              if (-not $sp.HasExited) {
-                Write-Host '=== solo run ALSO hung ==='
-                Get-CimInstance Win32_Process |
-                  Where-Object { $_.ParentProcessId -eq $sp.Id } |
-                  ForEach-Object { "child PID=$($_.ProcessId) $($_.Name)`n    $($_.CommandLine)" }
-                Stop-Process -Id $sp.Id -Force -ErrorAction SilentlyContinue
-              }
-              Copy-Item $solo (Join-Path $env:GITHUB_WORKSPACE 'solo.log') -Force
-              Copy-Item "$solo.err" (Join-Path $env:GITHUB_WORKSPACE 'solo.err.log') -Force
-            }
+            Start-Sleep -Seconds 3
+            return $true
           }
+
+          $hangs = 0
+          foreach ($i in 1..3) {
+            if (Invoke-Attempt "parallel-$i" @() 180) { $hangs++ }
+          }
+          Write-Host "########## parallel hangs: $hangs / 3 ##########"
+
+          $serialHung = Invoke-Attempt 'serial' @('--test-threads=1') 240
+          Write-Host "########## serial hung: $serialHung ##########"
+
+          # Just the two named tests, isolated from the rest of the binary.
+          Invoke-Attempt 'pair-only' @('--test-threads=2','correct_token_still_forwards','decider_seam_is_consulted_for_target_and_sni') 120 | Out-Null
+
+          Copy-Item (Join-Path $env:RUNNER_TEMP '*.log') $env:GITHUB_WORKSPACE -Force
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
         with:
           name: win-hang-probe-logs
-          path: |
-            cargo-test.log
-            cargo-test.err.log
-            procsnap.tsv
-            solo.log
-            solo.err.log
+          path: '*.log'
           if-no-files-found: warn
