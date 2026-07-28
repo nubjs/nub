@@ -28,6 +28,7 @@
 //! `resolve_policy` reads whichever home the detected incumbent major actually
 //! uses (see its doc).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -408,7 +409,8 @@ struct InstalledPkg {
 /// (nothing installed), a missing production dependency, and a version that no
 /// longer satisfies its declared range — without parsing any lockfile (so it's
 /// immune to cross-PM lockfile churn) and without ever false-warning on a
-/// `--prod` install.
+/// `--prod` install or on a dependency an override deliberately pins outside
+/// its declared range (see [`override_pinned_names`]).
 fn installed_tree_reason(project: &Project) -> Option<String> {
     let deps = deps_map(&project.manifest, "dependencies");
     let dev_deps = deps_map(&project.manifest, "devDependencies");
@@ -435,11 +437,21 @@ fn installed_tree_reason(project: &Project) -> Option<String> {
     // present-but-mismatched version — a devDep that is ABSENT here is tolerated,
     // because a `--prod` / `--omit=dev` install legitimately omits them and
     // warning would be a false positive.
+    //
+    // The override set is materialized LAZILY — only a dependency that already
+    // looks mismatched can be suppressed by it, and that is the rare case, so
+    // the happy path never pays for the gather (which in a workspace reads the
+    // root manifest).
+    let mut pinned: Option<HashSet<String>> = None;
     for (name, spec) in &deps {
         match resolved(name) {
             None => return Some(format!("`{name}` is not installed")),
             Some(installed) => {
-                if let Some(reason) = version_mismatch(name, spec, &installed) {
+                if let Some(reason) = version_mismatch(name, spec, &installed)
+                    && !pinned
+                        .get_or_insert_with(|| override_pinned_names(project))
+                        .contains(name.as_str())
+                {
                     return Some(reason);
                 }
             }
@@ -448,11 +460,105 @@ fn installed_tree_reason(project: &Project) -> Option<String> {
     for (name, spec) in &dev_deps {
         if let Some(installed) = resolved(name)
             && let Some(reason) = version_mismatch(name, spec, &installed)
+            && !pinned
+                .get_or_insert_with(|| override_pinned_names(project))
+                .contains(name.as_str())
         {
             return Some(reason);
         }
     }
     None
+}
+
+/// Package names an *effective* override pins, gathered from the manifest the
+/// walk already parsed and — in a workspace, where the pins live at the root
+/// while the deps are the member's — the workspace-root manifest.
+///
+/// A dependency pinned this way is installed OUTSIDE its declared range BY
+/// DESIGN, so comparing the two produces a warning that is both wrong and
+/// permanent: `nub install` honors the same pin, so the remedy the warning
+/// prints can never clear it. Suppression is by NAME, wholesale — the installed
+/// version is deliberately not re-checked against the override's own value,
+/// because override specs have forms that are not plain semver ranges (`$name`
+/// references, nested per-parent objects, `npm:` aliases) and mis-evaluating one
+/// reintroduces exactly the false-warn class this removes. Only DIRECT deps are
+/// ever version-checked, so keying on the target name is sufficient.
+fn override_pinned_names(project: &Project) -> HashSet<String> {
+    let mut names = HashSet::new();
+
+    let workspace_manifest = match project.workspace_root.as_deref() {
+        Some(ws) if ws != project.root.as_path() => {
+            std::fs::read_to_string(ws.join("package.json"))
+                .ok()
+                .and_then(|text| {
+                    serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&text)).ok()
+                })
+        }
+        _ => None,
+    };
+    // `pnpm.overrides` is a pnpm-BRANDED field, so it is honored only when pnpm
+    // is genuinely the incumbent (AGENTS.md's pnpm-named gate). The free presence
+    // probe short-circuits first, so a project without the field never pays for
+    // resolving incumbency.
+    let anchor = project.workspace_root.as_deref().unwrap_or(&project.root);
+    let mut pnpm_honored: Option<bool> = None;
+    for manifest in std::iter::once(&project.manifest).chain(workspace_manifest.as_ref()) {
+        for field in ["overrides", "resolutions"] {
+            if let Some(obj) = manifest.get(field).and_then(|v| v.as_object()) {
+                collect_override_names(obj, &mut names);
+            }
+        }
+        if let Some(obj) = pnpm_overrides(manifest)
+            && *pnpm_honored
+                .get_or_insert_with(|| pnpm_incumbency(anchor) != PnpmIncumbency::NotPnpm)
+        {
+            collect_override_names(obj, &mut names);
+        }
+    }
+
+    names
+}
+
+fn pnpm_overrides(
+    manifest: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    manifest.get("pnpm")?.get("overrides")?.as_object()
+}
+
+/// Every package name an override map targets, recursing into npm's nested
+/// per-parent blocks (`{"parent": {"child": "1.0.0"}}`). Deliberately
+/// OVER-collects — a name appearing anywhere in a selector, including as the
+/// parent half of pnpm's `parent>child`, suppresses its own check too. Erring
+/// wide can at worst miss a genuine staleness; erring narrow false-warns.
+fn collect_override_names(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    out: &mut HashSet<String>,
+) {
+    for (key, value) in obj {
+        for segment in key.split('>') {
+            if let Some(name) = selector_package_name(segment) {
+                out.insert(name.to_string());
+            }
+        }
+        if let Some(nested) = value.as_object() {
+            collect_override_names(nested, out);
+        }
+    }
+}
+
+/// The package name in one override selector segment: `foo`, `foo@^1.2`,
+/// `@scope/pkg`, `@scope/pkg@2`. `None` for a segment carrying no name — npm's
+/// `"."` self-selector, or the tail of a range that itself contained a `>`.
+fn selector_package_name(segment: &str) -> Option<&str> {
+    let segment = segment.trim();
+    // A scoped name's leading `@` belongs to the name; the version separator is
+    // the NEXT `@`.
+    let separator = match segment.strip_prefix('@') {
+        Some(rest) => rest.find('@').map(|i| i + 1),
+        None => segment.find('@'),
+    };
+    let name = separator.map_or(segment, |i| &segment[..i]);
+    (!name.is_empty() && name != ".").then_some(name)
 }
 
 /// Direct-dependency `(name, spec)` pairs from one manifest map. Non-string
@@ -586,6 +692,111 @@ mod tests {
         assert!(version_mismatch("foo", "^2.0.0", &at("1.0.0-beta.1")).is_none());
         // No readable installed version → skip.
         assert!(version_mismatch("foo", "^2.0.0", &InstalledPkg { version: None }).is_none());
+    }
+
+    fn project_at(root: &Path, manifest: serde_json::Value) -> Project {
+        Project {
+            root: root.to_path_buf(),
+            workspace_root: None,
+            manifest,
+        }
+    }
+
+    /// Every neutral override dialect and selector shape a manifest can pin a
+    /// direct dependency with must reach the suppression set — that set is the
+    /// only thing standing between a deliberate pin and a permanent warning.
+    #[test]
+    fn override_targets_are_collected_from_every_neutral_source_and_selector_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = override_pinned_names(&project_at(
+            dir.path(),
+            serde_json::json!({
+                "overrides": {
+                    "typescript": "~5.8.3",
+                    "esbuild@<0.25": "0.25.0",
+                    "@scope/pkg@^1": "1.2.3",
+                    "vite>rollup": "4.0.0",
+                    "webpack": { ".": "5.0.0", "terser": "5.31.0" }
+                },
+                "resolutions": { "lodash": "4.17.21" }
+            }),
+        ));
+        let mut got: Vec<&str> = names.iter().map(String::as_str).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            [
+                "@scope/pkg",
+                "esbuild",
+                "lodash",
+                "rollup",
+                "terser",
+                "typescript",
+                "vite",
+                "webpack"
+            ]
+        );
+    }
+
+    /// `pnpm.overrides` is a pnpm-BRANDED field, so the suppression it grants is
+    /// gated on pnpm genuinely being the incumbent — the same name-gate the rest
+    /// of nub applies to pnpm-named config.
+    #[test]
+    fn pnpm_overrides_suppress_only_under_a_pnpm_incumbent() {
+        let manifest = serde_json::json!({
+            "devDependencies": { "typescript": "^5.9.2" },
+            "pnpm": { "overrides": { "typescript": "~5.8.3" } }
+        });
+        let suppresses = |pnpm_lockfile: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+            if pnpm_lockfile {
+                std::fs::write(
+                    dir.path().join("pnpm-lock.yaml"),
+                    "lockfileVersion: '9.0'\n",
+                )
+                .unwrap();
+            }
+            override_pinned_names(&project_at(dir.path(), manifest.clone())).contains("typescript")
+        };
+        assert!(
+            suppresses(true),
+            "under a pnpm-lock.yaml incumbent the `pnpm.overrides` pin is real config and must suppress the check"
+        );
+        assert!(
+            !suppresses(false),
+            "with no pnpm incumbent the branded field must not be read at all"
+        );
+    }
+
+    /// The end-to-end contract this suppression exists for: a dependency the
+    /// manifest deliberately pins outside its declared range is not stale, while
+    /// the identical tree without the pin still is.
+    #[test]
+    fn an_override_pinned_dependency_is_not_reported_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("node_modules").join("typescript");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"typescript","version":"5.8.3"}"#,
+        )
+        .unwrap();
+
+        let declared = serde_json::json!({ "devDependencies": { "typescript": "^5.9.2" } });
+        assert_eq!(
+            installed_tree_reason(&project_at(dir.path(), declared.clone())).as_deref(),
+            Some("`typescript@5.8.3` does not satisfy `^5.9.2`"),
+            "an unpinned dependency outside its declared range is genuinely stale"
+        );
+
+        let mut pinned = declared;
+        pinned["overrides"] = serde_json::json!({ "typescript": "~5.8.3" });
+        assert_eq!(
+            installed_tree_reason(&project_at(dir.path(), pinned)).as_deref(),
+            None,
+            "the override pins typescript to the installed version, so `nub install` could never clear this warning"
+        );
     }
 
     /// The whole engine-repair contract, at the decision boundary: a tree nub
