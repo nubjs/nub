@@ -49,13 +49,6 @@ pub(crate) fn materialized_pkg_dir(
         .join(name)
 }
 
-/// Resolve a virtual-store directory to the location that physically holds it.
-/// Falls back to the input on any failure, so a caller never gets a hard error
-/// where it previously got a usable path. See [`link_dep_bins`] for why.
-fn resolve_store_dir(dir: &Path) -> PathBuf {
-    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
-}
-
 /// Directory holding the dep's own `node_modules/` — i.e. the dir
 /// that contains both `<name>` and its sibling symlinks. For scoped
 /// packages (`@scope/name`) `package_dir` is two levels below that
@@ -552,33 +545,22 @@ pub(crate) fn link_dep_bins(
             // a dep that was never materialized.
             continue;
         }
-        // Under the GVS this `.bin/` resolves through `.aube/<dep_path>` into the
-        // machine-global store, whose entries carry a graph-hash suffix the
-        // project side does not — so a target spelled in project coordinates
-        // names a directory present in neither namespace, and every transitive
-        // CLI a build script shells out to (the `prebuild-install` /
-        // `node-pre-gyp` native-addon shape) dies with `Cannot find module`.
-        // Name both endpoints in the store that physically holds them; that also
-        // keeps the shim valid for every OTHER project sharing the entry. GVS
-        // off: both resolve to themselves and the emitted shim is unchanged.
-        let dep_modules_dir = resolve_store_dir(&dep_modules_dir_for(&pkg_dir, &pkg.name));
+        // Both endpoints stay in PROJECT coordinates (`.aube/<dep_path>/…`),
+        // never the machine-global store's `<dep_path>-<graph-hash>` spelling,
+        // even though the symlink means the shim FILE lands in that store.
+        // The shim is a `/bin/sh` script whose `basedir=$(dirname "$0")` is
+        // purely lexical, and the only consumer — the lifecycle runner, which
+        // puts `<dep_modules_dir>/.bin` on PATH — derives that dir project-side
+        // (see `run_dep_lifecycles`). So a store-spelled relative target names
+        // `.store/<dep_path>-<hash>/…`, which exists in neither namespace, and
+        // every transitive CLI a build script shells out to (`node-gyp-build`,
+        // `prebuild-install`, `node-pre-gyp`) dies with `Cannot find module`.
+        // Project spelling stays correct for every OTHER project sharing the
+        // entry too: the store key hashes the whole dep-graph SUBTREE, so any
+        // two projects reaching this entry resolve their children to identical
+        // `dep_path`s (see `aube_lockfile::graph_hash`).
+        let dep_modules_dir = dep_modules_dir_for(&pkg_dir, &pkg.name);
         let bin_dir = dep_modules_dir.join(".bin");
-        // Same rule for the NODE_PATH hidden-hoist entry. Without it `pathdiff`
-        // would escape the store and bake one project's absolute path into a
-        // shim every project shares; re-anchoring keeps the emitted string
-        // byte-identical to the pre-GVS one. (Under GVS that entry is inert —
-        // the linker deletes `<store>/node_modules` — but that is pre-existing
-        // and orthogonal to the leak.)
-        let hidden_modules_dir = dep_modules_dir
-            .parent()
-            .and_then(Path::parent)
-            .map(|store_root| store_root.join("node_modules"));
-        let shim_opts = aube_linker::BinShimOptions {
-            hidden_modules_dir: shim_opts
-                .hidden_modules_dir
-                .and(hidden_modules_dir.as_deref()),
-            ..shim_opts
-        };
         // Don't `create_dir_all(&bin_dir)` here — most deps have
         // no child that ships a `bin`, and an eager mkdir would leave
         // empty `.bin/` directories everywhere. `create_bin_link`
@@ -606,13 +588,13 @@ pub(crate) fn link_dep_bins(
             // The sibling may have been filtered (optional on another
             // platform); `link_bins_for_dep_at` already returns Ok when
             // the target pkg_json is absent, so just call through.
-            let child_pkg_dir = resolve_store_dir(&materialized_pkg_dir(
+            let child_pkg_dir = materialized_pkg_dir(
                 aube_dir,
                 &child_dep_path,
                 child_name,
                 virtual_store_dir_max_length,
                 placements,
-            ));
+            );
             link_bins_for_dep_at(
                 cache,
                 &bin_dir,
@@ -1001,14 +983,24 @@ mod tests {
     /// THE STORE-KEY REGRESSION. Under the global virtual store each
     /// `.aube/<dep_path>` is a symlink into a machine-global store whose
     /// entries carry a graph-hash suffix, so a per-dep `.bin/` derived from
-    /// the project side lands PHYSICALLY in that store — and a shim target
-    /// spelled `../../../<dep_path>/…` then names a directory that exists in
-    /// neither namespace. Every transitive CLI a build script shells out to
-    /// (`prebuild-install`, `node-gyp-build`, node-pre-gyp — the whole native
-    /// addon family) died with `Cannot find module`. The assertion is
-    /// deliberately on RESOLUTION from the shim's real directory, not on the
-    /// target's spelling: it holds under either store layout and fails for
-    /// any future scheme that reintroduces a cross-namespace path.
+    /// the project side lands PHYSICALLY in that store. The shim is a
+    /// `/bin/sh` script whose `basedir=$(dirname "$0")` is purely LEXICAL, so
+    /// what it resolves against is the path its INVOKER used — and the only
+    /// invoker, the lifecycle runner, puts the project-side
+    /// `.aube/<dep_path>/node_modules/.bin` on PATH. A target spelled in the
+    /// store's `<dep_path>-<hash>` coordinates therefore names a directory
+    /// that exists in neither namespace, and every transitive CLI a build
+    /// script shells out to (`node-gyp-build`, `prebuild-install`,
+    /// node-pre-gyp — the whole native-addon family) dies with
+    /// `Cannot find module`.
+    ///
+    /// The assertion is deliberately on RESOLUTION FROM THE PROJECT SIDE
+    /// rather than on the target's spelling — that is the coordinate system
+    /// the shim is actually read in, and pinning the consumer's geometry is
+    /// what makes this fail for any future scheme that reintroduces a
+    /// cross-namespace path. (Asserting resolution from the shim's PHYSICAL
+    /// store directory instead is the inverted premise that let the
+    /// store-spelled target ship green.)
     #[test]
     #[cfg(unix)]
     fn dep_bin_shims_resolve_when_the_entry_is_a_symlink_into_a_hashed_store() {
@@ -1051,19 +1043,39 @@ mod tests {
         )
         .unwrap();
 
-        let shim = store
-            .join(format!("lmdb@3.0.0-{}", "0123456789abcdef"))
+        // Read the shim through the PROJECT-side path the lifecycle runner
+        // puts on PATH — the same bytes as the store-side file, but the
+        // coordinate system `$basedir` is actually expanded in.
+        let shim = aube_dir
+            .join("lmdb@3.0.0")
             .join("node_modules/.bin/node-gyp-build-optional-packages");
         let body = std::fs::read_to_string(&shim)
             .unwrap_or_else(|e| panic!("no shim at {}: {e}", shim.display()));
         let target =
             aube_linker::parse_posix_shim_target(&body).expect("shim must carry its target marker");
-        let resolved = shim.parent().unwrap().join(&target);
+        // `$basedir` is `dirname "$0"` — lexical, and Node then collapses the
+        // `..` segments of the path it is handed with `path.resolve`, i.e.
+        // WITHOUT consulting the filesystem. So the check has to be lexical
+        // too: letting the OS walk `.bin/../../..` would resolve the
+        // `.aube/<dep_path>` symlink first and land in the store, silently
+        // measuring a geometry no consumer ever sees.
+        let basedir = shim.parent().unwrap();
+        let mut resolved = basedir.to_path_buf();
+        for part in Path::new(&target).components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => resolved.push(other),
+            }
+        }
         assert!(
             resolved.exists(),
-            "shim target must resolve from the directory the shim physically \
-             lives in; {} + {target} does not exist",
-            shim.parent().unwrap().display()
+            "shim target must resolve from the project-side `.bin` the \
+             lifecycle runner puts on PATH; {} + {target} = {} does not exist",
+            basedir.display(),
+            resolved.display()
         );
 
         // A shim in the SHARED store is read by every project that shares the
