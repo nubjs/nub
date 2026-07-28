@@ -24,6 +24,7 @@ on:
     paths:
       - ".github/workflows/win-clean-root-probe.yml"
       - "crates/nub-sandbox/tests/windows_clean_root.rs"
+      - "crates/nub-sandbox/src/backend/windows.rs"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
