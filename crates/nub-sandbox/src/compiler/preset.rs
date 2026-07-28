@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// only preset today (the lifecycle-script baseline).
 pub fn resolve(name: &str) -> Result<Value, CompileError> {
     match name {
-        "build-jail" => Ok(build_jail_surface(None)),
+        "build-jail" => Ok(build_jail_surface(None, None)),
         other => Err(CompileError::unknown_preset(other, &["build-jail"])),
     }
 }
@@ -122,6 +122,104 @@ fn grant_build_jail_extra_reads(policy: &mut SandboxPolicy, extra_reads: &[PathB
 /// its nub entry, and `the_narrowed_toolchain_grant_stays_inside_tooldirs` pins that they
 /// stay in agreement.
 const NUB_PM_CACHE_PATTERN: &str = "$cache/nub/pm";
+
+/// Where the per-package private HOMEs live, as a `$cache`-anchored surface pattern.
+///
+/// A 66-package lifecycle corpus put an unwritable `$HOME` behind 7 of 11 filesystem
+/// failures — `npx only-allow`'s `~/.npm` (the widest, a common preinstall idiom),
+/// `~/.cache/Cypress`, `~/.stc`, `~/.cache/ffmpeg-static-nodejs`. Each wants a
+/// home-anchored scratch dir; none wants the USER's home. Cypress also shows the tiers
+/// are ordered: its CDNs are already on `$downloads` and it still failed, because the
+/// write is refused before the fetch is attempted.
+///
+/// A sibling of, not a child of, `$cache/nub/pm`: the PM cache is read-granted to every
+/// jailed script, and the one writable home must not nest inside the store it could then
+/// shadow.
+const NUB_JAIL_HOME_ROOT_PATTERN: &str = "$cache/nub/jail-home";
+
+/// Resolve and materialize the private HOME for ONE package's lifecycle spawns.
+///
+/// PER-PACKAGE, not shared. A shared home is a config root two different dependencies
+/// both write: package A drops `$HOME/.npmrc` naming `script-shell`/`node-gyp` under its
+/// own control, package B's `prebuild-install || npm run build` fallback honours it, and
+/// the attacker now runs inside B's jail with write access to B's `build/Release/*.node`
+/// — which the user later `require()`s UNCONFINED. Per-package removes that channel
+/// outright, and it is what aube's own jail chose (`aube-scripts::jail_home`).
+///
+/// PERSISTENT across runs, which is the one divergence from `$tmp` and from aube. It buys
+/// only install-time cache reuse — re-installing the same package skips a ~250 MB Cypress
+/// or ~70 MB ffmpeg-static re-download and works offline the second time. It does NOT
+/// make those artifacts resolvable at RUN time: the app's `HOME` is the user's own, and
+/// nub sets no `CYPRESS_CACHE_FOLDER`. Persistence is safe here only because the home is
+/// per-package — the sole writer is the package that reads it.
+///
+/// `None` — a cache root the engine never established, or anything but a real directory
+/// squatting the leaf — leaves the jail compiling exactly as before. That is the
+/// conservative direction: no grant, no redirect, today's behavior.
+fn private_home_dir(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
+    // Gate on the engine's cache root already existing, so a policy compiled against a
+    // synthetic `Homes` (every unit test) neither materializes a tree nor silently
+    // changes shape with the caller's privileges.
+    if !homes.cache.is_dir() {
+        return None;
+    }
+    let root = PathBuf::from(crate::matcher::path::expand_symbolic(
+        NUB_JAIL_HOME_ROOT_PATTERN,
+        homes,
+    ));
+    std::fs::create_dir_all(&root).ok()?;
+    // Canonicalize the ROOT and append the leaf literally — never canonicalize the leaf.
+    // The leaf is the one node a jailed script can unlink and recreate (a Seatbelt subpath
+    // grant matches its own root), so following it would let a script replace its home
+    // with a symlink to the real one and have the NEXT compile grant that. Resolving the
+    // parent instead is what makes the grant unforgeable; `symlink_metadata` then refuses
+    // a leaf that is anything but a real directory. The helper also strips Windows'
+    // `\\?\` verbatim prefix, whose `?` a bounded-literal grant reads as a glob and drops.
+    let root = crate::matcher::path::canonicalize_including_nonexistent(&root);
+    let dir = root.join(package_home_slug(package_dir));
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => Some(dir),
+        Ok(_) => None,
+        Err(_) => create_private_dir(&dir).is_ok().then_some(dir),
+    }
+}
+
+/// Create `dir` owner-only. The home holds one package's install scratch; nothing else on
+/// the machine has business in it, and the umask default (0755) would publish it.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// A stable, filesystem-safe directory name for one package's home: its readable basename
+/// plus a hash of the resolved package dir, so two packages never collide and the same
+/// package finds its own cache again on the next install. Hash stability across Rust
+/// releases is not required — a changed hash only means a cold cache.
+fn package_home_slug(package_dir: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let resolved = crate::matcher::path::canonicalize_including_nonexistent(package_dir);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    resolved.hash(&mut hasher);
+    let name: String = resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("package")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{name}-{:016x}", hasher.finish())
+}
 
 /// Grant the build jail's narrowed READ set: the consumer's DEPENDENCY TREE, the
 /// consumer's top-level MANIFEST, and nub's own PM cache. Together these replace what
@@ -244,13 +342,17 @@ fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
 /// wins over the front-inserted dependency-tree read for the package subtree
 /// (last-match-wins, preserved by the `preserve_order` serde_json map). `None` yields
 /// the static `--sandbox build-jail` skeleton (the per-package write is a production-
-/// interposition concern). The env axis is the strip-all floor here;
-/// [`compile_build_jail`] replaces it with the scrubbed lifecycle env.
-fn build_jail_surface(package_dir: Option<&Path>) -> Value {
+/// interposition concern), as does `private_home`. The env axis is the strip-all floor
+/// here; [`compile_build_jail`] replaces it with the scrubbed lifecycle env.
+fn build_jail_surface(package_dir: Option<&Path>, private_home: Option<&Path>) -> Value {
     let mut fs = serde_json::Map::new();
     // `$tmp` sets the private per-run tmp MODE (TmpMode::Private) — a writable scratch,
     // shared host tmp hidden. It emits no ordinary fs rule.
     fs.insert("$tmp".to_string(), json!("rw"));
+    if let Some(dir) = private_home {
+        // This package's own HOME (see `private_home_dir`), read-write.
+        fs.insert(dir.to_string_lossy().into_owned(), json!("rw"));
+    }
     if let Some(dir) = package_dir {
         // Own-package-dir READ-WRITE: the one subtree a dep build may write (its
         // `build/`, the compiled `.node`).
@@ -339,7 +441,8 @@ pub fn compile_build_jail(
     extra_reads: Vec<PathBuf>,
     ambient_env: BTreeMap<String, String>,
 ) -> Result<SandboxPolicy, CompileError> {
-    let surface = build_jail_surface(Some(package_dir));
+    let private_home = private_home_dir(&homes, package_dir);
+    let surface = build_jail_surface(Some(package_dir), private_home.as_deref());
     // cwd anchors diagnostics/canonicalization; the project root (homes.project) is
     // what `"./"` expands against, so the package dir as cwd does not affect grants.
     let cwd = homes.project.clone();
@@ -360,6 +463,32 @@ pub fn compile_build_jail(
     grant_build_jail_extra_reads(&mut policy, &extra_reads);
     enforce_pure_allowlist("build-jail", &mut policy);
     policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
+    // AFTER the scrub, which admits the ambient `HOME`/`USERPROFILE` verbatim — without
+    // this the grant above is invisible, because the script still spells its home the
+    // user's way and still lands outside every rule. Only names the ambient actually
+    // carried, so a POSIX child does not acquire a `USERPROFILE` the unconfined spawn
+    // never had. `LOCALAPPDATA` is deliberately NOT redirected: the Windows LowBox launch
+    // resolves its AppContainer profile dir from it (`defaults::OS_ESSENTIAL_ENV`), so
+    // pointing it elsewhere breaks process creation rather than a cache path — which also
+    // means Windows keeps most of this compat gap, since its tooling caches under
+    // `%LOCALAPPDATA%`.
+    if let Some(home) = &private_home {
+        let value = home.to_string_lossy().into_owned();
+        for key in ["HOME", "USERPROFILE"] {
+            // Matched the way `insert_env` replaces (case-insensitively on Windows, where
+            // the ambient may spell it `Userprofile`), so presence and replacement agree.
+            let present = policy.env.constructed.keys().any(|k| {
+                if cfg!(windows) {
+                    k.eq_ignore_ascii_case(key)
+                } else {
+                    k == key
+                }
+            });
+            if present {
+                defaults::insert_env(&mut policy.env.constructed, key.to_string(), value.clone());
+            }
+        }
+    }
     Ok(policy)
 }
 
@@ -434,6 +563,172 @@ mod tests {
                 policy.fs.rules.default_effect,
                 Effect::Deny,
                 "{label}: the allowlist only confines over a default-deny base"
+            );
+        }
+    }
+
+    /// One build-jail compile against REAL directories, so `private_home_dir` materializes.
+    /// `home` and `cache` are separate tempdirs so "the private home is writable" and "the
+    /// user's home is not" are independent facts here rather than two readings of one path.
+    struct HomeCase {
+        user_home: tempfile::TempDir,
+        cache: tempfile::TempDir,
+        policy: SandboxPolicy,
+    }
+
+    fn home_case(package: &str) -> HomeCase {
+        let user_home = tempfile::tempdir().expect("user home");
+        let cache = tempfile::tempdir().expect("cache home");
+        std::fs::create_dir_all(user_home.path().join(".ssh")).expect(".ssh");
+        std::fs::write(user_home.path().join(".ssh/id_rsa"), b"k").expect("key");
+        let project = user_home.path().join("proj");
+        let package_dir = project.join("node_modules").join(package);
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+        let policy = compile_build_jail(
+            Homes {
+                home: std::fs::canonicalize(user_home.path()).expect("canonical home"),
+                tmp: PathBuf::from("/testtmp"),
+                cache: std::fs::canonicalize(cache.path()).expect("canonical cache"),
+                project,
+            },
+            &package_dir,
+            Vec::new(),
+            Vec::new(),
+            [("HOME".to_string(), "/the/users/home".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("build-jail compiles");
+        HomeCase {
+            user_home,
+            cache,
+            policy,
+        }
+    }
+
+    /// The one directory under the jail-home root, which is the home the compile just made.
+    fn only_jail_home(cache: &tempfile::TempDir) -> PathBuf {
+        let mut homes: Vec<PathBuf> = std::fs::read_dir(cache.path().join("nub/jail-home"))
+            .expect("the jail home root is materialized at compile time")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        assert_eq!(homes.len(), 1, "one home per package: {homes:?}");
+        // Canonical, because that is the spelling the compiler grants and hands the child
+        // (on macOS the tempdir root is reached through the `/var -> /private/var` link).
+        std::fs::canonicalize(homes.pop().expect("one")).expect("canonical jail home")
+    }
+
+    /// The compat half: the script gets a REAL writable home AND is told about it. Neither
+    /// half implies the other — a grant the child never spells is invisible, and a redirect
+    /// with no grant is worse than nothing. The fixture's ambient `HOME` is the user's, so
+    /// this also pins that the redirect lands after the env scrub that passes it through.
+    #[test]
+    fn the_build_jail_hands_the_script_its_own_writable_home() {
+        let case = home_case("somepkg");
+        let jail_home = only_jail_home(&case.cache);
+        let matcher = crate::matcher::PathMatcher::new(&case.policy.fs.rules);
+        for rel in [".npm/_npx", ".cache/Cypress", ".stc"] {
+            let decision = matcher.decide(&jail_home.join(rel));
+            assert_eq!(
+                (decision.effect, decision.access),
+                (Effect::Allow, FsAccess::ReadWrite),
+                "{rel}: the corpus breakers' home-anchored dirs must be writable"
+            );
+        }
+        assert_eq!(
+            case.policy.env.constructed.get("HOME").map(String::as_str),
+            Some(jail_home.to_string_lossy().as_ref()),
+            "the child's HOME must name the granted dir, not the ambient one"
+        );
+    }
+
+    /// Two packages never share a home. A shared one is a config root both can write —
+    /// package A's `$HOME/.npmrc` steering package B's `node-gyp`/`script-shell` puts A's
+    /// code inside B's jail, and B's compiled addon is `require()`d unconfined.
+    #[test]
+    fn each_package_gets_its_own_home() {
+        let first = only_jail_home(&home_case("alpha").cache);
+        let second = only_jail_home(&home_case("beta").cache);
+        assert_ne!(
+            first.file_name(),
+            second.file_name(),
+            "two packages must not resolve to the same home directory name"
+        );
+    }
+
+    /// The escape the persistence choice opens if the leaf is trusted: a jailed script can
+    /// unlink and recreate its OWN home root (a subpath grant matches its root), so it can
+    /// leave a symlink to the user's home there. Resolving that would hand the NEXT compile
+    /// a read-write grant on `~`. The leaf must be refused, not followed.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_home_root_is_refused_rather_than_resolved() {
+        let case = home_case("somepkg");
+        let jail_home = only_jail_home(&case.cache);
+        let user_home = std::fs::canonicalize(case.user_home.path()).expect("canonical home");
+        std::fs::remove_dir_all(&jail_home).expect("the script can remove its own home");
+        std::os::unix::fs::symlink(&user_home, &jail_home).expect("and put a link there");
+
+        let homes = Homes {
+            home: user_home.clone(),
+            tmp: PathBuf::from("/testtmp"),
+            cache: std::fs::canonicalize(case.cache.path()).expect("canonical cache"),
+            project: user_home.join("proj"),
+        };
+        let package_dir = homes.project.join("node_modules/somepkg");
+        assert_eq!(
+            private_home_dir(&homes, &package_dir),
+            None,
+            "a leaf that is not a real directory must yield no grant at all"
+        );
+        let policy = compile_build_jail(
+            homes,
+            &package_dir,
+            Vec::new(),
+            Vec::new(),
+            [("HOME".to_string(), "/the/users/home".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("build-jail still compiles");
+        let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        assert_eq!(
+            matcher.decide(&user_home.join(".ssh/id_rsa")).effect,
+            Effect::Deny,
+            "the swapped link must not have resolved into a grant on the real home"
+        );
+    }
+
+    /// The security half, and the regression that would matter most: widening to a writable
+    /// home must not have made the USER's home reachable. Nothing here is a deny — the real
+    /// home is simply outside every grant, which is the only shape the allowlist backends
+    /// can enforce.
+    #[test]
+    fn the_private_home_leaves_the_users_own_home_unreachable() {
+        let case = home_case("somepkg");
+        let (cache, policy) = (&case.cache, &case.policy);
+        let user_home = std::fs::canonicalize(case.user_home.path()).expect("canonical home");
+        let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        for rel in [".ssh/id_rsa", ".aws/credentials", ".npmrc"] {
+            assert_eq!(
+                matcher.decide(&user_home.join(rel)).effect,
+                Effect::Deny,
+                "{rel} in the user's real home must stay ungranted"
+            );
+        }
+        assert_eq!(
+            matcher.decide(&user_home).effect,
+            Effect::Deny,
+            "the user's home directory itself must stay ungranted"
+        );
+        // In production the jail home sits UNDER the real home (`~/.cache/nub/jail-home`),
+        // so the grant must be a leaf: reachable itself, conferring nothing on its parents.
+        for ancestor in only_jail_home(cache).ancestors().skip(1) {
+            assert_eq!(
+                matcher.decide(ancestor).effect,
+                Effect::Deny,
+                "{} must not become writable by way of the home grant",
+                ancestor.display()
             );
         }
     }
