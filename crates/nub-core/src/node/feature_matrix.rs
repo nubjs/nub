@@ -494,6 +494,125 @@ static FEATURES: &[Feature] = &[
         ],
         evidence: "native on Node 24+",
     },
+    // ── Shipped-standard builtins missing below their Node line ─────────────
+    // All Stage 4 except Atomics.pause (Stage 3). Each was left unpolyfilled by the
+    // same stale-floor premise as Promise.withResolvers below; bands are measured,
+    // not read off release notes.
+    //
+    // URL.parse is the awkward one: Node backported it to 20.19 but the 21.x line
+    // never got it, so the row has a HOLE — native on 20.19-20.x, absent again
+    // across all of 21.x, native from 22.1. Same shape as the eventsource 21.x hole.
+    Feature {
+        name: "URL.parse",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((20, 19, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "URL.parse",
+                },
+            ),
+            (band((20, 19, 0), Some((21, 0, 0))), Mitigation::Native),
+            (
+                band((21, 0, 0), Some((22, 1, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "URL.parse",
+                },
+            ),
+            (band((22, 1, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4; native 22.1 and backported to 20.19; the 21.x line never got it",
+    },
+    // isWellFormed/toWellFormed ship together; isWellFormed is the detect anchor.
+    Feature {
+        name: "String.isWellFormed",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((20, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "String.prototype.isWellFormed",
+                },
+            ),
+            (band((20, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 (well-formed unicode strings); native on Node 20+",
+    },
+    Feature {
+        name: "Object.groupBy",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((21, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Object.groupBy",
+                },
+            ),
+            (band((21, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4; native on Node 21+ (V8 12.0)",
+    },
+    Feature {
+        name: "Map.groupBy",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((21, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Map.groupBy",
+                },
+            ),
+            (band((21, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4; native on Node 21+ (V8 12.0)",
+    },
+    // Change-array-by-copy. toSorted is the detect anchor for the whole family
+    // (Array toSorted/toReversed/toSpliced/with + the TypedArray forms, which get
+    // everything but toSpliced since a typed array cannot change length).
+    Feature {
+        name: "Array.toSorted",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((20, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Array.prototype.toSorted",
+                },
+            ),
+            (band((20, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 (change array by copy); native on Node 20+",
+    },
+    // transfer/transferToFixedLength/detached. Polyfillable ONLY because
+    // structuredClone's transfer list performs a real detach on the floor.
+    Feature {
+        name: "ArrayBuffer.transfer",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((21, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "ArrayBuffer.prototype.transfer",
+                },
+            ),
+            (band((21, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "Stage 4 (resizable ArrayBuffer / transfer); native on Node 21+",
+    },
+    // Stage 3, in no Node. A micro-architectural hint, so a validate-and-return
+    // implementation is fully faithful — the spec lets an implementation do nothing.
+    Feature {
+        name: "Atomics.pause",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "Atomics.pause",
+            },
+        )],
+        evidence: "TC39 Stage 3 (proposal-atomics-microwait); absent on every Node through 26.5",
+    },
     // ── Promise.withResolvers ───────────────────────────────────────────────
     // TC39 Stage 4 / ES2024; native on Node 22+, absent on the 18.19–21.x compat
     // tier. It went unpolyfilled until 2026-07 because the candidates survey

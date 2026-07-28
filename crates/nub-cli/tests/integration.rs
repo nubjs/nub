@@ -1245,6 +1245,63 @@ console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, a
 }
 
 #[test]
+fn floor_builtin_polyfills() {
+    // Shipped-standard builtins that are native only on a NEWER Node than the
+    // 18.19 support floor, so each is a compat-tier-only hole. Spec fidelity is
+    // verified separately by a battery that runs the SAME assertions against the
+    // polyfill (18.19-21.x) and against NATIVE (22.15+/24/26), so native is the
+    // oracle; this asserts reachability + correctness through nub's real preload
+    // chain. Isolated tmpdir + cache, as `polyfills_available`.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_floor_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const urlOk = URL.parse("https://a.example/x").href === "https://a.example/x" && URL.parse("!!") === null;
+const strOk = "a\uD800b".isWellFormed() === false && "a\uD800b".toWellFormed() === "a\uFFFDb";
+const grouped = Object.groupBy([1, 2, 3], (n) => (n % 2 ? "odd" : "even"));
+const groupOk = Object.getPrototypeOf(grouped) === null &&
+  grouped.odd.join(",") === "1,3" &&
+  Map.groupBy([1, 2], (n) => n % 2).get(1).join(",") === "1";
+const copyOk = [3, 1, 2].toSorted().join(",") === "1,2,3" &&
+  [3, 1, 2].toReversed().join(",") === "2,1,3" &&
+  [3, 1, 2].with(0, 9).join(",") === "9,1,2" &&
+  [3, 1, 2].toSpliced(1, 1).join(",") === "3,2" &&
+  new Int8Array([3, 1]).toSorted().constructor === Int8Array;
+// transfer must perform a REAL detach, not just zero the length.
+const buf = new ArrayBuffer(2);
+new Uint8Array(buf).set([7, 8]);
+const moved = buf.transfer();
+let viewThrew = false;
+try { new Uint8Array(buf); } catch { viewThrew = true; }
+const abOk = [...new Uint8Array(moved)].join(",") === "7,8" && buf.detached === true &&
+  viewThrew && new ArrayBuffer(0).detached === false;
+const pauseOk = Atomics.pause() === undefined;
+console.log(JSON.stringify({ urlOk, strOk, groupOk, copyOk, abOk, pauseOk }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"urlOk":true,"strOk":true,"groupOk":true,"copyOk":true,"abOk":true,"pauseOk":true}"#,
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn keyed_promise_combinator_polyfills() {
     // Promise.allKeyed / Promise.allSettledKeyed (TC39 "await dictionary", Stage 3)
     // ship in no engine, so this exercises the polyfill on every Node — there is no

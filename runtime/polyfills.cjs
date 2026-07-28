@@ -275,6 +275,225 @@ function installSyncPolyfills(preloaded) {
   installDisposableStacks();
   installKeyedPromiseCombinators();
   installPromiseWithResolvers();
+  installFloorBuiltins();
+}
+
+// ── Shipped-standard ECMAScript builtins missing below their Node line ──
+// Every one of these is Stage 4 (except Atomics.pause, Stage 3) and native on a
+// NEWER Node than nub's 18.19 support floor, so each is a hole only the compat
+// tier sees. They all went unpolyfilled until 2026-07 for the same reason
+// Promise.withResolvers did: the 2026-05 candidates survey judged them "native on
+// Nub's floor" while the floor was 22.15, and nothing revisited the verdicts when
+// it moved to 18.19. Bands are from measurement across 18.19/20.10/21.0/22.15, not
+// release notes — which is how URL.parse's 21.x hole turned up.
+//
+// Each guard is the method's own feature-detect, so every one is an independent
+// no-op where the engine ships it. Installed non-enumerable, per this file's
+// additive contract.
+function installFloorBuiltins() {
+  const def = (target, name, value) => {
+    Object.defineProperty(target, name, {
+      value,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  };
+
+  // ── URL.parse (native Node 22.1 and 20.19; absent on all of 21.x) ──
+  // The whole API is "new URL but null instead of throwing", so the try/catch IS
+  // the spec. `base` is forwarded only when supplied: passing an explicit
+  // undefined to the URL constructor is NOT the same as omitting it.
+  if (typeof URL.parse !== "function") {
+    // `base` is read from `arguments` rather than declared: WebIDL counts only
+    // REQUIRED arguments toward `length`, so native URL.parse.length is 1.
+    def(URL, "parse", function parse(url) {
+      const base = arguments.length > 1 ? arguments[1] : undefined;
+      try {
+        return base === undefined ? new URL(url) : new URL(url, base);
+      } catch {
+        return null;
+      }
+    });
+  }
+
+  // ── String.prototype.isWellFormed / toWellFormed (native Node 20; absent 18.19) ──
+  // "Well formed" means no LONE surrogate. Iterating with a code-point regex is
+  // the cheapest faithful test: a paired surrogate matches as one astral code
+  // point, so anything left in the 0xD800–0xDFFF range is unpaired.
+  if (typeof String.prototype.isWellFormed !== "function") {
+    const loneSurrogate = /[\uD800-\uDFFF]/u;
+    def(String.prototype, "isWellFormed", function isWellFormed() {
+      return !loneSurrogate.test(String(this));
+    });
+    def(String.prototype, "toWellFormed", function toWellFormed() {
+      // Replace each lone surrogate with U+FFFD. The `u` flag makes a well-formed
+      // pair a single match unit, so only unpaired units are hit.
+      return String(this).replace(/[\uD800-\uDFFF]/gu, "�");
+    });
+  }
+
+  // ── Object.groupBy / Map.groupBy (native Node 21; absent 18.19–20.x) ──
+  // The two differ in more than their container: Object.groupBy coerces each key
+  // with ToPropertyKey and returns a NULL-PROTOTYPE object (so a "toString" group
+  // can't collide with Object.prototype), while Map.groupBy keys on the raw value
+  // under SameValueZero — which a Map already implements, including -0 → +0.
+  if (typeof Object.groupBy !== "function") {
+    def(Object, "groupBy", function groupBy(items, callback) {
+      if (typeof callback !== "function") throw new TypeError("callback is not a function");
+      const obj = Object.create(null);
+      let i = 0;
+      for (const item of items) {
+        const key = callback(item, i++);
+        const k = typeof key === "symbol" ? key : String(key);
+        if (obj[k] === undefined && !(k in obj)) obj[k] = [];
+        obj[k].push(item);
+      }
+      return obj;
+    });
+  }
+  if (typeof Map.groupBy !== "function") {
+    def(Map, "groupBy", function groupBy(items, callback) {
+      if (typeof callback !== "function") throw new TypeError("callback is not a function");
+      const map = new Map();
+      let i = 0;
+      for (const item of items) {
+        // Map.prototype.get/set already key under SameValueZero, so -0 collapses
+        // to +0 exactly as the spec's normalization requires.
+        const key = callback(item, i++);
+        const group = map.get(key);
+        if (group === undefined) map.set(key, [item]);
+        else group.push(item);
+      }
+      return map;
+    });
+  }
+
+  // ── Change-array-by-copy (native Node 20; absent 18.19) ──
+  // Every method returns a plain Array regardless of the receiver's constructor —
+  // deliberately NOT species-aware, unlike map/filter. The Array.from(this) hop
+  // both realizes an array-like receiver and gives the fresh array to mutate.
+  if (typeof Array.prototype.toSorted !== "function") {
+    def(Array.prototype, "toSorted", function toSorted(compareFn) {
+      if (compareFn !== undefined && typeof compareFn !== "function") {
+        throw new TypeError("comparefn must be a function");
+      }
+      return Array.prototype.sort.call(Array.from(this), compareFn);
+    });
+    def(Array.prototype, "toReversed", function toReversed() {
+      return Array.from(this).reverse();
+    });
+    def(Array.prototype, "toSpliced", function toSpliced(start, skipCount, ...items) {
+      const arr = Array.from(this);
+      arr.splice(start, skipCount, ...items);
+      return arr;
+    });
+    // `with` is a reserved word, so a named function EXPRESSION is a SyntaxError.
+    // An object-method shorthand accepts the reserved name and infers `name` as
+    // "with", which a `function with_` would have gotten wrong.
+    def(Array.prototype, "with", {
+      with(index, value) {
+        const arr = Array.from(this);
+        const i = Math.trunc(Number(index)) || 0;
+        const actual = i < 0 ? arr.length + i : i;
+        if (actual < 0 || actual >= arr.length) throw new RangeError("invalid index");
+        arr[actual] = value;
+        return arr;
+      },
+    }.with);
+  }
+
+  // %TypedArray% gets toSorted/toReversed/with but NOT toSpliced (a typed array
+  // cannot change length), and unlike the Array forms these return the SAME
+  // typed-array type as the receiver.
+  const TypedArrayProto = Object.getPrototypeOf(Int8Array.prototype);
+  if (typeof TypedArrayProto.toSorted !== "function") {
+    def(TypedArrayProto, "toSorted", function toSorted(compareFn) {
+      if (compareFn !== undefined && typeof compareFn !== "function") {
+        throw new TypeError("comparefn must be a function");
+      }
+      const copy = new this.constructor(this);
+      return copy.sort(compareFn);
+    });
+    def(TypedArrayProto, "toReversed", function toReversed() {
+      return new this.constructor(this).reverse();
+    });
+    def(TypedArrayProto, "with", {
+      with(index, value) {
+        const copy = new this.constructor(this);
+        const i = Math.trunc(Number(index)) || 0;
+        const actual = i < 0 ? copy.length + i : i;
+        if (actual < 0 || actual >= copy.length) throw new RangeError("invalid index");
+        copy[actual] = value;
+        return copy;
+      },
+    }.with);
+  }
+
+  // ── ArrayBuffer.prototype.transfer / transferToFixedLength / detached ──
+  //    (native Node 21; absent 18.19–20.x)
+  // Faithful only because structuredClone's transfer list performs a REAL detach
+  // on the floor — verified on 18.19: the source drops to 0 bytes and any view
+  // construction on it throws, which is genuine detachment rather than a zeroed
+  // buffer. Userland cannot otherwise detach an ArrayBuffer, so without that
+  // primitive this pair would be unpolyfillable.
+  if (typeof ArrayBuffer.prototype.transfer !== "function") {
+    // A detached buffer is exactly one that rejects view construction. That is
+    // what distinguishes it from a legitimately zero-length buffer, which accepts
+    // a view fine — so byteLength alone cannot be the test.
+    const isDetached = (buf) => {
+      try {
+        new Uint8Array(buf);
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    const transferImpl = (buf, newLength) => {
+      if (isDetached(buf)) throw new TypeError("ArrayBuffer is detached");
+      const oldLen = buf.byteLength;
+      const len = newLength === undefined ? oldLen : Math.trunc(Number(newLength)) || 0;
+      if (len < 0) throw new RangeError("invalid length");
+      // Copy BEFORE detaching; the copy is truncated or zero-padded to `len`.
+      const out = new ArrayBuffer(len);
+      new Uint8Array(out).set(new Uint8Array(buf, 0, Math.min(oldLen, len)));
+      // Detach the source. The clone takes ownership of the original memory and
+      // is immediately discarded, so this moves rather than copies.
+      structuredClone(buf, { transfer: [buf] });
+      return out;
+    };
+    // newLength is optional, so it rides `arguments`: native length is 0 for both.
+    def(ArrayBuffer.prototype, "transfer", function transfer() {
+      return transferImpl(this, arguments.length > 0 ? arguments[0] : undefined);
+    });
+    def(ArrayBuffer.prototype, "transferToFixedLength", function transferToFixedLength() {
+      return transferImpl(this, arguments.length > 0 ? arguments[0] : undefined);
+    });
+    Object.defineProperty(ArrayBuffer.prototype, "detached", {
+      get: function detached() {
+        return isDetached(this);
+      },
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  // ── Atomics.pause (TC39 Stage 3, proposal-atomics-microwait; in no Node) ──
+  // A pure micro-architectural HINT with no observable effect beyond argument
+  // validation, so returning undefined is a fully faithful implementation — the
+  // spec permits an implementation to do nothing. Validation is the observable
+  // part: the optional argument must be an integral Number.
+  if (typeof Atomics !== "undefined" && typeof Atomics.pause !== "function") {
+    def(Atomics, "pause", function pause() {
+      const iterationNumber = arguments.length > 0 ? arguments[0] : undefined;
+      if (iterationNumber !== undefined) {
+        if (typeof iterationNumber !== "number" || !Number.isInteger(iterationNumber)) {
+          throw new TypeError("Atomics.pause iterationNumber must be an integral Number");
+        }
+      }
+      return undefined;
+    });
+  }
 }
 
 // ── Uint8Array base64/hex (TC39 Stage 3; native Node 25+, absent below) ──
