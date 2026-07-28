@@ -907,11 +907,16 @@ mod tests {
 
         // Non-vacuousness: the SAME manifest unjails once the cwd is inside it, so the
         // two assertions above are the provenance gates firing — not a parse failure, a
-        // missing field, or a jail that never opts out at all.
+        // missing field, or a jail that never opts out at all. The cwd must EXIST:
+        // `canonical` returns its input unchanged for a path that does not, and on macOS
+        // the real root canonicalizes `/var` to `/private/var`, so a made-up subpath
+        // would fail containment for a reason that has nothing to do with provenance.
+        let inside = checkout.join("sub");
+        std::fs::create_dir(&inside).expect("cwd inside the root");
         assert!(!should_confine_from(
             Some("payload"),
             checkout,
-            Some(checkout.join("sub"))
+            Some(inside)
         ));
     }
 
