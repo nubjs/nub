@@ -89,15 +89,26 @@ jobs:
   # Run the whole Windows suite once under a hard cap and surface any target that
   # stops making progress.
   win-full:
-    name: win full suite (hang scan)
+    name: win full suite (hang scan, ${{ matrix.variant }})
     runs-on: windows-latest
     permissions:
       contents: read
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # baseline is the epic tip WHOLESALE, so the failing-target list it reports is
+        # the pre-existing one — the only way to say which failures this diff owns.
+        variant: [baseline, fixed]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Check out the epic tip wholesale
+        if: matrix.variant == 'baseline'
+        shell: bash
+        run: git checkout f35bf4311707 -- crates/ vendor/
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
@@ -121,17 +132,23 @@ jobs:
       - name: Build the test binaries
         shell: bash
         run: cargo test --no-run
+      # Redirect rather than pipe: a leaked grandchild inherits the pipe, so `tee` blocks
+      # on EOF long after cargo has exited and the step burns to the job timeout —
+      # indistinguishable in the log from the hang this job exists to detect.
       - name: Run the full suite under a hard cap
         shell: bash
         run: |
           set +e
-          timeout 3000 cargo test --no-fail-fast 2>&1 | tee /tmp/full.log
-          code=${PIPESTATUS[0]}
+          timeout 3000 cargo test --no-fail-fast > /tmp/full.log 2>&1
+          code=$?
+          cat /tmp/full.log
           echo "cargo test exit=$code"
           echo "=== targets that stalled (cargo's >60s notice) ==="
           grep -F "has been running for over" /tmp/full.log || echo "(none)"
+          echo "=== failing targets ==="
+          sed -n '/targets failed:/,$p' /tmp/full.log || true
           [ $code -eq 124 ] && { echo "HANG: the suite made no progress in 3000s"; exit 1; }
-          echo "no hang — the suite ran to completion (test failures, if any, are above)"
+          echo "no hang — the suite ran to completion (failures, if any, are listed above)"
 
   linux:
     name: linux (${{ matrix.variant }})
