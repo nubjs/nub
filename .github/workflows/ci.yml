@@ -707,13 +707,13 @@ jobs:
             .
             crates/nub-native
       # ubuntu-latest (24.04) mediates unprivileged user namespaces via AppArmor, and
-      # `nub sandbox setup` (the repair) needs nub's OWN digest-pinned bubblewrap next
-      # to the binary — an `apt`-installed system bwrap is never enough (`nub sandbox
-      # setup` refuses to run an unverified helper as root; the enforcement tests'
+      # `nub setup-sandbox` (the repair) needs nub's OWN digest-pinned bubblewrap next
+      # to the binary — an `apt`-installed system bwrap is never enough (`nub
+      # setup-sandbox` refuses to run an unverified helper as root; the enforcement tests'
       # candidate probe separately rejects a system bwrap under the AppArmor
       # restriction). Measured on an ubuntu-latest-equivalent host: unrepaired, 2/38
       # Linux sandbox-enforcement tests run (the rest skip_without_bwrap()); after
-      # downloading the resource, staging it, and running `nub sandbox setup
+      # downloading the resource, staging it, and running `nub setup-sandbox
       # --all-users`, 38/38 pass in ~6s. NUB_SANDBOX_REQUIRE_BWRAP above is the
       # backstop: if this step ever silently fails to fix the host, the tests fail
       # loud instead of reporting a hollow green.
@@ -743,7 +743,7 @@ jobs:
           cp -a bwrap-resource/. target/debug/nub-resources/
           chmod +x target/debug/nub-resources/bwrap
           cargo build -p nub-cli
-          sudo target/debug/nub sandbox setup --all-users
+          sudo target/debug/nub setup-sandbox --all-users
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
