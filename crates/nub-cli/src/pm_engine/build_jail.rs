@@ -818,7 +818,10 @@ mod tests {
 
         write(r#"{"dependenciesMeta":{"esbuild":{"sandbox":false}}}"#);
         assert!(opted_out(root, "esbuild"));
-        assert!(!opted_out(root, "sharp"), "an unnamed package stays confined");
+        assert!(
+            !opted_out(root, "sharp"),
+            "an unnamed package stays confined"
+        );
 
         for confining in [
             r#"{"dependenciesMeta":{"esbuild":{"sandbox":true}}}"#,
@@ -835,7 +838,10 @@ mod tests {
         }
 
         std::fs::remove_file(root.join("package.json")).expect("remove");
-        assert!(!opted_out(root, "esbuild"), "a missing root manifest confines");
+        assert!(
+            !opted_out(root, "esbuild"),
+            "a missing root manifest confines"
+        );
     }
 
     /// The invariant the whole feature rests on: the opt-out is read from the CONSUMER's
@@ -861,7 +867,7 @@ mod tests {
         );
         // Stated the other way: the dep's manifest DOES carry the field, so this is a
         // scope test, not a parse test.
-        assert!(&dep != root && opted_out(&dep, "evil"));
+        assert!(dep.as_path() != root && opted_out(&dep, "evil"));
     }
 
     /// The GIT-DEP ESCALATION, which the first cut of this feature shipped and which the
