@@ -127,12 +127,20 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
             .lines()
             .map(str::to_owned)
             .collect();
+        assert_eq!(lines.len(), 1, "exactly one snapshot init: {lines:?}");
+        let logged = lines[0]
+            .strip_prefix("cwd=")
+            .and_then(|rest| rest.strip_suffix(" project=loaded"))
+            .unwrap_or_else(|| panic!("unexpected snapshot log line: {}", lines[0]));
+        // Compare resolved directories, not spellings. Windows hands the child
+        // whatever form the environment carried — an 8.3 short name under a
+        // RUNNER~1 home — while `canonicalize` yields the extended-length `\\?\`
+        // form. Both name the same directory, and the contract under test is
+        // which directory the snapshot resolved from.
         assert_eq!(
-            lines,
-            vec![format!(
-                "cwd={} project=loaded",
-                target.canonicalize().unwrap().display()
-            )]
+            Path::new(logged).canonicalize().expect("logged cwd exists"),
+            target.canonicalize().expect("target exists"),
+            "snapshot must resolve from the verb-local cwd"
         );
     }
 }

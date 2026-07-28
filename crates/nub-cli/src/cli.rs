@@ -458,7 +458,20 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
 /// keying the extra drop on which family is live reproduces each one's
 /// direct-runner behavior exactly.
 fn watch_guarded_env_file_keys(auto_cascade: bool) -> Vec<&'static str> {
-    let mut keys = nub_core::workspace::env::denied_env_file_keys().to_vec();
+    let mut keys: Vec<&'static str> = nub_core::workspace::env::denied_env_file_keys()
+        .iter()
+        .copied()
+        // The load-time denylist and this guard share a list but not a purpose.
+        // The denylist answers "may a `.env` SUPPLY this key" — no, for every
+        // entry. The guard answers "must the child start without it", and it
+        // enforces that by planting an empty placeholder. That is wrong for a
+        // key nub itself hands the child: the runtime snapshot is stamped from
+        // the resolved `nub.jsonc`, never from a file, so blanking it strips
+        // the child's own `tsconfig`/`define`/`loader` and it starts unconfigured.
+        // Skipping it here costs nothing — the denylist already stopped any
+        // file-supplied value from ever reaching the injection map.
+        .filter(|key| *key != nub_core::node::spawn::RUNTIME_CONFIG_ENV)
+        .collect();
     if auto_cascade {
         keys.push("NODE_ENV");
     }
