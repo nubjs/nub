@@ -33,6 +33,11 @@ mod inject;
 
 pub use bundle::{BundleOptions, SourcemapMode};
 
+/// Shown while a first run unpacks the embedded Node (or provisions one under
+/// `--smol`). Deliberately generic: the launcher has no app name of its own, and
+/// naming the runtime would leak an implementation detail into the app's UI.
+pub const DEFAULT_INSTALL_MESSAGE: &str = "Initializing...";
+
 pub struct CompileOptions {
     pub entry: String,
     pub out: Option<String>,
@@ -40,8 +45,9 @@ pub struct CompileOptions {
     /// Explicit `--target`; `None` → infer from the project's pin chain.
     pub target: Option<String>,
     pub platform: Option<String>,
-    /// First-run line, opt-in: `None` means the binary starts silently. Purely
-    /// additive, so there is no negative spelling to suppress a default.
+    /// Custom first-run line; `None` takes [`DEFAULT_INSTALL_MESSAGE`]. The flag
+    /// only customizes the text — there is no spelling that suppresses it, since
+    /// the alternative is a multi-second silent hang while Node is unpacked.
     pub install_message: Option<String>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
@@ -129,7 +135,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_sha256: node_sha,
         app_sha256: app_sha,
         minify: opts.bundle.minify,
-        install_message: opts.install_message.clone(),
+        install_message: Some(install_message(&opts)),
     };
     let payload = encode(&manifest, &app_files, &node_blob);
 
@@ -214,6 +220,16 @@ fn determine_target(target: Option<&str>, cwd: &Path) -> Result<(VersionPin, Str
              \x20\x20version must be intentional and reproducible.)"
         ),
     }
+}
+
+/// The first-run text to bake into the artifact. Always Some at the manifest:
+/// `None` there means "print nothing", and a first run unpacks ~100 MB of Node,
+/// so an omitted flag takes the default rather than leaving the user staring at
+/// a silent terminal.
+fn install_message(opts: &CompileOptions) -> String {
+    opts.install_message
+        .clone()
+        .unwrap_or_else(|| DEFAULT_INSTALL_MESSAGE.to_string())
 }
 
 /// The raw requirement to record for `--smol` — `None` for a bare exact version
@@ -725,16 +741,14 @@ mod tests {
         );
     }
 
-    // The flag is purely additive: the launcher treats `None` as "print
-    // nothing", so omitting `--install-message` must reach the manifest as
-    // `None` rather than being back-filled with a default line.
+    // The launcher treats `None` in the MANIFEST as "print nothing", and a first
+    // run unpacks ~100 MB of Node — so omitting the flag must reach the manifest
+    // as the default line, never as `None`. The flag customizes the text; it
+    // cannot silence it.
     #[test]
-    fn install_message_is_opt_in_and_silent_when_omitted() {
-        assert_eq!(opts(None).install_message, None);
-        assert_eq!(
-            opts(Some("Warming up")).install_message.as_deref(),
-            Some("Warming up")
-        );
+    fn install_message_defaults_when_omitted_and_is_overridable() {
+        assert_eq!(install_message(&opts(None)), "Initializing...");
+        assert_eq!(install_message(&opts(Some("Warming up"))), "Warming up");
     }
 
     #[test]

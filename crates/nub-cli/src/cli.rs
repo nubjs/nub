@@ -905,9 +905,8 @@ pub enum Command {
         #[arg(long, value_name = "KEY=VALUE", action = ArgAction::Append)]
         define: Vec<String>,
 
-        /// Message the compiled binary shows on a terminal while it sets itself
-        /// up on first run. Purely additive: omit it and the binary starts
-        /// silently.
+        /// Custom message the compiled binary shows on a terminal while it sets
+        /// itself up on first run. Default: `Initializing...`.
         #[arg(long, value_name = "TEXT")]
         install_message: Option<String>,
 
