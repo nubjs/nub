@@ -41,7 +41,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: macOS Seatbelt enforcement (per-backend + proxy + env-read/move-block closures)
-        run: cargo test -p nub-sandbox --test macos_enforcement --test macos_proxy --test macos_envread --test macos_moveblock --test build_jail_enforcement
+        # `--lib` is load-bearing, not tidiness: naming explicit `--test` targets EXCLUDES the lib
+        # target, so a unit test pinning kernel behaviour would first run only after merge to main
+        # (ci.yml's macos-14 leg is push:main/nightly). The stdio-stat differential below lives there.
+        run: cargo test -p nub-sandbox --lib --test macos_enforcement --test macos_proxy --test macos_envread --test macos_moveblock --test build_jail_enforcement
       - name: macOS CLI-seam conformance matrix
         run: cargo test -p nub-cli --test sandbox_conformance
 
