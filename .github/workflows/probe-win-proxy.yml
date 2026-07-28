@@ -14,9 +14,11 @@ on:
 
 permissions: {}
 
+# Deliberately NOT cancel-in-progress: consecutive independent runs are the evidence
+# this probe exists to produce, and a long hang scan must survive the next push.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -62,20 +64,24 @@ jobs:
           # `set +e` is load-bearing: the runner injects `-e`, which would abort the
           # step on the timeout kill before the exit code could be classified.
           set +e
+          # The baseline loops too: the deadlock is a concurrency race that does NOT hit
+          # every run (measured — run 30342722153 hung on iteration 1, run 30343448421
+          # did not), so a single-shot control would report a false "not reproduced".
           iters=10
-          [ "$VARIANT" = baseline ] && iters=1
           for i in $(seq 1 $iters); do
             echo "::group::iteration $i/$iters"
             timeout 300 cargo test -p nub-sandbox --test proxy
             code=$?
             echo "::endgroup::"
             echo "iteration $i exit=$code"
-            if [ "$VARIANT" = baseline ]; then
-              [ $code -eq 124 ] && { echo "REPRODUCED: proxy.rs made no progress in 300s"; exit 0; }
-              echo "NOT REPRODUCED — the baseline finished with exit $code"; exit 1
+            if [ "$VARIANT" = baseline ] && [ $code -eq 124 ]; then
+              echo "REPRODUCED at iteration $i: proxy.rs made no progress in 300s"; exit 0
             fi
             [ $code -eq 0 ] || { echo "FAILED at iteration $i (exit $code)"; exit 1; }
           done
+          if [ "$VARIANT" = baseline ]; then
+            echo "NOT REPRODUCED in $iters iterations"; exit 1
+          fi
           echo "$iters/$iters consecutive green at the default thread count"
 
   # The caveat from the diagnosis: with --no-fail-fast, everything ordered AFTER

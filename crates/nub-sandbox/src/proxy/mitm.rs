@@ -327,8 +327,17 @@ pub(super) fn terminate(
     server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     let mut sconn = rustls::ServerConnection::new(Arc::new(server_config)).map_err(tls_err)?;
-    // No read timeout for the terminated leg: a client may pause between handshake and
-    // request; the parent reaps the whole proxy when the child exits.
+    // No read timeout for the terminated leg: a client may legitimately pause between
+    // handshake and request, and rustls's blocking `Stream` treats a WouldBlock from the
+    // socket as a hard error rather than retrying, so the SPLICE_POLL tick the blind
+    // splice uses cannot simply be applied here.
+    //
+    // KNOWN GAP. That leaves this leg unbounded under `EgressProxy::drop`, which joins
+    // every handler: on Windows a `shutdown()` does not cancel a pending `recv()` (see
+    // `super::SPLICE_POLL`), so a child that terminates a brokered handshake and then
+    // stalls mid-request wedges teardown exactly as the blind splice used to. Closing it
+    // needs a retry-aware IO wrapper that absorbs the tick beneath rustls and surfaces
+    // only teardown as an error — tracked separately, not solved by the splice fix.
     client.set_read_timeout(None)?;
     let mut client_io = ReplayIo::new(prelude, client);
     let mut client_tls = rustls::Stream::new(&mut sconn, &mut client_io);

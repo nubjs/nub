@@ -25,6 +25,28 @@ fn basic_auth(token: &str) -> String {
 
 // ── throwaway upstream: a loopback echo server ──────────────────────────────────
 
+/// Start a loopback server that floods each connection with more bytes than any socket
+/// buffer pair can hold, so a client that never reads wedges the proxy's forwarder in a
+/// blocking send. Ignores what it is sent; the accept thread is detached.
+fn flood_server() -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut s) = conn else { continue };
+            std::thread::spawn(move || {
+                let chunk = vec![0xABu8; 64 * 1024];
+                for _ in 0..512 {
+                    if s.write_all(&chunk).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
 /// Start a loopback echo server that reflects bytes on each connection until EOF.
 /// Returns its address; the accept thread is detached (dies with the test process).
 fn echo_server() -> SocketAddr {
@@ -424,6 +446,50 @@ fn dropping_proxy_stops_the_listener() {
         TcpStream::connect(("127.0.0.1", port)).is_err(),
         "the proxy port must be closed after the handle drops"
     );
+}
+
+#[test]
+fn dropping_the_proxy_completes_while_a_tunnel_is_wedged() {
+    // Teardown must not depend on the child cooperating. A sandboxed child picks which
+    // direction it wedges: stop reading and the upstream→client forwarder blocks in
+    // `send`; open a tunnel and go silent and the client→upstream one blocks in `recv`.
+    // Windows wakes neither via `shutdown()`, so `EgressProxy::drop` — which joins every
+    // handler — hangs unless the forwarder bounds itself. Both are exercised here at once.
+    //
+    // The watchdog matters as much as the scenario: asserting on a bounded channel recv
+    // rather than letting `drop` block means a regression FAILS this test instead of
+    // hanging the whole Windows leg for an hour, which is what the original defect did.
+    let upstream = flood_server();
+    let proxy = start(net(vec![
+        allow_cidr("127.0.0.0/8"),
+        allow_host("*.allowed.example"),
+    ]));
+    let target = format!("127.0.0.1:{}", upstream.port());
+
+    // Wedge the send side: ask for the flood, then never read a byte of it.
+    let mut greedy = http_connect(proxy.port(), &target, proxy.token()).unwrap();
+    greedy
+        .write_all(&client_hello("api.allowed.example"))
+        .unwrap();
+    // Wedge the recv side: a spliced tunnel whose client simply says nothing more.
+    let mut silent = http_connect(proxy.port(), &target, proxy.token()).unwrap();
+    silent.write_all(b"PING plain-tcp\n").unwrap();
+    // Let the flood fill both socket buffers so the forwarder is genuinely blocked in a
+    // send rather than merely idle — otherwise this asserts nothing.
+    std::thread::sleep(Duration::from_secs(1));
+
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(proxy);
+        let _ = done.send(());
+    });
+    assert!(
+        wait.recv_timeout(Duration::from_secs(30)).is_ok(),
+        "dropping the proxy must complete even with both splice directions blocked \
+         (a wedged tunnel must not deadlock EgressProxy::drop's join)"
+    );
+    // Keep both tunnels open across the drop — the point is that the peers never help.
+    drop((greedy, silent));
 }
 
 // ── per-session token gate (defense-in-depth) ──────────────────────────────────────

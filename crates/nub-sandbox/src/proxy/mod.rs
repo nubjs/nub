@@ -111,22 +111,35 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PRELUDE: usize = 16 * 1024;
 /// Bound parent threads and socket state a sandboxed child can create at once.
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
-/// Wake interval for a blocked read inside a blind splice — the tick that lets a
+/// Wake interval for a blocked send OR recv inside a blind splice — the tick that lets a
 /// forwarder observe the teardown flag.
 ///
 /// PROVENANCE. Teardown ([`EgressProxy::drop`]) signals `shutdown` and then
 /// `shutdown(Shutdown::Both)`s every registered socket to wake the handlers it is about
 /// to `join()`. On POSIX that works: `shutdown(SHUT_RDWR)` both sends the FIN and wakes
-/// a `read()` already pending on another thread. WINSOCK DIVERGES on both halves — a
-/// `shutdown()` does not cancel a `recv()` pending elsewhere (only `closesocket` does),
-/// and the `SD_BOTH` suppresses the FIN that would have EOF'd the loopback peer. So a
-/// splice reading with no timeout never unblocks and `drop` deadlocks on the join
-/// (measured on `windows-latest`: the test thread inside `Drop::drop`, the handler
-/// inside `WS2_32!recv`). Do NOT "simplify" this back to `set_read_timeout(None)`.
+/// an operation already pending on another thread. WINSOCK DIVERGES on both halves — a
+/// `shutdown()` does not cancel a `recv()`/`send()` pending elsewhere (only `closesocket`
+/// does, which we cannot call while other threads hold clones of the handle), and the
+/// `SD_BOTH` suppresses the FIN that would have EOF'd the loopback peer. So a splice
+/// blocking with no timeout never unblocks and `drop` deadlocks on the join (measured on
+/// `windows-latest`: the test thread inside `Drop::drop`, the handler inside
+/// `WS2_32!recv`). Do NOT "simplify" either direction back to a `None` timeout — BOTH
+/// need it, and a sandboxed child picks which one it wedges: stop reading and the
+/// upstream→client `send` blocks; send nothing and the client→upstream `recv` blocks.
 ///
-/// Correctness does not depend on the value: a read timeout is never treated as EOF, it
-/// only re-checks the flag, so a legitimately idle long-lived tunnel survives any number
-/// of ticks. The value governs teardown responsiveness alone — keep it short.
+/// Correctness does not depend on the value: a timeout is never treated as EOF, only as
+/// "re-check the flag", so a legitimately idle long-lived tunnel survives any number of
+/// ticks. It governs teardown responsiveness alone — keep it short.
+///
+/// ACCEPTED CAVEAT. POSIX guarantees a timed-out `recv`/`send` reports any bytes it did
+/// transfer (`EAGAIN` only when none were), so retrying is lossless. Windows does not:
+/// MSDN calls the socket "indeterminate" after a blocking `SO_RCVTIMEO`/`SO_SNDTIMEO`
+/// expiry and advises closing. We retry anyway — the alternative is a guaranteed,
+/// child-triggerable teardown deadlock, and the failure mode if the caveat ever bites is
+/// a truncated TLS record the peer rejects, i.e. a dropped tunnel, never a forged or
+/// downgraded one. (These options are also silently inert on a socket not created with
+/// `WSA_FLAG_OVERLAPPED`; Rust's std sets that flag, so the fix is not a no-op — but that
+/// is a dependency on a std implementation detail worth knowing before porting this.)
 const SPLICE_POLL: Duration = Duration::from_millis(250);
 
 type ActiveSockets = Arc<Mutex<std::collections::BTreeMap<u64, Vec<TcpStream>>>>;
@@ -661,11 +674,13 @@ fn splice(client: TcpStream, upstream: TcpStream, shutdown: Arc<AtomicBool>) {
 ///
 /// The `io::copy` this replaces cannot be interrupted; the timeout+flag loop is what
 /// makes a blocked forwarder reachable by [`EgressProxy::drop`] on Windows (see
-/// [`SPLICE_POLL`]). A timeout is NOT end-of-stream — no byte was consumed, so the loop
-/// re-checks the flag and reads again. The flag is set only by teardown, which has
-/// already `shutdown(Both)`'d both legs, so an exit here never abandons a live tunnel.
+/// [`SPLICE_POLL`]). A timeout is NOT end-of-stream, so the loop re-checks the flag and
+/// retries. `shutdown` is written by nothing but teardown, so an exit on it only ever
+/// abandons a tunnel `drop` is concurrently tearing down anyway.
 fn pump(from: &mut TcpStream, to: &mut TcpStream, shutdown: &AtomicBool) {
-    if from.set_read_timeout(Some(SPLICE_POLL)).is_err() {
+    if from.set_read_timeout(Some(SPLICE_POLL)).is_err()
+        || to.set_write_timeout(Some(SPLICE_POLL)).is_err()
+    {
         return;
     }
     let mut buf = [0u8; 16 * 1024];
@@ -673,7 +688,7 @@ fn pump(from: &mut TcpStream, to: &mut TcpStream, shutdown: &AtomicBool) {
         match from.read(&mut buf) {
             Ok(0) => return,
             Ok(n) => {
-                if to.write_all(&buf[..n]).is_err() {
+                if !send_all(to, &buf[..n], shutdown) {
                     return;
                 }
             }
@@ -681,6 +696,26 @@ fn pump(from: &mut TcpStream, to: &mut TcpStream, shutdown: &AtomicBool) {
             Err(_) => return,
         }
     }
+}
+
+/// The send half of [`pump`], interruptible on the same tick. `write_all` cannot be used:
+/// it reports no byte count on error, so retrying it after a partial timed-out write
+/// would duplicate bytes into the tunnel — tracking the offset off each `write` is what
+/// makes the retry safe.
+fn send_all(to: &mut TcpStream, buf: &[u8], shutdown: &AtomicBool) -> bool {
+    let mut sent = 0;
+    while sent < buf.len() {
+        if shutdown.load(Ordering::SeqCst) {
+            return false;
+        }
+        match to.write(&buf[sent..]) {
+            Ok(0) => return false,
+            Ok(n) => sent += n,
+            Err(e) if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 fn is_timeout(e: &io::Error) -> bool {

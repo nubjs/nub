@@ -195,13 +195,10 @@ impl Tree {
         // each case supplies the same bounded current-path roots the real frontend uses.
         std::fs::create_dir_all(proj.join("writable")).unwrap();
         std::fs::create_dir_all(proj.join("nested")).unwrap();
-        // A directory NAMED by a policy must exist before the run, not merely when some
-        // case happens to target a file under it: a backend turns an authored fs entry
-        // into a bind mount whose source it refuses to invent, and `resolve` materializes
-        // only the current case's own target into a FRESH tree. So the ordered-reopen
-        // fixture's `./private` / `./private/reopened` exist for every case, including the
-        // ones probing elsewhere. Refusing a nonexistent authored source is correct
-        // fail-closed behaviour — the fixture is what has to supply the tree.
+        // A directory NAMED by a policy must exist for EVERY case, not just the ones
+        // probing under it: a backend binds an authored fs entry and rightly refuses to
+        // invent a missing source, while `resolve` materializes only the current case's
+        // own target into a fresh tree. Hence the ordered-reopen fixture's subtree here.
         std::fs::create_dir_all(proj.join("private/reopened")).unwrap();
         let manifest = if cfg!(target_os = "linux") {
             br#"{"workspaces":["nested"]}"#.as_slice()
