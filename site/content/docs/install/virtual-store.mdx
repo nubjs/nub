@@ -111,3 +111,27 @@ enableGlobalVirtualStore=false
 ```
 
 The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-dependency protection; it only relocates the store from the shared per-machine location to `node_modules/.store/` inside the project. That makes the tree self-contained — it survives a Docker `COPY --from` into a fresh image, where the shared store would not exist. Nub already does this automatically in CI and under `nub ci`, so you rarely set it by hand. See [store and disk layout](/docs/install#store-and-disk-layout) for the shared-versus-project-local store in full.
+
+## Project configuration
+
+A project [`nub.jsonc`](/docs/config) picks the layout with one [`nodeLinker`](/docs/config#installnodelinker) field — `symlink` for the shared symlink layout (the default), `isolated` for a project-local store, or `hoisted` for a flat, real-directory tree. The block applies only when Nub is the project's package manager; under an npm, pnpm, Yarn, or Bun lockfile the neutral `.npmrc` keys above are the lever.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "nodeLinker": "isolated",           // project-local store
+    "hoist": ["*eslint*", "@types/*"]   // fallback tree; isolated only
+  }
+}
+```
+
+The [`hoist`](/docs/config#installhoist) field fills the hidden fallback tree that packages reach for an undeclared import, and takes `true`, `false`, or a pattern list. Nub rejects it under any other layout rather than accept a setting it would ignore. Under the default `symlink` layout, [`symlinkDisablePattern`](/docs/config#installsymlinkdisablepattern) materializes matching packages inside the project instead of linking them from the shared store:
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "nodeLinker": "symlink",
+    "symlinkDisablePattern": ["electron", "@company/native-*"]
+  }
+}
+```

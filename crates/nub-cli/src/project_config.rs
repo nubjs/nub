@@ -1339,7 +1339,7 @@ mod tests {
 
     #[test]
     fn schema_key_is_accepted_and_ignored() {
-        let cfg = parse("{ \"$schema\": \"https://nubjs.com/schema/nub.json\" }");
+        let cfg = parse("{ \"$schema\": \"https://nubjs.com/schema/latest.json\" }");
         assert_eq!(cfg, ProjectConfig::default());
     }
 
@@ -1817,7 +1817,7 @@ mod tests {
         }
 
         let schema: Value =
-            serde_json::from_str(include_str!("../../../site/public/schema/nub.json"))
+            serde_json::from_str(include_str!("../../../site/public/schema/latest.json"))
                 .expect("the published nub.json schema must be valid JSON");
         assert_eq!(keys(&schema, "/properties"), active(ROOT_KEYS));
         assert_eq!(
@@ -1831,7 +1831,7 @@ mod tests {
         assert!(schema.pointer("/$defs/sandboxSetting").is_none());
         assert_eq!(
             schema.get("$id").and_then(Value::as_str),
-            Some("https://nubjs.com/schema/nub.json")
+            Some("https://nubjs.com/schema/latest.json")
         );
     }
 
@@ -2191,7 +2191,7 @@ mod tests {
             ]
         );
         let text = r#"{
-          "$schema": "https://nubjs.com/schema/nub.json",
+          "$schema": "https://nubjs.com/schema/latest.json",
           "nodeCompat": false,
           "preload": [],
           "nodeOptions": [],

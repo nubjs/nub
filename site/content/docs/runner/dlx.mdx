@@ -37,6 +37,21 @@ A fetched package's `preinstall`/`install`/`postinstall` scripts stay skipped â€
 
 A fetch runs through Nub's normal install resolver, so the `minimumReleaseAge` cooling window applies: a resolved version must be older than the window (default 24 hours) before it's used. See [the trust floor](/docs/install#default-trust-floor) for the full posture.
 
+## Configuration
+
+A project [`nub.jsonc`](/docs/config) carries a [`dlx`](/docs/config#dlx) block:
+
+```jsonc title="nub.jsonc"
+{
+  "dlx": {
+    "consent": "never",       // no implicit nubx registry fetch
+    "env": "./env/tools.env"  // environment files for fetched tools
+  }
+}
+```
+
+Setting `consent` to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fetch; an explicit `nub dlx` still runs, because typing it is the consent. The `env` key takes the same `true`, `false`, path, and path-array forms as the top-level `env` field.
+
 ## Related
 
 - [Runner](/docs/runner) â€” `nubx`, which fetches only on a local miss, and prompts first.

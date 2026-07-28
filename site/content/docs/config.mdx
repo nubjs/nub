@@ -1,29 +1,49 @@
 ---
-title: Project configuration
-description: Configure Nub's runtime, dependency installs, and temporary package runs from one project file.
+title: nub.jsonc
+description: The project file that configures Nub's runtime, dependency installs, and temporary package runs.
 ---
 
 Put `nub.jsonc` at the project root. Nub finds the nearest file by walking up from the command's working directory.
 
+The file uses JSON with comments and trailing commas. Unknown keys and invalid values stop the command with an error.
+
+## Every field
+
 ```jsonc title="nub.jsonc"
 {
-  "$schema": "https://nubjs.com/schema/nub.json",
+  "$schema": "https://nubjs.com/schema/latest.json",
 
-  "preload": ["./instrumentation.ts"],
-  "env": ["./env/base.env", "./env/local.env"],
+  // ── Runtime — applies to file runs, scripts, and watch mode ──
+  "preload": ["./instrumentation.ts"],       // modules loaded before the entry file
+  "nodeOptions": ["--enable-source-maps"],   // Node options for every run
+  "v8Flags": ["--expose-gc"],                // V8 flags, via NODE_OPTIONS
+  "env": ["./env/base.env", "./env/local.env"], // true | false | path | path[]
+  "define": { "APP_VERSION": "\"1.4.0\"" },  // compile-time identifier replacement
+  "loader": { ".txt": "text" },              // extension → loader
+  "conditions": ["development"],             // extra package export conditions
+  "tsconfig": "./tsconfig.runtime.json",     // TypeScript config for the runtime
+  "verifyDepsBeforeRun": "warn",             // warn | error | false
+  "nodeCompat": false,                       // true = plain Node, version pinning kept
 
+  // ── Installs ──
   "install": {
-    "nodeLinker": "symlink",
-    "minimumReleaseAge": "3d"
+    "nodeLinker": "symlink",                 // symlink | isolated | hoisted
+    "symlinkDisablePattern": ["electron"],   // packages to materialize in the project
+    "hoist": false,                          // hidden fallback tree; isolated only
+    "minimumReleaseAge": "3d",               // reject versions published too recently
+    "minimumReleaseAgeExclude": ["@company/*"],
+    "nodeOptions": ["--max-old-space-size=8192"] // for lifecycle scripts
   },
 
+  // ── Temporary package runs ──
   "dlx": {
-    "consent": "prompt"
+    "consent": "prompt",                     // prompt | never
+    "env": "./env/tools.env"                 // same forms as the top-level env
   }
 }
 ```
 
-The file uses JSON with comments and trailing commas. Unknown keys and invalid values stop the command with an error.
+Each field has its own section below, and each is also documented on the page for the feature it configures.
 
 ## `$schema`
 
@@ -31,7 +51,7 @@ Add the public schema URL for editor completion and validation.
 
 ```jsonc title="nub.jsonc"
 {
-  "$schema": "https://nubjs.com/schema/nub.json"
+  "$schema": "https://nubjs.com/schema/latest.json"
 }
 ```
 
@@ -84,6 +104,34 @@ Paths are resolved from the directory containing `nub.jsonc`.
 
 ```ts title="instrumentation.ts"
 globalThis.performance.mark("app-start");
+```
+
+An entry may also be a bare package specifier, resolved the way an import in your project would be.
+
+```jsonc title="nub.jsonc"
+{
+  "preload": ["tsx/esm", "@company/telemetry/register"]
+}
+```
+
+A bare specifier resolves through the package's `exports` map, so [`conditions`](#conditions) steers which file it loads.
+
+```jsonc title="nub.jsonc"
+{
+  "conditions": ["development"],
+  "preload": ["@company/telemetry/register"]
+}
+```
+
+```json title="node_modules/@company/telemetry/package.json"
+{
+  "exports": {
+    "./register": {
+      "development": "./register.dev.js",
+      "default": "./register.js"
+    }
+  }
+}
 ```
 
 ### `nodeOptions`
@@ -308,7 +356,7 @@ The install block configures Nub's package manager and dependency lifecycle scri
 
 It applies when Nub is the project's package manager. A project with an `npm`, `pnpm`, `yarn`, or `bun` lockfile keeps that tool's own configuration, and this block is ignored.
 
-### `nodeLinker`
+### `install.nodeLinker`
 
 Use Nub's shared symlink layout.
 
@@ -346,7 +394,7 @@ The `"pnp"` value is reserved for future Plug'n'Play support. An install that us
 nub: `install.nodeLinker: "pnp"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]
 ```
 
-### `symlinkDisablePattern`
+### `install.symlinkDisablePattern`
 
 Materialize selected packages inside the project instead of linking them from the shared store.
 
@@ -361,7 +409,7 @@ Materialize selected packages inside the project instead of linking them from th
 }
 ```
 
-### `hoist`
+### `install.hoist`
 
 Fill the hidden fallback tree that packages reach when they import something they never declared. It applies to the isolated layout only, so set `nodeLinker` alongside it.
 
@@ -405,7 +453,7 @@ Nub rejects the field under any other layout rather than accepting a setting it 
 nub: `install.hoist` is supported only with `install.nodeLinker: "isolated"` [ERR_NUB_CONFIG_UNSUPPORTED]
 ```
 
-### `minimumReleaseAge`
+### `install.minimumReleaseAge`
 
 Reject versions published too recently.
 
@@ -441,7 +489,7 @@ Exclude selected packages when they must update immediately.
 }
 ```
 
-### `nodeOptions`
+### `install.nodeOptions`
 
 Pass Node options to dependency lifecycle scripts.
 
@@ -459,7 +507,7 @@ Pass Node options to dependency lifecycle scripts.
 
 The dlx block configures temporary package runs through `nubx`, `nub dlx`, and `nub x`.
 
-### `consent`
+### `dlx.consent`
 
 Ask before an implicit `nubx` registry fetch.
 
@@ -483,7 +531,7 @@ Disable implicit registry fetches.
 
 Explicit `nub dlx` runs still work because the command itself supplies consent.
 
-### `env`
+### `dlx.env`
 
 Use a separate environment file for temporary tools.
 

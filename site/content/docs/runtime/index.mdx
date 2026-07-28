@@ -176,11 +176,28 @@ echo 'console.log(1 + 1)' | nub -
 Point VS Code's debugger at the `nub` binary to run a program through Nub with breakpoints and stepping. See [Debugging](/docs/runtime/debugging).
 </Callout>
 
+## Project configuration
+
+Settings you want on every run go in a [nub.jsonc](/docs/config) at the project root rather than on the command line.
+
+```jsonc title="nub.jsonc"
+{
+  "preload": ["./instrumentation.ts", "tsx/esm"], // loaded before the entry file
+  "nodeOptions": ["--enable-source-maps"],        // Node options for every run
+  "v8Flags": ["--expose-gc"],                     // V8 flags, via NODE_OPTIONS
+  "define": { "APP_VERSION": "\"1.4.0\"" }        // compile-time replacement
+}
+```
+
+A preload entry is either a path, resolved from the directory holding the file that supplied it, or a bare package specifier resolved the way an import in your project would be. Each `define` value is JavaScript source, so a string constant carries its own quotes. V8 flags travel through `NODE_OPTIONS`, so only the flags Node accepts there work — Nub rejects the rest before Node starts.
+
+A command-line flag always wins over the file. See [nub.jsonc](/docs/config#project-and-global-configuration) for the full precedence order.
+
 ## Compatibility mode
 
 Nub augments by default. Compatibility mode turns **every** augmentation off — no load hook, no preload, no unflagging, no `.env` loading — and runs your code on plain Node, exactly as `node <file>` would. It still runs the project's *pinned* Node (version provisioning stays on), so it's the additivity escape hatch and the differential-debugging tool: it makes the "would a plain-Node user get the same result?" test real. (This is distinct from the compatibility *tier* — the startup path for the Node lines without sync `registerHooks`, in the [table above](#supported-versions-and-tiers) — which is about how augmentation is delivered, not whether it runs.)
 
-There are two spellings, a per-invocation flag and a tree-wide env var, and they compose — either one forces compatibility mode.
+There are three spellings: a per-invocation flag, a tree-wide env var, and a project field. They compose — any one of them forces compatibility mode.
 
 ### `--node`
 
@@ -199,6 +216,18 @@ Setting a truthy `NODE_COMPAT` (`1`, `true`, or `yes`, case-insensitive) is the 
 export NODE_COMPAT=1     # every nub/node in this shell now runs vanilla
 nub script.ts            # plain Node, still on the project's pinned version
 ```
+
+### `nodeCompat`
+
+Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) is the project-wide form: everyone working in the repository gets plain Node without setting anything in their shell.
+
+```jsonc title="nub.jsonc"
+{
+  "nodeCompat": true
+}
+```
+
+Nub still resolves and provisions the project's pinned Node. Nothing else on this page applies — no load hook, no preload, no `.env` loading, and none of the other `nub.jsonc` runtime fields.
 
 ## How it works
 

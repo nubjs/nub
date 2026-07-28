@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nubjs.com/schema/latest.json",
+  "title": "Nub project configuration",
+  "description": "Configuration for a project-root nub.jsonc file.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "The JSON Schema URL used by the editor."
+    },
+    "nodeCompat": {
+      "type": "boolean",
+      "default": false,
+      "description": "Run with plain Node behavior while keeping Nub's Node version selection."
+    },
+    "preload": {
+      "$ref": "#/$defs/stringArray",
+      "description": "Modules loaded before the entry file."
+    },
+    "nodeOptions": {
+      "$ref": "#/$defs/stringArray",
+      "description": "Node options applied to runtime commands."
+    },
+    "v8Flags": {
+      "$ref": "#/$defs/stringArray",
+      "description": "V8 flags applied to runtime commands."
+    },
+    "env": {
+      "$ref": "#/$defs/envSetting",
+      "description": "Environment-file loading for runtime commands."
+    },
+    "define": {
+      "$ref": "#/$defs/stringMap",
+      "description": "Compile-time replacements. Values are JavaScript source strings."
+    },
+    "loader": {
+      "type": "object",
+      "description": "Map file extensions to Nub loaders.",
+      "propertyNames": {
+        "pattern": "^\\.[\\s\\S]+$"
+      },
+      "additionalProperties": {
+        "enum": [
+          "text",
+          "jsonc",
+          "json5",
+          "toml",
+          "yaml",
+          "ts",
+          "tsx",
+          "jsx"
+        ]
+      }
+    },
+    "conditions": {
+      "$ref": "#/$defs/stringArray",
+      "description": "Additional package export conditions."
+    },
+    "tsconfig": {
+      "type": "string",
+      "description": "Path to the tsconfig used by Nub's runtime."
+    },
+    "verifyDepsBeforeRun": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "enum": [
+            "install",
+            "warn",
+            "error",
+            "prompt"
+          ]
+        }
+      ],
+      "default": "warn",
+      "description": "What Nub does when dependencies may be stale before a run."
+    },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nodeLinker": {
+          "enum": [
+            "symlink",
+            "isolated",
+            "hoisted",
+            "pnp"
+          ],
+          "description": "The node_modules layout."
+        },
+        "symlinkDisablePattern": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Packages to materialize as project-local directories instead of symlinks."
+        },
+        "hoist": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/stringArray"
+            }
+          ],
+          "description": "Enable hoisting or select package-name patterns to hoist."
+        },
+        "minimumReleaseAge": {
+          "type": "string",
+          "pattern": "^[0-9]+[smhdw]$",
+          "examples": [
+            "30m",
+            "3d",
+            "2w"
+          ],
+          "description": "Reject package versions newer than this duration."
+        },
+        "minimumReleaseAgeExclude": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Package patterns exempt from minimumReleaseAge."
+        },
+        "nodeOptions": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Node options applied to dependency lifecycle scripts."
+        }
+      }
+    },
+    "dlx": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "consent": {
+          "enum": [
+            "prompt",
+            "never"
+          ],
+          "description": "Whether an implicit nubx registry fetch may be confirmed."
+        },
+        "env": {
+          "$ref": "#/$defs/envSetting",
+          "description": "Environment-file loading for nubx and nub dlx."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "envSetting": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/stringArray"
+        }
+      ]
+    }
+  }
+}

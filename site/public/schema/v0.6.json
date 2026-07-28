@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://nubjs.com/schema/nub.json",
+  "$id": "https://nubjs.com/schema/v0.6.json",
   "title": "Nub project configuration",
   "description": "Configuration for a project-root nub.jsonc file.",
   "type": "object",

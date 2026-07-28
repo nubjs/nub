@@ -245,6 +245,22 @@ An extension only *adds* what's missing — it never overrides a range the packa
 
 Runtime augmentation is reversible. Passing `--node`, or setting a truthy `NODE_COMPAT` for a whole tree, runs the project's pinned Node vanilla — version provisioning stays on, augmentation comes off. See [the runtime overview](/docs/runtime#--node) for the full contract.
 
+### Project configuration
+
+A project [`nub.jsonc`](/docs/config) carries an [`install`](/docs/config#install) block. It applies only when Nub is the project's package manager — a project with an npm, pnpm, Yarn, or Bun lockfile keeps that tool's own configuration, and the block is ignored.
+
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "minimumReleaseAge": "3d",                   // cooling window
+    "minimumReleaseAgeExclude": ["@company/*"],  // exempt from the window
+    "nodeOptions": ["--max-old-space-size=8192"] // for dependency build scripts
+  }
+}
+```
+
+Durations are an integer plus one of `s`, `m`, `h`, `d`, or `w` — a bare number is rejected. The top-level `nodeOptions` field is a separate setting that covers runtime commands, not dependency builds. Layout settings live in the same block; see [the virtual store](/docs/install/virtual-store#project-configuration).
+
 ## CLI
 
 The install engine is one CLI — pnpm's verbs and flags, driven by Nub.

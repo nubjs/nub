@@ -11,7 +11,7 @@ use super::*;
 fn golden_full_surface_config_parses_with_all_three_sandbox_positions() {
     let cfg = parse_project_config(
         r#"{
-          "$schema": "https://nubjs.com/schema/nub.json",
+          "$schema": "https://nubjs.com/schema/latest.json",
           "nodeCompat": false,
           "sandbox": { "fs": false, "net": ["registry.npmjs.org"], "env": true },
           "install": {
