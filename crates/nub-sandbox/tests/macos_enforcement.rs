@@ -101,7 +101,10 @@ impl Fixture {
         let spec = CommandSpec::new(program)
             .args(args.iter().copied())
             .cwd(&self.proj);
-        let out = apply(&policy, spec).expect("apply").output().expect("spawn");
+        let out = apply(&policy, spec)
+            .expect("apply")
+            .output()
+            .expect("spawn");
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
