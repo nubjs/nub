@@ -97,6 +97,18 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             extra_reads.extend(reads);
         }
 
+        // Same shape for node-gyp's OTHER out-of-jail toolchain dependency, Python. See
+        // `python_toolchain_grant` for why this pre-resolves rather than pins a fixed
+        // interpreter.
+        if let Some(python) = python_toolchain_grant(&ambient, &spawn) {
+            // `npm_config_python` is the only spelling that needs setting: it is what
+            // node-gyp reads as `--python`, and the one key that outranks it
+            // (`NODE_GYP_FORCE_PYTHON`) is not on the lifecycle env allowlist, so it never
+            // reaches the child at all — it is honoured here only as a resolution input.
+            ambient.insert("npm_config_python".to_string(), python.executable);
+            extra_reads.extend(python.reads);
+        }
+
         let homes = sandbox_homes(&spawn.project_root);
         let policy = nub_sandbox::compile_build_jail(
             homes,
@@ -255,6 +267,425 @@ fn npm_builtin_config_deny_root_for(lib_node_modules: &Path) -> Option<PathBuf> 
     npm_dir.is_dir().then_some(npm_dir)
 }
 
+/// node-gyp's one Python key that outranks `--python` / `npm_config_python`.
+const NODE_GYP_FORCE_PYTHON: &str = "NODE_GYP_FORCE_PYTHON";
+
+/// What [`python_toolchain_grant`] resolved: the interpreter to name in the child env,
+/// and the read subtrees that make it runnable inside the jail.
+struct PythonToolchain {
+    executable: String,
+    reads: Vec<PathBuf>,
+}
+
+/// Asks the interpreter where it actually lives. `sys.prefix` differs from `sys.base_prefix`
+/// only inside a virtualenv, where BOTH are load-bearing (the venv holds `pyvenv.cfg` and
+/// `site-packages`, the base holds the stdlib and the shared library).
+///
+/// The trailing lines are every shared object the interpreter ACTUALLY loaded, asked of
+/// the loader rather than inferred from the install layout. A Python is not
+/// self-contained: a pyenv-built one links Homebrew's `libintl` from outside every prefix
+/// it reports, so a prefix-only grant leaves it unrunnable — the exact half-grant that
+/// reasoning about layouts produces.
+///
+/// On macOS each image contributes TWO spellings: the path the loader resolved, and the
+/// image's own `LC_ID_DYLIB` install name — which is the spelling dyld looks up, and for
+/// Homebrew is an `opt/<formula>` alias whose link hop needs its own grant. The resolved
+/// path alone is not enough (measured: `libintl.8.dylib` granted at its Cellar path,
+/// still `blocked by sandbox` through the alias). Linux has no such indirection, so
+/// `/proc/self/maps` is the whole answer there.
+///
+/// The contract is the FIRST FOUR lines and nothing else: they are flushed before the
+/// introspection runs, and the caller gates on parsing rather than exit status, so an
+/// interpreter whose closure is already reachable is never rejected because this block
+/// was unavailable or died.
+///
+/// Run under `-I`, which is load-bearing for SAFETY, not tidiness. `python -c` puts the
+/// CWD on `sys.path`, and the cwd here is the package being built — so a dependency
+/// shipping `ctypes.py` beside its manifest would have its code imported by THIS probe,
+/// which runs unconfined in nub's own process (reproduced, then blocked by `-I`). `-I`
+/// also drops `PYTHONPATH`/`PYTHONHOME`; on every interpreter checked that leaves the four
+/// reported values identical, and a `PYTHONHOME` fidelity gap is the right trade for
+/// closing an arbitrary-code path.
+const PYTHON_PROBE: &str = "import sys\n\
+     print(sys.executable or '')\n\
+     print(sys.prefix)\n\
+     print(sys.base_prefix)\n\
+     print(sys.version_info[0], sys.version_info[1])\n\
+     sys.stdout.flush()\n\
+     try:\n\
+     \x20   import ctypes\n\
+     \x20   libc = ctypes.CDLL(None)\n\
+     \x20   if sys.platform == 'darwin':\n\
+     \x20       libc._dyld_get_image_name.restype = ctypes.c_char_p\n\
+     \x20       libc._dyld_get_image_header.restype = ctypes.c_void_p\n\
+     \x20       u32 = lambda a: ctypes.c_uint32.from_address(a).value\n\
+     \x20       for i in range(libc._dyld_image_count()):\n\
+     \x20           print(libc._dyld_get_image_name(i).decode())\n\
+     \x20           h = libc._dyld_get_image_header(i)\n\
+     \x20           if not h: continue\n\
+     \x20           o = 32\n\
+     \x20           for _ in range(u32(h + 16)):\n\
+     \x20               size = u32(h + o + 4)\n\
+     \x20               if size == 0: break\n\
+     \x20               if u32(h + o) == 0xd:\n\
+     \x20                   print(ctypes.string_at(h + o + u32(h + o + 8)).decode())\n\
+     \x20               o += size\n\
+     \x20   else:\n\
+     \x20       for line in open('/proc/self/maps'):\n\
+     \x20           p = line.rstrip().split(maxsplit=5)[-1]\n\
+     \x20           if p.startswith('/'):\n\
+     \x20               print(p)\n\
+     except Exception:\n\
+     \x20   pass";
+
+/// Resolve the Python node-gyp would pick, and derive the read closure that lets it RUN
+/// inside the jail.
+///
+/// PRE-RESOLVE, DO NOT PIN. Pinning a known-granted interpreter (`/usr/bin/python3`) would
+/// silently compile the user's addon with a different Python than npm/pnpm uses — a
+/// guardrail, not a fix. This instead reruns node-gyp's OWN search (its key order, its
+/// `>=3.6` floor, `posix_spawnp`'s first-hit PATH rule) against the effective child env and
+/// the spawn's cwd, then names the winner in `npm_config_python`. node-gyp resolves any
+/// candidate to that same interpreter, so only the SPELLING changes — which is what bounds
+/// the grant: otherwise it would have to cover a shim's whole re-exec chain (the shim, its
+/// bash, the version manager's libexec and version store) instead of one installation.
+///
+/// GRANTS READ ONLY — never write. The interpreter tree is user-managed and shared across
+/// builds; a confined script able to modify it would be rewriting the toolchain that
+/// compiles the NEXT package. Read suffices because exec is gated on read (Seatbelt allows
+/// `process-exec` globally and denies the file read; Linux binds the subtree read-only).
+///
+/// `None` — no eligible Python, or none new enough — leaves the env and grants untouched.
+///
+/// KNOWN GAP: a lifecycle script that invokes `python3` DIRECTLY (not through node-gyp)
+/// still reaches the ungranted shim. Granting the shim without its re-exec chain would
+/// only move the failure, so it stays out until a real package needs it.
+fn python_toolchain_grant(
+    ambient: &BTreeMap<String, String>,
+    spawn: &aube_util::LifecycleSandboxSpawn,
+) -> Option<PythonToolchain> {
+    // Gate on the gyp manifest: resolving costs an interpreter startup (~140ms measured),
+    // and only a package node-gyp will configure can spend it usefully. `binding.gyp` is
+    // what node-gyp itself keys on, and every wrapper that ends in a source build
+    // (`node-gyp-build`, `prebuild-install || node-gyp rebuild`, `node-pre-gyp`) ships one.
+    // A package that GENERATES its manifest at install time is missed and keeps the
+    // pre-existing failure — no regression, and no evidence any real one does this.
+    if !spawn.package_dir.join("binding.gyp").exists() {
+        return None;
+    }
+    let eligible = ProbeScope::new(spawn);
+    python_candidates(ambient, &eligible)
+        .into_iter()
+        .find_map(|candidate| probe_python(&candidate, ambient, &spawn.cwd, &eligible))
+}
+
+/// What nub is willing to EXECUTE while deciding the grant.
+///
+/// The probe runs UNCONFINED, in nub's own process, before any policy exists — so a
+/// candidate the dependency tree can supply is arbitrary code escaping the very jail this
+/// module implements. That is not hypothetical: a package declaring
+/// `"bin": {"python3": …}` lands its own script FIRST on the lifecycle PATH (aube
+/// prepends `node_modules/.bin`), and an early build of this feature ran it — the script
+/// read `~/.ssh` and wrote `$HOME`, both of which the jail denies.
+///
+/// So nothing the consumer or its dependencies can author is probeable: no relative path
+/// (it would resolve against nub's cwd, not the child's), nothing under the project or
+/// the package being built, and nothing beneath ANY `node_modules` — which is also what
+/// catches the store spellings a `.bin` shim resolves into. A real interpreter never
+/// lives in those places, so the only thing this refuses is an attack.
+///
+/// The refusal is a SKIP, not a stop: the search continues to the next candidate, so a
+/// planted `python3` costs the attacker nothing and gains them nothing.
+struct ProbeScope {
+    project_root: PathBuf,
+    package_dir: PathBuf,
+}
+
+impl ProbeScope {
+    fn new(spawn: &aube_util::LifecycleSandboxSpawn) -> Self {
+        Self {
+            project_root: canonical(&spawn.project_root),
+            package_dir: canonical(&spawn.package_dir),
+        }
+    }
+
+    fn allows(&self, candidate: &Path) -> bool {
+        let authored_here = |p: &Path| {
+            p.components().any(|c| c.as_os_str() == "node_modules")
+                || p.starts_with(&self.project_root)
+                || p.starts_with(&self.package_dir)
+        };
+        candidate.is_absolute()
+            && !authored_here(candidate)
+            && !authored_here(&canonical(candidate))
+    }
+}
+
+/// node-gyp's candidate order (`lib/find-python.js`): `NODE_GYP_FORCE_PYTHON` short-circuits
+/// the whole search, then `--python` (which npm-style config delivers as
+/// `npm_config_python`), then `PYTHON`, then a bare `python3`, then a bare `python`.
+///
+/// Every key here is reachable from a project-local `.npmrc`, so each resolved candidate
+/// passes [`ProbeScope`] before nub will run it.
+fn python_candidates(ambient: &BTreeMap<String, String>, eligible: &ProbeScope) -> Vec<PathBuf> {
+    let path = ambient.get("PATH").map(String::as_str);
+    let resolve = |program: &str| lookup_program(program, path, eligible);
+    if let Some(forced) = ambient.get(NODE_GYP_FORCE_PYTHON) {
+        return resolve(forced).into_iter().collect();
+    }
+    let mut out = Vec::new();
+    for key in ["npm_config_python", "PYTHON"] {
+        out.extend(ambient.get(key).and_then(|v| resolve(v)));
+    }
+    for name in ["python3", "python"] {
+        out.extend(resolve(name));
+    }
+    out
+}
+
+/// The absolute executable a spawn of `program` would reach: itself when already
+/// qualified, else the first executable hit walking `path` — `posix_spawnp`'s rule, which
+/// is what node-gyp's `execFile` goes through — restricted to what [`ProbeScope`] permits.
+fn lookup_program(program: &str, path: Option<&str>, eligible: &ProbeScope) -> Option<PathBuf> {
+    // Eligibility first: it is the only check that rejects a RELATIVE path, and a relative
+    // one would be stat'ed against nub's cwd while the exec resolves it against the child's.
+    let usable = |p: &Path| eligible.allows(p) && is_executable_file(p);
+    let named = Path::new(program);
+    if named.components().count() > 1 {
+        return usable(named).then(|| named.to_path_buf());
+    }
+    let candidates = |dir: PathBuf| {
+        // Windows spawns resolve a bare name through PATHEXT; `.exe` is the only suffix a
+        // Python installation uses, and a miss here just leaves the grant unresolved.
+        let mut names = vec![dir.join(program)];
+        if cfg!(windows) {
+            names.push(dir.join(format!("{program}.exe")));
+        }
+        names
+    };
+    std::env::split_paths(path?)
+        .flat_map(candidates)
+        .find(|p| usable(p))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
+/// Run `candidate` under the effective child env and cwd, and turn what it reports about
+/// itself into the read set. Rejecting a pre-3.6 interpreter here is what keeps this from
+/// naming one node-gyp would go on to reject — the alternative is pinning a Python that
+/// makes the build fail where it would otherwise have fallen through to the next candidate.
+fn probe_python(
+    candidate: &Path,
+    ambient: &BTreeMap<String, String>,
+    cwd: &Path,
+    eligible: &ProbeScope,
+) -> Option<PythonToolchain> {
+    // The candidate passing [`ProbeScope`] only covers the FIRST hop. A version-manager
+    // shim re-execs `python3` and searches PATH again, so leaving the dependency-authored
+    // entries on it hands the planted binary right back one hop later — measured: nub
+    // correctly skipped `node_modules/.bin/python3`, chose the real pyenv shim, and pyenv
+    // then resolved `python3` to the planted script anyway and ran it unconfined. The
+    // probe's whole process tree therefore searches only eligible directories.
+    let mut env = ambient.clone();
+    if let Some(path) = ambient.get("PATH") {
+        let kept: Vec<_> = std::env::split_paths(path)
+            .filter(|dir| eligible.allows(dir))
+            .collect();
+        env.insert(
+            "PATH".to_string(),
+            std::env::join_paths(kept)
+                .ok()?
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    // The cwd is the child's, because a version manager picks its version by walking up
+    // from it for a `.python-version` — resolving anywhere else would name a different
+    // interpreter than the build will use. See `PYTHON_PROBE` for why that cwd, being
+    // dependency-authored, makes `-I` mandatory.
+    let mut child = std::process::Command::new(candidate)
+        .arg("-I")
+        .arg("-c")
+        .arg(PYTHON_PROBE)
+        .env_clear()
+        .envs(&env)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = read_bounded(&mut child, PYTHON_PROBE_TIMEOUT)?;
+    // Gated on PARSING, not exit status: the four contract lines are flushed before the
+    // introspection tail, so a candidate that answered them is usable even if the tail
+    // died. Anything that is not a Python 3.6+ interpreter fails the parse.
+    let toolchain = python_reads(&String::from_utf8(stdout).ok()?)?;
+    // Re-gate what came BACK. The probe's answer decides both the interpreter nub names
+    // and the tree it read-grants, so a resolution that lands inside the dependency tree
+    // by any route must not become either — independent of how it got there.
+    let cleared = eligible.allows(Path::new(&toolchain.executable))
+        && toolchain.reads.iter().all(|p| eligible.allows(p));
+    cleared.then_some(toolchain)
+}
+
+/// Unlike node-gyp's own Python spawns, this one runs OUTSIDE the jail and outside the
+/// monitor that reaps it, so a candidate that never exits would wedge the install with
+/// nothing to collect it. Generous for a process whose whole job is printing four lines.
+const PYTHON_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Collect `child`'s stdout, killing it if it outlives `timeout`. The reader runs on its
+/// own thread because a child that fills the pipe blocks until someone drains it — polling
+/// `try_wait` alone would deadlock against exactly the hang this bounds.
+fn read_bounded(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut pipe = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        pipe.read_to_end(&mut buf).ok();
+        buf
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) => {
+                child.kill().ok();
+                child.wait().ok();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+    reader.join().ok()
+}
+
+/// Parse the probe's four lines into the grant. Split out from the spawn so the derivation
+/// — the version floor, the two prefixes, the root guard — is testable without a Python.
+///
+/// The read set covers each reported path BOTH as the kernel stores it and as the child
+/// spells it. Seatbelt matches a rule against the CANONICAL path, so a grant written on a
+/// symlinked spelling silently becomes a grant on the target and leaves the link itself
+/// ungranted — and resolving an ungranted link is denied, with `EPERM`, which
+/// `posix_spawnp` treats as fatal. The spelling is not ours to choose: node-gyp re-derives
+/// the interpreter from the candidate's own `sys.executable` and execs THAT, and a
+/// Homebrew Python reports its `opt/<pkg>` alias no matter which path invoked it — so
+/// there are two link hops between what node-gyp runs and the file (measured: the alias
+/// spelling `EPERM`s while the identical file under its Cellar path runs).
+fn python_reads(probe_stdout: &str) -> Option<PythonToolchain> {
+    let mut lines = probe_stdout.lines();
+    let executable = lines.next()?.trim();
+    let prefix = lines.next()?.trim();
+    let base_prefix = lines.next()?.trim();
+    let (major, minor) = lines.next()?.trim().split_once(' ')?;
+    if (major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?) < (3, 6) {
+        return None;
+    }
+    if executable.is_empty() {
+        return None;
+    }
+    let executable = PathBuf::from(executable);
+    let mut reads = Vec::new();
+    // Images are kept only if they EXIST as files. On macOS the loader reports every
+    // library in the dyld shared cache by a path that has no file behind it — 352 unique
+    // names on a stock Homebrew Python, of which 8 exist. Granting the other 344 would be
+    // pure cost: two `FsRule`s each, ~211 KB of SBPL in an argv element that shares
+    // ARG_MAX with the child's whole environment. Linux drops them anyway (a Speculative
+    // mount source that is missing is skipped); this makes both backends agree.
+    let images = lines
+        .map(str::trim)
+        .filter(|l| l.starts_with('/'))
+        .map(Path::new)
+        .filter(|p| p.is_file());
+    for reported in [Path::new(prefix), Path::new(base_prefix), &executable]
+        .into_iter()
+        .chain(images)
+    {
+        reads.push(canonical(reported));
+        reads.extend(symlink_hop_dirs(reported));
+    }
+    // The bin dir is NOT always under either prefix: a Homebrew Python's `bin/` sits beside
+    // the `Frameworks/…/Versions/<v>` tree that `sys.prefix` names, and the siblings there
+    // (`pip`, the versioned `pythonX.Y`) are what a gyp action reaches for.
+    let executable = canonical(&executable);
+    reads.extend(executable.parent().map(Path::to_path_buf));
+    reads.retain(|p| grantable(p));
+    let mut seen = std::collections::BTreeSet::new();
+    reads.retain(|p| seen.insert(p.clone()));
+    // Collapse anything an outer grant already covers.
+    let roots = reads.clone();
+    reads.retain(|p| !roots.iter().any(|r| r != p && p.starts_with(r)));
+    // Outermost first, so each grant nests inside the one before it in bwrap's argv.
+    reads.sort_by_key(|p| p.components().count());
+    Some(PythonToolchain {
+        executable: executable.to_string_lossy().into_owned(),
+        reads,
+    })
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether a derived path may become a read grant at all.
+///
+/// Refused: anything at or one level below the filesystem root (`sys.prefix` is `/usr` for
+/// a distro Python, which every backend's system floor already covers), the user's HOME or
+/// an ancestor of it (a version manager installed as `~/x -> ~/opt/x` would otherwise hand
+/// a hop grant on the whole home directory), and any path still carrying `..`/`.` —
+/// `canonical` falls back to its input for a path that does not exist, so a traversal
+/// would survive the component count and only collapse later, inside the policy compiler,
+/// landing on `/`.
+fn grantable(path: &Path) -> bool {
+    use std::path::Component;
+    if !path.is_absolute() || path.components().count() <= 2 {
+        return false;
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return false;
+    }
+    !user_home().is_some_and(|home| home.starts_with(path))
+}
+
+fn user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// The directories that must be readable for a child to TRAVERSE `path` as spelled: for
+/// every symlink among its ancestors, the real directory HOLDING that link. A link's own
+/// canonical path is its real parent plus its name, so granting that parent is the only
+/// way to make the hop legal — a rule naming the link resolves to the target and grants
+/// the wrong thing. What this opens is one directory of links per hop (read-only, and
+/// their targets stay ungranted unless separately allowed), which for the Homebrew case
+/// that motivated it is the list of installed formulae. `grantable` is what keeps a link
+/// sitting directly in `$HOME` from turning that into a grant on the whole home directory.
+fn symlink_hop_dirs(path: &Path) -> Vec<PathBuf> {
+    path.ancestors()
+        .filter(|a| std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()))
+        .filter_map(|a| a.parent().map(canonical))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +760,231 @@ mod tests {
 
         let nonexistent = tmp.path().join("nowhere/lib/node_modules");
         assert_eq!(npm_builtin_config_deny_root_for(&nonexistent), None);
+    }
+
+    /// The Python-grant cases are POSIX-shaped throughout — absolute paths without a
+    /// drive prefix, a `symlink` that only exists under `std::os::unix`, `/bin/*`
+    /// candidates. The derivation itself is platform-neutral; expressing these on Windows
+    /// would mean a second set of fixtures for a jail whose Windows story diverges
+    /// elsewhere anyway (deny-all net, AppContainer), so they run where they are honest.
+    #[cfg(unix)]
+    mod python {
+        use super::super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn probe_output(lines: &[&str]) -> String {
+            lines.join("\n")
+        }
+
+        /// The regression this whole path exists for. An interpreter reached through a
+        /// symlinked directory — a Homebrew `opt/<formula>` alias, a version manager's
+        /// current-version link — must have the LINK's holding directory granted, not just the
+        /// target: the sandbox resolves a rule to the target, so a target-only grant leaves the
+        /// hop denied and the exec fails `EPERM` with the interpreter itself readable.
+        #[test]
+        fn python_reads_grants_the_directory_holding_an_ancestor_symlink() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+            std::fs::create_dir_all(root.join("real/bin")).expect("prefix");
+            std::fs::write(root.join("real/bin/python3"), b"").expect("interpreter");
+            std::os::unix::fs::symlink(root.join("real"), root.join("alias")).expect("alias");
+
+            let aliased = root.join("alias/bin/python3");
+            let grant = python_reads(&probe_output(&[
+                &aliased.to_string_lossy(),
+                &root.join("real").to_string_lossy(),
+                &root.join("real").to_string_lossy(),
+                "3 12",
+            ]))
+            .expect("a 3.12 interpreter yields a grant");
+
+            assert!(
+                grant.reads.contains(&root),
+                "the directory holding the `alias` symlink must be granted so the hop resolves; \
+                 got {:?}",
+                grant.reads
+            );
+            assert_eq!(
+                grant.executable,
+                root.join("real/bin/python3").to_string_lossy(),
+                "the child is handed the resolved spelling"
+            );
+        }
+
+        /// A loaded shared object outside every reported prefix is part of the closure — a
+        /// pyenv-built Python links its `libintl` from the system package manager's tree —
+        /// while an entry an outer grant already covers is dropped rather than repeated, and
+        /// a reported image with no file behind it is dropped entirely. That last one is not
+        /// an edge case: on macOS the loader names every dyld-shared-cache library, 344 of
+        /// 352 on a stock host, and granting them cost ~211 KB of SBPL in an argv element
+        /// that shares ARG_MAX with the child's environment.
+        #[test]
+        fn python_reads_covers_out_of_prefix_images_and_drops_covered_or_absent_ones() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+            let prefix = root.join("py/3.12");
+            std::fs::create_dir_all(prefix.join("lib")).expect("prefix");
+            std::fs::create_dir_all(prefix.join("bin")).expect("bin");
+            std::fs::write(prefix.join("bin/python3"), b"").expect("interpreter");
+            std::fs::write(prefix.join("lib/libpython.so"), b"").expect("nested image");
+            let outside = root.join("brew/gettext/1.0/lib");
+            std::fs::create_dir_all(&outside).expect("outside prefix");
+            std::fs::write(outside.join("libintl.8.dylib"), b"").expect("outside image");
+
+            let grant = python_reads(&probe_output(&[
+                &prefix.join("bin/python3").to_string_lossy(),
+                &prefix.to_string_lossy(),
+                &prefix.to_string_lossy(),
+                "3 12",
+                &prefix.join("lib/libpython.so").to_string_lossy(),
+                &outside.join("libintl.8.dylib").to_string_lossy(),
+                "/System/Library/dyld-shared-cache/only/libNoSuchFile.dylib",
+            ]))
+            .expect("a 3.12 interpreter yields a grant");
+
+            assert!(
+                !grant.reads.iter().any(|p| p.starts_with("/System")),
+                "an image with no file behind it must not become a grant: {:?}",
+                grant.reads
+            );
+            assert!(
+                grant.reads.contains(&outside.join("libintl.8.dylib")),
+                "an image outside the prefix must be granted: {:?}",
+                grant.reads
+            );
+            assert!(
+                !grant.reads.contains(&prefix.join("lib/libpython.so")),
+                "an image the prefix grant already covers must not be repeated: {:?}",
+                grant.reads
+            );
+        }
+
+        /// node-gyp requires `>=3.6.0` and falls through to its next candidate below it.
+        /// Naming an older interpreter would turn that fall-through into a hard failure.
+        #[test]
+        fn python_reads_rejects_an_interpreter_older_than_node_gyps_floor() {
+            let older = probe_output(&["/usr/bin/python2.7", "/usr", "/usr", "2 7"]);
+            assert!(python_reads(&older).is_none());
+            let unsupported_three = probe_output(&["/usr/bin/python3.5", "/usr", "/usr", "3 5"]);
+            assert!(python_reads(&unsupported_three).is_none());
+        }
+
+        /// The three ways a derived path could widen the read set far past one interpreter:
+        /// a root-level prefix (`/usr` for a distro Python), a traversal that only collapses
+        /// later inside the policy compiler and lands on `/`, and — the one a real host hits
+        /// — a hop directory that IS `$HOME`, which a version manager installed as
+        /// `~/x -> …` would otherwise produce, handing every dependency build script the
+        /// whole home directory.
+        #[test]
+        fn grantable_refuses_every_path_that_would_widen_past_one_interpreter() {
+            for refused in ["/", "/usr", "/usr/../.."] {
+                assert!(!grantable(Path::new(refused)), "{refused} must be refused");
+            }
+            assert!(grantable(Path::new("/usr/local/py")));
+
+            let home = user_home().expect("HOME is set under test");
+            assert!(!grantable(&home), "$HOME itself must be refused");
+            assert!(
+                !grantable(home.parent().expect("HOME has a parent")),
+                "an ancestor of $HOME must be refused"
+            );
+            assert!(
+                grantable(&home.join("miniconda3")),
+                "a real interpreter tree inside $HOME stays grantable"
+            );
+        }
+
+        fn ambient(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        }
+
+        /// A scope that refuses nothing a real host would offer, for the ordering cases.
+        fn any_scope() -> ProbeScope {
+            ProbeScope {
+                project_root: PathBuf::from("/nonexistent-project"),
+                package_dir: PathBuf::from("/nonexistent-package"),
+            }
+        }
+
+        /// node-gyp's search order, which this must mirror exactly or the grant covers a
+        /// different interpreter than the one it goes on to run.
+        #[test]
+        fn python_candidates_follow_node_gyps_key_order() {
+            let forced = ambient(&[
+                (NODE_GYP_FORCE_PYTHON, "/bin/sh"),
+                ("npm_config_python", "/bin/echo"),
+                ("PYTHON", "/bin/cat"),
+            ]);
+            assert_eq!(
+                python_candidates(&forced, &any_scope()),
+                vec![PathBuf::from("/bin/sh")],
+                "NODE_GYP_FORCE_PYTHON short-circuits the whole search"
+            );
+
+            let configured = ambient(&[("npm_config_python", "/bin/echo"), ("PYTHON", "/bin/cat")]);
+            assert_eq!(
+                python_candidates(&configured, &any_scope()),
+                vec![PathBuf::from("/bin/echo"), PathBuf::from("/bin/cat")],
+                "--python outranks PYTHON"
+            );
+
+            assert!(
+                python_candidates(&ambient(&[("PATH", "/nonexistent")]), &any_scope()).is_empty(),
+                "no interpreter on PATH yields no candidate, leaving the env untouched"
+            );
+        }
+
+        /// The probe runs UNCONFINED, so a candidate the dependency tree can author would
+        /// be a sandbox escape: a package declaring `"bin": {"python3": …}` puts its own
+        /// script first on the lifecycle PATH, and an early build of this feature executed
+        /// it — `~/.ssh` read, `$HOME` written, both denied inside the jail. The planted
+        /// entry must be SKIPPED, with the search continuing past it.
+        #[test]
+        fn python_candidates_never_run_anything_the_dependency_tree_authored() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+            let planted = root.join("project/node_modules/.bin");
+            let system = root.join("usr/bin");
+            for dir in [&planted, &system] {
+                std::fs::create_dir_all(dir).expect("bin dir");
+                // Both spellings node-gyp tries, so this also pins that the two-name loop
+                // tolerates a host where `python3` and `python` are separate executables.
+                for name in ["python3", "python"] {
+                    let exe = dir.join(name);
+                    std::fs::write(&exe, b"#!/bin/sh\n").expect("interpreter");
+                    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
+                        .expect("chmod");
+                }
+            }
+            let scope = ProbeScope {
+                project_root: root.join("project"),
+                package_dir: root.join("project/node_modules/evil"),
+            };
+            let path = format!("{}:{}", planted.display(), system.display());
+
+            assert_eq!(
+                python_candidates(&ambient(&[("PATH", &path)]), &scope),
+                vec![system.join("python3"), system.join("python")],
+                "the planted bin must be skipped and the search continue"
+            );
+            assert_eq!(
+                python_candidates(
+                    &ambient(&[(
+                        "npm_config_python",
+                        &planted.join("python3").to_string_lossy()
+                    )]),
+                    &scope
+                ),
+                Vec::<PathBuf>::new(),
+                "a project-local .npmrc must not be able to name it either"
+            );
+            assert!(
+                !scope.allows(Path::new("relative/python3")),
+                "a relative candidate resolves against nub's cwd, not the child's"
+            );
+        }
     }
 }

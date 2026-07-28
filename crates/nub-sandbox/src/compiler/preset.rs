@@ -109,7 +109,11 @@ pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx:
 }
 
 /// Grant the build-jail's per-spawn extra READ subtrees that the interpreter grant misses.
-/// Today these are two subtrees of the provisioned Node's root: its C/C++ header dir
+/// The embedder derives them; today they are the provisioned Node's toolchain subtrees
+/// (below) plus the resolved Python's own closure, whose derivation and bounds live with
+/// the embedder because it owns where each toolchain comes from.
+///
+/// The Node pair is its C/C++ header dir
 /// (`<node-root>/include/node`) and `<node-root>/lib/node_modules`. node-gyp compiles an
 /// addon against the headers under `npm_config_nodedir/include/node`, and `npm`/`npx`/
 /// `corepack` are each a symlink into `lib/node_modules`, so without it they dangle and
