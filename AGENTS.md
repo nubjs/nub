@@ -10,6 +10,7 @@ This repo's task-specific playbooks — "skills" — live as plain-markdown `SKI
 
 - **`gcloud-vm`** — provision/start/reach Google Cloud VMs (real Linux-kernel enforcement, real Windows/MSVC/AppContainer, a clean build box); you can CREATE a VM on demand, not just start the standing `nub-linux`/`nub-win`.
 - **`dev-loop`** / **`rust-build`** / **`worktree`** — build & test nub in a worktree (the fast-profile loop, the shared-target-dir contamination hazard, the one-command worktree setup).
+- **`remote-build`** — run a cold build, `clippy --all-targets --all-features`, a full `cargo test`, or a `release` build on an ephemeral GCE spot VM instead of the dev Mac, and cross-compile `aarch64-apple-darwin` on Linux (no Apple SDK) to pull a signed binary back. Reach for it whenever the host is contended; the ~5s warm inner loop still stays local.
 - **`ci-adhoc-test`** — run a macOS/Windows/Linux-arch probe on real CI with NO PR (branch-scoped workflow); **`ci-watch`** — block on CI correctly.
 - **`release`** — cut a patch release end-to-end; **`address-issue`** — the full issue playbook; **`audit-thread`** / **`sandbox-pentest`** — parity-audit and adversarial-red-team methodology.
 - **`prose-writing`** — REQUIRED before writing any GitHub comment, doc, or release note; **`benchmarking`**, **`pm-perf-tracing`**, **`impact-analysis`**, **`aube-bump`**, **`git-archaeology`**, **`md-toc`**, **`soak`** — each a durable method for its named task.
