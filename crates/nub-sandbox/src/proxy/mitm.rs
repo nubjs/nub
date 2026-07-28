@@ -22,7 +22,7 @@
 //! and request pipelining are cut-1 non-goals; a chunked REQUEST body is refused
 //! (fail-closed) rather than mis-framed.
 
-use super::ca::MitmCa;
+use super::ca::{CaScope, MitmCa};
 use crate::matcher::host::strip_trailing_dot;
 use crate::policy::CredentialBroker;
 use base64::Engine as _;
@@ -206,7 +206,7 @@ impl MitmEngine {
         brokers: Vec<RuntimeCredentialBroker>,
         terminate_all: bool,
     ) -> io::Result<Arc<MitmEngine>> {
-        let ca = MitmCa::generate()?;
+        let ca = MitmCa::generate(ca_scope(&brokers, terminate_all))?;
         let roots = ca.native_roots().to_vec();
         Self::with_ca_and_roots(ca, brokers, terminate_all, roots)
     }
@@ -216,7 +216,7 @@ impl MitmEngine {
         brokers: Vec<RuntimeCredentialBroker>,
         upstream_root: rustls::pki_types::CertificateDer<'static>,
     ) -> io::Result<Arc<MitmEngine>> {
-        let ca = MitmCa::generate()?;
+        let ca = MitmCa::generate(ca_scope(&brokers, false))?;
         Self::with_ca_and_roots(ca, brokers, false, vec![upstream_root])
     }
 
@@ -295,6 +295,28 @@ fn broker_for_host<'a>(
         .iter()
         .find(|broker| strip_trailing_dot(&broker.host).eq_ignore_ascii_case(host))
         .map(|broker| broker.replacements.as_slice())
+}
+
+/// Decide the ephemeral CA's [`CaScope`] from what this engine can ever mint a leaf
+/// for. `should_terminate` mints for a broker match OR (when `terminate_all`) for ANY
+/// allowed host — and the full allowlist behind `terminate_all` never reaches
+/// `MitmEngine::new` (only the compiled `RuntimeCredentialBroker`s do), so there is no
+/// finite host set to constrain against on that path without a blind guess. Constrain
+/// only the one case where the mintable set is exactly known: brokers-only (today's
+/// only reachable posture — `terminate_all` is derived from the dormant
+/// `ProxyMode::Terminate`, see `policy.rs`).
+fn ca_scope(brokers: &[RuntimeCredentialBroker], terminate_all: bool) -> CaScope {
+    if terminate_all {
+        return CaScope::Unconstrained;
+    }
+    let mut hosts: Vec<String> = brokers.iter().map(|broker| broker.host.clone()).collect();
+    hosts.sort();
+    hosts.dedup();
+    if hosts.is_empty() {
+        CaScope::Unconstrained
+    } else {
+        CaScope::Hosts(hosts)
+    }
 }
 
 /// Terminate a client tunnel to `host:port`, inject the broker's credential, forward to
