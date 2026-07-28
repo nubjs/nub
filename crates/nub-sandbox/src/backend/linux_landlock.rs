@@ -189,7 +189,6 @@ struct PathBeneathAttr {
 #[derive(Debug)]
 pub(crate) struct LandlockRuleset {
     fd: OwnedFd,
-    pub(crate) abi: u32,
     pub(crate) rules_added: usize,
 }
 
@@ -331,7 +330,6 @@ pub(crate) fn build(policy: &SandboxPolicy) -> Result<LandlockRuleset, String> {
     }
     Ok(LandlockRuleset {
         fd: ruleset,
-        abi,
         rules_added,
     })
 }
@@ -487,31 +485,32 @@ unsafe fn install_confinement_pre_exec(
     seccomp: Option<std::sync::Arc<Vec<seccompiler::sock_filter>>>,
 ) {
     use std::os::unix::process::CommandExt;
-    unsafe {
-        command.pre_exec(move || {
-            // Own process group: without a PID namespace this is the only handle the parent
-            // has on the script's descendants, so it must exist before anything can fork.
-            if libc::setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            // Both Landlock and seccomp REFUSE an unprivileged caller that could still gain
-            // privileges through a setuid execve, so this gates everything below it.
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            unsafe { restrict_self(ruleset_fd) }
+    let hook = move || -> std::io::Result<()> {
+        // Own process group: without a PID namespace this is the only handle the parent
+        // has on the script's descendants, so it must exist before anything can fork.
+        if unsafe { libc::setpgid(0, 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Both Landlock and seccomp REFUSE an unprivileged caller that could still gain
+        // privileges through a setuid execve, so this gates everything below it.
+        if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        unsafe { restrict_self(ruleset_fd) }
+            .map_err(std::io::Error::from_raw_os_error)?;
+        if let Some(filter) = &seccomp {
+            super::linux_monitor::install_target_seccomp(filter)
                 .map_err(std::io::Error::from_raw_os_error)?;
-            if let Some(filter) = &seccomp {
-                super::linux_monitor::install_target_seccomp(filter)
-                    .map_err(std::io::Error::from_raw_os_error)?;
-            }
-            super::linux_monitor::mark_inherited_fds_cloexec()?;
-            Ok(())
-        });
-    }
+        }
+        super::linux_monitor::mark_inherited_fds_cloexec()?;
+        Ok(())
+    };
+    // SAFETY: the hook runs between fork and execve and performs only raw syscalls — no
+    // allocation, and nothing that can take a lock the forking parent held.
+    unsafe { command.pre_exec(hook) };
 }
 
 /// Build the fully-confined child command for the Landlock mechanism.
