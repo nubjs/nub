@@ -28,6 +28,15 @@
 // These need polyfills on all supported versions. (Temporal is a lazy global
 // installed by the preload entry, NOT here — see preload.cjs / preload.mjs.)
 
+// STRICT MODE IS LOAD-BEARING, not hygiene. In sloppy mode a method invoked as
+// `fn.call(null)` has its `this` COERCED to the global object, so every
+// RequireObjectCoercible / ToObject(this) check a polyfilled method makes would
+// silently pass where the real builtin throws a TypeError — verified against native
+// for both String.prototype.isWellFormed and Array.prototype.toSorted. Strict mode
+// leaves `this` as null and restores the spec behavior for the whole file at once,
+// instead of guarding method by method.
+"use strict";
+
 const { createRequire } = require("node:module");
 const __require = createRequire(__filename);
 
@@ -65,10 +74,10 @@ function installSyncPolyfills(preloaded) {
   // Neutralization is idempotent — a descendant re-running this preload deletes an
   // already-absent or re-installed `localStorage` again, which is harmless. The
   // property is a configurable own accessor (the define that replaced it before
-  // already proved that), so `delete` removes it cleanly. This file is sloppy-mode
-  // CJS, where `delete` never throws (a non-configurable property would just make
-  // it return false and leave Node's getter in place); the try/catch is belt-and-
-  // suspenders for any future strict/ESM move.
+  // already proved that), so `delete` removes it cleanly. This file is strict-mode
+  // CJS. The file is now STRICT (see the header), so `delete` on a
+  // non-configurable property THROWS rather than returning false — which is exactly
+  // what the try/catch below was already written to absorb.
   if (process.env.__NUB_NEUTRALIZE_LOCALSTORAGE) {
     try {
       delete globalThis.localStorage;
@@ -619,7 +628,10 @@ function installIteratorSurface() {
   };
   if (typeof Iterator.zip !== "function") {
     defBuiltin(Iterator, "zip", function zip(iterables) {
-      if (iterables === null || iterables === undefined || typeof iterables[Symbol.iterator] !== "function") {
+      // Step 1 is an OBJECT check, which precedes any iterability test — so a string
+      // primitive is a TypeError even though strings are iterable.
+      iterOf(iterables);
+      if (typeof iterables[Symbol.iterator] !== "function") {
         throw new TypeError("Iterator.zip requires an iterable of iterables");
       }
       const { mode, padding } = zipMode(arguments.length > 1 ? arguments[1] : undefined);
@@ -629,11 +641,47 @@ function installIteratorSurface() {
         }
         return it[Symbol.iterator]();
       });
-      const pads = padding === undefined ? [] : [...padding];
+      // Padding is stepped EXACTLY once per source and then closed, never drained:
+      // spreading it would hang on an infinite padding iterator and over-consume a
+      // finite one.
+      const pads = [];
+      if (padding !== undefined) {
+        if (padding === null || typeof padding[Symbol.iterator] !== "function") {
+          throw new TypeError("padding must be iterable");
+        }
+        const padIter = padding[Symbol.iterator]();
+        for (let i = 0; i < sources.length; i++) {
+          const r = padIter.next();
+          if (r.done) break;
+          pads.push(r.value);
+        }
+        if (typeof padIter.return === "function") {
+          try {
+            padIter.return();
+          } catch { /* closing must not mask the caller's completion */ }
+        }
+      }
       return (function* () {
+        if (sources.length === 0) return;
         const live = sources.map(() => true);
         while (true) {
           const row = [];
+          if (mode === "strict") {
+            // Strict requires every source to end on the SAME round, and must throw
+            // AT the diverging index — without stepping the sources after it.
+            let firstDone;
+            for (let i = 0; i < sources.length; i++) {
+              const r = sources[i].next();
+              if (i === 0) firstDone = !!r.done;
+              else if (!!r.done !== firstDone) {
+                throw new TypeError("Iterator.zip strict mode requires equal-length inputs");
+              }
+              if (!r.done) row.push(r.value);
+            }
+            if (firstDone) return;
+            yield row;
+            continue;
+          }
           let anyLive = false;
           let anyDone = false;
           for (let i = 0; i < sources.length; i++) {
@@ -652,12 +700,7 @@ function installIteratorSurface() {
               row.push(r.value);
             }
           }
-          if (sources.length === 0) return;
           if (mode === "shortest" && anyDone) return;
-          if (mode === "strict" && anyDone) {
-            if (!anyLive) return;
-            throw new TypeError("Iterator.zip strict mode requires equal-length inputs");
-          }
           if (mode === "longest" && !anyLive) return;
           yield row;
         }
@@ -892,7 +935,9 @@ function installArrayFromAsync() {
     // Array-like fallback: read `length`, then each index, awaiting both the
     // element and the mapfn result.
     const arrayLike = Object(asyncItems);
-    const len = Math.trunc(Number(arrayLike.length)) || 0;
+    // ToLength clamps to [0, 2^53-1], so a NEGATIVE length yields an empty result
+    // rather than the RangeError `new C(-5)` would throw.
+    const len = Math.min(Math.max(Math.trunc(Number(arrayLike.length)) || 0, 0), 2 ** 53 - 1);
     const out = new C(len);
     for (let i = 0; i < len; i++) {
       const v = await arrayLike[i];
@@ -958,6 +1003,9 @@ function installMathSumPrecise() {
     // can be escaped without losing exactness. Undone before returning.
     let scale = 1;
     let count = 0;
+    // Tracks whether every finite contribution was -0, which the spec keeps in a
+    // ~minus-zero~ state and must preserve in the result.
+    let allMinusZero = true;
     let hasNaN = false;
     let posInf = false;
     let negInf = false;
@@ -974,8 +1022,10 @@ function installMathSumPrecise() {
       }
       if (x === -Infinity) {
         negInf = true;
+        allMinusZero = false;
         continue;
       }
+      if (!Object.is(x, -0)) allMinusZero = false;
       if (hasNaN || (posInf && negInf)) continue;
       // Two-sum each new value against every existing partial, keeping the exact
       // low-order remainders as new partials.
@@ -1025,7 +1075,10 @@ function installMathSumPrecise() {
     if (posInf) return Infinity;
     if (negInf) return -Infinity;
     // The additive identity here is -0: summing nothing, or only -0s, gives -0.
-    if (count === 0 || partials.length === 0) return -0;
+    // The all-(-0) case must be caught HERE, because the final reduction seeds
+    // `total` with the literal +0 and `0 + -0` is +0, which would collapse the sign
+    // (bun, the oracle, returns -0 for [-0] and [-0, -0]).
+    if (count === 0 || partials.length === 0 || allMinusZero) return -0;
     // Add smallest-to-largest so the single final rounding is correct, then undo
     // the scale. Dividing by `scale` (a power of two) reintroduces no error.
     let total = 0;
@@ -1079,13 +1132,22 @@ function installFloorBuiltins() {
   // point, so anything left in the 0xD800–0xDFFF range is unpaired.
   if (typeof String.prototype.isWellFormed !== "function") {
     const loneSurrogate = /[\uD800-\uDFFF]/u;
+    // Spec step 1 is RequireObjectCoercible, so a null/undefined receiver must
+    // THROW rather than stringify — a bare `String(this)` silently succeeds, which
+    // native does not (verified: isWellFormed.call(null) is a TypeError).
+    const thisStr = (v) => {
+      if (v === null || v === undefined) {
+        throw new TypeError("String.prototype method called on null or undefined");
+      }
+      return String(v);
+    };
     def(String.prototype, "isWellFormed", function isWellFormed() {
-      return !loneSurrogate.test(String(this));
+      return !loneSurrogate.test(thisStr(this));
     });
     def(String.prototype, "toWellFormed", function toWellFormed() {
       // Replace each lone surrogate with U+FFFD. The `u` flag makes a well-formed
       // pair a single match unit, so only unpaired units are hit.
-      return String(this).replace(/[\uD800-\uDFFF]/gu, "�");
+      return thisStr(this).replace(/[\uD800-\uDFFF]/gu, "�");
     });
   }
 
@@ -1141,7 +1203,11 @@ function installFloorBuiltins() {
     });
     def(Array.prototype, "toSpliced", function toSpliced(start, skipCount, ...items) {
       const arr = Array.from(this);
-      arr.splice(start, skipCount, ...items);
+      // An OMITTED deleteCount deletes through the end, but a declared parameter
+      // forwards an explicit `undefined`, which splice coerces to 0. Branch on the
+      // real argument count so `toSpliced(1)` truncates the way native does.
+      if (arguments.length <= 1) arr.splice(start);
+      else arr.splice(start, skipCount, ...items);
       return arr;
     });
     // `with` is a reserved word, so a named function EXPRESSION is a SyntaxError.
@@ -1205,13 +1271,19 @@ function installFloorBuiltins() {
         return true;
       }
     };
-    const transferImpl = (buf, newLength) => {
+    const transferImpl = (buf, newLength, fixedLength) => {
       if (isDetached(buf)) throw new TypeError("ArrayBuffer is detached");
       const oldLen = buf.byteLength;
       const len = newLength === undefined ? oldLen : Math.trunc(Number(newLength)) || 0;
       if (len < 0) throw new RangeError("invalid length");
       // Copy BEFORE detaching; the copy is truncated or zero-padded to `len`.
-      const out = new ArrayBuffer(len);
+      // `transfer` PRESERVES a resizable source's resizability while
+      // `transferToFixedLength` always yields a fixed buffer — the two entry points
+      // genuinely differ, verified against native (resizable=true vs false).
+      const keepResizable = !fixedLength && buf.resizable === true;
+      const out = keepResizable
+        ? new ArrayBuffer(len, { maxByteLength: buf.maxByteLength })
+        : new ArrayBuffer(len);
       new Uint8Array(out).set(new Uint8Array(buf, 0, Math.min(oldLen, len)));
       // Detach the source. The clone takes ownership of the original memory and
       // is immediately discarded, so this moves rather than copies.
@@ -1220,10 +1292,10 @@ function installFloorBuiltins() {
     };
     // newLength is optional, so it rides `arguments`: native length is 0 for both.
     def(ArrayBuffer.prototype, "transfer", function transfer() {
-      return transferImpl(this, arguments.length > 0 ? arguments[0] : undefined);
+      return transferImpl(this, arguments.length > 0 ? arguments[0] : undefined, false);
     });
     def(ArrayBuffer.prototype, "transferToFixedLength", function transferToFixedLength() {
-      return transferImpl(this, arguments.length > 0 ? arguments[0] : undefined);
+      return transferImpl(this, arguments.length > 0 ? arguments[0] : undefined, true);
     });
     Object.defineProperty(ArrayBuffer.prototype, "detached", {
       get: function detached() {
