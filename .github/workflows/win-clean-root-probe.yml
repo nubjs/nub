@@ -145,7 +145,10 @@ jobs:
           # The task body goes in a FILE: schtasks caps /tr at 261 characters.
           # PowerShell, never cmd.exe: a cmd ancestor injects hidden `=C:` drive-cwd vars
           # and the sandbox rejects them as invalid env keys, which would void every cell.
+          # A scheduled task starts in %SystemRoot%\System32, which a standard user cannot
+          # write — and the probe creates a directory under its cwd.
           $body = @(
+            'Set-Location C:\nubprobe\out',
             'whoami /groups | Out-File -Encoding utf8 C:\nubprobe\out\who.txt',
             "& 'C:\nubprobe\windows_clean_root.exe' *> 'C:\nubprobe\out\probe.txt'",
             '$LASTEXITCODE | Out-File -Encoding utf8 C:\nubprobe\out\rc.txt'
@@ -153,6 +156,25 @@ jobs:
           Set-Content -Encoding utf8 -Path C:\nubprobe\run.ps1 -Value $body
           icacls C:\nubprobe\run.ps1 /grant 'nubstd:(RX)' | Out-Null
           $action = 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\nubprobe\run.ps1'
+
+          # A task with stored credentials logs on as a BATCH principal, and a plain member
+          # of Users has no SeBatchLogonRight — schtasks warns and the task silently never
+          # runs (Last Result 267011 = SCHED_S_TASK_HAS_NOT_RUN). Extend the existing
+          # assignment rather than replacing it: /areas USER_RIGHTS overwrites the whole
+          # membership set for each privilege named in the .inf.
+          $sid = (New-Object System.Security.Principal.NTAccount('nubstd')).
+                   Translate([System.Security.Principal.SecurityIdentifier]).Value
+          secedit /export /cfg C:\nubprobe\sec.inf /quiet
+          $existing = (Get-Content C:\nubprobe\sec.inf | Where-Object { $_ -match '^SeBatchLogonRight' })
+          $granted = if ($existing) { "$existing,*$sid" } else { "SeBatchLogonRight = *$sid" }
+          Set-Content -Encoding Unicode -Path C:\nubprobe\batch.inf -Value @(
+            '[Unicode]', 'Unicode=yes',
+            '[Version]', 'signature="$CHICAGO$"', 'Revision=1',
+            '[Privilege Rights]', $granted
+          )
+          secedit /configure /db C:\nubprobe\sec.sdb /cfg C:\nubprobe\batch.inf /areas USER_RIGHTS /quiet
+          secedit /export /cfg C:\nubprobe\sec2.inf /quiet
+          Write-Host "batch-logon assignment now: $(Get-Content C:\nubprobe\sec2.inf | Where-Object { $_ -match '^SeBatchLogonRight' })"
           schtasks /create /tn nubprobe /tr $action /sc once /st 23:59 /ru nubstd /rp $pw /rl LIMITED /f
           if ($LASTEXITCODE -ne 0) { throw "schtasks /create failed" }
           schtasks /run /tn nubprobe
@@ -163,7 +185,7 @@ jobs:
             Start-Sleep -Seconds 5
           }
           Write-Host "=== task state ==="
-          schtasks /query /tn nubprobe /v /fo LIST | Select-String 'Status|Last Result|Run As User'
+          schtasks /query /tn nubprobe /v /fo LIST | Select-String 'Status|Last Run Time|Last Result|Run As User'
           if (Test-Path C:\nubprobe\out\who.txt) {
             Write-Host "=== probe user groups (must NOT contain S-1-5-32-544) ==="
             Get-Content C:\nubprobe\out\who.txt

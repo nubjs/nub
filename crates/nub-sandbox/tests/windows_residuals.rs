@@ -521,17 +521,25 @@ mod win {
     /// Residual 4 — does an EXPLICIT deny-ACE for the AppContainer SID beat an INHERITED
     /// `ALL APPLICATION PACKAGES` allow, for a READ, inside a granted subtree?
     ///
-    /// The backend's allowlist rationale asserts it does not. The probe that produced that
-    /// assertion is RT-B above, which measured DEFAULT-DENY vs inherited AAP — it contains
-    /// no explicit deny-ACE at all, so the ordering question was never asked. Canonical
-    /// DACL ordering puts explicit denies ahead of inherited allows, so the assertion may
-    /// be backwards; this matrix settles it empirically. If the deny holds, a per-file
-    /// denylist becomes expressible on Windows with no new dependency.
+    /// SETTLED: **no — and the code's own suspicion was backwards.** All four cells report
+    /// `deny=defeated control=ok`, first on the nub-win VM (non-admin, Server 2022) and
+    /// re-confirmed on windows-latest (run 30321256052). The DACL dump shows the deny is
+    /// explicit, FIRST in the ACL, and covers `FILE_READ_DATA` (mask `0x001200a9`) — and
+    /// the child read the file anyway. The result is stronger than the question asked: the
+    /// CLEAN cells carry no AAP ace at all and the deny is defeated there too, so an
+    /// explicit deny naming the per-run AppContainer package SID is simply INERT against
+    /// that AppContainer's own child, AAP or no AAP, LPAC or no LPAC.
+    ///
+    /// Consequence: a per-file DENYLIST is NOT expressible via deny-ACEs on Windows, and
+    /// the backend's allowlist-only rationale stands. The cells are kept as the standing
+    /// regression guard for that conclusion — if one ever reports `deny=held`, the
+    /// allowlist-only constraint has changed and the design can be revisited.
     ///
     /// Why this module owns its LowBox launches instead of reusing [`code`]: the deny must
     /// name the per-run AppContainer SID and be in place BEFORE launch (`apply` mints that
-    /// SID internally and never exposes it), `apply` REJECTS an AAP-carrying root outright
-    /// (`verify_clean_root`), and LPAC is not a posture the backend can express at all.
+    /// SID internally and never exposes it), `apply` STRIPS the AAP ace from a working root
+    /// it is handed (`ensure_clean_root`) — which would erase the very grant the `aap-*`
+    /// cells are built on — and LPAC is not a posture the backend can express at all.
     mod denyace {
         use std::io;
         use std::os::windows::ffi::OsStrExt;

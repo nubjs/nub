@@ -395,32 +395,34 @@ mod win {
             survey(label, &path);
         }
 
-        // Case 1: an ordinary dir under %TEMP% (the build jail's private-tmp shape).
-        let temp_root = std::env::temp_dir().join(format!("nub-cleanroot-{:x}", nonce()));
-        std::fs::create_dir_all(&temp_root).unwrap();
-        ordinary_root_case(&mut fails, "temp-root", &temp_root);
-        let _ = std::fs::remove_dir_all(&temp_root);
-
-        // Case 2: an ordinary dir on the CI work volume — the exact shape that produced
-        // `\\?\D:\ grants ALL APPLICATION PACKAGES access` on a windows-latest runner.
-        let cwd_base = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
-        let cwd_root = cwd_base.join(format!("nub-cleanroot-{:x}", nonce()));
-        std::fs::create_dir_all(&cwd_root).unwrap();
-        ordinary_root_case(&mut fails, "workdir-root", &cwd_root);
-        let _ = std::fs::remove_dir_all(&cwd_root);
-
-        // Case 3: the system volume, which the earlier investigation also measured failing
-        // (`C:\nubfx`) — so the fix is shown to be volume-independent, not a D:-only patch.
-        let sys_root = PathBuf::from("C:\\").join(format!("nub-cleanroot-{:x}", nonce()));
-        match std::fs::create_dir_all(&sys_root) {
-            Ok(()) => {
-                ordinary_root_case(&mut fails, "system-volume-root-dir", &sys_root);
-                let _ = std::fs::remove_dir_all(&sys_root);
+        // Where a case's own fixture cannot be created the host, not the fix, is the reason
+        // — this runs as a standard user too, who can write neither `C:\` nor an arbitrary
+        // work volume. Skip rather than panic, so the cases that CAN run still report.
+        let mut case = |label: &str, base: PathBuf| {
+            let root = base.join(format!("nub-cleanroot-{:x}", nonce()));
+            match std::fs::create_dir_all(&root) {
+                Ok(()) => {
+                    ordinary_root_case(&mut fails, label, &root);
+                    let _ = std::fs::remove_dir_all(&root);
+                }
+                Err(e) => println!(
+                    "SKIP {label}: cannot create a fixture under {}: {e}",
+                    base.display()
+                ),
             }
-            // Creating a directory at C:\ needs write on the volume root, which a standard
-            // user does not have. That is a host fact, not a failure of the fix.
-            Err(e) => println!("SKIP system-volume-root-dir: cannot create C:\\<dir>: {e}"),
-        }
+        };
+
+        // The build jail's private-tmp shape.
+        case("temp-root", std::env::temp_dir());
+        // The CI work volume — the exact shape that produced
+        // `\\?\D:\ grants ALL APPLICATION PACKAGES access` on a windows-latest runner.
+        case(
+            "workdir-root",
+            std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+        );
+        // The system volume, which the earlier investigation also measured failing
+        // (`C:\nubfx`) — so the fix is shown to be volume-independent, not a D:-only patch.
+        case("system-volume-root-dir", PathBuf::from("C:\\"));
 
         if fails == 0 { Ok(()) } else { Err(fails) }
     }
