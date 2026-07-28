@@ -556,3 +556,143 @@ fn common_etc_reads_survive_the_leaf_narrowing() {
         "an unlisted, world-readable /etc file must be refused by the leaf narrowing:\n{stdout}"
     );
 }
+
+/// The PM-cache grant reaches the store and the toolchain, and STOPS at the git checkouts.
+///
+/// A git dependency is cloned to `$cache/nub/pm/git/<key>`, whose `.git/config` records the
+/// fetch URL — for a private dep fetched over HTTPS, with the token in it. The grant used to
+/// be the cache ROOT, so that token was readable by every lifecycle script on the machine
+/// (reproduced under the real jail on macOS and Linux, 2026-07-28). It is now two named
+/// subtrees.
+///
+/// The two positive probes are what make the negative one mean something: an assertion that
+/// the git config is refused would pass equally if the PM-cache grant had been dropped
+/// altogether, which breaks every native build (no node-gyp) and every dependency resolution
+/// through the global virtual store.
+#[test]
+fn build_jail_reads_the_pm_store_and_toolchain_but_not_a_git_dep_clone() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/somepkg");
+    std::fs::create_dir_all(&package_dir).unwrap();
+
+    // `$cache` is `~/Library/Caches` on macOS, matching `homes()` above and the NUB
+    // embedder's `cache_namespace = "nub/pm"`.
+    let pm = home.join("Library/Caches/nub/pm");
+    let dep = pm.join("store/left-pad@1.3.0-abc/node_modules/left-pad");
+    std::fs::create_dir_all(&dep).unwrap();
+    std::fs::write(dep.join("index.js"), b"STORE-CONTENT-VISIBLE").unwrap();
+    let gyp = pm.join("tools/node-gyp/lazy-bin");
+    std::fs::create_dir_all(&gyp).unwrap();
+    std::fs::write(gyp.join("node-gyp"), b"TOOLCHAIN-VISIBLE").unwrap();
+    let clone = pm.join("git/aube-git-deadbeef/.git");
+    std::fs::create_dir_all(&clone).unwrap();
+    std::fs::write(
+        clone.join("config"),
+        b"[remote \"origin\"]\n\turl = https://x-access-token:GIT-URL-TOKEN-DO-NOT-LEAK@github.com/acme/private.git\n",
+    )
+    .unwrap();
+
+    let policy = nub_sandbox::compile_build_jail(
+        homes(&home, &project),
+        &package_dir,
+        vec![home.join("Library/Caches/nub/node/bin/node")],
+        Vec::new(),
+        [("PATH", "/usr/bin:/bin")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    )
+    .expect("compile build-jail");
+
+    let script = format!(
+        "cat '{store}' 2>/dev/null || echo STORE_DENIED; \
+         cat '{tools}' 2>/dev/null || echo TOOLS_DENIED; \
+         cat '{git}' 2>/dev/null || echo GIT_CONFIG_DENIED",
+        store = dep.join("index.js").display(),
+        tools = gyp.join("node-gyp").display(),
+        git = clone.join("config").display(),
+    );
+    let spec = nub_sandbox::CommandSpec::new("/bin/sh")
+        .args(["-c", &script])
+        .cwd(&package_dir);
+    let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+    let out = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+        .expect("apply build-jail")
+        .output()
+        .expect("run confined probe");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("STORE-CONTENT-VISIBLE"),
+        "the global virtual store holds the dependency tree a project's node_modules \
+         symlinks into; without it nothing resolves:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("TOOLCHAIN-VISIBLE"),
+        "nub's bootstrapped node-gyp is the only one a confined native build can reach:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("GIT_CONFIG_DENIED") && !stdout.contains("GIT-URL-TOKEN-DO-NOT-LEAK"),
+        "a git dependency's clone config carries its fetch URL — a private dep's token — \
+         and must be outside the jail's read set:\n{stdout}"
+    );
+}
+
+/// `cfprefsd` reads preference domains on the child's behalf from OUTSIDE the sandbox, so
+/// the file allowlist does not bound it: with `~/Library/Preferences` ungranted, a confined
+/// script still got the global domain back byte-for-byte. Closed by withholding the
+/// `user-preference-read` grant (`macos_seatbelt_base.sbpl`) — not by a deny; the operation
+/// falls to `(deny default)`.
+///
+/// The unconfined run is the control. `defaults` reports a missing domain and a refused one
+/// the same way, so without proving the domain is non-empty on THIS host the confined
+/// refusal would be indistinguishable from there being nothing to read.
+#[test]
+fn build_jail_cannot_read_preferences_through_the_cfprefs_broker() {
+    let unconfined = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-globalDomain"])
+        .output()
+        .expect("run defaults unconfined");
+    assert!(
+        unconfined.status.success() && !unconfined.stdout.is_empty(),
+        "control: the global preference domain must be readable unconfined, else the \
+         confined refusal below proves nothing"
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let project = root.path().join("project");
+    let package_dir = project.join("node_modules/somepkg");
+    std::fs::create_dir_all(&package_dir).unwrap();
+
+    let policy = nub_sandbox::compile_build_jail(
+        homes(&home, &project),
+        &package_dir,
+        vec![home.join("Library/Caches/nub/node/bin/node")],
+        Vec::new(),
+        [("PATH", "/usr/bin:/bin")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    )
+    .expect("compile build-jail");
+
+    let spec = nub_sandbox::CommandSpec::new("/usr/bin/defaults")
+        .args(["read", "-globalDomain"])
+        .cwd(&package_dir);
+    let runtime = nub_sandbox::earliest_bootstrap().expect("bootstrap");
+    let out = nub_sandbox::apply_with_runtime(&policy, spec, &runtime)
+        .expect("apply build-jail")
+        .output()
+        .expect("run confined probe");
+
+    assert!(
+        out.stdout.is_empty(),
+        "the cfprefs broker read {} bytes of the user's global preference domain from \
+         inside the jail:\n{}",
+        out.stdout.len(),
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

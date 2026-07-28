@@ -115,13 +115,35 @@
     (extension "com.apple.sandbox.pty")))
 (allow file-ioctl (regex #"^/dev/ttys[0-9]+"))
 
-; readonly cfprefs / user-preference lookups
+; cfprefs bootstrap. The mach port and the shared-memory segment stay granted — CF
+; connects during startup — but `user-preference-read`, the operation that actually
+; returns a domain's CONTENTS, does NOT.
+;
+; It is a BROKER BYPASS, not an ordinary read. `cfprefsd` is a separate, unsandboxed
+; process that resolves HOME from `getpwuid` and reads on the child's behalf, so no path
+; grant or withholding reaches it: measured 2026-07-28, `defaults read -globalDomain`
+; under the compiled build jail returned the same 7917 bytes as unconfined while the
+; underlying `~/Library/Preferences/.GlobalPreferences.plist` was refused at the file
+; layer. Domain ENUMERATION was already closed, so it was guess-the-domain — trivial for
+; any known app.
+;
+; Removing the grant is what closes it, and removing is all that is needed: unlike
+; `process-info*`, `user-preference-read` is NOT allowed-by-default, so it falls to
+; `(deny default)` above. Measured with the plist path denied so the file route could not
+; confound the result: grant present → 7916 bytes rc=0; grant absent → 0 bytes rc=1;
+; grant absent PLUS an explicit `(deny user-preference-read)` → identical 0 bytes rc=1,
+; i.e. the deny buys nothing. That equality is why this is a grant removal — the build
+; jail emits zero deny rules, and an SBPL deny here would also be a rule the Landlock and
+; AppContainer backends have no way to mirror.
+;
+; Compat: `clang`, `make`, `perl`, `python3`, `git`, `xcrun`, `tar`, `curl` and `node` all
+; behave identically with and without it, `node` included down to the resolved `Intl`
+; locale — the one consumer that plausibly needed it.
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.daemon")
   (global-name "com.apple.cfprefsd.agent")
   (local-name "com.apple.cfprefsd.agent"))
-(allow user-preference-read)
 
 ; ── system read + framework map (the dyld/boot read surface) ─────────────────
 (allow file-map-executable
