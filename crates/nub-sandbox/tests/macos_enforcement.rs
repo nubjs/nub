@@ -93,6 +93,18 @@ impl Fixture {
         self.allowed_env(surface, &[], program, args)
     }
 
+    /// Like [`Fixture::allowed`], but hands back the child's stdout so a test can assert on
+    /// evidence the child PRINTED (a read-back, the absolute path it actually resolved)
+    /// rather than on exit status alone.
+    fn stdout(&self, surface: Value, program: &str, args: &[&str]) -> String {
+        let policy = compile(&surface, &self.ctx(&[])).expect("policy compiles");
+        let spec = CommandSpec::new(program)
+            .args(args.iter().copied())
+            .cwd(&self.proj);
+        let out = apply(&policy, spec).expect("apply").output().expect("spawn");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
     fn allowed_env(
         &self,
         surface: Value,
@@ -357,6 +369,86 @@ fn env_prefixed_directory_allow_does_not_expose_its_secret_contents() {
 }
 
 // ── private tmp (TmpMode::Private) — shared system tmp hidden (real kernel) ─────
+
+/// The per-run tmp dir must actually be USABLE, not merely granted on paper.
+///
+/// Regression, 2026-07-28: it was granted with a single `(allow file* (subpath …))`, and SBPL's
+/// last-match-wins holds only WITHIN one operation node — across nodes the more specific node
+/// wins at ANY position, so that general allow lost to the `(deny file-write* …)` covering the
+/// confstr scratch the per-run dir is created inside. Every write to `os.tmpdir()` returned
+/// EPERM; cypress died there. The grant is now emitted per operation node.
+///
+/// The probe REFUSES to run on a non-absolute or unexpected path (`BADPATH`) rather than
+/// silently falling back to a relative write in the cwd — a "successful write" that landed
+/// somewhere else would prove nothing.
+#[test]
+fn private_tmp_dir_is_writable_and_readable_by_the_child() {
+    let f = fixture();
+    let probe = r#"
+p="$TMPDIR/probe.txt"
+case "$p" in
+  /*/nub-tmp-*/probe.txt) ;;
+  *) echo "BADPATH:$p"; exit 3 ;;
+esac
+echo PRIVATETMPOK > "$p" || { echo "WRITEFAIL:$p"; exit 4; }
+printf 'READBACK:'; cat "$p" || { echo "READFAIL:$p"; exit 5; }
+echo "AT:$p"
+"#;
+    let out = f.stdout(
+        serde_json::json!({ "fs": { "/": "r", "$tmp": "rw" } }),
+        "/bin/sh",
+        &["-c", probe],
+    );
+    assert!(
+        out.contains("READBACK:PRIVATETMPOK"),
+        "the child must be able to write AND read back its own per-run tmp dir; got:\n{out}"
+    );
+    assert!(
+        out.contains("AT:/") && !out.contains("BADPATH"),
+        "the probe must have used an absolute per-run tmp path, not a relative fallback; \
+         got:\n{out}"
+    );
+
+    // CONTROL — the profile really is confining writes, so the success above is a genuine
+    // grant rather than an unenforced profile. The same policy must REFUSE an absolute write
+    // to the shared host tmp.
+    let shared = PathBuf::from(format!(
+        "/private/tmp/nub-tmptest-w-{}.probe",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&shared);
+    assert!(
+        !f.allowed(
+            serde_json::json!({ "fs": { "/": "r", "$tmp": "rw" } }),
+            TOUCH,
+            &[&s(&shared)]
+        ),
+        "private tmp must still refuse a write to the shared host tmp"
+    );
+    assert!(
+        !shared.exists(),
+        "the refused shared-tmp write must not have landed: {}",
+        shared.display()
+    );
+
+    // NEG-CONTROL — the refusal above is the private-tmp confinement, not the fixture: the
+    // same write with the project write-granted and no private tmp succeeds.
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _c = Cleanup(shared.clone());
+    assert!(
+        f.allowed(
+            serde_json::json!({ "fs": { "/": "r", "/private/tmp": "rw" } }),
+            TOUCH,
+            &[&s(&shared)]
+        ),
+        "neg-control: without private tmp, the same shared-tmp write succeeds"
+    );
+}
 
 #[test]
 fn private_tmp_hides_the_shared_system_tmp() {
