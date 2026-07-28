@@ -3015,7 +3015,6 @@ dependencies = [
  "demand",
  "dirs-next",
  "dotenvy",
- "glob-match",
  "jsonc-parser",
  "libc",
  "libsui",

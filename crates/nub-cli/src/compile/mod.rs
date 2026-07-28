@@ -40,10 +40,9 @@ pub struct CompileOptions {
     /// Explicit `--target`; `None` → infer from the project's pin chain.
     pub target: Option<String>,
     pub platform: Option<String>,
-    /// Custom first-run line; `None` takes the `Setting up <app-name>` default.
+    /// First-run line, opt-in: `None` means the binary starts silently. Purely
+    /// additive, so there is no negative spelling to suppress a default.
     pub install_message: Option<String>,
-    /// Suppress the first-run line entirely.
-    pub no_install_message: bool,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
 }
@@ -130,7 +129,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_sha256: node_sha,
         app_sha256: app_sha,
         minify: opts.bundle.minify,
-        install_message: install_message(&opts, &out_path),
+        install_message: opts.install_message.clone(),
     };
     let payload = encode(&manifest, &app_files, &node_blob);
 
@@ -215,24 +214,6 @@ fn determine_target(target: Option<&str>, cwd: &Path) -> Result<(VersionPin, Str
              \x20\x20version must be intentional and reproducible.)"
         ),
     }
-}
-
-/// The first-run text to bake into the artifact. One mechanism covers both
-/// shapes: the default shape shows it while decompressing the embedded Node,
-/// `--smol` while downloading one. The launcher has no app name of its own, so
-/// the default text is derived here from the output file name.
-fn install_message(opts: &CompileOptions, out: &Path) -> Option<String> {
-    if opts.no_install_message {
-        return None;
-    }
-    if let Some(text) = &opts.install_message {
-        return Some(text.clone());
-    }
-    let app = out
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "this app".into());
-    Some(format!("Setting up {app}"))
 }
 
 /// The raw requirement to record for `--smol` — `None` for a bare exact version
@@ -701,7 +682,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    fn opts(install_message: Option<&str>, no_install_message: bool) -> CompileOptions {
+    fn opts(install_message: Option<&str>) -> CompileOptions {
         CompileOptions {
             entry: "main.ts".into(),
             out: None,
@@ -709,7 +690,6 @@ mod tests {
             target: None,
             platform: None,
             install_message: install_message.map(str::to_string),
-            no_install_message,
             bundle: BundleOptions {
                 minify: true,
                 keep_names: true,
@@ -722,8 +702,6 @@ mod tests {
                 alias: Vec::new(),
                 conditions: Vec::new(),
                 tsconfig: None,
-                reject_unresolved: true,
-                allow_unresolved: Vec::new(),
             },
         }
     }
@@ -747,24 +725,15 @@ mod tests {
         );
     }
 
+    // The flag is purely additive: the launcher treats `None` as "print
+    // nothing", so omitting `--install-message` must reach the manifest as
+    // `None` rather than being back-filled with a default line.
     #[test]
-    fn install_message_defaults_to_the_output_name_and_is_overridable() {
-        let out = PathBuf::from("dist/mytool");
+    fn install_message_is_opt_in_and_silent_when_omitted() {
+        assert_eq!(opts(None).install_message, None);
         assert_eq!(
-            install_message(&opts(None, false), &out).as_deref(),
-            Some("Setting up mytool")
-        );
-        assert_eq!(
-            install_message(&opts(Some("Warming up"), false), &out).as_deref(),
+            opts(Some("Warming up")).install_message.as_deref(),
             Some("Warming up")
-        );
-        // Silent is the ONLY way to get None — the launcher treats None as
-        // "print nothing", so a missing message must never mean "use a default".
-        assert_eq!(install_message(&opts(None, true), &out), None);
-        // A Windows-style output name drops the extension, not just the directory.
-        assert_eq!(
-            install_message(&opts(None, false), Path::new("mytool.exe")).as_deref(),
-            Some("Setting up mytool")
         );
     }
 

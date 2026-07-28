@@ -9,11 +9,12 @@
 //! pipeline's own state, so `nub build` can drive it unchanged.
 //!
 //! One deliberate non-delegation: an unresolvable dynamic `import(expr)` FAILS
-//! the build rather than warning. A compiled artifact carries no `node_modules`,
-//! so a specifier that cannot be resolved at build time is a guaranteed
-//! `ERR_MODULE_NOT_FOUND` on the deploy machine — with no stack-trace clue and
-//! nothing the operator can install to fix it. Failing loudly at build time is
-//! the root-cause fix; `--allow-unresolved <GLOB>` is the escape hatch.
+//! the build rather than warning, and there is no flag to opt out. A compiled
+//! artifact carries no `node_modules`, so a specifier that cannot be resolved at
+//! build time is a guaranteed `ERR_MODULE_NOT_FOUND` on the deploy machine —
+//! with no stack-trace clue and nothing the operator can install to fix it. The
+//! only fix is to make the specifier statically analyzable, so an escape hatch
+//! would just defer the same crash to the user's machine.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -57,7 +58,8 @@ pub struct BundleOptions {
     /// pointing at the cause.
     pub keep_names: bool,
     pub sourcemap: SourcemapMode,
-    /// Embed the original source text in the map. `--no-sources-content` off.
+    /// Embed the original source text in the map. `--sourcemap-exclude-sources`
+    /// off.
     pub sources_content: bool,
     /// `K=V` from `--define`. Values are JS EXPRESSIONS (esbuild/Rolldown
     /// semantics), so a string constant is written `K='"v"'`.
@@ -75,12 +77,6 @@ pub struct BundleOptions {
     pub conditions: Vec<String>,
     /// Explicit tsconfig; `None` keeps Rolldown's auto-discovery.
     pub tsconfig: Option<PathBuf>,
-    /// Fail the build on an import that cannot be resolved at build time.
-    pub reject_unresolved: bool,
-    /// Globs exempting a site from `reject_unresolved`, matched against the path
-    /// of the module CONTAINING the import. That is the only handle both cases
-    /// share: an `import(expr)` has no specifier to name.
-    pub allow_unresolved: Vec<String>,
 }
 
 /// One emitted file: a chunk, or a source map that travels with it.
@@ -147,11 +143,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
     };
 
     let scan = std::sync::Arc::new(DynamicImportScan::default());
-    let plugins: Vec<SharedPluginable> = if opts.reject_unresolved {
-        vec![std::sync::Arc::clone(&scan) as SharedPluginable]
-    } else {
-        Vec::new()
-    };
+    let plugins: Vec<SharedPluginable> = vec![std::sync::Arc::clone(&scan) as SharedPluginable];
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -169,9 +161,7 @@ pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
             .map_err(|e| anyhow!("rolldown bundle failed: {e:?}"))
     })?;
 
-    if opts.reject_unresolved {
-        reject_unresolved(&scan.take(), &output.warnings, &opts.allow_unresolved)?;
-    }
+    reject_unresolved(&scan.take(), &output.warnings)?;
 
     let mut entry = None;
     let mut files = Vec::new();
@@ -448,18 +438,9 @@ fn snippet(source: &str, start: usize, end: usize) -> String {
 /// Fail the build on any import the bundler could not resolve — the dynamic
 /// `import(expr)` sites the scan found, plus Rolldown's own UNRESOLVED_IMPORT
 /// warnings for named specifiers that resolved to nothing.
-fn reject_unresolved(
-    sites: &[DynamicSite],
-    warnings: &[BuildDiagnostic],
-    allow: &[String],
-) -> Result<()> {
-    let allowed = |module: &str| allow.iter().any(|g| glob_match::glob_match(g, module));
-
+fn reject_unresolved(sites: &[DynamicSite], warnings: &[BuildDiagnostic]) -> Result<()> {
     let mut lines = Vec::new();
     for site in sites {
-        if allowed(&site.module) {
-            continue;
-        }
         lines.push(format!(
             "\x20\x20{}:{}:{}\n\x20\x20\x20\x20{}",
             site.module, site.line, site.column, site.snippet
@@ -468,12 +449,6 @@ fn reject_unresolved(
     let diag_opts = DiagnosticOptions::default();
     for w in warnings {
         if !matches!(w.kind(), EventKind::UnresolvedImport) {
-            continue;
-        }
-        // `id()` on a resolve diagnostic is the IMPORTER's path — the same
-        // handle `--allow-unresolved` matches for a dynamic site.
-        let id = w.id().unwrap_or_default();
-        if allowed(&id) {
             continue;
         }
         lines.push(format!("\x20\x20{}", w.to_message_with(&diag_opts)));
@@ -485,8 +460,8 @@ fn reject_unresolved(
     bail!(
         "{} import{} could not be resolved at build time:\n{}\n\n\
          \x20\x20A compiled binary carries no node_modules, so an unresolved import fails at\n\
-         \x20\x20runtime on the machine you ship to. Make the specifier a static string, or\n\
-         \x20\x20pass --allow-unresolved <GLOB> to ship it anyway.",
+         \x20\x20runtime on the machine you ship to. Make the specifier a static string so\n\
+         \x20\x20the bundler can follow it.",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" },
         lines.join("\n")
@@ -510,8 +485,6 @@ mod tests {
             alias: Vec::new(),
             conditions: Vec::new(),
             tsconfig: None,
-            reject_unresolved: true,
-            allow_unresolved: Vec::new(),
         }
     }
 
@@ -601,38 +574,21 @@ await import(`./${name}.js`);
         );
     }
 
+    // Rejection is unconditional — there is no opt-out — so the error has to
+    // carry everything needed to fix the source, and point at the only fix.
     #[test]
-    fn allow_unresolved_globs_match_the_containing_module() {
-        let sites = vec![DynamicSite {
-            module: "/p/node_modules/dep/index.js".into(),
-            line: 3,
-            column: 7,
-            snippet: "import(x)".into(),
-        }];
-        assert!(reject_unresolved(&sites, &[], &[]).is_err());
-        assert!(
-            reject_unresolved(&sites, &[], &["**/node_modules/**".to_string()]).is_ok(),
-            "a glob over the containing module must exempt the site"
-        );
-        assert!(
-            reject_unresolved(&sites, &[], &["**/other/**".to_string()]).is_err(),
-            "a non-matching glob must not exempt anything"
-        );
-    }
-
-    #[test]
-    fn rejection_names_the_site_and_the_escape_hatch() {
+    fn rejection_names_the_site_and_the_fix() {
         let sites = vec![DynamicSite {
             module: "/p/src/plugins.ts".into(),
             line: 12,
             column: 20,
             snippet: "import(pluginPath)".into(),
         }];
-        let err = reject_unresolved(&sites, &[], &[]).expect_err("must fail");
+        let err = reject_unresolved(&sites, &[]).expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/plugins.ts:12:20"), "got: {msg}");
         assert!(msg.contains("import(pluginPath)"), "got: {msg}");
-        assert!(msg.contains("--allow-unresolved"), "got: {msg}");
+        assert!(msg.contains("static string"), "got: {msg}");
     }
 
     fn bundle_fixture(source: &str, o: &BundleOptions) -> String {
@@ -660,8 +616,7 @@ await import(`./${name}.js`);
         const SRC: &str = "class Registry {}\nfunction handler() {}\n\
                            globalThis.OUT = Registry.name + handler.name;\n";
 
-        let mut kept = opts();
-        kept.reject_unresolved = false;
+        let kept = opts();
         let code = bundle_fixture(SRC, &kept);
         assert!(
             code.contains("Registry") && code.contains("handler"),
@@ -669,7 +624,6 @@ await import(`./${name}.js`);
         );
 
         let mut mangled = opts();
-        mangled.reject_unresolved = false;
         mangled.keep_names = false;
         let code = bundle_fixture(SRC, &mangled);
         assert!(
