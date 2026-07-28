@@ -852,13 +852,25 @@ pub(super) mod launch {
     /// Make `cwd` satisfy [`verify_clean_root`], re-authoring its DACL only if it does not
     /// already.
     ///
-    /// WHY THIS EXISTS AS A SETTER. `verify_clean_root` alone is unsatisfiable on a stock
-    /// machine: volume roots carry an `ALL APPLICATION PACKAGES` ACE and no ordinary
-    /// directory beneath one is `SE_DACL_PROTECTED`, so the walk always reaches the root and
-    /// fails. The precondition is nub's to CREATE, not the user's to have.
+    /// WHY THIS EXISTS AS A SETTER. `verify_clean_root` alone is barely satisfiable in the
+    /// field. A user-profile directory qualifies (`C:\Users\<name>` is `SE_DACL_PROTECTED`
+    /// and AAP-free), but anything outside one does not: a second volume's root grants AAP
+    /// and no ordinary directory beneath it is protected, so the walk runs out of ancestors
+    /// or hits the grant. A project on `D:\` — or a CI checkout, measured on windows-latest
+    /// as `\\?\D:\ grants ALL APPLICATION PACKAGES access` — could never be confined. The
+    /// precondition is nub's to CREATE, not the user's to happen to have.
     ///
-    /// The verify-first order keeps an already-clean root (a nub store dir, a fixture that
-    /// secured itself) untouched, so the DACL write happens once per working root at most.
+    /// VERIFY-FIRST IS THE NO-REGRESSION PROPERTY, not just an optimization. The DACL write
+    /// happens on exactly the inputs the old code rejected outright, so no configuration
+    /// that launched before can behave differently now, and an already-qualifying root (a
+    /// path under the profile, a fixture that secured itself) is never touched.
+    ///
+    /// The one consequence worth knowing: protecting `cwd` severs inheritance INTO it, so an
+    /// inheritable grant placed on an ANCESTOR of `cwd` no longer reaches it. Every backend
+    /// grant is placed directly on its own target (`set_ace` per grant path), and the build
+    /// jail write-grants the package dir that IS the cwd, so nothing depends on that
+    /// inheritance today. A future policy that grants only an ancestor would over-confine —
+    /// which surfaces as the child failing loudly, never as a widened allow-set.
     pub(super) fn ensure_clean_root(cwd: &Path) -> io::Result<()> {
         if verify_clean_root(cwd).is_ok() {
             return Ok(());
