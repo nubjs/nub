@@ -397,6 +397,13 @@ command -v node >/dev/null || { echo "remote-build: node missing on builder (wou
 mkdir -p runtime/addons
 [ -s runtime/addons/nub-native.node ] || printf 'placeholder' > runtime/addons/nub-native.node
 [ -d node_modules ] || npm install --no-audit --no-fund --loglevel=error
+# zig supplies a macOS libc, but nub's darwin tree also links Apple FRAMEWORKS and two system
+# dylibs (-lcompression -framework Security -framework SystemConfiguration -framework
+# CoreFoundation -liconv, via rustls-native-certs -> reqwest and lzma-sys). zig ships none of
+# them, so the cross-build fails at LINK time — compiling was never the problem. These are
+# symbol-only stub TBDs carrying no Apple code, which is what keeps the route licence-clean.
+mkdir -p "$HOME/.darwin-stubs"
+cp -R scripts/darwin-stubs/. "$HOME/.darwin-stubs/"
 `;
 
 export function jobScript(job: string, profile: string) {
@@ -416,8 +423,9 @@ tests/brand-lint/check-env-reads.sh`;
 cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
 cargo test`;
   }
-  return `${PREPARE}cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile ${profile}
-ls -la target/aarch64-apple-darwin/${profile}/nub`;
+  return `${PREPARE}export RUSTFLAGS="-C link-arg=-L$HOME/.darwin-stubs -C link-arg=-F$HOME/.darwin-stubs"
+cargo zigbuild --target aarch64-apple-darwin -p nub-cli --profile ${profile}
+ls -la "$CARGO_TARGET_DIR/aarch64-apple-darwin/${profile}/nub"`;
 }
 
 // `bash -s` reads the script FROM STDIN, incrementally, as it executes. Any command inside
@@ -520,7 +528,7 @@ async function oneBuild(
       sh("rsync", [
         "-az",
         "-e", `ssh -i ${SSH_KEY} ${SSH_OPTS.join(" ")}`,
-        `${SSH_USER}@${ip}:~/src/target/aarch64-apple-darwin/${a.profile}/nub`,
+        `${SSH_USER}@${ip}:~/.cargo-shared-target/aarch64-apple-darwin/${a.profile}/nub`,
         artifact,
       ]);
       verified = verifyArtifact(artifact);
@@ -675,6 +683,9 @@ cd ~/src
 mkdir -p runtime/addons && printf 'placeholder' > runtime/addons/nub-native.node
 npm install --no-audit --no-fund --loglevel=error
 cargo fetch
+mkdir -p "$HOME/.darwin-stubs"
+cp -R scripts/darwin-stubs/. "$HOME/.darwin-stubs/"
+export RUSTFLAGS="-C link-arg=-L$HOME/.darwin-stubs -C link-arg=-F$HOME/.darwin-stubs"
 # Best-effort: a warm-up failure still leaves a usable image (toolchain + registry), so it
 # must not abort the bake — but it must not be SILENT either, or a cold-building image is
 # indistinguishable from a warm one. Warn loudly rather than `|| true`.

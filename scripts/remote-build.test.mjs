@@ -75,6 +75,17 @@ test("jobScript(build) cross-compiles the darwin target at the requested profile
   assert.match(s, /--profile release/);
 });
 
+// zig supplies a macOS libc but NOT Apple's frameworks. nub's darwin tree links Security,
+// SystemConfiguration, CoreFoundation, libcompression and libiconv (rustls-native-certs ->
+// reqwest, and lzma-sys), so without the stub TBDs on the linker's search path the build
+// dies at LINK time with `library not found for -lcompression` — after a full compile.
+test("the darwin build points the linker at the stub TBDs", () => {
+  const s = jobScript("build", "fast");
+  assert.match(s, /cp -R scripts\/darwin-stubs\/\. "\$HOME\/\.darwin-stubs\/"/, "stubs must be installed");
+  assert.match(s, /-C link-arg=-L\$HOME\/\.darwin-stubs/, "library search path");
+  assert.match(s, /-C link-arg=-F\$HOME\/\.darwin-stubs/, "framework search path");
+});
+
 // Verified against .github/workflows/ci.yml: the Clippy job runs THREE things. nub-native
 // is its own workspace (panic=unwind cdylib) `exclude`d from the root, so a root-only
 // clippy goes green on code that CI then rejects — the exact --all-targets-shaped gap

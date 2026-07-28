@@ -1,0 +1,10 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos, arm64e-macos, x86_64-macos ]
+install-name:    '/usr/lib/libcompression.dylib'
+current-version: 1.0.0
+compatibility-version: 1.0.0
+exports:
+  - targets:         [ arm64-macos, arm64e-macos, x86_64-macos ]
+    symbols:         [ _compression_encode_buffer, _compression_encode_scratch_buffer_size ]
+...
