@@ -1,0 +1,62 @@
+# Branch-scoped capture probe: what `nub setup-sandbox` actually prints on Windows.
+#
+# The Windows host setup creates a local account and installs SID-keyed WFP filters, so it
+# cannot be exercised on macOS or in Docker. This runs the real built binary through the whole
+# flow on a real windows-latest runner and prints the output verbatim, so the printed copy is
+# read rather than reconstructed.
+#
+# No PR is required: the `push` trigger is keyed to this branch. `workflow_dispatch` stays for
+# the day the file reaches the default branch, where GitHub first registers it.
+#
+# Delete this file before the PR opens.
+#
+# Run 4: standard-user capture from a directory that user can actually reach.
+name: setup-sandbox-win-probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [sandbox-setup-cmd]
+    paths:
+      - ".github/workflows/setup-sandbox-win-probe.yml"
+      - "tests/setup-sandbox-win/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  capture:
+    name: Capture the Windows setup flow
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: setup-sandbox-win-probe
+
+      - name: Build the CLI
+        run: cargo build -p nub-cli --profile fast
+
+      - name: Capture the setup flow
+        shell: pwsh
+        run: |
+          ./tests/setup-sandbox-win/probe.ps1 -Nub "${{ github.workspace }}\target\fast\nub.exe"
+
+      # The probe tears down at step 6, but a failure before that would leave a real local
+      # account and persistent WFP filters on the runner image. Runners are ephemeral, so this
+      # is belt-and-braces rather than load-bearing.
+      - name: Ensure teardown
+        if: always()
+        shell: pwsh
+        run: |
+          & "${{ github.workspace }}\target\fast\nub.exe" setup-sandbox --undo
+          exit 0

@@ -68,6 +68,11 @@ const NETWORK_SERVICES: &str = "\
 (allow sysctl-read (sysctl-name-regex #\"^net.routetable\"))
 ";
 
+/// The stock, unprivileged entry point to Seatbelt. Every confined launch goes through exactly
+/// this path, which is what makes its presence the only readiness question macOS has — see
+/// [`super::macos_setup::enforceable`], which re-exports this constant rather than restating it.
+pub const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
+
 /// Apply a resolved policy to a command on macOS. When the policy confines neither
 /// fs nor net, no SBPL wrap is emitted (env-scrub alone is construction, needs no
 /// kernel primitive); otherwise the child is re-homed under `/usr/bin/sandbox-exec`.
@@ -96,7 +101,7 @@ pub fn apply(
     }
 
     let profile = build_profile(policy, &spec, proxy_port, ca_bundle, tmp_dir);
-    let mut wrapped = Command::new("/usr/bin/sandbox-exec");
+    let mut wrapped = Command::new(SANDBOX_EXEC_PATH);
     wrapped.arg("-p").arg(&profile).arg("--");
     wrapped.arg(&spec.program).args(&spec.args);
     if let Some(cwd) = &spec.cwd {

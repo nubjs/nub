@@ -352,6 +352,7 @@ mod win {
 
     pub fn run() -> i32 {
         let report = windows_admin::status()
+            .map(|r| r.text)
             .unwrap_or_else(|e| format!("sandbox account: status unavailable ({e})\n"));
         print!("{report}");
 
@@ -362,7 +363,7 @@ mod win {
                 eprintln!(
                     "\nABORT: this machine has no provisioned nub sandbox account, so there is \
                      nothing to probe.\n       Run this ONCE from an elevated (Run as \
-                     administrator) prompt:\n\n           nub run --sandbox-admin setup\n\n       then \
+                     administrator) prompt:\n\n           nub setup-sandbox\n\n       then \
                      re-run this probe. (Run the probe itself elevated and it will provision + \
                      tear down for you.)"
                 );
@@ -382,7 +383,7 @@ mod win {
                     return 2;
                 }
             }
-            let after = windows_admin::status().unwrap_or_default();
+            let after = windows_admin::status().map(|r| r.text).unwrap_or_default();
             print!("{after}");
             window = parse_window(&after);
         }

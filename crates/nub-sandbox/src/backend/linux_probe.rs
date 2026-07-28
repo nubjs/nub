@@ -3,7 +3,7 @@
 //! It exists because the question "can this host enforce?" is PRODUCTION's question,
 //! not "does a file named `bwrap` sit in one of two hardcoded places". Each suite used
 //! to answer it with its own copy of a `["/usr/bin/bwrap", "/bin/bwrap"]` smoke launch,
-//! which is blind to [`DEDICATED_HELPER_PATH`] — the helper `nub sandbox setup` installs
+//! which is blind to [`DEDICATED_HELPER_PATH`] — the helper `nub setup-sandbox` installs
 //! and the resolver prefers. On a correctly set-up Ubuntu 24.04 host that is precisely
 //! backwards: AppArmor denies the distro bwrap at its unprofiled path and ONLY the
 //! helper can create the namespace, so every suite reported a green all-skip on exactly
@@ -175,7 +175,7 @@ fn announce_once(suite: &str, probe: &BwrapProbe) {
          resolver's order (dedicated helper, system, bundled):\n\
          {}\
          On an AppArmor-restricted host the helper at {DEDICATED_HELPER_PATH} is the only\n\
-         candidate that can; `sudo nub sandbox setup` installs it. Set\n\
+         candidate that can; `sudo nub setup-sandbox` installs it. Set\n\
          NUB_SANDBOX_REQUIRE_BWRAP=1 to turn this skip into a hard failure.\n\
          ============================================================================\n",
         probe.ledger()

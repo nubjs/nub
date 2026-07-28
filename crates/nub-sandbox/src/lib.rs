@@ -97,11 +97,12 @@ pub mod compiler;
 pub mod conformance;
 pub mod matcher;
 pub mod policy;
+pub mod preflight;
 pub mod proxy;
 
 pub use backend::{
     CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget, RuntimeCapability,
-    apply, apply_with_runtime, earliest_bootstrap, validate_adjacent_resource_bundle,
+    StatusReport, apply, apply_with_runtime, earliest_bootstrap, validate_adjacent_resource_bundle,
 };
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
@@ -130,7 +131,7 @@ pub mod host_probe {
 /// principal to express the grammar.
 #[cfg(target_os = "windows")]
 pub mod windows_admin {
-    pub use crate::backend::windows_account::{clean, setup, status, teardown};
+    pub use crate::backend::windows_account::{SETUP_COMMAND, clean, setup, status, teardown};
 }
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, ScopeCapabilities, compile,
@@ -139,11 +140,23 @@ pub use compiler::{
 pub use matcher::Homes;
 
 /// One-time privileged host setup for the Linux agent-sandbox — the implementation behind
-/// `nub sandbox {setup,status,teardown}`. See `.fray/sandbox-escalation-ux.md`.
+/// `nub setup-sandbox`. See `.fray/sandbox-escalation-ux.md`.
 #[cfg(target_os = "linux")]
 pub mod linux_admin {
     pub use crate::backend::linux_setup::{
         HelperAccess, SETUP_COMMAND, SETUP_COMMAND_ALL_USERS, SetupReport, setup, status, teardown,
+    };
+}
+
+/// The macOS half of `nub setup-sandbox`.
+///
+/// Seatbelt is unprivileged, so there is no host setup to perform and these carry no privileged
+/// operation at all — the module exists so the CLI can answer the same three modes everywhere
+/// with a real per-platform readiness answer rather than a hardcoded "nothing to do".
+#[cfg(target_os = "macos")]
+pub mod macos_admin {
+    pub use crate::backend::macos_setup::{
+        SANDBOX_EXEC_PATH, enforceable, setup, status, teardown,
     };
 }
 

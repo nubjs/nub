@@ -1945,7 +1945,7 @@ fn open_bwrap_candidate_inventory(require_nesting: bool) -> PinnedCandidateInven
 /// it is the ONLY candidate that can create the userns — a stock system/bundled bwrap at an
 /// unprofiled path is denied. When the helper is absent (no setup, or an unrestricted host
 /// like 22.04 / sysctl=0) its open fails and the resolver falls through to system/bundled, so
-/// the no-setup path is unchanged where setup isn't needed. `nub sandbox setup` installs it.
+/// the no-setup path is unchanged where setup isn't needed. `nub setup-sandbox` installs it.
 ///
 /// Split out so [`crate::backend::linux_probe`] can ask the SAME question the resolver
 /// asks; a probe that enumerates its own paths drifts out of step with production and
@@ -2491,34 +2491,43 @@ fn apparmor_restricts_unprivileged_userns() -> bool {
 /// bring-up: on a restricted Ubuntu host `--unshare-all` dies THERE first, before
 /// reaching any uid-map step, which is why the errno alone is not enough to key on.
 ///
-/// The OPERATION is what identifies a namespace denial, never the errno: Bubblewrap
-/// always names the step it failed at, and matching the bare errno instead swept in
-/// every unrelated EACCES — most damagingly the source-path resolution failure that
-/// breaks a root launch, which the AppArmor setup cannot fix and must not be blamed for.
+/// A BARE errno is deliberately not a match. Matching "permission denied" on its own also
+/// caught an ordinary bind-mount EACCES — an unreadable path, a mode the caller does not hold
+/// — and sent that caller to `sudo nub setup-sandbox`, which cannot help: no AppArmor grant
+/// makes an unreadable path readable. The errno has to sit alongside a named namespace or
+/// credential operation to mean what the setup hint claims it means.
 ///
-/// The operations enumerated here are the ones a restricted host actually dies at, and the
-/// list is wider than the initial clone because the denial surfaces wherever the launch
-/// first needs the namespace:
+/// The list spans both places a launch first needs the namespace:
 ///
-/// - `unshare user ns` is the SECOND-level namespace, and it is not an exotic path: `--dev`
-///   sets Bubblewrap's `opt_needs_devpts`, which makes the first level map the caller to
-///   uid 0 so devpts can mount, so every launch by a NON-root user creates a second one to
-///   map back. Nub passes `--dev` on every launch.
-/// - the mount steps (`make / slave`, `mount tmpfs`, `newroot bind`, `pivot_root`) are
-///   where an fs-only policy dies, because `--unshare-net` is conditional on
+/// - the namespace/credential operations proper. `unshare` covers the SECOND-level
+///   namespace, which is not an exotic path: `--dev` sets Bubblewrap's `opt_needs_devpts`,
+///   which makes the first level map the caller to uid 0 so devpts can mount, so every
+///   launch by a NON-root user creates a second one to map back. Nub passes `--dev` always.
+/// - the mount steps (`make / slave`, `mount tmpfs`, `newroot bind`, `pivot_root`), where an
+///   fs-only policy dies instead, because `--unshare-net` is conditional on
 ///   `policy.net.enforce` and the loopback bring-up that yields `RTM_NEWADDR` never runs.
 fn is_namespace_denial(lower: &str) -> bool {
-    lower.contains("uid map")
-        || lower.contains("gid map")
-        || lower.contains("new namespace")
-        || lower.contains("unshare user ns")
-        || lower.contains("unshare pid ns")
-        || lower.contains("setgroups")
-        || lower.contains("rtm_newaddr")
-        || lower.contains("make / slave")
-        || lower.contains("mount tmpfs")
-        || lower.contains("newroot bind")
-        || lower.contains("pivot_root")
+    // `rtm_new` rather than `rtm_newaddr`: the netns loopback bring-up emits RTM_NEWADDR first
+    // and RTM_NEWLINK right behind it, and both are the same denial with the same remedy.
+    // `setgroups` is the credential half — bubblewrap's "error writing to setgroups" names no
+    // namespace and would otherwise miss. The substring forms (`namespace`, `unshare`) also
+    // subsume the narrower spellings the fs-only mount steps below do not cover.
+    const NAMESPACE_OPERATIONS: [&str; 11] = [
+        "uid map",
+        "gid map",
+        "namespace",
+        "userns",
+        "unshare",
+        "rtm_new",
+        "setgroups",
+        "make / slave",
+        "mount tmpfs",
+        "newroot bind",
+        "pivot_root",
+    ];
+    NAMESPACE_OPERATIONS
+        .iter()
+        .any(|operation| lower.contains(operation))
 }
 
 fn executable(path: &Path) -> bool {
@@ -4778,6 +4787,23 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_eacces_is_not_read_as_a_namespace_denial() {
+        // A bind-mount EACCES carries the same errno as a userns denial and nothing else. It
+        // used to match, so an unreadable path on a restricted host told the caller to run the
+        // setup — a remedy that cannot fix a file mode. The generic message is the honest one.
+        for detail in [
+            "bwrap: Can't create file at /newroot/etc/hosts: Permission denied",
+            "bwrap: Can't read /var/lib/secret: Operation not permitted",
+        ] {
+            let message = classify_bwrap_failures_under(&[detail.to_string()], false, true, false);
+            assert!(
+                !message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+                "a plain EACCES must not be blamed on the AppArmor userns grant: {message}"
+            );
+        }
+    }
+
+    #[test]
     fn an_errno_alone_is_not_read_as_a_namespace_denial() {
         // Bubblewrap always names the step it failed at, so the operation is the signal.
         for named in [
@@ -4800,6 +4826,31 @@ mod tests {
             assert!(
                 !is_namespace_denial(&unnamed.to_ascii_lowercase()),
                 "{unnamed}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_bubblewrap_userns_denial_still_reaches_the_setup_hint() {
+        // Enumerated from bubblewrap's own `die`/`die_with_error` sites on the namespace and
+        // credential paths. Narrowing the match to named operations must not drop any of them —
+        // RTM_NEWLINK and the setgroups write have no "namespace" in their text and were the
+        // two the first narrowing lost.
+        for detail in [
+            "bwrap: setting up uid map: Permission denied",
+            "bwrap: setting up gid map in child: Permission denied",
+            "bwrap: Creating new namespace failed: Operation not permitted",
+            "bwrap: No permissions to creating new namespace, likely because the kernel does \
+             not allow non-privileged user namespaces",
+            "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+            "bwrap: loopback: Failed RTM_NEWLINK: Operation not permitted",
+            "bwrap: error writing to setgroups: Permission denied",
+            "bwrap: sysctl user.max_user_namespaces = 1",
+        ] {
+            let message = classify_bwrap_failures_under(&[detail.to_string()], false, true, false);
+            assert!(
+                message.contains(crate::backend::linux_setup::SETUP_COMMAND),
+                "a userns denial must reach the setup hint: {detail}\n{message}"
             );
         }
     }

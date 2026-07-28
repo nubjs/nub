@@ -152,7 +152,7 @@ deliberate spike bound or an inherited platform property, not an unknown.
 
 ### One-time elevation is required, and per-run is not
 
-`nub run --sandbox-admin setup` needs administrator: it creates a local account and installs
+The one-time `nub setup-sandbox` needs administrator: it creates a local account and installs
 WFP filters, and Windows gates both. Every sandboxed run afterwards is unelevated. This is the
 whole reason the WFP permit covers a loopback PORT WINDOW rather than the run's exact proxy
 port — a filter tracking an ephemeral port would need a WFP write, hence a UAC prompt, on
@@ -352,7 +352,7 @@ on such a path is skipped instead (the account already has access).
 
 A run killed between granting an ace and stripping it leaves the ace behind. The ledger at
 `%PROGRAMDATA%\nub\sandbox\acl-ledger.txt` records every path so
-`nub run --sandbox-admin clean` (unelevated) collects them. A leaked grant is over-permission
+`nub setup-sandbox --clean` (unelevated) collects them. A leaked grant is over-permission
 for a confined account, not a host compromise — hygiene, not a correctness boundary.
 
 - **`clean` is a machine-wide sweep, so it can revoke a LIVE run's aces.** The ledger is

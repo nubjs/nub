@@ -24,7 +24,7 @@
 //! mandatory. See `.fray/sandbox-decisions-current.md` §2.
 //!
 //! **THE PRIVILEGE SPLIT IS THE WHOLE PRODUCT DECISION.** One elevated
-//! `nub run --sandbox-admin setup` per machine creates the account and installs four persistent
+//! `nub setup-sandbox` per machine creates the account and installs four persistent
 //! WFP filters over a pre-authorized loopback port window. Every run after that is
 //! **fully unelevated**: read the credential, ACL the policy's paths, and
 //! `CreateProcessWithLogonW` the child through the Secondary Logon service — which needs no
@@ -61,6 +61,12 @@ pub(crate) mod wfp;
 /// 11. Stable — the WFP filters and every granted ACE key on the SID it resolves to.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) const SANDBOX_ACCOUNT: &str = "nub-sandbox";
+
+/// The command a user runs to provision this machine. Every fail-closed message that demands
+/// setup names this constant, so the verb people are told to run and the verb the CLI actually
+/// accepts cannot drift — they diverged once already, when these messages pointed at the
+/// internal `nub run --sandbox-admin setup` flag that no documentation mentions.
+pub const SETUP_COMMAND: &str = "nub setup-sandbox";
 
 /// A local group holding the sandbox account. NOTHING KEYS ON IT TODAY: the credential store
 /// is locked by a PROTECTED DACL naming SYSTEM, `BUILTIN\Administrators` and the provisioning
@@ -242,9 +248,7 @@ pub fn setup(port_range: Option<(u16, u16)>) -> std::io::Result<String> {
     if !account::is_elevated() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "nub's Windows sandbox setup creates a local account and installs network filters, \
-             both of which require administrator. Re-run this from an elevated (Run as \
-             administrator) prompt.",
+            elevated_setup_instruction(),
         ));
     }
     let range = port_range.unwrap_or(wfp::DEFAULT_PROXY_PORT_RANGE);
@@ -272,8 +276,9 @@ pub fn teardown() -> std::io::Result<()> {
     if !account::is_elevated() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "removing the nub sandbox account and its network filters requires administrator. \
-             Re-run this from an elevated (Run as administrator) prompt.",
+            "removing the nub sandbox account and its network filters needs administrator. Open a \
+             terminal as administrator — right-click Windows Terminal or PowerShell and choose \
+             \"Run as administrator\" — then run `nub setup-sandbox --undo`.",
         ));
     }
     // Sweep BEFORE the account is deleted: once the SID stops resolving, the leftover aces
@@ -305,7 +310,7 @@ pub fn clean() -> std::io::Result<usize> {
     if account::lookup_sid()?.as_deref() != Some(marker.sid.as_str()) {
         return Err(std::io::Error::other(
             "the recorded sandbox SID does not match the live account, so nub will not sweep \
-             aces for it — re-run `nub run --sandbox-admin setup` from an elevated prompt",
+             aces for it — re-run `nub setup-sandbox` from an elevated prompt",
         ));
     }
     let paths = state::ledger_paths()?;
@@ -329,37 +334,53 @@ pub fn clean() -> std::io::Result<usize> {
 ///
 /// The filter count is only reachable when elevated: WFP gates even ENUMERATION on
 /// administrator, so an unelevated caller genuinely cannot see it and the report says so
-/// rather than implying the fence is absent.
+/// rather than implying the fence is absent. That unreadability deliberately does NOT make the
+/// report "not ready": the launch's own fail-closed gate is the marker plus a live SID that
+/// matches it, so readiness is reported against the same two facts the launch checks — an
+/// unelevated caller would otherwise be told the sandbox is broken every single time.
 #[cfg(target_os = "windows")]
-pub fn status() -> std::io::Result<String> {
+pub fn status() -> std::io::Result<crate::backend::StatusReport> {
     let marker = state::read_marker()?;
     let live_sid = account::lookup_sid()?;
     let mut out = String::new();
+    let mut ready = false;
     match (&marker, &live_sid) {
         (None, None) => out.push_str("sandbox account: not set up\n"),
         (None, Some(sid)) => out.push_str(&format!(
-            "sandbox account: `{SANDBOX_ACCOUNT}` exists ({sid}) but nub has no setup record — \
-             re-run `nub run --sandbox-admin setup` from an elevated prompt\n"
+            "sandbox account: `{SANDBOX_ACCOUNT}` exists ({sid}) but nub has no setup record\n"
         )),
         (Some(m), None) => out.push_str(&format!(
-            "sandbox account: recorded as {} but no longer exists — re-run `nub run \
-             --sandbox-admin setup` from an elevated prompt\n",
+            "sandbox account: recorded as {} but no longer exists\n",
             m.sid
         )),
         (Some(m), Some(sid)) if m.sid != *sid => out.push_str(&format!(
-            "sandbox account: SID changed (recorded {}, live {sid}) — re-run `nub run \
-             --sandbox-admin setup` from an elevated prompt\n",
+            "sandbox account: SID changed (recorded {}, live {sid})\n",
             m.sid
         )),
-        (Some(m), Some(sid)) => out.push_str(&format!(
-            "sandbox account: `{SANDBOX_ACCOUNT}` ({sid})\nproxy port window: {}-{}\n",
-            m.port_low, m.port_high
-        )),
+        (Some(m), Some(sid)) => {
+            ready = true;
+            out.push_str(&format!(
+                "sandbox account: `{SANDBOX_ACCOUNT}` ({sid})\nproxy port window: {}-{}\n",
+                m.port_low, m.port_high
+            ));
+        }
     }
+    // THE ONE PRECONDITION THE PER-RUN PATH CANNOT CHECK. `apply` trusts the marker plus a live
+    // SID match, because WFP gates even ENUMERATION on administrator — so an unelevated run
+    // genuinely cannot tell whether the egress fence still exists. An administrator who deleted
+    // the filters and left the marker leaves every later run believing it is fenced when it is
+    // not. This report is the only place that can catch it, and only when elevated, so when it
+    // CAN look it treats an empty filter set as not-ready rather than reporting a count nobody
+    // reads.
+    let mut filters_gone = false;
     out.push_str(
         &match (account::is_elevated(), wfp::installed_filter_count()) {
             (false, _) => {
                 "wfp filters: cannot read (enumeration requires administrator)\n".to_string()
+            }
+            (true, Ok(0)) => {
+                filters_gone = true;
+                "wfp filters: NONE installed — the egress fence is missing\n".to_string()
             }
             (true, Ok(n)) => format!("wfp filters: {n} installed\n"),
             (true, Err(e)) => format!("wfp filters: could not read ({e})\n"),
@@ -369,7 +390,44 @@ pub fn status() -> std::io::Result<String> {
         "acl ledger: {} path(s) recorded\n",
         state::ledger_paths().map(|p| p.len()).unwrap_or(0)
     ));
-    Ok(out)
+    // `filters_gone` only DESCRIBES a machine that is otherwise provisioned. On a machine with
+    // no account it is the ordinary post-teardown state, and reporting "the account exists but
+    // its filters are gone" there contradicts the account line printed two lines above it.
+    let filters_gone = filters_gone && ready;
+    let ready = ready && !filters_gone;
+    out.push_str(&if ready {
+        "\nThe sandbox can enforce on this host.\n".to_string()
+    } else if filters_gone {
+        format!(
+            "\nThe sandbox cannot enforce on this host: the account exists but its network \
+             filters are gone, so egress is unfenced. Re-run the setup to reinstall them.\n\n{}\n",
+            elevated_setup_instruction()
+        )
+    } else {
+        format!(
+            "\nThe sandbox cannot enforce on this host: the dedicated account is not \
+             provisioned.\n\n{}\n",
+            elevated_setup_instruction()
+        )
+    });
+    Ok(crate::backend::StatusReport { text: out, ready })
+}
+
+/// The remedy every fail-closed Windows message ends on.
+///
+/// NUB DOES NOT SELF-ELEVATE HERE, and the choice is deliberate rather than a missing feature.
+/// A `ShellExecuteExW`/`runas` re-launch would raise one UAC consent dialog, but it starts a
+/// SEPARATE process on a new console — so the setup's own report, which is the part that tells
+/// a user what was installed and what to do next, lands in a window that closes on exit. It
+/// would also give Windows an elevation posture Linux deliberately does not have, which is a
+/// decision about nub's relationship to privilege, not a per-platform convenience call.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn elevated_setup_instruction() -> String {
+    format!(
+        "Creating the account and installing the network filters both need administrator. Open a \
+         terminal as administrator — right-click Windows Terminal or PowerShell and choose \"Run \
+         as administrator\" — then run:\n\n    {SETUP_COMMAND}"
+    )
 }
 
 // ── the apply() entry (Windows-only: constructs Prepared.launch) ────────────────
@@ -404,7 +462,7 @@ pub(crate) fn apply(
                     "nub's sandbox setup record exists but is not readable by this user ({e}). \
                      The state directory is readable only by administrators and the user who \
                      ran the setup — run the sandboxed command as that user, or re-run \
-                     `nub run --sandbox-admin setup` as the user who will run it."
+                     `{SETUP_COMMAND}` as the user who will run it."
                 )),
             });
         }
@@ -429,8 +487,8 @@ pub(crate) fn apply(
                 reason: Some(format!(
                     "nub's egress proxy bound port {port}, outside the {}-{} loopback window the \
                      installed WFP filters permit — the sandboxed child could not reach it. Free a \
-                     port in that range, or re-run `nub run --sandbox-admin setup` from an elevated \
-                     prompt to authorize a different one.",
+                     port in that range, or re-run `{SETUP_COMMAND}` from an elevated prompt to \
+                     authorize a different one.",
                     marker.port_low, marker.port_high
                 )),
             });
@@ -519,6 +577,9 @@ pub(crate) fn apply(
         degradation: deg,
         proxy: None,
         launch: Some(WindowsLaunch::Account(launch)),
+        // The three fields the AppContainer backend also defaults. This backend does not own a
+        // private tmp (the account's own profile provides the isolation) and does not redact,
+        // matching `windows::apply`'s account-free path exactly.
         _private_tmp: None,
         redact_stdout: false,
         redact_stderr: false,
@@ -532,8 +593,8 @@ fn not_set_up(detail: &str) -> crate::backend::Degradation {
         reason: Some(format!(
             "{detail}. This policy needs nub's dedicated Windows sandbox account (it uses a \
              generous-read base, a deny inside a granted directory, or per-host network rules — \
-             none of which Windows can express without one). Run `nub run --sandbox-admin setup` \
-             once from an elevated (Run as administrator) prompt."
+             none of which Windows can express without one). Run `{SETUP_COMMAND}` once from an \
+             elevated (Run as administrator) prompt."
         )),
     }
 }
@@ -812,5 +873,26 @@ mod tests {
     #[test]
     fn unconfined_net_under_the_account_is_reported_as_fenced() {
         assert_eq!(plan_net(&net_off()), AccountNet::UnconfinedButFenced);
+    }
+
+    /// The elevation remedy is the ONLY thing an unelevated caller can act on, and it once
+    /// named the internal `--sandbox-admin` flag that no help text or doc mentions. It must
+    /// name the documented verb, and it must not smuggle a self-elevation instruction that the
+    /// code does not perform.
+    #[test]
+    fn the_elevation_remedy_names_the_documented_verb() {
+        let remedy = elevated_setup_instruction();
+        assert!(
+            remedy.contains(SETUP_COMMAND),
+            "the remedy must name `{SETUP_COMMAND}`: {remedy}"
+        );
+        assert!(
+            !remedy.contains("--sandbox-admin"),
+            "the remedy must not point at the internal flag: {remedy}"
+        );
+        assert!(
+            remedy.contains("administrator"),
+            "the remedy must say what privilege is missing: {remedy}"
+        );
     }
 }

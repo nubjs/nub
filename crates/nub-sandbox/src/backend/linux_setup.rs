@@ -1,4 +1,4 @@
-//! One-time privileged host setup for the Linux agent-sandbox — `nub sandbox {setup,status,teardown}`.
+//! One-time privileged host setup for the Linux agent-sandbox — `nub setup-sandbox`.
 //!
 //! WHY THIS IS PRIVILEGED, AND ONLY ONCE. On Ubuntu 23.10+/24.04 the kernel strips every
 //! capability from an unprivileged user namespace (the AppArmor `unprivileged_userns`
@@ -17,10 +17,11 @@ use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
 
+use super::StatusReport;
 use super::linux::DEDICATED_HELPER_PATH;
 
 const HELPER_DIR: &str = "/usr/libexec/nub";
-const HELPER_GROUP: &str = "nub-sandbox";
+const HELPER_GROUP: &str = crate::preflight::LINUX_HELPER_GROUP;
 const PROFILE_NAME: &str = "nub-bwrap-userns";
 const PROFILE_PATH: &str = "/etc/apparmor.d/nub-bwrap-userns";
 /// The path-bound profile bytes shipped in-tree; setup writes these verbatim so the loaded
@@ -39,10 +40,10 @@ fn expected_bwrap_version() -> String {
 
 /// The elevated command a normal user must run. Emitted by the "not set up" runtime error and
 /// by `status`, so the exact string lives in one place.
-pub const SETUP_COMMAND: &str = "sudo nub sandbox setup";
+pub const SETUP_COMMAND: &str = crate::preflight::LINUX_SETUP_COMMAND;
 /// The variant that needs no fresh login afterwards — the one-line form for CI and any other
 /// single-tenant machine.
-pub const SETUP_COMMAND_ALL_USERS: &str = "sudo nub sandbox setup --all-users";
+pub const SETUP_COMMAND_ALL_USERS: &str = "sudo nub setup-sandbox --all-users";
 
 /// Who may execute the installed helper. The AppArmor grant is path-keyed either way, so this
 /// decides only WHO can reach the one profiled binary — never what a namespace it creates can
@@ -120,13 +121,28 @@ fn first_id(field: &str) -> Option<u32> {
     field.split_whitespace().next()?.parse().ok()
 }
 
+/// The real and effective ids from a `/proc` `Uid:`/`Gid:` line, which is `real effective saved
+/// fs`. Both are needed to tell a `sudo` process from the shell that ran it.
+fn real_and_effective(field: &str) -> Option<(u32, u32)> {
+    let mut ids = field.split_whitespace().filter_map(|id| id.parse().ok());
+    Some((ids.next()?, ids.next()?))
+}
+
 /// The group set the KERNEL will check for the session that invoked this command.
 ///
 /// Under `sudo` this process's own group set is root's, and the account's `/etc/group` rows are
 /// not it either — the credentials that matter were fixed when the caller's shell was created.
-/// So walk the parent chain to the first ancestor still running as `SUDO_UID` and read the
-/// group set that process actually holds. That is the only reading that answers "will the next
-/// command in this shell be able to open the helper?".
+/// So walk the parent chain to the invoking shell and read the group set that process actually
+/// holds. That is the only reading that answers "will the next command in this shell be able to
+/// open the helper?".
+///
+/// THE ANCESTOR TEST IS ON BOTH IDS, AND THAT IS THE WHOLE SUBTLETY. `sudo` is setuid: it keeps
+/// the caller's REAL uid and only raises the effective one, so it reads as `Uid: 1000 0 0 0` and
+/// matches a real-uid-only test — on its own PARENT chain position, before the shell is ever
+/// reached. Its supplementary set is root's (`Groups: 0`), so matching it reported that the
+/// caller's session lacked the group EVERY time, and the "not usable from this session yet"
+/// exit fired even for a caller who had held the group since login. Requiring the effective uid
+/// to match too skips `sudo` and lands on the shell.
 fn invoking_session_gids() -> Option<Vec<u32>> {
     let Some(sudo_uid) = std::env::var("SUDO_UID")
         .ok()
@@ -140,7 +156,8 @@ fn invoking_session_gids() -> Option<Vec<u32>> {
         if ppid <= 1 {
             return None;
         }
-        if proc_status_field(ppid, "Uid:").and_then(|f| first_id(&f)) == Some(sudo_uid) {
+        let ids = proc_status_field(ppid, "Uid:").and_then(|f| real_and_effective(&f));
+        if ids == Some((sudo_uid, sudo_uid)) {
             let mut gids: Vec<u32> = proc_status_field(ppid, "Groups:")
                 .map(|list| {
                     list.split_whitespace()
@@ -229,6 +246,60 @@ fn session_access() -> SessionAccess {
 /// already-running shell reaches a group it did not have at login.
 fn sg_workaround() -> String {
     format!("    sg {HELPER_GROUP} -c '<your command>'")
+}
+
+/// Whether the kernel is restricting unprivileged user namespaces — the condition nub's
+/// path-keyed AppArmor grant exists to work around. False on any host that never restricted
+/// them, where no setup is needed at all.
+pub fn userns_restricted() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .is_ok_and(|value| value.trim() == "1")
+}
+
+/// How far the one-time setup got, from the perspective of a caller about to launch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HelperReadiness {
+    /// Installed, and this session can execute it.
+    Usable,
+    /// Absent. The one-time setup installs it.
+    NotInstalled,
+    /// Installed, but this session's group set predates the group. Re-running setup does not
+    /// help — the credentials are fixed for the life of the shell.
+    SessionCannotExecute,
+}
+
+/// Resolve [`HelperReadiness`] from the helper's real mode bits and the caller's LIVE
+/// credentials, never from `/etc/group`. An `Unknown` session reading is reported as usable:
+/// the launcher's own failure is a better diagnosis than a guess, and claiming a group problem
+/// nobody has is the failure mode this whole module exists to avoid.
+///
+/// THE THREE "RE-RUN SETUP" CONDITIONS ARE ONE ANSWER HERE, because they have one remedy. A
+/// helper that is absent, one whose digest no longer matches this nub build (what an upgrade
+/// produces), and a missing profile file are all repaired by the same command — and reporting
+/// only the first left the other two with NO remedy at all in the install refusal, while
+/// `--check` was telling the same user to re-run setup. The two readings must not disagree.
+pub fn helper_readiness() -> HelperReadiness {
+    let Some(_) = helper_mode() else {
+        return HelperReadiness::NotInstalled;
+    };
+    if !Path::new(PROFILE_PATH).exists() || helper_digest_mismatched() {
+        return HelperReadiness::NotInstalled;
+    }
+    match session_access() {
+        SessionAccess::Open | SessionAccess::Member | SessionAccess::Unknown => {
+            HelperReadiness::Usable
+        }
+        SessionAccess::NeedsFreshSession => HelperReadiness::SessionCannotExecute,
+    }
+}
+
+/// Whether the installed helper's bytes differ from the ones this nub build pins. A build with
+/// no pinned digest (a dev build) has nothing to compare, so it never reports a mismatch.
+fn helper_digest_mismatched() -> bool {
+    let Some(expected) = option_env!("NUB_BWRAP_SHA256") else {
+        return false;
+    };
+    sha256_hex(Path::new(DEDICATED_HELPER_PATH)).is_ok_and(|actual| actual != expected)
 }
 
 /// Locate nub's packaged bubblewrap next to the running binary, matching the runtime resolver's
@@ -520,11 +591,13 @@ fn verify_as(user: &str, access: HelperAccess) -> Result<(), String> {
     ))
 }
 
+/// `output()` rather than `status()`: the latter INHERITS stdio, so `getent`'s matched line
+/// ("nub-sandbox:x:988:") printed straight into the middle of the teardown report.
 fn group_exists(group: &str) -> bool {
     Command::new("getent")
         .args(["group", group])
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|out| out.status.success())
         .unwrap_or(false)
 }
 
@@ -554,7 +627,7 @@ fn group_members(group: &str) -> Vec<String> {
 
 /// UNPRIVILEGED. Report what is and isn't set up, changing nothing. Ends with the setup command
 /// when anything is missing.
-pub fn status() -> Result<String, String> {
+pub fn status() -> Result<StatusReport, String> {
     let mut out = String::new();
     let mut ready = true;
     // Kept apart from `ready`: an installed helper the CALLER cannot reach is a different
@@ -663,22 +736,30 @@ pub fn status() -> Result<String, String> {
 
     if !ready {
         out.push_str(&format!(
-            "\nnot fully set up. Run:\n\n    {SETUP_COMMAND}\n"
+            "\nThe sandbox cannot enforce on this host: the setup is incomplete. Run:\n\n    \
+             {SETUP_COMMAND}\n"
         ));
     } else if session_gap {
         out.push_str(&format!(
-            "\nthe host is set up, but THIS SESSION cannot reach the helper. Start a fresh login, \
-             prefix commands with `sg {HELPER_GROUP} -c ...`, or drop the group gate with:\n\n    \
+            "\nThe sandbox cannot enforce from THIS SESSION. The host is set up, but this shell's \
+             group set was fixed when it started. Start a fresh login, prefix commands with `sg \
+             {HELPER_GROUP} -c ...`, or drop the group gate with:\n\n    \
              {SETUP_COMMAND_ALL_USERS}\n"
         ));
     } else if out.contains("not readable") {
         out.push_str(
-            "\nhelper and profile are installed; run `sudo nub sandbox status` to confirm the profile is loaded in the kernel.\n",
+            "\nThe sandbox can enforce on this host. The profile's loaded state needs root to \
+             enumerate; run `sudo nub setup-sandbox --check` to confirm it.\n",
         );
     } else {
-        out.push_str("\nsandbox setup is complete on this host.\n");
+        out.push_str("\nThe sandbox can enforce on this host.\n");
     }
-    Ok(out)
+    // `ready` is the HOST's state and `session_gap` the CALLER's; enforcement needs both, and
+    // conflating them is what once reported success to a shell that could not open the helper.
+    Ok(StatusReport {
+        text: out,
+        ready: ready && !session_gap,
+    })
 }
 
 /// ELEVATED. Undo [`setup`]: unload + remove the profile, remove the helper (and its now-empty
@@ -687,7 +768,7 @@ pub fn status() -> Result<String, String> {
 pub fn teardown() -> Result<String, String> {
     if !is_root() {
         return Err(
-            "removing the sandbox helper and its AppArmor profile needs root. Re-run it with:\n\n    sudo nub sandbox teardown\n"
+            "removing the sandbox helper and its AppArmor profile needs root. Re-run it with:\n\n    sudo nub setup-sandbox --undo\n"
                 .to_string(),
         );
     }
@@ -772,6 +853,23 @@ mod tests {
         assert_eq!(
             from_syscall, from_proc,
             "getgroups() and /proc/{pid}/status disagree about this process's group set"
+        );
+    }
+
+    #[test]
+    fn a_setuid_ancestor_is_not_mistaken_for_the_invoking_shell() {
+        // `sudo` keeps the caller's REAL uid and raises only the effective one, so a
+        // real-uid-only test matched sudo — whose supplementary set is root's — instead of the
+        // shell behind it. That reported "this session lacks the group" for every caller,
+        // including one who had held it since login.
+        let sudo = "1000\t0\t0\t0";
+        let shell = "1000\t1000\t1000\t1000";
+        assert_eq!(real_and_effective(sudo), Some((1000, 0)));
+        assert_eq!(real_and_effective(shell), Some((1000, 1000)));
+        assert_ne!(
+            real_and_effective(sudo),
+            Some((1000, 1000)),
+            "a setuid ancestor must not satisfy the invoking-shell test"
         );
     }
 }
