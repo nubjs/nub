@@ -3,8 +3,9 @@
 //! `--ro-bind-fd FD DEST` is not a descriptor bind. Bubblewrap rewrites it to an ordinary
 //! bind whose source is the literal string `/proc/self/fd/FD`, then `realpath()`s that
 //! string from `resolve_symlinks_in_ops()` — which runs AFTER it has entered the new user
-//! namespace and written a map covering exactly one uid and one gid. Two ordinary host
-//! shapes therefore abort a launch that is otherwise correct:
+//! namespace and written a map covering exactly one uid and one gid. Resolving the source
+//! by name that late is the root of all three problems this module exists for — two that
+//! abort a launch which is otherwise correct:
 //!
 //! * **euid 0 with nub under a 0750 `$HOME`** — Ubuntu's `HOME_MODE` default since 21.04,
 //!   so the curl installer's `~/.nub/bin/nub` and every dev build. A capability held in a
@@ -14,6 +15,14 @@
 //! * **the pinned file unlinked while it is still running** — an in-place upgrade. The
 //!   descriptor stays valid, but `/proc/self/fd/FD` reads back as `<path> (deleted)` and
 //!   `realpath()` returns ENOENT.
+//!
+//! and one that does something worse than abort it:
+//!
+//! * **a closure object the invoking user can write**, which under `sudo` is a privilege
+//!   escalation: overwriting the pinned inode in place leaves the name, the dev/ino and the
+//!   resolution untouched while the bytes become the attacker's, and the monitor runs them
+//!   as root. See requirement 2 on [`bwrap_resolves`] for the measured primitive and why
+//!   ETXTBSY does not cover it.
 //!
 //! The repair for both is to copy the object out of the descriptor that was ALREADY pinned
 //! and verified, into a private directory every component of which resolves under those
@@ -29,10 +38,10 @@
 
 use super::linux_monitor::{FileIdentity, PinnedObject, duplicate_above_stdio};
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Bases tried in order. `TMPDIR` is deliberately NOT honoured: under `sudo` it still
@@ -40,16 +49,25 @@ use std::path::{Path, PathBuf};
 /// user controls would hand them the privileged binary the sandbox is about to exec.
 const STAGE_BASES: &[&str] = &["/tmp", "/var/tmp", "/run"];
 
-/// The pid embedded after this prefix is what lets a later run reclaim a directory whose
-/// owner died without unwinding — nub-cli deliberately leaks its `RuntimeCapability`, so
-/// [`StagedRuntime`]'s destructor never runs in production.
 const STAGE_PREFIX: &str = "nub-sandbox-runtime.";
+
+/// Held with `LOCK_EX` for the owning process's whole life, so a later run can tell a live
+/// staging directory from an abandoned one. nub-cli deliberately leaks its
+/// `RuntimeCapability`, so [`StagedRuntime`]'s destructor never runs in production and
+/// reclaiming abandoned directories is the only cleanup there is.
+///
+/// A lock rather than the pid in the directory name: a pid is meaningful only in the
+/// namespace that minted it, so a nub in a container sharing the host `/tmp` would read
+/// another namespace's pid as dead and delete a LIVE image out from under it. `flock` is
+/// namespace-independent and the kernel releases it exactly when the holder dies.
+const STAGE_LOCK: &str = ".lock";
 
 const COPY_CHUNK: usize = 1 << 20;
 
 /// Owns the staging directory for as long as the runtime image that binds out of it.
 pub(super) struct StagedRuntime {
     dir: PathBuf,
+    _lock: File,
 }
 
 impl std::fmt::Debug for StagedRuntime {
@@ -68,7 +86,7 @@ impl Drop for StagedRuntime {
 
 /// Accumulates the re-anchoring decisions for one runtime image.
 pub(super) struct RuntimeStaging {
-    dir: Option<PathBuf>,
+    dir: Option<(PathBuf, File)>,
     /// Set once no staging directory could be established, so the remaining objects skip
     /// the (filesystem-touching) search instead of repeating it.
     unavailable: bool,
@@ -100,12 +118,16 @@ impl RuntimeStaging {
         if bwrap_resolves(object) {
             return;
         }
+        // Read before any mutation: the map is keyed by the ORIGINAL inode, which is what
+        // makes two aliases over one file collapse onto one copy.
         let key = (object.identity.dev, object.identity.ino);
         if let Some(existing) = self.staged.get(&key) {
-            if let Ok(file) = duplicate_above_stdio(&existing.file) {
-                object.file = file;
-                object.source_path = existing.path.clone();
-                object.identity = existing.identity;
+            let replacement = existing
+                .file
+                .try_clone()
+                .map(|file| (file, existing.path.clone(), existing.identity));
+            if let Ok((file, path, identity)) = replacement {
+                self.adopt(object, file, path, identity);
             }
             return;
         }
@@ -125,30 +147,62 @@ impl RuntimeStaging {
         };
         match duplicate_above_stdio(&staged.file) {
             Ok(file) => {
-                object.file = file;
-                object.source_path = staged.path.clone();
-                object.identity = staged.identity;
-                self.staged.insert(key, staged);
+                if self.adopt(object, file, staged.path.clone(), staged.identity) {
+                    self.staged.insert(key, staged);
+                }
             }
             Err(error) => tracing::debug!(%error, "duplicating a staged runtime descriptor"),
         }
     }
 
+    /// Swap the copy in, then hold it to the same test the original failed. Proving the
+    /// replacement rather than assuming it is what makes "a host that launches today cannot
+    /// be broken by the attempt" an enforced property: a staging directory that is itself
+    /// unresolvable (a symlinked base whose real ancestors are not searchable) rolls back
+    /// to the original descriptor instead of substituting something no better.
+    fn adopt(
+        &self,
+        object: &mut PinnedObject,
+        file: File,
+        path: PathBuf,
+        identity: FileIdentity,
+    ) -> bool {
+        let original = std::mem::replace(
+            object,
+            PinnedObject {
+                file,
+                source_path: path,
+                identity,
+                private_name: object.private_name.clone(),
+            },
+        );
+        if bwrap_resolves(object) {
+            return true;
+        }
+        tracing::debug!(
+            staged = %object.source_path.display(),
+            "the staged runtime object is no more reachable than the original; rolling back"
+        );
+        *object = original;
+        false
+    }
+
     /// The guard the runtime image must hold, or `None` when nothing was staged.
     pub(super) fn finish(self) -> Option<StagedRuntime> {
-        self.dir.map(|dir| StagedRuntime { dir })
+        self.dir
+            .map(|(dir, lock)| StagedRuntime { dir, _lock: lock })
     }
 
     fn directory(&mut self) -> Option<PathBuf> {
-        if let Some(dir) = &self.dir {
+        if let Some((dir, _)) = &self.dir {
             return Some(dir.clone());
         }
         if self.unavailable {
             return None;
         }
         match create_stage_dir() {
-            Some(dir) => {
-                self.dir = Some(dir.clone());
+            Some((dir, lock)) => {
+                self.dir = Some((dir.clone(), lock));
                 Some(dir)
             }
             None => {
@@ -159,25 +213,49 @@ impl RuntimeStaging {
     }
 }
 
-/// Whether Bubblewrap's `realpath("/proc/self/fd/N")` still succeeds once it has entered
-/// the sandbox user namespace, where a capability overrides DAC only for an inode BOTH of
-/// whose owners are mapped and everything else falls back to plain DAC under this
-/// process's own uid/gid with supplementary groups dropped.
+/// Whether the NAME is a faithful stand-in for the descriptor at the moment Bubblewrap
+/// re-resolves it — which is what decides whether the copy is optional or mandatory.
 ///
-/// Wrong in the safe direction only: an ACL or LSM that grants access this cannot see
-/// costs a needless copy, never a missed repair.
+/// Two independent requirements, and only the first is about reachability:
+///
+/// 1. `realpath()` must succeed under the sandbox user namespace's credentials, where a
+///    capability overrides DAC only for an inode BOTH of whose owners are mapped and
+///    everything else falls back to plain DAC under this process's own uid/gid with
+///    supplementary groups dropped. Wrong in the safe direction only: an ACL or LSM that
+///    grants access this cannot see costs a needless copy, never a missed repair.
+///
+/// 2. No other uid may be able to change what the name refers to. THIS ONE IS A PRIVILEGE
+///    BOUNDARY, not robustness. Bubblewrap binds the path it re-resolves, not the
+///    descriptor nub pinned and verified, and the window between the two is wide.
+///
+///    The primitive is an IN-PLACE overwrite, and only that — all three were measured.
+///    Renaming a replacement over the path leaves `/proc/self/fd/N` reading back as
+///    `<path> (deleted)`, so Bubblewrap fails ENOENT. Renaming the original aside and
+///    planting a replacement makes the link follow the ORIGINAL's dentry to its new name,
+///    so Bubblewrap binds the original. Both are denial of service. Writing THROUGH the
+///    existing inode is the one that works: the link, the dev/ino and the resolution all
+///    stay intact while the bytes become the attacker's, and the monitor runs them AS ROOT.
+///
+///    ETXTBSY covers less of this than it looks. The running executable cannot be written,
+///    but a mapped SHARED LIBRARY can (measured — the kernel takes a write-deny for
+///    `execve`, not for `mmap`), and the loader and every `DT_NEEDED` library are bound
+///    alongside the executable. So the exposure is a closure object sitting where the
+///    invoking user can write while nub runs under `sudo`. Nothing downstream catches it:
+///    the in-sandbox identity check and the readiness marker are both attestations BY the
+///    substituted code. Copying the bytes out of the descriptor takes the name out of the
+///    trust path, so a writable chain is staged even though it resolves perfectly well.
+///    Ubuntu's 0750 home is the SAFE shape here precisely because it forces staging.
 fn bwrap_resolves(object: &PinnedObject) -> bool {
     let link = PathBuf::from(format!("/proc/self/fd/{}", object.file.as_raw_fd()));
     let Ok(path) = fs::canonicalize(&link) else {
         return false;
     };
-    // Bubblewrap binds whatever that path names NOW, not the descriptor. A path that has
-    // come to name a different inode is therefore no longer a usable stand-in for the
-    // pinned one, even though it resolves.
+    let uid = unsafe { libc::getuid() };
     if !fs::metadata(&path).is_ok_and(|meta| {
         meta.dev() == object.identity.dev
             && meta.ino() == object.identity.ino
             && meta.len() == object.identity.size
+            && tamper_proof(&meta, uid)
     }) {
         return false;
     }
@@ -188,9 +266,30 @@ fn resolvable_directory_chain(path: &Path) -> bool {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     path.ancestors().skip(1).all(|dir| {
-        fs::metadata(dir)
-            .is_ok_and(|meta| searchable(meta.uid(), meta.gid(), meta.mode(), uid, gid))
+        fs::metadata(dir).is_ok_and(|meta| {
+            searchable(meta.uid(), meta.gid(), meta.mode(), uid, gid) && tamper_proof(&meta, uid)
+        })
     })
+}
+
+/// Whether this component denies every uid but ours the ability to replace what it holds.
+/// See requirement 2 on [`bwrap_resolves`] for why a "no" is a privilege boundary.
+fn tamper_proof(meta: &Metadata, uid: u32) -> bool {
+    tamper_proof_parts(meta.uid(), meta.mode(), meta.is_dir(), uid)
+}
+
+fn tamper_proof_parts(owner: u32, mode: u32, is_dir: bool, uid: u32) -> bool {
+    // A root-owned component is not an escalation vector: root already outranks whoever is
+    // launching. Any OTHER foreign owner can rewrite or rename the entry at will.
+    if owner != uid && owner != 0 {
+        return false;
+    }
+    // Sticky withholds rename and unlink of entries you do not own, which is exactly the
+    // substitution at issue — it is what keeps a 1777 `/tmp` usable as a staging base.
+    if is_dir && mode & 0o1000 != 0 {
+        return true;
+    }
+    mode & 0o022 == 0
 }
 
 fn searchable(owner: u32, group: u32, mode: u32, uid: u32, gid: u32) -> bool {
@@ -206,18 +305,23 @@ fn searchable(owner: u32, group: u32, mode: u32, uid: u32, gid: u32) -> bool {
     mode & 0o001 != 0
 }
 
-fn create_stage_dir() -> Option<PathBuf> {
+fn create_stage_dir() -> Option<(PathBuf, File)> {
     let uid = unsafe { libc::getuid() };
     let pid = std::process::id();
     let mut suffix = [0u8; 8];
     getrandom::getrandom(&mut suffix).ok()?;
     let suffix = u64::from_le_bytes(suffix);
     for base in STAGE_BASES {
-        let base = Path::new(base);
+        // Canonicalized because `Path::ancestors` is purely lexical: on a host where a base
+        // is a symlink, the searchability of the link's REAL ancestors is what Bubblewrap
+        // will meet, and the lexical chain would never look at them.
+        let Ok(base) = fs::canonicalize(base) else {
+            continue;
+        };
         if !base.is_dir() {
             continue;
         }
-        sweep_abandoned(base, uid);
+        sweep_abandoned(&base, uid);
         let dir = base.join(format!("{STAGE_PREFIX}{pid}.{suffix:016x}"));
         // 0700 at CREATION, not afterwards: `mkdir` applies the umask, so a
         // create-then-chmod would leave the directory group/other-readable for a window in
@@ -226,12 +330,20 @@ fn create_stage_dir() -> Option<PathBuf> {
         if fs::DirBuilder::new().mode(0o700).create(&dir).is_err() {
             continue;
         }
-        if resolvable_directory_chain(&dir.join("x")) && exec_permitted(&dir) {
-            return Some(dir);
+        if let Some(lock) = claim(&dir)
+            && resolvable_directory_chain(&dir.join("x"))
+            && exec_permitted(&dir)
+        {
+            return Some((dir, lock));
         }
         let _ = fs::remove_dir_all(&dir);
     }
     None
+}
+
+fn claim(dir: &Path) -> Option<File> {
+    let lock = File::create(dir.join(STAGE_LOCK)).ok()?;
+    (unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(lock)
 }
 
 /// A `noexec` staging filesystem would produce a monitor that binds and then cannot exec,
@@ -239,18 +351,22 @@ fn create_stage_dir() -> Option<PathBuf> {
 /// reports the mount flag, not just the mode bits — including for root.
 fn exec_permitted(dir: &Path) -> bool {
     let probe = dir.join("exec-probe");
-    let created = OpenOptions::new()
+    let permitted = create_owner_executable(&probe).is_ok() && access_x_ok(&probe);
+    let _ = fs::remove_file(&probe);
+    permitted
+}
+
+/// `OpenOptions::mode` is `open(2)`'s mode argument and the umask masks it, so a umask
+/// carrying the owner-execute bit would silently produce a non-executable file — and then
+/// `exec_permitted` would reject every base. `chmod` is not masked, so it is what decides.
+fn create_owner_executable(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o500)
-        .open(&probe);
-    if created.is_err() {
-        return false;
-    }
-    drop(created);
-    let permitted = fs::metadata(&probe).is_ok_and(|meta| meta.is_file()) && access_x_ok(&probe);
-    let _ = fs::remove_file(&probe);
-    permitted
+        .open(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+    Ok(file)
 }
 
 fn access_x_ok(path: &Path) -> bool {
@@ -261,13 +377,14 @@ fn access_x_ok(path: &Path) -> bool {
     unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
 }
 
+/// One object's copy. The destination is named after `private_name`, which is unique across
+/// an image by construction (the fixed `nub-monitor` and `ld.so`, then one entry per
+/// resolved `DT_SONAME`); were that ever to stop holding, `create_new` turns the collision
+/// into an error and the object keeps its original descriptor rather than binding another
+/// object's bytes.
 fn stage_object(dir: &Path, object: &PinnedObject) -> io::Result<StagedObject> {
     let path = dir.join(&object.private_name);
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o500)
-        .open(&path)?;
+    let mut destination = create_owner_executable(&path)?;
     // `pread` throughout: the source descriptor is a `dup` of a caller-owned file and
     // shares its offset, so a read that advanced it would corrupt an unrelated reader.
     let copied = copy_from_offset_zero(&object.file, &mut destination, object.identity.size);
@@ -275,6 +392,10 @@ fn stage_object(dir: &Path, object: &PinnedObject) -> io::Result<StagedObject> {
         let _ = fs::remove_file(&path);
         return Err(error);
     }
+    // The writable descriptor must be gone before the monitor is exec'd from this file:
+    // Linux refuses `execve` with ETXTBSY while any process holds the image open for
+    // writing, so keeping one read-write handle instead of reopening read-only would break
+    // every launch.
     drop(destination);
     let file = duplicate_above_stdio(&File::open(&path)?)?;
     let identity = FileIdentity::from_file(&file)?;
@@ -310,37 +431,32 @@ fn copy_from_offset_zero(source: &File, destination: &mut File, size: u64) -> io
     Ok(())
 }
 
-/// Reclaim staging directories left by processes that are gone. Only a real directory this
-/// uid owns is a candidate, so a name planted by another user in a world-writable base is
-/// never followed or removed.
+/// Reclaim staging directories whose owner is gone, identified by a lock nobody holds.
+/// Only a real directory this uid owns is a candidate, so a name planted by another user in
+/// a world-writable base is never followed or removed; the bases are sticky or root-owned,
+/// so nobody else can swap a candidate between the check and the removal.
 fn sweep_abandoned(base: &Path, uid: u32) {
     let Ok(entries) = fs::read_dir(base) else {
         return;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(STAGE_PREFIX)) else {
-            continue;
-        };
-        let Some(pid) = rest.split('.').next().and_then(|p| p.parse::<i32>().ok()) else {
-            continue;
-        };
-        if pid <= 0 || process_alive(pid) {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(STAGE_PREFIX)
+        {
             continue;
         }
         let path = entry.path();
         if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir() && meta.uid() == uid) {
             continue;
         }
-        let _ = fs::remove_dir_all(&path);
+        // The lock is dropped here either way: taking it proves the owner is gone, and
+        // holding it no longer matters once the directory is being removed.
+        if claim(&path).is_some() {
+            let _ = fs::remove_dir_all(&path);
+        }
     }
-}
-
-fn process_alive(pid: i32) -> bool {
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
-    }
-    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(test)]
@@ -365,6 +481,31 @@ mod tests {
         // directory is unsearchable by its owner however open the group bits are.
         assert!(!searchable(1001, 50, 0o070, 1001, 1001));
         assert!(searchable(1001, 50, 0o070, 4242, 50));
+    }
+
+    #[test]
+    fn a_component_a_foreign_uid_can_rewrite_is_not_tamper_proof() {
+        // The escalation shape: `sudo nub install` with nub at `~/.nub/bin/nub` on a 0755
+        // home. Every component is world-searchable, so reachability says "fine" — but
+        // `~/.nub/bin` is owned by uid 1000, who can rename an ELF over the pinned binary
+        // between nub's check and Bubblewrap's re-resolve, and the monitor would exec it as
+        // root. Staging is mandatory here, and this is the predicate that says so.
+        assert!(
+            searchable(1000, 1000, 0o755, 0, 0),
+            "the fixture must be reachable"
+        );
+        assert!(!tamper_proof_parts(1000, 0o755, false, 0));
+        // Root-owned is not an escalation vector: root already outranks the launcher.
+        assert!(tamper_proof_parts(0, 0o755, false, 0));
+        assert!(tamper_proof_parts(0, 0o755, false, 1000));
+        // Group- or world-writable is, whoever owns it.
+        assert!(!tamper_proof_parts(0, 0o775, false, 0));
+        assert!(!tamper_proof_parts(0, 0o777, false, 0));
+        // ...unless sticky withholds rename/unlink of entries you do not own, which is what
+        // keeps a 1777 `/tmp` usable as a staging base.
+        assert!(tamper_proof_parts(0, 0o1777, true, 0));
+        // Sticky is a directory property; it exculpates nothing on the bound file itself.
+        assert!(!tamper_proof_parts(0, 0o1777, false, 0));
     }
 
     #[test]
@@ -441,6 +582,37 @@ mod tests {
         assert!(
             !staged_dir.exists(),
             "the staging directory outlived its guard"
+        );
+    }
+
+    #[test]
+    fn an_unlocked_staging_directory_is_reclaimed_and_a_locked_one_survives() {
+        // flock is namespace-independent and per open-file-description, so a second open
+        // of the same lock in THIS process contends exactly as another process would.
+        let base = tempfile::tempdir().unwrap();
+        let uid = unsafe { libc::getuid() };
+        let live = base
+            .path()
+            .join(format!("{STAGE_PREFIX}1.0000000000000001"));
+        let abandoned = base
+            .path()
+            .join(format!("{STAGE_PREFIX}2.0000000000000002"));
+        fs::create_dir(&live).unwrap();
+        fs::create_dir(&abandoned).unwrap();
+        let held = claim(&live).expect("hold the live directory's lock");
+
+        sweep_abandoned(base.path(), uid);
+        assert!(live.exists(), "a directory whose lock is held must survive");
+        assert!(
+            !abandoned.exists(),
+            "an unlocked directory must be reclaimed"
+        );
+
+        drop(held);
+        sweep_abandoned(base.path(), uid);
+        assert!(
+            !live.exists(),
+            "once the lock is released it must be reclaimed too"
         );
     }
 

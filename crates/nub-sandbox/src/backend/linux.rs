@@ -2270,8 +2270,10 @@ fn classify_bwrap_failures_under(
     //
     // Deliberately ahead of the container, sysctl, WSL and AppArmor arms, all of which would
     // otherwise claim it: this is not a namespace denial at all, so neither host setup nor a
-    // container flag can fix it and naming either sends the reader somewhere useless.
-    if lower.contains("can't find source path /proc/self/fd/") {
+    // container flag can fix it and naming either sends the reader somewhere useless. The
+    // `lower` it matches is every candidate's failure JOINED, though, so a run that also
+    // produced a real namespace denial must still report that one — hence the guard.
+    if lower.contains("can't find source path /proc/self/fd/") && !is_namespace_denial(&lower) {
         return format!(
             "nub could not mount its own runtime into the sandbox: Bubblewrap resolves the \
              mount by path from inside the user namespace, and that path is unreachable \
@@ -2368,11 +2370,30 @@ fn apparmor_restricts_unprivileged_userns() -> bool {
 /// always names the step it failed at, and matching the bare errno instead swept in
 /// every unrelated EACCES — most damagingly the source-path resolution failure that
 /// breaks a root launch, which the AppArmor setup cannot fix and must not be blamed for.
+///
+/// The operations enumerated here are the ones a restricted host actually dies at, and the
+/// list is wider than the initial clone because the denial surfaces wherever the launch
+/// first needs the namespace:
+///
+/// - `unshare user ns` is the SECOND-level namespace, and it is not an exotic path: `--dev`
+///   sets Bubblewrap's `opt_needs_devpts`, which makes the first level map the caller to
+///   uid 0 so devpts can mount, so every launch by a NON-root user creates a second one to
+///   map back. Nub passes `--dev` on every launch.
+/// - the mount steps (`make / slave`, `mount tmpfs`, `newroot bind`, `pivot_root`) are
+///   where an fs-only policy dies, because `--unshare-net` is conditional on
+///   `policy.net.enforce` and the loopback bring-up that yields `RTM_NEWADDR` never runs.
 fn is_namespace_denial(lower: &str) -> bool {
     lower.contains("uid map")
         || lower.contains("gid map")
         || lower.contains("new namespace")
+        || lower.contains("unshare user ns")
+        || lower.contains("unshare pid ns")
+        || lower.contains("setgroups")
         || lower.contains("rtm_newaddr")
+        || lower.contains("make / slave")
+        || lower.contains("mount tmpfs")
+        || lower.contains("newroot bind")
+        || lower.contains("pivot_root")
 }
 
 fn executable(path: &Path) -> bool {
@@ -4405,7 +4426,12 @@ mod tests {
             "bwrap: setting up uid map: Permission denied",
             "bwrap: setting up gid map: Permission denied",
             "bwrap: No permissions to create a new namespace",
+            "bwrap: Creating new namespace failed: Operation not permitted",
             "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+            // The second-level namespace `--dev` forces for every non-root launch.
+            "bwrap: unshare user ns: Operation not permitted",
+            "bwrap: unshare pid ns: Operation not permitted",
+            "bwrap: error writing to setgroups: Permission denied",
         ] {
             assert!(is_namespace_denial(&named.to_ascii_lowercase()), "{named}");
         }

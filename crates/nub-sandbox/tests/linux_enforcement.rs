@@ -1949,3 +1949,80 @@ fn a_runtime_image_behind_an_unsearchable_directory_still_launches() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn a_runtime_image_a_foreign_uid_can_rewrite_is_not_bound_by_name() {
+    // The escalation this closes. Bubblewrap binds the PATH it re-resolves, not the
+    // descriptor nub pinned and verified, so an object the invoking user can write is still
+    // theirs to change in the window between the two — and under `sudo` the monitor runs
+    // the result AS ROOT. Nothing downstream catches it: the in-sandbox identity check and
+    // the readiness marker are both attestations BY the substituted code.
+    //
+    // The primitive is an IN-PLACE overwrite specifically. Renaming a replacement over the
+    // path makes `/proc/self/fd/N` read back as `<path> (deleted)` (ENOENT), and renaming
+    // the original aside makes the link follow it, so both merely deny service. Writing
+    // through the existing inode keeps the link, the dev/ino and the resolution intact
+    // while the bytes change, which is why this test does exactly that.
+    //
+    // Deterministic, not a race: the capability materializes eagerly, so the overwrite
+    // lands strictly between nub's verification and Bubblewrap's re-resolve.
+    if skip_without_bwrap() {
+        return;
+    }
+    use std::fs::Permissions;
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let tmp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let euid_probe = root.join("euid-probe");
+    std::fs::write(&euid_probe, b"").unwrap();
+    if std::fs::metadata(&euid_probe).unwrap().uid() != 0 {
+        return;
+    }
+
+    // World-searchable throughout, but owned by someone who is not us: the shape that
+    // resolves perfectly and is still not trustworthy. Reachability alone calls this fine.
+    let theirs = root.join("theirs");
+    std::fs::create_dir(&theirs).unwrap();
+    let harness = theirs.join("nub-sandbox-monitor-harness");
+    std::fs::copy(env!("CARGO_BIN_EXE_nub-sandbox-monitor-harness"), &harness).unwrap();
+    std::fs::set_permissions(&harness, Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::chown(&harness, Some(65534), Some(65534)).unwrap();
+    std::os::unix::fs::chown(&theirs, Some(65534), Some(65534)).unwrap();
+    std::fs::set_permissions(&theirs, Permissions::from_mode(0o755)).unwrap();
+
+    let pinned = std::fs::metadata(&harness).unwrap().ino();
+    let runtime = RuntimeCapability::from_verified_executable(&harness)
+        .expect("pin an image on a path its owner can rewrite");
+
+    let payload = std::fs::read("/bin/true").unwrap();
+    let mut victim = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&harness)
+        .expect("the owner can still open it for writing");
+    victim.write_all(&payload).unwrap();
+    victim.set_len(payload.len() as u64).unwrap();
+    drop(victim);
+    assert_eq!(
+        std::fs::metadata(&harness).unwrap().ino(),
+        pinned,
+        "the overwrite must keep the inode, or it is not the primitive under test"
+    );
+
+    let f = fixture();
+    let policy = compile(&serde_json::json!({ "fs": true }), &f.ctx(&[])).expect("compiles");
+    let _mount_topology = host_mount_topology_lock()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let out = apply_with_runtime(&policy, CommandSpec::new(TRUE).cwd(&f.proj), &runtime)
+        .expect("apply")
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "the launch must run nub's verified bytes, not whatever now occupies the pinned \
+         inode: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
