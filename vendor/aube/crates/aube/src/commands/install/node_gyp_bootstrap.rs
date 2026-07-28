@@ -26,7 +26,7 @@
 //! install — the subprocess's cwd is the tool dir, which would
 //! otherwise only pick up `~/.npmrc`. An `xx::fslock` lock keyed
 //! off the tool dir serializes concurrent bootstraps across
-//! processes; the fast-path existence check short-circuits every
+//! processes; the [`tool_tree_usable`] fast path short-circuits every
 //! subsequent invocation.
 use miette::{IntoDiagnostic, WrapErr, miette};
 use std::path::{Path, PathBuf};
@@ -36,6 +36,9 @@ use std::path::{Path, PathBuf};
 const BUCKET: &str = "v12";
 /// Semver range passed to `aube install`. Keep aligned with `BUCKET`.
 const SPEC: &str = "^12.0.0";
+/// The bootstrapped package's name — also the tool dir's require root
+/// (`node_modules/<PKG>`), which is what [`tool_tree_usable`] probes.
+const PKG: &str = "node-gyp";
 
 #[cfg(windows)]
 const BINARY_NAMES: &[&str] = &["node-gyp.cmd", "node-gyp.exe", "node-gyp"];
@@ -60,6 +63,30 @@ fn node_gyp_on_path() -> bool {
 /// miss the bootstrapped shim and the fast-path would never fire.
 pub(crate) fn node_gyp_bin_exists(bin_dir: &Path) -> bool {
     BINARY_NAMES.iter().any(|name| bin_dir.join(name).exists())
+}
+
+/// True when a previously-bootstrapped tool tree is still *usable*, as
+/// opposed to merely present.
+///
+/// The `.bin` entry is a generated shim — on every platform a real file
+/// (POSIX `sh` script, Windows `.cmd`) whose existence says nothing
+/// about whether the package it execs is still on disk. The shim's
+/// target and the tool dir's `node_modules/<PKG>` require root both
+/// resolve through the same virtual-store symlink, so purging the
+/// global store — a routine disk-reclaim operation — leaves the shim
+/// standing and the target gone. Probing the require root is what makes
+/// the bootstrap re-run instead of handing back a path that dies at
+/// exec with `Cannot find module`. `exists()` follows symlinks, and
+/// `package.json` is the same materialization marker
+/// `state::verify_install_layout` uses, so this holds for the isolated
+/// and hoisted layouts alike.
+fn tool_tree_usable(tool_dir: &Path, bin_dir: &Path) -> bool {
+    node_gyp_bin_exists(bin_dir)
+        && tool_dir
+            .join("node_modules")
+            .join(PKG)
+            .join("package.json")
+            .exists()
 }
 
 fn primary_binary_name() -> &'static str {
@@ -91,7 +118,7 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     let root = tool_root()?;
     let tool_dir = root.join(BUCKET);
     let bin_dir = tool_dir.join("node_modules").join(".bin");
-    if node_gyp_bin_exists(&bin_dir) {
+    if tool_tree_usable(&tool_dir, &bin_dir) {
         return Ok(bin_dir);
     }
     let lock_key = root.join(format!("{BUCKET}.lock"));
@@ -231,7 +258,7 @@ fn bootstrap_blocking(
         .lock()
         .map_err(|e| miette!("failed to acquire node-gyp bootstrap lock: {e}"))?;
     // Re-check under the lock: another process may have raced us.
-    if node_gyp_bin_exists(bin_dir) {
+    if tool_tree_usable(tool_dir, bin_dir) {
         return Ok(());
     }
     let manifest = format!(
@@ -302,11 +329,102 @@ fn bootstrap_blocking(
             aube_util::cmd("install")
         ));
     }
-    if !node_gyp_bin_exists(bin_dir) {
+    if !tool_tree_usable(tool_dir, bin_dir) {
         return Err(miette!(
-            "node-gyp bootstrap completed but no shim found under {}",
+            "node-gyp bootstrap completed but left no usable tree under {} \
+             (missing shim in {}, or an unresolvable {PKG} require root)",
+            tool_dir.display(),
             bin_dir.display()
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct Tree {
+        _tmp: tempfile::TempDir,
+        tool_dir: PathBuf,
+        bin_dir: PathBuf,
+        store: PathBuf,
+    }
+
+    /// Mirrors the real bootstrapped layout: a generated shim (a plain
+    /// file, not a symlink) in `.bin`, and a require root that reaches
+    /// the package only by traversing a symlink into the global store.
+    fn isolated_tree() -> Tree {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tool_dir = tmp.path().join("tools/node-gyp/v12");
+        let bin_dir = tool_dir.join("node_modules/.bin");
+        let store = tmp.path().join("store/node-gyp@12.4.0-deadbeef");
+
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let pkg_in_store = store.join("node_modules/node-gyp");
+        std::fs::create_dir_all(&pkg_in_store).expect("store pkg");
+        std::fs::write(pkg_in_store.join("package.json"), b"{}").expect("pkg json");
+        std::fs::write(bin_dir.join(primary_binary_name()), b"#!/bin/sh\n").expect("shim");
+
+        let virtual_entry = tool_dir.join("node_modules/.store/node-gyp@12.4.0");
+        std::fs::create_dir_all(virtual_entry.parent().expect("parent")).expect("virtual store");
+        symlink_dir(&store, &virtual_entry);
+        symlink_dir(
+            &virtual_entry.join("node_modules/node-gyp"),
+            &tool_dir.join("node_modules/node-gyp"),
+        );
+
+        Tree {
+            _tmp: tmp,
+            tool_dir,
+            bin_dir,
+            store,
+        }
+    }
+
+    fn symlink_dir(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(target, link).expect("symlink");
+    }
+
+    #[test]
+    fn purging_the_global_store_makes_the_tool_tree_unusable() {
+        let t = isolated_tree();
+        assert!(
+            tool_tree_usable(&t.tool_dir, &t.bin_dir),
+            "control: an intact bootstrapped tree must be usable, else this \
+             test would pass no matter what the predicate returns"
+        );
+
+        std::fs::remove_dir_all(&t.store).expect("purge store");
+
+        assert!(
+            node_gyp_bin_exists(&t.bin_dir),
+            "precondition: the shim must survive the purge — that is exactly \
+             why existence alone is the wrong check"
+        );
+        assert!(
+            !tool_tree_usable(&t.tool_dir, &t.bin_dir),
+            "a purged store must force a re-bootstrap, not a success return"
+        );
+    }
+
+    #[test]
+    fn a_hoisted_tree_with_no_virtual_store_is_usable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tool_dir = tmp.path().to_path_buf();
+        let bin_dir = tool_dir.join("node_modules/.bin");
+        let pkg = tool_dir.join("node_modules/node-gyp");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        std::fs::create_dir_all(&pkg).expect("pkg dir");
+        std::fs::write(pkg.join("package.json"), b"{}").expect("pkg json");
+        std::fs::write(bin_dir.join(primary_binary_name()), b"#!/bin/sh\n").expect("shim");
+
+        // Guards the fast path: a false negative here would re-run the
+        // recursive install on every native dependency.
+        assert!(tool_tree_usable(&tool_dir, &bin_dir));
+    }
 }
