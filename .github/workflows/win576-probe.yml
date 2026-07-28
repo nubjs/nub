@@ -64,7 +64,7 @@ jobs:
           nub --version
           node --version
           Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize | Out-String -Width 300 | Write-Host
-      - name: pick roots (reporter was on D:)
+      - name: "pick roots (reporter was on the D drive)"
         id: roots
         run: |
           $d = if (Test-Path 'D:\') { 'D:\nub576' } else { 'C:\nub576-altdrive-missing' }
@@ -72,11 +72,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path 'C:\nub576' | Out-Null
           "droot=$d"  | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           Write-Host "D-root=$d  C-root=C:\nub576"
-      - name: cell 1 — D: drive, GVS default
+      - name: "cell 1 - D drive, GVS default"
         run: pwsh -File tests/win576-probe/repro.ps1 -Label "${{ matrix.tag }}-Ddrive-gvsdefault" -Root "${{ steps.roots.outputs.droot }}"
-      - name: cell 2 — C: drive, GVS default
+      - name: "cell 2 - C drive, GVS default"
         if: always()
         run: pwsh -File tests/win576-probe/repro.ps1 -Label "${{ matrix.tag }}-Cdrive-gvsdefault" -Root "C:\nub576"
-      - name: cell 3 — D: drive, GVS OFF
+      - name: "cell 3 - D drive, GVS OFF"
         if: always()
         run: pwsh -File tests/win576-probe/repro.ps1 -Label "${{ matrix.tag }}-Ddrive-gvsoff" -Root "${{ steps.roots.outputs.droot }}" -GvsOff
