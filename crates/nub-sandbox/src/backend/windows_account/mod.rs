@@ -638,6 +638,7 @@ mod tests {
             net,
             env: EnvPolicy::default(),
             pid: PidPolicy::default(),
+            build_jail: false,
         }
     }
 
