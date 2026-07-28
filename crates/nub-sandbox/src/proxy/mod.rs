@@ -111,6 +111,23 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PRELUDE: usize = 16 * 1024;
 /// Bound parent threads and socket state a sandboxed child can create at once.
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
+/// Wake interval for a blocked read inside a blind splice — the tick that lets a
+/// forwarder observe the teardown flag.
+///
+/// PROVENANCE. Teardown ([`EgressProxy::drop`]) signals `shutdown` and then
+/// `shutdown(Shutdown::Both)`s every registered socket to wake the handlers it is about
+/// to `join()`. On POSIX that works: `shutdown(SHUT_RDWR)` both sends the FIN and wakes
+/// a `read()` already pending on another thread. WINSOCK DIVERGES on both halves — a
+/// `shutdown()` does not cancel a `recv()` pending elsewhere (only `closesocket` does),
+/// and the `SD_BOTH` suppresses the FIN that would have EOF'd the loopback peer. So a
+/// splice reading with no timeout never unblocks and `drop` deadlocks on the join
+/// (measured on `windows-latest`: the test thread inside `Drop::drop`, the handler
+/// inside `WS2_32!recv`). Do NOT "simplify" this back to `set_read_timeout(None)`.
+///
+/// Correctness does not depend on the value: a read timeout is never treated as EOF, it
+/// only re-checks the flag, so a legitimately idle long-lived tunnel survives any number
+/// of ticks. The value governs teardown responsiveness alone — keep it short.
+const SPLICE_POLL: Duration = Duration::from_millis(250);
 
 type ActiveSockets = Arc<Mutex<std::collections::BTreeMap<u64, Vec<TcpStream>>>>;
 
@@ -478,13 +495,12 @@ fn handle_conn(
     }
     let upstream = connect_upstream(&req.host, req.port, allow_private)?;
     active.track(&upstream)?;
-    stream.set_read_timeout(None)?;
-    upstream.set_read_timeout(None)?;
     let mut up = upstream;
     if !prelude.is_empty() {
         up.write_all(&prelude)?;
     }
-    splice(stream, up);
+    // Both legs' read timeouts are owned by `pump` from here on (SPLICE_POLL).
+    splice(stream, up, shutdown);
     Ok(())
 }
 
@@ -622,22 +638,49 @@ fn connect_upstream(host: &Host, port: u16, allow_private: bool) -> io::Result<T
 /// Blind bidirectional forward. One thread copies client→upstream; this thread copies
 /// upstream→client. Each direction shuts down the peer's write half on EOF so the
 /// other copy unblocks and the tunnel tears down cleanly.
-fn splice(client: TcpStream, upstream: TcpStream) {
+fn splice(client: TcpStream, upstream: TcpStream, shutdown: Arc<AtomicBool>) {
     let Ok(mut client_rd) = client.try_clone() else {
         return;
     };
     let Ok(mut up_wr) = upstream.try_clone() else {
         return;
     };
+    let sh = shutdown.clone();
     let c2u = std::thread::spawn(move || {
-        let _ = io::copy(&mut client_rd, &mut up_wr);
+        pump(&mut client_rd, &mut up_wr, &sh);
         let _ = up_wr.shutdown(Shutdown::Write);
     });
     let mut up_rd = upstream;
     let mut client_wr = client;
-    let _ = io::copy(&mut up_rd, &mut client_wr);
+    pump(&mut up_rd, &mut client_wr, &shutdown);
     let _ = client_wr.shutdown(Shutdown::Write);
     let _ = c2u.join();
+}
+
+/// One direction of [`splice`]: copy until EOF, an IO error, or teardown.
+///
+/// The `io::copy` this replaces cannot be interrupted; the timeout+flag loop is what
+/// makes a blocked forwarder reachable by [`EgressProxy::drop`] on Windows (see
+/// [`SPLICE_POLL`]). A timeout is NOT end-of-stream — no byte was consumed, so the loop
+/// re-checks the flag and reads again. The flag is set only by teardown, which has
+/// already `shutdown(Both)`'d both legs, so an exit here never abandons a live tunnel.
+fn pump(from: &mut TcpStream, to: &mut TcpStream, shutdown: &AtomicBool) {
+    if from.set_read_timeout(Some(SPLICE_POLL)).is_err() {
+        return;
+    }
+    let mut buf = [0u8; 16 * 1024];
+    while !shutdown.load(Ordering::SeqCst) {
+        match from.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                if to.write_all(&buf[..n]).is_err() {
+                    return;
+                }
+            }
+            Err(e) if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
 }
 
 fn is_timeout(e: &io::Error) -> bool {
