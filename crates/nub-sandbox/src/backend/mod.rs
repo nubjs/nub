@@ -62,6 +62,9 @@ mod linux_monitor;
 mod linux_net_bridge;
 
 #[cfg(target_os = "linux")]
+mod linux_landlock;
+
+#[cfg(target_os = "linux")]
 mod linux_runtime_stage;
 
 #[cfg(target_os = "linux")]

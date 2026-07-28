@@ -5000,7 +5000,7 @@ fn target_child_main(
     target_child_fail(error_writer_fd, TargetSetupStage::Execve, child_errno());
 }
 
-fn install_target_seccomp(program: &[seccompiler::sock_filter]) -> Result<(), libc::c_int> {
+pub(super) fn install_target_seccomp(program: &[seccompiler::sock_filter]) -> Result<(), libc::c_int> {
     let len = u16::try_from(program.len()).map_err(|_| libc::E2BIG)?;
     let filter = libc::sock_fprog {
         len,
@@ -8242,7 +8242,7 @@ fn clear_cloexec(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn mark_inherited_fds_cloexec() -> io::Result<()> {
+pub(super) fn mark_inherited_fds_cloexec() -> io::Result<()> {
     const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
     let result =
         unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC) };

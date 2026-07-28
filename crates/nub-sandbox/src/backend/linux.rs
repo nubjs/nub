@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 /// Every TLS entry is named as a SUBPATH, never `/etc/ssl` or `/etc/pki` wholesale:
 /// `/etc/ssl/private` and `/etc/pki/tls/private` are mode-700 private-key directories and
 /// admitting either would undo the tightening this floor exists for.
-const ESSENTIAL_READ_PATHS: &[&str] = &[
+pub(super) const ESSENTIAL_READ_PATHS: &[&str] = &[
     "/usr",
     "/bin",
     "/sbin",
@@ -168,6 +168,18 @@ impl PinnedBubblewrapCandidate {
 
 pub(crate) struct LinuxPreflight {
     confined: Option<ConfinedPreflight>,
+    /// Set when the Landlock mechanism was selected. Mutually exclusive with `confined`:
+    /// Landlock needs no bubblewrap candidate, no runtime image, and no namespace, so the
+    /// whole bubblewrap admission path below is SKIPPED rather than attempted and
+    /// discarded — which is the point, since that admission is exactly what fails on a
+    /// restricted-userns host.
+    landlock: Option<LandlockPreflight>,
+}
+
+struct LandlockPreflight {
+    abi: u32,
+    /// Recorded when the policy asked for a per-host net tier the mechanism cannot carry.
+    net_tightened: bool,
 }
 
 struct ConfinedPreflight {
@@ -195,7 +207,30 @@ pub(crate) fn preflight(
     let sandboxing =
         confine_fs || policy.net.enforce || policy.env.enforce || policy.fs.tmp != TmpMode::Shared;
     if !sandboxing {
-        return Ok(LinuxPreflight { confined: None });
+        return Ok(LinuxPreflight {
+            confined: None,
+            landlock: None,
+        });
+    }
+    // THE mechanism decision. Landlock is primary because it is the only one of the two
+    // that works unprivileged with no user namespace — the case bubblewrap fails closed on
+    // (Ubuntu's `apparmor_restrict_unprivileged_userns=1`, and every container). Taken
+    // BEFORE the runtime image and bubblewrap admission below, both of which are
+    // bubblewrap-only costs.
+    match super::linux_landlock::landlock_availability(policy) {
+        Ok(abi) => {
+            return Ok(LinuxPreflight {
+                confined: None,
+                landlock: Some(LandlockPreflight {
+                    abi,
+                    net_tightened: policy.net.enforce
+                        && policy.net.mode != crate::policy::ProxyMode::Disabled,
+                }),
+            });
+        }
+        Err(reason) => {
+            tracing::debug!(?reason, "landlock unavailable; falling back to bubblewrap");
+        }
     }
     let runtime = runtime.ok_or_else(|| Degradation {
         lost: vec!["runtime-capability-missing".to_string()],
@@ -359,6 +394,7 @@ pub(crate) fn preflight(
         spec.require_nesting,
     )?;
     Ok(LinuxPreflight {
+        landlock: None,
         confined: Some(ConfinedPreflight {
             root_view,
             cwd,
@@ -383,6 +419,9 @@ pub fn apply(
     runtime: Option<&super::linux_monitor::RuntimeCapability>,
     preflight: LinuxPreflight,
 ) -> Result<Prepared, Degradation> {
+    if let Some(landlock) = preflight.landlock {
+        return apply_landlock(policy, spec, landlock);
+    }
     let Some(confined) = preflight.confined else {
         return Ok(Prepared {
             command: base_command(&spec, policy),
@@ -2920,6 +2959,75 @@ unsafe fn cloexec_open_fds_from_proc() -> std::io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Launch under Landlock + seccomp — no namespace, no helper process, no bubblewrap.
+///
+/// NETWORK IS COARSE DENY-ALL HERE, and that is a deliberate capability reduction rather
+/// than an oversight. The per-host tier works under bubblewrap because `--unshare-net` puts
+/// the child in an EMPTY network namespace whose only route out is the trusted in-netns
+/// bridge to nub's egress proxy; the seccomp filter can then safely re-permit AF_INET so the
+/// child can reach that bridge. Landlock has no namespace, so re-permitting AF_INET would
+/// let the child dial any host directly and simply ignore the proxy — the allowlist would
+/// become decorative. Denying every socket family is the only honest ceiling without a
+/// netns, so a policy that asked for `$downloads` is TIGHTENED to deny-all and the loss is
+/// reported. Stricter than requested is safe; the reverse would not be.
+fn apply_landlock(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+    plan: LandlockPreflight,
+) -> Result<Prepared, Degradation> {
+    let seccomp = build_seccomp(
+        policy.net.enforce,
+        // NEVER the per-host carve-out: it exists only because a netns bounds the IP
+        // families it re-permits, and there is no netns here.
+        false,
+        protects_ambient_credentials(policy),
+        false,
+    )
+    .map_err(|reason| Degradation {
+        lost: vec!["net".to_string()],
+        reason: Some(reason),
+    })?;
+
+    let (command, ruleset) =
+        super::linux_landlock::prepare_launch(policy, base_command(&spec, policy), seccomp)
+            .map_err(|reason| Degradation {
+                lost: vec!["fs".to_string()],
+                reason: Some(reason),
+            })?;
+
+    let degradation = if plan.net_tightened {
+        Degradation {
+            lost: vec!["net-per-host".to_string()],
+            reason: Some(
+                "landlock has no network namespace, so per-host egress cannot be confined to \
+                 the proxy; network is denied entirely instead"
+                    .to_string(),
+            ),
+        }
+    } else {
+        Degradation::full()
+    };
+    tracing::debug!(
+        abi = plan.abi,
+        rules = ruleset.rules_added,
+        "confining lifecycle spawn with landlock"
+    );
+
+    Ok(Prepared {
+        command,
+        degradation,
+        proxy: None,
+        net_bridge: None,
+        // Holds the ruleset descriptor open until the child is spawned; `pre_exec` consumes
+        // it after fork, so dropping it any earlier would leave the hook restricting nothing.
+        _inherited_files: vec![std::fs::File::from(ruleset.into_fd())],
+        retained_monitor: None,
+        _private_tmp: None,
+        redact_stdout: false,
+        redact_stderr: false,
+    })
 }
 
 fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
