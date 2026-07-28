@@ -161,8 +161,11 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         if let Some(warning) = prepared.degradation.warning() {
             eprintln!("warning: {warning}");
         }
-        // `status()` spawns, waits, and (Linux) reaps the whole process tree via the
-        // retained monitor on drop — descendant reaping without aube's job object.
+        // `status()` spawns and waits. Descendant reaping without aube's job object, by
+        // whichever handle the platform's mechanism affords: on Linux the build jail runs
+        // under Landlock, which has no PID namespace, so the child is made a session leader
+        // and its process GROUP is signalled and swept — weaker than a namespace, since a
+        // script that calls `setsid` itself escapes the group and survives.
         prepared.status()
     }
 }

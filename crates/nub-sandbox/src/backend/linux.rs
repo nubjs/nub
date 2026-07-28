@@ -434,6 +434,7 @@ pub fn apply(
             net_bridge: None,
             _inherited_files: Vec::new(),
             retained_monitor: None,
+            signal_process_group: false,
             _private_tmp: None,
             redact_stdout: false,
             redact_stderr: false,
@@ -535,12 +536,9 @@ pub fn apply(
 
     Ok(Prepared {
         command,
-        // Fully enforced. The build jail's network axis is BINARY — on or off — so coarse
-        // deny is the model, not a reduction of one. A per-host tier was never a capability
-        // of this product (it needs a namespace to confine egress to the proxy, which this
-        // mechanism does not have by design); a package that would have needed a specific
-        // host is served by prefetch instead, before the jail starts.
-        degradation: Degradation::full(),
+        degradation,
+        // The retained monitor is PID 1 of the child's namespace and reaps the tree itself.
+        signal_process_group: false,
         proxy: None,
         net_bridge: None,
         _inherited_files: setup_files,
@@ -3033,13 +3031,21 @@ fn apply_landlock(
 
     Ok(Prepared {
         command,
-        degradation,
+        // Fully enforced. The build jail's network axis is BINARY — on or off — so coarse
+        // deny is the model, not a reduction of one. A per-host tier was never a capability
+        // of this product (it needs a namespace to confine egress to the proxy, which this
+        // mechanism does not have by design); a package that would have needed a specific
+        // host is served by prefetch instead, before the jail starts.
+        degradation: Degradation::full(),
         proxy: None,
         net_bridge: None,
         // Holds the ruleset descriptor open until the child is spawned; `pre_exec` consumes
         // it after fork, so dropping it any earlier would leave the hook restricting nothing.
         _inherited_files: vec![std::fs::File::from(ruleset.into_fd())],
         retained_monitor: None,
+        // The Landlock hook makes the child a session leader, so its descendants are
+        // reachable as a process group — this path's only handle on them.
+        signal_process_group: true,
         _private_tmp: None,
         redact_stdout: false,
         redact_stderr: false,

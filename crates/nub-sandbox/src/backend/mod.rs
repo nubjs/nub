@@ -247,6 +247,16 @@ pub struct Prepared {
     /// One-shot authority for the authenticated Linux PID-1 monitor launch.
     #[cfg(target_os = "linux")]
     pub(crate) retained_monitor: Option<linux_monitor::RetainedMonitorLaunch>,
+    /// Signal and reap the child's whole PROCESS GROUP rather than just the child.
+    ///
+    /// Set only by the Landlock build jail, whose `pre_exec` calls `setsid` — so the child is
+    /// a session leader and its PGID equals its PID, making `-pid` a valid group target. It
+    /// is the only handle that path has on descendants: it runs no PID-1 monitor, so without
+    /// this a `Ctrl-C` reaches the script but not the compiler it spawned. MUST stay false
+    /// for every other path, where the child shares nub's own process group and a negative
+    /// target would signal nub itself.
+    #[cfg(target_os = "linux")]
+    pub(crate) signal_process_group: bool,
     /// Windows launch plan — the backend owns spawn+wait+teardown when this is `Some`.
     /// A two-variant enum, one per Windows mechanism: the per-run AppContainer (LowBox
     /// token) and the dedicated local account (`CreateProcessWithLogonW`, no LowBox
@@ -275,6 +285,8 @@ pub struct PreparedChild {
     signal_target: Option<i32>,
     #[cfg(target_os = "linux")]
     retained_monitor: Option<linux_monitor::RetainedMonitorSession>,
+    #[cfg(target_os = "linux")]
+    signal_process_group: bool,
     _proxy: Option<EgressProxy>,
     #[cfg(target_os = "linux")]
     _net_bridge: Option<linux_net_bridge::HostNetBridge>,
@@ -331,6 +343,14 @@ impl PreparedChild {
         #[cfg(not(target_os = "linux"))]
         let cleanup_complete = false;
         if result.is_ok() || cleanup_complete {
+            // The jailed script may have forked a build daemon that outlived it. The
+            // bubblewrap path's PID namespace reaped those implicitly when PID 1 exited;
+            // signalling the group is this path's only equivalent. Best-effort: an empty
+            // group is ESRCH, which is the normal case and not an error.
+            #[cfg(target_os = "linux")]
+            if self.signal_process_group {
+                unsafe { libc::kill(-(self.child_id as i32), libc::SIGKILL) };
+            }
             self.child.take();
             #[cfg(target_os = "linux")]
             self.retained_monitor.take();
@@ -517,6 +537,8 @@ impl Prepared {
         #[cfg(target_os = "linux")]
         self._inherited_files.clear();
         #[cfg(target_os = "linux")]
+        let signal_process_group = self.signal_process_group;
+        #[cfg(target_os = "linux")]
         let (launched_child, child_id, signal_target, retained_monitor) =
             match self.retained_monitor.take() {
                 Some(launch) => {
@@ -536,7 +558,13 @@ impl Prepared {
                     (outer, child_id, None, Some(session))
                 }
                 None => {
-                    let target = child.id() as i32;
+                    // Negative = the whole process group. Valid only because the Landlock
+                    // hook made the child a session leader; see `signal_process_group`.
+                    let target = if signal_process_group {
+                        -(child.id() as i32)
+                    } else {
+                        child.id() as i32
+                    };
                     if let Err(error) = ready(PreparedSignalTarget::Direct(target)) {
                         kill_and_reap(&mut child, Some(target));
                         return Err(error);
@@ -567,6 +595,8 @@ impl Prepared {
             signal_target,
             #[cfg(target_os = "linux")]
             retained_monitor,
+            #[cfg(target_os = "linux")]
+            signal_process_group,
             _proxy: self.proxy.take(),
             #[cfg(target_os = "linux")]
             _net_bridge: self.net_bridge.take(),
